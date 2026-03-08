@@ -10,6 +10,13 @@ keywords = ["memory", "ai-agent", "semantic-search", "knowledge-graph", "event-s
 categories = ["database", "science"]
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+rusqlite = { version = "0.34", features = ["bundled-full"] }
+blake3 = "1"
+tracing = "0.1"
 
 [dev-dependencies]
 
