@@ -1,0 +1,22 @@
+[package]
+name = "memory-engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Embedded memory engine for autonomous AI agents — hybrid search, bi-temporal facts, event-sourced"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+keywords = ["memory", "ai-agent", "semantic-search", "knowledge-graph", "event-sourcing"]
+categories = ["database", "science"]
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
