@@ -1,5 +1,7 @@
+pub mod events;
 pub mod schema;
 
+pub use events::{EventFilter, EventStore};
 pub use schema::{get_config, init_schema, open_connection, open_memory, set_config};
 
 use crate::error::{MemoryError, Result};
