@@ -21,10 +21,6 @@
 //! 1. Autonomous agents (Qwen 3.5 on Mac Mini M4)
 //! 2. Developer workflows (Claude Code / IDE hooks)
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn engine_compiles() {
-        assert!(true);
-    }
-}
+pub mod types;
+
+pub use types::*;

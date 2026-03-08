@@ -10,6 +10,9 @@ keywords = ["memory", "ai-agent", "semantic-search", "knowledge-graph", "event-s
 categories = ["database", "science"]
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 
