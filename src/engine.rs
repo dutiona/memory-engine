@@ -327,9 +327,7 @@ mod tests {
     #[test]
     fn forget_returns_not_implemented() {
         let mut engine = MemoryEngine::open_memory(DIM).unwrap();
-        let policy = ForgetPolicy {
-            min_importance: 0.1,
-        };
+        let policy = ForgetPolicy::default();
         let err = engine.forget(&policy).unwrap_err();
         assert!(matches!(err, MemoryError::NotImplemented(_)));
     }
