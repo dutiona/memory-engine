@@ -22,6 +22,7 @@
 //! 2. Developer workflows (Claude Code / IDE hooks)
 
 pub mod error;
+pub mod search;
 pub mod store;
 pub mod types;
 
