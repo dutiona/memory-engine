@@ -16,6 +16,20 @@
 | **Memento**                    | Hierarchical memory with summarization. Informed consolidation levels (local → cluster → global).                                                            |
 | **Doc-to-LoRA**                | Document-to-adapter pipeline. Confirmed our boundary: engine stores and retrieves, consumer decides what to do with results.                                 |
 
+### Storage Technology Decisions
+
+Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 storage stacks. The papers use diverse backends — Neo4j (Graphiti/Zep), Qdrant (Mem0), custom (A-Mem) — but all are external services. Our constraint: **embedded, single-process, no JVM/external DB**.
+
+| Technology            | Research Verdict                                                         | Current Status        | Rationale                                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Neo4j**             | Discarded                                                                | —                     | External JVM process. Mature graph + temporal support, but overkill for embedded single-agent use. Graphiti/Zep use it as a service.                                                  |
+| **Qdrant**            | Discarded                                                                | —                     | External service. Mem0 uses it for vector search, but violates our embedded constraint.                                                                                               |
+| **SurrealDB 3.0**     | Deferred                                                                 | Monitor stability     | "Best if stable" — Rust-native, vector+graph+KV+temporal in single binary. Too young (Feb 2026) when we evaluated. Event-sourced log enables replay-based migration if it matures.    |
+| **LanceDB**           | Deferred → Issue [#3](https://github.com/dutiona/memory-engine/issues/3) | Candidate for Phase 3 | Original plan for vector search (embedded, Rust-native, columnar, versioned). Dropped for brute-force cosine in Phase 1 — <50ms at expected scale. Revisit when benchmarks show need. |
+| **SQLite + Petgraph** | Adopted                                                                  | Phase 1 ✅            | Battle-tested, embedded, simple. FTS5 for keyword search. WAL for concurrent reads. Petgraph for in-memory graph loaded from SQLite.                                                  |
+
+**Migration safety net:** The event-sourced architecture guarantees we can replay into any storage backend. No lock-in.
+
 ### Key Design Decisions (from research convergence)
 
 1. **No layers** — One store, multiple projections. `fact_type` is a tag, not a partition. The 5-layer hierarchy (L0-L4) collapsed during design.
