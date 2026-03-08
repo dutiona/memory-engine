@@ -29,8 +29,10 @@ pub fn fts_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Ft
 
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
 
-    // FTS5 syntax errors surface at query execution time, not prepare time.
-    // Catch them here and return empty results instead of propagating.
+    // FTS5 syntax errors surface at query_map execution time, not at prepare time.
+    // They are indistinguishable from other rusqlite::Error variants at the type level,
+    // so we catch all errors here. This is intentional: the only realistic failure mode
+    // for a parameterized MATCH query is malformed FTS5 syntax from the caller.
     let rows = match stmt.query_map(rusqlite::params![query, limit_i64], |row| {
         Ok(FtsResult {
             fact_id: row.get(0)?,

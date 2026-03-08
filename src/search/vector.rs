@@ -45,6 +45,13 @@ pub fn vector_search(
     embed_dim: usize,
     limit: usize,
 ) -> Result<Vec<VectorResult>> {
+    if query_embedding.len() != embed_dim {
+        return Err(crate::error::MemoryError::EmbeddingDimension {
+            expected: embed_dim,
+            actual: query_embedding.len(),
+        });
+    }
+
     let mut stmt = conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL")?;
 
     let rows = stmt.query_map([], |row| {
@@ -145,6 +152,22 @@ mod tests {
         // Also both zero
         let sim2 = cosine_similarity(&a, &a);
         assert!(sim2.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn vector_search_rejects_wrong_query_dimension() {
+        let conn = setup();
+        let wrong_dim_query = [1.0_f32, 0.0]; // DIM is 4, query is 2
+        let result = vector_search(&conn, &wrong_dim_query, DIM, 3);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::MemoryError::EmbeddingDimension {
+                expected: 4,
+                actual: 2
+            }
+        ));
     }
 
     #[test]
