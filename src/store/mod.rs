@@ -2,11 +2,13 @@ pub mod edges;
 pub mod events;
 pub mod facts;
 pub mod schema;
+pub mod summaries;
 
 pub use edges::EdgeStore;
 pub use events::{EventFilter, EventStore};
 pub use facts::FactStore;
 pub use schema::{get_config, init_schema, open_connection, open_memory, set_config};
+pub use summaries::SummaryStore;
 
 use chrono::{DateTime, Utc};
 
