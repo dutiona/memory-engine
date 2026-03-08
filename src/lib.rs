@@ -21,6 +21,8 @@
 //! 1. Autonomous agents (Qwen 3.5 on Mac Mini M4)
 //! 2. Developer workflows (Claude Code / IDE hooks)
 
+pub mod error;
 pub mod types;
 
+pub use error::*;
 pub use types::*;
