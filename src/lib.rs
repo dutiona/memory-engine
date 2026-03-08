@@ -22,7 +22,9 @@
 //! 2. Developer workflows (Claude Code / IDE hooks)
 
 pub mod error;
+pub mod store;
 pub mod types;
 
 pub use error::*;
+pub use store::{deserialize_embedding, serialize_embedding};
 pub use types::*;
