@@ -21,6 +21,9 @@ Thumbs.db
 # Claude Code
 .claude/
 
+# Worktrees
+.worktrees/
+
 # Build artifacts
 *.o
 *.so
