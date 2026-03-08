@@ -17,6 +17,7 @@ thiserror = "2"
 rusqlite = { version = "0.34", features = ["bundled-full"] }
 blake3 = "1"
 tracing = "0.1"
+petgraph = "0.7"
 
 [dev-dependencies]
 

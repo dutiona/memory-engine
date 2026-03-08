@@ -21,6 +21,7 @@
 
 pub mod engine;
 pub mod error;
+pub mod graph;
 pub mod search;
 pub mod store;
 pub mod traits;

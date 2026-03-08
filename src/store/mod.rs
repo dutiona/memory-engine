@@ -1,10 +1,14 @@
+pub mod edges;
 pub mod events;
 pub mod facts;
 pub mod schema;
 
+pub use edges::EdgeStore;
 pub use events::{EventFilter, EventStore};
 pub use facts::FactStore;
 pub use schema::{get_config, init_schema, open_connection, open_memory, set_config};
+
+use chrono::{DateTime, Utc};
 
 use crate::error::{MemoryError, Result};
 
@@ -43,6 +47,30 @@ pub fn deserialize_embedding(blob: &[u8], dim: usize) -> Result<Vec<f32>> {
             f32::from_le_bytes(arr)
         })
         .collect())
+}
+
+/// Parse an optional ISO 8601 timestamp from a nullable TEXT column.
+pub(crate) fn parse_optional_timestamp(s: Option<&str>) -> rusqlite::Result<Option<DateTime<Utc>>> {
+    s.map_or(Ok(None), |ts| {
+        DateTime::parse_from_rfc3339(ts)
+            .map(|dt| Some(dt.with_timezone(&Utc)))
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+    })
+}
+
+/// Parse a required ISO 8601 timestamp from a TEXT column.
+pub(crate) fn parse_timestamp(s: &str) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 #[cfg(test)]
