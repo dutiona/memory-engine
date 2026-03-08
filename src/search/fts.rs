@@ -44,16 +44,15 @@ pub fn fts_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Ft
         }
     };
 
-    let mut results = Vec::new();
-    for row in rows {
-        match row {
-            Ok(r) => results.push(r),
+    let results: Vec<FtsResult> = rows
+        .filter_map(|row| match row {
+            Ok(r) => Some(r),
             Err(e) => {
-                tracing::warn!("FTS5 query failed (likely syntax error): {e}");
-                return Ok(vec![]);
+                tracing::warn!("FTS5 row mapping failed, skipping row: {e}");
+                None
             }
-        }
-    }
+        })
+        .collect();
     Ok(results)
 }
 

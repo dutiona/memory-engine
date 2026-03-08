@@ -98,8 +98,8 @@ impl MemoryEngine {
         self.event_store().insert(event)
     }
 
-    /// Add a fact: compute embedding via `embedder`, compute blake3 hash,
-    /// delegate to `FactStore`. Returns the assigned fact id.
+    /// Add a fact: compute embedding via `embedder`, delegate to `FactStore`
+    /// (which computes blake3 content hash). Returns the assigned fact id.
     ///
     /// # Errors
     ///
@@ -112,12 +112,11 @@ impl MemoryEngine {
         embedder: &dyn EmbeddingProvider,
     ) -> Result<i64> {
         let embedding = embedder.embed(content)?;
-        let content_hash = blake3::hash(content.as_bytes()).to_hex()[..16].to_string();
         let now = Utc::now();
 
         let new_fact = NewFact {
             content: content.into(),
-            content_hash,
+            content_hash: String::new(), // FactStore::insert computes this via blake3
             embedding,
             fact_type,
             t_created: now,

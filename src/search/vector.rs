@@ -61,13 +61,20 @@ pub fn vector_search(
         scored.push(VectorResult { fact_id: id, score });
     }
 
-    // Sort descending by score
+    // Partial sort: O(N) partition then sort only top `limit` elements
+    if scored.len() > limit {
+        scored.select_nth_unstable_by(limit, |a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(limit);
+    }
     scored.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    scored.truncate(limit);
     Ok(scored)
 }
 

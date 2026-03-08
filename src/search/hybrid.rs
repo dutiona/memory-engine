@@ -84,18 +84,20 @@ pub fn hybrid_search(
 
     // Collect FTS results
     let fts_results = if matches!(query.mode, SearchMode::Fts | SearchMode::Hybrid) {
-        query.text.as_ref().map_or_else(Vec::new, |text| {
-            fts_search(conn, text, overfetch).unwrap_or_default()
-        })
+        match query.text.as_ref() {
+            Some(text) => fts_search(conn, text, overfetch)?,
+            None => vec![],
+        }
     } else {
         vec![]
     };
 
     // Collect vector results
     let vec_results = if matches!(query.mode, SearchMode::Vector | SearchMode::Hybrid) {
-        query.embedding.as_ref().map_or_else(Vec::new, |emb| {
-            vector_search(conn, emb, embed_dim, overfetch).unwrap_or_default()
-        })
+        match query.embedding.as_ref() {
+            Some(emb) => vector_search(conn, emb, embed_dim, overfetch)?,
+            None => vec![],
+        }
     } else {
         vec![]
     };
@@ -120,7 +122,9 @@ pub fn hybrid_search(
         }
     };
 
-    // Load full facts and apply filters
+    // Load full facts and apply filters.
+    // NOTE: filters applied post-overfetch. Highly restrictive filters may return
+    // fewer results than `limit`. Phase 2 can push filters into SQL for accuracy.
     let store = FactStore::new(conn, embed_dim);
     let mut results = Vec::new();
     for (id, score) in ranked {
@@ -128,6 +132,7 @@ pub fn hybrid_search(
             break;
         }
         let Ok(fact) = store.get(id) else {
+            tracing::warn!("failed to load fact id={id} during result collection, skipping");
             continue;
         };
 

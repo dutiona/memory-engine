@@ -28,10 +28,10 @@ fn str_to_fact_type(s: &str) -> Result<FactType> {
     }
 }
 
-/// Compute blake3 hex hash of content, truncated to first 16 characters.
+/// Compute blake3 hex hash of content, truncated to first 32 characters (128 bits).
 fn content_hash(content: &str) -> String {
     let hash = blake3::hash(content.as_bytes());
-    hash.to_hex()[..16].to_string()
+    hash.to_hex()[..32].to_string()
 }
 
 /// Parse an optional ISO 8601 timestamp from a nullable TEXT column.
@@ -66,7 +66,7 @@ impl<'a> FactStore<'a> {
     }
 
     /// Insert a new fact. Validates embedding dimension, computes `content_hash`
-    /// via blake3 (hex, first 16 chars), serializes embedding as BLOB.
+    /// via blake3 (hex, first 32 chars / 128 bits), serializes embedding as BLOB.
     /// Returns the auto-assigned id.
     ///
     /// # Errors
@@ -435,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_is_blake3_hex_16() {
+    fn content_hash_is_blake3_hex_32() {
         let conn = setup();
         let store = FactStore::new(&conn, DIM);
         let content = "hash test content";
@@ -443,8 +443,8 @@ mod tests {
         let fact = store.get(id).unwrap();
 
         // Compute expected hash
-        let expected = &blake3::hash(content.as_bytes()).to_hex()[..16];
+        let expected = &blake3::hash(content.as_bytes()).to_hex()[..32];
         assert_eq!(fact.content_hash, expected);
-        assert_eq!(fact.content_hash.len(), 16);
+        assert_eq!(fact.content_hash.len(), 32);
     }
 }
