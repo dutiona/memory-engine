@@ -336,7 +336,10 @@ mod tests {
         let store = FactStore::new(&conn, DIM);
         let mut embedding = vec![0.0_f32; DIM];
         for (i, val) in embedding.iter_mut().enumerate() {
-            *val = i as f32 * 0.001;
+            #[allow(clippy::cast_precision_loss)]
+            {
+                *val = i as f32 * 0.001;
+            }
         }
         let fact = make_fact("embedding test", embedding.clone());
         let id = store.insert(&fact).unwrap();

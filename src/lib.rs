@@ -12,20 +12,22 @@
 //! ## Storage
 //!
 //! - `SQLite` WAL for event log, facts, and FTS5
-//! - `LanceDB` for vector similarity search
-//! - In-memory petgraph for relationship traversal
+//! - Pure Rust brute-force vector similarity (cosine)
 //!
-//! ## Consumers
+//! ## Threading
 //!
-//! Designed for two consumers from a single backend:
-//! 1. Autonomous agents (Qwen 3.5 on Mac Mini M4)
-//! 2. Developer workflows (Claude Code / IDE hooks)
+//! `MemoryEngine` is `!Send` and `!Sync` (rusqlite `Connection` is not
+//! thread-safe). Consumers must wrap in a `Mutex` or use an actor pattern.
 
+pub mod engine;
 pub mod error;
 pub mod search;
 pub mod store;
+pub mod traits;
 pub mod types;
 
+pub use engine::{EngineConfig, MemoryEngine};
 pub use error::*;
 pub use store::{deserialize_embedding, serialize_embedding};
+pub use traits::EmbeddingProvider;
 pub use types::*;
