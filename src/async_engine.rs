@@ -13,6 +13,7 @@ use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
     EmbeddingProvider, ForgetPolicy, PruneStats, SummaryGenerator,
 };
+use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::types::{AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact, Summary};
 
 /// Async wrapper around [`MemoryEngine`].
@@ -189,6 +190,14 @@ impl AsyncMemoryEngine {
     pub async fn set_config(&self, key: String, value: String) -> Result<()> {
         let engine = self.inner.clone();
         tokio::task::spawn_blocking(move || engine.set_config(&key, &value))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Retrieve tiered context for resuming a session.
+    pub async fn resume_context(&self, config: ResumeConfig) -> Result<ResumeContext> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.resume_context(&config))
             .await
             .map_err(join_err)?
     }

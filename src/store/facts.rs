@@ -213,6 +213,103 @@ impl<'a> FactStore<'a> {
         }
         Ok(())
     }
+
+    // --- Resume context queries ---
+
+    /// List active facts in a specific scope, ordered by importance DESC.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_by_scope_importance(&self, scope_id: i64, limit: usize) -> Result<Vec<Fact>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let dim = self.embed_dim;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, content_hash, embedding, fact_type,
+                    t_created, t_expired, t_valid, t_invalid,
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+             FROM facts
+             WHERE t_expired IS NULL AND scope_id = ?1
+             ORDER BY importance DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![scope_id, limit_i64], |row| row_to_fact(row, dim))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(MemoryError::Database)
+    }
+
+    /// List active facts in a set of scopes with importance >= threshold,
+    /// excluding specific fact IDs, ordered by importance DESC.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_by_scopes_importance(
+        &self,
+        scope_ids: &[i64],
+        min_importance: f64,
+        limit: usize,
+        exclude_ids: &std::collections::HashSet<i64>,
+    ) -> Result<Vec<Fact>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
+        let exclude_json = serde_json::to_string(&exclude_ids.iter().copied().collect::<Vec<_>>())
+            .expect("serialize exclude_ids");
+        let dim = self.embed_dim;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, content_hash, embedding, fact_type,
+                    t_created, t_expired, t_valid, t_invalid,
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+             FROM facts
+             WHERE t_expired IS NULL
+               AND scope_id IN (SELECT value FROM json_each(?1))
+               AND importance >= ?2
+               AND id NOT IN (SELECT value FROM json_each(?3))
+             ORDER BY importance DESC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            params![scope_json, min_importance, exclude_json, limit_i64],
+            |row| row_to_fact(row, dim),
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(MemoryError::Database)
+    }
+
+    /// List active facts in a set of scopes, excluding specific fact IDs,
+    /// ordered by `t_created` DESC (most recent first).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_by_scopes_recent(
+        &self,
+        scope_ids: &[i64],
+        limit: usize,
+        exclude_ids: &std::collections::HashSet<i64>,
+    ) -> Result<Vec<Fact>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
+        let exclude_json = serde_json::to_string(&exclude_ids.iter().copied().collect::<Vec<_>>())
+            .expect("serialize exclude_ids");
+        let dim = self.embed_dim;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, content_hash, embedding, fact_type,
+                    t_created, t_expired, t_valid, t_invalid,
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+             FROM facts
+             WHERE t_expired IS NULL
+               AND scope_id IN (SELECT value FROM json_each(?1))
+               AND id NOT IN (SELECT value FROM json_each(?2))
+             ORDER BY t_created DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![scope_json, exclude_json, limit_i64], |row| {
+            row_to_fact(row, dim)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(MemoryError::Database)
+    }
 }
 
 fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fact> {

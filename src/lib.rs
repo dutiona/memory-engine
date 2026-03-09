@@ -29,6 +29,7 @@ pub mod error;
 pub mod forgetting;
 pub mod graph;
 pub mod pool;
+pub mod resume;
 pub mod scope;
 pub mod search;
 pub mod store;

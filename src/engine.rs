@@ -7,6 +7,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
+use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
 use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
 use crate::store::events::EventStore;
@@ -387,6 +388,41 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` on query failure.
     pub fn list_summaries(&self, level: &ConsolidationLevel) -> Result<Vec<crate::types::Summary>> {
         self.with_read(|conn| SummaryStore::new(conn, self.embed_dim).list_by_level(level))
+    }
+
+    // --- Public API: Resume ---
+
+    /// Retrieve tiered context for resuming a session.
+    ///
+    /// Returns three tiers of facts (mutually exclusive):
+    /// 1. **Identity** — root scope, highest importance
+    /// 2. **Core** — importance >= threshold, from scope ancestors
+    /// 3. **Recent** — most recent, from scope ancestors
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the requested scope path doesn't exist.
+    pub fn resume_context(&self, config: &ResumeConfig) -> Result<ResumeContext> {
+        // Step 1: Resolve scope IDs from cache (short-lived read lock)
+        let (root_id, scope_ids) = {
+            let tree = self.scope_tree.read();
+            let root = tree.root_id();
+            let ids = match config.scope_path.as_ref() {
+                Some(path) => {
+                    let id = tree
+                        .resolve_path(path)
+                        .ok_or_else(|| MemoryError::NotFound(format!("scope path: {path}")))?;
+                    tree.ancestors(id)
+                }
+                None => vec![root],
+            };
+            (root, ids)
+        }; // scope_tree read lock dropped here
+
+        // Step 2: Query DB (no locks held)
+        self.with_read(|conn| {
+            crate::resume::resume_context(conn, root_id, &scope_ids, self.embed_dim, config)
+        })
     }
 }
 
@@ -937,5 +973,74 @@ mod tests {
             assert_eq!(results.len(), 1);
         });
         reader.join().unwrap();
+    }
+
+    // --- Phase 3 / T9: resume_context ---
+
+    #[test]
+    fn resume_empty_engine() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let ctx = engine.resume_context(&ResumeConfig::default()).unwrap();
+        assert!(ctx.identity.is_empty());
+        assert!(ctx.core.is_empty());
+        assert!(ctx.recent.is_empty());
+    }
+
+    #[test]
+    fn resume_with_facts() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        // Add a high-importance root fact (identity tier)
+        let opts = AddFactOptions {
+            importance: Some(0.95),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "user prefers Rust",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&opts),
+            )
+            .unwrap();
+
+        // Add a low-importance root fact (recent tier)
+        let opts_low = AddFactOptions {
+            importance: Some(0.1),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "had coffee today",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&opts_low),
+            )
+            .unwrap();
+
+        let config = ResumeConfig {
+            core_min_importance: 0.7,
+            ..ResumeConfig::default()
+        };
+        let ctx = engine.resume_context(&config).unwrap();
+        // Both facts are in root scope — identity gets the high-importance one
+        assert!(!ctx.identity.is_empty());
+        assert!(ctx.identity[0].importance >= 0.7);
+    }
+
+    #[test]
+    fn resume_nonexistent_scope_returns_not_found() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let config = ResumeConfig {
+            scope_path: Some("nonexistent/path".into()),
+            ..ResumeConfig::default()
+        };
+        let err = engine.resume_context(&config).unwrap_err();
+        assert!(matches!(err, MemoryError::NotFound(_)));
     }
 }
