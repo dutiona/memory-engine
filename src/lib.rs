@@ -19,8 +19,12 @@
 //! `MemoryEngine` is `!Send` and `!Sync` (rusqlite `Connection` is not
 //! thread-safe). Consumers must wrap in a `Mutex` or use an actor pattern.
 
+pub mod conflict;
+pub mod consolidation;
 pub mod engine;
 pub mod error;
+pub mod forgetting;
+pub mod graph;
 pub mod search;
 pub mod store;
 pub mod traits;

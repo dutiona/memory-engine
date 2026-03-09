@@ -86,8 +86,76 @@ pub struct ConflictResolution {
     pub new_fact_id: Option<i64>,
 }
 
-/// Policy for forgetting/pruning stale facts (Phase 2).
+/// Policy for forgetting/pruning stale facts.
+///
+/// Importance is computed as a weighted sum of 4 signals:
+///
+/// `recency × decay + frequency × log(access+1) + degree × log(edges+1) + base × importance`
+///
+/// Facts with computed importance below `min_importance` get soft-deleted (`t_expired` set).
 #[derive(Debug, Clone)]
 pub struct ForgetPolicy {
-    pub min_importance: f32,
+    /// Base Ebbinghaus half-life in days (default: 69.0).
+    pub half_life_days: f64,
+    /// Per-`FactType` half-life overrides. E.g., Episodic=30, Procedural=365.
+    pub half_life_overrides: std::collections::HashMap<crate::types::FactType, f64>,
+    /// Threshold below which facts are expired (default: 0.1).
+    pub min_importance: f64,
+    /// Weight for recency signal (Ebbinghaus decay). Default: 0.3.
+    pub recency_weight: f64,
+    /// Weight for access frequency signal. Default: 0.2.
+    pub frequency_weight: f64,
+    /// Weight for graph connectivity signal. Default: 0.3.
+    pub graph_degree_weight: f64,
+    /// Weight for base importance (`fact.importance`). Default: 0.2.
+    pub base_importance_weight: f64,
+}
+
+impl Default for ForgetPolicy {
+    fn default() -> Self {
+        Self {
+            half_life_days: 69.0,
+            half_life_overrides: std::collections::HashMap::new(),
+            min_importance: 0.1,
+            recency_weight: 0.3,
+            frequency_weight: 0.2,
+            graph_degree_weight: 0.3,
+            base_importance_weight: 0.2,
+        }
+    }
+}
+
+impl ForgetPolicy {
+    /// Validate policy parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Conflict` if any parameter is out of range.
+    pub fn validate(&self) -> Result<()> {
+        use crate::error::MemoryError;
+
+        if self.half_life_days <= 0.0 {
+            return Err(MemoryError::Conflict("half_life_days must be > 0".into()));
+        }
+        for (ft, &hl) in &self.half_life_overrides {
+            if hl <= 0.0 {
+                return Err(MemoryError::Conflict(format!(
+                    "half_life for {ft:?} must be > 0"
+                )));
+            }
+        }
+        if !(0.0..=1.0).contains(&self.min_importance) {
+            return Err(MemoryError::Conflict(
+                "min_importance must be in [0, 1]".into(),
+            ));
+        }
+        if self.recency_weight < 0.0
+            || self.frequency_weight < 0.0
+            || self.graph_degree_weight < 0.0
+            || self.base_importance_weight < 0.0
+        {
+            return Err(MemoryError::Conflict("weights must be >= 0".into()));
+        }
+        Ok(())
+    }
 }

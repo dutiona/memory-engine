@@ -4,10 +4,12 @@ use chrono::Utc;
 use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
+use crate::graph::MemoryGraph;
 use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, init_schema, open_connection, open_memory, set_config};
+use crate::store::summaries::SummaryStore;
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
     EmbeddingProvider, ForgetPolicy, PruneStats, SummaryGenerator,
@@ -28,6 +30,7 @@ pub struct EngineConfig {
 pub struct MemoryEngine {
     conn: Connection,
     embed_dim: usize,
+    graph: MemoryGraph,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -53,9 +56,11 @@ impl MemoryEngine {
         let conn = open_connection(&path_str)?;
         init_schema(&conn)?;
         Self::validate_or_set_embed_dim(&conn, config.embed_dim)?;
+        let graph = MemoryGraph::load_from_db(&conn)?;
         Ok(Self {
             conn,
             embed_dim: config.embed_dim,
+            graph,
         })
     }
 
@@ -68,7 +73,12 @@ impl MemoryEngine {
         let conn = open_memory()?;
         init_schema(&conn)?;
         Self::validate_or_set_embed_dim(&conn, embed_dim)?;
-        Ok(Self { conn, embed_dim })
+        let graph = MemoryGraph::load_from_db(&conn)?;
+        Ok(Self {
+            conn,
+            embed_dim,
+            graph,
+        })
     }
 
     fn validate_or_set_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
@@ -172,48 +182,83 @@ impl MemoryEngine {
         set_config(&self.conn, key, value)
     }
 
-    // --- Phase 2 stubs ---
+    // --- Phase 2: fully implemented ---
 
-    /// Consolidate memories (Phase 2).
+    /// Run three-pass consolidation: local dedup, cluster fusion, global integration.
     ///
     /// # Errors
     ///
-    /// Always returns `MemoryError::NotImplemented` in Phase 1.
+    /// Propagates errors from any consolidation pass or the `SummaryGenerator`.
     pub fn consolidate(
         &mut self,
-        _generator: &dyn SummaryGenerator,
-        _config: &ConsolidationConfig,
+        generator: &dyn SummaryGenerator,
+        config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        Err(MemoryError::NotImplemented(
-            "consolidation requires Phase 2 (Tasks 9-12)".into(),
-        ))
+        let stats =
+            crate::consolidation::consolidate(&self.conn, generator, self.embed_dim, config)?;
+
+        // Rebuild graph: dedup may have expired facts and their edges
+        if stats.duplicates_removed > 0 {
+            self.graph = MemoryGraph::load_from_db(&self.conn)?;
+        }
+
+        Ok(stats)
     }
 
-    /// Forget/prune stale facts (Phase 2).
+    /// Prune stale facts using Ebbinghaus decay and graph-aware importance scoring.
+    ///
+    /// Facts with computed importance below `policy.min_importance` get soft-deleted.
     ///
     /// # Errors
     ///
-    /// Always returns `MemoryError::NotImplemented` in Phase 1.
-    pub fn forget(&mut self, _policy: &ForgetPolicy) -> Result<PruneStats> {
-        Err(MemoryError::NotImplemented(
-            "forgetting requires Phase 2 (Tasks 9, 11)".into(),
-        ))
+    /// Returns `MemoryError::Conflict` if the policy is invalid.
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn forget(&mut self, policy: &ForgetPolicy) -> Result<PruneStats> {
+        crate::forgetting::prune(
+            &self.conn,
+            &mut self.graph,
+            policy,
+            self.embed_dim,
+            Utc::now(),
+        )
     }
 
-    /// Resolve a conflict between facts (Phase 2).
+    /// Resolve a conflict between an existing fact and a candidate new fact.
+    ///
+    /// Delegates the decision to the consumer-provided [`ConflictArbiter`].
+    /// Mutations happen in a single transaction; graph is updated only after commit.
     ///
     /// # Errors
     ///
-    /// Always returns `MemoryError::NotImplemented` in Phase 1.
+    /// Returns `MemoryError::NotFound` if the old fact doesn't exist.
+    /// Propagates errors from the arbiter or database operations.
     pub fn resolve_conflict(
         &mut self,
-        _arbiter: &dyn ConflictArbiter,
-        _old_id: i64,
-        _new_fact: NewFact,
+        arbiter: &dyn ConflictArbiter,
+        old_id: i64,
+        new_fact: &NewFact,
     ) -> Result<ConflictResolution> {
-        Err(MemoryError::NotImplemented(
-            "conflict resolution requires Phase 2 (Tasks 9, 13)".into(),
-        ))
+        crate::conflict::resolve_conflict(
+            &self.conn,
+            &mut self.graph,
+            arbiter,
+            old_id,
+            new_fact,
+            self.embed_dim,
+            Utc::now(),
+        )
+    }
+
+    /// Access the in-memory graph (read-only).
+    #[must_use]
+    pub const fn graph(&self) -> &MemoryGraph {
+        &self.graph
+    }
+
+    /// Get a `SummaryStore` borrowing this engine's connection.
+    #[must_use]
+    pub const fn summary_store(&self) -> SummaryStore<'_> {
+        SummaryStore::new(&self.conn, self.embed_dim)
     }
 }
 
@@ -221,8 +266,8 @@ impl MemoryEngine {
 mod tests {
     use super::*;
     use crate::search::hybrid::SearchMode;
-    use crate::traits::{ConsolidationConfig, ForgetPolicy};
-    use crate::types::{EventType, FactType};
+    use crate::traits::{ConsolidationConfig, CrudDecision, ForgetPolicy};
+    use crate::types::{EventType, Fact, FactType};
 
     const DIM: usize = 4;
 
@@ -236,26 +281,49 @@ mod tests {
         }
     }
 
-    struct DummyGen;
-    impl SummaryGenerator for DummyGen {
-        fn summarize(&self, _: &[crate::types::Fact]) -> Result<String> {
-            Ok(String::new())
+    struct MockGen;
+    impl SummaryGenerator for MockGen {
+        fn summarize(&self, facts: &[Fact]) -> Result<String> {
+            Ok(facts
+                .iter()
+                .map(|f| f.content.as_str())
+                .collect::<Vec<_>>()
+                .join("; "))
         }
         fn embed(&self, _: &str) -> Result<Vec<f32>> {
-            Ok(vec![])
+            Ok(vec![0.1; DIM])
         }
     }
 
-    struct DummyArbiter;
-    impl crate::traits::ConflictArbiter for DummyArbiter {
-        fn arbitrate(
-            &self,
-            _: &crate::types::Fact,
-            _: &crate::types::Fact,
-        ) -> Result<crate::traits::CrudDecision> {
-            Ok(crate::traits::CrudDecision::Noop)
+    struct FixedArbiter {
+        decision: CrudDecision,
+    }
+    impl ConflictArbiter for FixedArbiter {
+        fn arbitrate(&self, _: &Fact, _: &Fact) -> Result<CrudDecision> {
+            Ok(self.decision.clone())
         }
     }
+
+    fn make_new_fact(content: &str, embedding: Vec<f32>) -> NewFact {
+        let now = Utc::now();
+        NewFact {
+            content: content.into(),
+            content_hash: blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string(),
+            embedding,
+            fact_type: FactType::Semantic,
+            t_created: now,
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: now,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    // --- Phase 1 tests (unchanged) ---
 
     #[test]
     fn open_memory_succeeds() {
@@ -314,51 +382,6 @@ mod tests {
     }
 
     #[test]
-    fn consolidate_returns_not_implemented() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
-        let config = ConsolidationConfig {
-            dedup_threshold: 0.92,
-            min_cluster_size: 3,
-        };
-        let err = engine.consolidate(&DummyGen, &config).unwrap_err();
-        assert!(matches!(err, MemoryError::NotImplemented(_)));
-    }
-
-    #[test]
-    fn forget_returns_not_implemented() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
-        let policy = ForgetPolicy {
-            min_importance: 0.1,
-        };
-        let err = engine.forget(&policy).unwrap_err();
-        assert!(matches!(err, MemoryError::NotImplemented(_)));
-    }
-
-    #[test]
-    fn resolve_conflict_returns_not_implemented() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
-        let new_fact = NewFact {
-            content: "test".into(),
-            content_hash: "abc".into(),
-            embedding: vec![0.1; DIM],
-            fact_type: FactType::Episodic,
-            t_created: Utc::now(),
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            importance: 0.5,
-            access_count: 0,
-            last_accessed: Utc::now(),
-            metadata: serde_json::json!({}),
-        };
-        let err = engine
-            .resolve_conflict(&DummyArbiter, 1, new_fact)
-            .unwrap_err();
-        assert!(matches!(err, MemoryError::NotImplemented(_)));
-    }
-
-    #[test]
     fn embed_dim_validation_rejects_mismatch() {
         let dir = std::env::temp_dir().join("memory_engine_test_dim_validation");
         let _ = std::fs::remove_dir_all(&dir);
@@ -396,5 +419,212 @@ mod tests {
             engine.get_config("custom_key").unwrap(),
             Some("custom_value".into())
         );
+    }
+
+    // --- Phase 2 tests ---
+
+    #[test]
+    fn graph_starts_empty() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        assert_eq!(engine.graph().node_count(), 0);
+        assert_eq!(engine.graph().edge_count(), 0);
+    }
+
+    #[test]
+    fn consolidate_deduplicates_similar_facts() {
+        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
+        let fs = engine.fact_store();
+        // Two near-identical embeddings
+        fs.insert(&make_new_fact("fact alpha", vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        fs.insert(&make_new_fact(
+            "fact alpha copy",
+            vec![0.99, 0.01, 0.0, 0.0],
+        ))
+        .unwrap();
+
+        let config = ConsolidationConfig {
+            dedup_threshold: 0.90,
+            min_cluster_size: 10, // high threshold so no clusters form
+        };
+        let stats = engine.consolidate(&MockGen, &config).unwrap();
+        assert_eq!(stats.duplicates_removed, 1);
+
+        let active = engine.fact_store().list_active().unwrap();
+        assert_eq!(active.len(), 1);
+    }
+
+    #[test]
+    fn consolidate_is_idempotent() {
+        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
+        let fs = engine.fact_store();
+        fs.insert(&make_new_fact("unique A", vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        fs.insert(&make_new_fact("unique B", vec![0.0, 1.0, 0.0, 0.0]))
+            .unwrap();
+
+        let config = ConsolidationConfig {
+            dedup_threshold: 0.92,
+            min_cluster_size: 10,
+        };
+
+        let _stats1 = engine.consolidate(&MockGen, &config).unwrap();
+        let stats2 = engine.consolidate(&MockGen, &config).unwrap();
+
+        // Second run should find 0 new duplicates
+        assert_eq!(stats2.duplicates_removed, 0);
+        // Both facts still active
+        assert_eq!(engine.fact_store().list_active().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn forget_prunes_stale_facts() {
+        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
+
+        // Insert a fact with very low importance
+        let now = Utc::now();
+        let old_time = now - chrono::Duration::days(200);
+        engine
+            .fact_store()
+            .insert(&NewFact {
+                content: "ancient fact".into(),
+                content_hash: "h_ancient".into(),
+                embedding: vec![0.1; DIM],
+                fact_type: FactType::Episodic,
+                t_created: old_time,
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                importance: 0.01,
+                access_count: 0,
+                last_accessed: old_time,
+                metadata: serde_json::json!({}),
+            })
+            .unwrap();
+
+        let policy = ForgetPolicy {
+            min_importance: 0.3,
+            ..ForgetPolicy::default()
+        };
+        let stats = engine.forget(&policy).unwrap();
+        assert_eq!(stats.facts_expired, 1);
+        assert_eq!(stats.facts_evaluated, 1);
+    }
+
+    #[test]
+    fn forget_rejects_invalid_policy() {
+        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
+        let policy = ForgetPolicy {
+            half_life_days: 0.0, // invalid
+            ..ForgetPolicy::default()
+        };
+        assert!(engine.forget(&policy).is_err());
+    }
+
+    #[test]
+    fn resolve_conflict_update_creates_edge() {
+        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
+        let old_id = engine
+            .fact_store()
+            .insert(&make_new_fact("outdated", vec![0.5; DIM]))
+            .unwrap();
+
+        let arbiter = FixedArbiter {
+            decision: CrudDecision::Update,
+        };
+        let result = engine
+            .resolve_conflict(&arbiter, old_id, &make_new_fact("updated", vec![0.5; DIM]))
+            .unwrap();
+
+        assert_eq!(result.decision, CrudDecision::Update);
+        assert!(result.new_fact_id.is_some());
+
+        // Old fact should be expired
+        let old = engine.fact_store().get(old_id).unwrap();
+        assert!(old.t_expired.is_some());
+
+        // Graph should have the new edge
+        let new_id = result.new_fact_id.unwrap();
+        assert!(engine.graph().has_node(new_id));
+        assert_eq!(engine.graph().neighbors(new_id), vec![old_id]);
+    }
+
+    #[test]
+    fn resolve_conflict_noop_no_changes() {
+        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
+        let old_id = engine
+            .fact_store()
+            .insert(&make_new_fact("existing", vec![0.5; DIM]))
+            .unwrap();
+
+        let arbiter = FixedArbiter {
+            decision: CrudDecision::Noop,
+        };
+        let result = engine
+            .resolve_conflict(
+                &arbiter,
+                old_id,
+                &make_new_fact("candidate", vec![0.5; DIM]),
+            )
+            .unwrap();
+
+        assert_eq!(result.decision, CrudDecision::Noop);
+        assert!(result.new_fact_id.is_none());
+
+        // Old fact unchanged
+        let old = engine.fact_store().get(old_id).unwrap();
+        assert!(old.t_expired.is_none());
+    }
+
+    #[test]
+    fn graph_loads_on_reopen() {
+        let dir = std::env::temp_dir().join("memory_engine_test_graph_reload");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+
+        let config = EngineConfig {
+            path: db_path,
+            embed_dim: DIM,
+        };
+
+        // First session: add facts and create an edge via conflict resolution
+        {
+            let mut engine = MemoryEngine::open(&config).unwrap();
+            let old_id = engine
+                .fact_store()
+                .insert(&make_new_fact("original", vec![0.5; DIM]))
+                .unwrap();
+            let arbiter = FixedArbiter {
+                decision: CrudDecision::Update,
+            };
+            engine
+                .resolve_conflict(
+                    &arbiter,
+                    old_id,
+                    &make_new_fact("replacement", vec![0.5; DIM]),
+                )
+                .unwrap();
+            assert_eq!(engine.graph().edge_count(), 1);
+        }
+
+        // Second session: graph should be restored from DB
+        {
+            let engine = MemoryEngine::open(&config).unwrap();
+            assert_eq!(engine.graph().edge_count(), 1);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn summary_store_accessor_works() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let store = engine.summary_store();
+        let summaries = store
+            .list_by_level(&crate::types::ConsolidationLevel::Global)
+            .unwrap();
+        assert!(summaries.is_empty());
     }
 }
