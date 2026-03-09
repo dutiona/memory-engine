@@ -66,6 +66,11 @@ pub fn local_dedup(
                 fact_store.expire(expire_id, now)?;
                 expired_ids.insert(expire_id);
                 duplicates_removed += 1;
+
+                // If the new_fact itself was expired, stop comparing it
+                if expire_id == new_fact.id {
+                    break;
+                }
             }
         }
     }

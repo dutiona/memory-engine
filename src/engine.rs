@@ -206,7 +206,13 @@ impl MemoryEngine {
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn forget(&mut self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        crate::forgetting::prune(&self.conn, &self.graph, policy, self.embed_dim, Utc::now())
+        crate::forgetting::prune(
+            &self.conn,
+            &mut self.graph,
+            policy,
+            self.embed_dim,
+            Utc::now(),
+        )
     }
 
     /// Resolve a conflict between an existing fact and a candidate new fact.

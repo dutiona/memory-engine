@@ -3,6 +3,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::graph::MemoryGraph;
+use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::traits::{ForgetPolicy, PruneStats};
 use crate::types::Fact;
@@ -69,7 +70,10 @@ pub fn compute_importance(
 /// Prune facts with importance below threshold.
 ///
 /// Iterates all active facts, computes importance, soft-deletes those below
-/// `min_importance`. Returns statistics about the operation.
+/// `min_importance`. For each expired fact, cascades edge expiry in `SQLite`
+/// and removes edges from the in-memory graph to keep it consistent.
+///
+/// All mutations happen in a single transaction.
 ///
 /// # Errors
 ///
@@ -77,7 +81,7 @@ pub fn compute_importance(
 /// Returns `MemoryError::Database` on SQL failure.
 pub fn prune(
     conn: &Connection,
-    graph: &MemoryGraph,
+    graph: &mut MemoryGraph,
     policy: &ForgetPolicy,
     embed_dim: usize,
     now: DateTime<Utc>,
@@ -87,19 +91,35 @@ pub fn prune(
     let fact_store = FactStore::new(conn, embed_dim);
     let active_facts = fact_store.list_active()?;
     let facts_evaluated = active_facts.len();
-    let mut facts_expired = 0;
 
-    for fact in &active_facts {
-        let degree = graph.degree(fact.id);
-        let importance = compute_importance(fact, degree, now, policy);
-        if importance < policy.min_importance {
-            fact_store.expire(fact.id, now)?;
-            facts_expired += 1;
-        }
+    // Score all facts before mutating, so degree values are consistent
+    let to_expire: Vec<i64> = active_facts
+        .iter()
+        .filter(|fact| {
+            let degree = graph.degree(fact.id);
+            compute_importance(fact, degree, now, policy) < policy.min_importance
+        })
+        .map(|f| f.id)
+        .collect();
+
+    let tx = conn.unchecked_transaction()?;
+    let fact_store = FactStore::new(&tx, embed_dim);
+    let edge_store = EdgeStore::new(&tx);
+
+    for &fact_id in &to_expire {
+        fact_store.expire(fact_id, now)?;
+        edge_store.expire_by_fact(fact_id, now)?;
+    }
+
+    tx.commit()?;
+
+    // Update in-memory graph after successful commit
+    for &fact_id in &to_expire {
+        graph.remove_edges_by_fact(fact_id);
     }
 
     Ok(PruneStats {
-        facts_expired,
+        facts_expired: to_expire.len(),
         facts_evaluated,
     })
 }
@@ -294,13 +314,13 @@ mod tests {
             })
             .unwrap();
 
-        let graph = MemoryGraph::new();
+        let mut graph = MemoryGraph::new();
         let policy = ForgetPolicy {
             min_importance: 0.3,
             ..ForgetPolicy::default()
         };
 
-        let stats = prune(&conn, &graph, &policy, embed_dim, now).unwrap();
+        let stats = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
         assert_eq!(stats.facts_evaluated, 3);
         // At least 1 fact should be pruned (fact 3 with low importance + old age)
         assert!(

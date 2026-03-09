@@ -13,11 +13,14 @@ use crate::error::Result;
 use crate::store::schema::{get_config, set_config};
 use crate::traits::{ConsolidationConfig, ConsolidationStats, SummaryGenerator};
 
-/// Orchestrate all 3 consolidation passes.
+/// Orchestrate all 3 consolidation passes atomically.
 ///
 /// 1. Local dedup — expire near-duplicate facts
 /// 2. Cluster fusion — group related facts, generate cluster summaries
 /// 3. Global integration — summarize all clusters into one global summary
+///
+/// All passes run within a single transaction. On any failure (including
+/// `SummaryGenerator` errors), the entire consolidation is rolled back.
 ///
 /// Reads `last_consolidated_at` from config to scope dedup.
 /// Updates `last_consolidated_at` after successful completion.
@@ -40,11 +43,15 @@ pub fn consolidate(
         .map(|dt| dt.with_timezone(&Utc));
     let now = Utc::now();
 
-    let duplicates_removed = local_dedup(conn, embed_dim, config.dedup_threshold, last, now)?;
-    let clusters_created = cluster_fusion(conn, generator, embed_dim, config.min_cluster_size)?;
-    let global_summaries = global_integration(conn, generator, embed_dim)?;
+    let tx = conn.unchecked_transaction()?;
 
-    set_config(conn, "last_consolidated_at", &now.to_rfc3339())?;
+    let duplicates_removed = local_dedup(&tx, embed_dim, config.dedup_threshold, last, now)?;
+    let clusters_created = cluster_fusion(&tx, generator, embed_dim, config.min_cluster_size)?;
+    let global_summaries = global_integration(&tx, generator, embed_dim)?;
+
+    set_config(&tx, "last_consolidated_at", &now.to_rfc3339())?;
+
+    tx.commit()?;
 
     Ok(ConsolidationStats {
         duplicates_removed,
