@@ -174,7 +174,7 @@ mod tests {
 
     fn make_summary(level: ConsolidationLevel, source_ids: Vec<i64>) -> NewSummary {
         NewSummary {
-            content: format!("summary of facts {:?}", source_ids),
+            content: format!("summary of facts {source_ids:?}"),
             embedding: vec![0.1, 0.2, 0.3, 0.4],
             level,
             source_fact_ids: source_ids,

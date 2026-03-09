@@ -216,6 +216,8 @@ mod tests {
 
     #[test]
     fn prune_expires_low_importance_facts() {
+        use crate::types::NewFact;
+
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
 
@@ -225,7 +227,6 @@ mod tests {
 
         // Insert 3 facts directly with varying importance and recency
         let fact_store = FactStore::new(&conn, embed_dim);
-        use crate::types::NewFact;
 
         // Fact 1: high importance, recently accessed
         fact_store
@@ -307,6 +308,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn policy_validation_rejects_invalid() {
         let mut policy = ForgetPolicy::default();
 

@@ -74,6 +74,35 @@ impl MemoryGraph {
         }
     }
 
+    /// Remove all edges involving a given fact id (as source or target).
+    ///
+    /// Used by conflict resolution after expiring edges in `SQLite`.
+    ///
+    /// # Panics
+    ///
+    /// Cannot panic. The `expect` call is guarded by iterating only valid
+    /// edge indices from the graph.
+    pub fn remove_edges_by_fact(&mut self, fact_id: i64) {
+        let Some(&idx) = self.node_map.get(&fact_id) else {
+            return;
+        };
+        // Collect edges where fact is source or target
+        let to_remove: Vec<_> = self
+            .graph
+            .edge_indices()
+            .filter(|&ei| {
+                let (src, tgt) = self
+                    .graph
+                    .edge_endpoints(ei)
+                    .expect("edge index from edge_indices() is always valid");
+                src == idx || tgt == idx
+            })
+            .collect();
+        for ei in to_remove {
+            self.graph.remove_edge(ei);
+        }
+    }
+
     /// Outgoing neighbors of a fact.
     #[must_use]
     pub fn neighbors(&self, fact_id: i64) -> Vec<i64> {
