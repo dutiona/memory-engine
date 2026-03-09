@@ -46,6 +46,7 @@ fn full_roundtrip() {
         payload: serde_json::json!({"user": "test", "msg": "learning Rust"}),
         source: "integration_test".into(),
         session_id: Some("sess-roundtrip".into()),
+        scope_id: 1,
     };
     let event_id = engine.ingest(&event).unwrap();
     assert!(event_id > 0);
@@ -57,6 +58,8 @@ fn full_roundtrip() {
             FactType::Semantic,
             Some(event_id),
             &embedder,
+            None,
+            None,
         )
         .unwrap();
     let fact2_id = engine
@@ -65,6 +68,8 @@ fn full_roundtrip() {
             FactType::Semantic,
             Some(event_id),
             &embedder,
+            None,
+            None,
         )
         .unwrap();
     let fact3_id = engine
@@ -73,6 +78,8 @@ fn full_roundtrip() {
             FactType::Episodic,
             Some(event_id),
             &embedder,
+            None,
+            None,
         )
         .unwrap();
     assert!(fact1_id > 0);
@@ -88,6 +95,7 @@ fn full_roundtrip() {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         })
         .unwrap();
     assert_eq!(fts_results.len(), 2);
@@ -104,6 +112,7 @@ fn full_roundtrip() {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         })
         .unwrap();
     assert!(!vec_results.is_empty());
@@ -121,6 +130,7 @@ fn full_roundtrip() {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         })
         .unwrap();
     assert!(!hybrid_results.is_empty());
@@ -143,6 +153,7 @@ fn full_roundtrip() {
             limit: 10,
             valid_at: None,
             fact_type: Some(FactType::Semantic),
+            scope: None,
         })
         .unwrap();
     assert!(semantic_only

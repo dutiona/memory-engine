@@ -57,14 +57,15 @@ impl<'a> SummaryStore<'a> {
         let source_ids_json = serde_json::to_string(&summary.source_fact_ids)?;
 
         self.conn.execute(
-            "INSERT INTO summaries (content, embedding, level, source_fact_ids, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO summaries (content, embedding, level, source_fact_ids, created_at, scope_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 summary.content,
                 blob,
                 level_to_str(&summary.level),
                 source_ids_json,
                 summary.created_at.to_rfc3339(),
+                summary.scope_id,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -78,7 +79,7 @@ impl<'a> SummaryStore<'a> {
     pub fn get(&self, id: i64) -> Result<Summary> {
         self.conn
             .query_row(
-                "SELECT id, content, embedding, level, source_fact_ids, created_at
+                "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
                  FROM summaries WHERE id = ?1",
                 params![id],
                 |row| self.row_to_summary(row),
@@ -98,7 +99,7 @@ impl<'a> SummaryStore<'a> {
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_by_level(&self, level: &ConsolidationLevel) -> Result<Vec<Summary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, embedding, level, source_fact_ids, created_at
+            "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
              FROM summaries WHERE level = ?1",
         )?;
         let summaries = stmt
@@ -155,6 +156,7 @@ impl<'a> SummaryStore<'a> {
             level,
             source_fact_ids,
             created_at,
+            scope_id: row.get("scope_id")?,
         })
     }
 }
@@ -179,6 +181,7 @@ mod tests {
             level,
             source_fact_ids: source_ids,
             created_at: Utc::now(),
+            scope_id: 1,
         }
     }
 

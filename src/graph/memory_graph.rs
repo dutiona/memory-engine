@@ -294,6 +294,7 @@ mod tests {
             target_fact_id: 2,
             relation_type: "active".to_string(),
             weight: 1.0,
+            scope_id: 1,
             t_created: now,
             t_expired: None,
         };
@@ -302,6 +303,7 @@ mod tests {
             target_fact_id: 3,
             relation_type: "expired".to_string(),
             weight: 1.0,
+            scope_id: 1,
             t_created: now,
             t_expired: None,
         };

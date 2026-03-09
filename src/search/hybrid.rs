@@ -34,6 +34,7 @@ pub struct SearchQuery {
     pub limit: usize,
     pub valid_at: Option<DateTime<Utc>>,
     pub fact_type: Option<FactType>,
+    pub scope: Option<crate::types::ScopeQuery>,
 }
 
 /// A search result with the full fact, combined score, and match source.
@@ -79,23 +80,27 @@ pub fn hybrid_search(
     conn: &Connection,
     query: &SearchQuery,
     embed_dim: usize,
+    scope_ids: Option<&[i64]>,
 ) -> Result<Vec<SearchResult>> {
+    // When valid_at is set, over-fetch 3x to compensate for post-filter attrition
     let overfetch = query.limit.saturating_mul(3).max(query.limit);
 
-    // Collect FTS results
+    let fact_type_ref = query.fact_type.as_ref();
+
+    // Collect FTS results (t_expired, fact_type, scope pushed into SQL)
     let fts_results = if matches!(query.mode, SearchMode::Fts | SearchMode::Hybrid) {
         match query.text.as_ref() {
-            Some(text) => fts_search(conn, text, overfetch)?,
+            Some(text) => fts_search(conn, text, overfetch, fact_type_ref, scope_ids)?,
             None => vec![],
         }
     } else {
         vec![]
     };
 
-    // Collect vector results
+    // Collect vector results (t_expired, fact_type, scope pushed into SQL)
     let vec_results = if matches!(query.mode, SearchMode::Vector | SearchMode::Hybrid) {
         match query.embedding.as_ref() {
-            Some(emb) => vector_search(conn, emb, embed_dim, overfetch)?,
+            Some(emb) => vector_search(conn, emb, embed_dim, overfetch, fact_type_ref, scope_ids)?,
             None => vec![],
         }
     } else {
@@ -122,9 +127,8 @@ pub fn hybrid_search(
         }
     };
 
-    // Load full facts and apply filters.
-    // NOTE: filters applied post-overfetch. Highly restrictive filters may return
-    // fewer results than `limit`. Phase 2 can push filters into SQL for accuracy.
+    // Load full facts. t_expired, fact_type, and scope are now SQL-level filters.
+    // Only valid_at remains as a post-filter (complex temporal semantics).
     let store = FactStore::new(conn, embed_dim);
     let mut results = Vec::new();
     for (id, score) in ranked {
@@ -136,14 +140,7 @@ pub fn hybrid_search(
             continue;
         };
 
-        // Apply fact_type filter
-        if let Some(ref ft) = query.fact_type {
-            if &fact.fact_type != ft {
-                continue;
-            }
-        }
-
-        // Apply valid_at filter
+        // Apply valid_at filter (post-filter — complex temporal semantics)
         if let Some(valid_at) = query.valid_at {
             if let Some(t_valid) = fact.t_valid {
                 if t_valid > valid_at {
@@ -155,11 +152,6 @@ pub fn hybrid_search(
                     continue;
                 }
             }
-        }
-
-        // Skip expired facts
-        if fact.t_expired.is_some() {
-            continue;
         }
 
         let match_type = if fts_ids.contains(&id) && vec_ids.contains(&id) {
@@ -205,6 +197,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
+            scope_id: 1,
             importance: 0.5,
             access_count: 0,
             last_accessed: Utc::now(),
@@ -309,9 +302,10 @@ mod tests {
             limit: 3,
             valid_at: None,
             fact_type: None,
+            scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM).unwrap();
+        let results = hybrid_search(&conn, &query, DIM, None).unwrap();
         assert!(!results.is_empty());
         assert!(results.len() <= 3);
         // Results matching both FTS and vector should have MatchType::Both
@@ -337,9 +331,10 @@ mod tests {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM).unwrap();
+        let results = hybrid_search(&conn, &query, DIM, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].match_type, MatchType::Fts);
     }
@@ -362,9 +357,10 @@ mod tests {
             limit: 1,
             valid_at: None,
             fact_type: None,
+            scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM).unwrap();
+        let results = hybrid_search(&conn, &query, DIM, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].match_type, MatchType::Vector);
         assert_eq!(results[0].fact.content, "fact one");
@@ -396,9 +392,10 @@ mod tests {
             limit: 10,
             valid_at: None,
             fact_type: Some(FactType::Semantic),
+            scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM).unwrap();
+        let results = hybrid_search(&conn, &query, DIM, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.fact_type, FactType::Semantic);
     }

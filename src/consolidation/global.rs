@@ -45,6 +45,7 @@ pub fn global_integration(
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
+            scope_id: s.scope_id,
             importance: 1.0,
             access_count: 0,
             last_accessed: s.created_at,
@@ -61,11 +62,15 @@ pub fn global_integration(
         .flat_map(|s| s.source_fact_ids.iter().copied())
         .collect();
 
+    // Global summaries are intentionally root-scoped (scope_id=1).
+    // They aggregate across all cluster-level summaries regardless of
+    // individual cluster scopes. See issue #11.
     summary_store.insert(&NewSummary {
         content: global_text,
         embedding: global_embedding,
         level: ConsolidationLevel::Global,
         source_fact_ids: all_source_ids,
+        scope_id: 1,
         created_at: chrono::Utc::now(),
     })?;
 
@@ -112,6 +117,7 @@ mod tests {
                     embedding: vec![0.1; dim],
                     level: ConsolidationLevel::Cluster,
                     source_fact_ids: vec![i64::from(i)],
+                    scope_id: 1,
                     created_at: Utc::now(),
                 })
                 .unwrap();
@@ -152,6 +158,7 @@ mod tests {
                 embedding: vec![0.1; dim],
                 level: ConsolidationLevel::Cluster,
                 source_fact_ids: vec![1, 2],
+                scope_id: 1,
                 created_at: Utc::now(),
             })
             .unwrap();

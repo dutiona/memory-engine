@@ -39,6 +39,7 @@ pub struct Event {
     pub payload: serde_json::Value,
     pub source: String,
     pub session_id: Option<String>,
+    pub scope_id: i64,
 }
 
 /// A bi-temporal fact derived from events.
@@ -58,6 +59,7 @@ pub struct Fact {
     pub access_count: i64,
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
+    pub scope_id: i64,
 }
 
 /// A graph edge between two facts.
@@ -70,6 +72,7 @@ pub struct Edge {
     pub weight: f64,
     pub t_created: DateTime<Utc>,
     pub t_expired: Option<DateTime<Utc>>,
+    pub scope_id: i64,
 }
 
 /// A consolidation summary.
@@ -81,6 +84,51 @@ pub struct Summary {
     pub level: ConsolidationLevel,
     pub source_fact_ids: Vec<i64>,
     pub created_at: DateTime<Utc>,
+    pub scope_id: i64,
+}
+
+// --- Scope types ---
+
+/// A node in the hierarchical scope tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeNode {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub label: String,
+    pub depth: i64,
+}
+
+/// How to resolve scopes for a search query.
+/// Paths are consumer-facing strings (e.g., "user:michael/project:demo").
+/// The engine resolves them to internal integer IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeQuery {
+    /// Facts at exactly this scope path.
+    Exact(String),
+    /// Facts at this scope path and all descendants.
+    Subtree(String),
+    /// Facts at this scope path and all ancestors up to root.
+    Ancestors(String),
+    /// Facts at ancestors + at this scope path's subtree (full inherited context).
+    Inherited(String),
+}
+
+// --- Options ---
+
+/// Optional parameters for [`crate::engine::MemoryEngine::add_fact`].
+///
+/// All fields default to `None`, which uses the engine's defaults
+/// (importance=0.5, metadata={}, no temporal bounds).
+#[derive(Debug, Clone, Default)]
+pub struct AddFactOptions {
+    /// Override default importance (0.5). Must be in [0, 1].
+    pub importance: Option<f64>,
+    /// Override default metadata (empty object).
+    pub metadata: Option<serde_json::Value>,
+    /// Set the real-world validity start time.
+    pub t_valid: Option<DateTime<Utc>>,
+    /// Set the real-world validity end time.
+    pub t_invalid: Option<DateTime<Utc>>,
 }
 
 // --- New* structs (without id, for insertion) ---
@@ -93,6 +141,7 @@ pub struct NewEvent {
     pub payload: serde_json::Value,
     pub source: String,
     pub session_id: Option<String>,
+    pub scope_id: i64,
 }
 
 /// Fact to insert (DB assigns id).
@@ -111,6 +160,7 @@ pub struct NewFact {
     pub access_count: i64,
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
+    pub scope_id: i64,
 }
 
 /// Edge to insert (DB assigns id).
@@ -122,6 +172,7 @@ pub struct NewEdge {
     pub weight: f64,
     pub t_created: DateTime<Utc>,
     pub t_expired: Option<DateTime<Utc>>,
+    pub scope_id: i64,
 }
 
 /// Summary to insert (DB assigns id).
@@ -132,6 +183,7 @@ pub struct NewSummary {
     pub level: ConsolidationLevel,
     pub source_fact_ids: Vec<i64>,
     pub created_at: DateTime<Utc>,
+    pub scope_id: i64,
 }
 
 #[cfg(test)]
@@ -147,6 +199,7 @@ mod tests {
             payload: serde_json::json!({"key": "value"}),
             source: "test".into(),
             session_id: Some("sess-1".into()),
+            scope_id: 1,
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();
@@ -170,6 +223,7 @@ mod tests {
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),
+            scope_id: 1,
         };
         assert!(fact.t_expired.is_none());
         assert!(fact.t_valid.is_none());

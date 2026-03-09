@@ -16,15 +16,21 @@
 //!
 //! ## Threading
 //!
-//! `MemoryEngine` is `!Send` and `!Sync` (rusqlite `Connection` is not
-//! thread-safe). Consumers must wrap in a `Mutex` or use an actor pattern.
+//! `MemoryEngine` is `Send + Sync`. Thread safety is provided by an internal
+//! connection pool (N readers + 1 writer) and `RwLock`-protected caches.
+//! Consumers can share via `Arc<MemoryEngine>`.
 
+#[cfg(feature = "async")]
+pub mod async_engine;
 pub mod conflict;
 pub mod consolidation;
 pub mod engine;
 pub mod error;
 pub mod forgetting;
 pub mod graph;
+pub mod pool;
+pub mod resume;
+pub mod scope;
 pub mod search;
 pub mod store;
 pub mod traits;

@@ -56,6 +56,7 @@ pub fn resolve_conflict(
         t_valid: new_fact.t_valid,
         t_invalid: new_fact.t_invalid,
         source_event_id: new_fact.source_event_id,
+        scope_id: new_fact.scope_id,
         importance: new_fact.importance,
         access_count: new_fact.access_count,
         last_accessed: new_fact.last_accessed,
@@ -83,6 +84,7 @@ pub fn resolve_conflict(
                 target_fact_id: old_fact_id,
                 relation_type: RELATION_SUPPLEMENTS.to_string(),
                 weight: DEFAULT_EDGE_WEIGHT,
+                scope_id: new_fact.scope_id,
                 t_created: now,
                 t_expired: None,
             })?;
@@ -126,6 +128,7 @@ pub fn resolve_conflict(
                 target_fact_id: old_fact_id,
                 relation_type: RELATION_CONTRADICTS.to_string(),
                 weight: DEFAULT_EDGE_WEIGHT,
+                scope_id: new_fact.scope_id,
                 t_created: now,
                 t_expired: None,
             })?;
@@ -246,6 +249,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
+            scope_id: 1,
             importance: 0.5,
             access_count: 0,
             last_accessed: now,
@@ -409,6 +413,7 @@ mod tests {
                 target_fact_id: fact_b,
                 relation_type: "relates".into(),
                 weight: 1.0,
+                scope_id: 1,
                 t_created: Utc::now(),
                 t_expired: None,
             })
@@ -419,6 +424,7 @@ mod tests {
                 target_fact_id: fact_a,
                 relation_type: "depends".into(),
                 weight: 1.0,
+                scope_id: 1,
                 t_created: Utc::now(),
                 t_expired: None,
             })

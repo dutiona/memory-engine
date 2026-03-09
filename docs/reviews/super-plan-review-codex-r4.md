@@ -1,0 +1,6 @@
+[High] `init_schema()` still cannot safely run before `migrate()` on an existing v1 database if it creates full v2 DDL. `CREATE TABLE IF NOT EXISTS` is harmless, but v2-only statements like `CREATE INDEX ... ON facts(scope_id)` are not: on a v1 `facts` table, `scope_id` does not exist yet, so open will fail before the migration runs. The current “`init_schema()` is a no-op on v1 DBs” claim is false unless `init_schema()` is made schema-aware. You need one of:
+- detect “fresh/empty DB” first and only then create latest schema directly, or
+- keep `init_schema()` limited to base objects that are valid on v1 and move all v2-only indexes/column-dependent DDL into `migrate_v1_to_v2()`, or
+- read `schema_version` before deciding which schema initializer to run.
+
+[Medium] The scope cache update path is still underspecified for existing scopes. `add_fact()` does `ensure_path(path)?`, then always loads the node and calls `scope_tree.insert(node)`. If the path already existed, that is a cache refresh, not an insertion. Unless `ScopeTree::insert()` is explicitly idempotent by `id`, repeated writes into the same scope will duplicate children/root entries in-memory and can skew `subtree()` traversal or cause unbounded cache growth. The plan should require either idempotent `insert()` semantics or an API that tells the caller whether a node was newly created.
