@@ -13,7 +13,7 @@ pub struct FactStore<'a> {
     embed_dim: usize,
 }
 
-const fn fact_type_to_str(ft: &FactType) -> &'static str {
+pub(crate) const fn fact_type_to_str(ft: &FactType) -> &'static str {
     match ft {
         FactType::Episodic => "episodic",
         FactType::Semantic => "semantic",

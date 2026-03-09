@@ -95,6 +95,7 @@ fn full_roundtrip() {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         })
         .unwrap();
     assert_eq!(fts_results.len(), 2);
@@ -111,6 +112,7 @@ fn full_roundtrip() {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         })
         .unwrap();
     assert!(!vec_results.is_empty());
@@ -128,6 +130,7 @@ fn full_roundtrip() {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         })
         .unwrap();
     assert!(!hybrid_results.is_empty());
@@ -150,6 +153,7 @@ fn full_roundtrip() {
             limit: 10,
             valid_at: None,
             fact_type: Some(FactType::Semantic),
+            scope: None,
         })
         .unwrap();
     assert!(semantic_only

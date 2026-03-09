@@ -176,7 +176,11 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on query failure.
     pub fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        hybrid_search(&self.conn, query, self.embed_dim)
+        let scope_ids: Option<Vec<i64>> = query
+            .scope
+            .as_ref()
+            .and_then(|sq| self.scope_tree.borrow().resolve_query(sq));
+        hybrid_search(&self.conn, query, self.embed_dim, scope_ids.as_deref())
     }
 
     /// Get a `FactStore` borrowing this engine's connection.
@@ -413,6 +417,7 @@ mod tests {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         };
         let results = engine.query(&query).unwrap();
         assert_eq!(results.len(), 1);
