@@ -34,6 +34,7 @@ docs/_build/
 .venv/
 __pycache__/
 *.pyc
+uv.lock
 
 # Serena
 .serena/
