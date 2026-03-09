@@ -89,4 +89,4 @@ engine.add_fact(
 
 ## Scoping events
 
-The `scope_id` field on `NewEvent` is a raw integer referencing the scope tree. For most cases, use `1` (the root scope). If you need hierarchical scoping, the scope system is covered in more detail in [](adding-facts.md) -- facts are where scope-aware queries become relevant.
+The `scope_id` field on `NewEvent` is a raw integer referencing the scope tree. For most cases, use `1` (the root scope). If you need hierarchical scoping, the scope system is covered in more detail in [Adding Facts](adding-facts.md) -- facts are where scope-aware queries become relevant.
