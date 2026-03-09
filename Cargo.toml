@@ -18,8 +18,16 @@ rusqlite = { version = "0.34", features = ["bundled-full"] }
 blake3 = "1"
 tracing = "0.1"
 petgraph = "0.7"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
+
+[features]
+default = []
+async = ["dep:tokio"]
 
 [lints.rust]
 unsafe_code = "forbid"
