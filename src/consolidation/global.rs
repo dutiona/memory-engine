@@ -62,6 +62,9 @@ pub fn global_integration(
         .flat_map(|s| s.source_fact_ids.iter().copied())
         .collect();
 
+    // Global summaries are intentionally root-scoped (scope_id=1).
+    // They aggregate across all cluster-level summaries regardless of
+    // individual cluster scopes. See issue #11.
     summary_store.insert(&NewSummary {
         content: global_text,
         embedding: global_embedding,

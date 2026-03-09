@@ -55,7 +55,8 @@ pub fn cluster_fusion(
         let summary_text = generator.summarize(&cluster_facts)?;
         let summary_embedding = generator.embed(&summary_text)?;
 
-        // Determine scope_id from majority vote of source facts
+        // Determine scope_id from majority vote of source facts.
+        // Deterministic tie-break: lowest scope_id wins on equal counts.
         let scope_id = {
             let mut scope_counts: std::collections::HashMap<i64, usize> =
                 std::collections::HashMap::new();
@@ -64,7 +65,7 @@ pub fn cluster_fusion(
             }
             scope_counts
                 .into_iter()
-                .max_by_key(|&(_, count)| count)
+                .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
                 .map_or(1, |(id, _)| id)
         };
 
