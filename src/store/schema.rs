@@ -1,6 +1,9 @@
 use rusqlite::Connection;
 
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
+
+/// Current schema version. Bump when adding migrations.
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Open a `SQLite` connection to a file, with pragmas set.
 ///
@@ -40,25 +43,33 @@ fn set_pragmas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Initialize the full schema (idempotent via `IF NOT EXISTS`).
+/// Initialize schema for a database.
 ///
-/// Creates all tables, virtual tables, triggers, and indexes.
-/// Writes `schema_version=1` to the config table if not already present.
+/// **Fresh database (no config table):** Creates the full latest schema and sets
+/// `schema_version` to `CURRENT_SCHEMA_VERSION`.
+///
+/// **Existing database:** Returns immediately — all DDL evolution happens through
+/// [`migrate`]. This avoids running v2-only DDL against a v1 schema where new
+/// columns don't exist yet.
 ///
 /// # Errors
 ///
 /// Returns `MemoryError::Database` if any DDL statement fails.
 pub fn init_schema(conn: &Connection) -> Result<()> {
+    let is_fresh: bool = conn.query_row(
+        "SELECT COUNT(*) = 0 FROM sqlite_master WHERE type='table' AND name='config'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !is_fresh {
+        return Ok(()); // existing DB — let migrate() handle evolution
+    }
+    // Fresh DB: create full latest schema
     conn.execute_batch(TABLES_DDL)?;
     conn.execute_batch(FTS5_DDL)?;
     conn.execute_batch(TRIGGERS_DDL)?;
     conn.execute_batch(INDEXES_DDL)?;
-
-    // Write default config only if not already set.
-    if get_config(conn, "schema_version")?.is_none() {
-        set_config(conn, "schema_version", "1")?;
-    }
-
+    set_config(conn, "schema_version", &CURRENT_SCHEMA_VERSION.to_string())?;
     Ok(())
 }
 
@@ -90,6 +101,53 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
     )?;
     Ok(())
 }
+
+// --- Migration framework ---
+
+type MigrationFn = fn(&Connection) -> Result<()>;
+
+const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2];
+
+/// Run forward-only migrations from the current schema version to
+/// `CURRENT_SCHEMA_VERSION`.
+///
+/// Each migration runs inside a transaction. On failure, the migration rolls
+/// back and the version is NOT bumped.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Migration` if the stored version is newer than
+/// supported, or if any migration step fails.
+pub fn migrate(conn: &Connection) -> Result<()> {
+    let version_str = get_config(conn, "schema_version")?.unwrap_or_else(|| "1".to_string());
+    let version: u32 = version_str
+        .parse()
+        .map_err(|_| MemoryError::Migration(format!("invalid schema_version: {version_str}")))?;
+
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(MemoryError::Migration(format!(
+            "schema_version {version} is newer than supported {CURRENT_SCHEMA_VERSION}"
+        )));
+    }
+
+    for (i, migration) in MIGRATIONS.iter().enumerate() {
+        let target = (i as u32) + 2; // migrations are 1→2, 2→3, etc.
+        if version < target {
+            let tx = conn.unchecked_transaction()?;
+            migration(&tx)?;
+            set_config(&tx, "schema_version", &target.to_string())?;
+            tx.commit()?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_v1_to_v2(_conn: &Connection) -> Result<()> {
+    // Stub — filled in Task 3 (scopes table) + Task 4 (scope_id columns)
+    Ok(())
+}
+
+// --- DDL constants ---
 
 const TABLES_DDL: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -183,6 +241,16 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
 mod tests {
     use super::*;
 
+    /// Test helper: creates v1 schema (Phase 1 tables only, no scopes, no scope_id).
+    fn init_schema_v1(conn: &Connection) -> Result<()> {
+        conn.execute_batch(TABLES_DDL)?;
+        conn.execute_batch(FTS5_DDL)?;
+        conn.execute_batch(TRIGGERS_DDL)?;
+        conn.execute_batch(INDEXES_DDL)?;
+        set_config(conn, "schema_version", "1")?;
+        Ok(())
+    }
+
     #[test]
     fn init_schema_creates_all_tables() {
         let conn = open_memory().unwrap();
@@ -229,14 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn config_default_schema_version() {
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
-        let version = get_config(&conn, "schema_version").unwrap();
-        assert_eq!(version, Some("1".to_string()));
-    }
-
-    #[test]
     fn config_no_default_embed_dim() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
@@ -273,5 +333,78 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 9);
+    }
+
+    // --- Migration framework tests ---
+
+    #[test]
+    fn fresh_db_creates_latest_schema() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // init_schema creates latest version directly
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string())
+        );
+        // migrate is a no-op
+        migrate(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_runs_without_error() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("1".to_string())
+        );
+        migrate(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_skips_if_current() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn).unwrap();
+        // Second call is a no-op
+        migrate(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_rejects_future_version() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        set_config(&conn, "schema_version", "99").unwrap();
+        let err = migrate(&conn).unwrap_err();
+        assert!(matches!(err, MemoryError::Migration(_)));
+    }
+
+    #[test]
+    fn init_schema_noop_on_existing_db() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("1".to_string())
+        );
+        // Second init_schema call should be a no-op (config table exists)
+        init_schema(&conn).unwrap();
+        // Version should still be 1, not overwritten to 2
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("1".to_string())
+        );
     }
 }

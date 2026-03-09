@@ -8,7 +8,9 @@ use crate::graph::MemoryGraph;
 use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
-use crate::store::schema::{get_config, init_schema, open_connection, open_memory, set_config};
+use crate::store::schema::{
+    get_config, init_schema, migrate, open_connection, open_memory, set_config,
+};
 use crate::store::summaries::SummaryStore;
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
@@ -55,6 +57,7 @@ impl MemoryEngine {
         let path_str = config.path.to_string_lossy();
         let conn = open_connection(&path_str)?;
         init_schema(&conn)?;
+        migrate(&conn)?;
         Self::validate_or_set_embed_dim(&conn, config.embed_dim)?;
         let graph = MemoryGraph::load_from_db(&conn)?;
         Ok(Self {
@@ -72,6 +75,7 @@ impl MemoryEngine {
     pub fn open_memory(embed_dim: usize) -> Result<Self> {
         let conn = open_memory()?;
         init_schema(&conn)?;
+        migrate(&conn)?;
         Self::validate_or_set_embed_dim(&conn, embed_dim)?;
         let graph = MemoryGraph::load_from_db(&conn)?;
         Ok(Self {
