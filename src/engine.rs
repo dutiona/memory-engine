@@ -9,7 +9,7 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
-use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
+use crate::search::hybrid::{SearchQuery, SearchResult, hybrid_search};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};

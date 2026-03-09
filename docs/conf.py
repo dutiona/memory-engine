@@ -24,14 +24,11 @@ exclude_patterns = [
     "_build",
     "Thumbs.db",
     ".DS_Store",
-    # Old doc directories (not part of Sphinx tree — will be archived in PR 2)
-    "debate/**",
-    "reviews/**",
+    # Directories not part of the Sphinx tree (move to autonomous-agent-project later)
     "research/**",
     "prompts/**",
     "logs/**",
     "papers/**",
-    "plans/**",
     "ROADMAP.md",
 ]
 

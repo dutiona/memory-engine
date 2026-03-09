@@ -1,3 +1,7 @@
+//! SQLite persistence layer: events, facts, edges, summaries, scopes, and schema.
+//!
+//! Uses WAL mode for concurrent reads during writes.
+
 pub mod edges;
 pub mod events;
 pub mod facts;
