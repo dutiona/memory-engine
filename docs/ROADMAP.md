@@ -104,32 +104,81 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 ---
 
-### Phase 3: Hardening & Scalability 🔲
+### Phase 3: Hardening & Scoping 🔄
 
-Design tensions surfaced during Phase 1 implementation and code review. Tracked as individual issues.
+**Branch:** `feat/memory-engine-phase3`
 
-| Issue                                                   | Concern                                                  | Trigger                                                |
-| ------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------ |
-| [#3](https://github.com/dutiona/memory-engine/issues/3) | Brute-force vector search → ANN index                    | Fact count exceeds ~50K-100K                           |
-| [#4](https://github.com/dutiona/memory-engine/issues/4) | Post-overfetch filtering → SQL-level filters             | Skewed type distributions or restrictive `valid_at`    |
-| [#5](https://github.com/dutiona/memory-engine/issues/5) | `!Send`/`!Sync` → thread-safe engine                     | Async-first consumers, concurrent MCP requests         |
-| [#6](https://github.com/dutiona/memory-engine/issues/6) | Hardcoded `add_fact` defaults → `AddFactOptions` builder | Consumers needing per-fact importance/metadata control |
-
-**Approach:** Data-driven. Add criterion benchmarks first, then migrate when numbers justify it. No speculative optimization.
+| Feature                                                            | Status |
+| ------------------------------------------------------------------ | ------ |
+| Hierarchical scoping (`ScopeTree`, `ScopeStore`)                   | ✅     |
+| `scope_id` on facts, edges, events, summaries + migration          | ✅     |
+| SQL-level filters (`t_expired`, `fact_type`, `scope_id`)           | ✅     |
+| `ConnectionPool` (N readers + 1 writer, parking_lot)               | ✅     |
+| `MemoryEngine` Send+Sync with RwLock                               | ✅     |
+| `AsyncMemoryEngine` (tokio spawn_blocking)                         | ✅     |
+| `resume_context()` — basic, scope-aware (needs rework in 3b)       | ✅     |
+| Criterion benchmarks (vector, FTS, hybrid, scoped)                 | ✅     |
+| `AddFactOptions` builder (per-fact importance, metadata, temporal) | ✅     |
+| Schema migration framework (versioned, forward-only)               | ✅     |
 
 ---
 
-### Future (not planned)
+### Phase 3b: Temporal Memory & Agent Lifecycle 🔲
 
-These are not committed to any phase. They represent directions the research suggests but that we haven't validated need for.
+**Design:** [`docs/plans/2026-03-09-future-phases-design.md`](plans/2026-03-09-future-phases-design.md)
 
-- **Async API** — `async fn query(...)` wrapper, likely via `tokio::task::spawn_blocking`
-- **MCP server adapter** — Expose engine as a Model Context Protocol tool server
-- **Schema migrations** — `schema_version` is 1. Migration framework when schema evolves.
-- **Hierarchical summarization** — Multi-level abstractions (Memento-style). Currently consolidation is flat (local/cluster/global).
-- **Cross-session memory sharing** — Multiple agents sharing one store. Requires session isolation or namespacing.
-- **Multimodal memory** — Image/audio embeddings alongside text. Schema supports it (BLOB embeddings are dimension-agnostic) but no consumer integration.
-- **Parameter updates** — Doc-to-LoRA style adapter generation from memory contents. Explicitly out of scope — engine is retrieval-only.
+| Feature                 | Description                                                            |
+| ----------------------- | ---------------------------------------------------------------------- |
+| Unforgettable flag      | `is_pinned: bool` on facts, `PersistenceClassifier` trait hook         |
+| Future memory           | `t_valid` filter — facts surface when their date arrives               |
+| Scheduling API          | `resume_context(now)` rework, `drain_due(now)`, `next_due_time()`      |
+| Materialized importance | Persist importance score on facts for fast retrieval                   |
+| Event envelope v2       | `origin_node_id`, `sequence_id`, advisory `created_at` for future sync |
+
+---
+
+### Phase 4: Operability & MCP Server 🔲
+
+**Design:** [`docs/plans/2026-03-09-future-phases-design.md`](plans/2026-03-09-future-phases-design.md)
+
+| Feature                     | Description                                                         |
+| --------------------------- | ------------------------------------------------------------------- |
+| Inspection APIs             | `explain_fact()`, `replay_events()`, `dump_state()`, `statistics()` |
+| CLI inspector               | `memory-engine-cli` — clean operator tool (like `gh`)               |
+| MCP server                  | `memory-engine-mcp` workspace member, eventual separate repo        |
+| Import/export               | JSON event log + SQLite backup, gzip/zstd compression               |
+| Archival compression        | Cold storage `.pak` files for old non-pinned facts                  |
+| Semantic extraction queries | Scope + temporal range + semantic search composition                |
+
+---
+
+### Phase 5: Knowledge Integration 🔲
+
+**Design:** [`docs/plans/2026-03-09-future-phases-design.md`](plans/2026-03-09-future-phases-design.md)
+
+| Feature                        | Description                                     |
+| ------------------------------ | ----------------------------------------------- |
+| `KnowledgeBaseConnector` trait | Transport-agnostic, consumer-implemented        |
+| `KnowledgeRef` on facts        | URI field pointing to KB content                |
+| Graceful degradation           | "Memory lapse" when KB unreachable, retry later |
+| research-index bridge          | `memory-kb-research-index` middleware crate     |
+
+---
+
+### Deferred (not planned, trigger-based)
+
+Tracked as individual GitHub issues. See design doc for details.
+
+- **ANN vector index** — Trigger: benchmarks show >50ms at scale
+- **Web UI** — WASM+Rust graph visualization. Separate project.
+- **Auth** — Deployment layer concern, not engine core.
+- **SaaS Sync** — Separate product. CRDT event-log merge + E2EE.
+- **Evaluation harness** — Regression corpus for retrieval/consolidation quality.
+- **Hierarchical summarization** — Multi-level abstractions (Memento-style).
+- **Schema evolution discipline** — Versioning policy, backwards-compat testing.
+- **Determinism guarantees** — Replay, merge, idempotency rules for sync.
+- **Multimodal memory** — Image/audio embeddings. Schema supports it (BLOB).
+- **Parameter updates** — Doc-to-LoRA. Out of scope — engine is retrieval-only.
 
 ---
 
@@ -142,42 +191,64 @@ Consumer (AI agent, CLI tool, MCP server)
 ┌──────────────────────────────────────┐
 │           MemoryEngine               │
 │  ingest · add_fact · query           │  ← Phase 1 ✅
-│  consolidate · forget · resolve      │  ← Phase 2
+│  consolidate · forget · resolve      │  ← Phase 2 ✅
+│  resume_context · scoped queries     │  ← Phase 3
+│  drain_due · next_due_time           │  ← Phase 3b
 ├──────────────────────────────────────┤
 │  Search                              │
 │  ├─ FTS5 (BM25)                      │
 │  ├─ Vector (cosine, brute-force)     │
 │  └─ Hybrid (RRF k=60)               │
 ├──────────────────────────────────────┤
+│  Scoping                             │  ← Phase 3
+│  ├─ ScopeTree (hierarchical)         │
+│  └─ ScopeStore (SQLite-backed)       │
+├──────────────────────────────────────┤
 │  Store                               │
 │  ├─ EventStore (append-only log)     │
 │  ├─ FactStore (bi-temporal + BLOB)   │
-│  ├─ EdgeStore (graph persistence)    │  ← Phase 2
-│  └─ SummaryStore                     │  ← Phase 2
+│  ├─ EdgeStore (graph persistence)    │  ← Phase 2 ✅
+│  └─ SummaryStore                     │  ← Phase 2 ✅
 ├──────────────────────────────────────┤
-│  Graph (petgraph DiGraph)            │  ← Phase 2
+│  Graph (petgraph DiGraph)            │  ← Phase 2 ✅
 ├──────────────────────────────────────┤
-│  Forgetting (Ebbinghaus decay)       │  ← Phase 2
+│  Forgetting (Ebbinghaus decay)       │  ← Phase 2 ✅
 ├──────────────────────────────────────┤
-│  Consolidation (3-pass)              │  ← Phase 2
+│  Consolidation (3-pass)              │  ← Phase 2 ✅
 ├──────────────────────────────────────┤
-│  Conflict (bi-temporal arbiter)      │  ← Phase 2
+│  Conflict (bi-temporal arbiter)      │  ← Phase 2 ✅
+├──────────────────────────────────────┤
+│  ConnectionPool (N readers + 1 wr)   │  ← Phase 3
+├──────────────────────────────────────┤
+│  AsyncMemoryEngine (spawn_blocking)  │  ← Phase 3
 └──────────────────────────────────────┘
     │
     ▼
   SQLite WAL (rusqlite bundled-full)
-  ├─ events, facts, edges, summaries, config
+  ├─ events, facts, edges, summaries, scopes, config
   ├─ facts_fts (FTS5 virtual table)
-  └─ 9 indexes
+  └─ indexes + schema migration framework
 ```
 
 ## Consumer-Provided Traits
 
 ```
-EmbeddingProvider::embed(text) → Vec<f32>        ← Phase 1 ✅
-SummaryGenerator::summarize(facts) → String      ← Phase 2
-SummaryGenerator::embed(text) → Vec<f32>         ← Phase 2
-ConflictArbiter::arbitrate(old, new) → CrudDecision  ← Phase 2
+EmbeddingProvider::embed(text) → Vec<f32>              ← Phase 1 ✅
+SummaryGenerator::summarize(facts) → String            ← Phase 2 ✅
+SummaryGenerator::embed(text) → Vec<f32>               ← Phase 2 ✅
+ConflictArbiter::arbitrate(old, new) → CrudDecision    ← Phase 2 ✅
+PersistenceClassifier::should_pin(fact) → bool         ← Phase 3b
+KnowledgeBaseConnector::resolve(uri) → KnowledgeChunk  ← Phase 5
 ```
 
 The engine has zero LLM/network dependencies. All intelligence is injected by the consumer via these traits.
+
+## Conceptual Boundaries
+
+```
+Knowledge (raw content)     → Knowledge Base (e.g., research-index)
+Memory (internalized facts) → Memory Engine (this project)
+Wisdom (meta-reasoning)     → The model itself (out of scope)
+```
+
+See [`docs/plans/2026-03-09-future-phases-design.md`](plans/2026-03-09-future-phases-design.md) for full rationale.
