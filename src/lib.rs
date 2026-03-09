@@ -20,6 +20,8 @@
 //! connection pool (N readers + 1 writer) and `RwLock`-protected caches.
 //! Consumers can share via `Arc<MemoryEngine>`.
 
+#[cfg(feature = "async")]
+pub mod async_engine;
 pub mod conflict;
 pub mod consolidation;
 pub mod engine;
