@@ -112,6 +112,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
+            scope_id: 1,
             importance: 0.5,
             access_count: 0,
             last_accessed: Utc::now(),

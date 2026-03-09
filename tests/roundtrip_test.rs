@@ -46,6 +46,7 @@ fn full_roundtrip() {
         payload: serde_json::json!({"user": "test", "msg": "learning Rust"}),
         source: "integration_test".into(),
         session_id: Some("sess-roundtrip".into()),
+        scope_id: 1,
     };
     let event_id = engine.ingest(&event).unwrap();
     assert!(event_id > 0);

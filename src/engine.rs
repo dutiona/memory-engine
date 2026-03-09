@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use chrono::Utc;
@@ -5,12 +6,14 @@ use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
 use crate::graph::MemoryGraph;
+use crate::scope::ScopeTree;
 use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{
     get_config, init_schema, migrate, open_connection, open_memory, set_config,
 };
+use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
@@ -33,6 +36,7 @@ pub struct MemoryEngine {
     conn: Connection,
     embed_dim: usize,
     graph: MemoryGraph,
+    scope_tree: RefCell<ScopeTree>,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -60,10 +64,12 @@ impl MemoryEngine {
         migrate(&conn)?;
         Self::validate_or_set_embed_dim(&conn, config.embed_dim)?;
         let graph = MemoryGraph::load_from_db(&conn)?;
+        let scope_tree = ScopeTree::load(&conn)?;
         Ok(Self {
             conn,
             embed_dim: config.embed_dim,
             graph,
+            scope_tree: RefCell::new(scope_tree),
         })
     }
 
@@ -78,10 +84,12 @@ impl MemoryEngine {
         migrate(&conn)?;
         Self::validate_or_set_embed_dim(&conn, embed_dim)?;
         let graph = MemoryGraph::load_from_db(&conn)?;
+        let scope_tree = ScopeTree::load(&conn)?;
         Ok(Self {
             conn,
             embed_dim,
             graph,
+            scope_tree: RefCell::new(scope_tree),
         })
     }
 
@@ -127,10 +135,20 @@ impl MemoryEngine {
         scope: Option<&str>,
         opts: Option<&AddFactOptions>,
     ) -> Result<i64> {
-        let _ = scope; // unused until Task 4 (scope_id on facts)
         let embedding = embedder.embed(content)?;
         let now = Utc::now();
         let opts = opts.cloned().unwrap_or_default();
+
+        let scope_id = match scope {
+            Some(path) => {
+                let scope_store = ScopeStore::new(&self.conn);
+                let id = scope_store.ensure_path(path)?;
+                let node = scope_store.get(id)?;
+                self.scope_tree.borrow_mut().insert(node);
+                id
+            }
+            None => 1, // root scope
+        };
 
         let new_fact = NewFact {
             content: content.into(),
@@ -142,6 +160,7 @@ impl MemoryEngine {
             t_valid: opts.t_valid,
             t_invalid: opts.t_invalid,
             source_event_id,
+            scope_id,
             importance: opts.importance.unwrap_or(0.5),
             access_count: 0,
             last_accessed: now,
@@ -324,6 +343,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
+            scope_id: 1,
             importance: 0.5,
             access_count: 0,
             last_accessed: now,
@@ -348,6 +368,7 @@ mod tests {
             payload: serde_json::json!({"msg": "hello"}),
             source: "test".into(),
             session_id: None,
+            scope_id: 1,
         };
         let id = engine.ingest(&event).unwrap();
         assert_eq!(id, 1);
@@ -513,6 +534,7 @@ mod tests {
                 t_valid: None,
                 t_invalid: None,
                 source_event_id: None,
+                scope_id: 1,
                 importance: 0.01,
                 access_count: 0,
                 last_accessed: old_time,
@@ -692,6 +714,24 @@ mod tests {
         let fact = engine.fact_store().get(id).unwrap();
         assert!(fact.t_valid.is_some());
         assert!(fact.t_invalid.is_some());
+    }
+
+    #[test]
+    fn add_fact_with_scope_path() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let id = engine
+            .add_fact(
+                "scoped fact",
+                FactType::Semantic,
+                None,
+                &embedder,
+                Some("user:test/project:demo"),
+                None,
+            )
+            .unwrap();
+        let fact = engine.fact_store().get(id).unwrap();
+        assert_ne!(fact.scope_id, 1); // not root
     }
 
     #[test]

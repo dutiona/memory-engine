@@ -45,6 +45,7 @@ pub fn global_integration(
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
+            scope_id: 1,
             importance: 1.0,
             access_count: 0,
             last_accessed: s.created_at,
@@ -66,6 +67,7 @@ pub fn global_integration(
         embedding: global_embedding,
         level: ConsolidationLevel::Global,
         source_fact_ids: all_source_ids,
+        scope_id: 1,
         created_at: chrono::Utc::now(),
     })?;
 
@@ -112,6 +114,7 @@ mod tests {
                     embedding: vec![0.1; dim],
                     level: ConsolidationLevel::Cluster,
                     source_fact_ids: vec![i64::from(i)],
+                    scope_id: 1,
                     created_at: Utc::now(),
                 })
                 .unwrap();
@@ -152,6 +155,7 @@ mod tests {
                 embedding: vec![0.1; dim],
                 level: ConsolidationLevel::Cluster,
                 source_fact_ids: vec![1, 2],
+                scope_id: 1,
                 created_at: Utc::now(),
             })
             .unwrap();

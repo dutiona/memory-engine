@@ -60,6 +60,7 @@ pub fn cluster_fusion(
             embedding: summary_embedding,
             level: ConsolidationLevel::Cluster,
             source_fact_ids: source_ids,
+            scope_id: 1,
             created_at: chrono::Utc::now(),
         })?;
 
@@ -149,6 +150,7 @@ mod tests {
                 t_valid: None,
                 t_invalid: None,
                 source_event_id: None,
+                scope_id: 1,
                 importance: 0.5,
                 access_count: 0,
                 last_accessed: Utc::now(),

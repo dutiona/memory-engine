@@ -145,7 +145,12 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 
 fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCOPES_DDL)?;
-    // scope_id columns added in Task 4 (ALTER TABLE)
+    conn.execute_batch(
+        "ALTER TABLE facts ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE edges ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE events ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE summaries ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;",
+    )?;
     Ok(())
 }
 
@@ -158,7 +163,8 @@ CREATE TABLE IF NOT EXISTS events (
     event_type TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
     source TEXT NOT NULL,
-    session_id TEXT
+    session_id TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -175,7 +181,8 @@ CREATE TABLE IF NOT EXISTS facts (
     importance REAL NOT NULL DEFAULT 0.5,
     access_count INTEGER NOT NULL DEFAULT 0,
     last_accessed TEXT NOT NULL,
-    metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata))
+    metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -185,7 +192,8 @@ CREATE TABLE IF NOT EXISTS edges (
     relation_type TEXT NOT NULL,
     weight REAL NOT NULL DEFAULT 1.0,
     t_created TEXT NOT NULL,
-    t_expired TEXT
+    t_expired TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS summaries (
@@ -194,7 +202,8 @@ CREATE TABLE IF NOT EXISTS summaries (
     embedding BLOB NOT NULL,
     level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')),
     source_fact_ids TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    scope_id INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS config (
@@ -253,6 +262,10 @@ CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(content_hash);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_fact_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
 CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
+CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
+CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
+CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
+CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
 ";
 
 #[cfg(test)]
@@ -261,13 +274,79 @@ mod tests {
 
     /// Test helper: creates v1 schema (Phase 1 tables only, no scopes, no scope_id).
     fn init_schema_v1(conn: &Connection) -> Result<()> {
-        conn.execute_batch(TABLES_DDL)?;
+        conn.execute_batch(TABLES_V1_DDL)?;
         conn.execute_batch(FTS5_DDL)?;
         conn.execute_batch(TRIGGERS_DDL)?;
-        conn.execute_batch(INDEXES_DDL)?;
+        conn.execute_batch(INDEXES_V1_DDL)?;
         set_config(conn, "schema_version", "1")?;
         Ok(())
     }
+
+    /// V1 tables DDL (no scope_id columns, no FK to scopes).
+    const TABLES_V1_DDL: &str = "
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    session_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')),
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    t_valid TEXT,
+    t_invalid TEXT,
+    source_event_id INTEGER REFERENCES events(id),
+    importance REAL NOT NULL DEFAULT 0.5,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata))
+);
+
+CREATE TABLE IF NOT EXISTS edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    target_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    relation_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    t_created TEXT NOT NULL,
+    t_expired TEXT
+);
+
+CREATE TABLE IF NOT EXISTS summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')),
+    source_fact_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
+    /// V1 indexes DDL (no scope_id indexes).
+    const INDEXES_V1_DDL: &str = "
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_facts_expired ON facts(t_expired);
+CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
+CREATE INDEX IF NOT EXISTS idx_facts_valid ON facts(t_valid, t_invalid);
+CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(content_hash);
+CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_fact_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
+CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
+";
 
     #[test]
     fn init_schema_creates_all_tables() {
@@ -351,8 +430,8 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        // 9 original + 2 scopes indexes (idx_scopes_parent, idx_scopes_parent_label)
-        assert_eq!(count, 11);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes
+        assert_eq!(count, 15);
     }
 
     // --- Migration framework tests ---
@@ -409,6 +488,36 @@ mod tests {
         set_config(&conn, "schema_version", "99").unwrap();
         let err = migrate(&conn).unwrap_err();
         assert!(matches!(err, MemoryError::Migration(_)));
+    }
+
+    #[test]
+    fn migration_v1_to_v2_adds_scope_columns() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        // Insert a fact before migration
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata)
+             VALUES ('test', 'hash', X'00', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
+            [],
+        ).unwrap();
+
+        migrate(&conn).unwrap();
+
+        // Verify scope_id column exists and defaults to 1
+        let scope_id: i64 = conn
+            .query_row(
+                "SELECT scope_id FROM facts WHERE content = 'test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scope_id, 1);
+
+        // Verify scopes table exists with root
+        let root_label: String = conn
+            .query_row("SELECT label FROM scopes WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(root_label, "root");
     }
 
     #[test]

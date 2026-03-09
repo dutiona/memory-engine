@@ -22,6 +22,7 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
         weight: row.get("weight")?,
         t_created: parse_timestamp(&t_created_str)?,
         t_expired: parse_optional_timestamp(t_expired_str.as_deref())?,
+        scope_id: row.get("scope_id")?,
     })
 }
 
@@ -39,8 +40,8 @@ impl<'a> EdgeStore<'a> {
     /// Returns `MemoryError::Database` on SQL failure (e.g. FK violation).
     pub fn insert(&self, edge: &NewEdge) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO edges (source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO edges (source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 edge.source_fact_id,
                 edge.target_fact_id,
@@ -48,6 +49,7 @@ impl<'a> EdgeStore<'a> {
                 edge.weight,
                 edge.t_created.to_rfc3339(),
                 edge.t_expired.map(|dt| dt.to_rfc3339()),
+                edge.scope_id,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -61,7 +63,7 @@ impl<'a> EdgeStore<'a> {
     pub fn get(&self, id: i64) -> Result<Edge> {
         self.conn
             .query_row(
-                "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired
+                "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
                  FROM edges WHERE id = ?1",
                 params![id],
                 row_to_edge,
@@ -112,7 +114,7 @@ impl<'a> EdgeStore<'a> {
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_active(&self) -> Result<Vec<Edge>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired
+            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges WHERE t_expired IS NULL",
         )?;
         let edges = stmt
@@ -128,7 +130,7 @@ impl<'a> EdgeStore<'a> {
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_active_by_source(&self, source_fact_id: i64) -> Result<Vec<Edge>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired
+            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges WHERE source_fact_id = ?1 AND t_expired IS NULL",
         )?;
         let edges = stmt
@@ -144,7 +146,7 @@ impl<'a> EdgeStore<'a> {
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_active_by_target(&self, target_fact_id: i64) -> Result<Vec<Edge>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired
+            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges WHERE target_fact_id = ?1 AND t_expired IS NULL",
         )?;
         let edges = stmt
@@ -189,6 +191,7 @@ mod tests {
             weight: 1.0,
             t_created: Utc::now(),
             t_expired: None,
+            scope_id: 1,
         }
     }
 

@@ -39,6 +39,7 @@ pub struct Event {
     pub payload: serde_json::Value,
     pub source: String,
     pub session_id: Option<String>,
+    pub scope_id: i64,
 }
 
 /// A bi-temporal fact derived from events.
@@ -58,6 +59,7 @@ pub struct Fact {
     pub access_count: i64,
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
+    pub scope_id: i64,
 }
 
 /// A graph edge between two facts.
@@ -70,6 +72,7 @@ pub struct Edge {
     pub weight: f64,
     pub t_created: DateTime<Utc>,
     pub t_expired: Option<DateTime<Utc>>,
+    pub scope_id: i64,
 }
 
 /// A consolidation summary.
@@ -81,6 +84,7 @@ pub struct Summary {
     pub level: ConsolidationLevel,
     pub source_fact_ids: Vec<i64>,
     pub created_at: DateTime<Utc>,
+    pub scope_id: i64,
 }
 
 // --- Scope types ---
@@ -137,6 +141,7 @@ pub struct NewEvent {
     pub payload: serde_json::Value,
     pub source: String,
     pub session_id: Option<String>,
+    pub scope_id: i64,
 }
 
 /// Fact to insert (DB assigns id).
@@ -155,6 +160,7 @@ pub struct NewFact {
     pub access_count: i64,
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
+    pub scope_id: i64,
 }
 
 /// Edge to insert (DB assigns id).
@@ -166,6 +172,7 @@ pub struct NewEdge {
     pub weight: f64,
     pub t_created: DateTime<Utc>,
     pub t_expired: Option<DateTime<Utc>>,
+    pub scope_id: i64,
 }
 
 /// Summary to insert (DB assigns id).
@@ -176,6 +183,7 @@ pub struct NewSummary {
     pub level: ConsolidationLevel,
     pub source_fact_ids: Vec<i64>,
     pub created_at: DateTime<Utc>,
+    pub scope_id: i64,
 }
 
 #[cfg(test)]
@@ -191,6 +199,7 @@ mod tests {
             payload: serde_json::json!({"key": "value"}),
             source: "test".into(),
             session_id: Some("sess-1".into()),
+            scope_id: 1,
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();
@@ -214,6 +223,7 @@ mod tests {
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),
+            scope_id: 1,
         };
         assert!(fact.t_expired.is_none());
         assert!(fact.t_valid.is_none());

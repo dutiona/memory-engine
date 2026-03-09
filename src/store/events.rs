@@ -65,6 +65,7 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         payload,
         source: row.get("source")?,
         session_id: row.get("session_id")?,
+        scope_id: row.get("scope_id")?,
     })
 }
 
@@ -86,14 +87,15 @@ impl<'a> EventStore<'a> {
         let payload_str = serde_json::to_string(&event.payload)?;
 
         self.conn.execute(
-            "INSERT INTO events (timestamp, event_type, payload, source, session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO events (timestamp, event_type, payload, source, session_id, scope_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 timestamp_str,
                 event_type_str,
                 payload_str,
                 event.source,
                 event.session_id,
+                event.scope_id,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -106,7 +108,7 @@ impl<'a> EventStore<'a> {
     /// Returns `MemoryError::NotFound` if the id doesn't exist.
     pub fn get(&self, id: i64) -> Result<Event> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, event_type, payload, source, session_id
+            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id
              FROM events WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_event)?;
@@ -124,7 +126,7 @@ impl<'a> EventStore<'a> {
     /// Returns `MemoryError::Database` on query failure.
     pub fn list(&self, filter: &EventFilter) -> Result<Vec<Event>> {
         let (sql, values) = build_filter_query(
-            "SELECT id, timestamp, event_type, payload, source, session_id FROM events",
+            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id FROM events",
             filter,
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -209,6 +211,7 @@ mod tests {
             payload: serde_json::json!({"key": "value"}),
             source: source.into(),
             session_id: session_id.map(Into::into),
+            scope_id: 1,
         }
     }
 
@@ -293,6 +296,7 @@ mod tests {
             payload: payload.clone(),
             source: "test".into(),
             session_id: None,
+            scope_id: 1,
         };
         let id = store.insert(&event).unwrap();
         let retrieved = store.get(id).unwrap();

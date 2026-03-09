@@ -72,8 +72,8 @@ impl<'a> FactStore<'a> {
         self.conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type,
                 t_created, t_expired, t_valid, t_invalid,
-                source_event_id, importance, access_count, last_accessed, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                source_event_id, importance, access_count, last_accessed, metadata, scope_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 fact.content,
                 hash,
@@ -88,6 +88,7 @@ impl<'a> FactStore<'a> {
                 fact.access_count,
                 last_accessed,
                 metadata_str,
+                fact.scope_id,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -102,7 +103,7 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
              FROM facts WHERE id = ?1",
         )?;
         let dim = self.embed_dim;
@@ -123,7 +124,7 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
              FROM facts WHERE t_expired IS NULL",
         )?;
         let dim = self.embed_dim;
@@ -148,7 +149,7 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
              FROM facts
              WHERE t_expired IS NULL
                AND (t_valid IS NULL OR t_valid <= ?1)
@@ -257,6 +258,7 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
         access_count: row.get("access_count")?,
         last_accessed,
         metadata,
+        scope_id: row.get("scope_id")?,
     })
 }
 
@@ -289,6 +291,7 @@ mod tests {
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),
+            scope_id: 1,
         }
     }
 
