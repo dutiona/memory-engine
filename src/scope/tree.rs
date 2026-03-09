@@ -51,7 +51,7 @@ impl ScopeTree {
             let child_ids = self.children.get(&current)?;
             let found = child_ids
                 .iter()
-                .find(|&&id| self.nodes.get(&id).map_or(false, |n| n.label == segment));
+                .find(|&&id| self.nodes.get(&id).is_some_and(|n| n.label == segment));
             current = *found?;
         }
         Some(current)
