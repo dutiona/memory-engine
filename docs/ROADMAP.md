@@ -75,22 +75,32 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 ---
 
-### Phase 2: Graph, Consolidation, Forgetting, Conflict Resolution 🔲
+### Phase 2: Graph, Consolidation, Forgetting, Conflict Resolution ✅
 
-**Tasks:** 9-13 from the original plan
-**Dependencies:** All build on Phase 1's schema, fact store, and vector search.
+**PR:** [#8](https://github.com/dutiona/memory-engine/pull/8) (squash-merged)
+**Plan:** Comment on [Issue #1](https://github.com/dutiona/memory-engine/issues/1) (closed)
+**Tasks:** 9-13, 14b from the original plan
 
-| Task | Component           | Depends On                   | Description                                                                                                                                                                                       |
-| ---- | ------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 9    | Graph module        | Schema (T3)                  | `MemoryGraph` (petgraph `DiGraph`), `EdgeStore` (SQLite persistence), `neighbors`, `degree`, `connected_component`, `shortest_path`. Write-then-update sync: SQLite first, petgraph after commit. |
-| 10   | Summary store       | Schema (T3)                  | `SummaryStore` for consolidation outputs. Embedding BLOBs + JSON `source_fact_ids`.                                                                                                               |
-| 11   | Forgetting          | Graph (T9), Facts (T5)       | Ebbinghaus decay with per-`fact_type` half-life overrides. Multi-signal importance: recency + frequency + graph degree + base. Soft-delete via `t_expired`.                                       |
-| 12   | Consolidation       | Vector (T7), Summaries (T10) | Three-pass: local dedup (cosine >0.92, O(new×active)), cluster fusion (single-linkage + `SummaryGenerator` trait), global integration.                                                            |
-| 13   | Conflict resolution | Graph (T9), Facts (T5)       | `ConflictArbiter` trait → `CrudDecision` (Add/Update/Delete/Noop). Creates graph edges ("contradicts", "supplements"). Bi-temporal update of `t_expired`/`t_invalid`.                             |
+| Task | Component                                                      | Status |
+| ---- | -------------------------------------------------------------- | ------ |
+| 9    | Graph module (`MemoryGraph` petgraph wrapper, `EdgeStore`)     | ✅     |
+| 10   | Summary store (`SummaryStore` with embedding BLOBs)            | ✅     |
+| 11   | Forgetting (Ebbinghaus decay, multi-signal importance scoring) | ✅     |
+| 12   | Consolidation (three-pass: dedup, cluster fusion, global)      | ✅     |
+| 13   | Conflict resolution (bi-temporal, `ConflictArbiter` trait)     | ✅     |
+| 14b  | Engine facade wiring (replaced all `NotImplemented` stubs)     | ✅     |
 
-**Parallelizable:** Tasks 9+10 can run in parallel. Task 11 needs 9. Task 12 needs 10+vector. Task 13 needs 9.
+**Deliverable:** All 5 primitives fully operational: `ingest()`, `add_fact()`, `query()`, `consolidate()`, `forget()`, `resolve_conflict()`. 107 tests, 0 failures.
 
-**Engine facade updates:** Wire `consolidate()`, `forget()`, `resolve_conflict()` to replace `NotImplemented` stubs. Add `graph()` accessor.
+**Implementation learnings applied:**
+
+- **Edge cascade invariant:** Every fact expiry (conflict, forgetting, dedup) must also expire its edges in SQLite and update the in-memory graph. This was caught by multi-model review and applied uniformly across all three codepaths.
+- **Atomic consolidation:** All three passes (dedup, cluster, global) wrapped in a single `unchecked_transaction`. Generator failures roll back cleanly.
+- **O(degree) edge removal:** `petgraph::visit::EdgeRef` + `edges_directed()` instead of scanning all edges.
+- **Dedup double-expire bug:** Inner loop must `break` when the new_fact itself is the one expired, preventing re-expiry on subsequent iterations.
+- **Graph rebuild after consolidation:** Engine rebuilds in-memory graph from SQLite after dedup removes facts, keeping degree-based scoring consistent for subsequent `forget()` calls.
+- **Stale config handling:** `last_consolidated_at` parse errors return `MemoryError::Migration` instead of being silently ignored.
+- **Importance scoring normalization:** `ln_1p` for numerical accuracy near zero, with named constants for ceiling values (101.0 for frequency, 51.0 for connectivity).
 
 ---
 
