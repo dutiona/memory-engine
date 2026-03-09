@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use rusqlite::Connection;
 
@@ -76,28 +77,23 @@ impl MemoryGraph {
 
     /// Remove all edges involving a given fact id (as source or target).
     ///
+    /// Uses directed edge iterators for O(degree) instead of O(E).
     /// Used by conflict resolution after expiring edges in `SQLite`.
-    ///
-    /// # Panics
-    ///
-    /// Cannot panic. The `expect` call is guarded by iterating only valid
-    /// edge indices from the graph.
     pub fn remove_edges_by_fact(&mut self, fact_id: i64) {
         let Some(&idx) = self.node_map.get(&fact_id) else {
             return;
         };
-        // Collect edges where fact is source or target
-        let to_remove: Vec<_> = self
+        // Collect outgoing and incoming edge indices for this node — O(degree)
+        let mut to_remove: Vec<_> = self
             .graph
-            .edge_indices()
-            .filter(|&ei| {
-                let (src, tgt) = self
-                    .graph
-                    .edge_endpoints(ei)
-                    .expect("edge index from edge_indices() is always valid");
-                src == idx || tgt == idx
-            })
+            .edges_directed(idx, Direction::Outgoing)
+            .map(|e| e.id())
             .collect();
+        to_remove.extend(
+            self.graph
+                .edges_directed(idx, Direction::Incoming)
+                .map(|e| e.id()),
+        );
         for ei in to_remove {
             self.graph.remove_edge(ei);
         }

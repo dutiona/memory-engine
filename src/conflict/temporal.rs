@@ -126,7 +126,7 @@ pub fn resolve_conflict(
             tx.commit()?;
 
             // Update in-memory graph: remove expired edges, add new one
-            rebuild_graph_for_fact(graph, conn, old_fact_id, new_id, edge_id);
+            rebuild_graph_for_fact(graph, old_fact_id, new_id, edge_id);
 
             Ok(ConflictResolution {
                 decision: CrudDecision::Update,
@@ -175,13 +175,7 @@ fn expire_and_invalidate(conn: &Connection, fact_id: i64, now: DateTime<Utc>) ->
 /// Rebuild the in-memory graph after an Update conflict resolution.
 ///
 /// Removes all edges involving the old fact, then adds the new "contradicts" edge.
-fn rebuild_graph_for_fact(
-    graph: &mut MemoryGraph,
-    _conn: &Connection,
-    old_fact_id: i64,
-    new_id: i64,
-    edge_id: i64,
-) {
+fn rebuild_graph_for_fact(graph: &mut MemoryGraph, old_fact_id: i64, new_id: i64, edge_id: i64) {
     remove_edges_for_fact(graph, old_fact_id);
     graph.add_edge(
         new_id,
