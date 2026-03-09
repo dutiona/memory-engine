@@ -83,6 +83,24 @@ pub struct Summary {
     pub created_at: DateTime<Utc>,
 }
 
+// --- Options ---
+
+/// Optional parameters for [`crate::engine::MemoryEngine::add_fact`].
+///
+/// All fields default to `None`, which uses the engine's defaults
+/// (importance=0.5, metadata={}, no temporal bounds).
+#[derive(Debug, Clone, Default)]
+pub struct AddFactOptions {
+    /// Override default importance (0.5). Must be in [0, 1].
+    pub importance: Option<f64>,
+    /// Override default metadata (empty object).
+    pub metadata: Option<serde_json::Value>,
+    /// Set the real-world validity start time.
+    pub t_valid: Option<DateTime<Utc>>,
+    /// Set the real-world validity end time.
+    pub t_invalid: Option<DateTime<Utc>>,
+}
+
 // --- New* structs (without id, for insertion) ---
 
 /// Event to insert (DB assigns id).

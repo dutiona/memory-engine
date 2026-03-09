@@ -16,7 +16,7 @@ use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
     EmbeddingProvider, ForgetPolicy, PruneStats, SummaryGenerator,
 };
-use crate::types::{FactType, NewEvent, NewFact};
+use crate::types::{AddFactOptions, FactType, NewEvent, NewFact};
 
 /// Configuration for opening a [`MemoryEngine`] backed by a file.
 #[derive(Debug, Clone)]
@@ -124,9 +124,13 @@ impl MemoryEngine {
         fact_type: FactType,
         source_event_id: Option<i64>,
         embedder: &dyn EmbeddingProvider,
+        scope: Option<&str>,
+        opts: Option<&AddFactOptions>,
     ) -> Result<i64> {
+        let _ = scope; // unused until Task 4 (scope_id on facts)
         let embedding = embedder.embed(content)?;
         let now = Utc::now();
+        let opts = opts.cloned().unwrap_or_default();
 
         let new_fact = NewFact {
             content: content.into(),
@@ -135,13 +139,13 @@ impl MemoryEngine {
             fact_type,
             t_created: now,
             t_expired: None,
-            t_valid: None,
-            t_invalid: None,
+            t_valid: opts.t_valid,
+            t_invalid: opts.t_invalid,
             source_event_id,
-            importance: 0.5,
+            importance: opts.importance.unwrap_or(0.5),
             access_count: 0,
             last_accessed: now,
-            metadata: serde_json::json!({}),
+            metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
         };
 
         self.fact_store().insert(&new_fact)
@@ -354,7 +358,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let embedder = MockEmbedder { dim: DIM };
         let id = engine
-            .add_fact("Rust is fast", FactType::Semantic, None, &embedder)
+            .add_fact(
+                "Rust is fast",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
             .unwrap();
         assert!(id > 0);
     }
@@ -369,6 +380,8 @@ mod tests {
                 FactType::Semantic,
                 None,
                 &embedder,
+                None,
+                None,
             )
             .unwrap();
 
@@ -630,5 +643,73 @@ mod tests {
             .list_by_level(&crate::types::ConsolidationLevel::Global)
             .unwrap();
         assert!(summaries.is_empty());
+    }
+
+    // --- Phase 3 / T2: AddFactOptions ---
+
+    #[test]
+    fn add_fact_with_custom_importance() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let opts = AddFactOptions {
+            importance: Some(0.9),
+            ..Default::default()
+        };
+        let id = engine
+            .add_fact(
+                "important fact",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&opts),
+            )
+            .unwrap();
+        let fact = engine.fact_store().get(id).unwrap();
+        assert!((fact.importance - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn add_fact_with_temporal_bounds() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let now = Utc::now();
+        let opts = AddFactOptions {
+            t_valid: Some(now - chrono::Duration::hours(1)),
+            t_invalid: Some(now + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let id = engine
+            .add_fact(
+                "temporal fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&opts),
+            )
+            .unwrap();
+        let fact = engine.fact_store().get(id).unwrap();
+        assert!(fact.t_valid.is_some());
+        assert!(fact.t_invalid.is_some());
+    }
+
+    #[test]
+    fn add_fact_none_opts_uses_defaults() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let id = engine
+            .add_fact(
+                "default fact",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
+            .unwrap();
+        let fact = engine.fact_store().get(id).unwrap();
+        assert!((fact.importance - 0.5).abs() < f64::EPSILON);
+        assert!(fact.t_valid.is_none());
     }
 }
