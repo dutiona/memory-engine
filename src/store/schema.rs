@@ -64,8 +64,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     if !is_fresh {
         return Ok(()); // existing DB — let migrate() handle evolution
     }
-    // Fresh DB: create full latest schema
+    // Fresh DB: create full latest (v2) schema
     conn.execute_batch(TABLES_DDL)?;
+    conn.execute_batch(SCOPES_DDL)?;
     conn.execute_batch(FTS5_DDL)?;
     conn.execute_batch(TRIGGERS_DDL)?;
     conn.execute_batch(INDEXES_DDL)?;
@@ -142,8 +143,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_v1_to_v2(_conn: &Connection) -> Result<()> {
-    // Stub — filled in Task 3 (scopes table) + Task 4 (scope_id columns)
+fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCOPES_DDL)?;
+    // scope_id columns added in Task 4 (ALTER TABLE)
     Ok(())
 }
 
@@ -199,6 +201,22 @@ CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+";
+
+const SCOPES_DDL: &str = "
+CREATE TABLE IF NOT EXISTS scopes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER REFERENCES scopes(id),
+    label TEXT NOT NULL,
+    depth INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_scopes_parent ON scopes(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scopes_parent_label
+    ON scopes(parent_id, label);
+
+-- Insert root scope (sentinel). Only root has parent_id=NULL.
+INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (1, NULL, 'root', 0);
 ";
 
 const FTS5_DDL: &str = "
@@ -267,6 +285,7 @@ mod tests {
         assert!(tables.contains(&"edges".to_string()));
         assert!(tables.contains(&"summaries".to_string()));
         assert!(tables.contains(&"config".to_string()));
+        assert!(tables.contains(&"scopes".to_string()));
     }
 
     #[test]
@@ -332,7 +351,8 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 9);
+        // 9 original + 2 scopes indexes (idx_scopes_parent, idx_scopes_parent_label)
+        assert_eq!(count, 11);
     }
 
     // --- Migration framework tests ---

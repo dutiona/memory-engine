@@ -25,6 +25,7 @@ pub mod engine;
 pub mod error;
 pub mod forgetting;
 pub mod graph;
+pub mod scope;
 pub mod search;
 pub mod store;
 pub mod traits;
