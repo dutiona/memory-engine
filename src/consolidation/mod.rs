@@ -32,7 +32,11 @@ pub fn consolidate(
     config: &ConsolidationConfig,
 ) -> Result<ConsolidationStats> {
     let last = get_config(conn, "last_consolidated_at")?
-        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|s| DateTime::parse_from_rfc3339(&s))
+        .transpose()
+        .map_err(|e| {
+            crate::error::MemoryError::Migration(format!("invalid last_consolidated_at: {e}"))
+        })?
         .map(|dt| dt.with_timezone(&Utc));
     let now = Utc::now();
 

@@ -8,6 +8,13 @@ use crate::store::facts::FactStore;
 use crate::traits::{ConflictArbiter, ConflictResolution, CrudDecision};
 use crate::types::{NewEdge, NewFact};
 
+/// Relation type for edges created when facts supplement each other.
+const RELATION_SUPPLEMENTS: &str = "supplements";
+/// Relation type for edges created when facts contradict each other.
+const RELATION_CONTRADICTS: &str = "contradicts";
+/// Default weight for conflict resolution edges.
+const DEFAULT_EDGE_WEIGHT: f64 = 1.0;
+
 /// Resolve a conflict between an existing fact and a candidate new fact.
 ///
 /// Delegates the decision to the consumer-provided [`ConflictArbiter`] trait.
@@ -74,8 +81,8 @@ pub fn resolve_conflict(
             let edge_id = edge_store.insert(&NewEdge {
                 source_fact_id: new_id,
                 target_fact_id: old_fact_id,
-                relation_type: "supplements".to_string(),
-                weight: 1.0,
+                relation_type: RELATION_SUPPLEMENTS.to_string(),
+                weight: DEFAULT_EDGE_WEIGHT,
                 t_created: now,
                 t_expired: None,
             })?;
@@ -88,8 +95,8 @@ pub fn resolve_conflict(
                 old_fact_id,
                 EdgeData {
                     edge_id,
-                    relation_type: "supplements".to_string(),
-                    weight: 1.0,
+                    relation_type: RELATION_SUPPLEMENTS.to_string(),
+                    weight: DEFAULT_EDGE_WEIGHT,
                 },
             );
 
@@ -117,8 +124,8 @@ pub fn resolve_conflict(
             let edge_id = edge_store.insert(&NewEdge {
                 source_fact_id: new_id,
                 target_fact_id: old_fact_id,
-                relation_type: "contradicts".to_string(),
-                weight: 1.0,
+                relation_type: RELATION_CONTRADICTS.to_string(),
+                weight: DEFAULT_EDGE_WEIGHT,
                 t_created: now,
                 t_expired: None,
             })?;
@@ -182,8 +189,8 @@ fn rebuild_graph_for_fact(graph: &mut MemoryGraph, old_fact_id: i64, new_id: i64
         old_fact_id,
         EdgeData {
             edge_id,
-            relation_type: "contradicts".to_string(),
-            weight: 1.0,
+            relation_type: RELATION_CONTRADICTS.to_string(),
+            weight: DEFAULT_EDGE_WEIGHT,
         },
     );
 }

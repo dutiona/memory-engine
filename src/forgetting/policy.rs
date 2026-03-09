@@ -7,6 +7,13 @@ use crate::store::facts::FactStore;
 use crate::traits::{ForgetPolicy, PruneStats};
 use crate::types::Fact;
 
+/// Normalization ceiling for access frequency: ln(100+1).
+/// 100 accesses = full score.
+const FREQUENCY_NORMALIZATION_CEILING: f64 = 101.0;
+/// Normalization ceiling for graph connectivity: ln(50+1).
+/// 50 connections = full score.
+const CONNECTIVITY_NORMALIZATION_CEILING: f64 = 51.0;
+
 /// Ebbinghaus forgetting curve: retention = 2^(-age/half_life).
 ///
 /// Returns 1.0 at `age=0`, 0.5 at `age=half_life`, 0.25 at `age=2×half_life`.
@@ -44,9 +51,11 @@ pub fn compute_importance(
     // Normalization: log_base(count+1), capped at 1.0.
     // Using ln_1p for numerical accuracy near zero.
     #[allow(clippy::cast_precision_loss)]
-    let frequency = (f64::ln_1p(fact.access_count as f64) / 101.0_f64.ln()).min(1.0);
+    let frequency =
+        (f64::ln_1p(fact.access_count as f64) / FREQUENCY_NORMALIZATION_CEILING.ln()).min(1.0);
     #[allow(clippy::cast_precision_loss)]
-    let connectivity = (f64::ln_1p(graph_degree as f64) / 51.0_f64.ln()).min(1.0);
+    let connectivity =
+        (f64::ln_1p(graph_degree as f64) / CONNECTIVITY_NORMALIZATION_CEILING.ln()).min(1.0);
 
     policy
         .recency_weight

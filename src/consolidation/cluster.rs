@@ -46,12 +46,14 @@ pub fn cluster_fusion(
             continue;
         }
 
-        let cluster_facts: Vec<&Fact> = cluster.iter().map(|&idx| &active_facts[idx]).collect();
-        let facts_slice: Vec<Fact> = cluster_facts.iter().map(|f| (*f).clone()).collect();
-
-        let summary_text = generator.summarize(&facts_slice)?;
-        let summary_embedding = generator.embed(&summary_text)?;
+        let cluster_facts: Vec<Fact> = cluster
+            .iter()
+            .map(|&idx| active_facts[idx].clone())
+            .collect();
         let source_ids: Vec<i64> = cluster_facts.iter().map(|f| f.id).collect();
+
+        let summary_text = generator.summarize(&cluster_facts)?;
+        let summary_embedding = generator.embed(&summary_text)?;
 
         summary_store.insert(&NewSummary {
             content: summary_text,
