@@ -55,12 +55,25 @@ pub fn cluster_fusion(
         let summary_text = generator.summarize(&cluster_facts)?;
         let summary_embedding = generator.embed(&summary_text)?;
 
+        // Determine scope_id from majority vote of source facts
+        let scope_id = {
+            let mut scope_counts: std::collections::HashMap<i64, usize> =
+                std::collections::HashMap::new();
+            for fact in &cluster_facts {
+                *scope_counts.entry(fact.scope_id).or_default() += 1;
+            }
+            scope_counts
+                .into_iter()
+                .max_by_key(|&(_, count)| count)
+                .map_or(1, |(id, _)| id)
+        };
+
         summary_store.insert(&NewSummary {
             content: summary_text,
             embedding: summary_embedding,
             level: ConsolidationLevel::Cluster,
             source_fact_ids: source_ids,
-            scope_id: 1,
+            scope_id,
             created_at: chrono::Utc::now(),
         })?;
 

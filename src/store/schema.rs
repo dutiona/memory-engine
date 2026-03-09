@@ -151,6 +151,12 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
          ALTER TABLE events ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE summaries ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;",
     )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
+         CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
+         CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
+         CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);",
+    )?;
     Ok(())
 }
 
@@ -518,6 +524,28 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
             .query_row("SELECT label FROM scopes WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(root_label, "root");
+
+        // Verify scope indexes were created by migration
+        let scope_indexes: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%_scope'",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        for expected in &[
+            "idx_facts_scope",
+            "idx_edges_scope",
+            "idx_events_scope",
+            "idx_summaries_scope",
+        ] {
+            assert!(
+                scope_indexes.contains(&(*expected).to_string()),
+                "missing index {expected} after migration"
+            );
+        }
     }
 
     #[test]

@@ -217,11 +217,19 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on query failure.
     pub fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        // Resolve scope IDs from cache (short-lived read lock)
-        let scope_ids: Option<Vec<i64>> = query
-            .scope
-            .as_ref()
-            .and_then(|sq| self.scope_tree.read().resolve_query(sq));
+        // Resolve scope IDs from cache (short-lived read lock).
+        // When a scope query is provided but the path doesn't exist,
+        // return empty results instead of silently falling through to unscoped search.
+        let scope_ids: Option<Vec<i64>> = match &query.scope {
+            Some(sq) => {
+                let resolved = self.scope_tree.read().resolve_query(sq);
+                match resolved {
+                    Some(ids) => Some(ids),
+                    None => return Ok(vec![]), // scope doesn't exist → no results
+                }
+            }
+            None => None,
+        };
 
         self.with_read(|conn| hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref()))
     }
@@ -1042,5 +1050,42 @@ mod tests {
         };
         let err = engine.resume_context(&config).unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
+    }
+
+    #[test]
+    fn query_nonexistent_scope_returns_empty() {
+        use crate::types::ScopeQuery;
+
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        // Add a fact at root scope so there's something to find if search were unscoped
+        engine
+            .add_fact(
+                "visible without scope",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Query with a scope path that doesn't exist
+        let query = SearchQuery {
+            text: Some("visible".into()),
+            embedding: None,
+            mode: SearchMode::Fts,
+            limit: 10,
+            valid_at: None,
+            fact_type: None,
+            scope: Some(ScopeQuery::Exact("nonexistent/scope".into())),
+        };
+        let results = engine.query(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "expected empty results for nonexistent scope, got {}",
+            results.len()
+        );
     }
 }

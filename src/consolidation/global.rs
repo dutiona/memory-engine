@@ -45,7 +45,7 @@ pub fn global_integration(
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            scope_id: 1,
+            scope_id: s.scope_id,
             importance: 1.0,
             access_count: 0,
             last_accessed: s.created_at,
