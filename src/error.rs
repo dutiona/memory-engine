@@ -21,6 +21,9 @@ pub enum MemoryError {
 
     #[error("not implemented: {0}")]
     NotImplemented(String),
+
+    #[error("connection pool error: {0}")]
+    Pool(String),
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.

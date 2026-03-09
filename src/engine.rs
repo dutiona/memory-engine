@@ -1,36 +1,60 @@
 use std::path::PathBuf;
 
 use chrono::Utc;
+use parking_lot::{MutexGuard, RwLock};
 use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
 use crate::graph::MemoryGraph;
+use crate::pool::ConnectionPool;
+use crate::resume::context::{ResumeConfig, ResumeContext};
+use crate::scope::ScopeTree;
 use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
-use crate::store::schema::{get_config, init_schema, open_connection, open_memory, set_config};
+use crate::store::schema::{get_config, set_config};
+use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
     EmbeddingProvider, ForgetPolicy, PruneStats, SummaryGenerator,
 };
-use crate::types::{FactType, NewEvent, NewFact};
+use crate::types::{AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact};
 
 /// Configuration for opening a [`MemoryEngine`] backed by a file.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub path: PathBuf,
     pub embed_dim: usize,
+    /// Number of read connections in the pool (default: 4).
+    pub read_pool_size: usize,
+}
+
+impl EngineConfig {
+    /// Create a config with default read pool size.
+    #[must_use]
+    pub fn new(path: PathBuf, embed_dim: usize) -> Self {
+        Self {
+            path,
+            embed_dim,
+            read_pool_size: 4,
+        }
+    }
 }
 
 /// Facade over all memory primitives: ingest, query, consolidate, forget, resolve.
 ///
-/// `MemoryEngine` is `!Send` and `!Sync` because `rusqlite::Connection` is not
-/// thread-safe. Consumers must wrap in a `Mutex` or use an actor pattern.
+/// `MemoryEngine` is `Send + Sync`. Thread safety is provided by:
+/// - `ConnectionPool` — bounded read pool + exclusive write connection via `parking_lot::Mutex`
+/// - `RwLock<MemoryGraph>` — concurrent readers, exclusive writer
+/// - `RwLock<ScopeTree>` — concurrent readers, exclusive writer
+///
+/// All public methods take `&self`. Consumers can share via `Arc<MemoryEngine>`.
 pub struct MemoryEngine {
-    conn: Connection,
+    pool: ConnectionPool,
     embed_dim: usize,
-    graph: MemoryGraph,
+    graph: RwLock<MemoryGraph>,
+    scope_tree: RwLock<ScopeTree>,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -42,26 +66,17 @@ impl std::fmt::Debug for MemoryEngine {
 }
 
 impl MemoryEngine {
-    /// Open or create a memory engine backed by a `SQLite` file.
+    /// Open or create a memory engine backed by a SQLite file.
     ///
     /// On first open, writes `embed_dim` to the config table.
     /// On subsequent opens, validates the stored `embed_dim` matches.
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match
-    /// the requested value.
+    /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub fn open(config: &EngineConfig) -> Result<Self> {
-        let path_str = config.path.to_string_lossy();
-        let conn = open_connection(&path_str)?;
-        init_schema(&conn)?;
-        Self::validate_or_set_embed_dim(&conn, config.embed_dim)?;
-        let graph = MemoryGraph::load_from_db(&conn)?;
-        Ok(Self {
-            conn,
-            embed_dim: config.embed_dim,
-            graph,
-        })
+        let pool = ConnectionPool::open(&config.path, config.embed_dim, config.read_pool_size)?;
+        Self::init_from_pool(pool, config.embed_dim)
     }
 
     /// Open an in-memory engine for testing.
@@ -70,14 +85,25 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` if the connection or schema setup fails.
     pub fn open_memory(embed_dim: usize) -> Result<Self> {
-        let conn = open_memory()?;
-        init_schema(&conn)?;
-        Self::validate_or_set_embed_dim(&conn, embed_dim)?;
-        let graph = MemoryGraph::load_from_db(&conn)?;
+        let pool = ConnectionPool::open_memory(embed_dim)?;
+        Self::init_from_pool(pool, embed_dim)
+    }
+
+    /// Shared constructor logic: validate embed_dim, load graph and scope tree.
+    fn init_from_pool(pool: ConnectionPool, embed_dim: usize) -> Result<Self> {
+        // Scope the MutexGuard so it drops before we move `pool` into the struct.
+        let (graph, scope_tree) = {
+            let conn = pool.write();
+            Self::validate_or_set_embed_dim(&conn, embed_dim)?;
+            let graph = MemoryGraph::load_from_db(&conn)?;
+            let scope_tree = ScopeTree::load(&conn)?;
+            (graph, scope_tree)
+        };
         Ok(Self {
-            conn,
+            pool,
             embed_dim,
-            graph,
+            graph: RwLock::new(graph),
+            scope_tree: RwLock::new(scope_tree),
         })
     }
 
@@ -97,7 +123,25 @@ impl MemoryEngine {
         Ok(())
     }
 
-    // --- Phase 1: fully implemented ---
+    // --- Private connection dispatch helpers ---
+
+    /// Execute a read operation on a connection from the read pool.
+    fn with_read<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&Connection) -> Result<R>,
+    {
+        let conn = self.pool.read();
+        f(&conn)
+    }
+
+    /// Lock the write connection and return the guard directly.
+    /// Callers use this when they need to hold the write lock across
+    /// multiple operations (e.g., DB mutation + cache update).
+    fn write_conn(&self) -> MutexGuard<'_, Connection> {
+        self.pool.write()
+    }
+
+    // --- Public API: Ingest ---
 
     /// Append an event to the event log. Returns the assigned event id.
     ///
@@ -105,11 +149,15 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on insert failure.
     pub fn ingest(&self, event: &NewEvent) -> Result<i64> {
-        self.event_store().insert(event)
+        let conn = self.write_conn();
+        EventStore::new(&conn).insert(event)
     }
 
-    /// Add a fact: compute embedding via `embedder`, delegate to `FactStore`
-    /// (which computes blake3 content hash). Returns the assigned fact id.
+    /// Add a fact: compute embedding via `embedder`, compute blake3 content hash,
+    /// and insert into the fact store. Returns the assigned fact id.
+    ///
+    /// Embedding is computed **before** acquiring the write lock, so slow
+    /// embedding calls (network API) don't block readers.
     ///
     /// # Errors
     ///
@@ -120,9 +168,26 @@ impl MemoryEngine {
         fact_type: FactType,
         source_event_id: Option<i64>,
         embedder: &dyn EmbeddingProvider,
+        scope: Option<&str>,
+        opts: Option<&AddFactOptions>,
     ) -> Result<i64> {
+        // Embed OUTSIDE the write lock (potentially slow)
         let embedding = embedder.embed(content)?;
         let now = Utc::now();
+        let opts = opts.cloned().unwrap_or_default();
+
+        // Resolve scope + insert fact in a single write lock
+        let conn = self.write_conn();
+        let scope_id = match scope {
+            Some(path) => {
+                let scope_store = ScopeStore::new(&conn);
+                let id = scope_store.ensure_path(path)?;
+                let node = scope_store.get(id)?;
+                self.scope_tree.write().insert(node);
+                id
+            }
+            None => 1, // root scope
+        };
 
         let new_fact = NewFact {
             content: content.into(),
@@ -131,17 +196,20 @@ impl MemoryEngine {
             fact_type,
             t_created: now,
             t_expired: None,
-            t_valid: None,
-            t_invalid: None,
+            t_valid: opts.t_valid,
+            t_invalid: opts.t_invalid,
             source_event_id,
-            importance: 0.5,
+            scope_id,
+            importance: opts.importance.unwrap_or(0.5),
             access_count: 0,
             last_accessed: now,
-            metadata: serde_json::json!({}),
+            metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
         };
 
-        self.fact_store().insert(&new_fact)
+        FactStore::new(&conn, self.embed_dim).insert(&new_fact)
     }
+
+    // --- Public API: Query ---
 
     /// Query facts using hybrid search (FTS5 + vector + RRF).
     ///
@@ -149,20 +217,24 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on query failure.
     pub fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        hybrid_search(&self.conn, query, self.embed_dim)
+        // Resolve scope IDs from cache (short-lived read lock).
+        // When a scope query is provided but the path doesn't exist,
+        // return empty results instead of silently falling through to unscoped search.
+        let scope_ids: Option<Vec<i64>> = match &query.scope {
+            Some(sq) => {
+                let resolved = self.scope_tree.read().resolve_query(sq);
+                match resolved {
+                    Some(ids) => Some(ids),
+                    None => return Ok(vec![]), // scope doesn't exist → no results
+                }
+            }
+            None => None,
+        };
+
+        self.with_read(|conn| hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref()))
     }
 
-    /// Get a `FactStore` borrowing this engine's connection.
-    #[must_use]
-    pub const fn fact_store(&self) -> FactStore<'_> {
-        FactStore::new(&self.conn, self.embed_dim)
-    }
-
-    /// Get an `EventStore` borrowing this engine's connection.
-    #[must_use]
-    pub const fn event_store(&self) -> EventStore<'_> {
-        EventStore::new(&self.conn)
-    }
+    // --- Public API: Config ---
 
     /// Read a config value by key.
     ///
@@ -170,7 +242,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on query failure.
     pub fn get_config(&self, key: &str) -> Result<Option<String>> {
-        get_config(&self.conn, key)
+        self.with_read(|conn| get_config(conn, key))
     }
 
     /// Write a config value (upsert).
@@ -179,10 +251,11 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on write failure.
     pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
-        set_config(&self.conn, key, value)
+        let conn = self.write_conn();
+        set_config(&conn, key, value)
     }
 
-    // --- Phase 2: fully implemented ---
+    // --- Public API: Consolidation ---
 
     /// Run three-pass consolidation: local dedup, cluster fusion, global integration.
     ///
@@ -190,20 +263,22 @@ impl MemoryEngine {
     ///
     /// Propagates errors from any consolidation pass or the `SummaryGenerator`.
     pub fn consolidate(
-        &mut self,
+        &self,
         generator: &dyn SummaryGenerator,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        let stats =
-            crate::consolidation::consolidate(&self.conn, generator, self.embed_dim, config)?;
+        let conn = self.write_conn();
+        let stats = crate::consolidation::consolidate(&conn, generator, self.embed_dim, config)?;
 
-        // Rebuild graph: dedup may have expired facts and their edges
+        // Rebuild graph inside write lock — dedup may have expired facts and their edges
         if stats.duplicates_removed > 0 {
-            self.graph = MemoryGraph::load_from_db(&self.conn)?;
+            *self.graph.write() = MemoryGraph::load_from_db(&conn)?;
         }
 
         Ok(stats)
     }
+
+    // --- Public API: Forgetting ---
 
     /// Prune stale facts using Ebbinghaus decay and graph-aware importance scoring.
     ///
@@ -213,15 +288,13 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
-    pub fn forget(&mut self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        crate::forgetting::prune(
-            &self.conn,
-            &mut self.graph,
-            policy,
-            self.embed_dim,
-            Utc::now(),
-        )
+    pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
+        let conn = self.write_conn();
+        let mut graph = self.graph.write();
+        crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())
     }
+
+    // --- Public API: Conflict Resolution ---
 
     /// Resolve a conflict between an existing fact and a candidate new fact.
     ///
@@ -233,14 +306,16 @@ impl MemoryEngine {
     /// Returns `MemoryError::NotFound` if the old fact doesn't exist.
     /// Propagates errors from the arbiter or database operations.
     pub fn resolve_conflict(
-        &mut self,
+        &self,
         arbiter: &dyn ConflictArbiter,
         old_id: i64,
         new_fact: &NewFact,
     ) -> Result<ConflictResolution> {
+        let conn = self.write_conn();
+        let mut graph = self.graph.write();
         crate::conflict::resolve_conflict(
-            &self.conn,
-            &mut self.graph,
+            &conn,
+            &mut graph,
             arbiter,
             old_id,
             new_fact,
@@ -249,16 +324,113 @@ impl MemoryEngine {
         )
     }
 
-    /// Access the in-memory graph (read-only).
+    // --- Public API: Graph queries (no lock exposure) ---
+
+    /// Get the degree (in + out edges) for a fact in the graph.
     #[must_use]
-    pub const fn graph(&self) -> &MemoryGraph {
-        &self.graph
+    pub fn graph_degree(&self, fact_id: i64) -> usize {
+        self.graph.read().degree(fact_id)
     }
 
-    /// Get a `SummaryStore` borrowing this engine's connection.
+    /// Get the connected component containing a fact.
     #[must_use]
-    pub const fn summary_store(&self) -> SummaryStore<'_> {
-        SummaryStore::new(&self.conn, self.embed_dim)
+    pub fn graph_component(&self, fact_id: i64) -> Vec<i64> {
+        self.graph.read().connected_component(fact_id)
+    }
+
+    /// Get outgoing neighbors of a fact in the graph.
+    #[must_use]
+    pub fn graph_neighbors(&self, fact_id: i64) -> Vec<i64> {
+        self.graph.read().neighbors(fact_id)
+    }
+
+    /// Graph statistics: (node_count, edge_count).
+    #[must_use]
+    pub fn graph_stats(&self) -> (usize, usize) {
+        let g = self.graph.read();
+        (g.node_count(), g.edge_count())
+    }
+
+    /// Check if a node exists in the graph.
+    #[must_use]
+    pub fn graph_has_node(&self, fact_id: i64) -> bool {
+        self.graph.read().has_node(fact_id)
+    }
+
+    /// Embedding dimension configured for this engine.
+    #[must_use]
+    pub const fn embed_dim(&self) -> usize {
+        self.embed_dim
+    }
+
+    /// Whether this engine is file-backed (vs in-memory).
+    #[must_use]
+    pub fn is_file_backed(&self) -> bool {
+        self.pool.is_file_backed()
+    }
+
+    // --- Public API: Direct data access ---
+
+    /// Get a fact by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the fact doesn't exist.
+    pub fn get_fact(&self, id: i64) -> Result<Fact> {
+        self.with_read(|conn| FactStore::new(conn, self.embed_dim).get(id))
+    }
+
+    /// List all active (non-expired) facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_active_facts(&self) -> Result<Vec<Fact>> {
+        self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_active())
+    }
+
+    /// List summaries by consolidation level.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_summaries(&self, level: &ConsolidationLevel) -> Result<Vec<crate::types::Summary>> {
+        self.with_read(|conn| SummaryStore::new(conn, self.embed_dim).list_by_level(level))
+    }
+
+    // --- Public API: Resume ---
+
+    /// Retrieve tiered context for resuming a session.
+    ///
+    /// Returns three tiers of facts (mutually exclusive):
+    /// 1. **Identity** — root scope, highest importance
+    /// 2. **Core** — importance >= threshold, from scope ancestors
+    /// 3. **Recent** — most recent, from scope ancestors
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the requested scope path doesn't exist.
+    pub fn resume_context(&self, config: &ResumeConfig) -> Result<ResumeContext> {
+        // Step 1: Resolve scope IDs from cache (short-lived read lock)
+        let (root_id, scope_ids) = {
+            let tree = self.scope_tree.read();
+            let root = tree.root_id();
+            let ids = match config.scope_path.as_ref() {
+                Some(path) => {
+                    let id = tree
+                        .resolve_path(path)
+                        .ok_or_else(|| MemoryError::NotFound(format!("scope path: {path}")))?;
+                    tree.ancestors(id)
+                }
+                None => vec![root],
+            };
+            (root, ids)
+        }; // scope_tree read lock dropped here
+
+        // Step 2: Query DB (no locks held)
+        self.with_read(|conn| {
+            crate::resume::resume_context(conn, root_id, &scope_ids, self.embed_dim, config)
+        })
     }
 }
 
@@ -316,6 +488,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
+            scope_id: 1,
             importance: 0.5,
             access_count: 0,
             last_accessed: now,
@@ -323,12 +496,20 @@ mod tests {
         }
     }
 
-    // --- Phase 1 tests (unchanged) ---
+    /// Test helper: insert a raw fact via the write connection (bypasses engine's add_fact).
+    fn insert_raw_fact(engine: &MemoryEngine, fact: &NewFact) -> i64 {
+        let conn = engine.pool.write();
+        FactStore::new(&conn, engine.embed_dim)
+            .insert(fact)
+            .unwrap()
+    }
+
+    // --- Phase 1 tests ---
 
     #[test]
     fn open_memory_succeeds() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
-        assert_eq!(engine.embed_dim, DIM);
+        assert_eq!(engine.embed_dim(), DIM);
     }
 
     #[test]
@@ -340,6 +521,7 @@ mod tests {
             payload: serde_json::json!({"msg": "hello"}),
             source: "test".into(),
             session_id: None,
+            scope_id: 1,
         };
         let id = engine.ingest(&event).unwrap();
         assert_eq!(id, 1);
@@ -350,7 +532,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let embedder = MockEmbedder { dim: DIM };
         let id = engine
-            .add_fact("Rust is fast", FactType::Semantic, None, &embedder)
+            .add_fact(
+                "Rust is fast",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
             .unwrap();
         assert!(id > 0);
     }
@@ -365,6 +554,8 @@ mod tests {
                 FactType::Semantic,
                 None,
                 &embedder,
+                None,
+                None,
             )
             .unwrap();
 
@@ -375,6 +566,7 @@ mod tests {
             limit: 10,
             valid_at: None,
             fact_type: None,
+            scope: None,
         };
         let results = engine.query(&query).unwrap();
         assert_eq!(results.len(), 1);
@@ -383,19 +575,11 @@ mod tests {
 
     #[test]
     fn embed_dim_validation_rejects_mismatch() {
-        let dir = std::env::temp_dir().join("memory_engine_test_dim_validation");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("test.db");
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
 
-        let config_768 = EngineConfig {
-            path: db_path.clone(),
-            embed_dim: 768,
-        };
-        let config_384 = EngineConfig {
-            path: db_path,
-            embed_dim: 384,
-        };
+        let config_768 = EngineConfig::new(db_path.clone(), 768);
+        let config_384 = EngineConfig::new(db_path, 384);
 
         // First open with dim=768
         {
@@ -406,8 +590,6 @@ mod tests {
         let err = MemoryEngine::open(&config_384).unwrap_err();
         assert!(matches!(err, MemoryError::Migration(_)));
         assert!(err.to_string().contains("mismatch"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -426,22 +608,21 @@ mod tests {
     #[test]
     fn graph_starts_empty() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
-        assert_eq!(engine.graph().node_count(), 0);
-        assert_eq!(engine.graph().edge_count(), 0);
+        assert_eq!(engine.graph_stats(), (0, 0));
     }
 
     #[test]
     fn consolidate_deduplicates_similar_facts() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
-        let fs = engine.fact_store();
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
         // Two near-identical embeddings
-        fs.insert(&make_new_fact("fact alpha", vec![1.0, 0.0, 0.0, 0.0]))
-            .unwrap();
-        fs.insert(&make_new_fact(
-            "fact alpha copy",
-            vec![0.99, 0.01, 0.0, 0.0],
-        ))
-        .unwrap();
+        insert_raw_fact(
+            &engine,
+            &make_new_fact("fact alpha", vec![1.0, 0.0, 0.0, 0.0]),
+        );
+        insert_raw_fact(
+            &engine,
+            &make_new_fact("fact alpha copy", vec![0.99, 0.01, 0.0, 0.0]),
+        );
 
         let config = ConsolidationConfig {
             dedup_threshold: 0.90,
@@ -450,18 +631,21 @@ mod tests {
         let stats = engine.consolidate(&MockGen, &config).unwrap();
         assert_eq!(stats.duplicates_removed, 1);
 
-        let active = engine.fact_store().list_active().unwrap();
+        let active = engine.list_active_facts().unwrap();
         assert_eq!(active.len(), 1);
     }
 
     #[test]
     fn consolidate_is_idempotent() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
-        let fs = engine.fact_store();
-        fs.insert(&make_new_fact("unique A", vec![1.0, 0.0, 0.0, 0.0]))
-            .unwrap();
-        fs.insert(&make_new_fact("unique B", vec![0.0, 1.0, 0.0, 0.0]))
-            .unwrap();
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        insert_raw_fact(
+            &engine,
+            &make_new_fact("unique A", vec![1.0, 0.0, 0.0, 0.0]),
+        );
+        insert_raw_fact(
+            &engine,
+            &make_new_fact("unique B", vec![0.0, 1.0, 0.0, 0.0]),
+        );
 
         let config = ConsolidationConfig {
             dedup_threshold: 0.92,
@@ -474,19 +658,19 @@ mod tests {
         // Second run should find 0 new duplicates
         assert_eq!(stats2.duplicates_removed, 0);
         // Both facts still active
-        assert_eq!(engine.fact_store().list_active().unwrap().len(), 2);
+        assert_eq!(engine.list_active_facts().unwrap().len(), 2);
     }
 
     #[test]
     fn forget_prunes_stale_facts() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
 
         // Insert a fact with very low importance
         let now = Utc::now();
         let old_time = now - chrono::Duration::days(200);
-        engine
-            .fact_store()
-            .insert(&NewFact {
+        insert_raw_fact(
+            &engine,
+            &NewFact {
                 content: "ancient fact".into(),
                 content_hash: "h_ancient".into(),
                 embedding: vec![0.1; DIM],
@@ -496,12 +680,13 @@ mod tests {
                 t_valid: None,
                 t_invalid: None,
                 source_event_id: None,
+                scope_id: 1,
                 importance: 0.01,
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
-            })
-            .unwrap();
+            },
+        );
 
         let policy = ForgetPolicy {
             min_importance: 0.3,
@@ -514,7 +699,7 @@ mod tests {
 
     #[test]
     fn forget_rejects_invalid_policy() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
         let policy = ForgetPolicy {
             half_life_days: 0.0, // invalid
             ..ForgetPolicy::default()
@@ -524,11 +709,8 @@ mod tests {
 
     #[test]
     fn resolve_conflict_update_creates_edge() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
-        let old_id = engine
-            .fact_store()
-            .insert(&make_new_fact("outdated", vec![0.5; DIM]))
-            .unwrap();
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let old_id = insert_raw_fact(&engine, &make_new_fact("outdated", vec![0.5; DIM]));
 
         let arbiter = FixedArbiter {
             decision: CrudDecision::Update,
@@ -541,22 +723,19 @@ mod tests {
         assert!(result.new_fact_id.is_some());
 
         // Old fact should be expired
-        let old = engine.fact_store().get(old_id).unwrap();
+        let old = engine.get_fact(old_id).unwrap();
         assert!(old.t_expired.is_some());
 
         // Graph should have the new edge
         let new_id = result.new_fact_id.unwrap();
-        assert!(engine.graph().has_node(new_id));
-        assert_eq!(engine.graph().neighbors(new_id), vec![old_id]);
+        assert!(engine.graph_has_node(new_id));
+        assert_eq!(engine.graph_neighbors(new_id), vec![old_id]);
     }
 
     #[test]
     fn resolve_conflict_noop_no_changes() {
-        let mut engine = MemoryEngine::open_memory(DIM).unwrap();
-        let old_id = engine
-            .fact_store()
-            .insert(&make_new_fact("existing", vec![0.5; DIM]))
-            .unwrap();
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let old_id = insert_raw_fact(&engine, &make_new_fact("existing", vec![0.5; DIM]));
 
         let arbiter = FixedArbiter {
             decision: CrudDecision::Noop,
@@ -573,29 +752,21 @@ mod tests {
         assert!(result.new_fact_id.is_none());
 
         // Old fact unchanged
-        let old = engine.fact_store().get(old_id).unwrap();
+        let old = engine.get_fact(old_id).unwrap();
         assert!(old.t_expired.is_none());
     }
 
     #[test]
     fn graph_loads_on_reopen() {
-        let dir = std::env::temp_dir().join("memory_engine_test_graph_reload");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("test.db");
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
 
-        let config = EngineConfig {
-            path: db_path,
-            embed_dim: DIM,
-        };
+        let config = EngineConfig::new(db_path, DIM);
 
         // First session: add facts and create an edge via conflict resolution
         {
-            let mut engine = MemoryEngine::open(&config).unwrap();
-            let old_id = engine
-                .fact_store()
-                .insert(&make_new_fact("original", vec![0.5; DIM]))
-                .unwrap();
+            let engine = MemoryEngine::open(&config).unwrap();
+            let old_id = insert_raw_fact(&engine, &make_new_fact("original", vec![0.5; DIM]));
             let arbiter = FixedArbiter {
                 decision: CrudDecision::Update,
             };
@@ -606,25 +777,315 @@ mod tests {
                     &make_new_fact("replacement", vec![0.5; DIM]),
                 )
                 .unwrap();
-            assert_eq!(engine.graph().edge_count(), 1);
+            assert_eq!(engine.graph_stats().1, 1);
         }
 
         // Second session: graph should be restored from DB
         {
             let engine = MemoryEngine::open(&config).unwrap();
-            assert_eq!(engine.graph().edge_count(), 1);
+            assert_eq!(engine.graph_stats().1, 1);
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn summary_store_accessor_works() {
+    fn list_summaries_empty() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
-        let store = engine.summary_store();
-        let summaries = store
-            .list_by_level(&crate::types::ConsolidationLevel::Global)
-            .unwrap();
+        let summaries = engine.list_summaries(&ConsolidationLevel::Global).unwrap();
         assert!(summaries.is_empty());
+    }
+
+    // --- Phase 3 / T2: AddFactOptions ---
+
+    #[test]
+    fn add_fact_with_custom_importance() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let opts = AddFactOptions {
+            importance: Some(0.9),
+            ..Default::default()
+        };
+        let id = engine
+            .add_fact(
+                "important fact",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&opts),
+            )
+            .unwrap();
+        let fact = engine.get_fact(id).unwrap();
+        assert!((fact.importance - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn add_fact_with_temporal_bounds() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let now = Utc::now();
+        let opts = AddFactOptions {
+            t_valid: Some(now - chrono::Duration::hours(1)),
+            t_invalid: Some(now + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let id = engine
+            .add_fact(
+                "temporal fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&opts),
+            )
+            .unwrap();
+        let fact = engine.get_fact(id).unwrap();
+        assert!(fact.t_valid.is_some());
+        assert!(fact.t_invalid.is_some());
+    }
+
+    #[test]
+    fn add_fact_with_scope_path() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let id = engine
+            .add_fact(
+                "scoped fact",
+                FactType::Semantic,
+                None,
+                &embedder,
+                Some("user:test/project:demo"),
+                None,
+            )
+            .unwrap();
+        let fact = engine.get_fact(id).unwrap();
+        assert_ne!(fact.scope_id, 1); // not root
+    }
+
+    #[test]
+    fn add_fact_none_opts_uses_defaults() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let id = engine
+            .add_fact(
+                "default fact",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
+            .unwrap();
+        let fact = engine.get_fact(id).unwrap();
+        assert!((fact.importance - 0.5).abs() < f64::EPSILON);
+        assert!(fact.t_valid.is_none());
+    }
+
+    // --- Phase 3 / T7: Send + Sync ---
+
+    #[test]
+    fn engine_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<MemoryEngine>();
+    }
+
+    #[test]
+    fn engine_concurrent_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("concurrent.db");
+        let config = EngineConfig::new(db_path, DIM);
+
+        let engine = std::sync::Arc::new(MemoryEngine::open(&config).unwrap());
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "Rust is fast",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "Python is flexible",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut handles = vec![];
+        for _ in 0..4 {
+            let e = engine.clone();
+            handles.push(std::thread::spawn(move || {
+                let results = e
+                    .query(&SearchQuery {
+                        text: Some("Rust".into()),
+                        embedding: None,
+                        mode: SearchMode::Fts,
+                        limit: 10,
+                        valid_at: None,
+                        fact_type: None,
+                        scope: None,
+                    })
+                    .unwrap();
+                assert_eq!(results.len(), 1);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn engine_write_then_read_across_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("write_read.db");
+        let config = EngineConfig::new(db_path, DIM);
+
+        let engine = std::sync::Arc::new(MemoryEngine::open(&config).unwrap());
+
+        // Thread 1: write
+        let e1 = engine.clone();
+        let writer = std::thread::spawn(move || {
+            let embedder = MockEmbedder { dim: DIM };
+            e1.add_fact(
+                "Concurrent write test",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
+            .unwrap();
+        });
+        writer.join().unwrap();
+
+        // Thread 2: read (after write completes)
+        let reader = std::thread::spawn(move || {
+            let results = engine
+                .query(&SearchQuery {
+                    text: Some("Concurrent".into()),
+                    embedding: None,
+                    mode: SearchMode::Fts,
+                    limit: 10,
+                    valid_at: None,
+                    fact_type: None,
+                    scope: None,
+                })
+                .unwrap();
+            assert_eq!(results.len(), 1);
+        });
+        reader.join().unwrap();
+    }
+
+    // --- Phase 3 / T9: resume_context ---
+
+    #[test]
+    fn resume_empty_engine() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let ctx = engine.resume_context(&ResumeConfig::default()).unwrap();
+        assert!(ctx.identity.is_empty());
+        assert!(ctx.core.is_empty());
+        assert!(ctx.recent.is_empty());
+    }
+
+    #[test]
+    fn resume_with_facts() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        // Add a high-importance root fact (identity tier)
+        let opts = AddFactOptions {
+            importance: Some(0.95),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "user prefers Rust",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&opts),
+            )
+            .unwrap();
+
+        // Add a low-importance root fact (recent tier)
+        let opts_low = AddFactOptions {
+            importance: Some(0.1),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "had coffee today",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&opts_low),
+            )
+            .unwrap();
+
+        let config = ResumeConfig {
+            core_min_importance: 0.7,
+            ..ResumeConfig::default()
+        };
+        let ctx = engine.resume_context(&config).unwrap();
+        // Both facts are in root scope — identity gets the high-importance one
+        assert!(!ctx.identity.is_empty());
+        assert!(ctx.identity[0].importance >= 0.7);
+    }
+
+    #[test]
+    fn resume_nonexistent_scope_returns_not_found() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let config = ResumeConfig {
+            scope_path: Some("nonexistent/path".into()),
+            ..ResumeConfig::default()
+        };
+        let err = engine.resume_context(&config).unwrap_err();
+        assert!(matches!(err, MemoryError::NotFound(_)));
+    }
+
+    #[test]
+    fn query_nonexistent_scope_returns_empty() {
+        use crate::types::ScopeQuery;
+
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        // Add a fact at root scope so there's something to find if search were unscoped
+        engine
+            .add_fact(
+                "visible without scope",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Query with a scope path that doesn't exist
+        let query = SearchQuery {
+            text: Some("visible".into()),
+            embedding: None,
+            mode: SearchMode::Fts,
+            limit: 10,
+            valid_at: None,
+            fact_type: None,
+            scope: Some(ScopeQuery::Exact("nonexistent/scope".into())),
+        };
+        let results = engine.query(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "expected empty results for nonexistent scope, got {}",
+            results.len()
+        );
     }
 }

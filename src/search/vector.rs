@@ -1,7 +1,9 @@
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use crate::error::Result;
 use crate::store::deserialize_embedding;
+use crate::store::facts::fact_type_to_str;
+use crate::types::FactType;
 
 /// A single vector search result with fact id and cosine similarity score.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +46,8 @@ pub fn vector_search(
     query_embedding: &[f32],
     embed_dim: usize,
     limit: usize,
+    fact_type: Option<&FactType>,
+    scope_ids: Option<&[i64]>,
 ) -> Result<Vec<VectorResult>> {
     if query_embedding.len() != embed_dim {
         return Err(crate::error::MemoryError::EmbeddingDimension {
@@ -52,9 +56,17 @@ pub fn vector_search(
         });
     }
 
-    let mut stmt = conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL")?;
+    let ft_str: Option<&str> = fact_type.map(fact_type_to_str);
+    let scope_json: Option<String> = scope_ids.map(|ids| serde_json::to_string(ids).unwrap());
 
-    let rows = stmt.query_map([], |row| {
+    let mut stmt = conn.prepare(
+        "SELECT id, embedding FROM facts
+         WHERE t_expired IS NULL
+           AND (?1 IS NULL OR fact_type = ?1)
+           AND (?2 IS NULL OR scope_id IN (SELECT value FROM json_each(?2)))",
+    )?;
+
+    let rows = stmt.query_map(params![ft_str, scope_json], |row| {
         let id: i64 = row.get(0)?;
         let blob: Vec<u8> = row.get(1)?;
         Ok((id, blob))
@@ -112,6 +124,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
+            scope_id: 1,
             importance: 0.5,
             access_count: 0,
             last_accessed: Utc::now(),
@@ -158,7 +171,7 @@ mod tests {
     fn vector_search_rejects_wrong_query_dimension() {
         let conn = setup();
         let wrong_dim_query = [1.0_f32, 0.0]; // DIM is 4, query is 2
-        let result = vector_search(&conn, &wrong_dim_query, DIM, 3);
+        let result = vector_search(&conn, &wrong_dim_query, DIM, 3, None, None);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
@@ -201,12 +214,55 @@ mod tests {
             ))
             .unwrap(); // cosine = -1.0
 
-        let results = vector_search(&conn, &query, DIM, 3).unwrap();
+        let results = vector_search(&conn, &query, DIM, 3, None, None).unwrap();
         assert_eq!(results.len(), 3);
         // Descending order by score
         assert!(results[0].score >= results[1].score);
         assert!(results[1].score >= results[2].score);
         // Top result should be the exact match
         assert!((results[0].score - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vector_search_filters_by_scope() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        // Need scope 2 to exist for FK
+        conn.execute(
+            "INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'test', 1)",
+            [],
+        )
+        .unwrap();
+
+        let mut fact1 = make_fact_with_embedding("fact one", vec![1.0, 0.0, 0.0, 0.0]);
+        fact1.scope_id = 1;
+        store.insert(&fact1).unwrap();
+        let mut fact2 = make_fact_with_embedding("fact two", vec![0.9, 0.1, 0.0, 0.0]);
+        fact2.scope_id = 2;
+        store.insert(&fact2).unwrap();
+
+        let query = [1.0_f32, 0.0, 0.0, 0.0];
+        let results = vector_search(&conn, &query, DIM, 10, None, Some(&[1])).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn vector_search_filters_by_fact_type() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut fact1 = make_fact_with_embedding("fact one", vec![1.0, 0.0, 0.0, 0.0]);
+        fact1.fact_type = FactType::Semantic;
+        store.insert(&fact1).unwrap();
+        store
+            .insert(&make_fact_with_embedding(
+                "fact two",
+                vec![0.9, 0.1, 0.0, 0.0],
+            ))
+            .unwrap(); // Episodic
+
+        let query = [1.0_f32, 0.0, 0.0, 0.0];
+        let results =
+            vector_search(&conn, &query, DIM, 10, Some(&FactType::Semantic), None).unwrap();
+        assert_eq!(results.len(), 1);
     }
 }

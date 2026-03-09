@@ -1,6 +1,9 @@
 use rusqlite::Connection;
 
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
+
+/// Current schema version. Bump when adding migrations.
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Open a `SQLite` connection to a file, with pragmas set.
 ///
@@ -40,25 +43,34 @@ fn set_pragmas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Initialize the full schema (idempotent via `IF NOT EXISTS`).
+/// Initialize schema for a database.
 ///
-/// Creates all tables, virtual tables, triggers, and indexes.
-/// Writes `schema_version=1` to the config table if not already present.
+/// **Fresh database (no config table):** Creates the full latest schema and sets
+/// `schema_version` to `CURRENT_SCHEMA_VERSION`.
+///
+/// **Existing database:** Returns immediately — all DDL evolution happens through
+/// [`migrate`]. This avoids running v2-only DDL against a v1 schema where new
+/// columns don't exist yet.
 ///
 /// # Errors
 ///
 /// Returns `MemoryError::Database` if any DDL statement fails.
 pub fn init_schema(conn: &Connection) -> Result<()> {
+    let is_fresh: bool = conn.query_row(
+        "SELECT COUNT(*) = 0 FROM sqlite_master WHERE type='table' AND name='config'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !is_fresh {
+        return Ok(()); // existing DB — let migrate() handle evolution
+    }
+    // Fresh DB: create full latest (v2) schema
     conn.execute_batch(TABLES_DDL)?;
+    conn.execute_batch(SCOPES_DDL)?;
     conn.execute_batch(FTS5_DDL)?;
     conn.execute_batch(TRIGGERS_DDL)?;
     conn.execute_batch(INDEXES_DDL)?;
-
-    // Write default config only if not already set.
-    if get_config(conn, "schema_version")?.is_none() {
-        set_config(conn, "schema_version", "1")?;
-    }
-
+    set_config(conn, "schema_version", &CURRENT_SCHEMA_VERSION.to_string())?;
     Ok(())
 }
 
@@ -91,7 +103,193 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+// --- Migration framework ---
+
+type MigrationFn = fn(&Connection) -> Result<()>;
+
+const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2];
+
+/// Run forward-only migrations from the current schema version to
+/// `CURRENT_SCHEMA_VERSION`.
+///
+/// Each migration runs inside a transaction. On failure, the migration rolls
+/// back and the version is NOT bumped.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Migration` if the stored version is newer than
+/// supported, or if any migration step fails.
+pub fn migrate(conn: &Connection) -> Result<()> {
+    let version_str = get_config(conn, "schema_version")?.unwrap_or_else(|| "1".to_string());
+    let version: u32 = version_str
+        .parse()
+        .map_err(|_| MemoryError::Migration(format!("invalid schema_version: {version_str}")))?;
+
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(MemoryError::Migration(format!(
+            "schema_version {version} is newer than supported {CURRENT_SCHEMA_VERSION}"
+        )));
+    }
+
+    for (i, migration) in MIGRATIONS.iter().enumerate() {
+        let target = (i as u32) + 2; // migrations are 1→2, 2→3, etc.
+        if version < target {
+            let tx = conn.unchecked_transaction()?;
+            migration(&tx)?;
+            set_config(&tx, "schema_version", &target.to_string())?;
+            tx.commit()?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCOPES_DDL)?;
+    conn.execute_batch(
+        "ALTER TABLE facts ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE edges ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE events ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+         ALTER TABLE summaries ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
+         CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
+         CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
+         CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);",
+    )?;
+    Ok(())
+}
+
+// --- DDL constants ---
+
 const TABLES_DDL: &str = "
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    session_id TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,  -- blake3 hex[:16] for dedup
+    embedding BLOB NOT NULL,
+    fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')),
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    t_valid TEXT,
+    t_invalid TEXT,
+    source_event_id INTEGER REFERENCES events(id),
+    importance REAL NOT NULL DEFAULT 0.5,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+);
+
+CREATE TABLE IF NOT EXISTS edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    target_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    relation_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')),
+    source_fact_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    scope_id INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
+const SCOPES_DDL: &str = "
+CREATE TABLE IF NOT EXISTS scopes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER REFERENCES scopes(id),
+    label TEXT NOT NULL,
+    depth INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_scopes_parent ON scopes(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scopes_parent_label
+    ON scopes(parent_id, label);
+
+-- Insert root scope (sentinel). Only root has parent_id=NULL.
+INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (1, NULL, 'root', 0);
+";
+
+const FTS5_DDL: &str = "
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+    content,
+    content='facts',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+";
+
+const TRIGGERS_DDL: &str = "
+CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN
+    INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
+    INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
+END;
+";
+
+const INDEXES_DDL: &str = "
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_facts_expired ON facts(t_expired);
+CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
+CREATE INDEX IF NOT EXISTS idx_facts_valid ON facts(t_valid, t_invalid);
+CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(content_hash);
+CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_fact_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
+CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
+CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
+CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
+CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
+CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
+";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test helper: creates v1 schema (Phase 1 tables only, no scopes, no scope_id).
+    fn init_schema_v1(conn: &Connection) -> Result<()> {
+        conn.execute_batch(TABLES_V1_DDL)?;
+        conn.execute_batch(FTS5_DDL)?;
+        conn.execute_batch(TRIGGERS_DDL)?;
+        conn.execute_batch(INDEXES_V1_DDL)?;
+        set_config(conn, "schema_version", "1")?;
+        Ok(())
+    }
+
+    /// V1 tables DDL (no scope_id columns, no FK to scopes).
+    const TABLES_V1_DDL: &str = "
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -104,7 +302,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT NOT NULL,
-    content_hash TEXT NOT NULL,  -- blake3 hex[:16] for dedup
+    content_hash TEXT NOT NULL,
     embedding BLOB NOT NULL,
     fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')),
     t_created TEXT NOT NULL,
@@ -143,31 +341,8 @@ CREATE TABLE IF NOT EXISTS config (
 );
 ";
 
-const FTS5_DDL: &str = "
-CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
-    content,
-    content='facts',
-    content_rowid='id',
-    tokenize='porter unicode61'
-);
-";
-
-const TRIGGERS_DDL: &str = "
-CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN
-    INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN
-    INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN
-    INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
-    INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
-END;
-";
-
-const INDEXES_DDL: &str = "
+    /// V1 indexes DDL (no scope_id indexes).
+    const INDEXES_V1_DDL: &str = "
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_facts_expired ON facts(t_expired);
@@ -178,10 +353,6 @@ CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_fact_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
 CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
 ";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn init_schema_creates_all_tables() {
@@ -199,6 +370,7 @@ mod tests {
         assert!(tables.contains(&"edges".to_string()));
         assert!(tables.contains(&"summaries".to_string()));
         assert!(tables.contains(&"config".to_string()));
+        assert!(tables.contains(&"scopes".to_string()));
     }
 
     #[test]
@@ -226,14 +398,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn config_default_schema_version() {
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
-        let version = get_config(&conn, "schema_version").unwrap();
-        assert_eq!(version, Some("1".to_string()));
     }
 
     #[test]
@@ -272,6 +436,132 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 9);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes
+        assert_eq!(count, 15);
+    }
+
+    // --- Migration framework tests ---
+
+    #[test]
+    fn fresh_db_creates_latest_schema() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // init_schema creates latest version directly
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string())
+        );
+        // migrate is a no-op
+        migrate(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_runs_without_error() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("1".to_string())
+        );
+        migrate(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_skips_if_current() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn).unwrap();
+        // Second call is a no-op
+        migrate(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_rejects_future_version() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        set_config(&conn, "schema_version", "99").unwrap();
+        let err = migrate(&conn).unwrap_err();
+        assert!(matches!(err, MemoryError::Migration(_)));
+    }
+
+    #[test]
+    fn migration_v1_to_v2_adds_scope_columns() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        // Insert a fact before migration
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata)
+             VALUES ('test', 'hash', X'00', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
+            [],
+        ).unwrap();
+
+        migrate(&conn).unwrap();
+
+        // Verify scope_id column exists and defaults to 1
+        let scope_id: i64 = conn
+            .query_row(
+                "SELECT scope_id FROM facts WHERE content = 'test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scope_id, 1);
+
+        // Verify scopes table exists with root
+        let root_label: String = conn
+            .query_row("SELECT label FROM scopes WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(root_label, "root");
+
+        // Verify scope indexes were created by migration
+        let scope_indexes: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%_scope'",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        for expected in &[
+            "idx_facts_scope",
+            "idx_edges_scope",
+            "idx_events_scope",
+            "idx_summaries_scope",
+        ] {
+            assert!(
+                scope_indexes.contains(&(*expected).to_string()),
+                "missing index {expected} after migration"
+            );
+        }
+    }
+
+    #[test]
+    fn init_schema_noop_on_existing_db() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("1".to_string())
+        );
+        // Second init_schema call should be a no-op (config table exists)
+        init_schema(&conn).unwrap();
+        // Version should still be 1, not overwritten to 2
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("1".to_string())
+        );
     }
 }
