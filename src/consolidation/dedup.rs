@@ -3,6 +3,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::search::vector::cosine_similarity;
+use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 
 /// Local deduplication pass.
@@ -25,6 +26,7 @@ pub fn local_dedup(
     now: DateTime<Utc>,
 ) -> Result<usize> {
     let fact_store = FactStore::new(conn, embed_dim);
+    let edge_store = EdgeStore::new(conn);
     let active_facts = fact_store.list_active()?;
 
     // Split into "new" (to compare) and "all active" (to compare against)
@@ -64,6 +66,7 @@ pub fn local_dedup(
                 };
 
                 fact_store.expire(expire_id, now)?;
+                edge_store.expire_by_fact(expire_id, now)?;
                 expired_ids.insert(expire_id);
                 duplicates_removed += 1;
 

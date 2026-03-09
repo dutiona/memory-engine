@@ -194,7 +194,15 @@ impl MemoryEngine {
         generator: &dyn SummaryGenerator,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        crate::consolidation::consolidate(&self.conn, generator, self.embed_dim, config)
+        let stats =
+            crate::consolidation::consolidate(&self.conn, generator, self.embed_dim, config)?;
+
+        // Rebuild graph: dedup may have expired facts and their edges
+        if stats.duplicates_removed > 0 {
+            self.graph = MemoryGraph::load_from_db(&self.conn)?;
+        }
+
+        Ok(stats)
     }
 
     /// Prune stale facts using Ebbinghaus decay and graph-aware importance scoring.
