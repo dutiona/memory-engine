@@ -2,7 +2,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
-use crate::store::{deserialize_embedding, serialize_embedding};
+use crate::store::{
+    deserialize_embedding, parse_optional_timestamp, parse_timestamp, serialize_embedding,
+};
 use crate::types::{Fact, FactType, NewFact};
 
 /// Store for bi-temporal facts with embedding BLOBs.
@@ -32,30 +34,6 @@ fn str_to_fact_type(s: &str) -> Result<FactType> {
 fn content_hash(content: &str) -> String {
     let hash = blake3::hash(content.as_bytes());
     hash.to_hex()[..32].to_string()
-}
-
-/// Parse an optional ISO 8601 timestamp from a nullable TEXT column.
-fn parse_optional_timestamp(s: Option<&str>) -> rusqlite::Result<Option<DateTime<Utc>>> {
-    s.map_or(Ok(None), |ts| {
-        DateTime::parse_from_rfc3339(ts)
-            .map(|dt| Some(dt.with_timezone(&Utc)))
-            .map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })
-    })
-}
-
-/// Parse a required ISO 8601 timestamp from a TEXT column.
-fn parse_timestamp(s: &str) -> rusqlite::Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })
 }
 
 impl<'a> FactStore<'a> {
