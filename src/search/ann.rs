@@ -34,6 +34,251 @@ impl Metric<Vec<f32>> for CosineMetric {
     }
 }
 
+use std::collections::HashSet;
+
+use hnsw::{Hnsw, Searcher};
+use parking_lot::RwLock;
+use rand::rngs::SmallRng;
+use rusqlite::Connection;
+use space::Neighbor;
+
+use crate::error::Result;
+use crate::search::strategy::VectorSearchStrategy;
+use crate::search::vector::VectorResult;
+use crate::store::deserialize_embedding;
+use crate::types::FactType;
+
+/// HNSW approximate nearest neighbor strategy.
+///
+/// Wraps an in-memory HNSW index with ID mappings (`hnsw_index → fact_id`)
+/// and a tombstone set for lazily excluding expired facts from results.
+pub struct HnswStrategy {
+    inner: RwLock<HnswInner>,
+    embed_dim: usize,
+}
+
+struct HnswInner {
+    index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32>,
+    index_to_fact: Vec<i64>,
+    tombstones: HashSet<i64>,
+}
+
+const OVERFETCH_FACTOR: usize = 3;
+const DEFAULT_EF_SEARCH: usize = 100;
+const MAX_WIDEN_ATTEMPTS: usize = 3;
+
+impl HnswStrategy {
+    /// Build an HNSW index from all active facts in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure, or
+    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
+    ///
+    /// # Panics
+    ///
+    /// Panics if HNSW does not assign sequential IDs starting from 0.
+    pub fn build_from_db(conn: &Connection, embed_dim: usize) -> Result<Self> {
+        use rand::SeedableRng;
+
+        const HNSW_SEED: u64 = 42;
+        let mut index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32> = Hnsw::new_params_and_prng(
+            CosineMetric,
+            hnsw::Params::new().ef_construction(200),
+            SmallRng::seed_from_u64(HNSW_SEED),
+        );
+        let mut searcher: Searcher<u32> = Searcher::default();
+        let mut index_to_fact = Vec::new();
+
+        let mut stmt =
+            conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+
+        for row in rows {
+            let (fact_id, blob) = row?;
+            let embedding = deserialize_embedding(&blob, embed_dim)?;
+            let hnsw_id = index.insert(embedding, &mut searcher);
+            assert_eq!(
+                hnsw_id,
+                index_to_fact.len(),
+                "HNSW index must assign sequential IDs (got {hnsw_id}, expected {})",
+                index_to_fact.len()
+            );
+            index_to_fact.push(fact_id);
+        }
+
+        Ok(Self {
+            inner: RwLock::new(HnswInner {
+                index,
+                index_to_fact,
+                tombstones: HashSet::new(),
+            }),
+            embed_dim,
+        })
+    }
+}
+
+impl VectorSearchStrategy for HnswStrategy {
+    fn search(
+        &self,
+        conn: &Connection,
+        query_embedding: &[f32],
+        _embed_dim: usize,
+        limit: usize,
+        fact_type: Option<&FactType>,
+        scope_ids: Option<&[i64]>,
+    ) -> Result<Vec<VectorResult>> {
+        if query_embedding.len() != self.embed_dim {
+            return Err(crate::error::MemoryError::EmbeddingDimension {
+                expected: self.embed_dim,
+                actual: query_embedding.len(),
+            });
+        }
+
+        let mut ef = DEFAULT_EF_SEARCH;
+        let mut results = Vec::new();
+
+        for _attempt in 0..MAX_WIDEN_ATTEMPTS {
+            // Phase 1: Collect HNSW candidates under read lock, then release.
+            let candidates = {
+                let inner = self.inner.read();
+                let query_vec = query_embedding.to_vec();
+                let mut searcher: Searcher<u32> = Searcher::default();
+
+                // dest length must not exceed the number of indexed items
+                // (hnsw 0.11 panics on copy_from_slice if dest > item count)
+                let n_items = inner.index_to_fact.len();
+                if n_items == 0 {
+                    return Ok(Vec::new());
+                }
+                let overfetch = limit * OVERFETCH_FACTOR;
+                let dest_len = overfetch.min(n_items);
+                let mut dest = vec![
+                    Neighbor {
+                        index: !0,
+                        distance: !0,
+                    };
+                    dest_len
+                ];
+                let neighbors = inner
+                    .index
+                    .nearest(&query_vec, ef, &mut searcher, &mut dest);
+
+                let mut cands = Vec::new();
+                for neighbor in neighbors {
+                    let fact_id = inner.index_to_fact[neighbor.index];
+                    if !inner.tombstones.contains(&fact_id) {
+                        cands.push(fact_id);
+                    }
+                }
+                cands
+            }; // Read lock released here
+
+            // Phase 2: Post-filter and exact-score ALL candidates via DB
+            results.clear();
+            results.reserve(candidates.len());
+            for fact_id in candidates {
+                let passes = check_fact_filters(conn, fact_id, fact_type, scope_ids)?;
+                if !passes {
+                    continue;
+                }
+                let stored_emb = load_embedding(conn, fact_id, self.embed_dim)?;
+                let score = crate::search::cosine_similarity(query_embedding, &stored_emb);
+                results.push(VectorResult { fact_id, score });
+            }
+
+            if results.len() >= limit {
+                break;
+            }
+            ef *= 2;
+        }
+
+        // If HNSW widening couldn't satisfy, fall back to brute-force.
+        if results.len() < limit {
+            return crate::search::vector_search(
+                conn,
+                query_embedding,
+                self.embed_dim,
+                limit,
+                fact_type,
+                scope_ids,
+            );
+        }
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(limit);
+
+        Ok(results)
+    }
+
+    fn name(&self) -> &str {
+        "hnsw"
+    }
+
+    fn notify_insert(&self, fact_id: i64, embedding: &[f32]) {
+        let mut inner = self.inner.write();
+        let vec = embedding.to_vec();
+        let mut searcher: Searcher<u32> = Searcher::default();
+        let hnsw_id = inner.index.insert(vec, &mut searcher);
+        assert_eq!(
+            hnsw_id,
+            inner.index_to_fact.len(),
+            "HNSW sequential ID invariant violated on insert"
+        );
+        inner.index_to_fact.push(fact_id);
+        inner.tombstones.remove(&fact_id);
+    }
+
+    fn notify_expire(&self, fact_id: i64) {
+        let mut inner = self.inner.write();
+        inner.tombstones.insert(fact_id);
+    }
+}
+
+fn check_fact_filters(
+    conn: &Connection,
+    fact_id: i64,
+    fact_type: Option<&FactType>,
+    scope_ids: Option<&[i64]>,
+) -> Result<bool> {
+    use crate::store::facts::fact_type_to_str;
+
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM facts
+            WHERE id = ?1
+            AND t_expired IS NULL
+            AND (?2 IS NULL OR fact_type = ?2)
+            AND (?3 IS NULL OR scope_id IN (SELECT value FROM json_each(?3)))
+        )",
+        rusqlite::params![
+            fact_id,
+            fact_type.map(fact_type_to_str),
+            scope_ids.map(|ids| serde_json::to_string(ids).expect("scope_ids serialization")),
+        ],
+        |row| row.get(0),
+    )?;
+
+    Ok(exists)
+}
+
+fn load_embedding(conn: &Connection, fact_id: i64, embed_dim: usize) -> Result<Vec<f32>> {
+    let blob: Vec<u8> = conn.query_row(
+        "SELECT embedding FROM facts WHERE id = ?1",
+        [fact_id],
+        |row| row.get(0),
+    )?;
+    deserialize_embedding(&blob, embed_dim)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +361,126 @@ mod tests {
 
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32>>();
+    }
+
+    mod hnsw_strategy_tests {
+        use super::*;
+        use crate::search::strategy::VectorSearchStrategy;
+        use crate::store::facts::FactStore;
+        use crate::store::schema::{init_schema, open_memory};
+        use crate::types::{FactType, NewFact};
+        use chrono::Utc;
+
+        const DIM: usize = 4;
+
+        fn setup_with_facts() -> (rusqlite::Connection, Vec<i64>) {
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            let store = FactStore::new(&conn, DIM);
+            let mut ids = Vec::new();
+            let embeddings = vec![
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.9, 0.1, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0, 0.0],
+            ];
+            for (i, emb) in embeddings.into_iter().enumerate() {
+                let fact = NewFact {
+                    content: format!("fact {i}"),
+                    content_hash: String::new(),
+                    embedding: emb,
+                    fact_type: FactType::Semantic,
+                    t_created: Utc::now(),
+                    t_expired: None,
+                    t_valid: None,
+                    t_invalid: None,
+                    source_event_id: None,
+                    scope_id: 1,
+                    importance: 0.5,
+                    access_count: 0,
+                    last_accessed: Utc::now(),
+                    metadata: serde_json::json!({}),
+                };
+                let id = store.insert(&fact).unwrap();
+                ids.push(id);
+            }
+            (conn, ids)
+        }
+
+        #[test]
+        fn hnsw_strategy_finds_nearest() {
+            let (conn, ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy.search(&conn, &query, DIM, 2, None, None).unwrap();
+
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].fact_id, ids[0]);
+            assert_eq!(results[1].fact_id, ids[1]);
+        }
+
+        #[test]
+        fn hnsw_strategy_notify_insert_updates_index() {
+            let (conn, ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            let new_emb = vec![0.99, 0.01, 0.0, 0.0];
+            let store = FactStore::new(&conn, DIM);
+            let new_fact = NewFact {
+                content: "new close fact".into(),
+                content_hash: String::new(),
+                embedding: new_emb.clone(),
+                fact_type: FactType::Semantic,
+                t_created: Utc::now(),
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                scope_id: 1,
+                importance: 0.5,
+                access_count: 0,
+                last_accessed: Utc::now(),
+                metadata: serde_json::json!({}),
+            };
+            let new_id = store.insert(&new_fact).unwrap();
+            strategy.notify_insert(new_id, &new_emb);
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy.search(&conn, &query, DIM, 3, None, None).unwrap();
+
+            let found_ids: Vec<i64> = results.iter().map(|r| r.fact_id).collect();
+            assert!(
+                found_ids.contains(&new_id),
+                "newly inserted fact should appear in results"
+            );
+            assert!(
+                found_ids.contains(&ids[0]),
+                "original closest fact should still appear"
+            );
+        }
+
+        #[test]
+        fn hnsw_strategy_notify_expire_excludes_from_results() {
+            let (conn, ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            // Tombstone in HNSW index
+            strategy.notify_expire(ids[0]);
+            // Also expire in DB so check_fact_filters excludes it
+            conn.execute(
+                "UPDATE facts SET t_expired = datetime('now') WHERE id = ?1",
+                [ids[0]],
+            )
+            .unwrap();
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy.search(&conn, &query, DIM, 2, None, None).unwrap();
+
+            let found_ids: Vec<i64> = results.iter().map(|r| r.fact_id).collect();
+            assert!(
+                !found_ids.contains(&ids[0]),
+                "expired fact should be excluded"
+            );
+        }
     }
 }

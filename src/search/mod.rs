@@ -7,6 +7,8 @@ pub mod hybrid;
 pub mod strategy;
 pub mod vector;
 
+#[cfg(feature = "ann")]
+pub use ann::HnswStrategy;
 pub use fts::{fts_search, FtsResult};
 pub use hybrid::{hybrid_search, rrf_merge, MatchType, SearchMode, SearchQuery, SearchResult};
 pub use strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
