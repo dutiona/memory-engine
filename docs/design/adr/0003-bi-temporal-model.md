@@ -9,7 +9,7 @@ Agent memory must handle temporal contradictions. A fact that was true yesterday
 
 1. **Destructive replacement** -- Overwrite old value. No history. Used by early systems.
 2. **Soft deletion with timestamps** -- Mark old facts as expired. Preserves history but conflates system time with real-world time.
-3. **Bi-temporal modeling** -- Separate "when the system learned it" from "when it's true in the world." Graphiti (2410.13790) introduced this for knowledge graphs.
+3. **Bi-temporal modeling** -- Separate "when the system learned it" from "when it's true in the world." Graphiti (2501.13956) introduced this for knowledge graphs.
 
 The Graphiti paper demonstrated that bi-temporal facts enable temporal queries ("what did the agent know at time T?") and future scheduling ("this fact becomes valid next week"). The Memory Survey (2512.13564) Entry 11 in the Research Journal confirmed: "adopt Graphiti's bi-temporal model."
 
