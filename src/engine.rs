@@ -9,7 +9,8 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
-use crate::search::hybrid::{SearchQuery, SearchResult, hybrid_search};
+use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
+use crate::search::strategy::{BruteForce, VectorSearchStrategy};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};
@@ -55,12 +56,14 @@ pub struct MemoryEngine {
     embed_dim: usize,
     graph: RwLock<MemoryGraph>,
     scope_tree: RwLock<ScopeTree>,
+    vector_strategy: Box<dyn VectorSearchStrategy>,
 }
 
 impl std::fmt::Debug for MemoryEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryEngine")
             .field("embed_dim", &self.embed_dim)
+            .field("vector_strategy", &self.vector_strategy.name())
             .finish_non_exhaustive()
     }
 }
@@ -104,6 +107,7 @@ impl MemoryEngine {
             embed_dim,
             graph: RwLock::new(graph),
             scope_tree: RwLock::new(scope_tree),
+            vector_strategy: Box::new(BruteForce),
         })
     }
 
@@ -231,7 +235,10 @@ impl MemoryEngine {
             None => None,
         };
 
-        self.with_read(|conn| hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref()))
+        let strategy = &*self.vector_strategy;
+        self.with_read(|conn| {
+            hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
+        })
     }
 
     // --- Public API: Config ---
