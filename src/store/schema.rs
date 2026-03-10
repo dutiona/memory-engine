@@ -171,8 +171,7 @@ fn set_foreign_keys(conn: &Connection, enabled: bool) -> Result<()> {
     } else {
         "PRAGMA foreign_keys = OFF"
     };
-    let mut stmt = conn.prepare(sql)?;
-    let _ = stmt.query([])?;
+    conn.execute_batch(sql)?;
     Ok(())
 }
 
@@ -188,7 +187,21 @@ fn check_foreign_keys(conn: &Connection) -> Result<()> {
 }
 
 fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCOPES_DDL)?;
+    // Frozen snapshot of SCOPES_DDL at v2 — do not reference the global constant,
+    // which may evolve in future schema versions.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scopes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_id INTEGER REFERENCES scopes(id),
+            label TEXT NOT NULL,
+            depth INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_scopes_parent ON scopes(parent_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_scopes_parent_label
+            ON scopes(parent_id, label);
+        -- Insert root scope (sentinel). Only root has parent_id=NULL.
+        INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (1, NULL, 'root', 0);",
+    )?;
     conn.execute_batch(
         "ALTER TABLE facts ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE edges ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
