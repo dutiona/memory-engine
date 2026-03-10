@@ -177,21 +177,10 @@ impl MemoryEngine {
         let embedding = embedder.embed(content)?;
         let now = Utc::now();
         let opts = opts.cloned().unwrap_or_default();
+        let base_importance = opts.importance.unwrap_or(0.5);
 
-        // Resolve scope + insert fact in a single write lock
-        let conn = self.write_conn();
-        let scope_id = match scope {
-            Some(path) => {
-                let scope_store = ScopeStore::new(&conn);
-                let id = scope_store.ensure_path(path)?;
-                let node = scope_store.get(id)?;
-                self.scope_tree.write().insert(node);
-                id
-            }
-            None => 1, // root scope
-        };
-
-        // Explicit opts.pinned always wins; classifier only runs when pinned is None.
+        // Classify OUTSIDE the write lock (potentially slow — LLM, I/O, etc.)
+        // Uses scope_id=0 placeholder; classifiers should rely on content/type/importance/metadata.
         let is_pinned = match opts.pinned {
             Some(p) => p,
             None => classifier.is_some_and(|c| {
@@ -206,19 +195,32 @@ impl MemoryEngine {
                     t_valid: opts.t_valid,
                     t_invalid: opts.t_invalid,
                     source_event_id,
-                    importance: opts.importance.unwrap_or(0.5),
+                    importance: base_importance,
                     access_count: 0,
                     last_accessed: now,
                     metadata: opts
                         .metadata
                         .clone()
                         .unwrap_or_else(|| serde_json::json!({})),
-                    scope_id,
+                    scope_id: 0,
                     is_pinned: false,
-                    importance_score: 0.5,
+                    importance_score: base_importance,
                 };
                 c.should_pin(&temp)
             }),
+        };
+
+        // Resolve scope + insert fact in a single write lock
+        let conn = self.write_conn();
+        let scope_id = match scope {
+            Some(path) => {
+                let scope_store = ScopeStore::new(&conn);
+                let id = scope_store.ensure_path(path)?;
+                let node = scope_store.get(id)?;
+                self.scope_tree.write().insert(node);
+                id
+            }
+            None => 1, // root scope
         };
 
         let new_fact = NewFact {

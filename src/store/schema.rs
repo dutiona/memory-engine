@@ -165,6 +165,8 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
         "ALTER TABLE facts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE facts ADD COLUMN importance_score REAL NOT NULL DEFAULT 0.5;",
     )?;
+    // Backfill: seed importance_score from base importance for existing rows
+    conn.execute("UPDATE facts SET importance_score = importance", [])?;
     conn.execute_batch(
         "ALTER TABLE events ADD COLUMN origin_node_id TEXT NOT NULL DEFAULT 'local';
          ALTER TABLE events ADD COLUMN sequence_id INTEGER NOT NULL DEFAULT 0;
@@ -666,10 +668,10 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         let conn = open_memory().unwrap();
         init_schema_v2(&conn).unwrap();
 
-        // Insert a fact before migration
+        // Insert a fact before migration (importance=0.8 to verify backfill)
         conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata, scope_id)
-             VALUES ('test', 'hash', X'00', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}', 1)",
+             VALUES ('test', 'hash', X'00', 'episodic', datetime('now'), 0.8, 0, datetime('now'), '{}', 1)",
             [],
         ).unwrap();
 
@@ -692,7 +694,8 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
             )
             .unwrap();
         assert_eq!(is_pinned, 0);
-        assert!((importance_score - 0.5).abs() < f64::EPSILON);
+        // importance_score should be backfilled from importance (0.8), not default (0.5)
+        assert!((importance_score - 0.8).abs() < f64::EPSILON);
 
         // Verify event envelope fields
         let (origin, seq_id): (String, i64) = conn

@@ -73,8 +73,8 @@ impl<'a> FactStore<'a> {
             "INSERT INTO facts (content, content_hash, embedding, fact_type,
                 t_created, t_expired, t_valid, t_invalid,
                 source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                is_pinned)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                is_pinned, importance_score)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 fact.content,
                 hash,
@@ -91,6 +91,7 @@ impl<'a> FactStore<'a> {
                 metadata_str,
                 fact.scope_id,
                 i64::from(fact.is_pinned),
+                fact.importance, // seed importance_score from base importance
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
