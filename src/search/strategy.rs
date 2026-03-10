@@ -166,11 +166,7 @@ mod tests {
         let strategy = BruteForce;
         let via_trait = strategy.search(&conn, &query, DIM, 2, None, None).unwrap();
 
-        assert_eq!(direct.len(), via_trait.len());
-        for (d, t) in direct.iter().zip(via_trait.iter()) {
-            assert_eq!(d.fact_id, t.fact_id);
-            assert!((d.score - t.score).abs() < f32::EPSILON);
-        }
+        assert_eq!(direct, via_trait);
     }
 
     #[test]
