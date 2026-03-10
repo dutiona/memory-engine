@@ -60,6 +60,9 @@ pub struct MemoryEngine {
     graph: RwLock<MemoryGraph>,
     scope_tree: RwLock<ScopeTree>,
     vector_strategy: Box<dyn VectorSearchStrategy>,
+    #[cfg(feature = "ann")]
+    hnsw_strategy: Option<crate::search::ann::HnswStrategy>,
+    search_config: Option<SearchConfig>,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -67,6 +70,7 @@ impl std::fmt::Debug for MemoryEngine {
         f.debug_struct("MemoryEngine")
             .field("embed_dim", &self.embed_dim)
             .field("vector_strategy", &self.vector_strategy.name())
+            .field("active_strategy", &self.active_strategy_name())
             .finish_non_exhaustive()
     }
 }
@@ -82,7 +86,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub fn open(config: &EngineConfig) -> Result<Self> {
         let pool = ConnectionPool::open(&config.path, config.embed_dim, config.read_pool_size)?;
-        Self::init_from_pool(pool, config.embed_dim)
+        Self::init_from_pool(pool, config.embed_dim, config.search_config.clone())
     }
 
     /// Open an in-memory engine for testing.
@@ -92,11 +96,28 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` if the connection or schema setup fails.
     pub fn open_memory(embed_dim: usize) -> Result<Self> {
         let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(pool, embed_dim)
+        Self::init_from_pool(pool, embed_dim, None)
+    }
+
+    /// Open an in-memory engine with optional search config for testing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` if the connection or schema setup fails.
+    pub fn open_memory_with_config(
+        embed_dim: usize,
+        search_config: Option<SearchConfig>,
+    ) -> Result<Self> {
+        let pool = ConnectionPool::open_memory(embed_dim)?;
+        Self::init_from_pool(pool, embed_dim, search_config)
     }
 
     /// Shared constructor logic: validate embed_dim, load graph and scope tree.
-    fn init_from_pool(pool: ConnectionPool, embed_dim: usize) -> Result<Self> {
+    fn init_from_pool(
+        pool: ConnectionPool,
+        embed_dim: usize,
+        search_config: Option<SearchConfig>,
+    ) -> Result<Self> {
         // Scope the MutexGuard so it drops before we move `pool` into the struct.
         let (graph, scope_tree) = {
             let conn = pool.write();
@@ -105,13 +126,63 @@ impl MemoryEngine {
             let scope_tree = ScopeTree::load(&conn)?;
             (graph, scope_tree)
         };
+
+        #[cfg(feature = "ann")]
+        let hnsw_strategy = if search_config.is_some() {
+            let conn = pool.write();
+            Some(crate::search::ann::HnswStrategy::build_from_db(
+                &conn, embed_dim,
+            )?)
+        } else {
+            None
+        };
+
         Ok(Self {
             pool,
             embed_dim,
             graph: RwLock::new(graph),
             scope_tree: RwLock::new(scope_tree),
             vector_strategy: Box::new(BruteForce),
+            #[cfg(feature = "ann")]
+            hnsw_strategy,
+            search_config,
         })
+    }
+
+    /// Name of the strategy that would be used for a query right now.
+    #[must_use]
+    pub fn active_strategy_name(&self) -> &str {
+        if self.should_use_hnsw() {
+            "hnsw"
+        } else {
+            "brute_force"
+        }
+    }
+
+    #[cfg(feature = "ann")]
+    fn should_use_hnsw(&self) -> bool {
+        if self.hnsw_strategy.is_some() {
+            let conn = self.pool.read();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM facts WHERE t_expired IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            count as usize
+                >= self
+                    .search_config
+                    .as_ref()
+                    .map_or(usize::MAX, |c| c.ann_threshold)
+        } else {
+            false
+        }
+    }
+
+    #[cfg(not(feature = "ann"))]
+    fn should_use_hnsw(&self) -> bool {
+        false
     }
 
     fn validate_or_set_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
@@ -238,7 +309,15 @@ impl MemoryEngine {
             None => None,
         };
 
-        let strategy = &*self.vector_strategy;
+        #[cfg(feature = "ann")]
+        let strategy: &dyn VectorSearchStrategy = if self.should_use_hnsw() {
+            self.hnsw_strategy.as_ref().unwrap()
+        } else {
+            &*self.vector_strategy
+        };
+        #[cfg(not(feature = "ann"))]
+        let strategy: &dyn VectorSearchStrategy = &*self.vector_strategy;
+
         self.with_read(|conn| {
             hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
         })
