@@ -454,22 +454,19 @@ impl MemoryEngine {
         #[cfg(feature = "ann")]
         if let Some(ref hnsw) = self.hnsw_strategy {
             use crate::traits::CrudDecision;
-            match &resolution.decision {
-                CrudDecision::Update => {
-                    hnsw.notify_expire(old_id);
-                    if let Some(new_id) = resolution.new_fact_id {
-                        hnsw.notify_insert(new_id, &embedding);
-                    }
+            if matches!(
+                &resolution.decision,
+                CrudDecision::Update | CrudDecision::Delete
+            ) {
+                hnsw.notify_expire(old_id);
+            }
+            if matches!(
+                &resolution.decision,
+                CrudDecision::Update | CrudDecision::Add
+            ) {
+                if let Some(new_id) = resolution.new_fact_id {
+                    hnsw.notify_insert(new_id, &embedding);
                 }
-                CrudDecision::Delete => {
-                    hnsw.notify_expire(old_id);
-                }
-                CrudDecision::Add => {
-                    if let Some(new_id) = resolution.new_fact_id {
-                        hnsw.notify_insert(new_id, &embedding);
-                    }
-                }
-                CrudDecision::Noop => {}
             }
         }
 

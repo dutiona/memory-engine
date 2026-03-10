@@ -44,13 +44,37 @@ Facts are expired by setting `t_expired`, never hard-deleted. This applies to fo
 
 ---
 
-## Brute-Force Vector Search **{Implemented}**
+## Vector Search Strategy: Brute-Force + HNSW Dispatch **{Implemented}**
 
-Vector search uses O(N) cosine similarity scan with `select_nth_unstable_by` partial sort for top-K. No approximate nearest neighbor (ANN) index.
+Vector search uses runtime strategy dispatch between brute-force (O(N) cosine scan) and HNSW approximate nearest neighbor, gated by the `ann` feature flag and a configurable fact-count threshold.
 
-**Rationale:** At expected scale (sub-50ms for thousands of facts), brute-force is fast enough and has zero complexity overhead. LanceDB was the original ANN candidate but was deferred to keep the dependency surface small. The event-sourced architecture means we can always replay into an ANN backend later.
+### The path to this decision
 
-**Trigger for migration:** Benchmarks show >50ms at scale. This is tracked as a deferred item, not a planned phase.
+1. **Phase 1-3a: Brute-force only.** O(N) cosine similarity scan with `select_nth_unstable_by` partial sort for top-K. Zero complexity overhead. Sufficient for sub-50ms at thousands of facts.
+
+2. **Benchmark baseline (PR #27).** Established Criterion benchmarks at 1K–100K facts across dimensions 128/384/768. Confirmed brute-force exceeds acceptable latency around 50K facts. Introduced `VectorSearchStrategy` trait and `SearchConfig` struct to prepare the dispatch plumbing without committing to an ANN backend.
+
+3. **ANN backend selection.** Considered LanceDB (deferred — heavy dependency, external server model), FAISS (C++ FFI, `unsafe`), and the `hnsw` crate (rust-cv, 0.11). Chose `hnsw` because: pure Rust (respects `#![forbid(unsafe_code)]`), small dependency surface, in-process (no external server), and the `space::Metric` trait maps cleanly to our cosine distance.
+
+4. **HNSW implementation (PR #33).** Feature-gated behind `ann`. `CosineMetric` wraps cosine distance as `u32` via `f32::to_bits()` for the `space::Metric<Unit=u32>` requirement. `HnswStrategy` maintains an in-memory index alongside a `fact_to_hnsw: HashMap<i64, usize>` mapping and a tombstone set of HNSW indices (not fact IDs — a correction from code review that prevents stale entries when facts are replaced).
+
+5. **Dispatch logic.** `should_use_hnsw()` compares `HnswStrategy::active_count()` (O(1) in-memory) against `SearchConfig::ann_threshold`. The engine eagerly builds the HNSW index on `open()` when the threshold is reachable, and skips it entirely when `ann_threshold == usize::MAX`.
+
+6. **Widening loop with brute-force fallback.** HNSW search uses a 3-attempt widening loop that doubles both `ef_search` and `overfetch` each retry (scaling overfetch alongside ef was a review-driven correction — without it, aggressive filters exhaust the same small candidate set). If widening fails to produce enough results, the engine falls back to brute-force for correctness.
+
+7. **Concurrency model.** `RwLock<HnswInner>` with two-phase search: Phase 1 collects HNSW candidates under a read lock, Phase 2 post-filters and exact-scores via DB queries without holding the lock. Lifecycle hooks (`notify_insert`/`notify_expire`) fire after DB commits to maintain transaction safety.
+
+### Design decisions locked in by review
+
+- **Tombstones track HNSW indices, not fact IDs.** When a fact is expired and re-inserted (e.g., via `resolve_conflict`), the old HNSW entry must be tombstoned by its internal index, not by fact ID. Otherwise, removing a fact ID from the tombstone set un-tombstones all historical entries for that fact.
+
+- **NaN guard in CosineMetric.** `cosine_similarity` returns 0.0 for zero-norm vectors, but NaN can propagate from degenerate inputs. The metric guards with `is_nan()` before `clamp()` to prevent incorrect distance ordering.
+
+- **No eager build when threshold is unreachable.** If `ann_threshold == usize::MAX`, the HNSW index is never built, avoiding wasted memory and startup time.
+
+**Trade-off:** The `ann` feature adds ~3 crate dependencies (`hnsw`, `space`, `rand`). When disabled, the engine has zero ANN overhead — the entire module is compiled out.
+
+**Future refinement:** The threshold is currently total-active-fact-count. Candidate-set size after scope/type filtering, embedding dimension, and filter selectivity are future refinements for smarter dispatch.
 
 ---
 
