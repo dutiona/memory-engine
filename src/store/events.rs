@@ -58,6 +58,22 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
     })?;
 
+    let created_at_str: Option<String> = row.get("created_at")?;
+    let created_at = created_at_str
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+        })
+        .transpose()?;
+
     Ok(Event {
         id: row.get("id")?,
         timestamp,
@@ -66,6 +82,9 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         source: row.get("source")?,
         session_id: row.get("session_id")?,
         scope_id: row.get("scope_id")?,
+        origin_node_id: row.get("origin_node_id")?,
+        sequence_id: row.get("sequence_id")?,
+        created_at,
     })
 }
 
@@ -86,9 +105,12 @@ impl<'a> EventStore<'a> {
         let event_type_str = event_type_to_str(&event.event_type);
         let payload_str = serde_json::to_string(&event.payload)?;
 
+        let created_at_str = event.created_at.map(|dt| dt.to_rfc3339());
+
         self.conn.execute(
-            "INSERT INTO events (timestamp, event_type, payload, source, session_id, scope_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO events (timestamp, event_type, payload, source, session_id, scope_id,
+                origin_node_id, sequence_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 timestamp_str,
                 event_type_str,
@@ -96,6 +118,9 @@ impl<'a> EventStore<'a> {
                 event.source,
                 event.session_id,
                 event.scope_id,
+                event.origin_node_id,
+                event.sequence_id,
+                created_at_str,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -108,7 +133,8 @@ impl<'a> EventStore<'a> {
     /// Returns `MemoryError::NotFound` if the id doesn't exist.
     pub fn get(&self, id: i64) -> Result<Event> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id
+            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
+                    origin_node_id, sequence_id, created_at
              FROM events WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_event)?;
@@ -126,7 +152,8 @@ impl<'a> EventStore<'a> {
     /// Returns `MemoryError::Database` on query failure.
     pub fn list(&self, filter: &EventFilter) -> Result<Vec<Event>> {
         let (sql, values) = build_filter_query(
-            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id FROM events",
+            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
+                    origin_node_id, sequence_id, created_at FROM events",
             filter,
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -212,6 +239,9 @@ mod tests {
             source: source.into(),
             session_id: session_id.map(Into::into),
             scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
         }
     }
 
@@ -297,6 +327,9 @@ mod tests {
             source: "test".into(),
             session_id: None,
             scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
         };
         let id = store.insert(&event).unwrap();
         let retrieved = store.get(id).unwrap();

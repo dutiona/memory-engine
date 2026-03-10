@@ -119,6 +119,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: Utc::now(),
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap()
     }
@@ -177,6 +178,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap();
 
@@ -197,6 +199,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: Utc::now(),
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap();
 

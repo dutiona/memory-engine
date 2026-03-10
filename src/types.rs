@@ -40,6 +40,12 @@ pub struct Event {
     pub source: String,
     pub session_id: Option<String>,
     pub scope_id: i64,
+    /// Node that originated this event (for future multi-node sync).
+    pub origin_node_id: String,
+    /// Monotonic sequence within the origin node (for ordering/dedup in sync).
+    pub sequence_id: i64,
+    /// When the event was ingested into this node's store (ingest-time).
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// A bi-temporal fact derived from events.
@@ -60,6 +66,8 @@ pub struct Fact {
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
     pub scope_id: i64,
+    pub is_pinned: bool,
+    pub importance_score: f64,
 }
 
 /// A graph edge between two facts.
@@ -129,6 +137,8 @@ pub struct AddFactOptions {
     pub t_valid: Option<DateTime<Utc>>,
     /// Set the real-world validity end time.
     pub t_invalid: Option<DateTime<Utc>>,
+    /// Pin this fact (unforgettable). Overrides auto-classification.
+    pub pinned: Option<bool>,
 }
 
 // --- New* structs (without id, for insertion) ---
@@ -142,6 +152,9 @@ pub struct NewEvent {
     pub source: String,
     pub session_id: Option<String>,
     pub scope_id: i64,
+    pub origin_node_id: String,
+    pub sequence_id: i64,
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// Fact to insert (DB assigns id).
@@ -161,6 +174,7 @@ pub struct NewFact {
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
     pub scope_id: i64,
+    pub is_pinned: bool,
 }
 
 /// Edge to insert (DB assigns id).
@@ -200,6 +214,9 @@ mod tests {
             source: "test".into(),
             session_id: Some("sess-1".into()),
             scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();
@@ -224,6 +241,8 @@ mod tests {
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),
             scope_id: 1,
+            is_pinned: false,
+            importance_score: 0.5,
         };
         assert!(fact.t_expired.is_none());
         assert!(fact.t_valid.is_none());

@@ -173,6 +173,8 @@ mod tests {
             access_count: 100,
             last_accessed: now - Duration::hours(1),
             metadata: serde_json::json!({}),
+            is_pinned: false,
+            importance_score: 0.5,
         };
 
         // Fact B: old, rarely accessed, isolated, low importance
@@ -192,6 +194,8 @@ mod tests {
             access_count: 1,
             last_accessed: now - Duration::days(90),
             metadata: serde_json::json!({}),
+            is_pinned: false,
+            importance_score: 0.5,
         };
 
         let importance_a = compute_importance(&fact_a, 5, now, &policy);
@@ -230,6 +234,8 @@ mod tests {
             access_count: 5,
             last_accessed: now - Duration::days(60),
             metadata: serde_json::json!({}),
+            is_pinned: false,
+            importance_score: 0.5,
         };
 
         let mut procedural_fact = base_fact.clone();
@@ -277,6 +283,7 @@ mod tests {
                 access_count: 50,
                 last_accessed: now,
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap();
 
@@ -297,6 +304,7 @@ mod tests {
                 access_count: 2,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap();
 
@@ -317,6 +325,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap();
 

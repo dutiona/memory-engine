@@ -120,6 +120,7 @@ mod tests {
             access_count: 0,
             last_accessed: now,
             metadata: serde_json::json!({}),
+            is_pinned: false,
         }
     }
 

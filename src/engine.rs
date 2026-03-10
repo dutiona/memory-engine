@@ -204,6 +204,7 @@ impl MemoryEngine {
             access_count: 0,
             last_accessed: now,
             metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
+            is_pinned: opts.pinned.unwrap_or(false),
         };
 
         FactStore::new(&conn, self.embed_dim).insert(&new_fact)
@@ -493,6 +494,7 @@ mod tests {
             access_count: 0,
             last_accessed: now,
             metadata: serde_json::json!({}),
+            is_pinned: false,
         }
     }
 
@@ -522,6 +524,9 @@ mod tests {
             source: "test".into(),
             session_id: None,
             scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
         };
         let id = engine.ingest(&event).unwrap();
         assert_eq!(id, 1);
@@ -685,6 +690,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             },
         );
 

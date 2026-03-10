@@ -61,6 +61,8 @@ pub fn resolve_conflict(
         access_count: new_fact.access_count,
         last_accessed: new_fact.last_accessed,
         metadata: new_fact.metadata.clone(),
+        is_pinned: new_fact.is_pinned,
+        importance_score: 0.5,
     };
 
     let decision = arbiter.arbitrate(&old_fact, &new_as_fact)?;
@@ -254,6 +256,7 @@ mod tests {
             access_count: 0,
             last_accessed: now,
             metadata: serde_json::json!({}),
+            is_pinned: false,
         }
     }
 

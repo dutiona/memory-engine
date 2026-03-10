@@ -72,8 +72,9 @@ impl<'a> FactStore<'a> {
         self.conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type,
                 t_created, t_expired, t_valid, t_invalid,
-                source_event_id, importance, access_count, last_accessed, metadata, scope_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                is_pinned)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 fact.content,
                 hash,
@@ -89,6 +90,7 @@ impl<'a> FactStore<'a> {
                 last_accessed,
                 metadata_str,
                 fact.scope_id,
+                i64::from(fact.is_pinned),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -103,7 +105,8 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
              FROM facts WHERE id = ?1",
         )?;
         let dim = self.embed_dim;
@@ -124,7 +127,8 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
              FROM facts WHERE t_expired IS NULL",
         )?;
         let dim = self.embed_dim;
@@ -149,7 +153,8 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
              FROM facts
              WHERE t_expired IS NULL
                AND (t_valid IS NULL OR t_valid <= ?1)
@@ -227,7 +232,8 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
              FROM facts
              WHERE t_expired IS NULL AND scope_id = ?1
              ORDER BY importance DESC
@@ -259,7 +265,8 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
              FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
@@ -296,7 +303,8 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
              FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
@@ -340,6 +348,8 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })?;
 
+    let is_pinned_i64: i64 = row.get("is_pinned")?;
+
     Ok(Fact {
         id: row.get("id")?,
         content: row.get("content")?,
@@ -356,6 +366,8 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
         last_accessed,
         metadata,
         scope_id: row.get("scope_id")?,
+        is_pinned: is_pinned_i64 != 0,
+        importance_score: row.get("importance_score")?,
     })
 }
 
@@ -389,6 +401,7 @@ mod tests {
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),
             scope_id: 1,
+            is_pinned: false,
         }
     }
 
