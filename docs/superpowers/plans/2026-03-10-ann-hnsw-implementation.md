@@ -23,6 +23,15 @@
 
 ## Review Changelog
 
+### Round 3 (Codex GPT-5.4 R2 findings)
+
+Addressed 3 high findings + 1 open question from Codex R2:
+
+- **R3-1**: Removed `if results.len() >= limit { break; }` early-exit in Phase 2. All overfetched candidates are now scored, sorted by exact cosine similarity, then truncated to `limit`. This ensures the true best-by-exact-score results are returned.
+- **R3-2**: Restructured widening loop to check post-filter result count (not pre-filter candidate count). The entire HNSW fetch → post-filter → score cycle now repeats with doubled `ef_search`. Added actual brute-force fallback: if HNSW can't satisfy after `MAX_WIDEN_ATTEMPTS`, falls back to `vector_search()`.
+- **R3-3**: Replaced `load_embedding(conn, fact_id, embed_dim)` with `load_embedding(conn, fact_id, self.embed_dim)` — uses the validated field, not the caller-supplied parameter.
+- **R3-4**: Clarified `resolve_conflict` Replace path: replacement insertion goes through `add_fact()` which already calls `notify_insert()`. Only `notify_expire(old_id)` needs adding in Task 8.
+
 ### Round 2 (Codex GPT-5.4 + Gemini)
 
 Addressed 18 findings (3 blockers, 6 high, 7 medium, 2 low):
@@ -612,64 +621,70 @@ impl VectorSearchStrategy for HnswStrategy {
             });
         }
 
-        // Phase 1: Collect HNSW candidates under read lock, then release.
-        // This minimizes lock contention — DB I/O happens outside the lock.
-        let candidates = {
-            let inner = self.inner.read();
-            let query_vec = query_embedding.to_vec();
-            let mut searcher = Searcher::default();
+        // Widening loop: HNSW fetch → post-filter → check sufficiency → widen or fallback.
+        // The loop widens ef_search when post-filtered results are insufficient,
+        // and falls back to brute-force if HNSW cannot satisfy the query after all attempts.
+        let mut ef = DEFAULT_EF_SEARCH;
+        let mut results = Vec::new();
 
-            // Widening loop: if post-filtering leaves < limit results,
-            // retry with larger ef_search (up to 3 attempts).
-            let mut ef = DEFAULT_EF_SEARCH;
-            let mut all_candidates = Vec::new();
+        for attempt in 0..MAX_WIDEN_ATTEMPTS {
+            // Phase 1: Collect HNSW candidates under read lock, then release.
+            // This minimizes lock contention — DB I/O happens outside the lock.
+            let candidates = {
+                let inner = self.inner.read();
+                let query_vec = query_embedding.to_vec();
+                let mut searcher = Searcher::default();
 
-            for _attempt in 0..MAX_WIDEN_ATTEMPTS {
                 let overfetch = limit * OVERFETCH_FACTOR;
                 let mut dest = vec![hnsw::Neighbor::invalid(); overfetch];
                 let neighbors = inner.index.nearest(&query_vec, ef, &mut searcher, &mut dest);
 
-                all_candidates.clear();
+                let mut cands = Vec::new();
                 for neighbor in neighbors {
                     let fact_id = inner.index_to_fact[neighbor.index];
                     if !inner.tombstones.contains(&fact_id) {
-                        all_candidates.push(fact_id);
+                        cands.push(fact_id);
+                    }
+                }
+                cands
+            }; // Read lock released here
+
+            // Phase 2: Post-filter and exact-score ALL candidates via DB (no HNSW lock held).
+            // We score every surviving candidate so the final sort gives the true
+            // best-by-exact-score top `limit`, not just the first `limit` that passed filters.
+            results.clear();
+            results.reserve(candidates.len());
+            for fact_id in candidates {
+                // Post-filter: check fact_type and scope via DB if filters are active
+                if fact_type.is_some() || scope_ids.is_some() {
+                    let passes = check_fact_filters(conn, fact_id, fact_type, scope_ids)?;
+                    if !passes {
+                        continue;
                     }
                 }
 
-                // If we have enough non-tombstoned candidates, stop widening
-                if all_candidates.len() >= limit * OVERFETCH_FACTOR / 2 {
-                    break;
-                }
-                ef *= 2; // Widen search
+                // Compute exact cosine similarity for the score
+                // (HNSW u32 distance is for ordering only, not a meaningful score)
+                let stored_emb = load_embedding(conn, fact_id, self.embed_dim)?;
+                let score = crate::search::cosine_similarity(query_embedding, &stored_emb);
+                results.push(VectorResult { fact_id, score });
             }
 
-            all_candidates
-        }; // Read lock released here
-
-        // Phase 2: Post-filter and score candidates via DB (no HNSW lock held).
-        let mut results = Vec::with_capacity(limit);
-        for fact_id in candidates {
+            // Check sufficiency AFTER post-filtering (not before)
             if results.len() >= limit {
                 break;
             }
-
-            // Post-filter: check fact_type and scope via DB if filters are active
-            if fact_type.is_some() || scope_ids.is_some() {
-                let passes = check_fact_filters(conn, fact_id, fact_type, scope_ids)?;
-                if !passes {
-                    continue;
-                }
-            }
-
-            // Compute exact cosine similarity for the score
-            // (HNSW u32 distance is for ordering only, not a meaningful score)
-            let stored_emb = load_embedding(conn, fact_id, embed_dim)?;
-            let score = crate::search::cosine_similarity(query_embedding, &stored_emb);
-            results.push(VectorResult { fact_id, score });
+            ef *= 2; // Widen search for next attempt
         }
 
-        // Sort by descending score (exact cosine similarity, not HNSW order)
+        // If HNSW widening couldn't satisfy, fall back to brute-force.
+        if results.len() < limit {
+            return crate::search::vector_search(
+                conn, query_embedding, self.embed_dim, limit, fact_type, scope_ids,
+            );
+        }
+
+        // Sort ALL scored results by descending exact cosine similarity, then keep top `limit`.
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
 
@@ -1008,8 +1023,9 @@ There are three engine methods that expire facts. All must follow the same patte
    Ok((PruneStats { pruned_count: expired_ids.len() }, expired_ids))
    ```
 
-2. **`resolve_conflict(&self, arbiter, old_id, new_fact)`** (line ~315) — delegates to `conflict::resolve_conflict()` which may expire the old fact. When the resolution is `Replace`, the old fact is expired.
+2. **`resolve_conflict(&self, arbiter, old_id, new_fact)`** (line ~315) — delegates to `conflict::resolve_conflict()` which may expire the old fact. When the resolution is `Replace`, the old fact is expired and the replacement fact is inserted.
    - After `resolve_conflict()` returns with `Replace`, call `notify_expire(old_id)`.
+   - **Important:** The replacement fact insertion goes through `add_fact()`, which already calls `notify_insert()` for the new fact. Therefore only `notify_expire(old_id)` needs to be added here — the new fact's index entry is handled by the existing `add_fact` → `notify_insert` path. No additional `notify_insert` call is needed in `resolve_conflict`.
 
 3. **`consolidate(&self, ...)`** (line ~272) — delegates to dedup which calls `FactStore::expire()` on duplicates.
    - Similarly modify `local_dedup()` to return the list of expired duplicate IDs.
