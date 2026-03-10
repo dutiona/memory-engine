@@ -291,21 +291,24 @@ impl<'a> FactStore<'a> {
                         source_event_id, importance, access_count, last_accessed, metadata, scope_id,
                         is_pinned, importance_score
                  FROM facts WHERE t_expired IS NULL AND is_pinned = 1";
-        let sql = if scope_ids.is_empty() {
-            format!("{base} ORDER BY importance_score DESC")
-        } else {
-            let placeholders: String = scope_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            format!("{base} AND scope_id IN ({placeholders}) ORDER BY importance_score DESC")
-        };
-        let mut stmt = self.conn.prepare(&sql)?;
-        let params: Vec<Box<dyn rusqlite::types::ToSql>> =
-            scope_ids.iter().map(|id| Box::new(*id) as _).collect();
         let dim = self.embed_dim;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            row_to_fact(row, dim)
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        if scope_ids.is_empty() {
+            let sql = format!("{base} ORDER BY importance_score DESC");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        } else {
+            let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
+            let sql = format!(
+                "{base} AND scope_id IN (SELECT value FROM json_each(?1)) ORDER BY importance_score DESC"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows =
+                stmt.query_map(rusqlite::params![scope_json], |row| row_to_fact(row, dim))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        }
     }
 
     /// List active, valid facts where `t_valid <= now` and `t_valid IS NOT NULL`.

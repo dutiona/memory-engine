@@ -74,25 +74,16 @@ pub fn local_dedup(
                 duplicates_removed += 1;
 
                 // Update survivor's importance: inherit max from merged pair
-                let (survivor_id, loser_importance, loser_score) = if expire_id == new_fact.id {
-                    (candidate.id, new_fact.importance, new_fact.importance_score)
+                let (survivor, loser) = if expire_id == new_fact.id {
+                    (&candidate, new_fact)
                 } else {
-                    (
-                        new_fact.id,
-                        candidate.importance,
-                        candidate.importance_score,
-                    )
+                    (new_fact, &candidate)
                 };
-                let (survivor_importance, survivor_score) = if expire_id == new_fact.id {
-                    (candidate.importance, candidate.importance_score)
-                } else {
-                    (new_fact.importance, new_fact.importance_score)
-                };
-                if loser_importance > survivor_importance {
-                    fact_store.update_importance(survivor_id, loser_importance)?;
+                if loser.importance > survivor.importance {
+                    fact_store.update_importance(survivor.id, loser.importance)?;
                 }
-                if loser_score > survivor_score {
-                    fact_store.update_importance_score(survivor_id, loser_score)?;
+                if loser.importance_score > survivor.importance_score {
+                    fact_store.update_importance_score(survivor.id, loser.importance_score)?;
                 }
 
                 // If the new_fact itself was expired, stop comparing it
