@@ -116,9 +116,11 @@ fn full_roundtrip() {
         })
         .unwrap();
     assert!(!vec_results.is_empty());
-    assert!(vec_results
-        .iter()
-        .all(|r| r.match_type == MatchType::Vector));
+    assert!(
+        vec_results
+            .iter()
+            .all(|r| r.match_type == MatchType::Vector)
+    );
 
     // 5. Query via hybrid — combine text and embedding
     let hybrid_emb = embedder.embed("Rust programming language").unwrap();
@@ -156,7 +158,9 @@ fn full_roundtrip() {
             scope: None,
         })
         .unwrap();
-    assert!(semantic_only
-        .iter()
-        .all(|r| r.fact.fact_type == FactType::Semantic));
+    assert!(
+        semantic_only
+            .iter()
+            .all(|r| r.fact.fact_type == FactType::Semantic)
+    );
 }

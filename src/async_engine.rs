@@ -8,13 +8,15 @@ use std::sync::Arc;
 
 use crate::engine::{EngineConfig, MemoryEngine};
 use crate::error::{MemoryError, Result};
+use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
     EmbeddingProvider, ForgetPolicy, PruneStats, SummaryGenerator,
 };
-use crate::resume::context::{ResumeConfig, ResumeContext};
-use crate::types::{AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact, Summary};
+use crate::types::{
+    AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact, Summary,
+};
 
 /// Async wrapper around [`MemoryEngine`].
 ///
@@ -58,10 +60,9 @@ impl AsyncMemoryEngine {
     ///
     /// Returns errors from [`MemoryEngine::open`].
     pub async fn open(config: EngineConfig) -> Result<Self> {
-        let engine =
-            tokio::task::spawn_blocking(move || MemoryEngine::open(&config))
-                .await
-                .map_err(join_err)??;
+        let engine = tokio::task::spawn_blocking(move || MemoryEngine::open(&config))
+            .await
+            .map_err(join_err)??;
         Ok(Self::new(engine))
     }
 
@@ -71,10 +72,9 @@ impl AsyncMemoryEngine {
     ///
     /// Returns errors from [`MemoryEngine::open_memory`].
     pub async fn open_memory(embed_dim: usize) -> Result<Self> {
-        let engine =
-            tokio::task::spawn_blocking(move || MemoryEngine::open_memory(embed_dim))
-                .await
-                .map_err(join_err)??;
+        let engine = tokio::task::spawn_blocking(move || MemoryEngine::open_memory(embed_dim))
+            .await
+            .map_err(join_err)??;
         Ok(Self::new(engine))
     }
 

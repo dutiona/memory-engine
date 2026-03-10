@@ -3,7 +3,7 @@
 //! Run with: `cargo bench`
 //! Save baseline: `cargo bench -- --save-baseline phase3`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
