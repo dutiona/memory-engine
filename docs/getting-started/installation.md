@@ -21,6 +21,17 @@ Enable the `async` feature for `AsyncMemoryEngine` (requires tokio):
 memory-engine = { git = "https://github.com/dutiona/memory-engine", features = ["async"] }
 ```
 
+### ANN (Approximate Nearest Neighbor)
+
+Enable the `ann` feature for HNSW-accelerated vector search at scale:
+
+```toml
+[dependencies]
+memory-engine = { git = "https://github.com/dutiona/memory-engine", features = ["ann"] }
+```
+
+This adds the `hnsw`, `space`, and `rand` crates as dependencies. Without this feature, vector search uses brute-force only (zero additional dependencies). See [Hybrid Search — ANN](../advanced/hybrid-search.md#ann-approximate-nearest-neighbor) for configuration details.
+
 ## Build
 
 ```bash

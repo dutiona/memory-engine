@@ -344,6 +344,62 @@ fn bench_scoped_search(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// HNSW search (ANN-accelerated vector search)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ann")]
+fn setup_hnsw_engine(n: usize) -> MemoryEngine {
+    use memory_engine::search::SearchConfig;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("bench_hnsw.db");
+    let mut config = EngineConfig::new(db_path, DIM);
+    config.search_config = Some(SearchConfig {
+        ann_threshold: 0,
+        ..Default::default()
+    });
+    let engine = MemoryEngine::open(&config).expect("open engine");
+    let embedder = ConstEmbedder { dim: DIM };
+    for i in 0..n {
+        let topic = TOPICS[i % TOPICS.len()];
+        let content = format!("{topic} — fact number {i}");
+        engine
+            .add_fact(&content, FactType::Semantic, None, &embedder, None, None)
+            .expect("add_fact");
+    }
+    std::mem::forget(dir);
+    engine
+}
+
+#[cfg(feature = "ann")]
+fn bench_hnsw_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hnsw_search");
+
+    for &size in &[1_000, 10_000, 50_000, 100_000] {
+        let samples = if size >= 50_000 { 10 } else { 20 };
+        group.sample_size(samples);
+
+        let engine = setup_hnsw_engine(size);
+        let emb = query_embedding();
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
+            b.iter(|| {
+                engine
+                    .query(&SearchQuery {
+                        text: None,
+                        embedding: Some(emb.clone()),
+                        mode: SearchMode::Vector,
+                        limit: 10,
+                        valid_at: None,
+                        fact_type: None,
+                        scope: None,
+                    })
+                    .unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_cosine_similarity,
@@ -353,4 +409,12 @@ criterion_group!(
     bench_hybrid_search,
     bench_scoped_search
 );
+
+#[cfg(feature = "ann")]
+criterion_group!(ann_benches, bench_hnsw_search);
+
+#[cfg(feature = "ann")]
+criterion_main!(benches, ann_benches);
+
+#[cfg(not(feature = "ann"))]
 criterion_main!(benches);

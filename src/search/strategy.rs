@@ -36,6 +36,14 @@ pub trait VectorSearchStrategy: Send + Sync {
 
     /// Human-readable name for logging and debug output.
     fn name(&self) -> &str;
+
+    /// Called after a fact is inserted. Strategies that maintain an in-memory
+    /// index should add the vector. Default: no-op.
+    fn notify_insert(&self, _fact_id: i64, _embedding: &[f32]) {}
+
+    /// Called after a fact is expired (soft-deleted). Strategies that maintain
+    /// an in-memory index should mark it for exclusion. Default: no-op.
+    fn notify_expire(&self, _fact_id: i64) {}
 }
 
 /// Brute-force cosine similarity scan over all active facts.  O(N) per query.
@@ -191,6 +199,14 @@ mod tests {
     #[test]
     fn search_config_default_threshold() {
         assert_eq!(SearchConfig::default().ann_threshold, 50_000);
+    }
+
+    #[test]
+    fn brute_force_lifecycle_hooks_are_noop() {
+        let bf = BruteForce;
+        // These should compile and do nothing.
+        bf.notify_insert(1, &[1.0, 0.0, 0.0]);
+        bf.notify_expire(1);
     }
 
     #[test]

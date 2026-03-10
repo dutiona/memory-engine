@@ -85,7 +85,7 @@ pub fn prune(
     policy: &ForgetPolicy,
     embed_dim: usize,
     now: DateTime<Utc>,
-) -> Result<PruneStats> {
+) -> Result<(PruneStats, Vec<i64>)> {
     policy.validate()?;
 
     let fact_store = FactStore::new(conn, embed_dim);
@@ -118,10 +118,11 @@ pub fn prune(
         graph.remove_edges_by_fact(fact_id);
     }
 
-    Ok(PruneStats {
+    let stats = PruneStats {
         facts_expired: to_expire.len(),
         facts_evaluated,
-    })
+    };
+    Ok((stats, to_expire))
 }
 
 #[cfg(test)]
@@ -326,7 +327,7 @@ mod tests {
             ..ForgetPolicy::default()
         };
 
-        let stats = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+        let (stats, _expired_ids) = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
         assert_eq!(stats.facts_evaluated, 3);
         // At least 1 fact should be pruned (fact 3 with low importance + old age)
         assert!(

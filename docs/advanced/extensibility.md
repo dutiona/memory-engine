@@ -126,6 +126,43 @@ impl ConflictArbiter for SemanticArbiter {
 
 The arbiter can return an error to abort the resolution with no side effects.
 
+## VectorSearchStrategy: Internal Dispatch Trait
+
+`VectorSearchStrategy` is an internal trait that enables runtime dispatch between brute-force and HNSW vector search. Unlike the consumer traits above, this is **not** implemented by consumers — it is an engine-internal abstraction.
+
+```rust
+pub trait VectorSearchStrategy: Send + Sync {
+    fn search(&self, conn: &Connection, query_embedding: &[f32],
+              embed_dim: usize, limit: usize,
+              fact_type: Option<&FactType>, scope_ids: Option<&[i64]>,
+    ) -> Result<Vec<VectorResult>>;
+
+    fn notify_insert(&self, _fact_id: i64, _embedding: &[f32]) {}
+    fn notify_expire(&self, _fact_id: i64) {}
+
+    fn name(&self) -> &str;
+}
+```
+
+Two implementations exist:
+
+| Strategy       | Feature flag | When used                       |
+| -------------- | ------------ | ------------------------------- |
+| `BruteForce`   | (always)     | `active_count < ann_threshold`  |
+| `HnswStrategy` | `ann`        | `active_count >= ann_threshold` |
+
+The lifecycle hooks (`notify_insert`, `notify_expire`) are no-ops on `BruteForce` and maintain the in-memory HNSW index on `HnswStrategy`.
+
+## SearchConfig: ANN Dispatch Threshold
+
+```rust
+pub struct SearchConfig {
+    pub ann_threshold: usize,  // default: 50_000
+}
+```
+
+Controls when the engine switches from brute-force to HNSW. Passed via `EngineConfig::search_config`. Without `SearchConfig` (or without the `ann` feature), brute-force is always used.
+
 ## ForgetPolicy: Configuration, Not a Trait
 
 `ForgetPolicy` is a plain struct with configurable fields, not a trait. The forgetting algorithm (Ebbinghaus decay + multi-signal scoring) is fixed in the engine. Consumers tune it through weights and thresholds rather than replacing the algorithm entirely.
@@ -147,9 +184,11 @@ This is a policy (parameter set), not a strategy (pluggable algorithm). See [For
 
 ## Summary of Extension Points
 
-| Extension point     | Type   | When called          | Consumer provides            |
-| ------------------- | ------ | -------------------- | ---------------------------- |
-| `EmbeddingProvider` | trait  | `add_fact()`         | Text-to-vector model         |
-| `SummaryGenerator`  | trait  | `consolidate()`      | Summarization + embedding    |
-| `ConflictArbiter`   | trait  | `resolve_conflict()` | Resolution logic             |
-| `ForgetPolicy`      | struct | `forget()`           | Decay parameters and weights |
+| Extension point        | Type           | When called          | Provided by                         |
+| ---------------------- | -------------- | -------------------- | ----------------------------------- |
+| `EmbeddingProvider`    | consumer trait | `add_fact()`         | Text-to-vector model                |
+| `SummaryGenerator`     | consumer trait | `consolidate()`      | Summarization + embedding           |
+| `ConflictArbiter`      | consumer trait | `resolve_conflict()` | Resolution logic                    |
+| `ForgetPolicy`         | struct         | `forget()`           | Decay parameters                    |
+| `VectorSearchStrategy` | internal trait | `query()`            | Engine (BruteForce or HnswStrategy) |
+| `SearchConfig`         | struct         | `open()`             | ANN dispatch threshold              |
