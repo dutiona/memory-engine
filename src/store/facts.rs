@@ -283,6 +283,196 @@ impl<'a> FactStore<'a> {
             .map_err(MemoryError::Database)
     }
 
+    /// List active pinned (unforgettable) facts, optionally filtered by scope.
+    /// Pass empty slice to get all pinned facts across all scopes.
+    pub fn list_pinned(&self, scope_ids: &[i64]) -> Result<Vec<Fact>> {
+        if scope_ids.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, content, content_hash, embedding, fact_type,
+                        t_created, t_expired, t_valid, t_invalid,
+                        source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                        is_pinned, importance_score
+                 FROM facts WHERE t_expired IS NULL AND is_pinned = 1
+                 ORDER BY importance_score DESC",
+            )?;
+            let dim = self.embed_dim;
+            let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        } else {
+            let placeholders: String = scope_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT id, content, content_hash, embedding, fact_type,
+                        t_created, t_expired, t_valid, t_invalid,
+                        source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                        is_pinned, importance_score
+                 FROM facts WHERE t_expired IS NULL AND is_pinned = 1
+                 AND scope_id IN ({placeholders})
+                 ORDER BY importance_score DESC"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                scope_ids.iter().map(|id| Box::new(*id) as _).collect();
+            let dim = self.embed_dim;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                row_to_fact(row, dim)
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        }
+    }
+
+    /// List active, valid facts where `t_valid <= now` and `t_valid IS NOT NULL`.
+    /// Excludes facts where `t_invalid <= now` (bi-temporally invalidated).
+    pub fn list_due(&self, now: DateTime<Utc>, scope_ids: &[i64]) -> Result<Vec<Fact>> {
+        let now_str = now.to_rfc3339();
+        let base = "SELECT id, content, content_hash, embedding, fact_type,
+                    t_created, t_expired, t_valid, t_invalid,
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
+             FROM facts
+             WHERE t_expired IS NULL AND t_valid IS NOT NULL AND t_valid <= ?1
+             AND (t_invalid IS NULL OR t_invalid > ?1)";
+        let sql = if scope_ids.is_empty() {
+            format!("{base} ORDER BY t_valid ASC")
+        } else {
+            let placeholders: String = scope_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{base} AND scope_id IN ({placeholders}) ORDER BY t_valid ASC")
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now_str)];
+        for id in scope_ids {
+            params.push(Box::new(*id));
+        }
+        let dim = self.embed_dim;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            row_to_fact(row, dim)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Earliest future `t_valid` among active facts with `t_valid > now`.
+    /// Excludes bi-temporally invalidated facts.
+    pub fn next_due_time(
+        &self,
+        now: DateTime<Utc>,
+        scope_ids: &[i64],
+    ) -> Result<Option<DateTime<Utc>>> {
+        let now_str = now.to_rfc3339();
+        let base = "SELECT MIN(t_valid) FROM facts
+             WHERE t_expired IS NULL AND t_valid IS NOT NULL AND t_valid > ?1
+             AND (t_invalid IS NULL OR t_invalid > ?1)";
+        let sql = if scope_ids.is_empty() {
+            base.to_string()
+        } else {
+            let placeholders: String = scope_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{base} AND scope_id IN ({placeholders})")
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now_str)];
+        for id in scope_ids {
+            params.push(Box::new(*id));
+        }
+        let result: Option<String> =
+            stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?;
+        match result {
+            Some(s) => {
+                let dt = DateTime::parse_from_rfc3339(&s)
+                    .map_err(|e| crate::error::MemoryError::Migration(format!("bad t_valid: {e}")))?
+                    .with_timezone(&Utc);
+                Ok(Some(dt))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Set the pinned flag on a fact.
+    pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
+        let rows = self.conn.execute(
+            "UPDATE facts SET is_pinned = ?1 WHERE id = ?2",
+            rusqlite::params![pinned as i64, id],
+        )?;
+        if rows == 0 {
+            return Err(crate::error::MemoryError::NotFound(format!("fact {id}")));
+        }
+        Ok(())
+    }
+
+    /// Update the materialized importance score for a fact.
+    pub fn update_importance_score(&self, id: i64, score: f64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE facts SET importance_score = ?1 WHERE id = ?2",
+            rusqlite::params![score, id],
+        )?;
+        Ok(())
+    }
+
+    /// List active facts ordered by materialized importance_score, excluding IDs in `exclude`.
+    /// Pass empty `scope_ids` to query across all scopes.
+    pub fn list_by_importance_score(
+        &self,
+        scope_ids: &[i64],
+        min_score: f64,
+        limit: usize,
+        exclude: &std::collections::HashSet<i64>,
+    ) -> Result<Vec<Fact>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let exclude_json = serde_json::to_string(&exclude.iter().copied().collect::<Vec<_>>())
+            .expect("serialize exclude_ids");
+        let dim = self.embed_dim;
+
+        if scope_ids.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, content, content_hash, embedding, fact_type,
+                        t_created, t_expired, t_valid, t_invalid,
+                        source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                        is_pinned, importance_score
+                 FROM facts
+                 WHERE t_expired IS NULL AND importance_score >= ?1
+                   AND id NOT IN (SELECT value FROM json_each(?2))
+                 ORDER BY importance_score DESC
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![min_score, exclude_json, limit_i64],
+                |row| row_to_fact(row, dim),
+            )?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        } else {
+            let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
+            let mut stmt = self.conn.prepare(
+                "SELECT id, content, content_hash, embedding, fact_type,
+                        t_created, t_expired, t_valid, t_invalid,
+                        source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                        is_pinned, importance_score
+                 FROM facts
+                 WHERE t_expired IS NULL AND importance_score >= ?1
+                   AND scope_id IN (SELECT value FROM json_each(?2))
+                   AND id NOT IN (SELECT value FROM json_each(?3))
+                 ORDER BY importance_score DESC
+                 LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![min_score, scope_json, exclude_json, limit_i64],
+                |row| row_to_fact(row, dim),
+            )?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        }
+    }
+
     /// List active facts in a set of scopes, excluding specific fact IDs,
     /// ordered by `t_created` DESC (most recent first).
     ///
@@ -523,6 +713,81 @@ mod tests {
         let after = store.get(id).unwrap();
         assert_eq!(after.access_count, 1);
         assert!(after.last_accessed >= before.last_accessed);
+    }
+
+    #[test]
+    fn list_pinned_returns_only_pinned_active_facts() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let mut pinned = make_fact("pinned fact", vec![0.1; DIM]);
+        pinned.is_pinned = true;
+        fs.insert(&pinned).unwrap();
+        fs.insert(&make_fact("normal fact", vec![0.2; DIM]))
+            .unwrap();
+
+        let result = fs.list_pinned(&[]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_pinned);
+    }
+
+    #[test]
+    fn list_due_surfaces_facts_with_past_t_valid() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        let mut past = make_fact("past reminder", vec![0.1; DIM]);
+        past.t_valid = Some(now - chrono::Duration::hours(1));
+        fs.insert(&past).unwrap();
+
+        let mut future = make_fact("future reminder", vec![0.2; DIM]);
+        future.t_valid = Some(now + chrono::Duration::hours(1));
+        fs.insert(&future).unwrap();
+
+        fs.insert(&make_fact("regular fact", vec![0.3; DIM]))
+            .unwrap();
+
+        let result = fs.list_due(now, &[]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].content.contains("past"));
+    }
+
+    #[test]
+    fn next_due_time_returns_earliest_future_t_valid() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        assert!(fs.next_due_time(now, &[]).unwrap().is_none());
+
+        let mut future = make_fact("reminder", vec![0.1; DIM]);
+        future.t_valid = Some(now + chrono::Duration::hours(2));
+        fs.insert(&future).unwrap();
+
+        let mut sooner = make_fact("sooner reminder", vec![0.2; DIM]);
+        sooner.t_valid = Some(now + chrono::Duration::hours(1));
+        fs.insert(&sooner).unwrap();
+
+        let next = fs.next_due_time(now, &[]).unwrap().unwrap();
+        assert!(next < now + chrono::Duration::hours(2));
+    }
+
+    #[test]
+    fn set_pinned_toggles_flag() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let id = fs.insert(&make_fact("toggleable", vec![0.1; DIM])).unwrap();
+
+        let fact = fs.get(id).unwrap();
+        assert!(!fact.is_pinned);
+
+        fs.set_pinned(id, true).unwrap();
+        let fact = fs.get(id).unwrap();
+        assert!(fact.is_pinned);
+
+        fs.set_pinned(id, false).unwrap();
+        let fact = fs.get(id).unwrap();
+        assert!(!fact.is_pinned);
     }
 
     #[test]
