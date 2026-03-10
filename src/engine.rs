@@ -10,7 +10,7 @@ use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
 use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
-use crate::search::strategy::{BruteForce, VectorSearchStrategy};
+use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};
@@ -29,6 +29,8 @@ pub struct EngineConfig {
     pub embed_dim: usize,
     /// Number of read connections in the pool (default: 4).
     pub read_pool_size: usize,
+    /// Optional search configuration for ANN strategy dispatch.
+    pub search_config: Option<SearchConfig>,
 }
 
 impl EngineConfig {
@@ -39,6 +41,7 @@ impl EngineConfig {
             path,
             embed_dim,
             read_pool_size: 4,
+            search_config: None,
         }
     }
 }
@@ -1057,6 +1060,21 @@ mod tests {
         };
         let err = engine.resume_context(&config).unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
+    }
+
+    // --- Phase 3b / T6: SearchConfig in EngineConfig ---
+
+    #[test]
+    fn engine_config_default_has_no_search_config() {
+        let config = EngineConfig::new("test.db".into(), 128);
+        assert!(config.search_config.is_none());
+    }
+
+    #[test]
+    fn engine_config_with_search_config() {
+        let mut config = EngineConfig::new("test.db".into(), 128);
+        config.search_config = Some(SearchConfig::default());
+        assert_eq!(config.search_config.unwrap().ann_threshold, 50_000);
     }
 
     #[test]
