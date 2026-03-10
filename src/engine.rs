@@ -254,37 +254,49 @@ impl MemoryEngine {
         let now = Utc::now();
         let opts = opts.cloned().unwrap_or_default();
 
-        // Resolve scope + insert fact in a single write lock
-        let conn = self.write_conn();
-        let scope_id = match scope {
-            Some(path) => {
-                let scope_store = ScopeStore::new(&conn);
-                let id = scope_store.ensure_path(path)?;
-                let node = scope_store.get(id)?;
-                self.scope_tree.write().insert(node);
-                id
-            }
-            None => 1, // root scope
-        };
+        // Resolve scope + insert fact in a single write lock, then release
+        #[cfg(feature = "ann")]
+        let emb_copy = embedding.clone();
 
-        let new_fact = NewFact {
-            content: content.into(),
-            content_hash: String::new(), // FactStore::insert computes this via blake3
-            embedding,
-            fact_type,
-            t_created: now,
-            t_expired: None,
-            t_valid: opts.t_valid,
-            t_invalid: opts.t_invalid,
-            source_event_id,
-            scope_id,
-            importance: opts.importance.unwrap_or(0.5),
-            access_count: 0,
-            last_accessed: now,
-            metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
-        };
+        let fact_id = {
+            let conn = self.write_conn();
+            let scope_id = match scope {
+                Some(path) => {
+                    let scope_store = ScopeStore::new(&conn);
+                    let id = scope_store.ensure_path(path)?;
+                    let node = scope_store.get(id)?;
+                    self.scope_tree.write().insert(node);
+                    id
+                }
+                None => 1, // root scope
+            };
 
-        FactStore::new(&conn, self.embed_dim).insert(&new_fact)
+            let new_fact = NewFact {
+                content: content.into(),
+                content_hash: String::new(), // FactStore::insert computes this via blake3
+                embedding,
+                fact_type,
+                t_created: now,
+                t_expired: None,
+                t_valid: opts.t_valid,
+                t_invalid: opts.t_invalid,
+                source_event_id,
+                scope_id,
+                importance: opts.importance.unwrap_or(0.5),
+                access_count: 0,
+                last_accessed: now,
+                metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
+            };
+
+            FactStore::new(&conn, self.embed_dim).insert(&new_fact)?
+        }; // DB lock released = committed
+
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            hnsw.notify_insert(fact_id, &emb_copy);
+        }
+
+        Ok(fact_id)
     }
 
     // --- Public API: Query ---
@@ -356,13 +368,29 @@ impl MemoryEngine {
         generator: &dyn SummaryGenerator,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        let conn = self.write_conn();
-        let stats = crate::consolidation::consolidate(&conn, generator, self.embed_dim, config)?;
+        let (stats, expired_ids) = {
+            let conn = self.write_conn();
+            let (stats, expired_ids) =
+                crate::consolidation::consolidate(&conn, generator, self.embed_dim, config)?;
 
-        // Rebuild graph inside write lock — dedup may have expired facts and their edges
-        if stats.duplicates_removed > 0 {
-            *self.graph.write() = MemoryGraph::load_from_db(&conn)?;
+            // Rebuild graph inside write lock — dedup may have expired facts and their edges
+            if stats.duplicates_removed > 0 {
+                *self.graph.write() = MemoryGraph::load_from_db(&conn)?;
+            }
+
+            (stats, expired_ids)
+        }; // DB lock released
+
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            for &id in &expired_ids {
+                hnsw.notify_expire(id);
+            }
         }
+
+        // Suppress unused variable warning when ann feature is disabled
+        #[cfg(not(feature = "ann"))]
+        let _ = expired_ids;
 
         Ok(stats)
     }
@@ -378,9 +406,23 @@ impl MemoryEngine {
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        let conn = self.write_conn();
-        let mut graph = self.graph.write();
-        crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())
+        let expired_ids = {
+            let conn = self.write_conn();
+            let mut graph = self.graph.write();
+            let (stats, expired_ids) =
+                crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())?;
+            // Return stats + expired IDs; DB lock + graph lock released here
+            (stats, expired_ids)
+        };
+
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            for &id in &expired_ids.1 {
+                hnsw.notify_expire(id);
+            }
+        }
+
+        Ok(expired_ids.0)
     }
 
     // --- Public API: Conflict Resolution ---
@@ -400,17 +442,45 @@ impl MemoryEngine {
         old_id: i64,
         new_fact: &NewFact,
     ) -> Result<ConflictResolution> {
-        let conn = self.write_conn();
-        let mut graph = self.graph.write();
-        crate::conflict::resolve_conflict(
-            &conn,
-            &mut graph,
-            arbiter,
-            old_id,
-            new_fact,
-            self.embed_dim,
-            Utc::now(),
-        )
+        #[cfg(feature = "ann")]
+        let embedding = new_fact.embedding.clone();
+        let resolution = {
+            let conn = self.write_conn();
+            let mut graph = self.graph.write();
+            crate::conflict::resolve_conflict(
+                &conn,
+                &mut graph,
+                arbiter,
+                old_id,
+                new_fact,
+                self.embed_dim,
+                Utc::now(),
+            )?
+        }; // DB lock + graph lock released
+
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            use crate::traits::CrudDecision;
+            match &resolution.decision {
+                CrudDecision::Update => {
+                    hnsw.notify_expire(old_id);
+                    if let Some(new_id) = resolution.new_fact_id {
+                        hnsw.notify_insert(new_id, &embedding);
+                    }
+                }
+                CrudDecision::Delete => {
+                    hnsw.notify_expire(old_id);
+                }
+                CrudDecision::Add => {
+                    if let Some(new_id) = resolution.new_fact_id {
+                        hnsw.notify_insert(new_id, &embedding);
+                    }
+                }
+                CrudDecision::Noop => {}
+            }
+        }
+
+        Ok(resolution)
     }
 
     // --- Public API: Graph queries (no lock exposure) ---
