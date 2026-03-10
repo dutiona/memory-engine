@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Open a `SQLite` connection to a file, with pragmas set.
 ///
@@ -64,7 +64,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     if !is_fresh {
         return Ok(()); // existing DB — let migrate() handle evolution
     }
-    // Fresh DB: create full latest (v2) schema
+    // Fresh DB: create full latest (v3) schema
     conn.execute_batch(TABLES_DDL)?;
     conn.execute_batch(SCOPES_DDL)?;
     conn.execute_batch(FTS5_DDL)?;
@@ -107,7 +107,9 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 type MigrationFn = fn(&Connection) -> Result<()>;
 
-const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2];
+/// `(function, disable_foreign_keys)` — set second element to `true` for
+/// table-rebuild migrations that DROP and recreate tables with FK references.
+const MIGRATIONS: &[(MigrationFn, bool)] = &[(migrate_v1_to_v2, false), (migrate_v2_to_v3, true)];
 
 /// Run forward-only migrations from the current schema version to
 /// `CURRENT_SCHEMA_VERSION`.
@@ -131,14 +133,43 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         )));
     }
 
-    for (i, migration) in MIGRATIONS.iter().enumerate() {
+    for (i, (migration, disable_fk)) in MIGRATIONS.iter().enumerate() {
         let target = (i as u32) + 2; // migrations are 1→2, 2→3, etc.
         if version < target {
+            if *disable_fk {
+                set_foreign_keys(conn, false)?;
+            }
             let tx = conn.unchecked_transaction()?;
             migration(&tx)?;
             set_config(&tx, "schema_version", &target.to_string())?;
             tx.commit()?;
+            if *disable_fk {
+                set_foreign_keys(conn, true)?;
+                check_foreign_keys(conn)?;
+            }
         }
+    }
+    Ok(())
+}
+
+fn set_foreign_keys(conn: &Connection, enabled: bool) -> Result<()> {
+    let sql = if enabled {
+        "PRAGMA foreign_keys = ON"
+    } else {
+        "PRAGMA foreign_keys = OFF"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let _ = stmt.query([])?;
+    Ok(())
+}
+
+fn check_foreign_keys(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = stmt.query([])?;
+    if rows.next()?.is_some() {
+        return Err(MemoryError::Migration(
+            "foreign key violations detected after table rebuild".to_string(),
+        ));
     }
     Ok(())
 }
@@ -160,6 +191,106 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Rebuild tables to add `REFERENCES scopes(id)` on `scope_id` columns.
+///
+/// `ALTER TABLE` cannot add FK constraints in SQLite, so this migration
+/// recreates each table with the full column definition. Requires
+/// `PRAGMA foreign_keys = OFF` (handled by the migration framework).
+///
+/// Rebuild order respects FK dependencies: events → facts → edges → summaries.
+fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+    // 1. Drop FTS triggers and virtual table (they reference facts)
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS facts_fts_ai;
+         DROP TRIGGER IF EXISTS facts_fts_ad;
+         DROP TRIGGER IF EXISTS facts_fts_au;
+         DROP TABLE IF EXISTS facts_fts;",
+    )?;
+
+    // 2. Rebuild events (no FK deps from other data tables)
+    conn.execute_batch(
+        "CREATE TABLE events_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{}',
+            source TEXT NOT NULL,
+            session_id TEXT,
+            scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+        );
+        INSERT INTO events_new SELECT * FROM events;
+        DROP TABLE events;
+        ALTER TABLE events_new RENAME TO events;",
+    )?;
+
+    // 3. Rebuild facts (source_event_id references events)
+    conn.execute_batch(
+        "CREATE TABLE facts_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')),
+            t_created TEXT NOT NULL,
+            t_expired TEXT,
+            t_valid TEXT,
+            t_invalid TEXT,
+            source_event_id INTEGER REFERENCES events(id),
+            importance REAL NOT NULL DEFAULT 0.5,
+            access_count INTEGER NOT NULL DEFAULT 0,
+            last_accessed TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
+            scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+        );
+        INSERT INTO facts_new SELECT * FROM facts;
+        DROP TABLE facts;
+        ALTER TABLE facts_new RENAME TO facts;",
+    )?;
+
+    // 4. Rebuild edges (source/target_fact_id reference facts)
+    conn.execute_batch(
+        "CREATE TABLE edges_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_fact_id INTEGER NOT NULL REFERENCES facts(id),
+            target_fact_id INTEGER NOT NULL REFERENCES facts(id),
+            relation_type TEXT NOT NULL,
+            weight REAL NOT NULL DEFAULT 1.0,
+            t_created TEXT NOT NULL,
+            t_expired TEXT,
+            scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+        );
+        INSERT INTO edges_new SELECT * FROM edges;
+        DROP TABLE edges;
+        ALTER TABLE edges_new RENAME TO edges;",
+    )?;
+
+    // 5. Rebuild summaries (no FK deps from other data tables)
+    conn.execute_batch(
+        "CREATE TABLE summaries_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')),
+            source_fact_ids TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+        );
+        INSERT INTO summaries_new SELECT * FROM summaries;
+        DROP TABLE summaries;
+        ALTER TABLE summaries_new RENAME TO summaries;",
+    )?;
+
+    // 6. Recreate FTS5 and repopulate from rebuilt facts table
+    conn.execute_batch(FTS5_DDL)?;
+    conn.execute_batch("INSERT INTO facts_fts(rowid, content) SELECT id, content FROM facts;")?;
+
+    // 7. Recreate triggers and indexes (DROP TABLE removed them)
+    conn.execute_batch(TRIGGERS_DDL)?;
+    conn.execute_batch(INDEXES_DDL)?;
+
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -170,7 +301,7 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL DEFAULT '{}',
     source TEXT NOT NULL,
     session_id TEXT,
-    scope_id INTEGER NOT NULL DEFAULT 1
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -199,7 +330,7 @@ CREATE TABLE IF NOT EXISTS edges (
     weight REAL NOT NULL DEFAULT 1.0,
     t_created TEXT NOT NULL,
     t_expired TEXT,
-    scope_id INTEGER NOT NULL DEFAULT 1
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
 );
 
 CREATE TABLE IF NOT EXISTS summaries (
@@ -209,7 +340,7 @@ CREATE TABLE IF NOT EXISTS summaries (
     level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')),
     source_fact_ids TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
-    scope_id INTEGER NOT NULL DEFAULT 1
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
 );
 
 CREATE TABLE IF NOT EXISTS config (
@@ -446,21 +577,20 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
     fn fresh_db_creates_latest_schema() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
-        // init_schema creates latest version directly
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("2".to_string())
+            Some("3".to_string())
         );
-        // migrate is a no-op
+        // migrate is a no-op on fresh DB
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("2".to_string())
+            Some("3".to_string())
         );
     }
 
     #[test]
-    fn migrate_v1_to_v2_runs_without_error() {
+    fn migrate_v1_through_v3_runs_without_error() {
         let conn = open_memory().unwrap();
         init_schema_v1(&conn).unwrap();
         assert_eq!(
@@ -470,7 +600,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("2".to_string())
+            Some("3".to_string())
         );
     }
 
@@ -479,11 +609,10 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         migrate(&conn).unwrap();
-        // Second call is a no-op
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("2".to_string())
+            Some("3".to_string())
         );
     }
 
@@ -497,35 +626,56 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
     }
 
     #[test]
-    fn migration_v1_to_v2_adds_scope_columns() {
+    fn migration_v1_through_v3_preserves_data() {
         let conn = open_memory().unwrap();
         init_schema_v1(&conn).unwrap();
-        // Insert a fact before migration
+        // Insert data before migration
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source)
+             VALUES (datetime('now'), 'test', '{}', 'unit-test')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata)
-             VALUES ('test', 'hash', X'00', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
+             VALUES ('test fact', 'hash', X'00', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         migrate(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("3".to_string())
+        );
 
-        // Verify scope_id column exists and defaults to 1
+        // Data survived both migrations
         let scope_id: i64 = conn
             .query_row(
-                "SELECT scope_id FROM facts WHERE content = 'test'",
+                "SELECT scope_id FROM facts WHERE content = 'test fact'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(scope_id, 1);
 
-        // Verify scopes table exists with root
+        // FTS still works after table rebuild
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH 'test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 1);
+
+        // Scopes table exists with root
         let root_label: String = conn
             .query_row("SELECT label FROM scopes WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(root_label, "root");
 
-        // Verify scope indexes were created by migration
+        // All scope indexes present
         let scope_indexes: Vec<String> = conn
             .prepare(
                 "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%_scope'",
@@ -546,6 +696,98 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
                 "missing index {expected} after migration"
             );
         }
+    }
+
+    /// Creates a v2-migrated schema: v1 tables + ALTER TABLE scope_id (no FK).
+    fn init_schema_v2_migrated(conn: &Connection) -> Result<()> {
+        init_schema_v1(conn)?;
+        conn.execute_batch(SCOPES_DDL)?;
+        conn.execute_batch(
+            "ALTER TABLE facts ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE edges ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE events ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE summaries ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;",
+        )?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
+             CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
+             CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
+             CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);",
+        )?;
+        set_config(conn, "schema_version", "2")?;
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v2_to_v3_enforces_scope_fk() {
+        let conn = open_memory().unwrap();
+        init_schema_v2_migrated(&conn).unwrap();
+
+        // Before migration: orphan scope_id succeeds (no FK constraint)
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id)
+             VALUES (datetime('now'), 'test', '{}', 'test', 999)",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM events WHERE scope_id = 999", [])
+            .unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("3".to_string())
+        );
+
+        // After migration: orphan scope_id fails (FK enforced)
+        let result = conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id)
+             VALUES (datetime('now'), 'test', '{}', 'test', 999)",
+            [],
+        );
+        assert!(
+            result.is_err(),
+            "expected FK violation for orphan scope_id after v2→v3 migration"
+        );
+    }
+
+    #[test]
+    fn migrate_v2_to_v3_preserves_fts() {
+        let conn = open_memory().unwrap();
+        init_schema_v2_migrated(&conn).unwrap();
+        // Insert a fact with FTS content
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata, scope_id)
+             VALUES ('searchable content here', 'h1', X'00', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}', 1)",
+            [],
+        ).unwrap();
+
+        migrate(&conn).unwrap();
+
+        // FTS index was rebuilt and repopulated
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH 'searchable'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // FTS trigger fires for new inserts after migration
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata, scope_id)
+             VALUES ('another document', 'h2', X'00', 'semantic', datetime('now'), 0.5, 0, datetime('now'), '{}', 1)",
+            [],
+        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH 'another'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
