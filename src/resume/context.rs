@@ -68,7 +68,6 @@ pub struct ResumeContext {
 /// Takes pre-resolved scope IDs to avoid holding cache locks across DB access.
 pub fn resume_context(
     conn: &Connection,
-    _root_id: i64,
     scope_ids: &[i64],
     embed_dim: usize,
     config: &ResumeConfig,
@@ -156,7 +155,7 @@ mod tests {
     fn resume_empty_db() {
         let conn = setup();
         let config = ResumeConfig::default();
-        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
+        let ctx = resume_context(&conn, &[1], DIM, &config).unwrap();
         assert!(ctx.pinned.is_empty());
         assert!(ctx.high_importance.is_empty());
         assert!(ctx.due.is_empty());
@@ -173,7 +172,7 @@ mod tests {
         fs.insert(&pinned).unwrap();
 
         let config = ResumeConfig::default();
-        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
+        let ctx = resume_context(&conn, &[1], DIM, &config).unwrap();
         assert_eq!(ctx.pinned.len(), 1);
         assert!(ctx.pinned[0].is_pinned);
     }
@@ -193,7 +192,7 @@ mod tests {
             now,
             ..ResumeConfig::default()
         };
-        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
+        let ctx = resume_context(&conn, &[1], DIM, &config).unwrap();
         assert_eq!(ctx.due.len(), 1);
     }
 
@@ -224,7 +223,7 @@ mod tests {
             now,
             ..ResumeConfig::default()
         };
-        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
+        let ctx = resume_context(&conn, &[1], DIM, &config).unwrap();
 
         let all_ids: Vec<i64> = ctx
             .pinned
@@ -255,7 +254,7 @@ mod tests {
             high_importance_min: 0.7,
             ..ResumeConfig::default()
         };
-        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
+        let ctx = resume_context(&conn, &[1], DIM, &config).unwrap();
         assert_eq!(ctx.high_importance.len(), 1);
         assert!(ctx.high_importance[0].importance_score >= 0.7);
     }

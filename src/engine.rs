@@ -194,7 +194,7 @@ impl MemoryEngine {
         // Explicit opts.pinned always wins; classifier only runs when pinned is None.
         let is_pinned = match opts.pinned {
             Some(p) => p,
-            None => classifier.map_or(false, |c| {
+            None => classifier.is_some_and(|c| {
                 let temp = Fact {
                     id: 0,
                     content: content.into(),
@@ -496,10 +496,10 @@ impl MemoryEngine {
     /// Returns `MemoryError::NotFound` if the requested scope path doesn't exist.
     pub fn resume_context(&self, config: &ResumeConfig) -> Result<ResumeContext> {
         // Step 1: Resolve scope IDs from cache (short-lived read lock)
-        let (root_id, scope_ids) = {
+        let scope_ids = {
             let tree = self.scope_tree.read();
             let root = tree.root_id();
-            let ids = match config.scope_path.as_ref() {
+            match config.scope_path.as_ref() {
                 Some(path) => {
                     let id = tree
                         .resolve_path(path)
@@ -507,13 +507,12 @@ impl MemoryEngine {
                     tree.ancestors(id)
                 }
                 None => vec![root],
-            };
-            (root, ids)
+            }
         }; // scope_tree read lock dropped here
 
         // Step 2: Query DB (no locks held)
         self.with_read(|conn| {
-            crate::resume::resume_context(conn, root_id, &scope_ids, self.embed_dim, config)
+            crate::resume::resume_context(conn, &scope_ids, self.embed_dim, config)
         })
     }
 }

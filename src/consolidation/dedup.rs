@@ -356,17 +356,27 @@ mod tests {
     #[test]
     fn survivor_inherits_max_importance() {
         let (conn, dim) = setup();
-        // Low importance fact with high importance_score, high importance fact with low score
+        // Low importance fact, high importance fact — near-duplicate embeddings
         insert_fact(&conn, dim, "low imp", vec![1.0, 0.0, 0.0, 0.0], 0.3);
         insert_fact(&conn, dim, "high imp", vec![0.99, 0.01, 0.0, 0.0], 0.9);
 
+        // Set distinct importance_scores before dedup
+        let store = FactStore::new(&conn, dim);
+        store.update_importance_score(1, 0.8).unwrap(); // low imp fact gets higher score
+        store.update_importance_score(2, 0.4).unwrap(); // high imp fact gets lower score
+
         local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
 
-        let store = FactStore::new(&conn, dim);
         let active = store.list_active().unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "high imp");
-        // Survivor should keep its own importance (0.9 > 0.3, no update needed)
+        // Survivor inherits max base importance (0.9 > 0.3)
         assert!((active[0].importance - 0.9).abs() < f64::EPSILON);
+        // Survivor inherits max importance_score (0.8 > 0.4)
+        assert!(
+            (active[0].importance_score - 0.8).abs() < f64::EPSILON,
+            "expected importance_score 0.8, got {}",
+            active[0].importance_score
+        );
     }
 }
