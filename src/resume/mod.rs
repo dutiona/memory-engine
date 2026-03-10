@@ -1,3 +1,5 @@
+//! Session bootstrapping: 3-tier context retrieval (identity, core, recent).
+
 pub(crate) mod context;
 
-pub use context::{resume_context, ResumeConfig, ResumeContext};
+pub use context::{ResumeConfig, ResumeContext, resume_context};
