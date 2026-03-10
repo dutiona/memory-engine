@@ -101,12 +101,12 @@ fn full_lifecycle_pinned_and_future_memory() {
         "due tier should be empty (future fact not yet due)"
     );
 
-    // 5. drain_due at current time — nothing due yet
-    assert!(engine.drain_due(now, None).unwrap().is_empty());
+    // 5. list_due at current time — nothing due yet
+    assert!(engine.list_due(now, None).unwrap().is_empty());
 
-    // 6. drain_due at future time — reminder surfaces
+    // 6. list_due at future time — reminder surfaces
     let later = now + chrono::Duration::hours(25);
-    let due = engine.drain_due(later, None).unwrap();
+    let due = engine.list_due(later, None).unwrap();
     assert_eq!(due.len(), 1);
     assert!(due[0].content.contains("release notes"));
 

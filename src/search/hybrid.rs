@@ -140,17 +140,19 @@ pub fn hybrid_search(
             continue;
         };
 
-        // Apply valid_at filter (post-filter — complex temporal semantics)
-        if let Some(valid_at) = query.valid_at {
-            if let Some(t_valid) = fact.t_valid {
-                if t_valid > valid_at {
-                    continue;
-                }
+        // Apply temporal filter (post-filter — complex temporal semantics).
+        // Use explicit valid_at if provided, otherwise default to now.
+        // This ensures future-dated facts (t_valid > now) are invisible to
+        // regular queries — they only surface via list_due()/resume_context().
+        let cutoff = query.valid_at.unwrap_or_else(Utc::now);
+        if let Some(t_valid) = fact.t_valid {
+            if t_valid > cutoff {
+                continue;
             }
-            if let Some(t_invalid) = fact.t_invalid {
-                if t_invalid <= valid_at {
-                    continue;
-                }
+        }
+        if let Some(t_invalid) = fact.t_invalid {
+            if t_invalid <= cutoff {
+                continue;
             }
         }
 

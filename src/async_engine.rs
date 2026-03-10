@@ -210,9 +210,9 @@ impl AsyncMemoryEngine {
     }
 
     /// Get facts whose scheduled time has arrived.
-    pub async fn drain_due(&self, now: DateTime<Utc>, scope: Option<String>) -> Result<Vec<Fact>> {
+    pub async fn list_due(&self, now: DateTime<Utc>, scope: Option<String>) -> Result<Vec<Fact>> {
         let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.drain_due(now, scope.as_deref()))
+        tokio::task::spawn_blocking(move || engine.list_due(now, scope.as_deref()))
             .await
             .map_err(join_err)?
     }
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_drain_due() {
+    async fn async_list_due() {
         let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
         let embedder: Arc<dyn EmbeddingProvider + Send + Sync> =
             Arc::new(MockEmbedder { dim: DIM });
@@ -377,7 +377,7 @@ mod tests {
             .await
             .unwrap();
 
-        let due = engine.drain_due(Utc::now(), None).await.unwrap();
+        let due = engine.list_due(Utc::now(), None).await.unwrap();
         assert_eq!(due.len(), 1);
         assert!(due[0].content.contains("reminder"));
     }

@@ -435,14 +435,18 @@ impl MemoryEngine {
 
     // --- Public API: Scheduling ---
 
-    /// Get facts whose scheduled time has arrived.
-    /// Returns facts where `t_valid <= now` and `t_valid IS NOT NULL`.
-    pub fn drain_due(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>> {
+    /// List facts whose scheduled time has arrived.
+    /// Returns active facts where `t_valid <= now` and `t_valid IS NOT NULL`.
+    ///
+    /// This is a read-only query — facts are not consumed or marked as delivered.
+    /// Consumers should track delivery state externally if incremental delivery
+    /// is needed, or use `pin_fact()`/`forget()` to manage fact lifecycle.
+    pub fn list_due(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>> {
         let scope_ids = self.resolve_scope_ids(scope)?;
         self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_due(now, &scope_ids))
     }
 
-    /// Scheduling hint: when should the consumer next call `drain_due()`?
+    /// Scheduling hint: when should the consumer next call `list_due()`?
     /// Returns the earliest `t_valid` among active future-dated facts.
     pub fn next_due_time(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>> {
         let scope_ids = self.resolve_scope_ids(scope)?;
@@ -1196,7 +1200,7 @@ mod tests {
     // --- Phase 3b / T8: Engine facade new methods ---
 
     #[test]
-    fn drain_due_returns_scheduled_facts() {
+    fn list_due_returns_scheduled_facts() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let embedder = MockEmbedder { dim: DIM };
         let past = Utc::now() - chrono::Duration::hours(1);
@@ -1247,12 +1251,43 @@ mod tests {
             )
             .unwrap();
 
-        let due = engine.drain_due(Utc::now(), None).unwrap();
+        let due = engine.list_due(Utc::now(), None).unwrap();
         assert_eq!(due.len(), 1);
         assert!(due[0].content.contains("check release"));
 
         let next = engine.next_due_time(None).unwrap();
         assert!(next.is_some()); // the future fact
+
+        // Future-dated facts should be invisible to regular search (no valid_at)
+        let search = engine
+            .query(&SearchQuery {
+                text: Some("future check".into()),
+                embedding: None,
+                mode: SearchMode::Fts,
+                limit: 10,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+        assert!(
+            search.is_empty(),
+            "future-dated facts should not appear in regular search"
+        );
+
+        // But past-due facts should be visible
+        let search2 = engine
+            .query(&SearchQuery {
+                text: Some("check release".into()),
+                embedding: None,
+                mode: SearchMode::Fts,
+                limit: 10,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+        assert_eq!(search2.len(), 1, "past-due facts should appear in search");
     }
 
     #[test]

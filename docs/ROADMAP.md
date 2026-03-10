@@ -139,7 +139,7 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 | 5    | Forgetting: pinned bypass + importance_score materialization         | ✅     |
 | 6    | Consolidation: pinned skip + importance_score inheritance            | ✅     |
 | 7    | `resume_context()` rework — 5-tier pipeline                          | ✅     |
-| 8    | Engine facade: drain_due, next_due_time, pin/unpin, classifier       | ✅     |
+| 8    | Engine facade: list_due, next_due_time, pin/unpin, classifier        | ✅     |
 | 9    | AsyncMemoryEngine mirror                                             | ✅     |
 | 10   | Documentation                                                        | ✅     |
 | 11   | Integration tests                                                    | ✅     |
@@ -149,8 +149,8 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 **Key features:**
 
 - **Pinned facts** (`is_pinned`) — unforgettable, bypass forgetting and dedup. Agent identity and core beliefs.
-- **Future memory** (`t_valid`) — facts with `t_valid` in the future remain invisible until their scheduled time. `drain_due(now)` for incremental, `resume_context()` for full boot.
-- **Scheduling API** — `drain_due()`, `next_due_time()` let consumers implement timer-based polling.
+- **Future memory** (`t_valid`) — facts with `t_valid` in the future remain invisible until their scheduled time. `list_due(now)` for incremental, `resume_context()` for full boot.
+- **Scheduling API** — `list_due()`, `next_due_time()` let consumers implement timer-based polling.
 - **`PersistenceClassifier` trait** — consumer-provided auto-pinning logic. Explicit `opts.pinned` always overrides.
 - **Materialized `importance_score`** — composite score updated during `prune()` and `consolidate()`. O(1) sort in `resume_context()`.
 - **Event envelope** — `origin_node_id`, `sequence_id`, `created_at` for future multi-node sync. No behavioral change.
@@ -190,7 +190,7 @@ Consumer (AI agent, CLI tool, MCP server)
 │           MemoryEngine (Send + Sync)     │
 │  ingest · add_fact · query               │  ← Phase 1
 │  consolidate · forget · resolve          │  ← Phase 2
-│  resume_context · drain_due · pin/unpin  │  ← Phase 3/3b
+│  resume_context · list_due · pin/unpin  │  ← Phase 3/3b
 ├──────────────────────────────────────────┤
 │  AsyncMemoryEngine (tokio wrapper)       │  ← Phase 3
 ├──────────────────────────────────────────┤
