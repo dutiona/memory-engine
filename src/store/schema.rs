@@ -142,18 +142,22 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             let result: Result<()> = (|| {
                 let tx = conn.unchecked_transaction()?;
                 migration(&tx)?;
+                if *disable_fk {
+                    // Verify FK integrity BEFORE committing. PRAGMA foreign_key_check
+                    // works regardless of the foreign_keys setting — it's an explicit
+                    // scan, not runtime enforcement. If the rebuilt tables contain
+                    // orphan references, we abort here and the transaction rolls back.
+                    check_foreign_keys(&tx)?;
+                }
                 set_config(&tx, "schema_version", &target.to_string())?;
                 tx.commit()?;
                 Ok(())
             })();
             if *disable_fk {
-                // Re-enable FK checks unconditionally, even if migration failed.
+                // Re-enable FK enforcement unconditionally, even if migration failed.
                 // Transaction rollback already restored the data, but the
                 // connection-level PRAGMA must be restored explicitly.
                 set_foreign_keys(conn, true)?;
-                if result.is_ok() {
-                    check_foreign_keys(conn)?;
-                }
             }
             result?;
         }
@@ -845,6 +849,33 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn migrate_v2_to_v3_rejects_orphan_scope_ids() {
+        let conn = open_memory().unwrap();
+        init_schema_v2_migrated(&conn).unwrap();
+        // Insert a row with an orphan scope_id (no FK enforcement in v2)
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id)
+             VALUES (datetime('now'), 'test', '{}', 'test', 999)",
+            [],
+        )
+        .unwrap();
+
+        // Migration must fail — orphan scope_id violates FK check
+        let err = migrate(&conn).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Migration(_)),
+            "expected Migration error for orphan scope_id, got: {err:?}"
+        );
+
+        // DB must NOT be stuck at v3 — rollback should leave it at v2
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("2".to_string()),
+            "schema_version should remain 2 after failed migration"
+        );
     }
 
     #[test]
