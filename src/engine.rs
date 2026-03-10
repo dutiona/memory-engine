@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use parking_lot::{MutexGuard, RwLock};
 use rusqlite::Connection;
 
@@ -17,7 +17,7 @@ use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
-    EmbeddingProvider, ForgetPolicy, PruneStats, SummaryGenerator,
+    EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, SummaryGenerator,
 };
 use crate::types::{AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact};
 
@@ -170,6 +170,7 @@ impl MemoryEngine {
         embedder: &dyn EmbeddingProvider,
         scope: Option<&str>,
         opts: Option<&AddFactOptions>,
+        classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<i64> {
         // Embed OUTSIDE the write lock (potentially slow)
         let embedding = embedder.embed(content)?;
@@ -189,6 +190,36 @@ impl MemoryEngine {
             None => 1, // root scope
         };
 
+        // Explicit opts.pinned always wins; classifier only runs when pinned is None.
+        let is_pinned = match opts.pinned {
+            Some(p) => p,
+            None => classifier.map_or(false, |c| {
+                let temp = Fact {
+                    id: 0,
+                    content: content.into(),
+                    content_hash: String::new(),
+                    embedding: embedding.clone(),
+                    fact_type: fact_type.clone(),
+                    t_created: now,
+                    t_expired: None,
+                    t_valid: opts.t_valid,
+                    t_invalid: opts.t_invalid,
+                    source_event_id,
+                    importance: opts.importance.unwrap_or(0.5),
+                    access_count: 0,
+                    last_accessed: now,
+                    metadata: opts
+                        .metadata
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                    scope_id,
+                    is_pinned: false,
+                    importance_score: 0.5,
+                };
+                c.should_pin(&temp)
+            }),
+        };
+
         let new_fact = NewFact {
             content: content.into(),
             content_hash: String::new(), // FactStore::insert computes this via blake3
@@ -204,7 +235,7 @@ impl MemoryEngine {
             access_count: 0,
             last_accessed: now,
             metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
-            is_pinned: opts.pinned.unwrap_or(false),
+            is_pinned,
         };
 
         FactStore::new(&conn, self.embed_dim).insert(&new_fact)
@@ -399,6 +430,55 @@ impl MemoryEngine {
         self.with_read(|conn| SummaryStore::new(conn, self.embed_dim).list_by_level(level))
     }
 
+    // --- Public API: Scheduling ---
+
+    /// Get facts whose scheduled time has arrived.
+    /// Returns facts where `t_valid <= now` and `t_valid IS NOT NULL`.
+    pub fn drain_due(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>> {
+        let scope_ids = self.resolve_scope_ids(scope)?;
+        self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_due(now, &scope_ids))
+    }
+
+    /// Scheduling hint: when should the consumer next call `drain_due()`?
+    /// Returns the earliest `t_valid` among active future-dated facts.
+    pub fn next_due_time(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>> {
+        let scope_ids = self.resolve_scope_ids(scope)?;
+        self.with_read(|conn| {
+            FactStore::new(conn, self.embed_dim).next_due_time(Utc::now(), &scope_ids)
+        })
+    }
+
+    // --- Public API: Pinning ---
+
+    /// Pin a fact (make it unforgettable).
+    pub fn pin_fact(&self, id: i64) -> Result<()> {
+        let conn = self.write_conn();
+        FactStore::new(&conn, self.embed_dim).set_pinned(id, true)
+    }
+
+    /// Unpin a fact (allow forgetting).
+    pub fn unpin_fact(&self, id: i64) -> Result<()> {
+        let conn = self.write_conn();
+        FactStore::new(&conn, self.embed_dim).set_pinned(id, false)
+    }
+
+    // --- Private helpers ---
+
+    /// Resolve scope IDs from an optional scope path.
+    /// Returns [root_id] when scope is None, or ancestor IDs when scope exists.
+    fn resolve_scope_ids(&self, scope: Option<&str>) -> Result<Vec<i64>> {
+        let tree = self.scope_tree.read();
+        match scope {
+            Some(path) => {
+                let id = tree
+                    .resolve_path(path)
+                    .ok_or_else(|| MemoryError::NotFound(format!("scope path: {path}")))?;
+                Ok(tree.ancestors(id))
+            }
+            None => Ok(vec![tree.root_id()]),
+        }
+    }
+
     // --- Public API: Resume ---
 
     /// Retrieve tiered context for resuming a session.
@@ -441,7 +521,7 @@ impl MemoryEngine {
 mod tests {
     use super::*;
     use crate::search::hybrid::SearchMode;
-    use crate::traits::{ConsolidationConfig, CrudDecision, ForgetPolicy};
+    use crate::traits::{ConsolidationConfig, CrudDecision, ForgetPolicy, PersistenceClassifier};
     use crate::types::{EventType, Fact, FactType};
 
     const DIM: usize = 4;
@@ -546,6 +626,7 @@ mod tests {
                 &embedder,
                 None,
                 None,
+                None,
             )
             .unwrap();
         assert!(id > 0);
@@ -561,6 +642,7 @@ mod tests {
                 FactType::Semantic,
                 None,
                 &embedder,
+                None,
                 None,
                 None,
             )
@@ -820,6 +902,7 @@ mod tests {
                 &embedder,
                 None,
                 Some(&opts),
+                None,
             )
             .unwrap();
         let fact = engine.get_fact(id).unwrap();
@@ -844,6 +927,7 @@ mod tests {
                 &embedder,
                 None,
                 Some(&opts),
+                None,
             )
             .unwrap();
         let fact = engine.get_fact(id).unwrap();
@@ -863,6 +947,7 @@ mod tests {
                 &embedder,
                 Some("user:test/project:demo"),
                 None,
+                None,
             )
             .unwrap();
         let fact = engine.get_fact(id).unwrap();
@@ -879,6 +964,7 @@ mod tests {
                 FactType::Semantic,
                 None,
                 &embedder,
+                None,
                 None,
                 None,
             )
@@ -912,6 +998,7 @@ mod tests {
                 &embedder,
                 None,
                 None,
+                None,
             )
             .unwrap();
         engine
@@ -920,6 +1007,7 @@ mod tests {
                 FactType::Semantic,
                 None,
                 &embedder,
+                None,
                 None,
                 None,
             )
@@ -966,6 +1054,7 @@ mod tests {
                 FactType::Semantic,
                 None,
                 &embedder,
+                None,
                 None,
                 None,
             )
@@ -1022,6 +1111,7 @@ mod tests {
                 &embedder,
                 None,
                 Some(&opts_pinned),
+                None,
             )
             .unwrap();
 
@@ -1038,6 +1128,7 @@ mod tests {
                 &embedder,
                 None,
                 Some(&opts_low),
+                None,
             )
             .unwrap();
 
@@ -1078,6 +1169,7 @@ mod tests {
                 &embedder,
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -1097,5 +1189,184 @@ mod tests {
             "expected empty results for nonexistent scope, got {}",
             results.len()
         );
+    }
+
+    // --- Phase 3b / T8: Engine facade new methods ---
+
+    #[test]
+    fn drain_due_returns_scheduled_facts() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let future = Utc::now() + chrono::Duration::hours(1);
+
+        // Past-due fact
+        engine
+            .add_fact(
+                "check release",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&AddFactOptions {
+                    t_valid: Some(past),
+                    ..Default::default()
+                }),
+                None,
+            )
+            .unwrap();
+
+        // Future fact
+        engine
+            .add_fact(
+                "future check",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&AddFactOptions {
+                    t_valid: Some(future),
+                    ..Default::default()
+                }),
+                None,
+            )
+            .unwrap();
+
+        // Regular fact (no t_valid)
+        engine
+            .add_fact(
+                "regular",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let due = engine.drain_due(Utc::now(), None).unwrap();
+        assert_eq!(due.len(), 1);
+        assert!(due[0].content.contains("check release"));
+
+        let next = engine.next_due_time(None).unwrap();
+        assert!(next.is_some()); // the future fact
+    }
+
+    #[test]
+    fn pin_unpin_fact() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let id = engine
+            .add_fact(
+                "pinnable",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(!engine.get_fact(id).unwrap().is_pinned);
+        engine.pin_fact(id).unwrap();
+        assert!(engine.get_fact(id).unwrap().is_pinned);
+        engine.unpin_fact(id).unwrap();
+        assert!(!engine.get_fact(id).unwrap().is_pinned);
+    }
+
+    #[test]
+    fn add_fact_with_explicit_pin() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let opts = AddFactOptions {
+            pinned: Some(true),
+            ..Default::default()
+        };
+        let id = engine
+            .add_fact(
+                "identity",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&opts),
+                None,
+            )
+            .unwrap();
+        assert!(engine.get_fact(id).unwrap().is_pinned);
+    }
+
+    #[test]
+    fn add_fact_with_classifier() {
+        struct PinSemantic;
+        impl PersistenceClassifier for PinSemantic {
+            fn should_pin(&self, fact: &Fact) -> bool {
+                fact.fact_type == FactType::Semantic
+            }
+        }
+
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let classifier = PinSemantic;
+
+        let id = engine
+            .add_fact(
+                "auto-pinned",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+                Some(&classifier),
+            )
+            .unwrap();
+        assert!(engine.get_fact(id).unwrap().is_pinned);
+
+        let id2 = engine
+            .add_fact(
+                "not pinned",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                Some(&classifier),
+            )
+            .unwrap();
+        assert!(!engine.get_fact(id2).unwrap().is_pinned);
+    }
+
+    #[test]
+    fn explicit_pin_overrides_classifier() {
+        struct AlwaysPin;
+        impl PersistenceClassifier for AlwaysPin {
+            fn should_pin(&self, _fact: &Fact) -> bool {
+                true
+            }
+        }
+
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let classifier = AlwaysPin;
+
+        // Explicitly set pinned=false — should override the classifier
+        let opts = AddFactOptions {
+            pinned: Some(false),
+            ..Default::default()
+        };
+        let id = engine
+            .add_fact(
+                "not pinned despite classifier",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&opts),
+                Some(&classifier),
+            )
+            .unwrap();
+        assert!(!engine.get_fact(id).unwrap().is_pinned);
     }
 }

@@ -63,6 +63,7 @@ fn full_roundtrip() {
             &embedder,
             None,
             None,
+            None,
         )
         .unwrap();
     let fact2_id = engine
@@ -73,6 +74,7 @@ fn full_roundtrip() {
             &embedder,
             None,
             None,
+            None,
         )
         .unwrap();
     let fact3_id = engine
@@ -81,6 +83,7 @@ fn full_roundtrip() {
             FactType::Episodic,
             Some(event_id),
             &embedder,
+            None,
             None,
             None,
         )

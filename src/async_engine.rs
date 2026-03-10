@@ -105,6 +105,7 @@ impl AsyncMemoryEngine {
                 embedder.as_ref(),
                 scope.as_deref(),
                 opts.as_ref(),
+                None, // classifier — added in Task 9
             )
         })
         .await
