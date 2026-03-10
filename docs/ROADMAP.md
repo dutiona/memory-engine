@@ -104,18 +104,65 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 ---
 
-### Phase 3: Hardening & Scalability 🔲
+### Phase 3: Hardening & Scalability ✅
 
-Design tensions surfaced during Phase 1 implementation and code review. Tracked as individual issues.
+**PR:** [#20](https://github.com/dutiona/memory-engine/pull/20) (squash-merged)
+**Plan:** [Issue #15](https://github.com/dutiona/memory-engine/issues/15)
 
-| Issue                                                   | Concern                                                  | Trigger                                                |
-| ------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------ |
-| [#3](https://github.com/dutiona/memory-engine/issues/3) | Brute-force vector search → ANN index                    | Fact count exceeds ~50K-100K                           |
-| [#4](https://github.com/dutiona/memory-engine/issues/4) | Post-overfetch filtering → SQL-level filters             | Skewed type distributions or restrictive `valid_at`    |
-| [#5](https://github.com/dutiona/memory-engine/issues/5) | `!Send`/`!Sync` → thread-safe engine                     | Async-first consumers, concurrent MCP requests         |
-| [#6](https://github.com/dutiona/memory-engine/issues/6) | Hardcoded `add_fact` defaults → `AddFactOptions` builder | Consumers needing per-fact importance/metadata control |
+| Task | Component                                                   | Status |
+| ---- | ----------------------------------------------------------- | ------ |
+| T1   | Thread safety (`Send + Sync`, `parking_lot`)                | ✅     |
+| T2   | `AddFactOptions` builder (importance, metadata, temporal)   | ✅     |
+| T3   | Connection pool (N readers + 1 writer, WAL)                 | ✅     |
+| T4   | Async engine (`AsyncMemoryEngine`, tokio `spawn_blocking`)  | ✅     |
+| T5   | Schema migration framework (versioned, forward-only, v1→v2) | ✅     |
+| T6   | Hierarchical scoping (`ScopeTree`, path resolution)         | ✅     |
+| T7   | Criterion benchmarks (search, ingest, consolidate)          | ✅     |
+| T8   | FTS/SQL-level scope filtering                               | ✅     |
+| T9   | `resume_context()` — tiered cognitive boot                  | ✅     |
 
-**Approach:** Data-driven. Add criterion benchmarks first, then migrate when numbers justify it. No speculative optimization.
+**Deliverable:** Thread-safe engine with connection pool, async wrapper, scoping, migration framework, and `resume_context()`. 158 tests.
+
+---
+
+### Phase 3b: Temporal Memory & Agent Lifecycle ✅
+
+**PR:** (pending)
+**Plan:** [Issue #25](https://github.com/dutiona/memory-engine/issues/25)
+
+| Task | Component                                                            | Status |
+| ---- | -------------------------------------------------------------------- | ------ |
+| 1    | Schema migration v2→v3 (is_pinned, importance_score, event envelope) | ✅     |
+| 2    | Type changes (Fact, NewFact, Event, NewEvent, AddFactOptions)        | ✅     |
+| 3    | FactStore: list_pinned, list_due, next_due_time, set_pinned          | ✅     |
+| 4    | `PersistenceClassifier` trait (auto-pinning)                         | ✅     |
+| 5    | Forgetting: pinned bypass + importance_score materialization         | ✅     |
+| 6    | Consolidation: pinned skip + importance_score inheritance            | ✅     |
+| 7    | `resume_context()` rework — 5-tier pipeline                          | ✅     |
+| 8    | Engine facade: drain_due, next_due_time, pin/unpin, classifier       | ✅     |
+| 9    | AsyncMemoryEngine mirror                                             | ✅     |
+| 10   | Documentation                                                        | ✅     |
+| 11   | Integration tests                                                    | ✅     |
+
+**Deliverable:** Time-aware memory with unforgettable facts, future memory surfacing, scheduling API, 5-tier cognitive boot sequence. 183 tests (179 unit + 4 integration).
+
+**Key features:**
+
+- **Pinned facts** (`is_pinned`) — unforgettable, bypass forgetting and dedup. Agent identity and core beliefs.
+- **Future memory** (`t_valid`) — facts with `t_valid` in the future remain invisible until their scheduled time. `drain_due(now)` for incremental, `resume_context()` for full boot.
+- **Scheduling API** — `drain_due()`, `next_due_time()` let consumers implement timer-based polling.
+- **`PersistenceClassifier` trait** — consumer-provided auto-pinning logic. Explicit `opts.pinned` always overrides.
+- **Materialized `importance_score`** — composite score updated during `prune()` and `consolidate()`. O(1) sort in `resume_context()`.
+- **Event envelope** — `origin_node_id`, `sequence_id`, `created_at` for future multi-node sync. No behavioral change.
+- **5-tier `resume_context()`** — pinned → high_importance → due → recent → kb_stubs.
+
+**Implementation learnings:**
+
+- `importance_score` is on `Fact` only (engine-computed composite), not on `NewFact` (consumer input). DB default handles it.
+- `PersistenceClassifier` receives a synthetic `Fact` with `id=0` during `add_fact()` — classifiers should rely on `content`, `fact_type`, `importance`, `metadata` only.
+- Event envelope fields are metadata-only — no behavioral change, defaults to `'local'/0/NULL`.
+- Pinned facts are cross-scope in `resume_context()` tier 1 (always present regardless of scope filter).
+- Consolidation dedup skips pinned facts in both inner and outer loops to prevent merging identity facts.
 
 ---
 
@@ -123,13 +170,13 @@ Design tensions surfaced during Phase 1 implementation and code review. Tracked 
 
 These are not committed to any phase. They represent directions the research suggests but that we haven't validated need for.
 
-- **Async API** — `async fn query(...)` wrapper, likely via `tokio::task::spawn_blocking`
 - **MCP server adapter** — Expose engine as a Model Context Protocol tool server
-- **Schema migrations** — `schema_version` is 1. Migration framework when schema evolves.
 - **Hierarchical summarization** — Multi-level abstractions (Memento-style). Currently consolidation is flat (local/cluster/global).
 - **Cross-session memory sharing** — Multiple agents sharing one store. Requires session isolation or namespacing.
 - **Multimodal memory** — Image/audio embeddings alongside text. Schema supports it (BLOB embeddings are dimension-agnostic) but no consumer integration.
 - **Parameter updates** — Doc-to-LoRA style adapter generation from memory contents. Explicitly out of scope — engine is retrieval-only.
+- **Knowledge Base integration** — `kb_stubs` placeholder in `ResumeContext` for Phase 5 external knowledge references.
+- **Multi-node sync** — Event envelope fields (`origin_node_id`, `sequence_id`) are forward-compatible for distributed sync.
 
 ---
 
@@ -139,45 +186,54 @@ These are not committed to any phase. They represent directions the research sug
 Consumer (AI agent, CLI tool, MCP server)
     │
     ▼
-┌──────────────────────────────────────┐
-│           MemoryEngine               │
-│  ingest · add_fact · query           │  ← Phase 1 ✅
-│  consolidate · forget · resolve      │  ← Phase 2
-├──────────────────────────────────────┤
-│  Search                              │
-│  ├─ FTS5 (BM25)                      │
-│  ├─ Vector (cosine, brute-force)     │
-│  └─ Hybrid (RRF k=60)               │
-├──────────────────────────────────────┤
-│  Store                               │
-│  ├─ EventStore (append-only log)     │
-│  ├─ FactStore (bi-temporal + BLOB)   │
-│  ├─ EdgeStore (graph persistence)    │  ← Phase 2
-│  └─ SummaryStore                     │  ← Phase 2
-├──────────────────────────────────────┤
-│  Graph (petgraph DiGraph)            │  ← Phase 2
-├──────────────────────────────────────┤
-│  Forgetting (Ebbinghaus decay)       │  ← Phase 2
-├──────────────────────────────────────┤
-│  Consolidation (3-pass)              │  ← Phase 2
-├──────────────────────────────────────┤
-│  Conflict (bi-temporal arbiter)      │  ← Phase 2
-└──────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│           MemoryEngine (Send + Sync)     │
+│  ingest · add_fact · query               │  ← Phase 1
+│  consolidate · forget · resolve          │  ← Phase 2
+│  resume_context · drain_due · pin/unpin  │  ← Phase 3/3b
+├──────────────────────────────────────────┤
+│  AsyncMemoryEngine (tokio wrapper)       │  ← Phase 3
+├──────────────────────────────────────────┤
+│  ConnectionPool (N readers + 1 writer)   │  ← Phase 3
+├──────────────────────────────────────────┤
+│  Search                                  │
+│  ├─ FTS5 (BM25, scope-filtered)          │
+│  ├─ Vector (cosine, brute-force)         │
+│  └─ Hybrid (RRF k=60)                   │
+├──────────────────────────────────────────┤
+│  Store                                   │
+│  ├─ EventStore (append-only log)         │
+│  ├─ FactStore (bi-temporal + pinned)     │
+│  ├─ EdgeStore (graph persistence)        │
+│  ├─ SummaryStore                         │
+│  └─ ScopeStore (hierarchical scoping)   │  ← Phase 3
+├──────────────────────────────────────────┤
+│  Graph (petgraph DiGraph)                │
+├──────────────────────────────────────────┤
+│  Forgetting (Ebbinghaus + pinned bypass) │  ← Phase 3b
+├──────────────────────────────────────────┤
+│  Consolidation (3-pass + pinned skip)    │  ← Phase 3b
+├──────────────────────────────────────────┤
+│  Conflict (bi-temporal arbiter)          │
+├──────────────────────────────────────────┤
+│  Resume (5-tier cognitive boot)          │  ← Phase 3b
+└──────────────────────────────────────────┘
     │
     ▼
   SQLite WAL (rusqlite bundled-full)
-  ├─ events, facts, edges, summaries, config
+  ├─ events, facts, edges, summaries, scopes, config
   ├─ facts_fts (FTS5 virtual table)
-  └─ 9 indexes
+  └─ 19 indexes (schema v3)
 ```
 
 ## Consumer-Provided Traits
 
 ```
-EmbeddingProvider::embed(text) → Vec<f32>        ← Phase 1 ✅
-SummaryGenerator::summarize(facts) → String      ← Phase 2
-SummaryGenerator::embed(text) → Vec<f32>         ← Phase 2
-ConflictArbiter::arbitrate(old, new) → CrudDecision  ← Phase 2
+EmbeddingProvider::embed(text) → Vec<f32>              ← Phase 1
+SummaryGenerator::summarize(facts) → String            ← Phase 2
+SummaryGenerator::embed(text) → Vec<f32>               ← Phase 2
+ConflictArbiter::arbitrate(old, new) → CrudDecision    ← Phase 2
+PersistenceClassifier::should_pin(fact) → bool         ← Phase 3b
 ```
 
 The engine has zero LLM/network dependencies. All intelligence is injected by the consumer via these traits.
