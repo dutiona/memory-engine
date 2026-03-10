@@ -158,12 +158,12 @@ impl VectorSearchStrategy for HnswStrategy {
         let mut ef = DEFAULT_EF_SEARCH;
         let mut overfetch = limit * OVERFETCH_FACTOR;
         let mut results = Vec::new();
+        let query_vec = query_embedding.to_vec();
 
         for _attempt in 0..MAX_WIDEN_ATTEMPTS {
             // Phase 1: Collect HNSW candidates under read lock, then release.
             let candidates = {
                 let inner = self.inner.read();
-                let query_vec = query_embedding.to_vec();
                 let mut searcher: Searcher<u32> = Searcher::default();
 
                 // dest length must not exceed the number of indexed items
