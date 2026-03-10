@@ -10,7 +10,7 @@ use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
 use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
-use crate::search::strategy::{BruteForce, VectorSearchStrategy};
+use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};
@@ -29,6 +29,8 @@ pub struct EngineConfig {
     pub embed_dim: usize,
     /// Number of read connections in the pool (default: 4).
     pub read_pool_size: usize,
+    /// Optional search configuration for ANN strategy dispatch.
+    pub search_config: Option<SearchConfig>,
 }
 
 impl EngineConfig {
@@ -39,6 +41,7 @@ impl EngineConfig {
             path,
             embed_dim,
             read_pool_size: 4,
+            search_config: None,
         }
     }
 }
@@ -57,6 +60,10 @@ pub struct MemoryEngine {
     graph: RwLock<MemoryGraph>,
     scope_tree: RwLock<ScopeTree>,
     vector_strategy: Box<dyn VectorSearchStrategy>,
+    #[cfg(feature = "ann")]
+    hnsw_strategy: Option<crate::search::ann::HnswStrategy>,
+    #[cfg_attr(not(feature = "ann"), allow(dead_code))]
+    search_config: Option<SearchConfig>,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -64,6 +71,7 @@ impl std::fmt::Debug for MemoryEngine {
         f.debug_struct("MemoryEngine")
             .field("embed_dim", &self.embed_dim)
             .field("vector_strategy", &self.vector_strategy.name())
+            .field("active_strategy", &self.active_strategy_name())
             .finish_non_exhaustive()
     }
 }
@@ -79,7 +87,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub fn open(config: &EngineConfig) -> Result<Self> {
         let pool = ConnectionPool::open(&config.path, config.embed_dim, config.read_pool_size)?;
-        Self::init_from_pool(pool, config.embed_dim)
+        Self::init_from_pool(pool, config.embed_dim, config.search_config.clone())
     }
 
     /// Open an in-memory engine for testing.
@@ -89,11 +97,28 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` if the connection or schema setup fails.
     pub fn open_memory(embed_dim: usize) -> Result<Self> {
         let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(pool, embed_dim)
+        Self::init_from_pool(pool, embed_dim, None)
+    }
+
+    /// Open an in-memory engine with optional search config for testing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` if the connection or schema setup fails.
+    pub fn open_memory_with_config(
+        embed_dim: usize,
+        search_config: Option<SearchConfig>,
+    ) -> Result<Self> {
+        let pool = ConnectionPool::open_memory(embed_dim)?;
+        Self::init_from_pool(pool, embed_dim, search_config)
     }
 
     /// Shared constructor logic: validate embed_dim, load graph and scope tree.
-    fn init_from_pool(pool: ConnectionPool, embed_dim: usize) -> Result<Self> {
+    fn init_from_pool(
+        pool: ConnectionPool,
+        embed_dim: usize,
+        search_config: Option<SearchConfig>,
+    ) -> Result<Self> {
         // Scope the MutexGuard so it drops before we move `pool` into the struct.
         let (graph, scope_tree) = {
             let conn = pool.write();
@@ -102,13 +127,58 @@ impl MemoryEngine {
             let scope_tree = ScopeTree::load(&conn)?;
             (graph, scope_tree)
         };
+
+        #[cfg(feature = "ann")]
+        let hnsw_strategy = if let Some(ref cfg) = search_config {
+            // Skip building the index if the threshold is unreachable.
+            if cfg.ann_threshold < usize::MAX {
+                let conn = pool.write();
+                Some(crate::search::ann::HnswStrategy::build_from_db(
+                    &conn, embed_dim,
+                )?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             pool,
             embed_dim,
             graph: RwLock::new(graph),
             scope_tree: RwLock::new(scope_tree),
             vector_strategy: Box::new(BruteForce),
+            #[cfg(feature = "ann")]
+            hnsw_strategy,
+            search_config,
         })
+    }
+
+    /// Name of the strategy that would be used for a query right now.
+    #[must_use]
+    pub fn active_strategy_name(&self) -> &str {
+        if self.should_use_hnsw() {
+            "hnsw"
+        } else {
+            "brute_force"
+        }
+    }
+
+    #[cfg(feature = "ann")]
+    fn should_use_hnsw(&self) -> bool {
+        self.hnsw_strategy.as_ref().map_or(false, |hnsw| {
+            hnsw.active_count()
+                >= self
+                    .search_config
+                    .as_ref()
+                    .map_or(usize::MAX, |c| c.ann_threshold)
+        })
+    }
+
+    #[cfg(not(feature = "ann"))]
+    const fn should_use_hnsw(&self) -> bool {
+        false
     }
 
     fn validate_or_set_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
@@ -180,37 +250,49 @@ impl MemoryEngine {
         let now = Utc::now();
         let opts = opts.cloned().unwrap_or_default();
 
-        // Resolve scope + insert fact in a single write lock
-        let conn = self.write_conn();
-        let scope_id = match scope {
-            Some(path) => {
-                let scope_store = ScopeStore::new(&conn);
-                let id = scope_store.ensure_path(path)?;
-                let node = scope_store.get(id)?;
-                self.scope_tree.write().insert(node);
-                id
-            }
-            None => 1, // root scope
-        };
+        // Resolve scope + insert fact in a single write lock, then release
+        #[cfg(feature = "ann")]
+        let emb_copy = embedding.clone();
 
-        let new_fact = NewFact {
-            content: content.into(),
-            content_hash: String::new(), // FactStore::insert computes this via blake3
-            embedding,
-            fact_type,
-            t_created: now,
-            t_expired: None,
-            t_valid: opts.t_valid,
-            t_invalid: opts.t_invalid,
-            source_event_id,
-            scope_id,
-            importance: opts.importance.unwrap_or(0.5),
-            access_count: 0,
-            last_accessed: now,
-            metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
-        };
+        let fact_id = {
+            let conn = self.write_conn();
+            let scope_id = match scope {
+                Some(path) => {
+                    let scope_store = ScopeStore::new(&conn);
+                    let id = scope_store.ensure_path(path)?;
+                    let node = scope_store.get(id)?;
+                    self.scope_tree.write().insert(node);
+                    id
+                }
+                None => 1, // root scope
+            };
 
-        FactStore::new(&conn, self.embed_dim).insert(&new_fact)
+            let new_fact = NewFact {
+                content: content.into(),
+                content_hash: String::new(), // FactStore::insert computes this via blake3
+                embedding,
+                fact_type,
+                t_created: now,
+                t_expired: None,
+                t_valid: opts.t_valid,
+                t_invalid: opts.t_invalid,
+                source_event_id,
+                scope_id,
+                importance: opts.importance.unwrap_or(0.5),
+                access_count: 0,
+                last_accessed: now,
+                metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
+            };
+
+            FactStore::new(&conn, self.embed_dim).insert(&new_fact)?
+        }; // DB lock released = committed
+
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            hnsw.notify_insert(fact_id, &emb_copy);
+        }
+
+        Ok(fact_id)
     }
 
     // --- Public API: Query ---
@@ -235,7 +317,15 @@ impl MemoryEngine {
             None => None,
         };
 
-        let strategy = &*self.vector_strategy;
+        #[cfg(feature = "ann")]
+        let strategy: &dyn VectorSearchStrategy = if self.should_use_hnsw() {
+            self.hnsw_strategy.as_ref().unwrap()
+        } else {
+            &*self.vector_strategy
+        };
+        #[cfg(not(feature = "ann"))]
+        let strategy: &dyn VectorSearchStrategy = &*self.vector_strategy;
+
         self.with_read(|conn| {
             hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
         })
@@ -274,13 +364,29 @@ impl MemoryEngine {
         generator: &dyn SummaryGenerator,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        let conn = self.write_conn();
-        let stats = crate::consolidation::consolidate(&conn, generator, self.embed_dim, config)?;
+        let (stats, expired_ids) = {
+            let conn = self.write_conn();
+            let (stats, expired_ids) =
+                crate::consolidation::consolidate(&conn, generator, self.embed_dim, config)?;
 
-        // Rebuild graph inside write lock — dedup may have expired facts and their edges
-        if stats.duplicates_removed > 0 {
-            *self.graph.write() = MemoryGraph::load_from_db(&conn)?;
+            // Rebuild graph inside write lock — dedup may have expired facts and their edges
+            if stats.duplicates_removed > 0 {
+                *self.graph.write() = MemoryGraph::load_from_db(&conn)?;
+            }
+
+            (stats, expired_ids)
+        }; // DB lock released
+
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            for &id in &expired_ids {
+                hnsw.notify_expire(id);
+            }
         }
+
+        // Suppress unused variable warning when ann feature is disabled
+        #[cfg(not(feature = "ann"))]
+        let _ = expired_ids;
 
         Ok(stats)
     }
@@ -296,9 +402,20 @@ impl MemoryEngine {
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        let conn = self.write_conn();
-        let mut graph = self.graph.write();
-        crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())
+        let (stats, pruned_ids) = {
+            let conn = self.write_conn();
+            let mut graph = self.graph.write();
+            crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())?
+        };
+
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            for &id in &pruned_ids {
+                hnsw.notify_expire(id);
+            }
+        }
+
+        Ok(stats)
     }
 
     // --- Public API: Conflict Resolution ---
@@ -318,17 +435,42 @@ impl MemoryEngine {
         old_id: i64,
         new_fact: &NewFact,
     ) -> Result<ConflictResolution> {
-        let conn = self.write_conn();
-        let mut graph = self.graph.write();
-        crate::conflict::resolve_conflict(
-            &conn,
-            &mut graph,
-            arbiter,
-            old_id,
-            new_fact,
-            self.embed_dim,
-            Utc::now(),
-        )
+        #[cfg(feature = "ann")]
+        let embedding = new_fact.embedding.clone();
+        let resolution = {
+            let conn = self.write_conn();
+            let mut graph = self.graph.write();
+            crate::conflict::resolve_conflict(
+                &conn,
+                &mut graph,
+                arbiter,
+                old_id,
+                new_fact,
+                self.embed_dim,
+                Utc::now(),
+            )?
+        }; // DB lock + graph lock released
+
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            use crate::traits::CrudDecision;
+            if matches!(
+                &resolution.decision,
+                CrudDecision::Update | CrudDecision::Delete
+            ) {
+                hnsw.notify_expire(old_id);
+            }
+            if matches!(
+                &resolution.decision,
+                CrudDecision::Update | CrudDecision::Add
+            ) {
+                if let Some(new_id) = resolution.new_fact_id {
+                    hnsw.notify_insert(new_id, &embedding);
+                }
+            }
+        }
+
+        Ok(resolution)
     }
 
     // --- Public API: Graph queries (no lock exposure) ---
@@ -1057,6 +1199,21 @@ mod tests {
         };
         let err = engine.resume_context(&config).unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
+    }
+
+    // --- Phase 3b / T6: SearchConfig in EngineConfig ---
+
+    #[test]
+    fn engine_config_default_has_no_search_config() {
+        let config = EngineConfig::new("test.db".into(), 128);
+        assert!(config.search_config.is_none());
+    }
+
+    #[test]
+    fn engine_config_with_search_config() {
+        let mut config = EngineConfig::new("test.db".into(), 128);
+        config.search_config = Some(SearchConfig::default());
+        assert_eq!(config.search_config.unwrap().ann_threshold, 50_000);
     }
 
     #[test]

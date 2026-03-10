@@ -1036,7 +1036,7 @@ There are three engine methods that expire facts. All must follow the same patte
 
 2. **`resolve_conflict(&self, arbiter, old_id, new_fact)`** (line ~315) — delegates to `conflict::resolve_conflict()` which may expire the old fact. When the resolution is `Replace`, the old fact is expired and the replacement fact is inserted.
    - After `resolve_conflict()` returns with `Replace`, call `notify_expire(old_id)`.
-   - **Important:** The replacement fact insertion goes through `add_fact()`, which already calls `notify_insert()` for the new fact. Therefore only `notify_expire(old_id)` needs to be added here — the new fact's index entry is handled by the existing `add_fact` → `notify_insert` path. No additional `notify_insert` call is needed in `resolve_conflict`.
+   - **Implementation note (updated):** The actual implementation handles all `CrudDecision` variants (`Update`, `Delete`, `Add`, `Noop`) directly in `MemoryEngine::resolve_conflict` because `crate::conflict::resolve_conflict` uses `FactStore` directly rather than going through `add_fact()`. Both `notify_expire` (for Update/Delete) and `notify_insert` (for Update/Add) are called after the DB lock is released.
 
 3. **`consolidate(&self, ...)`** (line ~272) — delegates to dedup which calls `FactStore::expire()` on duplicates.
    - Similarly modify `local_dedup()` to return the list of expired duplicate IDs.

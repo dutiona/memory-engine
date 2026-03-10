@@ -24,7 +24,7 @@ pub fn local_dedup(
     threshold: f32,
     since: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> Result<usize> {
+) -> Result<(usize, Vec<i64>)> {
     let fact_store = FactStore::new(conn, embed_dim);
     let edge_store = EdgeStore::new(conn);
     let active_facts = fact_store.list_active()?;
@@ -78,7 +78,8 @@ pub fn local_dedup(
         }
     }
 
-    Ok(duplicates_removed)
+    let expired_vec: Vec<i64> = expired_ids.into_iter().collect();
+    Ok((duplicates_removed, expired_vec))
 }
 
 #[cfg(test)]
@@ -130,7 +131,7 @@ mod tests {
         insert_fact(&conn, dim, "fact A", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "fact B", vec![0.99, 0.01, 0.0, 0.0], 0.3);
 
-        let removed = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
         assert_eq!(removed, 1);
 
         // Lower importance (B) should be expired
@@ -147,7 +148,7 @@ mod tests {
         insert_fact(&conn, dim, "fact X", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "fact Y", vec![0.0, 1.0, 0.0, 0.0], 0.5);
 
-        let removed = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
         assert_eq!(removed, 0);
 
         let store = FactStore::new(&conn, dim);
@@ -202,7 +203,7 @@ mod tests {
 
         // Only compare facts created since `old_time + 1 day`
         let since = old_time + Duration::days(1);
-        let removed = local_dedup(&conn, dim, 0.90, Some(since), Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, Some(since), Utc::now()).unwrap();
         assert_eq!(removed, 1); // new duplicate should be expired against old
 
         let active = store.list_active().unwrap();

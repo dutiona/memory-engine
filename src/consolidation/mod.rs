@@ -37,7 +37,7 @@ pub fn consolidate(
     generator: &dyn SummaryGenerator,
     embed_dim: usize,
     config: &ConsolidationConfig,
-) -> Result<ConsolidationStats> {
+) -> Result<(ConsolidationStats, Vec<i64>)> {
     let last = get_config(conn, "last_consolidated_at")?
         .map(|s| DateTime::parse_from_rfc3339(&s))
         .transpose()
@@ -49,7 +49,8 @@ pub fn consolidate(
 
     let tx = conn.unchecked_transaction()?;
 
-    let duplicates_removed = local_dedup(&tx, embed_dim, config.dedup_threshold, last, now)?;
+    let (duplicates_removed, expired_ids) =
+        local_dedup(&tx, embed_dim, config.dedup_threshold, last, now)?;
     let clusters_created = cluster_fusion(&tx, generator, embed_dim, config.min_cluster_size)?;
     let global_summaries = global_integration(&tx, generator, embed_dim)?;
 
@@ -57,9 +58,12 @@ pub fn consolidate(
 
     tx.commit()?;
 
-    Ok(ConsolidationStats {
-        duplicates_removed,
-        clusters_created,
-        global_summaries,
-    })
+    Ok((
+        ConsolidationStats {
+            duplicates_removed,
+            clusters_created,
+            global_summaries,
+        },
+        expired_ids,
+    ))
 }

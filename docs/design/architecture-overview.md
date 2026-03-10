@@ -24,8 +24,9 @@ graph TB
 
     subgraph Search Layer
         fts["FTS5 (BM25)"]
-        vec["Vector (cosine, brute-force)"]
+        vec["Vector (brute-force / HNSW)"]
         rrf["Hybrid (RRF k=60)"]
+        strategy["VectorSearchStrategy dispatch"]
     end
 
     subgraph Storage Layer
@@ -57,7 +58,8 @@ graph TB
     add_fact --> embed
     query --> rrf
     rrf --> fts
-    rrf --> vec
+    rrf --> strategy
+    strategy --> vec
     consolidate --> summary
     consolidate --> facts
     forget --> graph
@@ -85,7 +87,7 @@ The crate is organized into modules with clear responsibilities:
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `engine`         | `MemoryEngine` facade. Orchestrates all operations, holds the `ConnectionPool`, `RwLock<MemoryGraph>`, and `RwLock<ScopeTree>`.          |
 | `store/`         | Persistence layer. `EventStore`, `FactStore`, `EdgeStore`, `SummaryStore`, `ScopeStore` each own their SQL. Schema migrations live here. |
-| `search/`        | Query layer. FTS5 (BM25), vector (cosine similarity), and hybrid (Reciprocal Rank Fusion) search implementations.                        |
+| `search/`        | Query layer. FTS5 (BM25), vector (cosine similarity, brute-force or HNSW via `ann` feature), strategy dispatch, and hybrid (RRF) search. |
 | `graph/`         | `MemoryGraph` wrapper around `petgraph::DiGraph`. Loaded from SQLite on startup, kept in sync on mutations.                              |
 | `scope/`         | `ScopeTree` for hierarchical isolation. In-memory tree structure, backed by `ScopeStore` in SQLite.                                      |
 | `resume/`        | Session bootstrapping. `resume_context()` implements 3-tier retrieval.                                                                   |
@@ -127,7 +129,7 @@ All public methods take `&self`. The embedding computation in `add_fact` happens
    (shared RwLock)    (shared RwLock)    (exclusive RwLock)
 ```
 
-This design replaced an earlier single-writer `!Send` design (Phase 1-2) where the engine owned a single `Connection` and could not be shared across threads. The Phase 3 rework introduced `ConnectionPool` to make the engine usable from async runtimes and multi-threaded consumers.
+This design replaced an earlier single-writer `!Send` design (Phase 1-2) where the engine owned a single `Connection` and could not be shared across threads. The Phase 3 rework introduced `ConnectionPool` to make the engine usable from async runtimes and multithreaded consumers.
 
 ## Data Flow
 
@@ -139,7 +141,7 @@ The core data flow follows an event-sourced pattern:
 
 2. **Add Fact** -- The consumer explicitly derives facts from events. Facts are not auto-projected; the consumer decides what to remember. Each fact gets a blake3 content hash, an embedding vector (via `EmbeddingProvider`), bi-temporal timestamps, and a scope assignment.
 
-3. **Query** -- Hybrid retrieval combines FTS5 (keyword, BM25-ranked), vector (cosine similarity, brute-force scan), or both (Reciprocal Rank Fusion with k=60). Results are filtered by temporal validity, fact type, and scope.
+3. **Query** -- Hybrid retrieval combines FTS5 (keyword, BM25-ranked), vector (cosine similarity via `VectorSearchStrategy` dispatch — brute-force or HNSW), or both (Reciprocal Rank Fusion with k=60). Results are filtered by temporal validity, fact type, and scope.
 
 4. **Consolidate** -- Three-pass memory compression: (1) local dedup merges near-duplicates by embedding cosine similarity, (2) cluster fusion groups related facts into thematic summaries, (3) global integration produces high-level summaries. All three passes run in a single SQLite transaction.
 
