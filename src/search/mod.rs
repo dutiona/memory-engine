@@ -1,5 +1,7 @@
 //! Hybrid search: FTS5 (BM25) + vector (cosine) + Reciprocal Rank Fusion.
 
+#[cfg(feature = "ann")]
+pub mod ann;
 pub mod fts;
 pub mod hybrid;
 pub mod strategy;
