@@ -208,10 +208,34 @@ impl AsyncMemoryEngine {
         self.inner.graph_degree(fact_id)
     }
 
+    /// Get the connected component containing a fact.
+    #[must_use]
+    pub fn graph_component(&self, fact_id: i64) -> Vec<i64> {
+        self.inner.graph_component(fact_id)
+    }
+
+    /// Get outgoing neighbors of a fact in the graph.
+    #[must_use]
+    pub fn graph_neighbors(&self, fact_id: i64) -> Vec<i64> {
+        self.inner.graph_neighbors(fact_id)
+    }
+
     /// Graph statistics: (node_count, edge_count).
     #[must_use]
     pub fn graph_stats(&self) -> (usize, usize) {
         self.inner.graph_stats()
+    }
+
+    /// Check if a node exists in the graph.
+    #[must_use]
+    pub fn graph_has_node(&self, fact_id: i64) -> bool {
+        self.inner.graph_has_node(fact_id)
+    }
+
+    /// Whether the engine is backed by a file (vs. in-memory).
+    #[must_use]
+    pub fn is_file_backed(&self) -> bool {
+        self.inner.is_file_backed()
     }
 
     /// Embedding dimension.
@@ -311,6 +335,19 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn async_graph_methods() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+
+        // Empty graph baseline
+        assert_eq!(engine.graph_stats(), (0, 0));
+        assert!(!engine.graph_has_node(1));
+        assert!(engine.graph_component(1).is_empty());
+        assert!(engine.graph_neighbors(1).is_empty());
+        assert_eq!(engine.graph_degree(1), 0);
+        assert!(!engine.is_file_backed());
     }
 
     #[tokio::test]
