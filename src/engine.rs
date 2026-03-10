@@ -129,11 +129,16 @@ impl MemoryEngine {
         };
 
         #[cfg(feature = "ann")]
-        let hnsw_strategy = if search_config.is_some() {
-            let conn = pool.write();
-            Some(crate::search::ann::HnswStrategy::build_from_db(
-                &conn, embed_dim,
-            )?)
+        let hnsw_strategy = if let Some(ref cfg) = search_config {
+            // Skip building the index if the threshold is unreachable.
+            if cfg.ann_threshold < usize::MAX {
+                let conn = pool.write();
+                Some(crate::search::ann::HnswStrategy::build_from_db(
+                    &conn, embed_dim,
+                )?)
+            } else {
+                None
+            }
         } else {
             None
         };

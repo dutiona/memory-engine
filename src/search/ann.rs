@@ -27,14 +27,16 @@ impl Metric<Vec<f32>> for CosineMetric {
 
     fn distance(&self, a: &Vec<f32>, b: &Vec<f32>) -> u32 {
         let sim = cosine_similarity(a, b);
-        // cosine_similarity returns 0.0 for zero-norm vectors.
-        // Clamp to [0, 2] to handle floating-point edge cases and NaN.
+        // Guard against NaN from degenerate inputs (e.g. all-NaN vectors).
+        // cosine_similarity returns 0.0 for zero-norm vectors, but NaN
+        // can propagate if input elements are NaN. Treat NaN as orthogonal.
+        let sim = if sim.is_nan() { 0.0 } else { sim };
         let dist = (1.0 - sim).clamp(0.0, 2.0);
         dist.to_bits()
     }
 }
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use hnsw::{Hnsw, Searcher};
 use parking_lot::RwLock;
@@ -60,7 +62,11 @@ pub struct HnswStrategy {
 struct HnswInner {
     index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32>,
     index_to_fact: Vec<i64>,
-    tombstones: HashSet<i64>,
+    /// Maps fact_id → current HNSW index (latest insert wins).
+    fact_to_hnsw: HashMap<i64, usize>,
+    /// Tombstoned HNSW indices (not fact IDs) — excludes stale entries
+    /// when a fact is expired or replaced by a newer insert.
+    tombstones: HashSet<usize>,
 }
 
 const OVERFETCH_FACTOR: usize = 3;
@@ -72,7 +78,7 @@ impl HnswStrategy {
     #[must_use]
     pub fn active_count(&self) -> usize {
         let inner = self.inner.read();
-        inner.index_to_fact.len() - inner.tombstones.len()
+        inner.fact_to_hnsw.len()
     }
 
     /// Build an HNSW index from all active facts in the database.
@@ -105,6 +111,7 @@ impl HnswStrategy {
             Ok((id, blob))
         })?;
 
+        let mut fact_to_hnsw = HashMap::new();
         for row in rows {
             let (fact_id, blob) = row?;
             let embedding = deserialize_embedding(&blob, embed_dim)?;
@@ -116,12 +123,14 @@ impl HnswStrategy {
                 index_to_fact.len()
             );
             index_to_fact.push(fact_id);
+            fact_to_hnsw.insert(fact_id, hnsw_id);
         }
 
         Ok(Self {
             inner: RwLock::new(HnswInner {
                 index,
                 index_to_fact,
+                fact_to_hnsw,
                 tombstones: HashSet::new(),
             }),
             embed_dim,
@@ -177,8 +186,8 @@ impl VectorSearchStrategy for HnswStrategy {
 
                 let mut cands = Vec::new();
                 for neighbor in neighbors {
-                    let fact_id = inner.index_to_fact[neighbor.index];
-                    if !inner.tombstones.contains(&fact_id) {
+                    if !inner.tombstones.contains(&neighbor.index) {
+                        let fact_id = inner.index_to_fact[neighbor.index];
                         cands.push(fact_id);
                     }
                 }
@@ -235,6 +244,11 @@ impl VectorSearchStrategy for HnswStrategy {
 
     fn notify_insert(&self, fact_id: i64, embedding: &[f32]) {
         let mut inner = self.inner.write();
+        // Tombstone the old HNSW entry for this fact_id (if any) so the
+        // stale embedding is excluded from future searches.
+        if let Some(&old_hnsw_id) = inner.fact_to_hnsw.get(&fact_id) {
+            inner.tombstones.insert(old_hnsw_id);
+        }
         let vec = embedding.to_vec();
         let mut searcher: Searcher<u32> = Searcher::default();
         let hnsw_id = inner.index.insert(vec, &mut searcher);
@@ -244,12 +258,14 @@ impl VectorSearchStrategy for HnswStrategy {
             "HNSW sequential ID invariant violated on insert"
         );
         inner.index_to_fact.push(fact_id);
-        inner.tombstones.remove(&fact_id);
+        inner.fact_to_hnsw.insert(fact_id, hnsw_id);
     }
 
     fn notify_expire(&self, fact_id: i64) {
         let mut inner = self.inner.write();
-        inner.tombstones.insert(fact_id);
+        if let Some(hnsw_id) = inner.fact_to_hnsw.remove(&fact_id) {
+            inner.tombstones.insert(hnsw_id);
+        }
     }
 }
 
