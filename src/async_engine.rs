@@ -89,6 +89,7 @@ impl AsyncMemoryEngine {
     }
 
     /// Add a fact with embedding computation.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_fact(
         &self,
         content: String,

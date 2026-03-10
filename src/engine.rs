@@ -162,6 +162,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns errors from embedding computation, dimension validation, or DB insert.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_fact(
         &self,
         content: &str,
