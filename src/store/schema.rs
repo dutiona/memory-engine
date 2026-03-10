@@ -139,14 +139,23 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             if *disable_fk {
                 set_foreign_keys(conn, false)?;
             }
-            let tx = conn.unchecked_transaction()?;
-            migration(&tx)?;
-            set_config(&tx, "schema_version", &target.to_string())?;
-            tx.commit()?;
+            let result: Result<()> = (|| {
+                let tx = conn.unchecked_transaction()?;
+                migration(&tx)?;
+                set_config(&tx, "schema_version", &target.to_string())?;
+                tx.commit()?;
+                Ok(())
+            })();
             if *disable_fk {
+                // Re-enable FK checks unconditionally, even if migration failed.
+                // Transaction rollback already restored the data, but the
+                // connection-level PRAGMA must be restored explicitly.
                 set_foreign_keys(conn, true)?;
-                check_foreign_keys(conn)?;
+                if result.is_ok() {
+                    check_foreign_keys(conn)?;
+                }
             }
+            result?;
         }
     }
     Ok(())
@@ -218,7 +227,8 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             session_id TEXT,
             scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
         );
-        INSERT INTO events_new SELECT * FROM events;
+        INSERT INTO events_new (id, timestamp, event_type, payload, source, session_id, scope_id)
+            SELECT id, timestamp, event_type, payload, source, session_id, scope_id FROM events;
         DROP TABLE events;
         ALTER TABLE events_new RENAME TO events;",
     )?;
@@ -242,7 +252,12 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
             scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
         );
-        INSERT INTO facts_new SELECT * FROM facts;
+        INSERT INTO facts_new (id, content, content_hash, embedding, fact_type, t_created,
+            t_expired, t_valid, t_invalid, source_event_id, importance, access_count,
+            last_accessed, metadata, scope_id)
+            SELECT id, content, content_hash, embedding, fact_type, t_created,
+            t_expired, t_valid, t_invalid, source_event_id, importance, access_count,
+            last_accessed, metadata, scope_id FROM facts;
         DROP TABLE facts;
         ALTER TABLE facts_new RENAME TO facts;",
     )?;
@@ -259,7 +274,10 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             t_expired TEXT,
             scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
         );
-        INSERT INTO edges_new SELECT * FROM edges;
+        INSERT INTO edges_new (id, source_fact_id, target_fact_id, relation_type, weight,
+            t_created, t_expired, scope_id)
+            SELECT id, source_fact_id, target_fact_id, relation_type, weight,
+            t_created, t_expired, scope_id FROM edges;
         DROP TABLE edges;
         ALTER TABLE edges_new RENAME TO edges;",
     )?;
@@ -275,18 +293,57 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL,
             scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
         );
-        INSERT INTO summaries_new SELECT * FROM summaries;
+        INSERT INTO summaries_new (id, content, embedding, level, source_fact_ids,
+            created_at, scope_id)
+            SELECT id, content, embedding, level, source_fact_ids,
+            created_at, scope_id FROM summaries;
         DROP TABLE summaries;
         ALTER TABLE summaries_new RENAME TO summaries;",
     )?;
 
     // 6. Recreate FTS5 and repopulate from rebuilt facts table
-    conn.execute_batch(FTS5_DDL)?;
-    conn.execute_batch("INSERT INTO facts_fts(rowid, content) SELECT id, content FROM facts;")?;
+    // Inlined rather than referencing global constants — migrations must be
+    // frozen snapshots of the schema at the target version.
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+            content,
+            content='facts',
+            content_rowid='id',
+            tokenize='porter unicode61'
+        );
+        INSERT INTO facts_fts(rowid, content) SELECT id, content FROM facts;",
+    )?;
 
-    // 7. Recreate triggers and indexes (DROP TABLE removed them)
-    conn.execute_batch(TRIGGERS_DDL)?;
-    conn.execute_batch(INDEXES_DDL)?;
+    // 7. Recreate triggers (inlined for v3 — frozen snapshot)
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN
+            INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN
+            INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN
+            INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
+            INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
+        END;",
+    )?;
+
+    // 8. Recreate indexes (inlined for v3 — frozen snapshot)
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_facts_expired ON facts(t_expired);
+        CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
+        CREATE INDEX IF NOT EXISTS idx_facts_valid ON facts(t_valid, t_invalid);
+        CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(content_hash);
+        CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_fact_id);
+        CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
+        CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
+        CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
+        CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
+        CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
+        CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);",
+    )?;
 
     Ok(())
 }
