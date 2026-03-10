@@ -403,10 +403,12 @@ impl MemoryEngine {
 
     /// Retrieve tiered context for resuming a session.
     ///
-    /// Returns three tiers of facts (mutually exclusive):
-    /// 1. **Identity** — root scope, highest importance
-    /// 2. **Core** — importance >= threshold, from scope ancestors
-    /// 3. **Recent** — most recent, from scope ancestors
+    /// Returns five tiers of facts (mutually exclusive):
+    /// 1. **Pinned** — all pinned facts (cross-scope)
+    /// 2. **High-importance** — top-N by materialized importance_score
+    /// 3. **Due** — facts with t_valid <= now
+    /// 4. **Recent** — most recent, from scope ancestors
+    /// 5. **KB stubs** — placeholder for Phase 5
     ///
     /// # Errors
     ///
@@ -995,8 +997,9 @@ mod tests {
     fn resume_empty_engine() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let ctx = engine.resume_context(&ResumeConfig::default()).unwrap();
-        assert!(ctx.identity.is_empty());
-        assert!(ctx.core.is_empty());
+        assert!(ctx.pinned.is_empty());
+        assert!(ctx.high_importance.is_empty());
+        assert!(ctx.due.is_empty());
         assert!(ctx.recent.is_empty());
     }
 
@@ -1005,9 +1008,10 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let embedder = MockEmbedder { dim: DIM };
 
-        // Add a high-importance root fact (identity tier)
-        let opts = AddFactOptions {
+        // Add a pinned fact (appears in tier 1)
+        let opts_pinned = AddFactOptions {
             importance: Some(0.95),
+            pinned: Some(true),
             ..Default::default()
         };
         engine
@@ -1017,7 +1021,7 @@ mod tests {
                 None,
                 &embedder,
                 None,
-                Some(&opts),
+                Some(&opts_pinned),
             )
             .unwrap();
 
@@ -1037,14 +1041,14 @@ mod tests {
             )
             .unwrap();
 
-        let config = ResumeConfig {
-            core_min_importance: 0.7,
-            ..ResumeConfig::default()
-        };
+        let config = ResumeConfig::default();
         let ctx = engine.resume_context(&config).unwrap();
-        // Both facts are in root scope — identity gets the high-importance one
-        assert!(!ctx.identity.is_empty());
-        assert!(ctx.identity[0].importance >= 0.7);
+        // The pinned fact should appear in the pinned tier
+        assert_eq!(ctx.pinned.len(), 1);
+        assert!(ctx.pinned[0].is_pinned);
+        assert!(ctx.pinned[0].content.contains("Rust"));
+        // The low-importance fact should appear in recent
+        assert!(!ctx.recent.is_empty());
     }
 
     #[test]

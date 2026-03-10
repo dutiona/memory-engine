@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::error::Result;
@@ -11,13 +12,17 @@ use crate::types::Fact;
 pub struct ResumeConfig {
     /// Scope path to resume from. None = root only.
     pub scope_path: Option<String>,
-    /// Max facts in identity tier (root scope, highest importance). Default: 5.
-    pub identity_cap: usize,
-    /// Max facts in core tier (importance >= threshold). Default: 20.
-    pub core_cap: usize,
-    /// Importance threshold for core tier. Default: 0.7.
-    pub core_min_importance: f64,
-    /// Max facts in recent tier (newest by t_created). Default: 10.
+    /// Current time for due-fact evaluation.
+    pub now: DateTime<Utc>,
+    /// Max pinned facts. Default: 50.
+    pub pinned_cap: usize,
+    /// Max high-importance facts (by materialized score). Default: 20.
+    pub high_importance_cap: usize,
+    /// Minimum importance_score for high-importance tier. Default: 0.7.
+    pub high_importance_min: f64,
+    /// Max due facts (future memory now surfacing). Default: 10.
+    pub due_cap: usize,
+    /// Max recent facts (scope-filtered). Default: 10.
     pub recent_cap: usize,
 }
 
@@ -25,9 +30,11 @@ impl Default for ResumeConfig {
     fn default() -> Self {
         Self {
             scope_path: None,
-            identity_cap: 5,
-            core_cap: 20,
-            core_min_importance: 0.7,
+            now: Utc::now(),
+            pinned_cap: 50,
+            high_importance_cap: 20,
+            high_importance_min: 0.7,
+            due_cap: 10,
             recent_cap: 10,
         }
     }
@@ -36,53 +43,74 @@ impl Default for ResumeConfig {
 /// Result of [`resume_context`].
 #[derive(Debug, Clone)]
 pub struct ResumeContext {
-    /// High-importance facts from root scope (user/agent identity).
-    pub identity: Vec<Fact>,
-    /// Important facts from the resolved scope and ancestors.
-    pub core: Vec<Fact>,
-    /// Most recent facts from the resolved scope and ancestors.
+    /// Pinned (unforgettable) facts — agent identity, core beliefs.
+    pub pinned: Vec<Fact>,
+    /// High-importance facts by materialized score.
+    pub high_importance: Vec<Fact>,
+    /// Future-memory facts whose t_valid has arrived.
+    pub due: Vec<Fact>,
+    /// Most recent facts from active scope.
     pub recent: Vec<Fact>,
+    /// Placeholder: KB reference URIs for Phase 5.
+    pub kb_stubs: Vec<String>,
 }
 
 /// Retrieve tiered context for resuming a session.
 ///
-/// Three tiers, mutually exclusive (no fact appears in multiple tiers):
+/// Five tiers, mutually exclusive (no fact appears in multiple tiers):
 ///
-/// 1. **Identity** — root scope, highest importance, capped at `config.identity_cap`
-/// 2. **Core** — importance >= threshold, from resolved scope ancestors, excluding identity
-/// 3. **Recent** — most recent by `t_created`, from scope ancestors, excluding identity + core
+/// 1. **Pinned** — all pinned facts (always present, cross-scope)
+/// 2. **High-importance** — top-N by materialized `importance_score`
+/// 3. **Due** — active facts with `t_valid <= now` (future memory surfacing)
+/// 4. **Scope-filtered recent** — newest by `t_created` from active scope
+/// 5. **KB stubs** — placeholder `Vec<String>` for Phase 5
 ///
 /// Takes pre-resolved scope IDs to avoid holding cache locks across DB access.
 pub fn resume_context(
     conn: &Connection,
-    root_id: i64,
+    _root_id: i64,
     scope_ids: &[i64],
     embed_dim: usize,
     config: &ResumeConfig,
 ) -> Result<ResumeContext> {
     let fact_store = FactStore::new(conn, embed_dim);
+    let mut seen: HashSet<i64> = HashSet::new();
 
-    // Tier 1: Identity — root scope, highest importance
-    let identity = fact_store.list_by_scope_importance(root_id, config.identity_cap)?;
-    let identity_ids: HashSet<i64> = identity.iter().map(|f| f.id).collect();
+    // Tier 1: Pinned facts (always present, cross-scope)
+    let pinned_all = fact_store.list_pinned(&[])?;
+    let pinned: Vec<Fact> = pinned_all.into_iter().take(config.pinned_cap).collect();
+    seen.extend(pinned.iter().map(|f| f.id));
 
-    // Tier 2: Core — importance >= threshold, from scope ancestors, excluding identity
-    let core = fact_store.list_by_scopes_importance(
+    // Tier 2: High-importance by materialized score
+    let high_importance = fact_store.list_by_importance_score(
         scope_ids,
-        config.core_min_importance,
-        config.core_cap,
-        &identity_ids,
+        config.high_importance_min,
+        config.high_importance_cap,
+        &seen,
     )?;
-    let core_ids: HashSet<i64> = core.iter().map(|f| f.id).collect();
+    seen.extend(high_importance.iter().map(|f| f.id));
 
-    // Tier 3: Recent — newest first, excluding identity + core
-    let exclude: HashSet<i64> = identity_ids.union(&core_ids).copied().collect();
-    let recent = fact_store.list_by_scopes_recent(scope_ids, config.recent_cap, &exclude)?;
+    // Tier 3: Due facts (future memory now surfacing)
+    let due_all = fact_store.list_due(config.now, scope_ids)?;
+    let due: Vec<Fact> = due_all
+        .into_iter()
+        .filter(|f| !seen.contains(&f.id))
+        .take(config.due_cap)
+        .collect();
+    seen.extend(due.iter().map(|f| f.id));
+
+    // Tier 4: Scope-filtered recent
+    let recent = fact_store.list_by_scopes_recent(scope_ids, config.recent_cap, &seen)?;
+
+    // Tier 5: KB stubs (Phase 5 placeholder)
+    let kb_stubs = Vec::new();
 
     Ok(ResumeContext {
-        identity,
-        core,
+        pinned,
+        high_importance,
+        due,
         recent,
+        kb_stubs,
     })
 }
 
@@ -127,106 +155,108 @@ mod tests {
     #[test]
     fn resume_empty_db() {
         let conn = setup();
-        let ctx = resume_context(&conn, 1, &[1], DIM, &ResumeConfig::default()).unwrap();
-        assert!(ctx.identity.is_empty());
-        assert!(ctx.core.is_empty());
+        let config = ResumeConfig::default();
+        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
+        assert!(ctx.pinned.is_empty());
+        assert!(ctx.high_importance.is_empty());
+        assert!(ctx.due.is_empty());
         assert!(ctx.recent.is_empty());
+        assert!(ctx.kb_stubs.is_empty());
     }
 
     #[test]
-    fn resume_identity_from_root() {
+    fn resume_pinned_always_present() {
         let conn = setup();
         let fs = FactStore::new(&conn, DIM);
-        fs.insert(&make_fact("identity fact", 0.9, 1)).unwrap();
+        let mut pinned = make_fact("pinned identity", 0.9, 1);
+        pinned.is_pinned = true;
+        fs.insert(&pinned).unwrap();
 
-        let ctx = resume_context(&conn, 1, &[1], DIM, &ResumeConfig::default()).unwrap();
-        assert_eq!(ctx.identity.len(), 1);
-        assert!(ctx.identity[0].content.contains("identity"));
+        let config = ResumeConfig::default();
+        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
+        assert_eq!(ctx.pinned.len(), 1);
+        assert!(ctx.pinned[0].is_pinned);
     }
 
     #[test]
-    fn resume_core_filters_by_importance() {
+    fn resume_due_surfaces_at_time() {
         let conn = setup();
         let fs = FactStore::new(&conn, DIM);
-        // Insert scope for non-root facts
-        conn.execute(
-            "INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'proj', 1)",
-            [],
-        )
-        .unwrap();
-        fs.insert(&make_fact("low importance", 0.3, 2)).unwrap();
-        fs.insert(&make_fact("high importance", 0.9, 2)).unwrap();
+        let now = Utc::now();
+        let past = now - chrono::Duration::hours(1);
+
+        let mut due_fact = make_fact("reminder", 0.5, 1);
+        due_fact.t_valid = Some(past);
+        fs.insert(&due_fact).unwrap();
 
         let config = ResumeConfig {
-            scope_path: None,
-            core_min_importance: 0.5,
-            ..ResumeConfig::default()
-        };
-        let ctx = resume_context(&conn, 1, &[1, 2], DIM, &config).unwrap();
-        // Only the 0.9 fact should be in core
-        assert_eq!(ctx.core.len(), 1);
-        assert!(ctx.core[0].importance >= 0.5);
-    }
-
-    #[test]
-    fn resume_recent_chronological() {
-        let conn = setup();
-        let fs = FactStore::new(&conn, DIM);
-        // Insert 8 facts with low importance so they don't appear in core.
-        // identity_cap=2 will consume 2, leaving 6 for recent (we cap at 3).
-        for i in 0..8 {
-            let mut fact = make_fact(&format!("recent fact {i}"), 0.1, 1);
-            fact.t_created = Utc::now() + chrono::Duration::milliseconds(i * 100);
-            fs.insert(&fact).unwrap();
-        }
-
-        let config = ResumeConfig {
-            identity_cap: 2,
-            core_min_importance: 0.5, // none qualify for core
-            recent_cap: 3,
+            now,
             ..ResumeConfig::default()
         };
         let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
-        assert_eq!(ctx.identity.len(), 2);
-        assert_eq!(ctx.recent.len(), 3);
-        // Most recent first
-        assert!(ctx.recent[0].t_created >= ctx.recent[1].t_created);
-        assert!(ctx.recent[1].t_created >= ctx.recent[2].t_created);
+        assert_eq!(ctx.due.len(), 1);
     }
 
     #[test]
     fn resume_tiers_mutually_exclusive() {
         let conn = setup();
         let fs = FactStore::new(&conn, DIM);
-        // One very important root fact (should go to identity)
-        fs.insert(&make_fact("identity", 0.95, 1)).unwrap();
-        // One important non-root fact (should go to core)
-        conn.execute(
-            "INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'proj', 1)",
-            [],
-        )
-        .unwrap();
-        fs.insert(&make_fact("core fact", 0.8, 2)).unwrap();
-        // One low-importance fact (should go to recent)
-        fs.insert(&make_fact("recent only", 0.1, 2)).unwrap();
+        let now = Utc::now();
+
+        // Pinned fact
+        let mut pinned = make_fact("pinned", 0.95, 1);
+        pinned.is_pinned = true;
+        fs.insert(&pinned).unwrap();
+
+        // High importance (needs importance_score >= 0.7)
+        let id2 = fs.insert(&make_fact("important", 0.9, 1)).unwrap();
+        fs.update_importance_score(id2, 0.85).unwrap();
+
+        // Due fact
+        let mut due = make_fact("due item", 0.5, 1);
+        due.t_valid = Some(now - chrono::Duration::hours(1));
+        fs.insert(&due).unwrap();
+
+        // Recent fact
+        fs.insert(&make_fact("recent", 0.1, 1)).unwrap();
 
         let config = ResumeConfig {
-            scope_path: None,
-            identity_cap: 5,
-            core_min_importance: 0.7,
-            core_cap: 20,
-            recent_cap: 10,
+            now,
+            ..ResumeConfig::default()
         };
-        let ctx = resume_context(&conn, 1, &[1, 2], DIM, &config).unwrap();
+        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
 
         let all_ids: Vec<i64> = ctx
-            .identity
+            .pinned
             .iter()
-            .chain(ctx.core.iter())
+            .chain(ctx.high_importance.iter())
+            .chain(ctx.due.iter())
             .chain(ctx.recent.iter())
             .map(|f| f.id)
             .collect();
         let unique: HashSet<i64> = all_ids.iter().copied().collect();
         assert_eq!(all_ids.len(), unique.len(), "no duplicates across tiers");
+    }
+
+    #[test]
+    fn resume_high_importance_uses_score() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+
+        // Fact with high importance_score
+        let id = fs.insert(&make_fact("important", 0.9, 1)).unwrap();
+        fs.update_importance_score(id, 0.85).unwrap();
+
+        // Fact with low importance_score
+        let id2 = fs.insert(&make_fact("not important", 0.1, 1)).unwrap();
+        fs.update_importance_score(id2, 0.3).unwrap();
+
+        let config = ResumeConfig {
+            high_importance_min: 0.7,
+            ..ResumeConfig::default()
+        };
+        let ctx = resume_context(&conn, 1, &[1], DIM, &config).unwrap();
+        assert_eq!(ctx.high_importance.len(), 1);
+        assert!(ctx.high_importance[0].importance_score >= 0.7);
     }
 }
