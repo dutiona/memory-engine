@@ -62,4 +62,59 @@ mod tests {
         let far = vec![0.0_f32, 1.0, 0.0];
         assert!(m.distance(&query, &close) < m.distance(&query, &far));
     }
+
+    #[test]
+    fn hnsw_spike_basic_search() {
+        use hnsw::{Hnsw, Searcher};
+        use rand::rngs::SmallRng;
+        use rand::SeedableRng;
+        use space::Neighbor;
+
+        // Build a small index: 5 vectors, dim=4, M=8, M0=16
+        let mut index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 8, 16> = Hnsw::new_params_and_prng(
+            CosineMetric,
+            hnsw::Params::new().ef_construction(100),
+            SmallRng::seed_from_u64(42),
+        );
+        let mut searcher = Searcher::default();
+
+        let vectors = vec![
+            vec![1.0, 0.0, 0.0, 0.0], // id 0: "north"
+            vec![0.9, 0.1, 0.0, 0.0], // id 1: close to north
+            vec![0.0, 1.0, 0.0, 0.0], // id 2: "east"
+            vec![0.0, 0.0, 1.0, 0.0], // id 3: "up"
+            vec![0.1, 0.0, 0.0, 1.0], // id 4: mostly "w" axis
+        ];
+
+        for v in &vectors {
+            index.insert(v.clone(), &mut searcher);
+        }
+
+        // Search for "north" -- should find id 0 first, id 1 second
+        let query = vec![1.0_f32, 0.0, 0.0, 0.0];
+        let mut dest = vec![
+            Neighbor {
+                index: !0,
+                distance: !0,
+            };
+            3
+        ];
+        let results = index.nearest(&query, 24, &mut searcher, &mut dest);
+
+        assert!(results.len() >= 2, "should find at least 2 neighbors");
+        // Closest should be id 0 (exact match, distance 0)
+        assert_eq!(results[0].index, 0);
+        assert_eq!(results[0].distance, 0);
+        // Second closest should be id 1
+        assert_eq!(results[1].index, 1);
+    }
+
+    #[test]
+    fn hnsw_is_send_sync() {
+        use hnsw::Hnsw;
+        use rand::rngs::SmallRng;
+
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32>>();
+    }
 }
