@@ -88,10 +88,29 @@ impl VectorSearchStrategy for BruteForce {
 /// | `50_000` (default) | Switch at ~50K facts |
 /// | `usize::MAX` | Always use brute-force |
 ///
-/// The default of 50,000 is a conservative estimate based on the observation
-/// that brute-force cosine similarity over 768-dim `f32` vectors stays under
-/// ~50 ms up to ~50K–100K facts on modern hardware.  Run the project benchmarks
-/// (`cargo bench`) at each release to validate this assumption and adjust.
+/// # Empirical basis (PR #27, Issue #3)
+///
+/// The default of 50,000 was chosen based on brute-force baseline benchmarks
+/// (`cargo bench`) measured on WSL2 / Linux 6.6, 128-dim embeddings:
+///
+/// | Facts   | Brute-force (128-d) | Notes                         |
+/// |---------|---------------------|-------------------------------|
+/// | 1,000   | ~884 µs             | Well within interactive budget |
+/// | 10,000  | ~9.8 ms             | Comfortable                   |
+/// | 50,000  | ~48.5 ms            | Threshold — approaching limit  |
+/// | 100,000 | ~89.7 ms            | Exceeds 50 ms target           |
+///
+/// Dimension impact at 10K facts: 128-d → 9.4 ms, 384-d → 26.3 ms, 768-d → 50.7 ms.
+/// At 768-d the 50 ms budget is already hit at 10K facts, suggesting the threshold
+/// should be dimension-aware in a future refinement.
+///
+/// Scope-filtered queries (exact/subtree) eliminate candidates at the SQL level
+/// (~36 ns), so they only benefit from ANN when the post-filter candidate set
+/// itself exceeds the threshold.
+///
+/// Run `cargo bench` at each release to validate these numbers and adjust.
+/// See: <https://github.com/dutiona/memory-engine/issues/3>
+/// See: <https://github.com/dutiona/memory-engine/pull/27>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchConfig {
     /// Fact count at which to switch from brute-force to ANN.
