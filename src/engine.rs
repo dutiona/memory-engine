@@ -162,23 +162,13 @@ impl MemoryEngine {
 
     #[cfg(feature = "ann")]
     fn should_use_hnsw(&self) -> bool {
-        if self.hnsw_strategy.is_some() {
-            let conn = self.pool.read();
-            let count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM facts WHERE t_expired IS NULL",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            count as usize
+        self.hnsw_strategy.as_ref().map_or(false, |hnsw| {
+            hnsw.active_count()
                 >= self
                     .search_config
                     .as_ref()
                     .map_or(usize::MAX, |c| c.ann_threshold)
-        } else {
-            false
-        }
+        })
     }
 
     #[cfg(not(feature = "ann"))]
@@ -407,23 +397,20 @@ impl MemoryEngine {
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        let expired_ids = {
+        let (stats, pruned_ids) = {
             let conn = self.write_conn();
             let mut graph = self.graph.write();
-            let (stats, expired_ids) =
-                crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())?;
-            // Return stats + expired IDs; DB lock + graph lock released here
-            (stats, expired_ids)
+            crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())?
         };
 
         #[cfg(feature = "ann")]
         if let Some(ref hnsw) = self.hnsw_strategy {
-            for &id in &expired_ids.1 {
+            for &id in &pruned_ids {
                 hnsw.notify_expire(id);
             }
         }
 
-        Ok(expired_ids.0)
+        Ok(stats)
     }
 
     // --- Public API: Conflict Resolution ---

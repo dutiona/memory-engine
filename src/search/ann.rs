@@ -68,6 +68,13 @@ const DEFAULT_EF_SEARCH: usize = 100;
 const MAX_WIDEN_ATTEMPTS: usize = 3;
 
 impl HnswStrategy {
+    /// Number of active (non-tombstoned) items in the index.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        let inner = self.inner.read();
+        inner.index_to_fact.len() - inner.tombstones.len()
+    }
+
     /// Build an HNSW index from all active facts in the database.
     ///
     /// # Errors
@@ -140,6 +147,7 @@ impl VectorSearchStrategy for HnswStrategy {
         }
 
         let mut ef = DEFAULT_EF_SEARCH;
+        let mut overfetch = limit * OVERFETCH_FACTOR;
         let mut results = Vec::new();
 
         for _attempt in 0..MAX_WIDEN_ATTEMPTS {
@@ -155,7 +163,6 @@ impl VectorSearchStrategy for HnswStrategy {
                 if n_items == 0 {
                     return Ok(Vec::new());
                 }
-                let overfetch = limit * OVERFETCH_FACTOR;
                 let dest_len = overfetch.min(n_items);
                 let mut dest = vec![
                     Neighbor {
@@ -194,7 +201,10 @@ impl VectorSearchStrategy for HnswStrategy {
             if results.len() >= limit {
                 break;
             }
+            // Widen both search accuracy and candidate count so aggressive
+            // filters don't exhaust the same small candidate set each retry.
             ef *= 2;
+            overfetch *= 2;
         }
 
         // If HNSW widening couldn't satisfy, fall back to brute-force.
