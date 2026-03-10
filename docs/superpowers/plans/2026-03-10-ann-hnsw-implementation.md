@@ -23,14 +23,21 @@
 
 ## Review Changelog
 
-### Round 3 (Codex GPT-5.4 R2 findings)
+### Round 3 (Codex GPT-5.4 R2 + R3 findings)
 
-Addressed 3 high findings + 1 open question from Codex R2:
+Addressed 3 high findings + 1 open question from Codex R2, then 1 high + 1 medium from Codex R3:
+
+**From R2:**
 
 - **R3-1**: Removed `if results.len() >= limit { break; }` early-exit in Phase 2. All overfetched candidates are now scored, sorted by exact cosine similarity, then truncated to `limit`. This ensures the true best-by-exact-score results are returned.
 - **R3-2**: Restructured widening loop to check post-filter result count (not pre-filter candidate count). The entire HNSW fetch → post-filter → score cycle now repeats with doubled `ef_search`. Added actual brute-force fallback: if HNSW can't satisfy after `MAX_WIDEN_ATTEMPTS`, falls back to `vector_search()`.
 - **R3-3**: Replaced `load_embedding(conn, fact_id, embed_dim)` with `load_embedding(conn, fact_id, self.embed_dim)` — uses the validated field, not the caller-supplied parameter.
 - **R3-4**: Clarified `resolve_conflict` Replace path: replacement insertion goes through `add_fact()` which already calls `notify_insert()`. Only `notify_expire(old_id)` needs adding in Task 8.
+
+**From R3:**
+
+- **R3-5**: Closed concurrent consistency gap — `check_fact_filters` now runs for ALL candidates (not just filtered queries). Always verifies `t_expired IS NULL` via DB, closing the window between DB commit and HNSW hook fire. Unfiltered queries can no longer return recently-expired facts.
+- **R3-6**: Fixed `self.search_config.map_or(...)` → `self.search_config.as_ref().map_or(...)` to avoid moving out of `Option<SearchConfig>`.
 
 ### Round 2 (Codex GPT-5.4 + Gemini)
 
@@ -655,12 +662,13 @@ impl VectorSearchStrategy for HnswStrategy {
             results.clear();
             results.reserve(candidates.len());
             for fact_id in candidates {
-                // Post-filter: check fact_type and scope via DB if filters are active
-                if fact_type.is_some() || scope_ids.is_some() {
-                    let passes = check_fact_filters(conn, fact_id, fact_type, scope_ids)?;
-                    if !passes {
-                        continue;
-                    }
+                // Always verify activeness via DB — closes the consistency window
+                // between DB commit and notify_expire/notify_insert hook fire.
+                // Without this, a concurrent unfiltered query could return a fact
+                // that was just expired in DB but not yet tombstoned in HNSW.
+                let passes = check_fact_filters(conn, fact_id, fact_type, scope_ids)?;
+                if !passes {
+                    continue;
                 }
 
                 // Compute exact cosine similarity for the score
@@ -712,8 +720,10 @@ impl VectorSearchStrategy for HnswStrategy {
     }
 }
 
-/// Check if a fact passes type and scope filters.
+/// Check if a fact is active and passes type/scope filters.
 ///
+/// Always verifies `t_expired IS NULL` — this closes the consistency window
+/// between DB commit and HNSW hook fire for concurrent queries.
 /// Uses the same `json_each` pattern as `vector_search` for scope filtering.
 fn check_fact_filters(
     conn: &Connection,
@@ -753,10 +763,11 @@ fn load_embedding(conn: &Connection, fact_id: i64, embed_dim: usize) -> Result<V
 }
 ```
 
-**Important:** The `check_fact_filters` and `load_embedding` functions hit SQLite per candidate. This is acceptable because:
+**Important:** `check_fact_filters` and `load_embedding` hit SQLite per candidate. `check_fact_filters` runs for ALL candidates (not just filtered queries) to close the concurrent consistency window between DB commit and HNSW hook fire. This is acceptable because:
 
 - HNSW returns O(k) candidates (not O(N))
 - Each DB hit is an indexed primary key lookup (~1 µs)
+- The activeness check guarantees no stale results under concurrent writes
 - The alternative (caching all metadata in memory) adds complexity for minimal gain
 
 - [ ] **Step 4: Run tests**
@@ -893,7 +904,7 @@ fn should_use_hnsw(&self) -> bool {
             "SELECT COUNT(*) FROM facts WHERE t_expired IS NULL",
             [], |row| row.get(0),
         ).unwrap_or(0);
-        count as usize >= self.search_config.map_or(usize::MAX, |c| c.ann_threshold)
+        count as usize >= self.search_config.as_ref().map_or(usize::MAX, |c| c.ann_threshold)
     } else {
         false
     }
@@ -1301,6 +1312,7 @@ git commit -m "chore: final cleanup for ANN implementation"
 | Index rebuild on engine open slow for large DBs     | Acceptable for embedded use; cold-start optimization tracked in #31              |
 | Transaction rollback desyncs HNSW                   | Hooks fire AFTER commit only; rollback cannot affect in-memory index             |
 | Tombstone accumulation degrades recall              | Rebuild threshold at 25% tombstones; periodic rebuild deferred to future work    |
+| Concurrent read during commit-to-hook window        | All candidates verified active via DB (`t_expired IS NULL`) before scoring       |
 | Overfetch insufficient under heavy filtering        | Widening loop (3 attempts, doubling ef_search); final fallback to brute-force    |
 | `clippy::ptr_arg` on `&Vec<f32>` in Metric impl     | `#[allow]` with comment — `space::Metric` trait requires `&P` where `P=Vec<f32>` |
 | Memory proportional to fact count on startup        | Documented on `build_from_db`; operational limit for embedded use                |
