@@ -14,7 +14,7 @@ The memory-engine design is grounded in 9 academic papers, community implementat
 | **AgeMem**        | 2601.01885 | Agentic memory framework where LTM and STM are jointly managed via explicit tool-based operations. The agent decides what/when to store, retrieve, summarize, discard. Validated the trait-based design: the engine provides primitives, the consumer provides intelligence.                                                                                                  |
 | **SparseMemFT**   | 2510.15103 | Sparse memory fine-tuning achieves only 11% knowledge drop (vs 89% full fine-tuning, 71% LoRA). Informed the boundary decision: the engine is retrieval-only. Parameter updates (fine-tuning, LoRA adaptation) are explicitly out of scope.                                                                                                                                   |
 | **Memento**       | 2508.16153 | Hierarchical memory with summarization. Case-based reasoning without fine-tuning. Informed the consolidation level hierarchy: `Local`, `Cluster`, `Global` in the `ConsolidationLevel` enum. The "dream cycle" concept (nightly batch consolidation) is the intended usage pattern for `consolidate()`.                                                                       |
-| **Doc-to-LoRA**   | --         | Document-to-adapter pipeline using hypernetworks. Confirmed the engine boundary: store and retrieve facts; the consumer decides what to do with retrieved results (including whether to fine-tune, generate adapters, or just use them in context).                                                                                                                           |
+| **Doc-to-LoRA**   | [Sakana AI](https://pub.sakana.ai/doc-to-lora/) | Document-to-adapter pipeline using hypernetworks. Confirmed the engine boundary: store and retrieve facts; the consumer decides what to do with retrieved results (including whether to fine-tune, generate adapters, or just use them in context).                                                                                                                           |
 
 ## Cross-Paper Convergence
 
@@ -48,6 +48,15 @@ Comparison pairs:
   Mem0     <-> Graphiti    (direct competitor; Mem0 paper benchmarks against Graphiti)
   Doc-LoRA <-> SparseMemFT (both: parameter-efficient continual learning)
 ```
+
+## Adjacent Work
+
+The following papers informed the conceptual framing but do not directly define the engine's storage architecture or algorithms. They are excluded from the core 9 but acknowledged as predecessors:
+
+- **MemGPT** (2310.08560) — Pioneered OS-like memory management for LLMs: treating the context window as virtual memory with page-in/page-out. The engine's separation of "what to store" vs "what to surface" echoes this pattern, but the implementation is retrieval-based rather than context-window-management-based.
+- **Letta** — MemGPT's production successor. Adds context repositories with git-based versioning and idle-time memory refinement. Influenced the "dream cycle" concept but did not define specific data structures adopted by the engine.
+- **Reflexion** (2303.11366) — Verbal reinforcement learning via self-critique. Relevant to how an agent _uses_ memory (reflect and improve), not how memory is _stored_. The engine provides the storage; the consumer provides the reflection loop.
+- **ACM TOIS Survey** (2404.13501) and **"Rethinking Memory Mechanisms"** (2602.06052) — Broader surveys that informed taxonomy but were superseded by the more targeted Memory Survey (2512.13564) for implementation details.
 
 ## Conceptual Boundaries
 
