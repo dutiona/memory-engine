@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Open a `SQLite` connection to a file, with pragmas set.
 ///
@@ -64,7 +64,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     if !is_fresh {
         return Ok(()); // existing DB — let migrate() handle evolution
     }
-    // Fresh DB: create full latest (v2) schema
+    // Fresh DB: create full latest (v3) schema
     conn.execute_batch(TABLES_DDL)?;
     conn.execute_batch(SCOPES_DDL)?;
     conn.execute_batch(FTS5_DDL)?;
@@ -107,7 +107,7 @@ pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 type MigrationFn = fn(&Connection) -> Result<()>;
 
-const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2];
+const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2, migrate_v2_to_v3];
 
 /// Run forward-only migrations from the current schema version to
 /// `CURRENT_SCHEMA_VERSION`.
@@ -160,6 +160,25 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE facts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE facts ADD COLUMN importance_score REAL NOT NULL DEFAULT 0.5;",
+    )?;
+    conn.execute_batch(
+        "ALTER TABLE events ADD COLUMN origin_node_id TEXT NOT NULL DEFAULT 'local';
+         ALTER TABLE events ADD COLUMN sequence_id INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE events ADD COLUMN created_at TEXT;",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
+         CREATE INDEX IF NOT EXISTS idx_facts_importance_score ON facts(importance_score);
+         CREATE INDEX IF NOT EXISTS idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
+         CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, sequence_id);",
+    )?;
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -170,7 +189,10 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL DEFAULT '{}',
     source TEXT NOT NULL,
     session_id TEXT,
-    scope_id INTEGER NOT NULL DEFAULT 1
+    scope_id INTEGER NOT NULL DEFAULT 1,
+    origin_node_id TEXT NOT NULL DEFAULT 'local',
+    sequence_id INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -188,7 +210,9 @@ CREATE TABLE IF NOT EXISTS facts (
     access_count INTEGER NOT NULL DEFAULT 0,
     last_accessed TEXT NOT NULL,
     metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
-    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    importance_score REAL NOT NULL DEFAULT 0.5
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -272,6 +296,10 @@ CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
 CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
 CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
 CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
+CREATE INDEX IF NOT EXISTS idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
+CREATE INDEX IF NOT EXISTS idx_facts_importance_score ON facts(importance_score);
+CREATE INDEX IF NOT EXISTS idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
+CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, sequence_id);
 ";
 
 #[cfg(test)]
@@ -352,6 +380,91 @@ CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(content_hash);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_fact_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
 CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
+";
+
+    /// Test helper: creates v2 schema (v1 + scopes + scope_id columns, no v3 columns).
+    fn init_schema_v2(conn: &Connection) -> Result<()> {
+        conn.execute_batch(TABLES_V2_DDL)?;
+        conn.execute_batch(SCOPES_DDL)?;
+        conn.execute_batch(FTS5_DDL)?;
+        conn.execute_batch(TRIGGERS_DDL)?;
+        conn.execute_batch(INDEXES_V2_DDL)?;
+        set_config(conn, "schema_version", "2")?;
+        Ok(())
+    }
+
+    /// V2 tables DDL (has scope_id columns but no v3 columns).
+    const TABLES_V2_DDL: &str = "
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    session_id TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')),
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    t_valid TEXT,
+    t_invalid TEXT,
+    source_event_id INTEGER REFERENCES events(id),
+    importance REAL NOT NULL DEFAULT 0.5,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+);
+
+CREATE TABLE IF NOT EXISTS edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    target_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    relation_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')),
+    source_fact_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    scope_id INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
+    /// V2 indexes DDL (has scope_id indexes but no v3 indexes).
+    const INDEXES_V2_DDL: &str = "
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_facts_expired ON facts(t_expired);
+CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
+CREATE INDEX IF NOT EXISTS idx_facts_valid ON facts(t_valid, t_invalid);
+CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(content_hash);
+CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_fact_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
+CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
+CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
+CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
+CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
+CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
 ";
 
     #[test]
@@ -436,8 +549,8 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
                 |r| r.get(0),
             )
             .unwrap();
-        // 9 original + 2 scopes indexes + 4 scope_id indexes
-        assert_eq!(count, 15);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes
+        assert_eq!(count, 19);
     }
 
     // --- Migration framework tests ---
@@ -449,13 +562,13 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
         // init_schema creates latest version directly
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("2".to_string())
+            Some("3".to_string())
         );
         // migrate is a no-op
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("2".to_string())
+            Some("3".to_string())
         );
     }
 
@@ -470,7 +583,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("2".to_string())
+            Some("3".to_string())
         );
     }
 
@@ -483,7 +596,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("2".to_string())
+            Some("3".to_string())
         );
     }
 
@@ -546,6 +659,79 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
                 "missing index {expected} after migration"
             );
         }
+    }
+
+    #[test]
+    fn migrate_v2_to_v3_adds_pinned_and_envelope() {
+        let conn = open_memory().unwrap();
+        init_schema_v2(&conn).unwrap();
+
+        // Insert a fact before migration
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata, scope_id)
+             VALUES ('test', 'hash', X'00', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}', 1)",
+            [],
+        ).unwrap();
+
+        // Insert an event before migration
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id)
+             VALUES (datetime('now'), 'Interaction', '{}', 'test', 1)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        // Verify new columns with defaults
+        let (is_pinned, importance_score): (i64, f64) = conn
+            .query_row(
+                "SELECT is_pinned, importance_score FROM facts WHERE content = 'test'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(is_pinned, 0);
+        assert!((importance_score - 0.5).abs() < f64::EPSILON);
+
+        // Verify event envelope fields
+        let (origin, seq_id): (String, i64) = conn
+            .query_row(
+                "SELECT origin_node_id, sequence_id FROM events WHERE source = 'test'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(origin, "local");
+        assert_eq!(seq_id, 0);
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("3".to_string())
+        );
+    }
+
+    #[test]
+    fn fresh_db_creates_v3_schema() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("3".to_string())
+        );
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, is_pinned, importance_score)
+             VALUES ('test', 'h', X'00', 'episodic', datetime('now'), datetime('now'), 1, 0.9)",
+            [],
+        ).unwrap();
+        let pinned: i64 = conn
+            .query_row(
+                "SELECT is_pinned FROM facts WHERE content = 'test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pinned, 1);
     }
 
     #[test]
