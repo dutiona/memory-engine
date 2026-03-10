@@ -9,9 +9,11 @@ use std::sync::Arc;
 use crate::engine::{EngineConfig, MemoryEngine};
 use crate::error::{MemoryError, Result};
 use crate::search::hybrid::{SearchQuery, SearchResult};
+use chrono::{DateTime, Utc};
+
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
-    EmbeddingProvider, ForgetPolicy, PruneStats, SummaryGenerator,
+    EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, SummaryGenerator,
 };
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::types::{AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact, Summary};
@@ -95,6 +97,7 @@ impl AsyncMemoryEngine {
         embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
         scope: Option<String>,
         opts: Option<AddFactOptions>,
+        classifier: Option<Arc<dyn PersistenceClassifier + Send + Sync>>,
     ) -> Result<i64> {
         let engine = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -105,7 +108,9 @@ impl AsyncMemoryEngine {
                 embedder.as_ref(),
                 scope.as_deref(),
                 opts.as_ref(),
-                None, // classifier — added in Task 9
+                classifier
+                    .as_ref()
+                    .map(|c| c.as_ref() as &dyn PersistenceClassifier),
             )
         })
         .await
@@ -203,6 +208,38 @@ impl AsyncMemoryEngine {
             .map_err(join_err)?
     }
 
+    /// Get facts whose scheduled time has arrived.
+    pub async fn drain_due(&self, now: DateTime<Utc>, scope: Option<String>) -> Result<Vec<Fact>> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.drain_due(now, scope.as_deref()))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Scheduling hint: earliest `t_valid` among active future-dated facts.
+    pub async fn next_due_time(&self, scope: Option<String>) -> Result<Option<DateTime<Utc>>> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.next_due_time(scope.as_deref()))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Pin a fact (make it unforgettable).
+    pub async fn pin_fact(&self, id: i64) -> Result<()> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.pin_fact(id))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Unpin a fact (allow forgetting).
+    pub async fn unpin_fact(&self, id: i64) -> Result<()> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.unpin_fact(id))
+            .await
+            .map_err(join_err)?
+    }
+
     /// Graph degree for a fact.
     #[must_use]
     pub fn graph_degree(&self, fact_id: i64) -> usize {
@@ -252,6 +289,7 @@ mod tests {
                 embedder,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -285,6 +323,7 @@ mod tests {
                 embedder,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -312,6 +351,59 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn async_drain_due() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        let embedder: Arc<dyn EmbeddingProvider + Send + Sync> =
+            Arc::new(MockEmbedder { dim: DIM });
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let opts = AddFactOptions {
+            t_valid: Some(past),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "reminder".into(),
+                FactType::Semantic,
+                None,
+                embedder,
+                None,
+                Some(opts),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let due = engine.drain_due(Utc::now(), None).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert!(due[0].content.contains("reminder"));
+    }
+
+    #[tokio::test]
+    async fn async_pin_unpin() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        let embedder: Arc<dyn EmbeddingProvider + Send + Sync> =
+            Arc::new(MockEmbedder { dim: DIM });
+        let id = engine
+            .add_fact(
+                "pinnable".into(),
+                FactType::Semantic,
+                None,
+                embedder,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!engine.get_fact(id).await.unwrap().is_pinned);
+        engine.pin_fact(id).await.unwrap();
+        assert!(engine.get_fact(id).await.unwrap().is_pinned);
+        engine.unpin_fact(id).await.unwrap();
+        assert!(!engine.get_fact(id).await.unwrap().is_pinned);
     }
 
     #[tokio::test]
