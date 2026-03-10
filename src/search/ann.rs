@@ -476,9 +476,8 @@ mod tests {
             let query = [1.0_f32, 0.0, 0.0, 0.0];
             let results = strategy.search(&conn, &query, DIM, 2, None, None).unwrap();
 
-            let found_ids: Vec<i64> = results.iter().map(|r| r.fact_id).collect();
             assert!(
-                !found_ids.contains(&ids[0]),
+                !results.iter().any(|r| r.fact_id == ids[0]),
                 "expired fact should be excluded"
             );
         }

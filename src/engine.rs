@@ -62,6 +62,7 @@ pub struct MemoryEngine {
     vector_strategy: Box<dyn VectorSearchStrategy>,
     #[cfg(feature = "ann")]
     hnsw_strategy: Option<crate::search::ann::HnswStrategy>,
+    #[cfg_attr(not(feature = "ann"), allow(dead_code))]
     search_config: Option<SearchConfig>,
 }
 
@@ -181,7 +182,7 @@ impl MemoryEngine {
     }
 
     #[cfg(not(feature = "ann"))]
-    fn should_use_hnsw(&self) -> bool {
+    const fn should_use_hnsw(&self) -> bool {
         false
     }
 
