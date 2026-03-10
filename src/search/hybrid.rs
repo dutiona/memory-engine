@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::search::fts::fts_search;
-use crate::search::vector::vector_search;
+use crate::search::strategy::VectorSearchStrategy;
 use crate::store::facts::FactStore;
 use crate::types::{Fact, FactType};
 
@@ -81,6 +81,7 @@ pub fn hybrid_search(
     query: &SearchQuery,
     embed_dim: usize,
     scope_ids: Option<&[i64]>,
+    vector_strategy: &dyn VectorSearchStrategy,
 ) -> Result<Vec<SearchResult>> {
     // When valid_at is set, over-fetch 3x to compensate for post-filter attrition
     let overfetch = query.limit.saturating_mul(3).max(query.limit);
@@ -100,7 +101,9 @@ pub fn hybrid_search(
     // Collect vector results (t_expired, fact_type, scope pushed into SQL)
     let vec_results = if matches!(query.mode, SearchMode::Vector | SearchMode::Hybrid) {
         match query.embedding.as_ref() {
-            Some(emb) => vector_search(conn, emb, embed_dim, overfetch, fact_type_ref, scope_ids)?,
+            Some(emb) => {
+                vector_strategy.search(conn, emb, embed_dim, overfetch, fact_type_ref, scope_ids)?
+            }
             None => vec![],
         }
     } else {
@@ -175,6 +178,7 @@ pub fn hybrid_search(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::strategy::BruteForce;
     use crate::store::schema::{init_schema, open_memory};
     use crate::types::NewFact;
 
@@ -305,7 +309,7 @@ mod tests {
             scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM, None).unwrap();
+        let results = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert!(!results.is_empty());
         assert!(results.len() <= 3);
         // Results matching both FTS and vector should have MatchType::Both
@@ -334,7 +338,7 @@ mod tests {
             scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM, None).unwrap();
+        let results = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].match_type, MatchType::Fts);
     }
@@ -360,7 +364,7 @@ mod tests {
             scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM, None).unwrap();
+        let results = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].match_type, MatchType::Vector);
         assert_eq!(results[0].fact.content, "fact one");
@@ -395,7 +399,7 @@ mod tests {
             scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM, None).unwrap();
+        let results = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.fact_type, FactType::Semantic);
     }
