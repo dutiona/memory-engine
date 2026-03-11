@@ -36,9 +36,9 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 2. **Traits for LLM ops** — `EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`. Engine has zero network/LLM dependencies.
 3. **Event-sourced** — Append-only event log is source of truth. Facts are consumer-derived (explicit `add_fact`), not auto-projected.
 4. **Soft deletion** — Facts are expired (`t_expired` set), never hard-deleted. Full audit trail for temporal reasoning.
-5. **Synchronous** — No async. SQLite is local I/O. Async adapter is future work.
-6. **Single-writer, `!Send`** — `MemoryEngine` owns one `Connection`, not thread-safe. Consumer wraps in actor or mutex.
-7. **Brute-force vector** — O(N) scan with cosine similarity. Migrate to ANN when benchmarks show need.
+5. **Async via spawn_blocking** — `AsyncMemoryEngine` wraps sync calls in `tokio::spawn_blocking`. SQLite is local I/O; true async would over-complicate.
+6. **Send + Sync** — `MemoryEngine` uses `ConnectionPool` (N readers + 1 writer) with `parking_lot::RwLock`. Thread-safe by default since Phase 3.
+7. **Pluggable vector search** — Brute-force cosine by default; HNSW ANN behind `ann` feature flag (Phase 3). `VectorSearchStrategy` trait for future backends.
 
 ---
 
@@ -127,7 +127,7 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 ### Phase 3b: Temporal Memory & Agent Lifecycle ✅
 
-**PR:** (pending)
+**PR:** [#34](https://github.com/dutiona/memory-engine/pull/34) (cherry-picked into main)
 **Plan:** [Issue #25](https://github.com/dutiona/memory-engine/issues/25)
 
 | Task | Component                                                            | Status |
