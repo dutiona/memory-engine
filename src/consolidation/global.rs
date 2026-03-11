@@ -50,6 +50,8 @@ pub fn global_integration(
             access_count: 0,
             last_accessed: s.created_at,
             metadata: serde_json::json!({}),
+            is_pinned: false,
+            importance_score: 0.5,
         })
         .collect();
 
