@@ -316,7 +316,7 @@ mod tests {
             false,
         );
 
-        let removed = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
         // Neither should be deduped because one is pinned
         assert_eq!(removed, 0);
 
@@ -338,7 +338,7 @@ mod tests {
             true,
         );
 
-        let removed = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
         assert_eq!(removed, 0);
 
         let store = FactStore::new(&conn, dim);

@@ -423,7 +423,7 @@ mod tests {
             min_importance: 0.3,
             ..ForgetPolicy::default()
         };
-        let stats = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+        let (stats, _pruned_ids) = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
 
         assert_eq!(stats.facts_expired, 1); // only unpinned
         assert_eq!(stats.facts_evaluated, 2);
