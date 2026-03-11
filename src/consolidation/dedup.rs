@@ -44,13 +44,16 @@ pub fn local_dedup(
     let mut duplicates_removed = 0;
 
     for new_fact in &new_facts {
-        if expired_ids.contains(&new_fact.id) {
-            continue;
+        if expired_ids.contains(&new_fact.id) || new_fact.is_pinned {
+            continue; // pinned facts are never dedup candidates
         }
 
         for candidate in &active_facts {
-            if candidate.id == new_fact.id || expired_ids.contains(&candidate.id) {
-                continue;
+            if candidate.id == new_fact.id
+                || expired_ids.contains(&candidate.id)
+                || candidate.is_pinned
+            {
+                continue; // skip pinned candidates too
             }
 
             let similarity = cosine_similarity(&new_fact.embedding, &candidate.embedding);
@@ -69,6 +72,19 @@ pub fn local_dedup(
                 edge_store.expire_by_fact(expire_id, now)?;
                 expired_ids.insert(expire_id);
                 duplicates_removed += 1;
+
+                // Update survivor's importance: inherit max from merged pair
+                let (survivor, loser) = if expire_id == new_fact.id {
+                    (&candidate, new_fact)
+                } else {
+                    (new_fact, &candidate)
+                };
+                if loser.importance > survivor.importance {
+                    fact_store.update_importance(survivor.id, loser.importance)?;
+                }
+                if loser.importance_score > survivor.importance_score {
+                    fact_store.update_importance_score(survivor.id, loser.importance_score)?;
+                }
 
                 // If the new_fact itself was expired, stop comparing it
                 if expire_id == new_fact.id {
@@ -120,6 +136,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: Utc::now(),
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap()
     }
@@ -178,6 +195,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap();
 
@@ -198,6 +216,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: Utc::now(),
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             })
             .unwrap();
 
@@ -244,5 +263,112 @@ mod tests {
         let active = store.list_active().unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "older fact");
+    }
+
+    fn insert_pinned_fact(
+        conn: &Connection,
+        embed_dim: usize,
+        content: &str,
+        embedding: Vec<f32>,
+        importance: f64,
+        is_pinned: bool,
+    ) -> i64 {
+        let store = FactStore::new(conn, embed_dim);
+        store
+            .insert(&NewFact {
+                content: content.into(),
+                content_hash: blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string(),
+                embedding,
+                fact_type: FactType::Semantic,
+                t_created: Utc::now(),
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                scope_id: 1,
+                importance,
+                access_count: 0,
+                last_accessed: Utc::now(),
+                metadata: serde_json::json!({}),
+                is_pinned,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn pinned_facts_not_deduped() {
+        let (conn, dim) = setup();
+        // Insert a pinned fact and a near-duplicate unpinned fact
+        insert_pinned_fact(
+            &conn,
+            dim,
+            "pinned fact",
+            vec![1.0, 0.0, 0.0, 0.0],
+            0.5,
+            true,
+        );
+        insert_pinned_fact(
+            &conn,
+            dim,
+            "pinned fact copy",
+            vec![0.99, 0.01, 0.0, 0.0],
+            0.5,
+            false,
+        );
+
+        let removed = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        // Neither should be deduped because one is pinned
+        assert_eq!(removed, 0);
+
+        let store = FactStore::new(&conn, dim);
+        let active = store.list_active().unwrap();
+        assert_eq!(active.len(), 2);
+    }
+
+    #[test]
+    fn both_pinned_not_deduped() {
+        let (conn, dim) = setup();
+        insert_pinned_fact(&conn, dim, "pinned A", vec![1.0, 0.0, 0.0, 0.0], 0.5, true);
+        insert_pinned_fact(
+            &conn,
+            dim,
+            "pinned B",
+            vec![0.99, 0.01, 0.0, 0.0],
+            0.8,
+            true,
+        );
+
+        let removed = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        assert_eq!(removed, 0);
+
+        let store = FactStore::new(&conn, dim);
+        assert_eq!(store.list_active().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn survivor_inherits_max_importance() {
+        let (conn, dim) = setup();
+        // Low importance fact, high importance fact — near-duplicate embeddings
+        insert_fact(&conn, dim, "low imp", vec![1.0, 0.0, 0.0, 0.0], 0.3);
+        insert_fact(&conn, dim, "high imp", vec![0.99, 0.01, 0.0, 0.0], 0.9);
+
+        // Set distinct importance_scores before dedup
+        let store = FactStore::new(&conn, dim);
+        store.update_importance_score(1, 0.8).unwrap(); // low imp fact gets higher score
+        store.update_importance_score(2, 0.4).unwrap(); // high imp fact gets lower score
+
+        local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+
+        let active = store.list_active().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, "high imp");
+        // Survivor inherits max base importance (0.9 > 0.3)
+        assert!((active[0].importance - 0.9).abs() < f64::EPSILON);
+        // Survivor inherits max importance_score (0.8 > 0.4)
+        assert!(
+            (active[0].importance_score - 0.8).abs() < f64::EPSILON,
+            "expected importance_score 0.8, got {}",
+            active[0].importance_score
+        );
     }
 }

@@ -47,6 +47,9 @@ fn full_roundtrip() {
         source: "integration_test".into(),
         session_id: Some("sess-roundtrip".into()),
         scope_id: 1,
+        origin_node_id: "local".into(),
+        sequence_id: 0,
+        created_at: None,
     };
     let event_id = engine.ingest(&event).unwrap();
     assert!(event_id > 0);
@@ -60,6 +63,7 @@ fn full_roundtrip() {
             &embedder,
             None,
             None,
+            None,
         )
         .unwrap();
     let fact2_id = engine
@@ -70,6 +74,7 @@ fn full_roundtrip() {
             &embedder,
             None,
             None,
+            None,
         )
         .unwrap();
     let fact3_id = engine
@@ -78,6 +83,7 @@ fn full_roundtrip() {
             FactType::Episodic,
             Some(event_id),
             &embedder,
+            None,
             None,
             None,
         )

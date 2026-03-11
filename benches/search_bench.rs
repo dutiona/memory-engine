@@ -72,7 +72,15 @@ fn setup_engine_with_dim(n: usize, dim: usize) -> MemoryEngine {
         let topic = TOPICS[i % TOPICS.len()];
         let content = format!("{topic} — fact number {i}");
         engine
-            .add_fact(&content, FactType::Semantic, None, &embedder, None, None)
+            .add_fact(
+                &content,
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
             .expect("add_fact");
     }
 
@@ -110,6 +118,7 @@ fn setup_scoped_engine(n: usize) -> MemoryEngine {
                 None,
                 &embedder,
                 Some(scope),
+                None,
                 None,
             )
             .expect("add_fact");

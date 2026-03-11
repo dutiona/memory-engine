@@ -56,6 +56,29 @@ pub enum CrudDecision {
     Noop,
 }
 
+// --- Phase 3b: Persistence classifier ---
+
+/// Trait for classifying whether a fact should be pinned (unforgettable).
+///
+/// Consumers implement this to apply domain-specific rules:
+/// LLM-based classification, regex matching, importance thresholds, etc.
+///
+/// Default implementation returns `false` — opt-in, zero behavior change.
+///
+/// **Classifier input caveat:** The `Fact` passed to `should_pin()` during
+/// `add_fact()` is a pre-insert synthetic with `id=0`, `scope_id=0`,
+/// `importance_score` seeded from base `importance`, and no graph connectivity.
+/// Classifiers should only rely on `content`, `fact_type`, `importance`
+/// (caller hint), and `metadata` — not on `id`, `scope_id`,
+/// `importance_score`, or `access_count`.
+pub trait PersistenceClassifier {
+    /// Decide if a fact should be pinned (never forgotten).
+    fn should_pin(&self, fact: &Fact) -> bool {
+        let _ = fact;
+        false
+    }
+}
+
 /// Configuration for the consolidation process (Phase 2).
 #[derive(Debug, Clone)]
 pub struct ConsolidationConfig {
