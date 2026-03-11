@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -20,12 +22,32 @@ pub enum FactType {
     Procedural,
 }
 
+impl fmt::Display for FactType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Episodic => write!(f, "episodic"),
+            Self::Semantic => write!(f, "semantic"),
+            Self::Procedural => write!(f, "procedural"),
+        }
+    }
+}
+
 /// Consolidation level for summaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsolidationLevel {
     Local,
     Cluster,
     Global,
+}
+
+impl fmt::Display for ConsolidationLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => write!(f, "local"),
+            Self::Cluster => write!(f, "cluster"),
+            Self::Global => write!(f, "global"),
+        }
+    }
 }
 
 // --- Full structs (with id, as returned from DB) ---
