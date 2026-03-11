@@ -2,11 +2,11 @@
 //!
 //! Run with: `cargo run --example basic_roundtrip`
 
-use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{EventType, FactType, NewEvent};
+use memory_engine::MemoryEngine;
 
 /// Zero-vector embedder for examples (no external model needed).
 struct DummyEmbedder;
@@ -29,6 +29,9 @@ fn main() -> Result<(), MemoryError> {
         source: "chat".into(),
         session_id: Some("session-1".into()),
         scope_id: 1,
+        origin_node_id: "local".into(),
+        sequence_id: 0,
+        created_at: None,
     })?;
     println!("Ingested event id={event_id}");
 
@@ -40,6 +43,7 @@ fn main() -> Result<(), MemoryError> {
         &embedder,
         None, // root scope
         None, // default options
+        None, // no persistence classifier
     )?;
     println!("Added fact id={fact1}");
 
@@ -48,6 +52,7 @@ fn main() -> Result<(), MemoryError> {
         FactType::Episodic,
         Some(event_id),
         &embedder,
+        None,
         None,
         None,
     )?;

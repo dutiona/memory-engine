@@ -437,7 +437,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        let (stats, pruned_ids) = {
+        let (stats, _pruned_ids) = {
             let conn = self.write_conn();
             let mut graph = self.graph.write();
             crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())?

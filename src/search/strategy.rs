@@ -165,6 +165,7 @@ mod tests {
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),
+            is_pinned: false,
         }
     }
 

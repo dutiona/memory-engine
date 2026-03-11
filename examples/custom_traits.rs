@@ -2,13 +2,13 @@
 //!
 //! Run with: `cargo run --example custom_traits`
 
-use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, ForgetPolicy,
     SummaryGenerator,
 };
 use memory_engine::types::{Fact, FactType, NewFact};
+use memory_engine::MemoryEngine;
 
 // --- EmbeddingProvider: consumers bring their own embedding model ---
 
@@ -78,12 +78,14 @@ fn main() -> Result<(), MemoryError> {
         &embedder,
         None,
         None,
+        None,
     )?;
     engine.add_fact(
         "Rust was created by Graydon Hoare",
         FactType::Semantic,
         None,
         &embedder,
+        None,
         None,
         None,
     )?;
@@ -94,12 +96,14 @@ fn main() -> Result<(), MemoryError> {
         &embedder,
         None,
         None,
+        None,
     )?;
     engine.add_fact(
         "Rust uses ownership for memory safety",
         FactType::Semantic,
         None,
         &embedder,
+        None,
         None,
         None,
     )?; // duplicate
@@ -145,6 +149,7 @@ fn main() -> Result<(), MemoryError> {
         &embedder,
         None,
         None,
+        None,
     )?;
 
     let conflicting = NewFact {
@@ -162,6 +167,7 @@ fn main() -> Result<(), MemoryError> {
         access_count: 0,
         last_accessed: chrono::Utc::now(),
         metadata: serde_json::json!({}),
+        is_pinned: false,
     };
 
     let arbiter = RecencyArbiter;

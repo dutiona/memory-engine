@@ -772,18 +772,18 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("3".to_string())
+            Some("4".to_string())
         );
         // migrate is a no-op on fresh DB
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("3".to_string())
+            Some("4".to_string())
         );
     }
 
     #[test]
-    fn migrate_v1_through_v3_runs_without_error() {
+    fn migrate_v1_through_v4_runs_without_error() {
         let conn = open_memory().unwrap();
         init_schema_v1(&conn).unwrap();
         assert_eq!(
@@ -793,7 +793,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("3".to_string())
+            Some("4".to_string())
         );
     }
 
@@ -805,7 +805,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("3".to_string())
+            Some("4".to_string())
         );
     }
 
@@ -839,7 +839,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("3".to_string())
+            Some("4".to_string())
         );
 
         // Data survived both migrations
@@ -929,7 +929,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         migrate(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("3".to_string())
+            Some("4".to_string())
         );
 
         // After migration: orphan scope_id fails (FK enforced)
@@ -1011,7 +1011,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
     }
 
     #[test]
-    fn migrate_v2_to_v3_adds_pinned_and_envelope() {
+    fn migrate_v3_to_v4_adds_pinned_and_envelope() {
         let conn = open_memory().unwrap();
         init_schema_v2(&conn).unwrap();
 
@@ -1057,17 +1057,17 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("3".to_string())
+            Some("4".to_string())
         );
     }
 
     #[test]
-    fn fresh_db_creates_v3_schema() {
+    fn fresh_db_creates_v4_schema() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("3".to_string())
+            Some("4".to_string())
         );
         conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, is_pinned, importance_score)

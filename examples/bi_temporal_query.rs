@@ -5,11 +5,11 @@
 //! Run with: `cargo run --example bi_temporal_query`
 
 use chrono::{Duration, Utc};
-use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, FactType};
+use memory_engine::MemoryEngine;
 
 struct DummyEmbedder;
 
@@ -37,6 +37,7 @@ fn main() -> Result<(), MemoryError> {
             t_invalid: Some(now + Duration::days(5)),
             ..Default::default()
         }),
+        None,
     )?;
 
     // Fact valid only in the future (scheduled memory)
@@ -51,6 +52,7 @@ fn main() -> Result<(), MemoryError> {
             t_valid: Some(now + Duration::days(10)),
             ..Default::default()
         }),
+        None,
     )?;
 
     // Fact that expired yesterday (historical knowledge)
@@ -65,6 +67,7 @@ fn main() -> Result<(), MemoryError> {
             t_invalid: Some(now - Duration::days(1)),
             ..Default::default()
         }),
+        None,
     )?;
 
     // Query: what's valid RIGHT NOW?
