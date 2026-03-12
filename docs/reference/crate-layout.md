@@ -16,7 +16,7 @@ memory_engine (lib.rs)
   +-- conflict      Bi-temporal conflict resolution
   +-- pool          Connection pool (N readers + 1 writer)
   +-- scope         Hierarchical scope tree cache
-  +-- resume        Session bootstrapping (3-tier retrieval)
+  +-- resume        Session bootstrapping (5-tier retrieval)
   +-- async_engine  Async wrapper (feature-gated)
 ```
 
@@ -37,6 +37,7 @@ memory_engine (lib.rs)
 - `EmbeddingProvider` -- compute text embeddings (local model or API).
 - `SummaryGenerator` -- generate summaries from fact clusters, plus embed the result.
 - `ConflictArbiter` -- decide how to resolve contradicting facts (returns `CrudDecision`).
+- `PersistenceClassifier` -- decide whether a new fact should be pinned (unforgettable). Optional, default returns `false`.
   Also defines `ForgetPolicy` (Ebbinghaus parameters and signal weights), `ConsolidationConfig`, `ConsolidationStats`, `PruneStats`, `ConflictResolution`, and `CrudDecision`.
 
 `search`
@@ -80,11 +81,13 @@ memory_engine (lib.rs)
 : `ScopeTree` -- in-memory cache of the hierarchical scope tree. Loaded from the `scopes` table on engine open. Resolves `ScopeQuery` variants (`Exact`, `Subtree`, `Ancestors`, `Inherited`) to sets of scope IDs without hitting the database.
 
 `resume`
-: Session bootstrapping via `ResumeConfig` and `ResumeContext`. Implements 3-tier retrieval:
+: Session bootstrapping via `ResumeConfig` and `ResumeContext`. Implements 5-tier retrieval:
 
-1. **Identity** -- root-scope, highest-importance facts.
-2. **Core** -- facts above an importance threshold from scope ancestors.
-3. **Recent** -- most recent facts from scope ancestors.
+1. **Pinned** -- unforgettable facts (`is_pinned = true`), cross-scope, sorted by `importance_score` descending.
+2. **High-importance** -- facts with materialized `importance_score` above a configurable threshold.
+3. **Due** -- future-memory facts whose `t_valid` has arrived (`t_valid <= now`).
+4. **Recent** -- most recent facts from scope ancestors.
+5. **KB stubs** -- placeholder for Phase 5 knowledge-base references.
    Tiers are mutually exclusive (a fact appears in at most one tier).
 
 `async_engine`

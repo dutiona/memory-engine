@@ -114,9 +114,26 @@ let opts = AddFactOptions {
 };
 engine.add_fact(
     "new API version goes live next week",
-    FactType::Semantic, None, &embedder, None, Some(&opts),
+    FactType::Semantic, None, &embedder, None, Some(&opts), None,
 )?;
 ```
+
+The scheduling API provides active retrieval of due facts without requiring a full query:
+
+```rust
+// Get all facts whose t_valid has arrived
+let due_facts = engine.list_due(Utc::now(), None)?;
+for fact in &due_facts {
+    println!("Now due: {}", fact.content);
+}
+
+// Scheduling hint: when should I poll again?
+if let Some(next) = engine.next_due_time(None)? {
+    println!("Next fact becomes due at: {}", next);
+}
+```
+
+`list_due(now, scope)` returns active facts where `t_valid <= now` and `t_valid IS NOT NULL`, excluding bi-temporally invalidated facts (`t_invalid <= now`). `next_due_time(scope)` returns the earliest `t_valid` among facts where `t_valid > now`, allowing the consumer to schedule its next poll without busy-waiting.
 
 **Historical queries**. Query what the agent knew at a past point in time by setting `valid_at` to a historical timestamp.
 

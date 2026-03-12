@@ -74,7 +74,30 @@ for operations that require external models:
 `ForgetPolicy`
 : Configuration struct (not a trait) controlling Ebbinghaus decay parameters.
 
+`PersistenceClassifier`
+: Decide whether a new fact should be pinned (unforgettable). Called during `add_fact()`. Optional.
+
 This design means the core crate compiles without any ML framework, HTTP client, or API key.
+
+## Pinned Facts
+
+Facts can be marked as **pinned** (unforgettable). Pinned facts:
+
+- Are never expired by the forgetting system (`forget()` skips them)
+- Are never deduplicated during consolidation
+- Appear in the top tier of `resume_context()` (tier 1: pinned)
+- Can be pinned explicitly via `pin_fact(id)` / `unpin_fact(id)`, through `AddFactOptions { pinned: Some(true), .. }`, or automatically via a `PersistenceClassifier`
+
+Pinned facts model agent identity, core beliefs, and critical knowledge that should persist indefinitely.
+
+## Future Memory & Scheduling
+
+Facts with `t_valid` set in the future are invisible to present-time queries but surface when their time arrives. The scheduling API supports this:
+
+- `list_due(now, scope)` — returns facts whose `t_valid <= now` (they have become valid)
+- `next_due_time(scope)` — returns the earliest future `t_valid`, so the consumer knows when to poll again
+
+This enables reminders, deferred knowledge, and time-triggered agent behavior.
 
 ## Scoping
 
@@ -96,15 +119,19 @@ Scope queries control visibility:
 - **Ancestors** — this scope and all parents up to root
 - **Inherited** — ancestors + subtree (full inherited context)
 
-## Five Primitives
+**Global summary invariant:** Global-level summaries (pass 3 of consolidation) are always placed at `scope_id=1` (root scope), regardless of the scopes of the underlying facts. Cluster-level summaries (pass 2) use majority-vote scope assignment from their source facts.
 
-| Primitive       | Method               | Purpose                                       |
-| --------------- | -------------------- | --------------------------------------------- |
-| **Ingest**      | `ingest()`           | Append event to the audit log                 |
-| **Query**       | `query()`            | Hybrid search with temporal and scope filters |
-| **Consolidate** | `consolidate()`      | Merge duplicates, cluster facts, summarize    |
-| **Forget**      | `forget()`           | Decay and prune low-importance facts          |
-| **Resolve**     | `resolve_conflict()` | Arbitrate contradicting facts                 |
+## Seven Primitives
+
+| Primitive       | Method                          | Purpose                                             |
+| --------------- | ------------------------------- | --------------------------------------------------- |
+| **Ingest**      | `ingest()`                      | Append event to the audit log                       |
+| **Query**       | `query()`                       | Hybrid search with temporal and scope filters       |
+| **Consolidate** | `consolidate()`                 | Merge duplicates, cluster facts, summarize          |
+| **Forget**      | `forget()`                      | Decay and prune low-importance facts (skips pinned) |
+| **Resolve**     | `resolve_conflict()`            | Arbitrate contradicting facts                       |
+| **Schedule**    | `list_due()`, `next_due_time()` | Surface future-memory facts and poll timing         |
+| **Resume**      | `resume_context()`              | 5-tier session bootstrapping                        |
 
 ## Threading
 
