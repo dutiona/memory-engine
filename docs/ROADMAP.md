@@ -20,13 +20,13 @@
 
 Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 storage stacks. The papers use diverse backends — Neo4j (Graphiti/Zep), Qdrant (Mem0), custom (A-Mem) — but all are external services. Our constraint: **embedded, single-process, no JVM/external DB**.
 
-| Technology            | Research Verdict                                                         | Current Status        | Rationale                                                                                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Neo4j**             | Discarded                                                                | —                     | External JVM process. Mature graph + temporal support, but overkill for embedded single-agent use. Graphiti/Zep use it as a service.                                                  |
-| **Qdrant**            | Discarded                                                                | —                     | External service. Mem0 uses it for vector search, but violates our embedded constraint.                                                                                               |
-| **SurrealDB 3.0**     | Deferred                                                                 | Monitor stability     | "Best if stable" — Rust-native, vector+graph+KV+temporal in single binary. Too young (Feb 2026) when we evaluated. Event-sourced log enables replay-based migration if it matures.    |
-| **LanceDB**           | Deferred → Issue [#3](https://github.com/dutiona/memory-engine/issues/3) | Candidate for Phase 3 | Original plan for vector search (embedded, Rust-native, columnar, versioned). Dropped for brute-force cosine in Phase 1 — <50ms at expected scale. Revisit when benchmarks show need. |
-| **SQLite + Petgraph** | Adopted                                                                  | Phase 1 ✅            | Battle-tested, embedded, simple. FTS5 for keyword search. WAL for concurrent reads. Petgraph for in-memory graph loaded from SQLite.                                                  |
+| Technology            | Research Verdict | Current Status     | Rationale                                                                                                                                                                                                                       |
+| --------------------- | ---------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Neo4j**             | Discarded        | —                  | External JVM process. Mature graph + temporal support, but overkill for embedded single-agent use. Graphiti/Zep use it as a service.                                                                                            |
+| **Qdrant**            | Discarded        | —                  | External service. Mem0 uses it for vector search, but violates our embedded constraint.                                                                                                                                         |
+| **SurrealDB 3.0**     | Deferred         | Monitor stability  | "Best if stable" — Rust-native, vector+graph+KV+temporal in single binary. Too young (Feb 2026) when we evaluated. Event-sourced log enables replay-based migration if it matures.                                              |
+| **LanceDB**           | Deferred         | Superseded by HNSW | Original ANN candidate (embedded, Rust-native, columnar). HNSW (`hnsw` crate) chosen instead for in-memory ANN behind `ann` feature flag. LanceDB remains a hypothetical future option for disk-backed ANN if data exceeds RAM. |
+| **SQLite + Petgraph** | Adopted          | Phase 1 ✅         | Battle-tested, embedded, simple. FTS5 for keyword search. WAL for concurrent reads. Petgraph for in-memory graph loaded from SQLite.                                                                                            |
 
 **Migration safety net:** The event-sourced architecture guarantees we can replay into any storage backend. No lock-in.
 
@@ -107,7 +107,7 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 ### Phase 3: Hardening & Scalability ✅
 
 **PR:** [#20](https://github.com/dutiona/memory-engine/pull/20) (squash-merged)
-**Plan:** [Issue #15](https://github.com/dutiona/memory-engine/issues/15)
+**Plan:** Issues [#3](https://github.com/dutiona/memory-engine/issues/3)–[#7](https://github.com/dutiona/memory-engine/issues/7) (originally scoped as "Phase 2", executed here)
 
 | Task | Component                                                   | Status |
 | ---- | ----------------------------------------------------------- | ------ |
@@ -168,50 +168,87 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 ### Phase 4: Operability & MCP Server 🔲
 
-**Design:** [`docs/plans/2026-03-09-future-phases-design.md`](plans/2026-03-09-future-phases-design.md)
+**Design:** [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md)
 
-| Feature                     | Description                                                         |
-| --------------------------- | ------------------------------------------------------------------- |
-| Inspection APIs             | `explain_fact()`, `replay_events()`, `dump_state()`, `statistics()` |
-| CLI inspector               | `memory-engine-cli` — clean operator tool (like `gh`)               |
-| MCP server                  | `memory-engine-mcp` workspace member, eventual separate repo        |
-| Import/export               | JSON event log + SQLite backup, gzip/zstd compression               |
-| Archival compression        | Cold storage `.pak` files for old non-pinned facts                  |
-| Semantic extraction queries | Scope + temporal range + semantic search composition                |
+#### Prerequisites (gate Phase 4 — can be done in parallel)
+
+| Item                                                                                    | Description                                                                                                                                          |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Documentation gap ([#35](https://github.com/dutiona/memory-engine/issues/35))           | Update 13 doc files for Phase 3b features (pinned facts, 5-tier resume, scheduling API, classifier). Includes scope_id=1 invariant (folded from #11) |
+| Schema evolution discipline ([#18](https://github.com/dutiona/memory-engine/issues/18)) | Versioning policy, migration rules, backwards-compat testing. Design doc: "before Phase 4 ships"                                                     |
+
+#### Phase 4a: Introspection & Data (library)
+
+| Feature                                                                                 | Description                                                                               |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Inspection APIs ([#39](https://github.com/dutiona/memory-engine/issues/39))             | `explain_fact()`, `replay_events()`, `dump_state()`, `statistics()`                       |
+| Import/export ([#40](https://github.com/dutiona/memory-engine/issues/40))               | JSON event log + SQLite backup, gzip/zstd compression                                     |
+| Semantic extraction queries ([#41](https://github.com/dutiona/memory-engine/issues/41)) | Query builder composing scope + temporal range + semantic search                          |
+| `Reranker` trait ([#42](https://github.com/dutiona/memory-engine/issues/42))            | Cross-encoder reranking on top-K candidates after RRF (+5-15% nDCG@10). Consumer-provided |
+| Session log bootstrap ([#43](https://github.com/dutiona/memory-engine/issues/43))       | Parse Claude Code JSONL session logs into historical memory facts                         |
+
+#### Phase 4b: Tooling (new workspace binaries)
+
+| Feature                                                                   | Description                                                                                                 |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| CLI inspector ([#44](https://github.com/dutiona/memory-engine/issues/44)) | `memory-engine-cli` — operator tool (subcommands: inspect, dump, query, explain, stats, import, export)     |
+| MCP server ([#45](https://github.com/dutiona/memory-engine/issues/45))    | `memory-engine-mcp` — maps 1:1 to engine API. Includes pre-compaction flush endpoint for push-based capture |
+
+#### Phase 4c: Quality & Cold Storage
+
+| Feature                                                                          | Description                                                                                               |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Evaluation harness ([#16](https://github.com/dutiona/memory-engine/issues/16))   | Regression corpus for retrieval quality, consolidation correctness, forgetting behavior. After 4a/4b ship |
+| Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback)                |
+| Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot                                                       |
 
 ---
 
-### Phase 5: Knowledge Integration 🔲
+### Phase 5: Cognitive Pipelines 🔲
 
-**Design:** [`docs/plans/2026-03-09-future-phases-design.md`](plans/2026-03-09-future-phases-design.md)
+**Theme:** Close the Memory → Wisdom gap identified by the [four-layer cognitive architecture](https://github.com/dutiona/research-index/blob/master/docs/insights/four-layer-cognitive-architecture.md). Make the engine self-improving.
 
-| Feature                        | Description                                     |
-| ------------------------------ | ----------------------------------------------- |
-| `KnowledgeBaseConnector` trait | Transport-agnostic, consumer-implemented        |
-| `KnowledgeRef` on facts        | URI field pointing to KB content                |
-| Graceful degradation           | "Memory lapse" when KB unreachable, retry later |
-| research-index bridge          | `memory-kb-research-index` middleware crate     |
+| Feature                                                                               | Description                                                                                                                                                          |
+| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Wisdom promotion API ([#47](https://github.com/dutiona/memory-engine/issues/47))      | Pattern detection over consolidated memories (DBSCAN or similar). Proposal generation with human approval gate. Output: CLAUDE.md entries, skills, feedback memories |
+| Hook-based memory capture ([#48](https://github.com/dutiona/memory-engine/issues/48)) | Infrastructure-level observation ("scrub nurse" pattern). Automatic ingestion without model initiative — hooks feed memory, model only logs what only it knows       |
+| Dream-cycle consolidation ([#49](https://github.com/dutiona/memory-engine/issues/49)) | Batch retroactive consolidation with review gates. Run over historical data (overnight "dream cycle"), detect patterns for wisdom promotion candidates               |
+
+---
+
+### Phase 6: Knowledge Integration 🔲
+
+**Design:** [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md)
+
+| Feature                                                                                                                            | Description                                                                               |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `KnowledgeBaseConnector` trait + `KnowledgeRef` + graceful degradation ([#50](https://github.com/dutiona/memory-engine/issues/50)) | Transport-agnostic trait, optional URI field on facts, "memory lapse" when KB unreachable |
+| Knowledge change notification ([#51](https://github.com/dutiona/memory-engine/issues/51))                                          | When KB content is superseded/updated, notify memory to re-evaluate dependent facts       |
+| research-index bridge ([#52](https://github.com/dutiona/memory-engine/issues/52))                                                  | `memory-kb-research-index` middleware crate implementing `KnowledgeBaseConnector`         |
+
+---
+
+### Phase 7: Visualization 🔲
+
+| Feature                                                            | Description                                                                                                                                                                 |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Web UI ([#13](https://github.com/dutiona/memory-engine/issues/13)) | WASM+Rust graph visualization. Hybrid: petgraph+fdg-sim (WASM) for layout, sigma.js (WebGL) for rendering. Scope filtering, fact editing, import/export, event log timeline |
 
 ---
 
 ### Deferred (not planned, trigger-based)
 
-Tracked as individual GitHub issues. See design doc for details.
+Tracked as individual GitHub issues. Not scheduled for any phase — each has a trigger condition.
 
-- **ANN vector index** — ✅ Implemented in Phase 3 (HNSW behind `ann` feature flag)
-- **MCP server adapter** — Expose engine as a Model Context Protocol tool server
-- **Web UI** — WASM+Rust graph visualization. Separate project.
-- **Auth** — Deployment layer concern, not engine core.
-- **SaaS Sync** — Separate product. CRDT event-log merge + E2EE.
-- **Evaluation harness** — Regression corpus for retrieval/consolidation quality.
-- **Hierarchical summarization** — Multi-level abstractions (Memento-style). Currently consolidation is flat (local/cluster/global).
-- **Cross-session memory sharing** — Multiple agents sharing one store. Requires session isolation or namespacing.
-- **Schema evolution discipline** — Versioning policy, backwards-compat testing.
-- **Determinism guarantees** — Replay, merge, idempotency rules for sync.
-- **Multimodal memory** — Image/audio embeddings. Schema supports it (BLOB).
-- **Parameter updates** — Doc-to-LoRA. Out of scope — engine is retrieval-only.
-- **Knowledge Base integration** — `kb_stubs` placeholder in `ResumeContext` for Phase 5 external knowledge references.
-- **Multi-node sync** — Event envelope fields (`origin_node_id`, `sequence_id`) are forward-compatible for distributed sync.
+| Item                                                                                     | Trigger                                                                                               |
+| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Auth ([#14](https://github.com/dutiona/memory-engine/issues/14))                         | Multi-user deployment decision. Deployment layer concern, not engine core                             |
+| SaaS Sync ([#15](https://github.com/dutiona/memory-engine/issues/15))                    | Product decision for multi-device. CRDT event-log merge + E2EE. Requires determinism guarantees first |
+| Hierarchical summarization ([#17](https://github.com/dutiona/memory-engine/issues/17))   | Usage exceeds flat consolidation. Memento-style multi-level abstractions                              |
+| Determinism guarantees ([#19](https://github.com/dutiona/memory-engine/issues/19))       | Before sync work begins. Replay, merge, idempotency rules                                             |
+| Cross-session memory sharing ([#36](https://github.com/dutiona/memory-engine/issues/36)) | Multi-agent deployments. Session isolation or namespace via ScopeTree                                 |
+| Multimodal memory ([#37](https://github.com/dutiona/memory-engine/issues/37))            | Non-text memories needed. Schema supports it (BLOB embeddings)                                        |
+| Multi-node sync ([#38](https://github.com/dutiona/memory-engine/issues/38))              | Multi-device eventual consistency. Event envelope fields are forward-compatible                       |
 
 ---
 
@@ -226,6 +263,8 @@ Consumer (AI agent, CLI tool, MCP server)
 │  ingest · add_fact · query               │  ← Phase 1 ✅
 │  consolidate · forget · resolve          │  ← Phase 2 ✅
 │  resume_context · list_due · pin/unpin  │  ← Phase 3/3b ✅
+│  explain · replay · dump · statistics   │  ← Phase 4a
+│  promote · dream_cycle                  │  ← Phase 5
 ├──────────────────────────────────────────┤
 │  AsyncMemoryEngine (tokio wrapper)       │  ← Phase 3 ✅
 ├──────────────────────────────────────────┤
@@ -234,7 +273,8 @@ Consumer (AI agent, CLI tool, MCP server)
 │  Search                                  │
 │  ├─ FTS5 (BM25, scope-filtered)          │
 │  ├─ Vector (cosine / HNSW ANN)           │
-│  └─ Hybrid (RRF k=60)                   │
+│  ├─ Hybrid (RRF k=60)                   │
+│  └─ Reranker (cross-encoder, optional)  │  ← Phase 4a
 ├──────────────────────────────────────────┤
 │  Store                                   │
 │  ├─ EventStore (append-only log)         │
@@ -252,6 +292,15 @@ Consumer (AI agent, CLI tool, MCP server)
 │  Conflict (bi-temporal arbiter)          │  ← Phase 2 ✅
 ├──────────────────────────────────────────┤
 │  Resume (5-tier cognitive boot)          │  ← Phase 3b ✅
+├──────────────────────────────────────────┤
+│  Cognitive Pipelines                     │  ← Phase 5
+│  ├─ WisdomPromoter (pattern → proposal) │
+│  ├─ HookCapture (infrastructure → mem)  │
+│  └─ DreamCycle (batch consolidation)    │
+├──────────────────────────────────────────┤
+│  Knowledge Bridge                        │  ← Phase 6
+│  ├─ KnowledgeRef (URI on facts)         │
+│  └─ ChangeNotification (KB → memory)   │
 └──────────────────────────────────────────┘
     │
     ▼
@@ -269,17 +318,23 @@ SummaryGenerator::summarize(facts) → String            ← Phase 2 ✅
 SummaryGenerator::embed(text) → Vec<f32>               ← Phase 2 ✅
 ConflictArbiter::arbitrate(old, new) → CrudDecision    ← Phase 2 ✅
 PersistenceClassifier::should_pin(fact) → bool         ← Phase 3b ✅
-KnowledgeBaseConnector::resolve(uri) → KnowledgeChunk  ← Phase 5
+Reranker::rerank(query, candidates) → Vec<ScoredFact>  ← Phase 4a
+WisdomPromoter::propose(patterns) → Vec<Candidate>     ← Phase 5
+KnowledgeBaseConnector::resolve(uri) → KnowledgeChunk  ← Phase 6
 ```
 
 The engine has zero LLM/network dependencies. All intelligence is injected by the consumer via these traits.
 
-## Conceptual Boundaries
+## Four-Layer Cognitive Architecture
 
 ```
-Knowledge (raw content)     → Knowledge Base (e.g., research-index)
-Memory (internalized facts) → Memory Engine (this project)
-Wisdom (meta-reasoning)     → The model itself (out of scope)
+Intelligence (inference-time) → The model (out of scope)
+Wisdom (durable patterns)     → CLAUDE.md, skills, feedback files
+Memory (internalized facts)   → Memory Engine (this project)
+Knowledge (raw content)       → Knowledge Base (research-index)
 ```
 
-See [`docs/plans/2026-03-09-future-phases-design.md`](plans/2026-03-09-future-phases-design.md) for full rationale.
+The engine sits at the **Memory** layer. It consolidates experiences, forgets irrelevant ones, and (Phase 5) proposes promotions to the **Wisdom** layer. It does not own knowledge (that's research-index) or intelligence (that's the model). This separation prevents the category error of applying decay to knowledge or treating all persistent data identically.
+
+See [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md) for Phase 4-6 design rationale.
+See [four-layer cognitive architecture](https://github.com/dutiona/research-index/blob/master/docs/insights/four-layer-cognitive-architecture.md) for the foundational framework.
