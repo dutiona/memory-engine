@@ -54,6 +54,9 @@ let event_id = engine.ingest(&NewEvent {
     source: "chat".into(),
     session_id: Some("session-1".into()),
     scope_id: 1, // root scope
+    origin_node_id: "local".into(),
+    sequence_id: 0,
+    created_at: None,
 })?;
 ```
 
@@ -72,6 +75,7 @@ let fact_id = engine.add_fact(
     &embedder,
     None,            // root scope
     None,            // default options (importance=0.5)
+    None,            // no auto-pin classifier
 )?;
 ```
 

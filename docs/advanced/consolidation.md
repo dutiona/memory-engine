@@ -16,11 +16,17 @@ All three passes execute atomically. If any pass fails (including errors from th
 
 ### Pass 1: Local Dedup
 
-Compares facts created since the last consolidation against all active facts. Pairs with cosine similarity above `dedup_threshold` are resolved by expiring the lower-importance fact. Tie-break on equal importance: the newer fact (higher id) is expired.
+Compares facts created since the last consolidation against all active facts. **Pinned facts are excluded from dedup** — they are never candidates for expiration, and pinned candidates are skipped during comparison. This ensures unforgettable facts are preserved even if near-duplicates exist.
+
+Pairs with cosine similarity above `dedup_threshold` are resolved by expiring the lower-importance fact. Tie-break on equal importance: the newer fact (higher id) is expired.
 
 ```rust
-// dedup.rs — core logic
+// dedup.rs — core logic (simplified)
+if new_fact.is_pinned { continue; }  // pinned facts skip dedup entirely
+
 let similarity = cosine_similarity(&new_fact.embedding, &candidate.embedding);
+if candidate.is_pinned { continue; }  // pinned candidates are also protected
+
 if similarity > threshold {
     let expire_id = if new_fact.importance < candidate.importance {
         new_fact.id
@@ -33,6 +39,8 @@ if similarity > threshold {
     edge_store.expire_by_fact(expire_id, now)?;
 }
 ```
+
+When a duplicate pair is resolved, the surviving fact **inherits the loser's `importance_score`** if it is higher. This prevents loss of accumulated importance during dedup.
 
 Expired facts have their edges cascade-expired as well, keeping the graph consistent.
 

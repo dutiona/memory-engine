@@ -25,10 +25,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Ingest
 
-| Method     | Signature                                                                            | Description                                                                                                              |
-| ---------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `ingest`   | `(&self, event: &NewEvent) -> Result<i64>`                                           | Append an event to the log. Returns the event ID.                                                                        |
-| `add_fact` | `(&self, content, fact_type, source_event_id, embedder, scope, opts) -> Result<i64>` | Compute embedding, blake3 hash, resolve scope, and insert a fact. Embedding is computed before acquiring the write lock. |
+| Method     | Signature                                                                                        | Description                                                                                                                                                  |
+| ---------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ingest`   | `(&self, event: &NewEvent) -> Result<i64>`                                                       | Append an event to the log. Returns the event ID.                                                                                                            |
+| `add_fact` | `(&self, content, fact_type, source_event_id, embedder, scope, opts, classifier) -> Result<i64>` | Compute embedding, blake3 hash, resolve scope, optionally auto-pin via classifier, and insert a fact. Embedding is computed before acquiring the write lock. |
 
 ### Facts
 
@@ -100,23 +100,43 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | `graph_stats`     | `(&self) -> (usize, usize)`         | `(node_count, edge_count)`.                                   |
 | `graph_has_node`  | `(&self, fact_id: i64) -> bool`     | Whether a node exists in the graph.                           |
 
+### Pinning
+
+| Method       | Signature                        | Description                                                        |
+| ------------ | -------------------------------- | ------------------------------------------------------------------ |
+| `pin_fact`   | `(&self, id: i64) -> Result<()>` | Pin a fact (make it unforgettable). Bypasses forgetting and dedup. |
+| `unpin_fact` | `(&self, id: i64) -> Result<()>` | Unpin a fact (allow forgetting).                                   |
+
+### Scheduling
+
+| Method          | Signature                                                               | Description                                                                                           |
+| --------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `list_due`      | `(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>>` | List active facts whose `t_valid <= now` (future memory that has surfaced). `None` scope = root only. |
+| `next_due_time` | `(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>>`         | Scheduling hint: earliest `t_valid` among active future-dated facts. `None` scope = root only.        |
+
 ### Resume
 
 | Method           | Signature                                                 | Description                                                                                                     |
 | ---------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `resume_context` | `(&self, config: &ResumeConfig) -> Result<ResumeContext>` | 3-tier fact retrieval for session bootstrapping. Returns `NotFound` if the requested scope path does not exist. |
+| `resume_context` | `(&self, config: &ResumeConfig) -> Result<ResumeContext>` | 5-tier fact retrieval for session bootstrapping. Returns `NotFound` if the requested scope path does not exist. |
 
 `ResumeConfig` fields:
 
 - `scope_path: Option<String>` -- scope to resume from (ancestors are included).
-- `core_min_importance: f64` -- importance threshold for the core tier.
-- `identity_limit`, `core_limit`, `recent_limit` -- max facts per tier.
+- `now: DateTime<Utc>` -- current time for due-fact evaluation.
+- `pinned_cap: usize` -- max pinned facts (default: 50).
+- `high_importance_cap: usize` -- max high-importance facts (default: 20).
+- `high_importance_min: f64` -- minimum `importance_score` for tier 2 (default: 0.7).
+- `due_cap: usize` -- max due facts (default: 10).
+- `recent_cap: usize` -- max recent facts (default: 10).
 
-`ResumeContext` fields:
+`ResumeContext` fields (5 tiers, mutually exclusive):
 
-- `identity: Vec<Fact>` -- root-scope, highest-importance facts.
-- `core: Vec<Fact>` -- above-threshold facts from ancestors.
-- `recent: Vec<Fact>` -- most recent facts from ancestors.
+- `pinned: Vec<Fact>` -- tier 1: unforgettable facts, cross-scope, sorted by `importance_score` descending.
+- `high_importance: Vec<Fact>` -- tier 2: top facts by materialized `importance_score`.
+- `due: Vec<Fact>` -- tier 3: future-memory facts whose `t_valid` has arrived.
+- `recent: Vec<Fact>` -- tier 4: most recent facts from scope ancestors.
+- `kb_stubs: Vec<String>` -- tier 5: placeholder for Phase 5 knowledge-base references.
 
 ### Config
 
@@ -131,7 +151,7 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 
 - **Engine**: `MemoryEngine`, `EngineConfig`
 - **Error**: `MemoryError`, `Result`
-- **Traits**: `EmbeddingProvider`
+- **Traits**: `EmbeddingProvider` (note: `PersistenceClassifier` is available via `memory_engine::traits::PersistenceClassifier`, not re-exported at root)
 - **Types**: all public types from the `types` module (`Event`, `Fact`, `Edge`, `Summary`, `NewEvent`, `NewFact`, `NewEdge`, `NewSummary`, `EventType`, `FactType`, `ConsolidationLevel`, `ScopeQuery`, `ScopeNode`, `AddFactOptions`)
 - **Store utilities**: `serialize_embedding`, `deserialize_embedding`
 

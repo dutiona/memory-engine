@@ -44,8 +44,26 @@ Embedding
 Importance
 : Computed score in the range [0, 1] that determines a fact's resistance to forgetting. Combines four weighted signals: recency decay, access frequency (`log(access_count + 1)`), graph degree (`log(edges + 1)`), and the fact's base importance value.
 
+Pinned fact
+: A fact marked as unforgettable (`is_pinned = true`). Pinned facts are never expired by forgetting and never deduplicated during consolidation. They appear in tier 1 of `resume_context()`. Facts can be pinned explicitly via `pin_fact()`, through `AddFactOptions { pinned: Some(true) }`, or automatically by a `PersistenceClassifier`.
+
+Future memory
+: A fact with `t_valid` set in the future. Invisible to present-time queries until `t_valid` arrives. Retrieved via `list_due(now)` when the time comes. Enables reminders, deferred knowledge, and scheduled agent behavior.
+
+Importance score (materialized)
+: A composite score in [0, 1] stored on each fact as `importance_score`. Computed during `forget()` as a weighted sum of recency, frequency, graph connectivity, and base importance. Used by `resume_context()` tier 2 (high-importance) to select facts without recomputation.
+
+PersistenceClassifier
+: Consumer-provided trait that decides whether a newly inserted fact should be pinned. Called during `add_fact()` with a pre-insert synthetic `Fact`. Default implementation returns `false` (opt-in). Classifiers should rely on `content`, `fact_type`, `importance`, and `metadata` only.
+
+Scheduling API
+: The `list_due(now, scope)` and `next_due_time(scope)` methods. `list_due` returns active facts whose `t_valid` has arrived. `next_due_time` returns the earliest future `t_valid` for poll scheduling.
+
+Global summary invariant
+: Global-level summaries (consolidation pass 3) are always placed at `scope_id=1` (root scope), regardless of the scopes of the underlying facts. Cluster-level summaries use majority-vote scope assignment.
+
 Resume context
-: Three-tier fact retrieval for bootstrapping a new agent session. Tier 1 (identity): root-scope, highest-importance facts. Tier 2 (core): facts above an importance threshold from scope ancestors. Tier 3 (recent): most recent facts from scope ancestors. Tiers are mutually exclusive.
+: Five-tier fact retrieval for bootstrapping a new agent session. Tier 1 (pinned): unforgettable facts, cross-scope. Tier 2 (high-importance): facts above a materialized `importance_score` threshold. Tier 3 (due): future-memory facts whose `t_valid` has arrived. Tier 4 (recent): most recent facts from scope ancestors. Tier 5 (kb_stubs): placeholder for Phase 5 knowledge-base references. Tiers are mutually exclusive.
 
 WAL (Write-Ahead Logging)
 : SQLite journaling mode used by the connection pool. Enables concurrent readers while a single writer commits. The engine opens all connections in WAL mode to maximize read throughput without blocking on writes.
