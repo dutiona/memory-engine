@@ -2,7 +2,7 @@
 
 **Status: Implemented**
 
-memory-engine is designed around trait-based extensibility. The core crate has zero LLM or network dependencies. Consumers bring their own models by implementing three traits and configuring one policy struct.
+memory-engine is designed around trait-based extensibility. The core crate has zero LLM or network dependencies. Consumers bring their own models by implementing four traits and configuring one policy struct.
 
 ## Design Philosophy
 
@@ -126,6 +126,44 @@ impl ConflictArbiter for SemanticArbiter {
 
 The arbiter can return an error to abort the resolution with no side effects.
 
+### PersistenceClassifier
+
+Called during `add_fact()` to decide whether a newly inserted fact should be pinned (unforgettable). This is an optional parameter — passing `None` for the classifier skips auto-pinning.
+
+```rust
+pub trait PersistenceClassifier {
+    /// Decide if a fact should be pinned (never forgotten).
+    fn should_pin(&self, fact: &Fact) -> bool {
+        let _ = fact;
+        false
+    }
+}
+```
+
+The default implementation returns `false` — opt-in, zero behavior change for existing consumers.
+
+**Classifier input caveat:** The `Fact` passed to `should_pin()` during `add_fact()` is a pre-insert synthetic with `id=0`, `scope_id=0`, and `importance_score` seeded from the base `importance`. Classifiers should only rely on `content`, `fact_type`, `importance` (caller hint), and `metadata` — not on `id`, `scope_id`, `importance_score`, or `access_count`.
+
+Implementation example:
+
+```rust
+use memory_engine::traits::PersistenceClassifier;
+use memory_engine::types::Fact;
+
+struct KeywordPinner {
+    keywords: Vec<String>,
+}
+
+impl PersistenceClassifier for KeywordPinner {
+    fn should_pin(&self, fact: &Fact) -> bool {
+        // Pin facts containing critical keywords
+        self.keywords.iter().any(|kw| fact.content.contains(kw))
+    }
+}
+```
+
+When both the classifier returns `true` and `AddFactOptions::pinned` is explicitly set, the explicit `pinned` field takes precedence.
+
 ## VectorSearchStrategy: Internal Dispatch Trait
 
 `VectorSearchStrategy` is an internal trait that enables runtime dispatch between brute-force and HNSW vector search. Unlike the consumer traits above, this is **not** implemented by consumers — it is an engine-internal abstraction.
@@ -184,11 +222,12 @@ This is a policy (parameter set), not a strategy (pluggable algorithm). See [For
 
 ## Summary of Extension Points
 
-| Extension point        | Type           | When called          | Provided by                         |
-| ---------------------- | -------------- | -------------------- | ----------------------------------- |
-| `EmbeddingProvider`    | consumer trait | `add_fact()`         | Text-to-vector model                |
-| `SummaryGenerator`     | consumer trait | `consolidate()`      | Summarization + embedding           |
-| `ConflictArbiter`      | consumer trait | `resolve_conflict()` | Resolution logic                    |
-| `ForgetPolicy`         | struct         | `forget()`           | Decay parameters                    |
-| `VectorSearchStrategy` | internal trait | `query()`            | Engine (BruteForce or HnswStrategy) |
-| `SearchConfig`         | struct         | `open()`             | ANN dispatch threshold              |
+| Extension point         | Type           | When called          | Provided by                         |
+| ----------------------- | -------------- | -------------------- | ----------------------------------- |
+| `EmbeddingProvider`     | consumer trait | `add_fact()`         | Text-to-vector model                |
+| `SummaryGenerator`      | consumer trait | `consolidate()`      | Summarization + embedding           |
+| `ConflictArbiter`       | consumer trait | `resolve_conflict()` | Resolution logic                    |
+| `PersistenceClassifier` | consumer trait | `add_fact()`         | Auto-pinning logic                  |
+| `ForgetPolicy`          | struct         | `forget()`           | Decay parameters                    |
+| `VectorSearchStrategy`  | internal trait | `query()`            | Engine (BruteForce or HnswStrategy) |
+| `SearchConfig`          | struct         | `open()`             | ANN dispatch threshold              |

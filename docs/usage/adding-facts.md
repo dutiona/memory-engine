@@ -31,6 +31,7 @@ pub fn add_fact(
     embedder: &dyn EmbeddingProvider,
     scope: Option<&str>,
     opts: Option<&AddFactOptions>,
+    classifier: Option<&dyn PersistenceClassifier>,
 ) -> Result<i64>
 ```
 
@@ -41,7 +42,8 @@ pub fn add_fact(
 | `source_event_id` | Optional link back to the originating event for provenance.                                      |
 | `embedder`        | Implementation of `EmbeddingProvider` to compute the embedding vector.                           |
 | `scope`           | Optional hierarchical scope path (e.g., `"user:michael/project:demo"`). `None` means root scope. |
-| `opts`            | Optional overrides for importance, metadata, and temporal bounds.                                |
+| `opts`            | Optional overrides for importance, metadata, temporal bounds, and pinning.                       |
+| `classifier`      | Optional `PersistenceClassifier` for auto-pinning. Pass `None` to skip.                          |
 
 The method computes the embedding **before** acquiring the write lock. This means slow embedding calls (e.g., network API round-trips) do not block concurrent readers.
 
@@ -87,6 +89,7 @@ let fact_id = engine.add_fact(
     &embedder,
     None,       // root scope
     None,       // default options
+    None,       // no auto-pin classifier
 )?;
 ```
 
@@ -100,6 +103,7 @@ pub struct AddFactOptions {
     pub metadata: Option<serde_json::Value>,
     pub t_valid: Option<DateTime<Utc>>,
     pub t_invalid: Option<DateTime<Utc>>,
+    pub pinned: Option<bool>,
 }
 ```
 
@@ -108,6 +112,7 @@ All fields are `Option` and default to `None`. When `None`:
 - `importance` defaults to `0.5`
 - `metadata` defaults to `{}`
 - `t_valid` and `t_invalid` are unset (the fact is valid for all time)
+- `pinned` uses the classifier's decision (or `false` if no classifier is provided). Setting `pinned: Some(true)` overrides the classifier.
 
 Example with overrides:
 
@@ -133,6 +138,7 @@ let id = engine.add_fact(
     &embedder,
     Some("team:backend/service:api"),
     Some(&opts),
+    None,  // no auto-pin classifier
 )?;
 ```
 
@@ -164,11 +170,11 @@ When `scope` is `None`, the fact is placed at the root scope (ID 1), which is vi
 ```rust
 // Facts at different scopes
 engine.add_fact("Global preference", FactType::Semantic, None, &embedder,
-    None, None)?;  // root scope
+    None, None, None)?;  // root scope
 
 engine.add_fact("Michael's preference", FactType::Semantic, None, &embedder,
-    Some("user:michael"), None)?;
+    Some("user:michael"), None, None)?;
 
 engine.add_fact("Project-specific config", FactType::Procedural, None, &embedder,
-    Some("user:michael/project:demo"), None)?;
+    Some("user:michael/project:demo"), None, None)?;
 ```

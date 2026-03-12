@@ -90,7 +90,7 @@ The crate is organized into modules with clear responsibilities:
 | `search/`        | Query layer. FTS5 (BM25), vector (cosine similarity, brute-force or HNSW via `ann` feature), strategy dispatch, and hybrid (RRF) search. |
 | `graph/`         | `MemoryGraph` wrapper around `petgraph::DiGraph`. Loaded from SQLite on startup, kept in sync on mutations.                              |
 | `scope/`         | `ScopeTree` for hierarchical isolation. In-memory tree structure, backed by `ScopeStore` in SQLite.                                      |
-| `resume/`        | Session bootstrapping. `resume_context()` implements 3-tier retrieval.                                                                   |
+| `resume/`        | Session bootstrapping. `resume_context()` implements 5-tier retrieval (pinned → high_importance → due → recent → kb_stubs).              |
 | `consolidation/` | Three-pass memory compression: local dedup, cluster fusion, global integration.                                                          |
 | `forgetting/`    | Ebbinghaus decay with multi-signal importance scoring.                                                                                   |
 | `conflict/`      | Bi-temporal conflict resolution delegated to `ConflictArbiter`.                                                                          |
@@ -151,15 +151,17 @@ The core data flow follows an event-sourced pattern:
 
 ### Resume Context
 
-Session bootstrapping uses 3-tier retrieval to populate the agent's context window:
+Session bootstrapping uses 5-tier retrieval to populate the agent's context window:
 
-| Tier         | Source          | Selection Criteria                                                          |
-| ------------ | --------------- | --------------------------------------------------------------------------- |
-| **Identity** | Root scope only | Highest importance facts. These define the agent's persistent identity.     |
-| **Core**     | Scope ancestors | Facts with importance above a configurable threshold. Project/user context. |
-| **Recent**   | Scope ancestors | Most recently created facts. Current working context.                       |
+| Tier                | Source          | Selection Criteria                                                           |
+| ------------------- | --------------- | ---------------------------------------------------------------------------- |
+| **Pinned**          | Cross-scope     | Unforgettable facts (`is_pinned = true`), sorted by `importance_score` desc. |
+| **High-importance** | Scope ancestors | Facts with materialized `importance_score` above a configurable threshold.   |
+| **Due**             | Scope ancestors | Future-memory facts whose `t_valid` has arrived (`t_valid <= now`).          |
+| **Recent**          | Scope ancestors | Most recently created facts. Current working context.                        |
+| **KB stubs**        | —               | Placeholder for Phase 5 knowledge-base references.                           |
 
-The three tiers are mutually exclusive (a fact appears in at most one tier). The consumer controls tier sizes and thresholds via `ResumeConfig`.
+The five tiers are mutually exclusive (a fact appears in at most one tier). The consumer controls tier sizes and thresholds via `ResumeConfig`.
 
 ## Scope Tree
 
@@ -186,13 +188,13 @@ The `ScopeQuery` enum controls scope resolution for searches:
 
 The engine has zero LLM or network dependencies. All intelligence is injected by the consumer:
 
-| Trait                    | Method                                | Phase                 |
-| ------------------------ | ------------------------------------- | --------------------- |
-| `EmbeddingProvider`      | `embed(text) -> Vec<f32>`             | Phase 1 (implemented) |
-| `SummaryGenerator`       | `summarize(facts) -> String`          | Phase 2 (implemented) |
-| `SummaryGenerator`       | `embed(text) -> Vec<f32>`             | Phase 2 (implemented) |
-| `ConflictArbiter`        | `arbitrate(old, new) -> CrudDecision` | Phase 2 (implemented) |
-| `PersistenceClassifier`  | `should_pin(fact) -> bool`            | Phase 3b (planned)    |
-| `KnowledgeBaseConnector` | `resolve(uri) -> KnowledgeChunk`      | Phase 5 (planned)     |
+| Trait                    | Method                                | Phase                  |
+| ------------------------ | ------------------------------------- | ---------------------- |
+| `EmbeddingProvider`      | `embed(text) -> Vec<f32>`             | Phase 1 (implemented)  |
+| `SummaryGenerator`       | `summarize(facts) -> String`          | Phase 2 (implemented)  |
+| `SummaryGenerator`       | `embed(text) -> Vec<f32>`             | Phase 2 (implemented)  |
+| `ConflictArbiter`        | `arbitrate(old, new) -> CrudDecision` | Phase 2 (implemented)  |
+| `PersistenceClassifier`  | `should_pin(fact) -> bool`            | Phase 3b (implemented) |
+| `KnowledgeBaseConnector` | `resolve(uri) -> KnowledgeChunk`      | Phase 5 (planned)      |
 
 This trait-based design means the engine can be tested with mock implementations (as the test suite demonstrates) and consumers can swap between local models, API-based models, or rule-based logic without touching the engine.

@@ -119,10 +119,12 @@ The pruning process:
 
 1. Validate policy parameters.
 2. Load all active facts.
-3. Score each fact using the 4-signal formula with current graph degrees.
-4. Collect facts scoring below `min_importance`.
-5. In a single transaction: soft-delete each fact (`t_expired = now`) and cascade-expire its edges.
-6. After commit: remove expired edges from the in-memory graph.
+3. **Skip pinned facts** — facts with `is_pinned = true` are never candidates for pruning, regardless of their score.
+4. Score each remaining fact using the 4-signal formula with current graph degrees.
+5. **Materialize `importance_score`** — each scored fact has its `importance_score` field updated in the database via `update_importance_score()`. This makes the composite score available to `resume_context()` and other queries without recomputation.
+6. Collect facts scoring below `min_importance`.
+7. In a single transaction: soft-delete each fact (`t_expired = now`) and cascade-expire its edges.
+8. After commit: remove expired edges from the in-memory graph.
 
 Scoring happens before any mutations, so degree values are consistent across the batch.
 
