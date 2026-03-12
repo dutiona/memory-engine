@@ -25,6 +25,8 @@ This separation has deep implications:
 
 ## Phase Overview
 
+> **Note (2026-03-12):** Phase numbering was restructured during roadmap reconciliation. This document's "Phase 5: Knowledge Integration" is now Phase 6 in ROADMAP.md. Phase 5 in ROADMAP.md is "Cognitive Pipelines" (added post-community research). See ROADMAP.md for canonical phase numbering.
+
 | Phase | Name                                       | Status      | Scope                                                                                                                   |
 | ----- | ------------------------------------------ | ----------- | ----------------------------------------------------------------------------------------------------------------------- |
 | 1     | Ingest → Query Loop                        | Done        | Hybrid search, bi-temporal facts, event sourcing                                                                        |
