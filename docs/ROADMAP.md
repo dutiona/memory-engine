@@ -208,11 +208,28 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 **Theme:** Close the Memory → Wisdom gap identified by the [four-layer cognitive architecture](https://github.com/dutiona/research-index/blob/master/docs/insights/four-layer-cognitive-architecture.md). Make the engine self-improving.
 
-| Feature                                                                               | Description                                                                                                                                                          |
-| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Wisdom promotion API ([#47](https://github.com/dutiona/memory-engine/issues/47))      | Pattern detection over consolidated memories (DBSCAN or similar). Proposal generation with human approval gate. Output: CLAUDE.md entries, skills, feedback memories |
-| Hook-based memory capture ([#48](https://github.com/dutiona/memory-engine/issues/48)) | Infrastructure-level observation ("scrub nurse" pattern). Automatic ingestion without model initiative — hooks feed memory, model only logs what only it knows       |
-| Dream-cycle consolidation ([#49](https://github.com/dutiona/memory-engine/issues/49)) | Batch retroactive consolidation with review gates. Run over historical data (overnight "dream cycle"), detect patterns for wisdom promotion candidates               |
+**Design:** Community research synthesis (5 projects) + three-way debate (Claude/Codex/Gemini, 2 rounds, 7 questions). See `docs/design/debate-phase5/synthesis.md` and `docs/design/2026-03-12-community-research-synthesis.md`.
+
+| Feature                                                                                                                                                               | Description                                                                                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| InsightStream trait — fast-path capture ([#48](https://github.com/dutiona/memory-engine/issues/48))                                                                   | `record()` method for high-value observations. Consumer-implemented. **Note:** Gemini dissent — may simplify to `FactType::Insight` via `add_fact()` during implementation |
+| DreamCycle trait — cognitive pipeline ([#49](https://github.com/dutiona/memory-engine/issues/49), [#47](https://github.com/dutiona/memory-engine/issues/47) absorbed) | Full batch pipeline: consolidation → pattern detection → behavioral compression → promotion → rescoring. Returns `CycleReport`                                             |
+| `sample_dormant()` API ([#54](https://github.com/dutiona/memory-engine/issues/54))                                                                                    | Passive resonance for autonomous agents. HNSW search filtered for dormant facts. Consumer-driven                                                                           |
+| Provenance infrastructure ([#55](https://github.com/dutiona/memory-engine/issues/55))                                                                                 | `PromotionProvenance` envelope + sidecar `LineageTable` in SQLite. Source fact expiry (`t_expired` set) with lineage preservation                                          |
+| `DreamCycleConfig` ([#56](https://github.com/dutiona/memory-engine/issues/56))                                                                                        | Per-FactType compression ratios, ±2 symmetric rescoring, quarantine path for contradictions                                                                                |
+| Three-layer identity output ([#57](https://github.com/dutiona/memory-engine/issues/57))                                                                               | ANCHORS/CORE/PREDICTIONS structure in `CycleReport`. Each item: `{pattern, directive, false_positive}`                                                                     |
+
+#### Sub-phasing
+
+- **Phase 5a (Minimum Viable Cognitive Pipeline):**
+  - InsightStream trait (or `FactType::Insight` — decide during implementation)
+  - DreamCycle trait
+  - `PromotionProvenance` + `LineageTable`
+  - `DreamCycleConfig`
+  - three-layer identity output
+- **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path for contradictions
+- **Phase 5 (independent, any time):** `sample_dormant()` API (passive resonance for autonomous agents)
+- **Deferred (not in Phase 5):** `compress_behavior()` hook on DreamCycle (depends on consumer LLM integration)
 
 ---
 
@@ -264,7 +281,7 @@ Consumer (AI agent, CLI tool, MCP server)
 │  consolidate · forget · resolve          │  ← Phase 2 ✅
 │  resume_context · list_due · pin/unpin  │  ← Phase 3/3b ✅
 │  explain · replay · dump · statistics   │  ← Phase 4a
-│  promote · dream_cycle                  │  ← Phase 5
+│  dream_cycle · sample_dormant           │  ← Phase 5
 ├──────────────────────────────────────────┤
 │  AsyncMemoryEngine (tokio wrapper)       │  ← Phase 3 ✅
 ├──────────────────────────────────────────┤
@@ -281,7 +298,8 @@ Consumer (AI agent, CLI tool, MCP server)
 │  ├─ FactStore (bi-temporal + pinned)     │
 │  ├─ EdgeStore (graph persistence)        │
 │  ├─ SummaryStore                         │
-│  └─ ScopeStore (hierarchical scoping)   │  ← Phase 3 ✅
+│  ├─ ScopeStore (hierarchical scoping)   │  ← Phase 3 ✅
+│  └─ LineageTable (provenance sidecar)   │  ← Phase 5
 ├──────────────────────────────────────────┤
 │  Graph (petgraph DiGraph)                │  ← Phase 2 ✅
 ├──────────────────────────────────────────┤
@@ -294,9 +312,8 @@ Consumer (AI agent, CLI tool, MCP server)
 │  Resume (5-tier cognitive boot)          │  ← Phase 3b ✅
 ├──────────────────────────────────────────┤
 │  Cognitive Pipelines                     │  ← Phase 5
-│  ├─ WisdomPromoter (pattern → proposal) │
-│  ├─ HookCapture (infrastructure → mem)  │
-│  └─ DreamCycle (batch consolidation)    │
+│  ├─ InsightStream (fast-path capture)   │
+│  └─ DreamCycle (full cognitive pipeline) │
 ├──────────────────────────────────────────┤
 │  Knowledge Bridge                        │  ← Phase 6
 │  ├─ KnowledgeRef (URI on facts)         │
@@ -319,7 +336,8 @@ SummaryGenerator::embed(text) → Vec<f32>               ← Phase 2 ✅
 ConflictArbiter::arbitrate(old, new) → CrudDecision    ← Phase 2 ✅
 PersistenceClassifier::should_pin(fact) → bool         ← Phase 3b ✅
 Reranker::rerank(query, candidates) → Vec<ScoredFact>  ← Phase 4a
-WisdomPromoter::propose(patterns) → Vec<Candidate>     ← Phase 5
+InsightStream::record(insight) → Result<()>             ← Phase 5
+DreamCycle::run(engine) → Result<CycleReport>           ← Phase 5
 KnowledgeBaseConnector::resolve(uri) → KnowledgeChunk  ← Phase 6
 ```
 
