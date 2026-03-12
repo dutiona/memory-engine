@@ -135,7 +135,7 @@ This page summarizes the public API surface of the `memory-engine` crate.
 - `pinned: Vec<Fact>` -- tier 1: unforgettable facts, cross-scope, sorted by `importance_score` descending.
 - `high_importance: Vec<Fact>` -- tier 2: top facts by materialized `importance_score`.
 - `due: Vec<Fact>` -- tier 3: future-memory facts whose `t_valid` has arrived.
-- `recent: Vec<Fact>` -- tier 4: most recent facts from active scope.
+- `recent: Vec<Fact>` -- tier 4: most recent facts from scope ancestors.
 - `kb_stubs: Vec<String>` -- tier 5: placeholder for Phase 5 knowledge-base references.
 
 ### Config
@@ -151,7 +151,7 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 
 - **Engine**: `MemoryEngine`, `EngineConfig`
 - **Error**: `MemoryError`, `Result`
-- **Traits**: `EmbeddingProvider`, `PersistenceClassifier`
+- **Traits**: `EmbeddingProvider` (note: `PersistenceClassifier` is available via `memory_engine::traits::PersistenceClassifier`, not re-exported at root)
 - **Types**: all public types from the `types` module (`Event`, `Fact`, `Edge`, `Summary`, `NewEvent`, `NewFact`, `NewEdge`, `NewSummary`, `EventType`, `FactType`, `ConsolidationLevel`, `ScopeQuery`, `ScopeNode`, `AddFactOptions`)
 - **Store utilities**: `serialize_embedding`, `deserialize_embedding`
 

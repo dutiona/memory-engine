@@ -148,7 +148,7 @@ Implementation example:
 
 ```rust
 use memory_engine::traits::PersistenceClassifier;
-use memory_engine::types::{Fact, FactType};
+use memory_engine::types::Fact;
 
 struct KeywordPinner {
     keywords: Vec<String>,
