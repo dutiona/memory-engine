@@ -221,7 +221,12 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 #### Sub-phasing
 
-- **Phase 5a (Minimum Viable Cognitive Pipeline):** InsightStream trait (or `FactType::Insight` — decide during implementation), DreamCycle trait, `PromotionProvenance` + `LineageTable`, `DreamCycleConfig`, three-layer identity output
+- **Phase 5a (Minimum Viable Cognitive Pipeline):**
+  - InsightStream trait (or `FactType::Insight` — decide during implementation)
+  - DreamCycle trait
+  - `PromotionProvenance` + `LineageTable`
+  - `DreamCycleConfig`
+  - three-layer identity output
 - **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path for contradictions
 - **Phase 5 (independent, any time):** `sample_dormant()` API (passive resonance for autonomous agents)
 - **Deferred (not in Phase 5):** `compress_behavior()` hook on DreamCycle (depends on consumer LLM integration)
