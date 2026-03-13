@@ -24,6 +24,9 @@ pub enum MemoryError {
 
     #[error("connection pool error: {0}")]
     Pool(String),
+
+    #[error("unsupported storage epoch: database is epoch {db_epoch}, this library supports epoch {supported_epoch}")]
+    UnsupportedEpoch { db_epoch: u16, supported_epoch: u16 },
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.

@@ -68,6 +68,13 @@ pub struct Event {
     pub sequence_id: i64,
     /// When the event was ingested into this node's store (ingest-time).
     pub created_at: Option<DateTime<Utc>>,
+    /// Schema revision of the event payload (for upcasting at read time).
+    #[serde(default = "default_event_revision")]
+    pub event_revision: u16,
+}
+
+const fn default_event_revision() -> u16 {
+    1
 }
 
 /// A bi-temporal fact derived from events.
@@ -239,6 +246,7 @@ mod tests {
             origin_node_id: "local".into(),
             sequence_id: 0,
             created_at: None,
+            event_revision: 1,
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();

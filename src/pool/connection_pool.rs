@@ -82,10 +82,15 @@ impl ConnectionPool {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` if any connection or schema setup fails.
-    pub fn open(path: &Path, embed_dim: usize, read_pool_size: usize) -> Result<Self> {
+    pub fn open(
+        path: &Path,
+        embed_dim: usize,
+        read_pool_size: usize,
+        backup_dir: Option<&Path>,
+    ) -> Result<Self> {
         let write_conn = open_connection(&path.to_string_lossy())?;
         init_schema(&write_conn)?;
-        migrate(&write_conn)?;
+        migrate(&write_conn, backup_dir)?;
 
         let mut read_conns = Vec::with_capacity(read_pool_size);
         for _ in 0..read_pool_size {
@@ -113,7 +118,7 @@ impl ConnectionPool {
     pub fn open_memory(embed_dim: usize) -> Result<Self> {
         let conn = open_memory_conn()?;
         init_schema(&conn)?;
-        migrate(&conn)?;
+        migrate(&conn, None)?;
         Ok(Self {
             write_conn: Mutex::new(conn),
             read_conns: Mutex::new(Vec::new()),
@@ -189,7 +194,7 @@ mod tests {
     fn pool_file_backed_concurrent_reads() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let pool = ConnectionPool::open(&db_path, 4, 2).unwrap();
+        let pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
 
         // Write something
         {
@@ -210,7 +215,7 @@ mod tests {
     fn pool_read_guard_returns_connection() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let pool = ConnectionPool::open(&db_path, 4, 1).unwrap();
+        let pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
 
         // Checkout and return
         {
@@ -232,7 +237,7 @@ mod tests {
     fn pool_file_backed_is_file_backed() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let pool = ConnectionPool::open(&db_path, 4, 2).unwrap();
+        let pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
         assert!(pool.is_file_backed());
 
         let mem_pool = ConnectionPool::open_memory(4).unwrap();
