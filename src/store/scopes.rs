@@ -161,7 +161,7 @@ mod tests {
     fn setup() -> Connection {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
-        crate::store::schema::migrate(&conn).unwrap();
+        crate::store::schema::migrate(&conn, None).unwrap();
         conn
     }
 

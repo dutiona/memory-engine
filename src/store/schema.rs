@@ -1,9 +1,19 @@
+use std::path::{Path, PathBuf};
+
 use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
+
+/// Storage epoch — coarse-grained compatibility gate.
+///
+/// All schema versions within the same epoch are forwards-compatible via
+/// the migration chain. Bumping the epoch signals a breaking architectural
+/// change (e.g., dropping old migration support). Libraries reject DBs
+/// from future epochs with [`MemoryError::UnsupportedEpoch`].
+const STORAGE_EPOCH: u16 = 1;
 
 /// Open a `SQLite` connection to a file, with pragmas set.
 ///
@@ -64,13 +74,14 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     if !is_fresh {
         return Ok(()); // existing DB — let migrate() handle evolution
     }
-    // Fresh DB: create full latest (v3) schema
+    // Fresh DB: create full latest schema
     conn.execute_batch(TABLES_DDL)?;
     conn.execute_batch(SCOPES_DDL)?;
     conn.execute_batch(FTS5_DDL)?;
     conn.execute_batch(TRIGGERS_DDL)?;
     conn.execute_batch(INDEXES_DDL)?;
     set_config(conn, "schema_version", &CURRENT_SCHEMA_VERSION.to_string())?;
+    set_config(conn, "storage_epoch", &STORAGE_EPOCH.to_string())?;
     Ok(())
 }
 
@@ -113,6 +124,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrate_v1_to_v2, false),
     (migrate_v2_to_v3, true),
     (migrate_v3_to_v4, false),
+    (migrate_v4_to_v5, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -121,20 +133,53 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
 /// Each migration runs inside a transaction. On failure, the migration rolls
 /// back and the version is NOT bumped.
 ///
+/// When `backup_dir` is `Some`, a WAL-safe backup is created via `VACUUM INTO`
+/// before running any migration functions. Pass `None` for in-memory databases
+/// or when backup is not desired.
+///
 /// # Errors
 ///
+/// Returns `MemoryError::UnsupportedEpoch` if the DB is from a future epoch.
 /// Returns `MemoryError::Migration` if the stored version is newer than
 /// supported, or if any migration step fails.
-pub fn migrate(conn: &Connection) -> Result<()> {
+pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
     let version_str = get_config(conn, "schema_version")?.unwrap_or_else(|| "1".to_string());
     let version: u32 = version_str
         .parse()
         .map_err(|_| MemoryError::Migration(format!("invalid schema_version: {version_str}")))?;
 
+    // --- Epoch gate ---
+    let epoch_str = get_config(conn, "storage_epoch")?;
+    let epoch_raw = epoch_str.as_deref().unwrap_or("1"); // pre-epoch DBs are implicitly epoch 1
+    let db_epoch: u16 = epoch_raw
+        .parse()
+        .map_err(|_| MemoryError::Migration(format!("invalid storage_epoch: {epoch_raw}")))?;
+    if db_epoch > STORAGE_EPOCH {
+        return Err(MemoryError::UnsupportedEpoch {
+            db_epoch,
+            supported_epoch: STORAGE_EPOCH,
+        });
+    }
+
     if version > CURRENT_SCHEMA_VERSION {
         return Err(MemoryError::Migration(format!(
-            "schema_version {version} is newer than supported {CURRENT_SCHEMA_VERSION}"
+            "schema_version {version} is newer than supported {CURRENT_SCHEMA_VERSION}; \
+             consider upgrading the memory-engine crate"
         )));
+    }
+
+    // Nothing to migrate
+    if version == CURRENT_SCHEMA_VERSION {
+        // Ensure epoch is set for pre-epoch DBs that are already at latest version
+        if epoch_str.is_none() {
+            set_config(conn, "storage_epoch", &STORAGE_EPOCH.to_string())?;
+        }
+        return Ok(());
+    }
+
+    // --- WAL-safe backup before migration ---
+    if let Some(dir) = backup_dir {
+        backup_before_migration(conn, dir, version)?;
     }
 
     for (i, (migration, disable_fk)) in MIGRATIONS.iter().enumerate() {
@@ -166,7 +211,65 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             result?;
         }
     }
+
+    // Stamp epoch for pre-epoch migrated DBs
+    if epoch_str.is_none() {
+        set_config(conn, "storage_epoch", &STORAGE_EPOCH.to_string())?;
+    }
+
     Ok(())
+}
+
+/// Create a WAL-safe backup of the database before running migrations.
+///
+/// Uses `VACUUM INTO` which produces an atomic, consistent copy regardless
+/// of WAL state (no sidecar files to worry about).
+///
+/// # Errors
+///
+/// Returns `MemoryError::Migration` if the connection is in-memory or the
+/// backup path cannot be written to.
+pub fn backup_before_migration(
+    conn: &Connection,
+    backup_dir: &Path,
+    current_version: u32,
+) -> Result<PathBuf> {
+    // Extract the source database file path via PRAGMA database_list
+    let db_path: String = conn
+        .query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
+        .map_err(|e| MemoryError::Migration(format!("cannot read database path: {e}")))?;
+
+    if db_path.is_empty() || db_path == ":memory:" {
+        return Err(MemoryError::Migration(
+            "cannot backup in-memory database".to_string(),
+        ));
+    }
+
+    let db_name = Path::new(&db_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let backup_path = backup_dir.join(format!("{db_name}.v{current_version}.bak"));
+
+    // Remove existing backup to avoid VACUUM INTO failure on re-run
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path).map_err(|e| {
+            MemoryError::Migration(format!(
+                "cannot remove existing backup {}: {e}",
+                backup_path.display()
+            ))
+        })?;
+    }
+
+    // VACUUM INTO creates a standalone, defragmented copy — WAL-safe.
+    // SQLite VACUUM INTO does not support parameterized paths, so we escape
+    // single quotes manually (SQLite string literal escaping: ' → '').
+    let escaped = backup_path.to_string_lossy().replace('\'', "''");
+    let sql = format!("VACUUM INTO '{escaped}'");
+    conn.execute_batch(&sql)
+        .map_err(|e| MemoryError::Migration(format!("backup failed: {e}")))?;
+
+    Ok(backup_path)
 }
 
 fn set_foreign_keys(conn: &Connection, enabled: bool) -> Result<()> {
@@ -390,6 +493,12 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add `event_revision` column for per-event-type envelope versioning.
+fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
+    conn.execute_batch("ALTER TABLE events ADD COLUMN event_revision INTEGER NOT NULL DEFAULT 1;")?;
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -403,7 +512,8 @@ CREATE TABLE IF NOT EXISTS events (
     scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
     origin_node_id TEXT NOT NULL DEFAULT 'local',
     sequence_id INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT
+    created_at TEXT,
+    event_revision INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS facts (
@@ -678,6 +788,141 @@ CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
 CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
 ";
 
+    // --- Frozen V4 DDL snapshot ---
+    // Complete standalone DDL for v4 schema. Depends on NO live DDL constants
+    // to prevent fixture drift when tables evolve in future versions.
+
+    /// Test helper: creates v4 schema (v3 + is_pinned, importance_score, event envelope).
+    fn init_schema_v4(conn: &Connection) -> Result<()> {
+        conn.execute_batch(TABLES_V4_DDL)?;
+        conn.execute_batch(SCOPES_DDL_V4)?;
+        conn.execute_batch(FTS5_DDL_V4)?;
+        conn.execute_batch(TRIGGERS_DDL_V4)?;
+        conn.execute_batch(INDEXES_V4_DDL)?;
+        set_config(conn, "schema_version", "4")?;
+        Ok(())
+    }
+
+    const TABLES_V4_DDL: &str = "
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    session_id TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
+    origin_node_id TEXT NOT NULL DEFAULT 'local',
+    sequence_id INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')),
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    t_valid TEXT,
+    t_invalid TEXT,
+    source_event_id INTEGER REFERENCES events(id),
+    importance REAL NOT NULL DEFAULT 0.5,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    importance_score REAL NOT NULL DEFAULT 0.5
+);
+
+CREATE TABLE IF NOT EXISTS edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    target_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    relation_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+);
+
+CREATE TABLE IF NOT EXISTS summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')),
+    source_fact_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+);
+
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
+    const SCOPES_DDL_V4: &str = "
+CREATE TABLE IF NOT EXISTS scopes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER REFERENCES scopes(id),
+    label TEXT NOT NULL,
+    depth INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_scopes_parent ON scopes(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scopes_parent_label
+    ON scopes(parent_id, label);
+
+INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (1, NULL, 'root', 0);
+";
+
+    const FTS5_DDL_V4: &str = "
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+    content,
+    content='facts',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+";
+
+    const TRIGGERS_DDL_V4: &str = "
+CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN
+    INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
+    INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
+END;
+";
+
+    const INDEXES_V4_DDL: &str = "
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_facts_expired ON facts(t_expired);
+CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
+CREATE INDEX IF NOT EXISTS idx_facts_valid ON facts(t_valid, t_invalid);
+CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts(content_hash);
+CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_fact_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
+CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
+CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
+CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
+CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
+CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
+CREATE INDEX IF NOT EXISTS idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
+CREATE INDEX IF NOT EXISTS idx_facts_importance_score ON facts(importance_score);
+CREATE INDEX IF NOT EXISTS idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
+CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, sequence_id);
+";
+
     #[test]
     fn init_schema_creates_all_tables() {
         let conn = open_memory().unwrap();
@@ -772,28 +1017,28 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("4".to_string())
+            Some("5".to_string())
         );
         // migrate is a no-op on fresh DB
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("4".to_string())
+            Some("5".to_string())
         );
     }
 
     #[test]
-    fn migrate_v1_through_v4_runs_without_error() {
+    fn migrate_v1_through_v5_runs_without_error() {
         let conn = open_memory().unwrap();
         init_schema_v1(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
             Some("1".to_string())
         );
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("4".to_string())
+            Some("5".to_string())
         );
     }
 
@@ -801,11 +1046,11 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
     fn migrate_skips_if_current() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
-        migrate(&conn).unwrap();
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("4".to_string())
+            Some("5".to_string())
         );
     }
 
@@ -814,7 +1059,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         set_config(&conn, "schema_version", "99").unwrap();
-        let err = migrate(&conn).unwrap_err();
+        let err = migrate(&conn, None).unwrap_err();
         assert!(matches!(err, MemoryError::Migration(_)));
     }
 
@@ -836,10 +1081,10 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         )
         .unwrap();
 
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("4".to_string())
+            Some("5".to_string())
         );
 
         // Data survived both migrations
@@ -926,10 +1171,10 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         conn.execute("DELETE FROM events WHERE scope_id = 999", [])
             .unwrap();
 
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("4".to_string())
+            Some("5".to_string())
         );
 
         // After migration: orphan scope_id fails (FK enforced)
@@ -955,7 +1200,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
             [],
         ).unwrap();
 
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
 
         // FTS index was rebuilt and repopulated
         let count: i64 = conn
@@ -996,7 +1241,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         .unwrap();
 
         // Migration must fail — orphan scope_id violates FK check
-        let err = migrate(&conn).unwrap_err();
+        let err = migrate(&conn, None).unwrap_err();
         assert!(
             matches!(err, MemoryError::Migration(_)),
             "expected Migration error for orphan scope_id, got: {err:?}"
@@ -1030,7 +1275,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
         )
         .unwrap();
 
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
 
         // Verify new columns with defaults
         let (is_pinned, importance_score): (i64, f64) = conn
@@ -1057,17 +1302,17 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("4".to_string())
+            Some("5".to_string())
         );
     }
 
     #[test]
-    fn fresh_db_creates_v4_schema() {
+    fn fresh_db_creates_v5_schema() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("4".to_string())
+            Some("5".to_string())
         );
         conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, is_pinned, importance_score)
@@ -1099,5 +1344,384 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
             get_config(&conn, "schema_version").unwrap(),
             Some("1".to_string())
         );
+    }
+
+    // --- Storage epoch tests ---
+
+    #[test]
+    fn init_schema_sets_storage_epoch() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        assert_eq!(
+            get_config(&conn, "storage_epoch").unwrap(),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_rejects_future_epoch() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        set_config(&conn, "storage_epoch", "99").unwrap();
+        let err = migrate(&conn, None).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::UnsupportedEpoch {
+                    db_epoch: 99,
+                    supported_epoch: 1
+                }
+            ),
+            "expected UnsupportedEpoch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn migrate_sets_epoch_for_pre_epoch_db() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        // Pre-epoch DB has no storage_epoch config
+        assert!(get_config(&conn, "storage_epoch").unwrap().is_none());
+        migrate(&conn, None).unwrap();
+        // After migration, epoch is stamped
+        assert_eq!(
+            get_config(&conn, "storage_epoch").unwrap(),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_sets_epoch_for_current_version_db() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        // Manually set to current version but no epoch
+        set_config(&conn, "schema_version", &CURRENT_SCHEMA_VERSION.to_string()).unwrap();
+        assert!(get_config(&conn, "storage_epoch").unwrap().is_none());
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "storage_epoch").unwrap(),
+            Some("1".to_string())
+        );
+    }
+
+    // --- WAL-safe backup tests ---
+
+    #[test]
+    fn backup_returns_error_for_memory_db() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let err = backup_before_migration(&conn, dir.path(), 4).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Migration(ref msg) if msg.contains("in-memory")),
+            "expected in-memory error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn backup_creates_wal_safe_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let backup_dir = dir.path().join("backups");
+        std::fs::create_dir(&backup_dir).unwrap();
+
+        // Create a real file-backed DB
+        let conn = open_connection(&db_path.to_string_lossy()).unwrap();
+        init_schema(&conn).unwrap();
+        // Insert some data
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id)
+             VALUES (datetime('now'), 'Interaction', '{}', 'test', 1)",
+            [],
+        )
+        .unwrap();
+
+        let backup_path = backup_before_migration(&conn, &backup_dir, 4).unwrap();
+        assert!(backup_path.exists(), "backup file should exist");
+        assert!(
+            backup_path.to_string_lossy().contains("test.db.v4.bak"),
+            "backup should be named test.db.v4.bak, got: {backup_path:?}"
+        );
+
+        // Verify backup is a valid SQLite database with data
+        let backup_conn = Connection::open(&backup_path).unwrap();
+        let count: i64 = backup_conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "backup should contain the event");
+    }
+
+    #[test]
+    fn backup_nonexistent_dir_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = open_connection(&db_path.to_string_lossy()).unwrap();
+        init_schema(&conn).unwrap();
+
+        let bad_dir = dir.path().join("nonexistent");
+        let err = backup_before_migration(&conn, &bad_dir, 4).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Migration(ref msg) if msg.contains("backup failed")),
+            "expected backup failed error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn migrate_without_backup_dir_skips_backup() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+        // Should work fine with None — no backup attempted on in-memory
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("5".to_string())
+        );
+    }
+
+    // --- v4→v5 migration tests ---
+
+    #[test]
+    fn migrate_v4_to_v5_adds_event_revision() {
+        let conn = open_memory().unwrap();
+        init_schema_v4(&conn).unwrap();
+
+        // Insert an event at v4 (no event_revision column yet)
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id)
+             VALUES (datetime('now'), 'Interaction', '{}', 'test', 1)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("5".to_string())
+        );
+
+        // Existing events get default revision = 1
+        let revision: i64 = conn
+            .query_row(
+                "SELECT event_revision FROM events WHERE source = 'test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, 1);
+
+        // New events can specify revision
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id, event_revision)
+             VALUES (datetime('now'), 'ToolCall', '{}', 'test2', 1, 3)",
+            [],
+        )
+        .unwrap();
+        let rev2: i64 = conn
+            .query_row(
+                "SELECT event_revision FROM events WHERE source = 'test2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rev2, 3);
+    }
+
+    #[test]
+    fn fresh_db_has_event_revision_column() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        // Insert with explicit event_revision
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id, event_revision)
+             VALUES (datetime('now'), 'Interaction', '{}', 'test', 1, 2)",
+            [],
+        )
+        .unwrap();
+        let rev: i64 = conn
+            .query_row(
+                "SELECT event_revision FROM events WHERE source = 'test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rev, 2);
+
+        // Default is 1
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, scope_id)
+             VALUES (datetime('now'), 'ToolCall', '{}', 'test2', 1)",
+            [],
+        )
+        .unwrap();
+        let rev_default: i64 = conn
+            .query_row(
+                "SELECT event_revision FROM events WHERE source = 'test2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rev_default, 1);
+    }
+
+    #[test]
+    fn migrate_v1_through_v5_preserves_events() {
+        let conn = open_memory().unwrap();
+        init_schema_v1(&conn).unwrap();
+
+        // Insert event at v1
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source)
+             VALUES (datetime('now'), 'Interaction', '{\"key\":\"val\"}', 'v1-src')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("5".to_string())
+        );
+
+        // Event survived all migrations, got default revision
+        let (source, revision): (String, i64) = conn
+            .query_row(
+                "SELECT source, event_revision FROM events WHERE source = 'v1-src'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "v1-src");
+        assert_eq!(revision, 1);
+    }
+
+    // --- Schema snapshot test (insta) ---
+
+    /// Deterministic projection of the schema: sorted by (type, name), SQL normalized.
+    /// This avoids SQLite formatting variance across versions.
+    fn deterministic_schema_dump(conn: &Connection) -> String {
+        let mut stmt = conn
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master
+                 WHERE sql IS NOT NULL
+                 ORDER BY type, name",
+            )
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map([], |row| {
+                let obj_type: String = row.get(0)?;
+                let name: String = row.get(1)?;
+                let sql: String = row.get(2)?;
+                // Normalize whitespace for determinism
+                let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+                Ok(format!("-- {obj_type}: {name}\n{normalized};"))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        rows.join("\n\n")
+    }
+
+    #[test]
+    fn schema_v5_snapshot() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let schema = deterministic_schema_dump(&conn);
+        insta::assert_snapshot!("schema_v5", schema);
+    }
+
+    // --- Property-based migration tests (proptest) ---
+
+    proptest::proptest! {
+        #[test]
+        fn migration_preserves_event_count(n_events in 1_usize..20) {
+            let conn = open_memory().unwrap();
+            init_schema_v1(&conn).unwrap();
+
+            for i in 0..n_events {
+                conn.execute(
+                    "INSERT INTO events (timestamp, event_type, payload, source)
+                     VALUES (datetime('now'), 'Interaction', '{}', ?1)",
+                    rusqlite::params![format!("src-{i}")],
+                ).unwrap();
+            }
+
+            let count_before: i64 = conn
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count_before, n_events as i64);
+
+            migrate(&conn, None).unwrap();
+
+            let count_after: i64 = conn
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count_after, n_events as i64);
+        }
+
+        #[test]
+        fn migration_preserves_fact_content_hashes(n_facts in 1_usize..10) {
+            let conn = open_memory().unwrap();
+            init_schema_v1(&conn).unwrap();
+
+            let mut expected_hashes = Vec::new();
+            for i in 0..n_facts {
+                let hash = format!("hash-{i}");
+                conn.execute(
+                    "INSERT INTO facts (content, content_hash, embedding, fact_type,
+                     t_created, importance, access_count, last_accessed, metadata)
+                     VALUES (?1, ?2, X'00', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
+                    rusqlite::params![format!("fact-{i}"), &hash],
+                ).unwrap();
+                expected_hashes.push(hash);
+            }
+
+            migrate(&conn, None).unwrap();
+
+            let mut stmt = conn
+                .prepare("SELECT content_hash FROM facts ORDER BY id")
+                .unwrap();
+            let actual_hashes: Vec<String> = stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert_eq!(actual_hashes, expected_hashes);
+        }
+
+        #[test]
+        fn migration_v1_to_v5_fk_integrity(n_events in 1_usize..5) {
+            let conn = open_memory().unwrap();
+            init_schema_v1(&conn).unwrap();
+
+            for i in 0..n_events {
+                conn.execute(
+                    "INSERT INTO events (timestamp, event_type, payload, source)
+                     VALUES (datetime('now'), 'Interaction', '{}', ?1)",
+                    rusqlite::params![format!("src-{i}")],
+                ).unwrap();
+            }
+
+            // Insert a fact referencing event 1
+            if n_events > 0 {
+                conn.execute(
+                    "INSERT INTO facts (content, content_hash, embedding, fact_type,
+                     t_created, source_event_id, importance, access_count, last_accessed, metadata)
+                     VALUES ('test', 'h1', X'00', 'episodic', datetime('now'), 1, 0.5, 0, datetime('now'), '{}')",
+                    [],
+                ).unwrap();
+            }
+
+            migrate(&conn, None).unwrap();
+
+            // PRAGMA foreign_key_check returns rows for violations — empty = clean
+            let mut stmt = conn.prepare("PRAGMA foreign_key_check").unwrap();
+            let violations: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert!(violations.is_empty(), "FK violations: {violations:?}");
+        }
     }
 }

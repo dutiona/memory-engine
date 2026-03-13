@@ -126,7 +126,7 @@ mod tests {
     fn setup() -> Connection {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
         conn
     }
 

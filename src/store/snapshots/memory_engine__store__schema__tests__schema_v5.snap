@@ -1,0 +1,106 @@
+---
+source: src/store/schema.rs
+assertion_line: 1618
+expression: schema
+---
+-- index: idx_edges_expired
+CREATE INDEX idx_edges_expired ON edges(t_expired);
+
+-- index: idx_edges_scope
+CREATE INDEX idx_edges_scope ON edges(scope_id);
+
+-- index: idx_edges_source
+CREATE INDEX idx_edges_source ON edges(source_fact_id);
+
+-- index: idx_edges_target
+CREATE INDEX idx_edges_target ON edges(target_fact_id);
+
+-- index: idx_events_origin_seq
+CREATE INDEX idx_events_origin_seq ON events(origin_node_id, sequence_id);
+
+-- index: idx_events_scope
+CREATE INDEX idx_events_scope ON events(scope_id);
+
+-- index: idx_events_session
+CREATE INDEX idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
+
+-- index: idx_events_timestamp
+CREATE INDEX idx_events_timestamp ON events(timestamp);
+
+-- index: idx_facts_expired
+CREATE INDEX idx_facts_expired ON facts(t_expired);
+
+-- index: idx_facts_hash
+CREATE INDEX idx_facts_hash ON facts(content_hash);
+
+-- index: idx_facts_importance_score
+CREATE INDEX idx_facts_importance_score ON facts(importance_score);
+
+-- index: idx_facts_pinned
+CREATE INDEX idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
+
+-- index: idx_facts_scope
+CREATE INDEX idx_facts_scope ON facts(scope_id);
+
+-- index: idx_facts_t_valid_due
+CREATE INDEX idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
+
+-- index: idx_facts_type
+CREATE INDEX idx_facts_type ON facts(fact_type);
+
+-- index: idx_facts_valid
+CREATE INDEX idx_facts_valid ON facts(t_valid, t_invalid);
+
+-- index: idx_scopes_parent
+CREATE INDEX idx_scopes_parent ON scopes(parent_id);
+
+-- index: idx_scopes_parent_label
+CREATE UNIQUE INDEX idx_scopes_parent_label ON scopes(parent_id, label);
+
+-- index: idx_summaries_scope
+CREATE INDEX idx_summaries_scope ON summaries(scope_id);
+
+-- table: config
+CREATE TABLE config ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
+
+-- table: edges
+CREATE TABLE edges ( id INTEGER PRIMARY KEY AUTOINCREMENT, source_fact_id INTEGER NOT NULL REFERENCES facts(id), target_fact_id INTEGER NOT NULL REFERENCES facts(id), relation_type TEXT NOT NULL, weight REAL NOT NULL DEFAULT 1.0, t_created TEXT NOT NULL, t_expired TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) );
+
+-- table: events
+CREATE TABLE events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1 );
+
+-- table: facts
+CREATE TABLE facts ( id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, content_hash TEXT NOT NULL, -- blake3 hex[:16] for dedup embedding BLOB NOT NULL, fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')), t_created TEXT NOT NULL, t_expired TEXT, t_valid TEXT, t_invalid TEXT, source_event_id INTEGER REFERENCES events(id), importance REAL NOT NULL DEFAULT 0.5, access_count INTEGER NOT NULL DEFAULT 0, last_accessed TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)), scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), is_pinned INTEGER NOT NULL DEFAULT 0, importance_score REAL NOT NULL DEFAULT 0.5 );
+
+-- table: facts_fts
+CREATE VIRTUAL TABLE facts_fts USING fts5( content, content='facts', content_rowid='id', tokenize='porter unicode61' );
+
+-- table: facts_fts_config
+CREATE TABLE 'facts_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+
+-- table: facts_fts_data
+CREATE TABLE 'facts_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+
+-- table: facts_fts_docsize
+CREATE TABLE 'facts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
+
+-- table: facts_fts_idx
+CREATE TABLE 'facts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+
+-- table: scopes
+CREATE TABLE scopes ( id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER REFERENCES scopes(id), label TEXT NOT NULL, depth INTEGER NOT NULL DEFAULT 0 );
+
+-- table: sqlite_sequence
+CREATE TABLE sqlite_sequence(name,seq);
+
+-- table: summaries
+CREATE TABLE summaries ( id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, embedding BLOB NOT NULL, level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')), source_fact_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) );
+
+-- trigger: facts_fts_ad
+CREATE TRIGGER facts_fts_ad AFTER DELETE ON facts BEGIN INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content); END;
+
+-- trigger: facts_fts_ai
+CREATE TRIGGER facts_fts_ai AFTER INSERT ON facts BEGIN INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content); END;
+
+-- trigger: facts_fts_au
+CREATE TRIGGER facts_fts_au AFTER UPDATE ON facts BEGIN INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content); INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content); END;
