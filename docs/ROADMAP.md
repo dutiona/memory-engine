@@ -174,7 +174,7 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 | Item                                                                                    | Description                                                                                                                                                               |
 | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Documentation gap ([#35](https://github.com/dutiona/memory-engine/issues/35))           | Update 13 doc files for Phase 3b features (pinned facts, 5-tier resume, scheduling API, classifier). Includes scope_id=1 invariant (folded from #11)                      |
+| Documentation gap ([#35](https://github.com/dutiona/memory-engine/issues/35))           | ✅ Updated 13 doc files for Phase 3b features (pinned facts, 5-tier resume, scheduling API, classifier). [PR #60](https://github.com/dutiona/memory-engine/pull/60)       |
 | Schema evolution discipline ([#18](https://github.com/dutiona/memory-engine/issues/18)) | ✅ Storage epoch versioning, WAL-safe backup, event envelope versioning, upcaster registry, migration testing. [PR #61](https://github.com/dutiona/memory-engine/pull/61) |
 
 #### Phase 4a: Introspection & Data (library)
