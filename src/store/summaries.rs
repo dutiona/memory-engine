@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{deserialize_embedding, parse_timestamp, serialize_embedding};
@@ -282,12 +282,10 @@ mod tests {
 
         let deleted = store.delete_by_level(&ConsolidationLevel::Cluster).unwrap();
         assert_eq!(deleted, 2);
-        assert!(
-            store
-                .list_by_level(&ConsolidationLevel::Cluster)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(store
+            .list_by_level(&ConsolidationLevel::Cluster)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             store
                 .list_by_level(&ConsolidationLevel::Global)

@@ -38,6 +38,6 @@ pub mod types;
 
 pub use engine::{EngineConfig, MemoryEngine};
 pub use error::*;
-pub use store::{deserialize_embedding, serialize_embedding};
+pub use store::{deserialize_embedding, serialize_embedding, UpcasterRegistry};
 pub use traits::EmbeddingProvider;
 pub use types::*;

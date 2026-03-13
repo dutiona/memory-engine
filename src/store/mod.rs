@@ -8,13 +8,18 @@ pub mod facts;
 pub mod schema;
 pub mod scopes;
 pub mod summaries;
+pub mod upcaster;
 
 pub use edges::EdgeStore;
 pub use events::{EventFilter, EventStore};
 pub use facts::FactStore;
-pub use schema::{get_config, init_schema, migrate, open_connection, open_memory, set_config};
+pub use schema::{
+    backup_before_migration, get_config, init_schema, migrate, open_connection, open_memory,
+    set_config,
+};
 pub use scopes::ScopeStore;
 pub use summaries::SummaryStore;
+pub use upcaster::UpcasterRegistry;
 
 use chrono::{DateTime, Utc};
 

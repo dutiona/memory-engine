@@ -133,7 +133,7 @@ mod tests {
     fn setup_tree() -> ScopeTree {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
-        migrate(&conn).unwrap();
+        migrate(&conn, None).unwrap();
 
         // Create: root -> user:michael -> project:demo
         //                              -> project:other

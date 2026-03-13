@@ -16,6 +16,7 @@ use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};
 use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
+use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
     EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, SummaryGenerator,
@@ -31,6 +32,12 @@ pub struct EngineConfig {
     pub read_pool_size: usize,
     /// Optional search configuration for ANN strategy dispatch.
     pub search_config: Option<SearchConfig>,
+    /// Optional directory for WAL-safe pre-migration backups.
+    /// When set, `VACUUM INTO` creates a backup before running migrations.
+    pub backup_dir: Option<PathBuf>,
+    /// Upcaster registry for event payload versioning.
+    /// Defaults to empty (all event types at revision 1).
+    pub upcaster_registry: UpcasterRegistry,
 }
 
 impl EngineConfig {
@@ -42,6 +49,8 @@ impl EngineConfig {
             embed_dim,
             read_pool_size: 4,
             search_config: None,
+            backup_dir: None,
+            upcaster_registry: UpcasterRegistry::new(),
         }
     }
 }
@@ -64,6 +73,7 @@ pub struct MemoryEngine {
     hnsw_strategy: Option<crate::search::ann::HnswStrategy>,
     #[cfg_attr(not(feature = "ann"), allow(dead_code))]
     search_config: Option<SearchConfig>,
+    upcaster_registry: UpcasterRegistry,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -86,8 +96,18 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub fn open(config: &EngineConfig) -> Result<Self> {
-        let pool = ConnectionPool::open(&config.path, config.embed_dim, config.read_pool_size)?;
-        Self::init_from_pool(pool, config.embed_dim, config.search_config.clone())
+        let pool = ConnectionPool::open(
+            &config.path,
+            config.embed_dim,
+            config.read_pool_size,
+            config.backup_dir.as_deref(),
+        )?;
+        Self::init_from_pool(
+            pool,
+            config.embed_dim,
+            config.search_config.clone(),
+            config.upcaster_registry.clone(),
+        )
     }
 
     /// Open an in-memory engine for testing.
@@ -97,7 +117,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` if the connection or schema setup fails.
     pub fn open_memory(embed_dim: usize) -> Result<Self> {
         let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(pool, embed_dim, None)
+        Self::init_from_pool(pool, embed_dim, None, UpcasterRegistry::new())
     }
 
     /// Open an in-memory engine with optional search config for testing.
@@ -110,7 +130,7 @@ impl MemoryEngine {
         search_config: Option<SearchConfig>,
     ) -> Result<Self> {
         let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(pool, embed_dim, search_config)
+        Self::init_from_pool(pool, embed_dim, search_config, UpcasterRegistry::new())
     }
 
     /// Shared constructor logic: validate embed_dim, load graph and scope tree.
@@ -118,6 +138,7 @@ impl MemoryEngine {
         pool: ConnectionPool,
         embed_dim: usize,
         search_config: Option<SearchConfig>,
+        upcaster_registry: UpcasterRegistry,
     ) -> Result<Self> {
         // Scope the MutexGuard so it drops before we move `pool` into the struct.
         let (graph, scope_tree) = {
@@ -152,6 +173,7 @@ impl MemoryEngine {
             #[cfg(feature = "ann")]
             hnsw_strategy,
             search_config,
+            upcaster_registry,
         })
     }
 
@@ -224,7 +246,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` on insert failure.
     pub fn ingest(&self, event: &NewEvent) -> Result<i64> {
         let conn = self.write_conn();
-        EventStore::new(&conn).insert(event)
+        EventStore::new(&conn, &self.upcaster_registry).insert(event)
     }
 
     /// Add a fact: compute embedding via `embedder`, compute blake3 content hash,

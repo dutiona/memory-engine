@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
+use crate::store::upcaster::UpcasterRegistry;
 use crate::types::{Event, EventType, NewEvent};
 
 /// Filter for querying events.
@@ -16,6 +17,7 @@ pub struct EventFilter {
 /// Store for the append-only event log.
 pub struct EventStore<'a> {
     conn: &'a Connection,
+    registry: &'a UpcasterRegistry,
 }
 
 const fn event_type_to_str(et: &EventType) -> &'static str {
@@ -74,6 +76,8 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         })
         .transpose()?;
 
+    let event_revision: i64 = row.get("event_revision")?;
+
     Ok(Event {
         id: row.get("id")?,
         timestamp,
@@ -85,14 +89,15 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         origin_node_id: row.get("origin_node_id")?,
         sequence_id: row.get("sequence_id")?,
         created_at,
+        event_revision: u16::try_from(event_revision).unwrap_or(1),
     })
 }
 
 impl<'a> EventStore<'a> {
-    /// Create a new `EventStore` borrowing the given connection.
+    /// Create a new `EventStore` borrowing the given connection and upcaster registry.
     #[must_use]
-    pub const fn new(conn: &'a Connection) -> Self {
-        Self { conn }
+    pub const fn new(conn: &'a Connection, registry: &'a UpcasterRegistry) -> Self {
+        Self { conn, registry }
     }
 
     /// Insert a new event, returning its auto-assigned id.
@@ -109,8 +114,8 @@ impl<'a> EventStore<'a> {
 
         self.conn.execute(
             "INSERT INTO events (timestamp, event_type, payload, source, session_id, scope_id,
-                origin_node_id, sequence_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                origin_node_id, sequence_id, created_at, event_revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 timestamp_str,
                 event_type_str,
@@ -121,6 +126,7 @@ impl<'a> EventStore<'a> {
                 event.origin_node_id,
                 event.sequence_id,
                 created_at_str,
+                i64::from(self.registry.latest_revision(event_type_str)),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -134,7 +140,7 @@ impl<'a> EventStore<'a> {
     pub fn get(&self, id: i64) -> Result<Event> {
         let mut stmt = self.conn.prepare(
             "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
-                    origin_node_id, sequence_id, created_at
+                    origin_node_id, sequence_id, created_at, event_revision
              FROM events WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_event)?;
@@ -153,7 +159,7 @@ impl<'a> EventStore<'a> {
     pub fn list(&self, filter: &EventFilter) -> Result<Vec<Event>> {
         let (sql, values) = build_filter_query(
             "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
-                    origin_node_id, sequence_id, created_at FROM events",
+                    origin_node_id, sequence_id, created_at, event_revision FROM events",
             filter,
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -175,6 +181,48 @@ impl<'a> EventStore<'a> {
         let mut stmt = self.conn.prepare(&sql)?;
         let count = stmt.query_row(rusqlite::params_from_iter(values), |row| row.get(0))?;
         Ok(count)
+    }
+
+    /// Get an event by id with upcasted payload.
+    ///
+    /// Unlike [`Self::get`], this applies the upcaster chain to transform
+    /// the payload from its stored revision to the latest revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the id doesn't exist.
+    /// Returns `MemoryError::Migration` if upcasting fails.
+    pub fn get_upcasted(&self, id: i64) -> Result<Event> {
+        let event = self.get(id)?;
+        self.apply_upcasting(event)
+    }
+
+    /// List events matching the filter with upcasted payloads.
+    ///
+    /// Unlike [`Self::list`], this applies the upcaster chain to transform
+    /// each event's payload from its stored revision to the latest revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Migration` if upcasting fails.
+    pub fn list_upcasted(&self, filter: &EventFilter) -> Result<Vec<Event>> {
+        let events = self.list(filter)?;
+        events
+            .into_iter()
+            .map(|e| self.apply_upcasting(e))
+            .collect()
+    }
+
+    /// Apply the upcaster chain to an event's payload.
+    fn apply_upcasting(&self, mut event: Event) -> Result<Event> {
+        let event_type_str = event_type_to_str(&event.event_type);
+        let (new_payload, new_rev) =
+            self.registry
+                .upcast(event_type_str, event.event_revision, event.payload)?;
+        event.payload = new_payload;
+        event.event_revision = new_rev;
+        Ok(event)
     }
 }
 
@@ -248,7 +296,8 @@ mod tests {
     #[test]
     fn insert_returns_id() {
         let conn = setup();
-        let store = EventStore::new(&conn);
+        let registry = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &registry);
         let id = store.insert(&make_event("test", None)).unwrap();
         assert_eq!(id, 1);
         let id2 = store.insert(&make_event("test", None)).unwrap();
@@ -258,7 +307,8 @@ mod tests {
     #[test]
     fn get_round_trip() {
         let conn = setup();
-        let store = EventStore::new(&conn);
+        let registry = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &registry);
         let event = make_event("src1", Some("sess-1"));
         let id = store.insert(&event).unwrap();
         let retrieved = store.get(id).unwrap();
@@ -271,7 +321,8 @@ mod tests {
     #[test]
     fn get_not_found() {
         let conn = setup();
-        let store = EventStore::new(&conn);
+        let registry = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &registry);
         let err = store.get(999).unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
     }
@@ -279,7 +330,8 @@ mod tests {
     #[test]
     fn list_with_session_id_filter() {
         let conn = setup();
-        let store = EventStore::new(&conn);
+        let registry = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &registry);
         store.insert(&make_event("a", Some("sess-1"))).unwrap();
         store.insert(&make_event("b", Some("sess-2"))).unwrap();
         store.insert(&make_event("c", Some("sess-1"))).unwrap();
@@ -290,17 +342,16 @@ mod tests {
         };
         let results = store.list(&filter).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(
-            results
-                .iter()
-                .all(|e| e.session_id == Some("sess-1".into()))
-        );
+        assert!(results
+            .iter()
+            .all(|e| e.session_id == Some("sess-1".into())));
     }
 
     #[test]
     fn count_matches_list() {
         let conn = setup();
-        let store = EventStore::new(&conn);
+        let registry = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &registry);
         store.insert(&make_event("a", Some("sess-1"))).unwrap();
         store.insert(&make_event("b", Some("sess-2"))).unwrap();
         store.insert(&make_event("c", Some("sess-1"))).unwrap();
@@ -316,7 +367,8 @@ mod tests {
     #[test]
     fn json_payload_round_trip() {
         let conn = setup();
-        let store = EventStore::new(&conn);
+        let registry = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &registry);
         let payload = serde_json::json!({
             "nested": {"array": [1, 2, 3]},
             "bool": true,
@@ -337,5 +389,125 @@ mod tests {
         let retrieved = store.get(id).unwrap();
         assert_eq!(retrieved.payload, payload);
         assert_eq!(retrieved.event_type, EventType::ToolCall);
+    }
+
+    #[test]
+    fn get_returns_raw_event() {
+        let conn = setup();
+        // Insert with empty registry → stamped at revision 1
+        let empty_reg = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &empty_reg);
+        let id = store.insert(&make_event("test", None)).unwrap();
+
+        // Now read with a registry that has upcasters
+        let mut registry = UpcasterRegistry::new();
+        registry.register("Interaction", 1, |mut v| {
+            v["upcasted"] = serde_json::json!(true);
+            Ok(v)
+        });
+        let store2 = EventStore::new(&conn, &registry);
+
+        // Raw get() does NOT apply upcasting — returns stored payload
+        let raw = store2.get(id).unwrap();
+        assert!(raw.payload.get("upcasted").is_none());
+        assert_eq!(raw.event_revision, 1); // stored at revision 1
+    }
+
+    #[test]
+    fn get_upcasted_transforms_payload() {
+        let conn = setup();
+        // Insert with empty registry → stored at revision 1
+        let empty_reg = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &empty_reg);
+        let id = store.insert(&make_event("test", None)).unwrap();
+
+        // Read with upcaster registry
+        let mut registry = UpcasterRegistry::new();
+        registry.register("Interaction", 1, |mut v| {
+            v["upcasted"] = serde_json::json!(true);
+            Ok(v)
+        });
+        let store2 = EventStore::new(&conn, &registry);
+
+        // get_upcasted() applies the chain: revision 1 → 2
+        let upcasted = store2.get_upcasted(id).unwrap();
+        assert_eq!(upcasted.payload["upcasted"], true);
+        assert_eq!(upcasted.event_revision, 2);
+    }
+
+    #[test]
+    fn list_upcasted_transforms_all() {
+        let conn = setup();
+        // Insert with empty registry → stored at revision 1
+        let empty_reg = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &empty_reg);
+        store.insert(&make_event("a", None)).unwrap();
+        store.insert(&make_event("b", None)).unwrap();
+
+        // Read with upcaster registry
+        let mut registry = UpcasterRegistry::new();
+        registry.register("Interaction", 1, |mut v| {
+            v["version"] = serde_json::json!("v2");
+            Ok(v)
+        });
+        let store2 = EventStore::new(&conn, &registry);
+
+        let raw = store2.list(&EventFilter::default()).unwrap();
+        assert!(raw.iter().all(|e| e.payload.get("version").is_none()));
+
+        let upcasted = store2.list_upcasted(&EventFilter::default()).unwrap();
+        assert_eq!(upcasted.len(), 2);
+        assert!(upcasted.iter().all(|e| e.payload["version"] == "v2"));
+        assert!(upcasted.iter().all(|e| e.event_revision == 2));
+    }
+
+    #[test]
+    fn insert_stamps_latest_revision() {
+        let conn = setup();
+        let mut registry = UpcasterRegistry::new();
+        // Interaction has upcasters 1→2 and 2→3, so latest = 3
+        registry.register("Interaction", 1, |v| Ok(v));
+        registry.register("Interaction", 2, |v| Ok(v));
+        let store = EventStore::new(&conn, &registry);
+
+        let id = store.insert(&make_event("test", None)).unwrap();
+        let event = store.get(id).unwrap();
+        assert_eq!(event.event_revision, 3); // stamped at latest
+    }
+
+    #[test]
+    fn serde_event_revision_compat() {
+        // Event JSON without event_revision deserializes with default 1
+        let json = r#"{
+            "id": 1,
+            "timestamp": "2024-01-01T00:00:00Z",
+            "event_type": "Interaction",
+            "payload": {},
+            "source": "test",
+            "session_id": null,
+            "scope_id": 1,
+            "origin_node_id": "local",
+            "sequence_id": 0,
+            "created_at": null
+        }"#;
+        let event: crate::types::Event = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_revision, 1);
+
+        // With explicit event_revision
+        let json_v3 = r#"{
+            "id": 1,
+            "timestamp": "2024-01-01T00:00:00Z",
+            "event_type": "Interaction",
+            "payload": {},
+            "source": "test",
+            "session_id": null,
+            "scope_id": 1,
+            "origin_node_id": "local",
+            "sequence_id": 0,
+            "created_at": null,
+            "event_revision": 3
+        }"#;
+        let event_v3: crate::types::Event = serde_json::from_str(json_v3).unwrap();
+        assert_eq!(event_v3.event_revision, 3);
     }
 }
