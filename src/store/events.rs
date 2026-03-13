@@ -89,7 +89,13 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         origin_node_id: row.get("origin_node_id")?,
         sequence_id: row.get("sequence_id")?,
         created_at,
-        event_revision: u16::try_from(event_revision).unwrap_or(1),
+        event_revision: u16::try_from(event_revision).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10, // event_revision column index
+                rusqlite::types::Type::Integer,
+                format!("event_revision {event_revision} out of u16 range").into(),
+            )
+        })?,
     })
 }
 

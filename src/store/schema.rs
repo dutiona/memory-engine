@@ -150,11 +150,10 @@ pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
 
     // --- Epoch gate ---
     let epoch_str = get_config(conn, "storage_epoch")?;
-    let db_epoch: u16 = epoch_str
-        .as_deref()
-        .unwrap_or("1") // pre-epoch DBs are implicitly epoch 1
+    let epoch_raw = epoch_str.as_deref().unwrap_or("1"); // pre-epoch DBs are implicitly epoch 1
+    let db_epoch: u16 = epoch_raw
         .parse()
-        .unwrap_or(1);
+        .map_err(|_| MemoryError::Migration(format!("invalid storage_epoch: {epoch_raw}")))?;
     if db_epoch > STORAGE_EPOCH {
         return Err(MemoryError::UnsupportedEpoch {
             db_epoch,
@@ -252,8 +251,21 @@ pub fn backup_before_migration(
         .to_string_lossy();
     let backup_path = backup_dir.join(format!("{db_name}.v{current_version}.bak"));
 
-    // VACUUM INTO creates a standalone, defragmented copy — WAL-safe
-    let sql = format!("VACUUM INTO '{}'", backup_path.to_string_lossy());
+    // Remove existing backup to avoid VACUUM INTO failure on re-run
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path).map_err(|e| {
+            MemoryError::Migration(format!(
+                "cannot remove existing backup {}: {e}",
+                backup_path.display()
+            ))
+        })?;
+    }
+
+    // VACUUM INTO creates a standalone, defragmented copy — WAL-safe.
+    // SQLite VACUUM INTO does not support parameterized paths, so we escape
+    // single quotes manually (SQLite string literal escaping: ' → '').
+    let escaped = backup_path.to_string_lossy().replace('\'', "''");
+    let sql = format!("VACUUM INTO '{escaped}'");
     conn.execute_batch(&sql)
         .map_err(|e| MemoryError::Migration(format!("backup failed: {e}")))?;
 

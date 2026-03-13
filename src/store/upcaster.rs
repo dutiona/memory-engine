@@ -93,9 +93,10 @@ impl UpcasterRegistry {
 
         let mut value = payload;
         let mut rev = current_revision;
+        let type_key = event_type.to_string();
 
         while rev < latest {
-            let key = (event_type.to_string(), rev);
+            let key = (type_key.clone(), rev);
             let func = self.upcasters.get(&key).ok_or_else(|| {
                 MemoryError::Migration(format!(
                     "missing upcaster for event type '{event_type}' from revision {rev} to {}",
