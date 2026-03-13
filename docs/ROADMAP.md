@@ -172,10 +172,10 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 #### Prerequisites (gate Phase 4 — can be done in parallel)
 
-| Item                                                                                    | Description                                                                                                                                          |
-| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Documentation gap ([#35](https://github.com/dutiona/memory-engine/issues/35))           | Update 13 doc files for Phase 3b features (pinned facts, 5-tier resume, scheduling API, classifier). Includes scope_id=1 invariant (folded from #11) |
-| Schema evolution discipline ([#18](https://github.com/dutiona/memory-engine/issues/18)) | Versioning policy, migration rules, backwards-compat testing. Design doc: "before Phase 4 ships"                                                     |
+| Item                                                                                    | Description                                                                                                                                                               |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Documentation gap ([#35](https://github.com/dutiona/memory-engine/issues/35))           | Update 13 doc files for Phase 3b features (pinned facts, 5-tier resume, scheduling API, classifier). Includes scope_id=1 invariant (folded from #11)                      |
+| Schema evolution discipline ([#18](https://github.com/dutiona/memory-engine/issues/18)) | ✅ Storage epoch versioning, WAL-safe backup, event envelope versioning, upcaster registry, migration testing. [PR #61](https://github.com/dutiona/memory-engine/pull/61) |
 
 #### Phase 4a: Introspection & Data (library)
 
@@ -294,7 +294,7 @@ Consumer (AI agent, CLI tool, MCP server)
 │  └─ Reranker (cross-encoder, optional)  │  ← Phase 4a
 ├──────────────────────────────────────────┤
 │  Store                                   │
-│  ├─ EventStore (append-only log)         │
+│  ├─ EventStore (append-only, upcasting)  │
 │  ├─ FactStore (bi-temporal + pinned)     │
 │  ├─ EdgeStore (graph persistence)        │
 │  ├─ SummaryStore                         │
@@ -324,7 +324,7 @@ Consumer (AI agent, CLI tool, MCP server)
   SQLite WAL (rusqlite bundled-full)
   ├─ events, facts, edges, summaries, scopes, config
   ├─ facts_fts (FTS5 virtual table)
-  └─ indexes + schema migration framework (v4)
+  └─ indexes + schema migration framework (v5, epoch-gated)
 ```
 
 ## Consumer-Provided Traits
