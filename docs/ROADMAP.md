@@ -2,19 +2,25 @@
 
 ## Research Foundation
 
-9 papers, 22 cross-paper relationships, community synthesis (OpenClaw, Reddit), 3-round multi-AI debate.
+9 core papers + 6 context adaptation papers, 22+ cross-paper relationships, community synthesis (OpenClaw, Reddit), 3-round multi-AI debate + context adaptation survey (2026-03-19).
 
-| Paper                          | Key Contribution to Design                                                                                                                                   |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **CoALA** (2309.02427)         | 4 memory types → `fact_type` tag (Episodic, Semantic, Procedural). Working memory stays in consumer's context window.                                        |
-| **Graphiti** (2410.13790)      | Bi-temporal model: 4 timestamps per fact (`t_created`/`t_expired` system, `t_valid`/`t_invalid` real-world). Conflict detection via LLM.                     |
-| **Mem0** (2504.19413)          | CRUD conflict resolution pattern (Add/Update/Delete/Noop). Graph-based memory with entity-centric + semantic triplet retrieval.                              |
-| **A-Mem** (2502.12110)         | Self-organizing memory without predefined schemas. Zettelkasten-inspired linking. Informed our "one store, multiple projections" decision.                   |
-| **Memory Survey** (2512.13564) | Three-pass consolidation taxonomy: local dedup → cluster fusion → global integration. Forgetting via time expiration, access frequency, informational value. |
-| **AgeMem** (2601.01885)        | Agentic memory framework where LTM and STM are jointly managed via explicit tool-based operations. Validated our trait-based design.                         |
-| **SparseMemFT**                | Sparse memory fine-tuning. Informed our decision to keep parameter updates out of scope (engine is retrieval-only, not fine-tuning).                         |
-| **Memento**                    | Hierarchical memory with summarization. Informed consolidation levels (local → cluster → global).                                                            |
-| **Doc-to-LoRA**                | Document-to-adapter pipeline. Confirmed our boundary: engine stores and retrieves, consumer decides what to do with results.                                 |
+| Paper                               | Key Contribution to Design                                                                                                                                                 |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CoALA** (2309.02427)              | 4 memory types → `fact_type` tag (Episodic, Semantic, Procedural). Working memory stays in consumer's context window.                                                      |
+| **Graphiti** (2410.13790)           | Bi-temporal model: 4 timestamps per fact (`t_created`/`t_expired` system, `t_valid`/`t_invalid` real-world). Conflict detection via LLM.                                   |
+| **Mem0** (2504.19413)               | CRUD conflict resolution pattern (Add/Update/Delete/Noop). Graph-based memory with entity-centric + semantic triplet retrieval.                                            |
+| **A-Mem** (2502.12110)              | Self-organizing memory without predefined schemas. Zettelkasten-inspired linking. Informed our "one store, multiple projections" decision.                                 |
+| **Memory Survey** (2512.13564)      | Three-pass consolidation taxonomy: local dedup → cluster fusion → global integration. Forgetting via time expiration, access frequency, informational value.               |
+| **AgeMem** (2601.01885)             | Agentic memory framework where LTM and STM are jointly managed via explicit tool-based operations. Validated our trait-based design.                                       |
+| **SparseMemFT**                     | Sparse memory fine-tuning. Informed our decision to keep parameter updates out of scope (engine is retrieval-only, not fine-tuning).                                       |
+| **Memento**                         | Hierarchical memory with summarization. Informed consolidation levels (local → cluster → global).                                                                          |
+| **Doc-to-LoRA**                     | Document-to-adapter pipeline. Confirmed our boundary: engine stores and retrieves, consumer decides what to do with results.                                               |
+| **Dynamic Cheatsheet** (2504.07952) | Test-time learning with adaptive memory. Identified **context collapse** failure mode. DC-RS (retrieve-before-reflect) > DC-Cu (accumulate).                               |
+| **ACE** (2510.04618)                | Agentic Context Engineering (ICLR 2026). Incremental delta updates prevent context collapse. Helpful/harmful counters for outcome tracking. Comprehensive playbook thesis. |
+| **AWM** (2409.07429)                | Agent Workflow Memory. Abstract parameterized workflows > concrete examples. Hierarchical composition (snowball effect). Success-gated induction.                          |
+| **Reflexion** (2303.11366)          | Verbal RL (NeurIPS 2023). Self-reflection as episodic memory. Explicitly calls for structured memory (SQL/vector DBs) as future work — validates memory-engine.            |
+| **GEPA** (2507.19457)               | Genetic-Pareto prompt evolution (ICLR 2026 Oral). NL traces > scalar rewards. Pareto diversity prevents local optima in promotion selection.                               |
+| **APC** (2506.14852)                | Agentic Plan Caching (NeurIPS 2025). Plan templates (abstracted, context-stripped). Keyword > embedding for intent matching. Cold-start pre-warming.                       |
 
 ### Storage Technology Decisions
 
@@ -179,13 +185,14 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 #### Phase 4a: Introspection & Data (library)
 
-| Feature                                                                                 | Description                                                                               |
-| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Inspection APIs ([#39](https://github.com/dutiona/memory-engine/issues/39))             | `explain_fact()`, `replay_events()`, `dump_state()`, `statistics()`                       |
-| Import/export ([#40](https://github.com/dutiona/memory-engine/issues/40))               | JSON event log + SQLite backup, gzip/zstd compression                                     |
-| Semantic extraction queries ([#41](https://github.com/dutiona/memory-engine/issues/41)) | Query builder composing scope + temporal range + semantic search                          |
-| `Reranker` trait ([#42](https://github.com/dutiona/memory-engine/issues/42))            | Cross-encoder reranking on top-K candidates after RRF (+5-15% nDCG@10). Consumer-provided |
-| Session log bootstrap ([#43](https://github.com/dutiona/memory-engine/issues/43))       | Parse Claude Code JSONL session logs into historical memory facts                         |
+| Feature                                                                                 | Description                                                                                                                                                                                   |
+| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Inspection APIs ([#39](https://github.com/dutiona/memory-engine/issues/39))             | `explain_fact()`, `replay_events()`, `dump_state()`, `statistics()`                                                                                                                           |
+| Import/export ([#40](https://github.com/dutiona/memory-engine/issues/40))               | JSON event log + SQLite backup, gzip/zstd compression                                                                                                                                         |
+| Semantic extraction queries ([#41](https://github.com/dutiona/memory-engine/issues/41)) | Query builder composing scope + temporal range + semantic search                                                                                                                              |
+| `Reranker` trait ([#42](https://github.com/dutiona/memory-engine/issues/42))            | Cross-encoder reranking on top-K candidates after RRF (+5-15% nDCG@10). Consumer-provided                                                                                                     |
+| Session log bootstrap ([#43](https://github.com/dutiona/memory-engine/issues/43))       | Parse Claude Code JSONL session logs into historical memory facts. **Research update:** success-gated ingestion (R1, AWM), workflow extraction (R2, AWM/APC), pre-warming semantics (R3, APC) |
+| Co-session edges ([#62](https://github.com/dutiona/memory-engine/issues/62))            | Auto-create `co_session` edges between facts sharing a `session_id`. Pairs with #43                                                                                                           |
 
 #### Phase 4b: Tooling (new workspace binaries)
 
@@ -196,11 +203,11 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 #### Phase 4c: Quality & Cold Storage
 
-| Feature                                                                          | Description                                                                                               |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Evaluation harness ([#16](https://github.com/dutiona/memory-engine/issues/16))   | Regression corpus for retrieval quality, consolidation correctness, forgetting behavior. After 4a/4b ship |
-| Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback)                |
-| Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot                                                       |
+| Feature                                                                          | Description                                                                                                                                                                                                                  |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Evaluation harness ([#16](https://github.com/dutiona/memory-engine/issues/16))   | Regression corpus for retrieval quality, consolidation correctness, forgetting behavior. After 4a/4b ship. **Research update:** context collapse detection (R4, DC/ACE), outcome-based retrieval quality (R5, ACE/Reflexion) |
+| Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback)                                                                                                                                   |
+| Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot                                                                                                                                                                          |
 
 ---
 
@@ -208,26 +215,28 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 **Theme:** Close the Memory → Wisdom gap identified by the [four-layer cognitive architecture](https://github.com/dutiona/research-index/blob/master/docs/insights/four-layer-cognitive-architecture.md). Make the engine self-improving.
 
-**Design:** Community research synthesis (5 projects) + three-way debate (Claude/Codex/Gemini, 2 rounds, 7 questions). See `docs/design/debate-phase5/synthesis.md` and `docs/design/2026-03-12-community-research-synthesis.md`.
+**Design:** Community research synthesis (5 projects) + three-way debate (Claude/Codex/Gemini, 2 rounds, 7 questions) + context adaptation survey (6 papers, 2026-03-19). See `docs/design/debate-phase5/synthesis.md`, `docs/design/2026-03-12-community-research-synthesis.md`, and `~/dev/autonomous-agent-project/docs/summaries/05-context-adaptation-research.md`.
 
-| Feature                                                                                                                                                               | Description                                                                                                                                                                |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| InsightStream trait — fast-path capture ([#48](https://github.com/dutiona/memory-engine/issues/48))                                                                   | `record()` method for high-value observations. Consumer-implemented. **Note:** Gemini dissent — may simplify to `FactType::Insight` via `add_fact()` during implementation |
-| DreamCycle trait — cognitive pipeline ([#49](https://github.com/dutiona/memory-engine/issues/49), [#47](https://github.com/dutiona/memory-engine/issues/47) absorbed) | Full batch pipeline: consolidation → pattern detection → behavioral compression → promotion → rescoring. Returns `CycleReport`                                             |
-| `sample_dormant()` API ([#54](https://github.com/dutiona/memory-engine/issues/54))                                                                                    | Passive resonance for autonomous agents. HNSW search filtered for dormant facts. Consumer-driven                                                                           |
-| Provenance infrastructure ([#55](https://github.com/dutiona/memory-engine/issues/55))                                                                                 | `PromotionProvenance` envelope + sidecar `LineageTable` in SQLite. Source fact expiry (`t_expired` set) with lineage preservation                                          |
-| `DreamCycleConfig` ([#56](https://github.com/dutiona/memory-engine/issues/56))                                                                                        | Per-FactType compression ratios, ±2 symmetric rescoring, quarantine path for contradictions                                                                                |
-| Three-layer identity output ([#57](https://github.com/dutiona/memory-engine/issues/57))                                                                               | ANCHORS/CORE/PREDICTIONS structure in `CycleReport`. Each item: `{pattern, directive, false_positive}`                                                                     |
+| Feature                                                                                                                                                               | Description                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| InsightStream trait — fast-path capture ([#48](https://github.com/dutiona/memory-engine/issues/48))                                                                   | `record()` method for high-value observations. Consumer-implemented. **Note:** Gemini dissent — may simplify to `FactType::Insight` via `add_fact()` during implementation                                                                                                                  |
+| DreamCycle trait — cognitive pipeline ([#49](https://github.com/dutiona/memory-engine/issues/49), [#47](https://github.com/dutiona/memory-engine/issues/47) absorbed) | Full batch pipeline: consolidation → pattern detection → promotion → rescoring. Returns delta-based `CycleReport`. **Research update:** delta-based output (R7, ACE), retrieve-before-reflect (R8, DC), abstract pattern extraction (R9, AWM/APC/GEPA), hierarchical composition (R13, AWM) |
+| Outcome tracking ([#63](https://github.com/dutiona/memory-engine/issues/63))                                                                                          | `EventType::OutcomeSignal` for fact feedback loops. `record_outcome(fact_id, outcome)` API. Feeds DreamCycle rescoring. **Research basis:** ACE, Reflexion, AWM, GEPA                                                                                                                       |
+| `sample_dormant()` API ([#54](https://github.com/dutiona/memory-engine/issues/54))                                                                                    | Passive resonance for autonomous agents. HNSW search filtered for dormant facts. Consumer-driven                                                                                                                                                                                            |
+| Provenance infrastructure ([#55](https://github.com/dutiona/memory-engine/issues/55))                                                                                 | `PromotionProvenance` envelope + sidecar `LineageTable` in SQLite. Source fact expiry (`t_expired` set) with lineage preservation                                                                                                                                                           |
+| `DreamCycleConfig` ([#56](https://github.com/dutiona/memory-engine/issues/56))                                                                                        | ±2 symmetric rescoring, quarantine path for contradictions. **Research update:** compression as opt-in archival (R10, ACE/DC), Pareto-diverse promotion (R11, GEPA)                                                                                                                         |
+| Three-layer identity output ([#57](https://github.com/dutiona/memory-engine/issues/57))                                                                               | ANCHORS/CORE/PREDICTIONS structure in `CycleReport`. Each item: `{pattern, directive, false_positive}`                                                                                                                                                                                      |
 
 #### Sub-phasing
 
 - **Phase 5a (Minimum Viable Cognitive Pipeline):**
   - InsightStream trait (or `FactType::Insight` — decide during implementation)
-  - DreamCycle trait
+  - DreamCycle trait with delta-based `CycleReport` (R7) and retrieve-before-reflect (R8)
+  - Outcome tracking — `EventType::OutcomeSignal` (#63, R6)
   - `PromotionProvenance` + `LineageTable`
-  - `DreamCycleConfig`
-  - three-layer identity output
-- **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path for contradictions
+  - `DreamCycleConfig` with compression as opt-in archival (R10)
+  - Three-layer identity output
+- **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path, grow-and-refine semantic dedup (#64, R12), hierarchical workflow composition (R13)
 - **Phase 5 (independent, any time):** `sample_dormant()` API (passive resonance for autonomous agents)
 - **Deferred (not in Phase 5):** `compress_behavior()` hook on DreamCycle (depends on consumer LLM integration)
 
@@ -237,11 +246,12 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 **Design:** [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md)
 
-| Feature                                                                                                                            | Description                                                                               |
-| ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `KnowledgeBaseConnector` trait + `KnowledgeRef` + graceful degradation ([#50](https://github.com/dutiona/memory-engine/issues/50)) | Transport-agnostic trait, optional URI field on facts, "memory lapse" when KB unreachable |
-| Knowledge change notification ([#51](https://github.com/dutiona/memory-engine/issues/51))                                          | When KB content is superseded/updated, notify memory to re-evaluate dependent facts       |
-| research-index bridge ([#52](https://github.com/dutiona/memory-engine/issues/52))                                                  | `memory-kb-research-index` middleware crate implementing `KnowledgeBaseConnector`         |
+| Feature                                                                                                                            | Description                                                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `KnowledgeBaseConnector` trait + `KnowledgeRef` + graceful degradation ([#50](https://github.com/dutiona/memory-engine/issues/50)) | Transport-agnostic trait, optional URI field on facts, "memory lapse" when KB unreachable              |
+| Knowledge change notification ([#51](https://github.com/dutiona/memory-engine/issues/51))                                          | When KB content is superseded/updated, notify memory to re-evaluate dependent facts                    |
+| research-index bridge ([#52](https://github.com/dutiona/memory-engine/issues/52))                                                  | `memory-kb-research-index` middleware crate implementing `KnowledgeBaseConnector`                      |
+| Cross-layer session propagation                                                                                                    | Propagate KB ingestion `session_id` (dutiona/knowledge-base#128) through bridge → #62 co-session edges |
 
 ---
 
@@ -257,15 +267,17 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 Tracked as individual GitHub issues. Not scheduled for any phase — each has a trigger condition.
 
-| Item                                                                                     | Trigger                                                                                               |
-| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Auth ([#14](https://github.com/dutiona/memory-engine/issues/14))                         | Multi-user deployment decision. Deployment layer concern, not engine core                             |
-| SaaS Sync ([#15](https://github.com/dutiona/memory-engine/issues/15))                    | Product decision for multi-device. CRDT event-log merge + E2EE. Requires determinism guarantees first |
-| Hierarchical summarization ([#17](https://github.com/dutiona/memory-engine/issues/17))   | Usage exceeds flat consolidation. Memento-style multi-level abstractions                              |
-| Determinism guarantees ([#19](https://github.com/dutiona/memory-engine/issues/19))       | Before sync work begins. Replay, merge, idempotency rules                                             |
-| Cross-session memory sharing ([#36](https://github.com/dutiona/memory-engine/issues/36)) | Multi-agent deployments. Session isolation or namespace via ScopeTree                                 |
-| Multimodal memory ([#37](https://github.com/dutiona/memory-engine/issues/37))            | Non-text memories needed. Schema supports it (BLOB embeddings)                                        |
-| Multi-node sync ([#38](https://github.com/dutiona/memory-engine/issues/38))              | Multi-device eventual consistency. Event envelope fields are forward-compatible                       |
+| Item                                                                                       | Trigger                                                                                                                                                |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Auth ([#14](https://github.com/dutiona/memory-engine/issues/14))                           | Multi-user deployment decision. Deployment layer concern, not engine core                                                                              |
+| SaaS Sync ([#15](https://github.com/dutiona/memory-engine/issues/15))                      | Product decision for multi-device. CRDT event-log merge + E2EE. Requires determinism guarantees first                                                  |
+| Hierarchical summarization ([#17](https://github.com/dutiona/memory-engine/issues/17))     | Usage exceeds flat consolidation. Memento-style multi-level abstractions                                                                               |
+| Determinism guarantees ([#19](https://github.com/dutiona/memory-engine/issues/19))         | Before sync work begins. Replay, merge, idempotency rules                                                                                              |
+| Cross-session memory sharing ([#36](https://github.com/dutiona/memory-engine/issues/36))   | Multi-agent deployments. Session isolation or namespace via ScopeTree                                                                                  |
+| Multimodal memory ([#37](https://github.com/dutiona/memory-engine/issues/37))              | Non-text memories needed. Schema supports it (BLOB embeddings)                                                                                         |
+| Multi-node sync ([#38](https://github.com/dutiona/memory-engine/issues/38))                | Multi-device eventual consistency. Event envelope fields are forward-compatible                                                                        |
+| GEPA meta-optimization ([#65](https://github.com/dutiona/memory-engine/issues/65))         | Evolutionary optimization of DreamCycle consumer prompts. Trigger: sufficient DreamCycle execution data (>100 runs). Research: GEPA (arXiv:2507.19457) |
+| Keyword-weighted hybrid search ([#66](https://github.com/dutiona/memory-engine/issues/66)) | Weight FTS5 higher than vector for `FactType::Procedural` retrieval. Trigger: after #42 (Reranker) ships. Research: APC (arXiv:2506.14852)             |
 
 ---
 
@@ -281,7 +293,9 @@ Consumer (AI agent, CLI tool, MCP server)
 │  consolidate · forget · resolve          │  ← Phase 2 ✅
 │  resume_context · list_due · pin/unpin  │  ← Phase 3/3b ✅
 │  explain · replay · dump · statistics   │  ← Phase 4a
+│  link_session_facts                     │  ← Phase 4a
 │  dream_cycle · sample_dormant           │  ← Phase 5
+│  record_outcome · dedup_semantic        │  ← Phase 5 (#63, #64)
 ├──────────────────────────────────────────┤
 │  AsyncMemoryEngine (tokio wrapper)       │  ← Phase 3 ✅
 ├──────────────────────────────────────────┤
