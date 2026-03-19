@@ -33,7 +33,7 @@ impl fmt::Display for FactType {
 }
 
 /// Consolidation level for summaries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConsolidationLevel {
     Local,
     Cluster,

@@ -64,7 +64,7 @@ impl EngineConfig {
 ///
 /// All public methods take `&self`. Consumers can share via `Arc<MemoryEngine>`.
 pub struct MemoryEngine {
-    pool: ConnectionPool,
+    pub(crate) pool: ConnectionPool,
     embed_dim: usize,
     graph: RwLock<MemoryGraph>,
     scope_tree: RwLock<ScopeTree>,
@@ -459,7 +459,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        let (stats, _pruned_ids) = {
+        let (stats, pruned_ids) = {
             let conn = self.write_conn();
             let mut graph = self.graph.write();
             crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())?
@@ -472,6 +472,7 @@ impl MemoryEngine {
             }
         }
 
+        let _ = pruned_ids; // consumed above when ann is enabled; suppress unused warning otherwise
         Ok(stats)
     }
 
@@ -638,6 +639,102 @@ impl MemoryEngine {
     pub fn unpin_fact(&self, id: i64) -> Result<()> {
         let conn = self.write_conn();
         FactStore::new(&conn, self.embed_dim).set_pinned(id, false)
+    }
+
+    // --- Public API: Inspection ---
+
+    /// Compute aggregate statistics about the engine state.
+    ///
+    /// Returns counts of facts (active, expired, pinned, due), edges,
+    /// summaries, scopes, events, and storage metrics.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
+        self.with_read(|conn| {
+            crate::inspect::statistics::compute_statistics(conn, self.pool.path())
+        })
+    }
+
+    /// Replay a segment of the event log for debugging.
+    ///
+    /// Supports filtering by time range, ID range, session, and event type.
+    /// Default ordering is by insertion order (ID ascending) for deterministic replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn replay_events(
+        &self,
+        filter: &crate::inspect::ReplayFilter,
+    ) -> Result<Vec<crate::types::Event>> {
+        let event_filter = crate::inspect::replay::to_event_filter(filter);
+        self.with_read(|conn| {
+            let store = EventStore::new(conn, &self.upcaster_registry);
+            if filter.upcast {
+                store.list_upcasted(&event_filter)
+            } else {
+                store.list(&event_filter)
+            }
+        })
+    }
+
+    /// Explain why a fact is in its current state.
+    ///
+    /// Returns provenance, temporal state, graph context, and scope path.
+    /// For expired facts, the graph context reflects the current (active-only) graph state.
+    ///
+    /// **Note:** `ExpiredReason` is best-effort. Most expired facts return `Unknown`
+    /// until event-based audit trail is added in a future version.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the fact doesn't exist.
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
+        let graph = self.graph.read();
+        let scope_tree = self.scope_tree.read();
+        self.with_read(|conn| {
+            crate::inspect::explain::explain_fact(conn, &graph, &scope_tree, self.embed_dim, id)
+        })
+    }
+
+    /// Reconstruct the temporal history of a fact from its bi-temporal timestamps.
+    ///
+    /// Returns a sorted timeline of lifecycle events computed from the fact's
+    /// `t_created`, `t_valid`, `t_invalid`, and `t_expired` timestamps.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the fact doesn't exist.
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn fact_history(&self, id: i64) -> Result<crate::inspect::FactHistory> {
+        self.with_read(|conn| crate::inspect::explain::fact_history(conn, self.embed_dim, id))
+    }
+
+    /// Export full engine state to a file.
+    ///
+    /// - `DumpFormat::Json(path)`: Serializes all facts, edges, summaries, scopes,
+    ///   events, and config to JSON. Works for both file-backed and in-memory engines.
+    ///   Uses raw events (not upcasted) for snapshot fidelity.
+    /// - `DumpFormat::Sqlite(path)`: Creates an atomic backup via `VACUUM INTO`.
+    ///   Only works for file-backed engines.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Internal` on I/O failure.
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
+        match format {
+            crate::inspect::DumpFormat::Json(path) => {
+                self.with_read(|conn| crate::inspect::dump::dump_json(conn, self.embed_dim, path))
+            }
+            crate::inspect::DumpFormat::Sqlite(path) => {
+                let conn = self.write_conn();
+                crate::inspect::dump::dump_sqlite(&conn, path)
+            }
+        }
     }
 
     // --- Private helpers ---

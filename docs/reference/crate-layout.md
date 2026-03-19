@@ -17,6 +17,7 @@ memory_engine (lib.rs)
   +-- pool          Connection pool (N readers + 1 writer)
   +-- scope         Hierarchical scope tree cache
   +-- resume        Session bootstrapping (5-tier retrieval)
+  +-- inspect       Debugging and observability APIs
   +-- async_engine  Async wrapper (feature-gated)
 ```
 
@@ -90,6 +91,15 @@ memory_engine (lib.rs)
 5. **KB stubs** -- placeholder for Phase 5 knowledge-base references.
    Tiers are mutually exclusive (a fact appears in at most one tier).
 
+`inspect`
+: Inspection APIs for debugging and observability. Sub-modules handle distinct concerns:
+
+- `inspect::types` -- all inspection-specific types (`FactExplanation`, `FactState`, `EngineStatistics`, `ReplayFilter`, `DumpFormat`, etc.).
+- `inspect::explain` -- `explain_fact()` state analysis and `fact_history()` temporal reconstruction.
+- `inspect::replay` -- `ReplayFilter` to `EventFilter` conversion for event replay.
+- `inspect::dump` -- JSON snapshot serialization and SQLite `VACUUM INTO` backup.
+- `inspect::statistics` -- SQL count queries for aggregate statistics.
+
 `async_engine`
 : `AsyncMemoryEngine` -- thin async wrapper around `MemoryEngine` using `tokio::task::spawn_blocking`. Feature-gated under the `"async"` Cargo feature. Mirrors the synchronous API surface.
 
@@ -102,3 +112,4 @@ The crate root re-exports the most commonly used items so consumers can `use mem
 - `EmbeddingProvider` (from `traits`)
 - All public types (from `types`)
 - `serialize_embedding`, `deserialize_embedding` (from `store`)
+- `inspect_types` (from `inspect::types` — inspection-specific types)

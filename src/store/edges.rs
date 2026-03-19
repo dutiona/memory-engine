@@ -107,6 +107,21 @@ impl<'a> EdgeStore<'a> {
         Ok(count)
     }
 
+    /// List ALL edges (including expired). Used for state dumps.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn list_all(&self) -> Result<Vec<Edge>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
+             FROM edges ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], row_to_edge)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// List all active edges (`t_expired IS NULL`).
     ///
     /// # Errors

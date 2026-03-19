@@ -399,6 +399,25 @@ impl<'a> FactStore<'a> {
         Ok(())
     }
 
+    /// List ALL facts (including expired). Used for state dumps.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn list_all(&self) -> Result<Vec<Fact>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, content_hash, embedding, fact_type,
+                    t_created, t_expired, t_valid, t_invalid,
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
+             FROM facts ORDER BY id ASC",
+        )?;
+        let dim = self.embed_dim;
+        let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Update the materialized importance score for a fact.
     pub fn update_importance_score(&self, id: i64, score: f64) -> Result<()> {
         self.conn.execute(

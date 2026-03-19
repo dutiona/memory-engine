@@ -27,6 +27,9 @@ pub enum MemoryError {
 
     #[error("unsupported storage epoch: database is epoch {db_epoch}, this library supports epoch {supported_epoch}")]
     UnsupportedEpoch { db_epoch: u16, supported_epoch: u16 },
+
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.

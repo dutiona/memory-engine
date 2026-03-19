@@ -9,9 +9,13 @@ use crate::types::{Event, EventType, NewEvent};
 #[derive(Debug, Clone, Default)]
 pub struct EventFilter {
     pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
     pub session_id: Option<String>,
     pub event_type: Option<EventType>,
     pub limit: Option<usize>,
+    pub id_min: Option<i64>,
+    pub id_max: Option<i64>,
+    pub order_by_id: bool,
 }
 
 /// Store for the append-only event log.
@@ -247,6 +251,11 @@ fn build_filter_query(
         values.push(Box::new(since.to_rfc3339()));
         idx += 1;
     }
+    if let Some(ref until) = filter.until {
+        clauses.push(format!("timestamp <= ?{idx}"));
+        values.push(Box::new(until.to_rfc3339()));
+        idx += 1;
+    }
     if let Some(ref session_id) = filter.session_id {
         clauses.push(format!("session_id = ?{idx}"));
         values.push(Box::new(session_id.clone()));
@@ -257,13 +266,27 @@ fn build_filter_query(
         values.push(Box::new(event_type_to_str(event_type).to_string()));
         idx += 1;
     }
+    if let Some(id_min) = filter.id_min {
+        clauses.push(format!("id >= ?{idx}"));
+        values.push(Box::new(id_min));
+        idx += 1;
+    }
+    if let Some(id_max) = filter.id_max {
+        clauses.push(format!("id <= ?{idx}"));
+        values.push(Box::new(id_max));
+        idx += 1;
+    }
 
     let mut sql = base.to_string();
     if !clauses.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&clauses.join(" AND "));
     }
-    sql.push_str(" ORDER BY timestamp ASC");
+    if filter.order_by_id {
+        sql.push_str(" ORDER BY id ASC");
+    } else {
+        sql.push_str(" ORDER BY timestamp ASC");
+    }
 
     if let Some(limit) = filter.limit {
         use std::fmt::Write;
