@@ -500,8 +500,9 @@ impl MemoryEngine {
 
     /// Search path: delegate to hybrid_search, then post-filter.
     ///
-    /// When post-filters are active (period, importance, pinned), we overfetch 3x
-    /// from `hybrid_search` to compensate for attrition, then truncate after filtering.
+    /// When post-filters are active (period, importance, pinned), we pass the
+    /// raw `limit` (not inflated) because `hybrid_search` already does its own
+    /// internal 3x overfetch before its temporal filter.
     fn execute_search_path(
         &self,
         query: &MemoryQuery,
@@ -511,34 +512,25 @@ impl MemoryEngine {
     ) -> Result<Vec<SearchResult>> {
         let mode = Self::infer_search_mode(query);
 
-        // Overfetch when post-filters will reduce the result set.
-        // hybrid_search already does its own 3x overfetch internally for temporal
-        // filtering, but our post-filters (period, importance, pinned) are additional
-        // attrition on top of that.
-        let has_post_filters =
-            query.has_period() || query.min_importance_score.is_some() || query.pinned_only;
-        let fetch_limit = if has_post_filters {
-            limit.saturating_mul(3).max(limit)
-        } else {
-            limit
-        };
-
         // When period is set, effective_cutoff is None — but hybrid_search defaults
-        // valid_at=None to Utc::now(), which would hide future-dated facts that
-        // should be reachable via period overlap. Fix: use period_end as the cutoff
-        // so hybrid_search's temporal filter is permissive enough for the period range,
-        // and the period post-filter applies exact overlap semantics.
-        let search_cutoff = if effective_cutoff.is_none() {
-            query.period_end // period queries: widen to period_end
+        // valid_at=None to Utc::now(), which would hide facts outside the current
+        // instant. We need hybrid_search to return ALL temporally-viable candidates
+        // so our period post-filter can apply exact interval overlap semantics.
+        // Fix: pass MAX_UTC as the cutoff to effectively disable hybrid_search's
+        // built-in temporal filter. The period post-filter handles the real semantics.
+        let search_cutoff = if effective_cutoff.is_none() && query.has_period() {
+            Some(DateTime::<Utc>::MAX_UTC)
         } else {
             effective_cutoff
         };
 
+        // hybrid_search already does its own 3x overfetch internally (line 87),
+        // so we pass the raw limit here — no double inflation.
         let search_query = SearchQuery {
             text: query.text.clone(),
             embedding: query.embedding.clone(),
             mode,
-            limit: fetch_limit,
+            limit,
             valid_at: search_cutoff,
             fact_type: query.fact_type.clone(),
             scope: query.scope.clone(),
@@ -578,8 +570,8 @@ impl MemoryEngine {
 
     /// Store path: no text/vector search, use FactStore directly.
     ///
-    /// Overfetches 3x from SQL when post-filters (temporal cutoff, fact_type)
-    /// will cause attrition, then truncates after filtering.
+    /// Strategy: fetch a broad candidate set from the most selective SQL query,
+    /// then apply ALL remaining filters as post-filters to guarantee AND semantics.
     fn execute_store_path(
         &self,
         query: &MemoryQuery,
@@ -589,62 +581,61 @@ impl MemoryEngine {
     ) -> Result<Vec<SearchResult>> {
         let scope_slice = scope_ids.unwrap_or(&[]);
 
-        // Determine if post-filters will cause attrition beyond the primary fetch.
-        // If so, overfetch from SQL to avoid underfilling.
-        let has_post_attrition = effective_cutoff.is_some() || query.fact_type.is_some();
-        let fetch_limit = if has_post_attrition {
-            limit.saturating_mul(3).max(limit)
-        } else {
-            limit
-        };
+        // Fetch a broad candidate set. Use the most selective SQL query available,
+        // but do NOT rely on it for AND semantics — post-filters handle that.
+        // Overfetch to compensate for post-filter attrition.
+        let fetch_limit = limit.saturating_mul(3).max(limit);
 
-        let mut facts: Vec<Fact> = if query.pinned_only {
-            // list_pinned already guarantees is_pinned=true; no redundant post-filter needed.
-            self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_pinned(scope_slice))?
-        } else if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
-            // list_active_in_period already handles period overlap + optional fact_type in SQL.
-            self.with_read(|conn| {
-                FactStore::new(conn, self.embed_dim).list_active_in_period(
-                    start,
-                    end,
-                    scope_slice,
-                    query.fact_type.as_ref(),
-                )
-            })?
-        } else if let Some(min_score) = query.min_importance_score {
-            self.with_read(|conn| {
-                FactStore::new(conn, self.embed_dim).list_by_importance_score(
-                    scope_slice,
-                    min_score,
-                    fetch_limit,
-                    &std::collections::HashSet::new(),
-                )
-            })?
-        } else {
-            // Default: all facts in scope, ordered by importance_score DESC
-            self.with_read(|conn| {
-                FactStore::new(conn, self.embed_dim).list_by_importance_score(
-                    scope_slice,
-                    0.0,
-                    fetch_limit,
-                    &std::collections::HashSet::new(),
-                )
-            })?
-        };
+        let mut facts: Vec<Fact> =
+            if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
+                // Period is the most selective: overlap + scope + optional fact_type in SQL.
+                self.with_read(|conn| {
+                    FactStore::new(conn, self.embed_dim).list_active_in_period(
+                        start,
+                        end,
+                        scope_slice,
+                        query.fact_type.as_ref(),
+                    )
+                })?
+            } else {
+                // Default: fetch by importance_score DESC (most useful ordering).
+                // Use min_importance_score if set, otherwise 0.0 (all active facts).
+                let min_score = query.min_importance_score.unwrap_or(0.0);
+                self.with_read(|conn| {
+                    FactStore::new(conn, self.embed_dim).list_by_importance_score(
+                        scope_slice,
+                        min_score,
+                        fetch_limit,
+                        &std::collections::HashSet::new(),
+                    )
+                })?
+            };
 
-        // --- Post-filters ---
-        // Only apply filters that weren't already handled by the primary SQL query.
+        // --- Post-filters: apply ALL filters for AND semantics ---
 
         // Temporal safety: exclude future-dated facts
         if let Some(cutoff) = effective_cutoff {
             facts.retain(|f| passes_temporal_cutoff(f, cutoff));
         }
 
-        // Fact type (only for branches that don't push it into SQL)
+        // Fact type (period branch already handles this in SQL; skip to avoid double-filter)
         if !query.has_period() {
             if let Some(ref ft) = query.fact_type {
                 facts.retain(|f| &f.fact_type == ft);
             }
+        }
+
+        // Importance score (the default branch already handles this in SQL via min_score;
+        // but the period branch does NOT, so we must apply it here for AND semantics)
+        if query.has_period() {
+            if let Some(min_score) = query.min_importance_score {
+                facts.retain(|f| f.importance_score >= min_score);
+            }
+        }
+
+        // Pinned filter — always applied as post-filter regardless of primary query
+        if query.pinned_only {
+            facts.retain(|f| f.is_pinned);
         }
 
         // Sort by importance_score DESC and truncate
