@@ -9,6 +9,7 @@ pub fn to_event_filter(filter: &ReplayFilter) -> EventFilter {
         until: filter.until,
         session_id: filter.session_id.clone(),
         event_type: filter.event_type.clone(),
+        source: None,
         limit: filter.limit,
         id_min: filter.id_range.map(|(min, _)| min),
         id_max: filter.id_range.map(|(_, max)| max),

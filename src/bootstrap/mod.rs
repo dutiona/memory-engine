@@ -51,8 +51,9 @@ pub(crate) fn bootstrap_session_inner(
     let mut report = BootstrapReport::default();
 
     // --- Parse ---
-    let entries = parse::parse_session_file(reader);
+    let (entries, malformed) = parse::parse_session_file(reader);
     report.entries_parsed = entries.len();
+    report.entries_malformed = malformed;
 
     // Extract session_id from first entry that has one
     let session_id = entries
@@ -61,7 +62,7 @@ pub(crate) fn bootstrap_session_inner(
         .unwrap_or_default();
 
     if session_id.is_empty() {
-        report.entries_malformed = entries.len();
+        // No session_id found — nothing to bootstrap (but entries parsed fine)
         return Ok(report);
     }
 
@@ -148,15 +149,21 @@ fn bootstrap_within_savepoint(
     report.events_ingested = 1;
 
     // --- Reconstruct turns ---
-    let mut turns = filter::reconstruct_turns(entries);
+    let turns = filter::reconstruct_turns(entries);
     report.turns_reconstructed = turns.len();
 
-    if config.max_turns > 0 && turns.len() > config.max_turns {
-        turns.truncate(config.max_turns);
-    }
-
-    // --- Classify outcome ---
+    // --- Classify outcome on FULL turns (before truncation) ---
+    // Outcome evidence (commits, test results) lives at the end of sessions,
+    // so we must not truncate before classification.
     let (outcome, _signals) = outcome::classify_outcome(&turns);
+
+    // Apply max_turns limit AFTER outcome classification, keeping the TAIL
+    // (most recent turns) since they contain resolution evidence.
+    let turns = if config.max_turns > 0 && turns.len() > config.max_turns {
+        turns[turns.len() - config.max_turns..].to_vec()
+    } else {
+        turns
+    };
     match outcome {
         SessionOutcome::Success => report.outcome_counts.success += 1,
         SessionOutcome::Failure => report.outcome_counts.failure += 1,
@@ -181,6 +188,11 @@ fn bootstrap_within_savepoint(
 
     // --- Extract + add facts ---
     let mut importance_sum = 0.0;
+    // Note: We use FactStore::insert() directly (bypassing engine.add_fact())
+    // because we're inside a savepoint that already holds the write lock.
+    // When the `ann` feature is enabled, bootstrapped facts won't be in the
+    // HNSW index until the engine is reopened (index is built from DB at open).
+    // This is acceptable for a batch import operation.
     let fact_store = FactStore::new(conn, embed_dim);
 
     for candidate in &candidates {

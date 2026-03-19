@@ -85,13 +85,18 @@ pub enum ContentBlock {
 ///
 /// Malformed lines are skipped with a `tracing::warn`; this function never
 /// fails so callers always get a best-effort result.
-pub fn parse_session_file(reader: impl std::io::BufRead) -> Vec<SessionEntry> {
+///
+/// Returns `(entries, malformed_count)` where `malformed_count` is the number
+/// of non-empty lines that failed to parse.
+pub fn parse_session_file(reader: impl std::io::BufRead) -> (Vec<SessionEntry>, usize) {
     let mut entries = Vec::new();
+    let mut malformed = 0;
     for (idx, line) in reader.lines().enumerate() {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(line = idx + 1, error = %e, "failed to read line");
+                malformed += 1;
                 continue;
             }
         };
@@ -103,10 +108,11 @@ pub fn parse_session_file(reader: impl std::io::BufRead) -> Vec<SessionEntry> {
             Ok(entry) => entries.push(entry),
             Err(e) => {
                 tracing::warn!(line = idx + 1, error = %e, "skipping malformed JSONL line");
+                malformed += 1;
             }
         }
     }
-    entries
+    (entries, malformed)
 }
 
 /// Parse the content blocks from a [`MessagePayload`]'s `content` field.
@@ -195,7 +201,7 @@ mod tests {
     #[test]
     fn parse_empty_file() {
         let reader = BufReader::new("".as_bytes());
-        let entries = parse_session_file(reader);
+        let (entries, _malformed) = parse_session_file(reader);
         assert!(entries.is_empty());
     }
 
@@ -205,8 +211,9 @@ mod tests {
 {"type":"user","sessionId":"a1b2c3"}
 "#;
         let reader = BufReader::new(input.as_bytes());
-        let entries = parse_session_file(reader);
+        let (entries, malformed) = parse_session_file(reader);
         assert_eq!(entries.len(), 1);
+        assert_eq!(malformed, 1, "one malformed line should be counted");
         assert_eq!(entries[0].entry_type, EntryType::User);
     }
 
@@ -214,7 +221,7 @@ mod tests {
     fn parse_user_message() {
         let line = r#"{"type":"user","sessionId":"sess-001","timestamp":"2026-03-19T10:00:00Z","uuid":"u1","parentUuid":null,"cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"hello world"}]}}"#;
         let reader = BufReader::new(line.as_bytes());
-        let entries = parse_session_file(reader);
+        let (entries, _malformed) = parse_session_file(reader);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::User);
         let msg = entries[0].message.as_ref().unwrap();
@@ -225,7 +232,7 @@ mod tests {
     fn parse_assistant_tool_use() {
         let line = r#"{"type":"assistant","sessionId":"sess-001","timestamp":"2026-03-19T10:01:00Z","uuid":"u2","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#;
         let reader = BufReader::new(line.as_bytes());
-        let entries = parse_session_file(reader);
+        let (entries, _malformed) = parse_session_file(reader);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::Assistant);
         let content = entries[0]
@@ -244,7 +251,7 @@ mod tests {
     fn parse_tool_result_entry() {
         let line = r#"{"type":"user","sessionId":"sess-001","uuid":"u3","parentUuid":"u2","toolUseResult":{"stdout":"ok","stderr":"","isError":false}}"#;
         let reader = BufReader::new(line.as_bytes());
-        let entries = parse_session_file(reader);
+        let (entries, _malformed) = parse_session_file(reader);
         assert_eq!(entries.len(), 1);
         let result = entries[0].tool_use_result.as_ref().unwrap();
         assert_eq!(result.stdout.as_deref(), Some("ok"));
@@ -255,7 +262,7 @@ mod tests {
     fn parse_progress_entry() {
         let line = r#"{"type":"progress","sessionId":"sess-001","data":{"status":"running"}}"#;
         let reader = BufReader::new(line.as_bytes());
-        let entries = parse_session_file(reader);
+        let (entries, _malformed) = parse_session_file(reader);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::Progress);
     }
