@@ -7,4 +7,5 @@ recording-events
 adding-facts
 querying-memory
 graph-relationships
+inspection
 ```
