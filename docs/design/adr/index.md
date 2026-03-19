@@ -12,4 +12,6 @@ Key design decisions, documented as ADRs. Each records the context, decision, an
 0005-consolidation-3pass
 0006-ebbinghaus-forgetting
 0007-hierarchical-scoping
+0008-materialized-importance
+0009-session-bootstrap
 ```
