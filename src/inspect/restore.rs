@@ -188,11 +188,13 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
 
     let tx = conn.unchecked_transaction()?;
 
-    // 1. Delete auto-inserted root scope so we can insert snapshot's scopes with original IDs.
-    tx.execute("DELETE FROM scopes", [])?;
+    // 1. Replace scopes with snapshot's scopes (preserving original IDs).
+    //    When the snapshot has scopes, delete the auto-inserted root and reinsert all.
+    //    When the snapshot has no scopes (empty snapshot), keep the root from init_schema.
+    if !snapshot.scopes.is_empty() {
+        tx.execute("DELETE FROM scopes", [])?;
 
-    // 2. Insert scopes (sorted by depth then id to satisfy parent FK).
-    {
+        // 2. Insert scopes (sorted by depth then id to satisfy parent FK).
         let mut scopes = snapshot.scopes.clone();
         scopes.sort_by_key(|s| (s.depth, s.id));
         let mut stmt =

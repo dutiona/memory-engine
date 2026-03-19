@@ -1397,11 +1397,22 @@ impl MemoryEngine {
 
         std::fs::copy(backup_path, &config.path)?;
 
+        // Any failure after copy must clean up the orphan file.
+        let cleanup = |e| {
+            let _ = std::fs::remove_file(&config.path);
+            e
+        };
+
         // Probe the copied DB for embed_dim validation.
-        let probe = crate::store::schema::open_connection(&config.path.to_string_lossy())?;
-        let db_dim: usize = get_config(&probe, "embed_dim")?
+        let probe = crate::store::schema::open_connection(&config.path.to_string_lossy())
+            .map_err(cleanup)?;
+        let db_dim: usize = get_config(&probe, "embed_dim")
+            .map_err(cleanup)?
             .and_then(|v| v.parse().ok())
-            .ok_or_else(|| MemoryError::Internal("backup has no embed_dim in config".into()))?;
+            .ok_or_else(|| {
+                let _ = std::fs::remove_file(&config.path);
+                MemoryError::Internal("backup has no embed_dim in config".into())
+            })?;
         drop(probe);
 
         if config.embed_dim != db_dim {
@@ -1412,7 +1423,10 @@ impl MemoryEngine {
             });
         }
 
-        Self::open(config)
+        Self::open(config).map_err(|e| {
+            let _ = std::fs::remove_file(&config.path);
+            e
+        })
     }
 
     // --- Private helpers ---
