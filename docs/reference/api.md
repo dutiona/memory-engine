@@ -47,9 +47,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Query
 
-| Method  | Signature                                                   | Description                                                                                                                             |
-| ------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `query` | `(&self, query: &SearchQuery) -> Result<Vec<SearchResult>>` | Hybrid search combining FTS5, vector similarity, and RRF merge. Respects scope filtering. Returns empty results for nonexistent scopes. |
+| Method          | Signature                                                   | Description                                                                                                                             |
+| --------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `query`         | `(&self, query: &SearchQuery) -> Result<Vec<SearchResult>>` | Hybrid search combining FTS5, vector similarity, and RRF merge. Respects scope filtering. Returns empty results for nonexistent scopes. |
+| `execute_query` | `(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>>` | Fluent query builder API composing scope, temporal, search, and filter dimensions. See `MemoryQuery` below.                             |
 
 `SearchQuery` fields:
 
@@ -61,11 +62,24 @@ This page summarizes the public API surface of the `memory-engine` crate.
 - `fact_type: Option<FactType>` -- filter by fact type.
 - `scope: Option<ScopeQuery>` -- scope resolution strategy.
 
+`MemoryQuery` fields (all optional, AND semantics):
+
+- `scope: Option<ScopeQuery>` -- scope filter.
+- `period_start/period_end: Option<DateTime<Utc>>` -- temporal period overlap `[start, end)`.
+- `text: Option<String>` -- FTS query (triggers search path).
+- `embedding: Option<Vec<f32>>` -- vector query (triggers search path).
+- `search_mode: Option<SearchMode>` -- override inferred mode (default: infer from text/embedding).
+- `fact_type: Option<FactType>` -- filter by fact type.
+- `min_importance_score: Option<f64>` -- minimum materialized importance score.
+- `pinned_only: bool` -- return only pinned facts.
+- `limit: Option<usize>` -- max results (default: 50).
+- `valid_at: Option<DateTime<Utc>>` -- point-in-time filter (mutually exclusive with period).
+
 `SearchResult` fields:
 
 - `fact: Fact` -- the matched fact.
-- `score: f64` -- relevance score.
-- `match_type: MatchType` -- `Fts`, `Vector`, or `Both`.
+- `score: f64` -- relevance score (search path) or `importance_score` (store path).
+- `match_type: MatchType` -- `Fts`, `Vector`, `Both`, or `ImportanceRank` (non-exhaustive).
 
 ### Consolidation
 

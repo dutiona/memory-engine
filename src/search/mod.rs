@@ -4,6 +4,7 @@
 pub mod ann;
 pub mod fts;
 pub mod hybrid;
+pub mod query;
 pub mod strategy;
 pub mod vector;
 
@@ -11,5 +12,6 @@ pub mod vector;
 pub use ann::HnswStrategy;
 pub use fts::{fts_search, FtsResult};
 pub use hybrid::{hybrid_search, rrf_merge, MatchType, SearchMode, SearchQuery, SearchResult};
+pub use query::MemoryQuery;
 pub use strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
 pub use vector::{cosine_similarity, vector_search, VectorResult};

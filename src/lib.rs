@@ -41,6 +41,7 @@ pub mod types;
 pub use engine::{EngineConfig, MemoryEngine};
 pub use inspect::types as inspect_types;
 pub use error::*;
+pub use search::MemoryQuery;
 pub use store::{deserialize_embedding, serialize_embedding, UpcasterRegistry};
 pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
 pub use traits::EmbeddingProvider;

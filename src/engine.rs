@@ -9,7 +9,8 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
-use crate::search::hybrid::{hybrid_search, SearchQuery, SearchResult};
+use crate::search::hybrid::{hybrid_search, MatchType, SearchMode, SearchQuery, SearchResult};
+use crate::search::query::MemoryQuery;
 use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
@@ -388,6 +389,249 @@ impl MemoryEngine {
         self.with_read(|conn| {
             hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
         })
+    }
+
+    // --- Public API: MemoryQuery ---
+
+    /// Execute a composed query using the [`MemoryQuery`] builder.
+    ///
+    /// Routes to hybrid search (FTS + vector) when text/embedding is present,
+    /// or to store-level queries (importance, pinned, period) otherwise.
+    /// All code paths enforce the temporal safety invariant: future-dated facts
+    /// (`t_valid > now`) are excluded unless overridden by `valid_at` or `period`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Conflict` if:
+    /// - `period_start` is set without `period_end` (or vice versa)
+    /// - `valid_at` and `period` are both set (mutually exclusive)
+    /// - `search_mode` conflicts with available text/embedding inputs
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn execute_query(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>> {
+        // --- Validation ---
+        self.validate_memory_query(query)?;
+
+        // --- Resolve scope ---
+        let scope_ids: Option<Vec<i64>> = match &query.scope {
+            Some(sq) => {
+                let resolved = self.scope_tree.read().resolve_query(sq);
+                match resolved {
+                    Some(ids) => Some(ids),
+                    None => return Ok(vec![]), // scope doesn't exist → no results
+                }
+            }
+            None => None,
+        };
+
+        // --- Compute effective temporal cutoff ---
+        // Default: Utc::now() to hide future-dated facts (scheduling model invariant).
+        // Overridden by explicit valid_at. Disabled when period is set (period handles its own semantics).
+        let effective_cutoff = if query.valid_at.is_some() {
+            query.valid_at
+        } else if query.has_period() {
+            None // period handles temporal semantics itself
+        } else {
+            Some(Utc::now()) // default: hide future-dated facts
+        };
+
+        let limit = query.effective_limit();
+
+        if query.has_search() {
+            self.execute_search_path(query, scope_ids.as_deref(), effective_cutoff, limit)
+        } else {
+            self.execute_store_path(query, scope_ids.as_deref(), effective_cutoff, limit)
+        }
+    }
+
+    /// Validate a `MemoryQuery` for conflicting or incomplete options.
+    fn validate_memory_query(&self, query: &MemoryQuery) -> Result<()> {
+        // Period: both start and end must be set, or neither
+        if query.period_start.is_some() != query.period_end.is_some() {
+            return Err(MemoryError::Conflict(
+                "period_start and period_end must both be set or both unset".into(),
+            ));
+        }
+
+        // valid_at and period are mutually exclusive
+        if query.valid_at.is_some() && query.has_period() {
+            return Err(MemoryError::Conflict(
+                "valid_at and period are mutually exclusive".into(),
+            ));
+        }
+
+        // Search mode compatibility (D7)
+        if let Some(ref mode) = query.search_mode {
+            match mode {
+                SearchMode::Fts if query.text.is_none() => {
+                    return Err(MemoryError::Conflict(
+                        "SearchMode::Fts requires text to be set".into(),
+                    ));
+                }
+                SearchMode::Vector if query.embedding.is_none() => {
+                    return Err(MemoryError::Conflict(
+                        "SearchMode::Vector requires embedding to be set".into(),
+                    ));
+                }
+                SearchMode::Hybrid if query.text.is_none() || query.embedding.is_none() => {
+                    return Err(MemoryError::Conflict(
+                        "SearchMode::Hybrid requires both text and embedding".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Infer search mode from available inputs (D7).
+    fn infer_search_mode(query: &MemoryQuery) -> SearchMode {
+        if let Some(ref mode) = query.search_mode {
+            return mode.clone();
+        }
+        match (query.text.is_some(), query.embedding.is_some()) {
+            (true, true) => SearchMode::Hybrid,
+            (true, false) => SearchMode::Fts,
+            (false, true) => SearchMode::Vector,
+            (false, false) => unreachable!("has_search() should be false"),
+        }
+    }
+
+    /// Search path: delegate to hybrid_search, then post-filter.
+    fn execute_search_path(
+        &self,
+        query: &MemoryQuery,
+        scope_ids: Option<&[i64]>,
+        effective_cutoff: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let mode = Self::infer_search_mode(query);
+
+        let search_query = SearchQuery {
+            text: query.text.clone(),
+            embedding: query.embedding.clone(),
+            mode,
+            limit, // hybrid_search handles its own 3x overfetch internally
+            valid_at: effective_cutoff,
+            fact_type: query.fact_type.clone(),
+            scope: query.scope.clone(),
+        };
+
+        #[cfg(feature = "ann")]
+        let strategy: &dyn VectorSearchStrategy = if self.should_use_hnsw() {
+            self.hnsw_strategy.as_ref().unwrap()
+        } else {
+            &*self.vector_strategy
+        };
+        #[cfg(not(feature = "ann"))]
+        let strategy: &dyn VectorSearchStrategy = &*self.vector_strategy;
+
+        let mut results = self.with_read(|conn| {
+            hybrid_search(conn, &search_query, self.embed_dim, scope_ids, strategy)
+        })?;
+
+        // Post-filter by period overlap
+        if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
+            results.retain(|r| fact_overlaps_period(&r.fact, start, end));
+        }
+
+        // Post-filter by importance score
+        if let Some(min_score) = query.min_importance_score {
+            results.retain(|r| r.fact.importance_score >= min_score);
+        }
+
+        // Post-filter by pinned
+        if query.pinned_only {
+            results.retain(|r| r.fact.is_pinned);
+        }
+
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    /// Store path: no text/vector search, use FactStore directly.
+    fn execute_store_path(
+        &self,
+        query: &MemoryQuery,
+        scope_ids: Option<&[i64]>,
+        effective_cutoff: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let scope_slice = scope_ids.unwrap_or(&[]);
+
+        let mut facts: Vec<Fact> = if query.pinned_only {
+            self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_pinned(scope_slice))?
+        } else if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
+            self.with_read(|conn| {
+                FactStore::new(conn, self.embed_dim).list_active_in_period(
+                    start,
+                    end,
+                    scope_slice,
+                    query.fact_type.as_ref(),
+                )
+            })?
+        } else if let Some(min_score) = query.min_importance_score {
+            self.with_read(|conn| {
+                FactStore::new(conn, self.embed_dim).list_by_importance_score(
+                    scope_slice,
+                    min_score,
+                    limit,
+                    &std::collections::HashSet::new(),
+                )
+            })?
+        } else {
+            // Default: all facts in scope, ordered by importance_score DESC
+            self.with_read(|conn| {
+                FactStore::new(conn, self.embed_dim).list_by_importance_score(
+                    scope_slice,
+                    0.0,
+                    limit,
+                    &std::collections::HashSet::new(),
+                )
+            })?
+        };
+
+        // --- Post-filters (applied to all store-path results) ---
+
+        // Temporal safety: exclude future-dated facts
+        if let Some(cutoff) = effective_cutoff {
+            facts.retain(|f| passes_temporal_cutoff(f, cutoff));
+        }
+
+        // Apply all remaining filters as post-filters.
+        // Each filter is applied regardless of which store method was primary,
+        // ensuring AND semantics across all dimensions.
+
+        // Period overlap
+        if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
+            facts.retain(|f| fact_overlaps_period(f, start, end));
+        }
+
+        // Fact type
+        if let Some(ref ft) = query.fact_type {
+            facts.retain(|f| &f.fact_type == ft);
+        }
+
+        // Importance score
+        if let Some(min_score) = query.min_importance_score {
+            facts.retain(|f| f.importance_score >= min_score);
+        }
+
+        // Pinned
+        if query.pinned_only {
+            facts.retain(|f| f.is_pinned);
+        }
+
+        // Sort by importance_score DESC and truncate
+        facts.sort_by(|a, b| {
+            b.importance_score
+                .partial_cmp(&a.importance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        facts.truncate(limit);
+
+        Ok(facts.into_iter().map(fact_to_search_result).collect())
     }
 
     // --- Public API: Config ---
@@ -877,6 +1121,38 @@ impl MemoryEngine {
         self.with_read(|conn| {
             crate::resume::resume_context(conn, &scope_ids, self.embed_dim, config)
         })
+    }
+}
+
+/// Check if a fact's validity window passes the temporal cutoff.
+/// A fact passes if it's valid at the cutoff instant:
+/// `(t_valid IS NULL OR t_valid <= cutoff) AND (t_invalid IS NULL OR t_invalid > cutoff)`
+fn passes_temporal_cutoff(fact: &Fact, cutoff: DateTime<Utc>) -> bool {
+    if let Some(t_valid) = fact.t_valid {
+        if t_valid > cutoff {
+            return false;
+        }
+    }
+    if let Some(t_invalid) = fact.t_invalid {
+        if t_invalid <= cutoff {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if a fact's `[t_valid, t_invalid)` interval overlaps `[start, end)`.
+fn fact_overlaps_period(fact: &Fact, start: DateTime<Utc>, end: DateTime<Utc>) -> bool {
+    // (t_valid IS NULL OR t_valid < end) AND (t_invalid IS NULL OR t_invalid > start)
+    fact.t_valid.is_none_or(|tv| tv < end) && fact.t_invalid.is_none_or(|ti| ti > start)
+}
+
+/// Wrap a `Fact` into a `SearchResult` with `MatchType::ImportanceRank`.
+fn fact_to_search_result(fact: Fact) -> SearchResult {
+    SearchResult {
+        score: fact.importance_score,
+        match_type: MatchType::ImportanceRank,
+        fact,
     }
 }
 
@@ -1777,5 +2053,469 @@ mod tests {
             )
             .unwrap();
         assert!(!engine.get_fact(id).unwrap().is_pinned);
+    }
+
+    // --- execute_query integration tests ---
+
+    #[test]
+    fn execute_query_empty_returns_active_facts() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "fact one",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "fact two",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = engine.execute_query(&MemoryQuery::new()).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results
+            .iter()
+            .all(|r| r.match_type == MatchType::ImportanceRank));
+    }
+
+    #[test]
+    fn execute_query_text_search() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "Rust systems programming",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "Python machine learning",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = engine
+            .execute_query(&MemoryQuery::new().text("Rust"))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "Rust systems programming");
+        assert_eq!(results[0].match_type, MatchType::Fts);
+    }
+
+    #[test]
+    fn execute_query_scope_only() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        // Add fact to "project:demo" scope (auto-created by add_fact)
+        engine
+            .add_fact(
+                "scoped fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                Some("project:demo"),
+                None,
+                None,
+            )
+            .unwrap();
+        // Add fact to root scope
+        engine
+            .add_fact(
+                "root fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = engine
+            .execute_query(&MemoryQuery::new().scope_exact("project:demo"))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "scoped fact");
+    }
+
+    #[test]
+    fn execute_query_fact_type_filter() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "episodic",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "semantic",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = engine
+            .execute_query(&MemoryQuery::new().fact_type(FactType::Semantic))
+            .unwrap();
+        // fact_type filtering in store path — list_by_importance_score doesn't filter by fact_type,
+        // so it should be post-filtered
+        assert!(results
+            .iter()
+            .all(|r| r.fact.fact_type == FactType::Semantic));
+    }
+
+    #[test]
+    fn execute_query_importance_threshold() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        let opts_low = AddFactOptions {
+            importance: Some(0.1),
+            ..Default::default()
+        };
+        let opts_high = AddFactOptions {
+            importance: Some(0.9),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "low importance",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&opts_low),
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "high importance",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&opts_high),
+                None,
+            )
+            .unwrap();
+
+        let results = engine
+            .execute_query(&MemoryQuery::new().min_importance_score(0.5))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "high importance");
+    }
+
+    #[test]
+    fn execute_query_pinned_only() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        let id = engine
+            .add_fact(
+                "pinned",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine.pin_fact(id).unwrap();
+
+        engine
+            .add_fact(
+                "normal",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = engine
+            .execute_query(&MemoryQuery::new().pinned_only())
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "pinned");
+        assert!(results[0].fact.is_pinned);
+    }
+
+    #[test]
+    fn execute_query_future_dated_excluded() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        // Regular fact
+        engine
+            .add_fact(
+                "present fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Future-dated fact
+        let future_opts = AddFactOptions {
+            t_valid: Some(Utc::now() + chrono::Duration::hours(24)),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "future fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&future_opts),
+                None,
+            )
+            .unwrap();
+
+        // Empty query should NOT return the future-dated fact
+        let results = engine.execute_query(&MemoryQuery::new()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "present fact");
+
+        // Scope-only query should also exclude future-dated facts
+        let results2 = engine
+            .execute_query(&MemoryQuery::new().min_importance_score(0.0))
+            .unwrap();
+        assert_eq!(results2.len(), 1);
+        assert_eq!(results2[0].fact.content, "present fact");
+    }
+
+    #[test]
+    fn execute_query_period_mutual_exclusion() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let now = Utc::now();
+
+        let result = engine.execute_query(
+            &MemoryQuery::new()
+                .valid_at(now)
+                .period(now - chrono::Duration::hours(1), now),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execute_query_search_mode_conflict() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+        // Hybrid requires both text and embedding
+        let result = engine.execute_query(
+            &MemoryQuery::new()
+                .text("test")
+                .search_mode(SearchMode::Hybrid),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execute_query_search_mode_inference() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "Rust programming",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Text-only → should infer FTS mode
+        let results = engine
+            .execute_query(&MemoryQuery::new().text("Rust"))
+            .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].match_type, MatchType::Fts);
+    }
+
+    #[test]
+    fn execute_query_period_filter() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let now = Utc::now();
+
+        // Fact valid in the past
+        let past_opts = AddFactOptions {
+            t_valid: Some(now - chrono::Duration::hours(3)),
+            t_invalid: Some(now - chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "past fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&past_opts),
+                None,
+            )
+            .unwrap();
+
+        // Fact still valid
+        engine
+            .add_fact(
+                "current fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Period query covering only the past window
+        let results = engine
+            .execute_query(&MemoryQuery::new().period(
+                now - chrono::Duration::hours(4),
+                now - chrono::Duration::minutes(30),
+            ))
+            .unwrap();
+
+        // Both should match: past fact has [t_valid, t_invalid) overlapping the period,
+        // and current fact has NULL t_valid/t_invalid (unbounded, overlaps everything)
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn execute_query_composed_filters() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        let opts_high = AddFactOptions {
+            importance: Some(0.9),
+            ..Default::default()
+        };
+        let opts_low = AddFactOptions {
+            importance: Some(0.1),
+            ..Default::default()
+        };
+
+        engine
+            .add_fact(
+                "Rust high importance",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&opts_high),
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "Rust low importance",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&opts_low),
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "Python high importance",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                Some(&opts_high),
+                None,
+            )
+            .unwrap();
+
+        // Text "Rust" + importance >= 0.5 → only "Rust high importance"
+        let results = engine
+            .execute_query(&MemoryQuery::new().text("Rust").min_importance_score(0.5))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "Rust high importance");
+    }
+
+    #[test]
+    fn execute_query_empty_results() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+        let results = engine
+            .execute_query(&MemoryQuery::new().text("nonexistent"))
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn execute_query_default_limit() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        // Add 60 facts (over the default limit of 50)
+        for i in 0..60 {
+            engine
+                .add_fact(
+                    &format!("fact {i}"),
+                    FactType::Episodic,
+                    None,
+                    &embedder,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let results = engine.execute_query(&MemoryQuery::new()).unwrap();
+        assert_eq!(results.len(), 50); // default limit
     }
 }

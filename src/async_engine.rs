@@ -126,6 +126,17 @@ impl AsyncMemoryEngine {
             .map_err(join_err)?
     }
 
+    /// Execute a composed query using the [`MemoryQuery`](crate::search::query::MemoryQuery) builder.
+    pub async fn execute_query(
+        &self,
+        query: crate::search::query::MemoryQuery,
+    ) -> Result<Vec<SearchResult>> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.execute_query(&query))
+            .await
+            .map_err(join_err)?
+    }
+
     /// Run three-pass consolidation.
     pub async fn consolidate(
         &self,
