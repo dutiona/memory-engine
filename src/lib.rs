@@ -28,6 +28,7 @@ pub mod engine;
 pub mod error;
 pub mod forgetting;
 pub mod graph;
+pub mod inspect;
 pub mod pool;
 pub mod resume;
 pub mod scope;
@@ -37,6 +38,7 @@ pub mod traits;
 pub mod types;
 
 pub use engine::{EngineConfig, MemoryEngine};
+pub use inspect::types as inspect_types;
 pub use error::*;
 pub use store::{deserialize_embedding, serialize_embedding, UpcasterRegistry};
 pub use traits::EmbeddingProvider;

@@ -167,6 +167,12 @@ impl ConnectionPool {
     pub fn is_file_backed(&self) -> bool {
         self.path.is_some()
     }
+
+    /// Database file path, if file-backed. `None` for in-memory.
+    #[must_use]
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
+    }
 }
 
 #[cfg(test)]

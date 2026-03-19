@@ -123,6 +123,49 @@ impl ScopeTree {
         }
         self.nodes.insert(node.id, node);
     }
+
+    /// Number of nodes in the scope tree.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Maximum depth in the scope tree. Returns 0 for an empty tree.
+    #[must_use]
+    pub fn max_depth(&self) -> i64 {
+        self.nodes.values().map(|n| n.depth).max().unwrap_or(0)
+    }
+
+    /// Reconstruct the scope path string for a given scope ID.
+    ///
+    /// Returns `"/"` for the root scope. Non-root example: `"user:michael/project:demo"`.
+    /// Returns `None` if the ID is not in the tree.
+    ///
+    /// **Note:** The root path `"/"` is display-only — it is not a valid input to
+    /// [`ScopeTree::resolve_path`].
+    #[must_use]
+    pub fn path_for_id(&self, scope_id: i64) -> Option<String> {
+        if !self.nodes.contains_key(&scope_id) {
+            return None;
+        }
+        if scope_id == self.root_id() {
+            return Some("/".to_string());
+        }
+
+        // Walk ancestors (excluding root) and collect labels in reverse
+        let mut segments = Vec::new();
+        let mut current = Some(scope_id);
+        while let Some(id) = current {
+            if id == self.root_id() {
+                break;
+            }
+            let node = self.nodes.get(&id)?;
+            segments.push(node.label.clone());
+            current = node.parent_id;
+        }
+        segments.reverse();
+        Some(segments.join("/"))
+    }
 }
 
 #[cfg(test)]

@@ -107,6 +107,16 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | `pin_fact`   | `(&self, id: i64) -> Result<()>` | Pin a fact (make it unforgettable). Bypasses forgetting and dedup. |
 | `unpin_fact` | `(&self, id: i64) -> Result<()>` | Unpin a fact (allow forgetting).                                   |
 
+### Inspection
+
+| Method          | Signature                                              | Description                                                                                      |
+| --------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `statistics`    | `(&self) -> Result<EngineStatistics>`                  | Aggregate counts of facts, edges, summaries, scopes, events, and storage metrics.                |
+| `explain_fact`  | `(&self, id: i64) -> Result<FactExplanation>`          | Why a fact is in its current state: provenance, graph context, scope path.                       |
+| `fact_history`  | `(&self, id: i64) -> Result<FactHistory>`              | Bi-temporal timeline of a fact's lifecycle from its temporal stamps.                             |
+| `replay_events` | `(&self, filter: &ReplayFilter) -> Result<Vec<Event>>` | Replay a filtered segment of the event log. Supports ID range, time window, session, and upcast. |
+| `dump_state`    | `(&self, format: &DumpFormat) -> Result<()>`           | Export full engine state to JSON or SQLite backup.                                               |
+
 ### Scheduling
 
 | Method          | Signature                                                               | Description                                                                                           |
@@ -176,3 +186,4 @@ All fallible methods return `Result<T>`, which is `std::result::Result<T, Memory
 | `Migration(String)`                       | Schema migration failed (e.g., `embed_dim` mismatch on reopen). |
 | `NotImplemented(String)`                  | Feature not yet implemented.                                    |
 | `Pool(String)`                            | Connection pool error.                                          |
+| `Internal(String)`                        | I/O failure or other internal error (e.g., dump write failure). |

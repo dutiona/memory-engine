@@ -241,6 +241,83 @@ impl AsyncMemoryEngine {
             .map_err(join_err)?
     }
 
+    /// Async wrapper for [`MemoryEngine::statistics`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
+    pub async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.statistics())
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Async wrapper for [`MemoryEngine::replay_events`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
+    pub async fn replay_events(
+        &self,
+        filter: &crate::inspect::ReplayFilter,
+    ) -> Result<Vec<crate::types::Event>> {
+        let engine = self.inner.clone();
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || engine.replay_events(&filter))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Async wrapper for [`MemoryEngine::explain_fact`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+    /// [`MemoryError::Database`] on SQL failure.
+    pub async fn explain_fact(
+        &self,
+        id: i64,
+    ) -> Result<crate::inspect::FactExplanation> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.explain_fact(id))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Async wrapper for [`MemoryEngine::fact_history`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+    /// [`MemoryError::Database`] on SQL failure.
+    pub async fn fact_history(
+        &self,
+        id: i64,
+    ) -> Result<crate::inspect::FactHistory> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.fact_history(id))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Async wrapper for [`MemoryEngine::dump_state`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] on I/O or serialization failure,
+    /// or [`MemoryError::Database`] on SQL failure.
+    pub async fn dump_state(
+        &self,
+        format: &crate::inspect::DumpFormat,
+    ) -> Result<()> {
+        let engine = self.inner.clone();
+        let format = format.clone();
+        tokio::task::spawn_blocking(move || engine.dump_state(&format))
+            .await
+            .map_err(join_err)?
+    }
+
     /// Graph degree for a fact.
     #[must_use]
     pub fn graph_degree(&self, fact_id: i64) -> usize {
