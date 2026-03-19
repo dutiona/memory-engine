@@ -100,6 +100,27 @@ pub fn get_config(conn: &Connection, key: &str) -> Result<Option<String>> {
     }
 }
 
+/// List all config key-value pairs.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on query failure.
+pub fn list_config(conn: &Connection) -> Result<std::collections::HashMap<String, String>> {
+    use std::collections::HashMap;
+    let mut stmt = conn.prepare("SELECT key, value FROM config")?;
+    let rows = stmt.query_map([], |row| {
+        let key: String = row.get(0)?;
+        let value: String = row.get(1)?;
+        Ok((key, value))
+    })?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (key, value) = row?;
+        map.insert(key, value);
+    }
+    Ok(map)
+}
+
 /// Write a config value (upsert).
 ///
 /// # Errors

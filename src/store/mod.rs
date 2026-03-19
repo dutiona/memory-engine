@@ -14,8 +14,8 @@ pub use edges::EdgeStore;
 pub use events::{EventFilter, EventStore};
 pub use facts::FactStore;
 pub use schema::{
-    backup_before_migration, get_config, init_schema, migrate, open_connection, open_memory,
-    set_config,
+    backup_before_migration, get_config, init_schema, list_config, migrate, open_connection,
+    open_memory, set_config,
 };
 pub use scopes::ScopeStore;
 pub use summaries::SummaryStore;

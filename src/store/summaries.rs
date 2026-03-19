@@ -108,6 +108,22 @@ impl<'a> SummaryStore<'a> {
         Ok(summaries)
     }
 
+    /// List ALL summaries. Used for state dumps.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn list_all(&self) -> Result<Vec<Summary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
+             FROM summaries ORDER BY id ASC",
+        )?;
+        let summaries = stmt
+            .query_map([], |row| self.row_to_summary(row))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(summaries)
+    }
+
     /// Delete all summaries at the given level. Returns count deleted.
     ///
     /// Used for idempotent consolidation rebuild.
