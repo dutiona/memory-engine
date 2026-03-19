@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -15,19 +15,10 @@ use crate::store::UpcasterRegistry;
 
 use super::types::EngineSnapshot;
 
-/// Dump engine state to a JSON file.
-///
-/// Serializes all facts, edges, summaries, scopes, events, and config
-/// via `serde_json::to_writer`. Works for both file-backed and in-memory engines.
-///
-/// # Errors
-///
-/// Returns [`MemoryError::Database`] on SQL failure or
-/// [`MemoryError::Internal`] on I/O or serialization failure.
-pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
+/// Build an [`EngineSnapshot`] from the current database state.
+fn build_snapshot(conn: &Connection, embed_dim: usize) -> Result<EngineSnapshot> {
     let registry = UpcasterRegistry::new(); // raw events, no upcasting
 
-    // Collect all data
     let facts = FactStore::new(conn, embed_dim).list_all()?;
     let edges = EdgeStore::new(conn).list_all()?;
     let summaries = SummaryStore::new(conn, embed_dim).list_all()?;
@@ -42,7 +33,7 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let snapshot = EngineSnapshot {
+    Ok(EngineSnapshot {
         schema_version,
         storage_epoch,
         embed_dim,
@@ -52,12 +43,61 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
         scopes,
         events,
         config,
-    };
+    })
+}
 
+/// Serialize an [`EngineSnapshot`] to a writer.
+fn write_snapshot(writer: impl Write, snapshot: &EngineSnapshot) -> Result<()> {
+    serde_json::to_writer(writer, snapshot)?;
+    Ok(())
+}
+
+/// Dump engine state to a JSON file.
+///
+/// Serializes all facts, edges, summaries, scopes, events, and config
+/// via `serde_json::to_writer`. Works for both file-backed and in-memory engines.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Database`] on SQL failure or
+/// [`MemoryError::Internal`] on I/O or serialization failure.
+pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
+    let snapshot = build_snapshot(conn, embed_dim)?;
     let file = File::create(path).map_err(|e| MemoryError::Internal(e.to_string()))?;
-    let writer = BufWriter::new(file);
-    serde_json::to_writer(writer, &snapshot)?;
+    write_snapshot(BufWriter::new(file), &snapshot)
+}
 
+/// Dump engine state to a gzip-compressed JSON file.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Database`] on SQL failure or
+/// [`MemoryError::Internal`] on I/O or serialization failure.
+#[cfg(feature = "compress-gzip")]
+pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
+    let snapshot = build_snapshot(conn, embed_dim)?;
+    let file = File::create(path).map_err(|e| MemoryError::Internal(e.to_string()))?;
+    let encoder =
+        flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::default());
+    write_snapshot(encoder, &snapshot)
+}
+
+/// Dump engine state to a zstd-compressed JSON file.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Database`] on SQL failure or
+/// [`MemoryError::Internal`] on I/O or serialization failure.
+#[cfg(feature = "compress-zstd")]
+pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
+    let snapshot = build_snapshot(conn, embed_dim)?;
+    let file = File::create(path).map_err(|e| MemoryError::Internal(e.to_string()))?;
+    let mut encoder = zstd::Encoder::new(BufWriter::new(file), 0)
+        .map_err(|e| MemoryError::Internal(format!("zstd encoder init failed: {e}")))?;
+    serde_json::to_writer(&mut encoder, &snapshot)?;
+    encoder
+        .finish()
+        .map_err(|e| MemoryError::Internal(format!("zstd finish failed: {e}")))?;
     Ok(())
 }
 
@@ -159,5 +199,60 @@ mod tests {
         let db_path = dir.path().join("dump.db");
         let result = engine.dump_state(&DumpFormat::Sqlite(db_path));
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "compress-gzip")]
+    #[test]
+    fn gzip_dump_has_correct_magic_bytes() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        engine
+            .add_fact(
+                "gzip test",
+                FactType::Semantic,
+                None,
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.json.gz");
+        engine
+            .dump_state(&DumpFormat::JsonGzip(path.clone()))
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() > 2, "file too small");
+        assert_eq!(bytes[0], 0x1f, "gzip magic byte 0");
+        assert_eq!(bytes[1], 0x8b, "gzip magic byte 1");
+    }
+
+    #[cfg(feature = "compress-zstd")]
+    #[test]
+    fn zstd_dump_has_correct_magic_bytes() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        engine
+            .add_fact(
+                "zstd test",
+                FactType::Semantic,
+                None,
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.json.zst");
+        engine
+            .dump_state(&DumpFormat::JsonZstd(path.clone()))
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() > 4, "file too small");
+        assert_eq!(&bytes[..4], &[0x28, 0xb5, 0x2f, 0xfd], "zstd magic bytes");
     }
 }
