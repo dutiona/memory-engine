@@ -62,7 +62,12 @@ fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     }
     if let Some(t_valid) = fact.t_valid {
         if t_valid <= now && (fact.t_invalid.is_none() || fact.t_invalid.unwrap() > now) {
-            let surfaced = fact.last_accessed > t_valid;
+            // Heuristic: `surfaced` checks whether the fact was accessed after it
+            // became valid. This is unreliable when `last_accessed` equals insertion
+            // time (no explicit access yet) — a past-dated fact will appear surfaced
+            // even if the scheduler never returned it. A dedicated `surfaced_at`
+            // column would fix this; for now, treat the flag as best-effort.
+            let surfaced = fact.access_count > 0 && fact.last_accessed > t_valid;
             return FactState::Due { t_valid, surfaced };
         }
     }
@@ -82,14 +87,16 @@ const fn build_provenance(fact: &Fact) -> FactProvenance {
 
 fn build_graph_context(graph: &MemoryGraph, fact_id: i64) -> GraphContext {
     let degree = graph.degree(fact_id);
-    let mut neighbor_ids = graph.neighbors(fact_id);
-    neighbor_ids.sort_unstable();
-    neighbor_ids.dedup();
-    let component_size = if graph.has_node(fact_id) {
-        graph.connected_component(fact_id).len()
+    // Use connected_component to get ALL neighbors (in + out), consistent with degree.
+    // `neighbors()` only returns outgoing, which would be inconsistent with degree.
+    let mut neighbor_ids: Vec<i64> = if graph.has_node(fact_id) {
+        let component = graph.connected_component(fact_id);
+        component.into_iter().filter(|&id| id != fact_id).collect()
     } else {
-        0
+        Vec::new()
     };
+    neighbor_ids.sort_unstable();
+    let component_size = neighbor_ids.len() + usize::from(graph.has_node(fact_id));
     GraphContext {
         degree,
         neighbor_ids,

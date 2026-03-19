@@ -54,6 +54,8 @@ pub enum ExpiredReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactProvenance {
     pub source_event_id: Option<i64>,
+    /// The source event, if available. Currently always `None` — populating this
+    /// requires an `EventStore` lookup that is deferred to a future version.
     pub source_event: Option<Event>,
     pub importance: f64,
     pub importance_score: f64,

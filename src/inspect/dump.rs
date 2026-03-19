@@ -80,7 +80,18 @@ pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
         ));
     }
 
-    // Remove existing file to avoid VACUUM INTO failure
+    // Guard: refuse to dump onto the live database file (or a symlink resolving to it).
+    let source = std::fs::canonicalize(&db_path)
+        .map_err(|e| MemoryError::Internal(format!("cannot canonicalize db path: {e}")))?;
+    if let Ok(target) = std::fs::canonicalize(path) {
+        if target == source {
+            return Err(MemoryError::Internal(
+                "dump target resolves to the live database file".to_string(),
+            ));
+        }
+    }
+
+    // Remove existing file to avoid VACUUM INTO failure on re-run.
     if path.exists() {
         std::fs::remove_file(path)
             .map_err(|e| MemoryError::Internal(format!("cannot remove existing dump file: {e}")))?;
