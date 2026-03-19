@@ -62,10 +62,11 @@ The constant `k=60` dampens the impact of rank position. Items appearing in both
 
 ## Overfetch Strategy
 
-The search overfetches 3x the requested `limit` from each source before merging. This compensates for post-filter attrition -- facts that pass the SQL filters but get removed by the `valid_at` temporal post-filter. On the HNSW path, overfetch is adaptive: the widening loop doubles it on each retry (3x → 6x → 12x) before falling back to brute-force. See [ANN Search](#ann-approximate-nearest-neighbor) for details.
+The search computes an effective candidate target from `rerank_depth` (if set) or `limit`, clamped to at least `limit`. The effective target is always multiplied by 3x to compensate for post-filter attrition -- the temporal post-filter runs unconditionally (cutoff defaults to `Utc::now()` when `valid_at` is `None`), and Hybrid mode benefits from extra candidates for RRF fusion quality. On the HNSW path, overfetch is adaptive: the widening loop doubles it on each retry (3x → 6x → 12x) before falling back to brute-force. See [ANN Search](#ann-approximate-nearest-neighbor) for details.
 
 ```rust
-let overfetch = query.limit.saturating_mul(3).max(query.limit);
+let effective_target = query.rerank_depth.unwrap_or(query.limit).max(query.limit);
+let overfetch = effective_target.saturating_mul(3).max(effective_target);
 ```
 
 ## Filtering
@@ -103,6 +104,7 @@ pub struct SearchQuery {
     pub embedding: Option<Vec<f32>>,          // for vector
     pub mode: SearchMode,
     pub limit: usize,
+    pub rerank_depth: Option<usize>,          // over-fetch for reranker (clamped to >= limit)
     pub valid_at: Option<DateTime<Utc>>,      // temporal post-filter
     pub fact_type: Option<FactType>,          // SQL-level filter
     pub scope: Option<ScopeQuery>,            // SQL-level filter
@@ -127,6 +129,61 @@ pub enum MatchType {
 
 `MatchType::Both` indicates the result appeared in both FTS and vector result sets, which typically correlates with higher relevance.
 
+## Reranking (Cross-Encoder Refinement)
+
+**Status: Implemented (Phase 4a)**
+
+After RRF merge and result assembly, the engine can optionally pass candidates through a consumer-provided `Reranker` for cross-encoder scoring. This is the standard two-stage retrieval pattern: fast bi-encoder retrieval (FTS + vector) followed by precise cross-encoder reranking on the top-K candidates.
+
+### Why
+
+Bi-encoder similarity (embedding dot-product) scores query and document independently, which is fast but loses cross-attention signal. Cross-encoders process the (query, document) pair jointly, capturing token-level interactions. Research on four-layer cognitive architectures shows cross-encoder reranking on top-20 candidates improves nDCG@10 by 5-15%.
+
+### How It Works
+
+```
+FTS/Vector sources → RRF merge → collect top-N facts → Reranker → truncate to limit
+```
+
+1. `hybrid_search()` collects up to `effective_target` candidates (from `rerank_depth` or `limit`, whichever is larger).
+2. The engine's `query()` method passes these candidates to the `Reranker` trait (if configured) **outside the read lock** -- safe for slow inference or API calls.
+3. The reranker returns reordered results with updated scores.
+4. Results are unconditionally truncated to `limit`.
+
+### rerank_depth
+
+`rerank_depth` controls how many candidates the reranker sees before the final truncation to `limit`. It is clamped to at least `limit` -- it can only widen the candidate pool, never shrink it.
+
+```rust
+let query = SearchQuery {
+    text: Some("memory consolidation".into()),
+    embedding: Some(embedder.embed("memory consolidation")?),
+    mode: SearchMode::Hybrid,
+    limit: 10,
+    rerank_depth: Some(50),  // reranker sees 50 candidates, output truncated to 10
+    valid_at: None,
+    fact_type: None,
+    scope: None,
+};
+```
+
+When `rerank_depth` is `None`, falls back to `limit` (no over-fetch beyond temporal 3x).
+
+### Activation Conditions
+
+The reranker fires when **both** conditions are met:
+
+1. A `Reranker` is configured on the engine (via `open_with_reranker()` or `open_memory_with()`).
+2. The query has `text` set (cross-encoders need query text).
+
+This means reranking applies to FTS, Hybrid, and Vector+text queries. Pure vector queries without text skip the reranker.
+
+### Error Handling
+
+The `Reranker::rerank()` method is failable (`-> Result<Vec<SearchResult>>`). Errors propagate as `MemoryError::Reranker`. This allows consumers to handle inference failures, timeouts, or API errors gracefully.
+
+See [Extensibility](extensibility.md) for trait definition, implementation example, and engine wiring.
+
 ## Content Hashing
 
 Facts are content-hashed with Blake3 at insertion time. The 32-character hex hash is stored in `content_hash`. This supports fast exact-duplicate detection independent of embedding similarity.
@@ -139,6 +196,7 @@ let query = SearchQuery {
     embedding: Some(embedder.embed("memory consolidation")?),
     mode: SearchMode::Hybrid,
     limit: 10,
+    rerank_depth: None,                       // or Some(50) to over-fetch for reranker
     valid_at: Some(Utc::now()),
     fact_type: Some(FactType::Semantic),
     scope: None,

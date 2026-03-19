@@ -2,7 +2,7 @@
 
 **Status: Implemented**
 
-memory-engine is designed around trait-based extensibility. The core crate has zero LLM or network dependencies. Consumers bring their own models by implementing four traits and configuring one policy struct.
+memory-engine is designed around trait-based extensibility. The core crate has zero LLM or network dependencies. Consumers bring their own models by implementing five traits and configuring one policy struct.
 
 ## Design Philosophy
 
@@ -164,6 +164,77 @@ impl PersistenceClassifier for KeywordPinner {
 
 When both the classifier returns `true` and `AddFactOptions::pinned` is explicitly set, the explicit `pinned` field takes precedence.
 
+### Reranker
+
+Called during `query()` to refine the top-K search results using a cross-encoder or similar precise scoring model. This is the second stage in a two-stage retrieval pipeline: fast bi-encoder retrieval (FTS + vector + RRF) followed by precise cross-encoder reranking.
+
+```rust
+pub trait Reranker: Send + Sync {
+    fn rerank(&self, query: &str, candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>>;
+    fn name(&self) -> &str;
+}
+```
+
+The `rerank` method receives the query text and the candidate results from `hybrid_search()`. It returns a reordered (and optionally re-scored) vector of results. The method is failable -- errors propagate as `MemoryError::Reranker`.
+
+`Send + Sync` bounds are required because `MemoryEngine` is shared across threads via `Arc`.
+
+Implementation example:
+
+```rust
+use memory_engine::traits::Reranker;
+use memory_engine::search::hybrid::SearchResult;
+
+struct CrossEncoderReranker {
+    client: reqwest::blocking::Client,
+    model_url: String,
+}
+
+impl Reranker for CrossEncoderReranker {
+    fn rerank(&self, query: &str, mut candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>> {
+        // Score each (query, document) pair with the cross-encoder
+        let mut scored: Vec<(f64, SearchResult)> = candidates
+            .into_iter()
+            .map(|r| {
+                let score = self.cross_encode(query, &r.fact.content)?;
+                Ok((score, r))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Sort by cross-encoder score descending
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(scored.into_iter().map(|(score, mut r)| {
+            r.score = score;  // replace RRF score with cross-encoder score
+            r
+        }).collect())
+    }
+
+    fn name(&self) -> &str {
+        "cross_encoder"
+    }
+}
+```
+
+The reranker is optional. When no reranker is configured (or the query has no text), results are returned directly from `hybrid_search()`.
+
+**Engine wiring:**
+
+```rust
+// File-backed engine with reranker
+let engine = MemoryEngine::open_with_reranker(&config, Some(Box::new(my_reranker)))?;
+
+// In-memory engine with reranker (for testing)
+let engine = MemoryEngine::open_memory_with(dim, None, Some(Box::new(my_reranker)))?;
+
+// Check active reranker
+assert_eq!(engine.reranker_name(), Some("cross_encoder"));
+```
+
+**Lock semantics:** Reranking runs _outside_ the database read lock. This is critical because cross-encoder inference (local model or API call) can take 10-100ms per candidate. The read lock is held only for `hybrid_search()`, then released before reranking begins.
+
+**Research rationale:** Four-layer cognitive architecture research shows cross-encoder reranking on top-20 candidates improves nDCG@10 by 5-15%. The engine is positioned at layer 2 (retrieval + reranking), while layers 3-4 (semantic extraction, context adaptation) are consumer responsibilities.
+
 ### SessionExtractor
 
 Called during `bootstrap_session()` and `bootstrap_directory()` to extract facts from candidate episodes identified by the keyword pre-filter. Lives in the `bootstrap` module (not `traits.rs`) because it is domain-specific to the bootstrap pipeline.
@@ -251,13 +322,14 @@ This is a policy (parameter set), not a strategy (pluggable algorithm). See [For
 
 ## Summary of Extension Points
 
-| Extension point         | Type           | When called          | Provided by                         |
-| ----------------------- | -------------- | -------------------- | ----------------------------------- |
-| `EmbeddingProvider`     | consumer trait | `add_fact()`         | Text-to-vector model                |
-| `SummaryGenerator`      | consumer trait | `consolidate()`      | Summarization + embedding           |
-| `ConflictArbiter`       | consumer trait | `resolve_conflict()` | Resolution logic                    |
-| `PersistenceClassifier` | consumer trait | `add_fact()`         | Auto-pinning logic                  |
-| `SessionExtractor`      | consumer trait | `bootstrap_session()`| Episode-to-fact extraction          |
-| `ForgetPolicy`          | struct         | `forget()`           | Decay parameters                    |
-| `VectorSearchStrategy`  | internal trait | `query()`            | Engine (BruteForce or HnswStrategy) |
-| `SearchConfig`          | struct         | `open()`             | ANN dispatch threshold              |
+| Extension point         | Type           | When called           | Provided by                         |
+| ----------------------- | -------------- | --------------------- | ----------------------------------- |
+| `EmbeddingProvider`     | consumer trait | `add_fact()`          | Text-to-vector model                |
+| `SummaryGenerator`      | consumer trait | `consolidate()`       | Summarization + embedding           |
+| `ConflictArbiter`       | consumer trait | `resolve_conflict()`  | Resolution logic                    |
+| `PersistenceClassifier` | consumer trait | `add_fact()`          | Auto-pinning logic                  |
+| `Reranker`              | consumer trait | `query()`             | Cross-encoder reranking (Phase 4a)  |
+| `SessionExtractor`      | consumer trait | `bootstrap_session()` | Episode-to-fact extraction          |
+| `ForgetPolicy`          | struct         | `forget()`            | Decay parameters                    |
+| `VectorSearchStrategy`  | internal trait | `query()`             | Engine (BruteForce or HnswStrategy) |
+| `SearchConfig`          | struct         | `open()`              | ANN dispatch threshold              |

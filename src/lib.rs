@@ -44,5 +44,5 @@ pub use error::*;
 pub use search::MemoryQuery;
 pub use store::{deserialize_embedding, serialize_embedding, UpcasterRegistry};
 pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
-pub use traits::EmbeddingProvider;
+pub use traits::{EmbeddingProvider, Reranker};
 pub use types::*;
