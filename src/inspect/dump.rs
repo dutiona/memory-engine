@@ -92,7 +92,7 @@ pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
     let snapshot = build_snapshot(conn, embed_dim)?;
     let file = File::create(path).map_err(|e| MemoryError::Internal(e.to_string()))?;
-    let mut encoder = zstd::Encoder::new(BufWriter::new(file), 0)
+    let mut encoder = zstd::Encoder::new(BufWriter::new(file), zstd::DEFAULT_COMPRESSION_LEVEL)
         .map_err(|e| MemoryError::Internal(format!("zstd encoder init failed: {e}")))?;
     serde_json::to_writer(&mut encoder, &snapshot)?;
     encoder
