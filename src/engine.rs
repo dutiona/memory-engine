@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use parking_lot::{MutexGuard, RwLock};
@@ -1237,6 +1237,10 @@ impl MemoryEngine {
     /// - `DumpFormat::Json(path)`: Serializes all facts, edges, summaries, scopes,
     ///   events, and config to JSON. Works for both file-backed and in-memory engines.
     ///   Uses raw events (not upcasted) for snapshot fidelity.
+    /// - `DumpFormat::JsonGzip(path)`: Same as `Json`, but gzip-compressed.
+    ///   Requires the `compress-gzip` feature.
+    /// - `DumpFormat::JsonZstd(path)`: Same as `Json`, but zstd-compressed.
+    ///   Requires the `compress-zstd` feature.
     /// - `DumpFormat::Sqlite(path)`: Creates an atomic backup via `VACUUM INTO`.
     ///   Only works for file-backed engines.
     ///
@@ -1244,16 +1248,185 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Internal` on I/O failure.
     /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::NotImplemented` if a compression format is used
+    /// without the corresponding feature enabled.
+    #[allow(unreachable_patterns)] // wildcard needed for #[non_exhaustive] forward compat
     pub fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
         match format {
             crate::inspect::DumpFormat::Json(path) => {
                 self.with_read(|conn| crate::inspect::dump::dump_json(conn, self.embed_dim, path))
             }
+            #[cfg(feature = "compress-gzip")]
+            crate::inspect::DumpFormat::JsonGzip(path) => self
+                .with_read(|conn| crate::inspect::dump::dump_json_gzip(conn, self.embed_dim, path)),
+            #[cfg(not(feature = "compress-gzip"))]
+            crate::inspect::DumpFormat::JsonGzip(_) => Err(MemoryError::NotImplemented(
+                "gzip compression requires the `compress-gzip` feature".into(),
+            )),
+            #[cfg(feature = "compress-zstd")]
+            crate::inspect::DumpFormat::JsonZstd(path) => self
+                .with_read(|conn| crate::inspect::dump::dump_json_zstd(conn, self.embed_dim, path)),
+            #[cfg(not(feature = "compress-zstd"))]
+            crate::inspect::DumpFormat::JsonZstd(_) => Err(MemoryError::NotImplemented(
+                "zstd compression requires the `compress-zstd` feature".into(),
+            )),
             crate::inspect::DumpFormat::Sqlite(path) => {
                 let conn = self.write_conn();
                 crate::inspect::dump::dump_sqlite(&conn, path)
             }
+            _ => Err(MemoryError::NotImplemented(
+                "unsupported dump format".into(),
+            )),
         }
+    }
+
+    // --- Restore (static constructors) ---
+
+    /// Restore from a JSON snapshot into a new file-backed engine.
+    ///
+    /// `config.path` must not already exist. The `config.embed_dim` is validated
+    /// against the snapshot's `embed_dim`. All other config fields (pool size,
+    /// search config, upcaster registry, backup dir) are passed through.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Conflict` if the target path already exists.
+    /// Returns `MemoryError::EmbeddingDimension` if `config.embed_dim` mismatches.
+    /// Returns `MemoryError::Io` / `MemoryError::Serialization` on read failure.
+    pub fn restore_json(snapshot_path: &Path, config: &EngineConfig) -> Result<Self> {
+        if config.path.exists() {
+            return Err(MemoryError::Conflict(
+                "target database path already exists".into(),
+            ));
+        }
+
+        let snapshot = crate::inspect::restore::read_snapshot(snapshot_path)?;
+
+        if config.embed_dim != snapshot.embed_dim {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: config.embed_dim,
+                actual: snapshot.embed_dim,
+            });
+        }
+
+        let pool = ConnectionPool::open(
+            &config.path,
+            config.embed_dim,
+            config.read_pool_size,
+            config.backup_dir.as_deref(),
+        );
+
+        // On any failure after DB creation, clean up the orphan file.
+        let pool = match pool {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = std::fs::remove_file(&config.path);
+                return Err(e);
+            }
+        };
+
+        let restore_result = {
+            let conn = pool.write();
+            crate::inspect::restore::restore_snapshot_into(&conn, &snapshot)
+        };
+
+        if let Err(e) = restore_result {
+            drop(pool);
+            let _ = std::fs::remove_file(&config.path);
+            return Err(e);
+        }
+
+        Self::init_from_pool(
+            pool,
+            config.embed_dim,
+            config.search_config.clone(),
+            config.upcaster_registry.clone(),
+            None,
+        )
+    }
+
+    /// Restore from a JSON snapshot into a new in-memory engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Io` / `MemoryError::Serialization` on read failure.
+    pub fn restore_json_memory(snapshot_path: &Path) -> Result<Self> {
+        let snapshot = crate::inspect::restore::read_snapshot(snapshot_path)?;
+        let pool = ConnectionPool::open_memory(snapshot.embed_dim)?;
+
+        {
+            let conn = pool.write();
+            crate::inspect::restore::restore_snapshot_into(&conn, &snapshot)?;
+        }
+
+        Self::init_from_pool(
+            pool,
+            snapshot.embed_dim,
+            None,
+            UpcasterRegistry::new(),
+            None,
+        )
+    }
+
+    /// Restore from a [`dump_sqlite()`](crate::inspect::dump::dump_sqlite) backup
+    /// into a new file-backed engine.
+    ///
+    /// **Only accepts clean backups** produced by `dump_state(DumpFormat::Sqlite(..))`.
+    /// Copying a live WAL-mode database is unsafe (the WAL sidecar may be missing).
+    ///
+    /// `config.path` must not already exist. The backup's `embed_dim` is validated
+    /// against `config.embed_dim`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Conflict` if the target path already exists.
+    /// Returns `MemoryError::NotFound` if the backup file doesn't exist.
+    /// Returns `MemoryError::EmbeddingDimension` on dimension mismatch.
+    pub fn restore_sqlite(backup_path: &Path, config: &EngineConfig) -> Result<Self> {
+        if config.path.exists() {
+            return Err(MemoryError::Conflict(
+                "target database path already exists".into(),
+            ));
+        }
+        if !backup_path.exists() {
+            return Err(MemoryError::NotFound(format!(
+                "backup file: {}",
+                backup_path.display()
+            )));
+        }
+
+        std::fs::copy(backup_path, &config.path)?;
+
+        // Any failure after copy must clean up the orphan file.
+        let cleanup = |e| {
+            let _ = std::fs::remove_file(&config.path);
+            e
+        };
+
+        // Probe the copied DB for embed_dim validation.
+        let probe = crate::store::schema::open_connection(&config.path.to_string_lossy())
+            .map_err(cleanup)?;
+        let db_dim: usize = get_config(&probe, "embed_dim")
+            .map_err(cleanup)?
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| {
+                let _ = std::fs::remove_file(&config.path);
+                MemoryError::Internal("backup has no embed_dim in config".into())
+            })?;
+        drop(probe);
+
+        if config.embed_dim != db_dim {
+            let _ = std::fs::remove_file(&config.path);
+            return Err(MemoryError::EmbeddingDimension {
+                expected: config.embed_dim,
+                actual: db_dim,
+            });
+        }
+
+        Self::open(config).map_err(|e| {
+            let _ = std::fs::remove_file(&config.path);
+            e
+        })
     }
 
     // --- Private helpers ---

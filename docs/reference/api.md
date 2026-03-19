@@ -16,12 +16,15 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Lifecycle
 
-| Method           | Signature                                 | Description                                                                                          |
-| ---------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `open`           | `(config: &EngineConfig) -> Result<Self>` | Open or create a file-backed engine. Validates `embed_dim` against stored value on subsequent opens. |
-| `open_memory`    | `(embed_dim: usize) -> Result<Self>`      | Open an in-memory engine (testing).                                                                  |
-| `embed_dim`      | `(&self) -> usize`                        | Return the configured embedding dimension.                                                           |
-| `is_file_backed` | `(&self) -> bool`                         | Whether the engine uses a file (vs in-memory).                                                       |
+| Method                | Signature                                                  | Description                                                                                                                    |
+| --------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `open`                | `(config: &EngineConfig) -> Result<Self>`                  | Open or create a file-backed engine. Validates `embed_dim` against stored value on subsequent opens.                           |
+| `open_memory`         | `(embed_dim: usize) -> Result<Self>`                       | Open an in-memory engine (testing).                                                                                            |
+| `restore_json`        | `(snapshot: &Path, config: &EngineConfig) -> Result<Self>` | Restore from a JSON snapshot into a new file-backed engine. Auto-detects gzip/zstd compression. Config path must not exist.    |
+| `restore_json_memory` | `(snapshot: &Path) -> Result<Self>`                        | Restore from a JSON snapshot into a new in-memory engine. Auto-detects compression.                                            |
+| `restore_sqlite`      | `(backup: &Path, config: &EngineConfig) -> Result<Self>`   | Restore from a `dump_sqlite()` backup into a new file-backed engine. Only accepts clean VACUUM INTO backups (no live WAL DBs). |
+| `embed_dim`           | `(&self) -> usize`                                         | Return the configured embedding dimension.                                                                                     |
+| `is_file_backed`      | `(&self) -> bool`                                          | Whether the engine uses a file (vs in-memory).                                                                                 |
 
 ### Ingest
 
@@ -32,10 +35,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Bootstrap
 
-| Method                | Signature                                                                                                    | Description                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                        | Bootstrap a single JSONL session log. Savepoint-wrapped for crash safety. Uses marker event for idempotency.            |
-| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                    | Bootstrap all top-level `*.jsonl` files in a directory. Aggregates reports. Individual failures are logged and skipped.  |
+| Method                | Signature                                                                                 | Description                                                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`     | Bootstrap a single JSONL session log. Savepoint-wrapped for crash safety. Uses marker event for idempotency.            |
+| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>` | Bootstrap all top-level `*.jsonl` files in a directory. Aggregates reports. Individual failures are logged and skipped. |
 
 ### Facts
 
@@ -172,10 +175,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Bootstrap
 
-| Method                | Signature                                                                                                                   | Description                                                                                                                                                      |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                                       | Parse a single JSONL session log and import noteworthy episodes as historical facts. Uses savepoint transactions for crash safety and event-based idempotency.   |
-| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                                   | Discover and bootstrap all top-level `*.jsonl` files in a directory. Individual session failures are logged and skipped. Returns an aggregated report.            |
+| Method                | Signature                                                                                 | Description                                                                                                                                                    |
+| --------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`     | Parse a single JSONL session log and import noteworthy episodes as historical facts. Uses savepoint transactions for crash safety and event-based idempotency. |
+| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>` | Discover and bootstrap all top-level `*.jsonl` files in a directory. Individual session failures are logged and skipped. Returns an aggregated report.         |
 
 `BootstrapConfig` fields:
 
