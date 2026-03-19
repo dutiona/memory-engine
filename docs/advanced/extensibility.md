@@ -164,6 +164,35 @@ impl PersistenceClassifier for KeywordPinner {
 
 When both the classifier returns `true` and `AddFactOptions::pinned` is explicitly set, the explicit `pinned` field takes precedence.
 
+### SessionExtractor
+
+Called during `bootstrap_session()` and `bootstrap_directory()` to extract facts from candidate episodes identified by the keyword pre-filter. Lives in the `bootstrap` module (not `traits.rs`) because it is domain-specific to the bootstrap pipeline.
+
+```rust
+pub trait SessionExtractor {
+    fn extract(
+        &self,
+        episode: &CandidateEpisode,
+        outcome: &SessionOutcome,
+    ) -> Result<Vec<ExtractedFact>>;
+}
+```
+
+The method receives a `CandidateEpisode` (pre-filtered conversation turns with matched keywords and a category) and the session's heuristic outcome. It returns zero or more `ExtractedFact` values, each with content, fact type, importance, category, and metadata.
+
+The default implementation (`KeywordExtractor`) maps `(category, outcome)` pairs to `(FactType, importance)` without requiring an LLM:
+
+```rust
+use memory_engine::bootstrap::KeywordExtractor;
+
+let extractor = KeywordExtractor;
+// Bug + Success → Procedural fact at importance 0.7
+// Convention + any → Procedural fact at importance 0.8
+// Decision + any → Semantic fact at importance 0.6
+```
+
+For higher-quality extraction, implement `SessionExtractor` with an LLM to produce parameterized procedural patterns or multi-fact outputs per episode.
+
 ## VectorSearchStrategy: Internal Dispatch Trait
 
 `VectorSearchStrategy` is an internal trait that enables runtime dispatch between brute-force and HNSW vector search. Unlike the consumer traits above, this is **not** implemented by consumers — it is an engine-internal abstraction.
@@ -228,6 +257,7 @@ This is a policy (parameter set), not a strategy (pluggable algorithm). See [For
 | `SummaryGenerator`      | consumer trait | `consolidate()`      | Summarization + embedding           |
 | `ConflictArbiter`       | consumer trait | `resolve_conflict()` | Resolution logic                    |
 | `PersistenceClassifier` | consumer trait | `add_fact()`         | Auto-pinning logic                  |
+| `SessionExtractor`      | consumer trait | `bootstrap_session()`| Episode-to-fact extraction          |
 | `ForgetPolicy`          | struct         | `forget()`           | Decay parameters                    |
 | `VectorSearchStrategy`  | internal trait | `query()`            | Engine (BruteForce or HnswStrategy) |
 | `SearchConfig`          | struct         | `open()`             | ANN dispatch threshold              |

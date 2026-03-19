@@ -30,6 +30,13 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | `ingest`   | `(&self, event: &NewEvent) -> Result<i64>`                                                       | Append an event to the log. Returns the event ID.                                                                                                            |
 | `add_fact` | `(&self, content, fact_type, source_event_id, embedder, scope, opts, classifier) -> Result<i64>` | Compute embedding, blake3 hash, resolve scope, optionally auto-pin via classifier, and insert a fact. Embedding is computed before acquiring the write lock. |
 
+### Bootstrap
+
+| Method                | Signature                                                                                                    | Description                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                        | Bootstrap a single JSONL session log. Savepoint-wrapped for crash safety. Uses marker event for idempotency.            |
+| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                    | Bootstrap all top-level `*.jsonl` files in a directory. Aggregates reports. Individual failures are logged and skipped.  |
+
 ### Facts
 
 | Method              | Signature                                                     | Description                                           |
@@ -147,6 +154,27 @@ This page summarizes the public API surface of the `memory-engine` crate.
 - `due: Vec<Fact>` -- tier 3: future-memory facts whose `t_valid` has arrived.
 - `recent: Vec<Fact>` -- tier 4: most recent facts from scope ancestors.
 - `kb_stubs: Vec<String>` -- tier 5: placeholder for Phase 5 knowledge-base references.
+
+### Bootstrap
+
+| Method                | Signature                                                                                                                   | Description                                                                                                                                                      |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                                       | Parse a single JSONL session log and import noteworthy episodes as historical facts. Uses savepoint transactions for crash safety and event-based idempotency.   |
+| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                                   | Discover and bootstrap all top-level `*.jsonl` files in a directory. Individual session failures are logged and skipped. Returns an aggregated report.            |
+
+`BootstrapConfig` fields:
+
+- `scope: Option<String>` -- scope path for ingested facts (e.g., `"project:my-app"`). `None` = root scope.
+- `max_turns: usize` -- maximum turns to process per session. `0` = no limit.
+- `skip_existing: bool` -- skip sessions already bootstrapped (default: `true`).
+
+`BootstrapReport` fields:
+
+- `sessions_processed`, `sessions_skipped`, `entries_parsed`, `entries_malformed` -- pipeline counters.
+- `turns_reconstructed`, `candidates_found`, `facts_created`, `events_ingested` -- per-stage metrics.
+- `outcome_counts: OutcomeCounts` -- breakdown by session outcome (success/failure/indeterminate).
+- `category_counts: CategoryCounts` -- breakdown by episode category (bug/decision/convention/learning).
+- `prewarm_metrics: PrewarmMetrics` -- fact-type distribution and average importance for cold-start analysis.
 
 ### Config
 

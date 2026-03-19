@@ -16,6 +16,7 @@ memory_engine (lib.rs)
   +-- conflict      Bi-temporal conflict resolution
   +-- pool          Connection pool (N readers + 1 writer)
   +-- scope         Hierarchical scope tree cache
+  +-- bootstrap     Session log bootstrap pipeline
   +-- resume        Session bootstrapping (5-tier retrieval)
   +-- inspect       Debugging and observability APIs
   +-- async_engine  Async wrapper (feature-gated)
@@ -81,6 +82,9 @@ memory_engine (lib.rs)
 `scope`
 : `ScopeTree` -- in-memory cache of the hierarchical scope tree. Loaded from the `scopes` table on engine open. Resolves `ScopeQuery` variants (`Exact`, `Subtree`, `Ancestors`, `Inherited`) to sets of scope IDs without hitting the database.
 
+`bootstrap`
+: Session log bootstrap pipeline. Parses Claude Code JSONL session logs and imports noteworthy episodes (bug fixes, decisions, conventions, learnings) as historical facts. Sub-modules handle each pipeline stage: `parse` (JSONL deserialization), `filter` (turn reconstruction and keyword pre-filter), `outcome` (heuristic session outcome classification), `extract` (fact extraction via the `SessionExtractor` trait), and `metrics` (configuration, reporting, and prewarm quality metrics). Uses savepoint transactions for crash safety and event-based idempotency to prevent duplicate imports.
+
 `resume`
 : Session bootstrapping via `ResumeConfig` and `ResumeContext`. Implements 5-tier retrieval:
 
@@ -110,6 +114,7 @@ The crate root re-exports the most commonly used items so consumers can `use mem
 - `MemoryEngine`, `EngineConfig` (from `engine`)
 - `MemoryError`, `Result` (from `error`)
 - `EmbeddingProvider` (from `traits`)
+- `SessionExtractor`, `KeywordExtractor`, `BootstrapConfig`, `BootstrapReport` (from `bootstrap`)
 - All public types (from `types`)
 - `serialize_embedding`, `deserialize_embedding` (from `store`)
 - `inspect_types` (from `inspect::types` — inspection-specific types)

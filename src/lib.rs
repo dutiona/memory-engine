@@ -22,6 +22,7 @@
 
 #[cfg(feature = "async")]
 pub mod async_engine;
+pub mod bootstrap;
 pub mod conflict;
 pub mod consolidation;
 pub mod engine;
@@ -41,5 +42,6 @@ pub use engine::{EngineConfig, MemoryEngine};
 pub use inspect::types as inspect_types;
 pub use error::*;
 pub use store::{deserialize_embedding, serialize_embedding, UpcasterRegistry};
+pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
 pub use traits::EmbeddingProvider;
 pub use types::*;
