@@ -499,6 +499,9 @@ impl MemoryEngine {
     }
 
     /// Search path: delegate to hybrid_search, then post-filter.
+    ///
+    /// When post-filters are active (period, importance, pinned), we overfetch 3x
+    /// from `hybrid_search` to compensate for attrition, then truncate after filtering.
     fn execute_search_path(
         &self,
         query: &MemoryQuery,
@@ -508,12 +511,35 @@ impl MemoryEngine {
     ) -> Result<Vec<SearchResult>> {
         let mode = Self::infer_search_mode(query);
 
+        // Overfetch when post-filters will reduce the result set.
+        // hybrid_search already does its own 3x overfetch internally for temporal
+        // filtering, but our post-filters (period, importance, pinned) are additional
+        // attrition on top of that.
+        let has_post_filters =
+            query.has_period() || query.min_importance_score.is_some() || query.pinned_only;
+        let fetch_limit = if has_post_filters {
+            limit.saturating_mul(3).max(limit)
+        } else {
+            limit
+        };
+
+        // When period is set, effective_cutoff is None — but hybrid_search defaults
+        // valid_at=None to Utc::now(), which would hide future-dated facts that
+        // should be reachable via period overlap. Fix: use period_end as the cutoff
+        // so hybrid_search's temporal filter is permissive enough for the period range,
+        // and the period post-filter applies exact overlap semantics.
+        let search_cutoff = if effective_cutoff.is_none() {
+            query.period_end // period queries: widen to period_end
+        } else {
+            effective_cutoff
+        };
+
         let search_query = SearchQuery {
             text: query.text.clone(),
             embedding: query.embedding.clone(),
             mode,
-            limit, // hybrid_search handles its own 3x overfetch internally
-            valid_at: effective_cutoff,
+            limit: fetch_limit,
+            valid_at: search_cutoff,
             fact_type: query.fact_type.clone(),
             scope: query.scope.clone(),
         };
@@ -551,6 +577,9 @@ impl MemoryEngine {
     }
 
     /// Store path: no text/vector search, use FactStore directly.
+    ///
+    /// Overfetches 3x from SQL when post-filters (temporal cutoff, fact_type)
+    /// will cause attrition, then truncates after filtering.
     fn execute_store_path(
         &self,
         query: &MemoryQuery,
@@ -560,9 +589,20 @@ impl MemoryEngine {
     ) -> Result<Vec<SearchResult>> {
         let scope_slice = scope_ids.unwrap_or(&[]);
 
+        // Determine if post-filters will cause attrition beyond the primary fetch.
+        // If so, overfetch from SQL to avoid underfilling.
+        let has_post_attrition = effective_cutoff.is_some() || query.fact_type.is_some();
+        let fetch_limit = if has_post_attrition {
+            limit.saturating_mul(3).max(limit)
+        } else {
+            limit
+        };
+
         let mut facts: Vec<Fact> = if query.pinned_only {
+            // list_pinned already guarantees is_pinned=true; no redundant post-filter needed.
             self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_pinned(scope_slice))?
         } else if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
+            // list_active_in_period already handles period overlap + optional fact_type in SQL.
             self.with_read(|conn| {
                 FactStore::new(conn, self.embed_dim).list_active_in_period(
                     start,
@@ -576,7 +616,7 @@ impl MemoryEngine {
                 FactStore::new(conn, self.embed_dim).list_by_importance_score(
                     scope_slice,
                     min_score,
-                    limit,
+                    fetch_limit,
                     &std::collections::HashSet::new(),
                 )
             })?
@@ -586,41 +626,25 @@ impl MemoryEngine {
                 FactStore::new(conn, self.embed_dim).list_by_importance_score(
                     scope_slice,
                     0.0,
-                    limit,
+                    fetch_limit,
                     &std::collections::HashSet::new(),
                 )
             })?
         };
 
-        // --- Post-filters (applied to all store-path results) ---
+        // --- Post-filters ---
+        // Only apply filters that weren't already handled by the primary SQL query.
 
         // Temporal safety: exclude future-dated facts
         if let Some(cutoff) = effective_cutoff {
             facts.retain(|f| passes_temporal_cutoff(f, cutoff));
         }
 
-        // Apply all remaining filters as post-filters.
-        // Each filter is applied regardless of which store method was primary,
-        // ensuring AND semantics across all dimensions.
-
-        // Period overlap
-        if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
-            facts.retain(|f| fact_overlaps_period(f, start, end));
-        }
-
-        // Fact type
-        if let Some(ref ft) = query.fact_type {
-            facts.retain(|f| &f.fact_type == ft);
-        }
-
-        // Importance score
-        if let Some(min_score) = query.min_importance_score {
-            facts.retain(|f| f.importance_score >= min_score);
-        }
-
-        // Pinned
-        if query.pinned_only {
-            facts.retain(|f| f.is_pinned);
+        // Fact type (only for branches that don't push it into SQL)
+        if !query.has_period() {
+            if let Some(ref ft) = query.fact_type {
+                facts.retain(|f| &f.fact_type == ft);
+            }
         }
 
         // Sort by importance_score DESC and truncate
