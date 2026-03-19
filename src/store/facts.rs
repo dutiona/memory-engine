@@ -486,7 +486,7 @@ impl<'a> FactStore<'a> {
     /// Returns `MemoryError::Database` on query failure.
     pub fn list_active_by_session(&self, session_id: &str) -> Result<Vec<SessionFact>> {
         let mut stmt = self.conn.prepare(
-            "SELECT f.id, f.scope_id
+            "SELECT f.id
              FROM facts f
              INNER JOIN events e ON f.source_event_id = e.id
              WHERE e.session_id = ?1
@@ -494,10 +494,7 @@ impl<'a> FactStore<'a> {
              ORDER BY f.id",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
-            Ok(SessionFact {
-                id: row.get(0)?,
-                scope_id: row.get(1)?,
-            })
+            Ok(SessionFact { id: row.get(0)? })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(MemoryError::Database)
@@ -616,11 +613,10 @@ impl<'a> FactStore<'a> {
 }
 
 /// Lightweight fact info for session-based edge creation.
-/// Avoids deserializing embeddings — only carries the fields needed for pairwise edge wiring.
+/// Avoids deserializing embeddings — only carries the fact id needed for pairwise edge wiring.
 #[derive(Debug, Clone)]
 pub struct SessionFact {
     pub id: i64,
-    pub scope_id: i64,
 }
 
 fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fact> {

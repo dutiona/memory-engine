@@ -987,13 +987,17 @@ impl MemoryEngine {
             let tx = conn.unchecked_transaction()?;
             let edge_store = EdgeStore::new(&tx);
 
+            // Batch-fetch existing co_session edges for dedup (1 query instead of N²)
+            let fact_ids: Vec<i64> = facts.iter().map(|f| f.id).collect();
+            let existing = edge_store.list_active_pairs_by_facts(&fact_ids, "co_session")?;
+
             for i in 0..facts.len() {
                 for j in (i + 1)..facts.len() {
                     let a_id = facts[i].id;
                     let b_id = facts[j].id;
 
                     for (src, tgt) in [(a_id, b_id), (b_id, a_id)] {
-                        if !edge_store.exists_active(src, tgt, "co_session")? {
+                        if !existing.contains(&(src, tgt)) {
                             let edge_id = edge_store.insert(&NewEdge {
                                 source_fact_id: src,
                                 target_fact_id: tgt,
