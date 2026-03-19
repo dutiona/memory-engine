@@ -154,6 +154,34 @@ impl<'a> EdgeStore<'a> {
         Ok(edges)
     }
 
+    /// Check if an active edge exists between two facts with a given relation type.
+    ///
+    /// Used as a dedup guard for idempotent edge creation (e.g. `co_session` edges).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn exists_active(
+        &self,
+        source_fact_id: i64,
+        target_fact_id: i64,
+        relation_type: &str,
+    ) -> Result<bool> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE source_fact_id = ?1
+                   AND target_fact_id = ?2
+                   AND relation_type = ?3
+                   AND t_expired IS NULL",
+                params![source_fact_id, target_fact_id, relation_type],
+                |row| row.get(0),
+            )
+            .map_err(MemoryError::Database)?;
+        Ok(count > 0)
+    }
+
     /// List active edges by target fact id.
     ///
     /// # Errors
@@ -271,6 +299,30 @@ mod tests {
 
         let to_3 = store.list_active_by_target(3).unwrap();
         assert_eq!(to_3.len(), 2);
+    }
+
+    #[test]
+    fn exists_active_returns_correct_status() {
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        // No edges yet
+        assert!(!store.exists_active(1, 2, "co_session").unwrap());
+
+        // Insert a co_session edge
+        store.insert(&make_edge(1, 2, "co_session")).unwrap();
+        assert!(store.exists_active(1, 2, "co_session").unwrap());
+
+        // Wrong direction
+        assert!(!store.exists_active(2, 1, "co_session").unwrap());
+
+        // Wrong relation type
+        assert!(!store.exists_active(1, 2, "supplements").unwrap());
+
+        // Expire the edge
+        let edges = store.list_active_by_source(1).unwrap();
+        store.expire(edges[0].id, Utc::now()).unwrap();
+        assert!(!store.exists_active(1, 2, "co_session").unwrap());
     }
 
     #[test]
