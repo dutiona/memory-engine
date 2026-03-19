@@ -192,7 +192,7 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 | ✅ Semantic extraction queries ([#41](https://github.com/dutiona/memory-engine/issues/41)) | `MemoryQuery` fluent builder: scope + temporal period + FTS/vector + importance/pinned filters. `execute_query()` on engine + async mirror. `#[non_exhaustive]` `MatchType::ImportanceRank`   |
 | `Reranker` trait ([#42](https://github.com/dutiona/memory-engine/issues/42))               | Cross-encoder reranking on top-K candidates after RRF (+5-15% nDCG@10). Consumer-provided                                                                                                     |
 | Session log bootstrap ([#43](https://github.com/dutiona/memory-engine/issues/43))          | Parse Claude Code JSONL session logs into historical memory facts. **Research update:** success-gated ingestion (R1, AWM), workflow extraction (R2, AWM/APC), pre-warming semantics (R3, APC) |
-| Co-session edges ([#62](https://github.com/dutiona/memory-engine/issues/62))               | Auto-create `co_session` edges between facts sharing a `session_id`. Pairs with #43                                                                                                           |
+| Co-session edges ([#62](https://github.com/dutiona/memory-engine/issues/62))               | ✅ Auto-create `co_session` edges between facts sharing a `session_id`. [PR #67](https://github.com/dutiona/memory-engine/pull/67). Pairs with #43                                            |
 
 #### Phase 4b: Tooling (new workspace binaries)
 
