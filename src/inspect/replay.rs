@@ -2,6 +2,7 @@ use crate::inspect::types::{ReplayFilter, ReplayOrder};
 use crate::store::events::EventFilter;
 
 /// Convert a `ReplayFilter` into an `EventFilter` for the store layer.
+#[must_use]
 pub fn to_event_filter(filter: &ReplayFilter) -> EventFilter {
     EventFilter {
         since: filter.since,

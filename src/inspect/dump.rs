@@ -19,6 +19,11 @@ use super::types::EngineSnapshot;
 ///
 /// Serializes all facts, edges, summaries, scopes, events, and config
 /// via `serde_json::to_writer`. Works for both file-backed and in-memory engines.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Database`] on SQL failure or
+/// [`MemoryError::Internal`] on I/O or serialization failure.
 pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
     let registry = UpcasterRegistry::new(); // raw events, no upcasting
 
@@ -56,7 +61,12 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
     Ok(())
 }
 
-/// Create an atomic SQLite backup via `VACUUM INTO`.
+/// Create an atomic `SQLite` backup via `VACUUM INTO`.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Internal`] if the database is in-memory or
+/// the `VACUUM INTO` statement fails.
 pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
     // Check if this is an in-memory database
     let db_path: String = conn

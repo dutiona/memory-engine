@@ -242,6 +242,10 @@ impl AsyncMemoryEngine {
     }
 
     /// Async wrapper for [`MemoryEngine::statistics`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
         let engine = self.inner.clone();
         tokio::task::spawn_blocking(move || engine.statistics())
@@ -250,6 +254,10 @@ impl AsyncMemoryEngine {
     }
 
     /// Async wrapper for [`MemoryEngine::replay_events`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn replay_events(
         &self,
         filter: &crate::inspect::ReplayFilter,
@@ -262,6 +270,11 @@ impl AsyncMemoryEngine {
     }
 
     /// Async wrapper for [`MemoryEngine::explain_fact`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+    /// [`MemoryError::Database`] on SQL failure.
     pub async fn explain_fact(
         &self,
         id: i64,
@@ -273,6 +286,11 @@ impl AsyncMemoryEngine {
     }
 
     /// Async wrapper for [`MemoryEngine::fact_history`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+    /// [`MemoryError::Database`] on SQL failure.
     pub async fn fact_history(
         &self,
         id: i64,
@@ -284,6 +302,11 @@ impl AsyncMemoryEngine {
     }
 
     /// Async wrapper for [`MemoryEngine::dump_state`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] on I/O or serialization failure,
+    /// or [`MemoryError::Database`] on SQL failure.
     pub async fn dump_state(
         &self,
         format: &crate::inspect::DumpFormat,

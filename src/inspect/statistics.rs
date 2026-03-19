@@ -4,11 +4,17 @@ use std::path::Path;
 use chrono::Utc;
 use rusqlite::Connection;
 
-use super::types::*;
+use super::types::{
+    EdgeStats, EngineStatistics, EventStats, FactStats, ScopeStats, StorageStats, SummaryStats,
+};
 use crate::error::Result;
 use crate::types::ConsolidationLevel;
 
 /// Compute aggregate statistics from the database.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Database`] on SQL failure.
 pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<EngineStatistics> {
     let now = Utc::now();
     let now_str = now.to_rfc3339();

@@ -7,9 +7,17 @@ use crate::scope::tree::ScopeTree;
 use crate::store::facts::FactStore;
 use crate::types::Fact;
 
-use super::types::*;
+use super::types::{
+    ExpiredReason, FactExplanation, FactHistory, FactHistoryEntry, FactProvenance, FactState,
+    GraphContext, HistoryEventKind,
+};
 
 /// Explain why a fact is in its current state.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+/// [`MemoryError::Database`] on SQL failure.
 pub fn explain_fact(
     conn: &Connection,
     graph: &MemoryGraph,
@@ -61,7 +69,7 @@ fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     FactState::Active
 }
 
-fn build_provenance(fact: &Fact) -> FactProvenance {
+const fn build_provenance(fact: &Fact) -> FactProvenance {
     FactProvenance {
         source_event_id: fact.source_event_id,
         source_event: None,
@@ -91,8 +99,13 @@ fn build_graph_context(graph: &MemoryGraph, fact_id: i64) -> GraphContext {
 
 /// Reconstruct the temporal history of a fact from its bi-temporal timestamps.
 ///
-/// Returns a sorted timeline of lifecycle events (Created, BecameValid, etc.)
+/// Returns a sorted timeline of lifecycle events (`Created`, `BecameValid`, etc.)
 /// computed from the fact's `t_created`, `t_valid`, `t_invalid`, and `t_expired` fields.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+/// [`MemoryError::Database`] on SQL failure.
 pub fn fact_history(conn: &Connection, embed_dim: usize, fact_id: i64) -> Result<FactHistory> {
     let store = FactStore::new(conn, embed_dim);
     let fact = store.get(fact_id)?;

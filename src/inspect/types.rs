@@ -21,7 +21,7 @@ pub struct FactExplanation {
 }
 
 /// Current lifecycle state of a fact.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FactState {
     Active,
     Expired {
@@ -42,7 +42,7 @@ pub enum FactState {
 /// Forgetting, conflict resolution, and deduplication do not currently emit
 /// `MemoryOp` events, so most expired facts will return [`ExpiredReason::Unknown`]
 /// until an event-based audit trail is added.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExpiredReason {
     Forgotten,
     ConflictResolved { superseded_by: Option<i64> },
@@ -65,7 +65,7 @@ pub struct FactProvenance {
 ///
 /// For expired facts, this reflects the current graph state (active edges only).
 /// Historical connectivity requires replaying events.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphContext {
     pub degree: usize,
     pub neighbor_ids: Vec<i64>,
@@ -77,21 +77,21 @@ pub struct GraphContext {
 // ---------------------------------------------------------------------------
 
 /// Temporal history of a single fact.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactHistory {
     pub fact_id: i64,
     pub timeline: Vec<FactHistoryEntry>,
 }
 
 /// A single entry in a fact's history timeline.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactHistoryEntry {
     pub timestamp: DateTime<Utc>,
     pub kind: HistoryEventKind,
 }
 
 /// Kind of temporal event in a fact's history.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryEventKind {
     Created,
     BecameValid,
@@ -104,7 +104,7 @@ pub enum HistoryEventKind {
 // ---------------------------------------------------------------------------
 
 /// Filter criteria for event replay.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayFilter {
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
@@ -116,23 +116,8 @@ pub struct ReplayFilter {
     pub order: ReplayOrder,
 }
 
-impl Default for ReplayFilter {
-    fn default() -> Self {
-        Self {
-            since: None,
-            until: None,
-            id_range: None,
-            session_id: None,
-            event_type: None,
-            limit: None,
-            upcast: false,
-            order: ReplayOrder::default(),
-        }
-    }
-}
-
 /// Ordering for event replay.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReplayOrder {
     #[default]
     InsertionOrder,
@@ -144,7 +129,7 @@ pub enum ReplayOrder {
 // ---------------------------------------------------------------------------
 
 /// Output format for a full engine dump.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DumpFormat {
     Json(PathBuf),
     Sqlite(PathBuf),
@@ -169,7 +154,7 @@ pub struct EngineSnapshot {
 // ---------------------------------------------------------------------------
 
 /// Aggregate statistics for the engine.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineStatistics {
     pub facts: FactStats,
     pub edges: EdgeStats,
@@ -180,7 +165,7 @@ pub struct EngineStatistics {
 }
 
 /// Fact-level statistics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactStats {
     pub total: i64,
     pub active: i64,
@@ -190,7 +175,7 @@ pub struct FactStats {
 }
 
 /// Edge-level statistics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeStats {
     pub total: i64,
     pub active: i64,
@@ -198,21 +183,21 @@ pub struct EdgeStats {
 }
 
 /// Summary-level statistics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryStats {
     pub total: i64,
     pub by_level: HashMap<ConsolidationLevel, i64>,
 }
 
 /// Scope tree statistics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeStats {
     pub total: i64,
     pub max_depth: i64,
 }
 
 /// Event log statistics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventStats {
     pub total: i64,
 }
@@ -220,7 +205,7 @@ pub struct EventStats {
 /// Storage-level statistics.
 ///
 /// `main_db_bytes` excludes WAL/SHM sidecars.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageStats {
     pub page_count: i64,
     pub page_size: i64,
