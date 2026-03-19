@@ -198,5 +198,9 @@ fn bootstrap_max_turns_limits_processing() {
 
     assert_eq!(report.sessions_processed, 1);
     // With max_turns=1, we process at most 1 turn
-    assert!(report.turns_reconstructed <= 1 || report.candidates_found <= 1);
+    assert!(
+        report.turns_reconstructed <= 1,
+        "should process at most one turn, got {}",
+        report.turns_reconstructed
+    );
 }

@@ -36,6 +36,7 @@ pub use outcome::{OutcomeSignals, SessionOutcome};
 ///
 /// Returns errors from the engine (DB, embedding, scope resolution) or
 /// extraction failures. Malformed JSONL lines are skipped with `tracing::warn`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bootstrap_session_inner(
     conn: &Connection,
     embed_dim: usize,
@@ -103,7 +104,11 @@ pub(crate) fn bootstrap_session_inner(
             Ok(report)
         }
         Err(e) => {
+            // ROLLBACK TO restores the savepoint but keeps it open —
+            // we must RELEASE to close it and avoid leaving the writer
+            // in an open transaction.
             let _ = conn.execute_batch("ROLLBACK TO bootstrap");
+            let _ = conn.execute_batch("RELEASE bootstrap");
             Err(e)
         }
     }
@@ -257,6 +262,7 @@ fn bootstrap_within_savepoint(
 ///
 /// Returns `MemoryError::Io` for directory traversal failures.
 /// Individual session failures are logged and skipped (not fatal).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bootstrap_directory_inner(
     conn: &Connection,
     embed_dim: usize,
@@ -280,7 +286,13 @@ pub(crate) fn bootstrap_directory_inner(
             continue;
         }
 
-        let file = std::fs::File::open(&path)?;
+        let file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping unreadable session file");
+                continue;
+            }
+        };
         let reader = std::io::BufReader::new(file);
 
         match bootstrap_session_inner(

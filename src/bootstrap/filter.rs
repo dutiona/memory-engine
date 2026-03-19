@@ -94,8 +94,12 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
     let mut turns: Vec<ConversationTurn> = Vec::new();
 
     // --- UUID-linked pairing ---
+    // Separate user entries that are tool results (carry tool_use_result)
+    // from user entries that are genuine prompts.
+    let is_tool_result = |e: &SessionEntry| -> bool { e.tool_use_result.is_some() };
+
     for entry in &relevant {
-        if !matches!(entry.entry_type, EntryType::User) {
+        if !matches!(entry.entry_type, EntryType::User) || is_tool_result(entry) {
             continue;
         }
         let Some(ref user_uuid) = entry.uuid else {
@@ -115,10 +119,17 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
         });
 
         if let Some(assistant) = assistant {
-            turns.push(build_turn(entry, assistant));
+            // Collect tool-result user entries that follow this assistant.
+            let tool_results = collect_tool_result_entries(&relevant, assistant);
+            turns.push(build_turn(entry, assistant, &tool_results));
             used.insert(user_uuid.as_str());
             if let Some(ref a_uuid) = assistant.uuid {
                 used.insert(a_uuid.as_str());
+            }
+            for tr in &tool_results {
+                if let Some(ref u) = tr.uuid {
+                    used.insert(u.as_str());
+                }
             }
         }
     }
@@ -129,6 +140,7 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
         let entry = relevant[i];
         let entry_uuid = entry.uuid.as_deref().unwrap_or("");
         if matches!(entry.entry_type, EntryType::User)
+            && !is_tool_result(entry)
             && !entry_uuid.is_empty()
             && !used.contains(entry_uuid)
         {
@@ -137,10 +149,16 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
                 matches!(a.entry_type, EntryType::Assistant)
                     && a.uuid.as_deref().is_some_and(|u| !used.contains(u))
             }) {
-                turns.push(build_turn(entry, assistant));
+                let tool_results = collect_tool_result_entries(&relevant, assistant);
+                turns.push(build_turn(entry, assistant, &tool_results));
                 used.insert(entry_uuid);
                 if let Some(ref a_uuid) = assistant.uuid {
                     used.insert(a_uuid.as_str());
+                }
+                for tr in &tool_results {
+                    if let Some(ref u) = tr.uuid {
+                        used.insert(u.as_str());
+                    }
                 }
             }
         }
@@ -152,10 +170,17 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
 }
 
 /// Build a single [`ConversationTurn`] from a user entry and its assistant reply.
-fn build_turn(user: &SessionEntry, assistant: &SessionEntry) -> ConversationTurn {
+///
+/// `tool_result_entries` are user entries that carry `tool_use_result` for the
+/// assistant's tool_use blocks (collected by the caller from subsequent entries).
+fn build_turn(
+    user: &SessionEntry,
+    assistant: &SessionEntry,
+    tool_result_entries: &[&SessionEntry],
+) -> ConversationTurn {
     let user_text = extract_text(user);
     let assistant_text = extract_text(assistant);
-    let tool_calls = extract_tool_calls(assistant, user);
+    let tool_calls = extract_tool_calls(assistant, tool_result_entries);
 
     let timestamp = user
         .timestamp
@@ -176,6 +201,27 @@ fn build_turn(user: &SessionEntry, assistant: &SessionEntry) -> ConversationTurn
         tool_calls,
         uuid: user.uuid.clone().unwrap_or_default(),
     }
+}
+
+/// Collect user entries that carry `tool_use_result` and whose `parent_uuid`
+/// points to the given assistant entry. These are the tool-result rows that
+/// follow an assistant's tool_use blocks in Claude Code JSONL.
+fn collect_tool_result_entries<'a>(
+    all: &[&'a SessionEntry],
+    assistant: &SessionEntry,
+) -> Vec<&'a SessionEntry> {
+    let Some(ref assistant_uuid) = assistant.uuid else {
+        return Vec::new();
+    };
+    all.iter()
+        .filter(|e| {
+            e.tool_use_result.is_some()
+                && e.parent_uuid
+                    .as_deref()
+                    .is_some_and(|p| p == assistant_uuid)
+        })
+        .copied()
+        .collect()
 }
 
 /// Extract plain text from an entry's message content blocks.
@@ -201,9 +247,17 @@ fn extract_text(entry: &SessionEntry) -> String {
 }
 
 /// Extract tool call records from the assistant's tool-use blocks, enriching
-/// them with tool-result data found in the user entry (which carries
-/// `tool_use_result` for the preceding tool invocations).
-fn extract_tool_calls(assistant: &SessionEntry, user: &SessionEntry) -> Vec<ToolCallRecord> {
+/// them with tool-result data from corresponding user entries.
+///
+/// In Claude Code JSONL, `tool_use_result` lives on user rows that follow
+/// the assistant's `tool_use` blocks. Each user row carries the result for
+/// one tool invocation. We collect results from `tool_result_entries` (user
+/// entries that carry `tool_use_result`) and pair them positionally with
+/// the assistant's tool-use blocks.
+fn extract_tool_calls(
+    assistant: &SessionEntry,
+    tool_result_entries: &[&SessionEntry],
+) -> Vec<ToolCallRecord> {
     let Some(ref msg) = assistant.message else {
         return Vec::new();
     };
@@ -226,15 +280,16 @@ fn extract_tool_calls(assistant: &SessionEntry, user: &SessionEntry) -> Vec<Tool
         }
     }
 
-    // Enrich with tool_use_result from the user entry (which typically carries
-    // the result of the *previous* assistant's tool calls).
-    if let Some(ref result) = user.tool_use_result {
-        // If there is exactly one tool call and one result, pair them directly.
-        // Otherwise, apply the result to the first call lacking results.
-        if calls.len() == 1 {
-            calls[0].stdout.clone_from(&result.stdout);
-            calls[0].stderr.clone_from(&result.stderr);
-            calls[0].is_error = result.is_error.unwrap_or(false);
+    // Pair tool results positionally: the i-th tool_result_entry corresponds
+    // to the i-th tool_use block in the assistant's message.
+    for (i, result_entry) in tool_result_entries.iter().enumerate() {
+        if i >= calls.len() {
+            break;
+        }
+        if let Some(ref result) = result_entry.tool_use_result {
+            calls[i].stdout.clone_from(&result.stdout);
+            calls[i].stderr.clone_from(&result.stderr);
+            calls[i].is_error = result.is_error.unwrap_or(false);
         }
     }
 
@@ -539,9 +594,12 @@ mod tests {
 
     #[test]
     fn reconstruct_extracts_tool_calls() {
+        // Real JSONL flow: User(prompt) → Assistant(tool_use) → User(tool_result)
         let entries = vec![
-            user_with_tool_result("u1", "", "run ls", Some("file.txt"), None, false, 100),
+            user_entry("u1", "", "run ls", 100),
             assistant_with_tool("a1", "u1", "Sure, running ls", "Bash", 101),
+            // Tool result entry: parent_uuid points to assistant, carries tool_use_result
+            user_with_tool_result("u2", "a1", "", Some("file.txt"), None, false, 102),
         ];
         let turns = reconstruct_turns(&entries);
         assert_eq!(turns.len(), 1);

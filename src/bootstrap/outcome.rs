@@ -104,7 +104,7 @@ fn input_command(input: &serde_json::Value) -> Option<&str> {
 fn detect_commit(turns: &[super::filter::ConversationTurn]) -> bool {
     for turn in turns {
         for tc in &turn.tool_calls {
-            let is_bash = tc.tool_name.contains("ash"); // "Bash" or "bash"
+            let is_bash = tc.tool_name.eq_ignore_ascii_case("bash");
 
             if is_bash {
                 if let Some(cmd) = input_command(&tc.input) {

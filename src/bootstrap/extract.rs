@@ -80,10 +80,10 @@ impl SessionExtractor for KeywordExtractor {
             "matched_keywords": episode.matched_keywords,
         });
 
-        if matches!(outcome, SessionOutcome::Failure) {
-            metadata["session_outcome"] = serde_json::json!("failure");
-        } else if matches!(outcome, SessionOutcome::Success) {
-            metadata["session_outcome"] = serde_json::json!("success");
+        match outcome {
+            SessionOutcome::Failure => metadata["session_outcome"] = "failure".into(),
+            SessionOutcome::Success => metadata["session_outcome"] = "success".into(),
+            SessionOutcome::Indeterminate => {}
         }
 
         Ok(vec![ExtractedFact {
