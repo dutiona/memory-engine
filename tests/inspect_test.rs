@@ -136,9 +136,12 @@ fn inspection_lifecycle() {
     assert_eq!(snapshot.embed_dim, DIM);
     assert!(snapshot.schema_version > 0);
 
-    // SQLite dump should fail for in-memory engine
+    // SQLite dump works for in-memory engine (VACUUM INTO supports :memory: since SQLite 3.27).
     let sqlite_path = dir.path().join("snapshot.db");
-    assert!(engine.dump_state(&DumpFormat::Sqlite(sqlite_path)).is_err());
+    engine
+        .dump_state(&DumpFormat::Sqlite(sqlite_path.clone()))
+        .unwrap();
+    assert!(sqlite_path.exists());
 }
 
 /// Test explain_fact for a not-found ID returns proper error.
