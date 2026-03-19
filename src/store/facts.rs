@@ -901,7 +901,7 @@ mod tests {
 
     // --- Co-session edge support tests ---
 
-    /// Insert an event with a session_id, return the event id.
+    /// Insert an event with a `session_id`, return the event id.
     fn insert_event(conn: &Connection, session_id: Option<&str>) -> i64 {
         conn.execute(
             "INSERT INTO events (timestamp, event_type, payload, source, session_id, scope_id, origin_node_id, sequence_id)
@@ -912,7 +912,7 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    /// Insert a fact linked to an event via source_event_id.
+    /// Insert a fact linked to an event via `source_event_id`.
     fn insert_fact_with_event(conn: &Connection, content: &str, event_id: i64) -> i64 {
         let store = FactStore::new(conn, DIM);
         let mut fact = make_fact(content, vec![0.1; DIM]);

@@ -958,11 +958,21 @@ impl MemoryEngine {
 
     // --- Public API: Co-session edge creation ---
 
+    /// Relation type for edges linking facts that co-occur in the same session.
+    const CO_SESSION_RELATION: &str = "co_session";
+    /// Default weight for co-session edges — strong enough to influence importance
+    /// scoring but weaker than explicit semantic relationships.
+    const CO_SESSION_WEIGHT: f64 = 0.5;
+    /// Scope ID for co-session edges — root scope, since co-session is cross-scope.
+    const CO_SESSION_SCOPE_ID: i64 = 1;
+
     /// Create `co_session` edges between all active facts sharing a session.
     ///
-    /// Edges are bidirectional (A→B and B→A), with weight 0.5 and
-    /// `scope_id = 1` (root — cross-scope by nature). Idempotent: calling
-    /// twice for the same session does not create duplicate edges.
+    /// Edges are bidirectional (A→B and B→A), with weight
+    /// [`CO_SESSION_WEIGHT`](Self::CO_SESSION_WEIGHT) and
+    /// `scope_id =` [`CO_SESSION_SCOPE_ID`](Self::CO_SESSION_SCOPE_ID)
+    /// (root — cross-scope by nature). Idempotent: calling twice for the same
+    /// session does not create duplicate edges.
     ///
     /// Returns the number of new edges created.
     ///
@@ -977,6 +987,7 @@ impl MemoryEngine {
         let facts = FactStore::new(&conn, self.embed_dim).list_active_by_session(session_id)?;
 
         if facts.len() < 2 {
+            drop(conn);
             return Ok(0);
         }
 
@@ -989,7 +1000,8 @@ impl MemoryEngine {
 
             // Batch-fetch existing co_session edges for dedup (1 query instead of N²)
             let fact_ids: Vec<i64> = facts.iter().map(|f| f.id).collect();
-            let existing = edge_store.list_active_pairs_by_facts(&fact_ids, "co_session")?;
+            let existing =
+                edge_store.list_active_pairs_by_facts(&fact_ids, Self::CO_SESSION_RELATION)?;
 
             for i in 0..facts.len() {
                 for j in (i + 1)..facts.len() {
@@ -1001,9 +1013,9 @@ impl MemoryEngine {
                             let edge_id = edge_store.insert(&NewEdge {
                                 source_fact_id: src,
                                 target_fact_id: tgt,
-                                relation_type: "co_session".to_string(),
-                                weight: 0.5,
-                                scope_id: 1,
+                                relation_type: Self::CO_SESSION_RELATION.to_string(),
+                                weight: Self::CO_SESSION_WEIGHT,
+                                scope_id: Self::CO_SESSION_SCOPE_ID,
                                 t_created: now,
                                 t_expired: None,
                             })?;
@@ -1015,6 +1027,7 @@ impl MemoryEngine {
 
             tx.commit()?;
         }
+        drop(conn);
 
         // Sync in-memory graph after successful commit
         if !new_edges.is_empty() {
@@ -1025,8 +1038,8 @@ impl MemoryEngine {
                     tgt,
                     EdgeData {
                         edge_id,
-                        relation_type: "co_session".to_string(),
-                        weight: 0.5,
+                        relation_type: Self::CO_SESSION_RELATION.to_string(),
+                        weight: Self::CO_SESSION_WEIGHT,
                     },
                 );
             }
@@ -1390,7 +1403,7 @@ mod tests {
         }
     }
 
-    /// Test helper: insert a raw fact via the write connection (bypasses engine's add_fact).
+    /// Test helper: insert a raw fact via the write connection (bypasses engine's `add_fact`).
     fn insert_raw_fact(engine: &MemoryEngine, fact: &NewFact) -> i64 {
         let conn = engine.pool.write();
         FactStore::new(&conn, engine.embed_dim)
@@ -3179,7 +3192,7 @@ mod tests {
 
     // --- Co-session edge tests ---
 
-    /// Helper: ingest an event with a session_id and add a fact linked to it.
+    /// Helper: ingest an event with a `session_id` and add a fact linked to it.
     fn add_session_fact(engine: &MemoryEngine, content: &str, session_id: &str) -> (i64, i64) {
         let embedder = MockEmbedder { dim: DIM };
         let event = NewEvent {
@@ -3218,14 +3231,16 @@ mod tests {
         assert_eq!(created, 2); // A→B and B→A
 
         // Verify edges in DB
-        let conn = engine.pool.read();
-        let edges = crate::store::edges::EdgeStore::new(&conn)
-            .list_active()
-            .unwrap();
-        let co_edges: Vec<_> = edges
-            .iter()
-            .filter(|e| e.relation_type == "co_session")
-            .collect();
+        let co_edges = {
+            let conn = engine.pool.read();
+            let edges = crate::store::edges::EdgeStore::new(&conn)
+                .list_active()
+                .unwrap();
+            edges
+                .into_iter()
+                .filter(|e| e.relation_type == "co_session")
+                .collect::<Vec<_>>()
+        };
         assert_eq!(co_edges.len(), 2);
 
         // Both directions present
@@ -3236,9 +3251,9 @@ mod tests {
             .iter()
             .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1));
 
-        // Weight 0.5
+        // Weight matches constant
         for e in &co_edges {
-            assert!((e.weight - 0.5).abs() < f64::EPSILON);
+            assert!((e.weight - MemoryEngine::CO_SESSION_WEIGHT).abs() < f64::EPSILON);
         }
     }
 

@@ -187,6 +187,11 @@ impl<'a> EdgeStore<'a> {
     /// Returns `(source_fact_id, target_fact_id)` pairs. Used for efficient dedup
     /// before bulk edge creation (avoids N² per-pair SQL queries).
     ///
+    /// # Panics
+    ///
+    /// Panics if `fact_ids` cannot be serialized to JSON (should never happen
+    /// for `&[i64]`).
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on SQL failure.
