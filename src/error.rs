@@ -36,6 +36,9 @@ pub enum MemoryError {
 
     #[error("bootstrap error: {0}")]
     Bootstrap(String),
+
+    #[error("reranker error: {0}")]
+    Reranker(String),
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.
@@ -63,6 +66,12 @@ mod tests {
         let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
         let err: MemoryError = json_err.into();
         assert!(matches!(err, MemoryError::Serialization(_)));
+    }
+
+    #[test]
+    fn reranker_error_display() {
+        let err = MemoryError::Reranker("cross-encoder timeout".into());
+        assert_eq!(err.to_string(), "reranker error: cross-encoder timeout");
     }
 
     #[test]

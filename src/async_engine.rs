@@ -68,6 +68,12 @@ impl AsyncMemoryEngine {
         Ok(Self::new(engine))
     }
 
+    /// Returns the name of the active reranker, if any.
+    #[must_use]
+    pub fn reranker_name(&self) -> Option<&str> {
+        self.inner.reranker_name()
+    }
+
     /// Open an in-memory async engine.
     ///
     /// # Errors
@@ -414,6 +420,7 @@ mod tests {
                 embedding: None,
                 mode: SearchMode::Fts,
                 limit: 10,
+                rerank_depth: None,
                 valid_at: None,
                 fact_type: None,
                 scope: None,
@@ -451,6 +458,7 @@ mod tests {
                         embedding: None,
                         mode: SearchMode::Fts,
                         limit: 10,
+                        rerank_depth: None,
                         valid_at: None,
                         fact_type: None,
                         scope: None,

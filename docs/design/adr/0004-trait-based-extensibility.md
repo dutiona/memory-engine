@@ -41,7 +41,7 @@ struct ForgetPolicy { /* configurable weights and thresholds */ }
 
 The `CrudDecision` enum (Add, Update, Delete, Noop) follows Mem0's conflict resolution pattern (2504.19413).
 
-Future traits planned: `PersistenceClassifier` (Phase 3b) for unforgettable facts, `KnowledgeBaseConnector` (Phase 5) for external knowledge integration.
+Traits added since original decision: `PersistenceClassifier` (Phase 3b) for unforgettable facts, `Reranker` (Phase 4a) for cross-encoder reranking after RRF. Future traits planned: `KnowledgeBaseConnector` (Phase 5) for external knowledge integration.
 
 ## Consequences
 

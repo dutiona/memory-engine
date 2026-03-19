@@ -76,6 +76,7 @@ fn hnsw_recall_at_k_exceeds_threshold() {
             embedding: Some(query_emb),
             mode: SearchMode::Vector,
             limit: K,
+            rerank_depth: None,
             valid_at: None,
             fact_type: None,
             scope: None,

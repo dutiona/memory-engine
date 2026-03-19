@@ -35,6 +35,10 @@ pub struct SearchQuery {
     pub embedding: Option<Vec<f32>>,
     pub mode: SearchMode,
     pub limit: usize,
+    /// How many candidates to pass to the reranker before truncating to `limit`.
+    /// Clamped to at least `limit` — can only widen the candidate pool, never shrink it.
+    /// When `None`, falls back to `limit` (no over-fetch).
+    pub rerank_depth: Option<usize>,
     pub valid_at: Option<DateTime<Utc>>,
     pub fact_type: Option<FactType>,
     pub scope: Option<crate::types::ScopeQuery>,
@@ -86,8 +90,14 @@ pub fn hybrid_search(
     scope_ids: Option<&[i64]>,
     vector_strategy: &dyn VectorSearchStrategy,
 ) -> Result<Vec<SearchResult>> {
-    // When valid_at is set, over-fetch 3x to compensate for post-filter attrition
-    let overfetch = query.limit.saturating_mul(3).max(query.limit);
+    // Effective candidate target: rerank_depth widens the pool, but never below limit.
+    let effective_target = query.rerank_depth.unwrap_or(query.limit).max(query.limit);
+    // Over-fetch 3x to compensate for post-filter attrition.
+    // The temporal post-filter always runs (cutoff defaults to Utc::now()
+    // when valid_at is None), so 3x is always needed. In Hybrid mode,
+    // overfetch also ensures RRF has enough candidates from each source
+    // for meaningful rank fusion.
+    let overfetch = effective_target.saturating_mul(3).max(effective_target);
 
     let fact_type_ref = query.fact_type.as_ref();
 
@@ -135,10 +145,13 @@ pub fn hybrid_search(
 
     // Load full facts. t_expired, fact_type, and scope are now SQL-level filters.
     // Only valid_at remains as a post-filter (complex temporal semantics).
+    // Collect up to effective_target candidates (rerank_depth widens the pool).
+    // Clamped to at least query.limit so rerank_depth can never shrink results.
+    let effective_limit = effective_target;
     let store = FactStore::new(conn, embed_dim);
     let mut results = Vec::new();
     for (id, score) in ranked {
-        if results.len() >= query.limit {
+        if results.len() >= effective_limit {
             break;
         }
         let Ok(fact) = store.get(id) else {
@@ -310,6 +323,7 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
             mode: SearchMode::Hybrid,
             limit: 3,
+            rerank_depth: None,
             valid_at: None,
             fact_type: None,
             scope: None,
@@ -339,6 +353,7 @@ mod tests {
             embedding: None,
             mode: SearchMode::Fts,
             limit: 10,
+            rerank_depth: None,
             valid_at: None,
             fact_type: None,
             scope: None,
@@ -365,6 +380,7 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
             mode: SearchMode::Vector,
             limit: 1,
+            rerank_depth: None,
             valid_at: None,
             fact_type: None,
             scope: None,
@@ -400,6 +416,7 @@ mod tests {
             embedding: None,
             mode: SearchMode::Fts,
             limit: 10,
+            rerank_depth: None,
             valid_at: None,
             fact_type: Some(FactType::Semantic),
             scope: None,
