@@ -376,6 +376,44 @@ impl AsyncMemoryEngine {
     pub fn embed_dim(&self) -> usize {
         self.inner.embed_dim()
     }
+
+    // --- Restore (static constructors) ---
+
+    /// Async wrapper for [`MemoryEngine::restore_json`].
+    pub async fn restore_json(
+        snapshot_path: std::path::PathBuf,
+        config: EngineConfig,
+    ) -> Result<Self> {
+        let engine = tokio::task::spawn_blocking(move || {
+            MemoryEngine::restore_json(&snapshot_path, &config)
+        })
+        .await
+        .map_err(join_err)??;
+        Ok(Self::new(engine))
+    }
+
+    /// Async wrapper for [`MemoryEngine::restore_json_memory`].
+    pub async fn restore_json_memory(snapshot_path: std::path::PathBuf) -> Result<Self> {
+        let engine = tokio::task::spawn_blocking(move || {
+            MemoryEngine::restore_json_memory(&snapshot_path)
+        })
+        .await
+        .map_err(join_err)??;
+        Ok(Self::new(engine))
+    }
+
+    /// Async wrapper for [`MemoryEngine::restore_sqlite`].
+    pub async fn restore_sqlite(
+        backup_path: std::path::PathBuf,
+        config: EngineConfig,
+    ) -> Result<Self> {
+        let engine = tokio::task::spawn_blocking(move || {
+            MemoryEngine::restore_sqlite(&backup_path, &config)
+        })
+        .await
+        .map_err(join_err)??;
+        Ok(Self::new(engine))
+    }
 }
 
 #[cfg(test)]

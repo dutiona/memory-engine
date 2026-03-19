@@ -155,15 +155,36 @@ let filter = ReplayFilter {
 The default `InsertionOrder` (`ORDER BY id ASC`) is deterministic — events with
 backdated timestamps still appear in append order.
 
-## Dump State
+## Import/Export
+
+### Why
+
+Long-running agents need backup/restore for disaster recovery, migration between
+machines, and offline analysis. The event-sourced architecture (ADR-0001) makes
+full-state export/import natural — the `EngineSnapshot` captures the complete
+materialized view. Compressed exports reduce storage costs for archival
+(see `docs/design/plans/2026-03-09-future-phases-design.md` § Phase 4 for the
+"10 agents × 10 years" cold storage scenario).
+
+Research context: context adaptation research (ACE, AWM — see research basis)
+emphasizes that memory systems must be _portable_ and _inspectable_ to support
+multi-device agents and human oversight.
+
+### Export (dump)
 
 Export the full engine state for backup, migration, or offline analysis.
 
 ```rust
-use memory_engine::inspect::types::DumpFormat;
+use memory_engine::inspect_types::DumpFormat;
 
 // JSON snapshot (works for both file-backed and in-memory)
 engine.dump_state(&DumpFormat::Json("snapshot.json".into()))?;
+
+// Gzip-compressed JSON (requires `compress-gzip` feature)
+engine.dump_state(&DumpFormat::JsonGzip("snapshot.json.gz".into()))?;
+
+// Zstd-compressed JSON (requires `compress-zstd` feature)
+engine.dump_state(&DumpFormat::JsonZstd("snapshot.json.zst".into()))?;
 
 // SQLite backup via VACUUM INTO (file-backed only)
 engine.dump_state(&DumpFormat::Sqlite("backup.db".into()))?;
@@ -171,10 +192,12 @@ engine.dump_state(&DumpFormat::Sqlite("backup.db".into()))?;
 
 ### Format comparison
 
-| Format | Portability     | Speed  | In-memory engines  | Includes embeddings |
-| ------ | --------------- | ------ | ------------------ | ------------------- |
-| JSON   | High (any lang) | Slower | Yes                | Yes (large output)  |
-| SQLite | Native (SQLite) | Fast   | No (returns error) | Yes (binary BLOB)   |
+| Format    | Portability     | Speed  | In-memory engines  | Includes embeddings | Feature flag    |
+| --------- | --------------- | ------ | ------------------ | ------------------- | --------------- |
+| JSON      | High (any lang) | Slower | Yes                | Yes (large output)  | —               |
+| JSON+gzip | High            | Medium | Yes                | Yes (compressed)    | `compress-gzip` |
+| JSON+zstd | High            | Medium | Yes                | Yes (compressed)    | `compress-zstd` |
+| SQLite    | Native (SQLite) | Fast   | No (returns error) | Yes (binary BLOB)   | —               |
 
 The JSON dump produces an `EngineSnapshot` containing all facts, edges, summaries,
 scopes, events, and config. Raw events are stored (not upcasted) for snapshot fidelity.
@@ -182,11 +205,48 @@ scopes, events, and config. Raw events are stored (not upcasted) for snapshot fi
 The SQLite dump uses `VACUUM INTO`, producing an atomic, defragmented copy of the
 database without WAL sidecars.
 
+### Import (restore)
+
+Restore from a backup into a **new** engine. Import always targets a fresh database —
+no merge/additive semantics. This is a deliberate constraint: merging state is a
+sync problem deferred to future CRDT-based work.
+
+```rust
+use memory_engine::engine::{EngineConfig, MemoryEngine};
+use std::path::Path;
+
+// Restore JSON snapshot into a new file-backed engine.
+// config.embed_dim must match the snapshot's embed_dim.
+let config = EngineConfig::new("restored.db".into(), 768);
+let engine = MemoryEngine::restore_json(Path::new("snapshot.json"), &config)?;
+
+// Restore into a new in-memory engine (auto-detects compression).
+let engine = MemoryEngine::restore_json_memory(Path::new("snapshot.json.gz"))?;
+
+// Restore from a SQLite backup (only accepts dump_sqlite() output).
+let engine = MemoryEngine::restore_sqlite(Path::new("backup.db"), &config)?;
+```
+
+**Constraints:**
+
+- Target path (`config.path`) must not already exist.
+- `config.embed_dim` is validated against the snapshot — mismatches are rejected.
+- `restore_sqlite` only accepts clean `VACUUM INTO` backups produced by `dump_state`.
+  Copying a live WAL-mode database is unsafe.
+- `restore_json` and `restore_sqlite` accept the full `EngineConfig`, preserving
+  pool size, search config, upcaster registry, and backup directory settings.
+- Compression is auto-detected from magic bytes (gzip: `1f 8b`, zstd: `28 b5 2f fd`).
+- On failure, orphan database files are cleaned up automatically.
+
 ## Async API
 
-All five methods are mirrored in `AsyncMemoryEngine` (requires the `async` feature):
+All inspection and import/export methods are mirrored in `AsyncMemoryEngine`
+(requires the `async` feature):
 
 ```rust
 let stats = async_engine.statistics().await?;
 let explanation = async_engine.explain_fact(id).await?;
+
+// Async restore
+let engine = AsyncMemoryEngine::restore_json_memory("snapshot.json".into()).await?;
 ```

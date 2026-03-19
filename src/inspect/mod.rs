@@ -6,6 +6,7 @@
 pub mod dump;
 pub mod explain;
 pub mod replay;
+pub mod restore;
 pub mod statistics;
 pub mod types;
 

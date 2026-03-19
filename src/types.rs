@@ -63,8 +63,10 @@ pub struct Event {
     pub session_id: Option<String>,
     pub scope_id: i64,
     /// Node that originated this event (for future multi-node sync).
+    #[serde(default = "default_origin_node_id")]
     pub origin_node_id: String,
     /// Monotonic sequence within the origin node (for ordering/dedup in sync).
+    #[serde(default)]
     pub sequence_id: i64,
     /// When the event was ingested into this node's store (ingest-time).
     pub created_at: Option<DateTime<Utc>>,
@@ -75,6 +77,10 @@ pub struct Event {
 
 const fn default_event_revision() -> u16 {
     1
+}
+
+fn default_origin_node_id() -> String {
+    "local".to_string()
 }
 
 /// A bi-temporal fact derived from events.

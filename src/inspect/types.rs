@@ -132,8 +132,15 @@ pub enum ReplayOrder {
 
 /// Output format for a full engine dump.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DumpFormat {
+    /// Plain JSON (uncompressed).
     Json(PathBuf),
+    /// Gzip-compressed JSON. Requires the `compress-gzip` feature.
+    JsonGzip(PathBuf),
+    /// Zstandard-compressed JSON. Requires the `compress-zstd` feature.
+    JsonZstd(PathBuf),
+    /// Atomic SQLite backup via `VACUUM INTO` (file-backed engines only).
     Sqlite(PathBuf),
 }
 
