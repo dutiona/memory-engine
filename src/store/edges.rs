@@ -154,6 +154,74 @@ impl<'a> EdgeStore<'a> {
         Ok(edges)
     }
 
+    /// Check if an active edge exists between two facts with a given relation type.
+    ///
+    /// Useful as a per-pair dedup guard for edge creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn exists_active(
+        &self,
+        source_fact_id: i64,
+        target_fact_id: i64,
+        relation_type: &str,
+    ) -> Result<bool> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE source_fact_id = ?1
+                   AND target_fact_id = ?2
+                   AND relation_type = ?3
+                   AND t_expired IS NULL",
+                params![source_fact_id, target_fact_id, relation_type],
+                |row| row.get(0),
+            )
+            .map_err(MemoryError::Database)?;
+        Ok(count > 0)
+    }
+
+    /// Batch-fetch all active edges of a given relation type involving any of the given fact IDs.
+    ///
+    /// Returns `(source_fact_id, target_fact_id)` pairs. Used for efficient dedup
+    /// before bulk edge creation (avoids N² per-pair SQL queries).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `fact_ids` cannot be serialized to JSON (should never happen
+    /// for `&[i64]`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn list_active_pairs_by_facts(
+        &self,
+        fact_ids: &[i64],
+        relation_type: &str,
+    ) -> Result<std::collections::HashSet<(i64, i64)>> {
+        use std::collections::HashSet;
+        if fact_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let ids_json = serde_json::to_string(fact_ids).expect("serialize fact_ids");
+        let mut stmt = self.conn.prepare(
+            "SELECT source_fact_id, target_fact_id FROM edges
+             WHERE source_fact_id IN (SELECT value FROM json_each(?1))
+               AND target_fact_id IN (SELECT value FROM json_each(?1))
+               AND relation_type = ?2
+               AND t_expired IS NULL",
+        )?;
+        let rows = stmt.query_map(params![ids_json, relation_type], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut set = HashSet::new();
+        for row in rows {
+            set.insert(row?);
+        }
+        Ok(set)
+    }
+
     /// List active edges by target fact id.
     ///
     /// # Errors
@@ -271,6 +339,30 @@ mod tests {
 
         let to_3 = store.list_active_by_target(3).unwrap();
         assert_eq!(to_3.len(), 2);
+    }
+
+    #[test]
+    fn exists_active_returns_correct_status() {
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        // No edges yet
+        assert!(!store.exists_active(1, 2, "co_session").unwrap());
+
+        // Insert a co_session edge
+        store.insert(&make_edge(1, 2, "co_session")).unwrap();
+        assert!(store.exists_active(1, 2, "co_session").unwrap());
+
+        // Wrong direction
+        assert!(!store.exists_active(2, 1, "co_session").unwrap());
+
+        // Wrong relation type
+        assert!(!store.exists_active(1, 2, "supplements").unwrap());
+
+        // Expire the edge
+        let edges = store.list_active_by_source(1).unwrap();
+        store.expire(edges[0].id, Utc::now()).unwrap();
+        assert!(!store.exists_active(1, 2, "co_session").unwrap());
     }
 
     #[test]
