@@ -12,6 +12,7 @@ pub struct EventFilter {
     pub until: Option<DateTime<Utc>>,
     pub session_id: Option<String>,
     pub event_type: Option<EventType>,
+    pub source: Option<String>,
     pub limit: Option<usize>,
     pub id_min: Option<i64>,
     pub id_max: Option<i64>,
@@ -264,6 +265,11 @@ fn build_filter_query(
     if let Some(ref event_type) = filter.event_type {
         clauses.push(format!("event_type = ?{idx}"));
         values.push(Box::new(event_type_to_str(event_type).to_string()));
+        idx += 1;
+    }
+    if let Some(ref source) = filter.source {
+        clauses.push(format!("source = ?{idx}"));
+        values.push(Box::new(source.clone()));
         idx += 1;
     }
     if let Some(id_min) = filter.id_min {

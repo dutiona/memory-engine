@@ -168,6 +168,12 @@ pub struct AddFactOptions {
     pub t_invalid: Option<DateTime<Utc>>,
     /// Pin this fact (unforgettable). Overrides auto-classification.
     pub pinned: Option<bool>,
+    /// Override system creation time (default: `Utc::now()`).
+    /// Used by bootstrap to backdate historical facts.
+    pub t_created: Option<DateTime<Utc>>,
+    /// Override last-accessed time (default: `Utc::now()`).
+    /// Used by bootstrap to preserve correct Ebbinghaus decay for historical facts.
+    pub last_accessed: Option<DateTime<Utc>>,
 }
 
 // --- New* structs (without id, for insertion) ---

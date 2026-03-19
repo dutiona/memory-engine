@@ -30,6 +30,12 @@ pub enum MemoryError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("bootstrap error: {0}")]
+    Bootstrap(String),
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.
