@@ -18,11 +18,14 @@ pub enum SearchMode {
 }
 
 /// Which source(s) contributed to a result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MatchType {
     Fts,
     Vector,
     Both,
+    /// Result came from importance-ranked store query (no text/vector search).
+    ImportanceRank,
 }
 
 /// A unified search query across FTS5 and vector sources.
