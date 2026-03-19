@@ -22,6 +22,7 @@
 
 #[cfg(feature = "async")]
 pub mod async_engine;
+pub mod bootstrap;
 pub mod conflict;
 pub mod consolidation;
 pub mod engine;
