@@ -156,7 +156,7 @@ impl<'a> EdgeStore<'a> {
 
     /// Check if an active edge exists between two facts with a given relation type.
     ///
-    /// Used as a dedup guard for idempotent edge creation (e.g. `co_session` edges).
+    /// Useful as a per-pair dedup guard for edge creation.
     ///
     /// # Errors
     ///

@@ -960,8 +960,10 @@ impl MemoryEngine {
 
     /// Relation type for edges linking facts that co-occur in the same session.
     const CO_SESSION_RELATION: &str = "co_session";
-    /// Default weight for co-session edges — strong enough to influence importance
-    /// scoring but weaker than explicit semantic relationships.
+    /// Default weight for co-session edges — weaker than explicit semantic
+    /// relationships by design intent. Note: the current forgetting system uses
+    /// raw `graph.degree()` (unweighted), so the weight does not yet reduce
+    /// connectivity impact. It will matter once weighted traversal ships (Phase 5).
     const CO_SESSION_WEIGHT: f64 = 0.5;
     /// Scope ID for co-session edges — root scope, since co-session is cross-scope.
     const CO_SESSION_SCOPE_ID: i64 = 1;
