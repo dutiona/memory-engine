@@ -22,11 +22,11 @@ use output::OutputFormat;
 )]
 struct Cli {
     /// Path to the memory-engine SQLite database
-    #[arg(long, global = true, env = "MEMORY_ENGINE_DB")]
+    #[arg(long, env = "MEMORY_ENGINE_DB")]
     db: PathBuf,
 
     /// Output format
-    #[arg(long, global = true, default_value = "table")]
+    #[arg(long, default_value = "table")]
     format: OutputFormat,
 
     #[command(subcommand)]

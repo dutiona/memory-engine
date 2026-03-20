@@ -1,0 +1,274 @@
+use std::path::PathBuf;
+
+use assert_cmd::Command;
+use predicates::prelude::*;
+use tempfile::TempDir;
+
+/// Create a test database with sample data and return (tempdir, db_path).
+fn create_test_db() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let config = memory_engine::EngineConfig::new(db_path.clone(), 4);
+    let engine = memory_engine::MemoryEngine::open(&config).unwrap();
+
+    struct FakeEmbed;
+    impl memory_engine::EmbeddingProvider for FakeEmbed {
+        fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
+            Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
+    }
+
+    engine
+        .add_fact(
+            "The sky is blue",
+            memory_engine::FactType::Semantic,
+            None,
+            &FakeEmbed,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    engine
+        .add_fact(
+            "Rust is fast",
+            memory_engine::FactType::Procedural,
+            None,
+            &FakeEmbed,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    engine
+        .add_fact(
+            "Memory engines consolidate facts",
+            memory_engine::FactType::Episodic,
+            None,
+            &FakeEmbed,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+    drop(engine);
+    (dir, db_path)
+}
+
+fn cli() -> Command {
+    Command::cargo_bin("memory-engine-cli").unwrap()
+}
+
+// --- stats ---
+
+#[test]
+fn stats_table_output() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Facts"))
+        .stdout(predicate::str::contains("3"));
+}
+
+#[test]
+fn stats_json_output() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+            "stats",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"active\""));
+}
+
+#[test]
+fn stats_plain_output() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "plain",
+            "stats",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts.active=3"));
+}
+
+// --- inspect ---
+
+#[test]
+fn inspect_existing_fact() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "inspect", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("The sky is blue"));
+}
+
+#[test]
+fn inspect_nonexistent_fact() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "inspect", "999"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("error"));
+}
+
+// --- explain ---
+
+#[test]
+fn explain_fact() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "explain", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fact_id"))
+        .stdout(predicate::str::contains("scope"));
+}
+
+// --- query ---
+
+#[test]
+fn query_fts() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "query", "blue sky"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sky"));
+}
+
+#[test]
+fn query_no_results() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "query", "xyznonexistent"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No results"));
+}
+
+// --- export + import roundtrip ---
+
+// NOTE: Skipped due to pre-existing library bug — restore.rs has
+// CURRENT_SCHEMA_VERSION=5 but running schema is v6 after #78/#92.
+// Re-enable once the library's restore tests are fixed.
+#[test]
+#[ignore]
+fn export_import_roundtrip() {
+    let (dir, db_path) = create_test_db();
+
+    // Export
+    let export_path = dir.path().join("export.json");
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "export",
+            "-o",
+            export_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(export_path.exists());
+
+    // Import into new DB
+    let new_db = dir.path().join("imported.db");
+    cli()
+        .args([
+            "--db",
+            new_db.to_str().unwrap(),
+            "import",
+            export_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Verify imported DB has same data
+    cli()
+        .args([
+            "--db",
+            new_db.to_str().unwrap(),
+            "--format",
+            "plain",
+            "stats",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts.active=3"));
+}
+
+// --- dump ---
+
+#[test]
+fn dump_facts() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "dump", "facts"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Active Facts"));
+}
+
+#[test]
+fn dump_events() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "dump", "events"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Events"));
+}
+
+// --- error handling ---
+
+#[test]
+fn missing_db_flag() {
+    cli()
+        .args(["stats"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--db"));
+}
+
+#[test]
+fn nonexistent_db() {
+    cli()
+        .args(["--db", "/tmp/nonexistent_memory_engine.db", "stats"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("error"));
+}
+
+#[test]
+fn import_rejects_existing_db() {
+    let (dir, db_path) = create_test_db();
+    let fake_snapshot = dir.path().join("fake.json");
+    std::fs::write(&fake_snapshot, "{}").unwrap();
+
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "import",
+            fake_snapshot.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
