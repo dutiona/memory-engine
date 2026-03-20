@@ -79,6 +79,29 @@ The state is determined by the **first matching** rule:
 4. `t_valid <= now` and not invalidated → `Due`
 5. Otherwise → `Active`
 
+### Provenance and source event
+
+`FactProvenance` includes the originating event when the fact has a `source_event_id`:
+
+```rust
+let explanation = engine.explain_fact(fact_id)?;
+if let Some(event) = &explanation.provenance.source_event {
+    println!("Created from event {}: {:?}", event.id, event.event_type);
+    println!("Payload: {}", event.payload);
+}
+```
+
+- **What:** `FactProvenance.source_event` contains the full `Event` that produced this
+  fact, fetched via upcasted read so the payload is always at the latest schema revision.
+- **Why:** Enables full provenance tracing — from fact to originating event — without
+  a separate event lookup. Useful for debugging, auditing, and tooling integration.
+- **How:** Automatically populated when the fact has a `source_event_id` (set during
+  `add_fact()` when extracting from an ingested event). `None` for facts created
+  without a source event.
+
+Note: the full `Event` envelope is exposed (payload, source, session_id, origin_node_id,
+sequence_id). This is intentional for inspection/debugging use cases.
+
 ### Limitations
 
 - **`ExpiredReason`** is best-effort. Most expired facts return `Unknown` because

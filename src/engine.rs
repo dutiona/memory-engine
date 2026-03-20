@@ -1215,7 +1215,14 @@ impl MemoryEngine {
         let graph = self.graph.read();
         let scope_tree = self.scope_tree.read();
         self.with_read(|conn| {
-            crate::inspect::explain::explain_fact(conn, &graph, &scope_tree, self.embed_dim, id)
+            crate::inspect::explain::explain_fact(
+                conn,
+                &graph,
+                &scope_tree,
+                self.embed_dim,
+                id,
+                &self.upcaster_registry,
+            )
         })
     }
 

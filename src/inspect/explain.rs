@@ -4,7 +4,9 @@ use rusqlite::Connection;
 use crate::error::Result;
 use crate::graph::MemoryGraph;
 use crate::scope::tree::ScopeTree;
+use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
+use crate::store::upcaster::UpcasterRegistry;
 use crate::types::Fact;
 
 use super::types::{
@@ -14,23 +16,28 @@ use super::types::{
 
 /// Explain why a fact is in its current state.
 ///
+/// When the fact has a `source_event_id`, the originating event is fetched via
+/// [`EventStore::get_upcasted`] and included in the provenance output.
+///
 /// # Errors
 ///
-/// Returns [`MemoryError::NotFound`] if the fact does not exist, or
-/// [`MemoryError::Database`] on SQL failure.
+/// Returns [`MemoryError::NotFound`] if the fact (or its source event) does not exist.
+/// Returns [`MemoryError::Migration`] if the source event cannot be upcasted.
+/// Returns [`MemoryError::Database`] on SQL failure.
 pub fn explain_fact(
     conn: &Connection,
     graph: &MemoryGraph,
     scope_tree: &ScopeTree,
     embed_dim: usize,
     fact_id: i64,
+    registry: &UpcasterRegistry,
 ) -> Result<FactExplanation> {
     let store = FactStore::new(conn, embed_dim);
     let fact = store.get(fact_id)?;
     let now = Utc::now();
 
     let state = determine_state(&fact, now);
-    let provenance = build_provenance(&fact);
+    let provenance = build_provenance(conn, registry, &fact)?;
     let graph_context = build_graph_context(graph, fact_id);
     let scope_path = scope_tree
         .path_for_id(fact.scope_id)
@@ -74,15 +81,27 @@ fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     FactState::Active
 }
 
-const fn build_provenance(fact: &Fact) -> FactProvenance {
-    FactProvenance {
+fn build_provenance(
+    conn: &Connection,
+    registry: &UpcasterRegistry,
+    fact: &Fact,
+) -> Result<FactProvenance> {
+    let source_event = match fact.source_event_id {
+        Some(event_id) => {
+            let event_store = EventStore::new(conn, registry);
+            Some(event_store.get_upcasted(event_id)?)
+        }
+        None => None,
+    };
+
+    Ok(FactProvenance {
         source_event_id: fact.source_event_id,
-        source_event: None,
+        source_event,
         importance: fact.importance,
         importance_score: fact.importance_score,
         is_pinned: fact.is_pinned,
         access_count: fact.access_count,
-    }
+    })
 }
 
 fn build_graph_context(graph: &MemoryGraph, fact_id: i64) -> GraphContext {
@@ -150,7 +169,7 @@ mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
     use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactOptions, FactType};
+    use crate::types::{AddFactOptions, EventType, FactType, NewEvent};
     use chrono::Duration;
 
     const DIM: usize = 4;
@@ -291,5 +310,67 @@ mod tests {
             history.timeline[0].kind,
             HistoryEventKind::Created
         ));
+    }
+
+    #[test]
+    fn explain_fact_with_source_event() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+        // Ingest an event to get an event_id
+        let event = NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::Interaction,
+            payload: serde_json::json!({"role": "user", "content": "hello"}),
+            source: "test".to_string(),
+            session_id: Some("sess-1".to_string()),
+            scope_id: 1,
+            origin_node_id: "node-1".to_string(),
+            sequence_id: 1,
+            created_at: None,
+        };
+        let event_id = engine.ingest(&event).unwrap();
+
+        // Create a fact linked to that event
+        let fact_id = engine
+            .add_fact(
+                "fact from event",
+                FactType::Semantic,
+                Some(event_id),
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let explanation = engine.explain_fact(fact_id).unwrap();
+        assert_eq!(explanation.provenance.source_event_id, Some(event_id));
+
+        let source_event = explanation
+            .provenance
+            .source_event
+            .expect("source_event should be populated");
+        assert_eq!(source_event.id, event_id);
+        assert!(matches!(source_event.event_type, EventType::Interaction));
+    }
+
+    #[test]
+    fn explain_fact_without_source_event() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let fact_id = engine
+            .add_fact(
+                "standalone fact",
+                FactType::Semantic,
+                None,
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let explanation = engine.explain_fact(fact_id).unwrap();
+        assert_eq!(explanation.provenance.source_event_id, None);
+        assert!(explanation.provenance.source_event.is_none());
     }
 }
