@@ -135,6 +135,8 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
     }
 
     // --- Sequential fallback for unpaired entries ---
+    // Only pair a user entry with the next assistant that appears *before*
+    // the next genuine user entry in the sequence (issue #82).
     let mut i = 0;
     while i < relevant.len() {
         let entry = relevant[i];
@@ -144,11 +146,19 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
             && !entry_uuid.is_empty()
             && !used.contains(entry_uuid)
         {
-            // Look for the next assistant entry.
-            if let Some(assistant) = relevant[i + 1..].iter().find(|a| {
+            // Find the index of the next genuine user entry after i.
+            let next_user_bound = relevant[i + 1..]
+                .iter()
+                .position(|e| matches!(e.entry_type, EntryType::User) && !is_tool_result(e))
+                .map_or(relevant.len(), |offset| i + 1 + offset);
+
+            // Search for an assistant only within [i+1 .. next_user_bound).
+            let assistant = relevant[i + 1..next_user_bound].iter().find(|a| {
                 matches!(a.entry_type, EntryType::Assistant)
                     && a.uuid.as_deref().is_some_and(|u| !used.contains(u))
-            }) {
+            });
+
+            if let Some(assistant) = assistant {
                 let tool_results = collect_tool_result_entries(&relevant, assistant);
                 turns.push(build_turn(entry, assistant, &tool_results));
                 used.insert(entry_uuid);
@@ -693,5 +703,42 @@ mod tests {
         let turn = make_turn("Hello world", "Hello! How can I help?");
         let episodes = keyword_prefilter(&[turn], "s1");
         assert!(episodes.is_empty());
+    }
+
+    // -- Issue #82: sequential fallback pairing must not skip user entries --
+
+    #[test]
+    fn sequential_fallback_does_not_skip_intermediate_user() {
+        // Scenario: User1, User2, Assistant2 — none UUID-linked.
+        // The fallback should NOT pair User1 with Assistant2 (skipping User2).
+        // User1 should remain unpaired; User2 should pair with Assistant2.
+        let entries = vec![
+            user_entry("u1", "", "First question", 100),
+            user_entry("u2", "", "Second question", 101),
+            assistant_entry("a2", "", "Answer to second", 102),
+        ];
+        let turns = reconstruct_turns(&entries);
+        // Only User2→Assistant2 should pair; User1 has no adjacent assistant.
+        assert_eq!(turns.len(), 1, "expected 1 turn, got {}", turns.len());
+        assert_eq!(turns[0].user_text, "Second question");
+        assert_eq!(turns[0].assistant_text, "Answer to second");
+    }
+
+    #[test]
+    fn sequential_fallback_pairs_adjacent_correctly() {
+        // User1, Assistant1, User2, Assistant2 — none UUID-linked.
+        // Fallback should pair User1→Assistant1 and User2→Assistant2.
+        let entries = vec![
+            user_entry("u1", "", "First", 100),
+            assistant_entry("a1", "", "Reply one", 101),
+            user_entry("u2", "", "Second", 102),
+            assistant_entry("a2", "", "Reply two", 103),
+        ];
+        let turns = reconstruct_turns(&entries);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].user_text, "First");
+        assert_eq!(turns[0].assistant_text, "Reply one");
+        assert_eq!(turns[1].user_text, "Second");
+        assert_eq!(turns[1].assistant_text, "Reply two");
     }
 }
