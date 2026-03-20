@@ -1242,13 +1242,14 @@ impl MemoryEngine {
     /// - `DumpFormat::JsonZstd(path)`: Same as `Json`, but zstd-compressed.
     ///   Requires the `compress-zstd` feature.
     /// - `DumpFormat::Sqlite(path)`: Creates an atomic backup via `VACUUM INTO`.
-    ///   Only works for file-backed engines.
+    ///   Works for both file-backed and in-memory engines (`SQLite` 3.27+).
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Internal` on I/O failure.
-    /// Returns `MemoryError::Database` on SQL failure.
-    /// Returns `MemoryError::NotImplemented` if a compression format is used
+    /// Returns [`MemoryError::Io`] on filesystem failure.
+    /// Returns [`MemoryError::Conflict`] if the target path resolves to the live database.
+    /// Returns [`MemoryError::Database`] on SQL failure.
+    /// Returns [`MemoryError::NotImplemented`] if a compression format is used
     /// without the corresponding feature enabled.
     #[allow(unreachable_patterns)] // wildcard needed for #[non_exhaustive] forward compat
     pub fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
