@@ -185,14 +185,30 @@ Research (OQ1 in `docs/research/08-open-questions-research.md`) evaluated 4 stor
 
 #### Phase 4a: Introspection & Data (library)
 
-| Feature                                                                                    | Description                                                                                                                                                                                      |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| ✅ Inspection APIs ([#39](https://github.com/dutiona/memory-engine/issues/39))             | `explain_fact()`, `fact_history()`, `replay_events()`, `dump_state()`, `statistics()`                                                                                                            |
-| ✅ Import/export ([#40](https://github.com/dutiona/memory-engine/issues/40))               | `restore_json`, `restore_json_memory`, `restore_sqlite` static constructors. `DumpFormat::JsonGzip`/`JsonZstd` compressed exports. Auto-detection from magic bytes. `EngineConfig`-aware restore |
-| ✅ Semantic extraction queries ([#41](https://github.com/dutiona/memory-engine/issues/41)) | `MemoryQuery` fluent builder: scope + temporal period + FTS/vector + importance/pinned filters. `execute_query()` on engine + async mirror. `#[non_exhaustive]` `MatchType::ImportanceRank`      |
-| `Reranker` trait ([#42](https://github.com/dutiona/memory-engine/issues/42))               | Cross-encoder reranking on top-K candidates after RRF (+5-15% nDCG@10). Consumer-provided                                                                                                        |
-| Session log bootstrap ([#43](https://github.com/dutiona/memory-engine/issues/43))          | Parse Claude Code JSONL session logs into historical memory facts. **Research update:** success-gated ingestion (R1, AWM), workflow extraction (R2, AWM/APC), pre-warming semantics (R3, APC)    |
-| Co-session edges ([#62](https://github.com/dutiona/memory-engine/issues/62))               | ✅ Auto-create `co_session` edges between facts sharing a `session_id`. [PR #67](https://github.com/dutiona/memory-engine/pull/67). Pairs with #43                                               |
+| Feature                                                                                    | Description                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ✅ Inspection APIs ([#39](https://github.com/dutiona/memory-engine/issues/39))             | `explain_fact()`, `fact_history()`, `replay_events()`, `dump_state()`, `statistics()`                                                                                                       |
+| ✅ Import/export ([#40](https://github.com/dutiona/memory-engine/issues/40))               | JSON event log + SQLite backup, gzip/zstd compression                                                                                                                                       |
+| ✅ Semantic extraction queries ([#41](https://github.com/dutiona/memory-engine/issues/41)) | `MemoryQuery` fluent builder: scope + temporal period + FTS/vector + importance/pinned filters. `execute_query()` on engine + async mirror. `#[non_exhaustive]` `MatchType::ImportanceRank` |
+| ✅ `Reranker` trait ([#42](https://github.com/dutiona/memory-engine/issues/42))            | Cross-encoder reranking on top-K candidates after RRF (+5-15% nDCG@10). Consumer-provided                                                                                                   |
+| ✅ Session log bootstrap ([#43](https://github.com/dutiona/memory-engine/issues/43))       | Parse Claude Code JSONL session logs into historical memory facts. Success-gated ingestion (AWM), workflow extraction (AWM/APC), pre-warming semantics (APC)                                |
+| ✅ Co-session edges ([#62](https://github.com/dutiona/memory-engine/issues/62))            | Auto-create `co_session` edges between facts sharing a `session_id`. [PR #67](https://github.com/dutiona/memory-engine/pull/67). Pairs with #43                                             |
+
+#### Phase 4a Follow-ups (polish & hardening)
+
+Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c.
+
+| Issue                                                        | Category  | Description                                                                                              |
+| ------------------------------------------------------------ | --------- | -------------------------------------------------------------------------------------------------------- |
+| [#76](https://github.com/dutiona/memory-engine/issues/76)    | perf      | Streaming JSON dump for large databases                                                                  |
+| ✅ [#77](https://github.com/dutiona/memory-engine/issues/77) | feat      | Populate `source_event` in `FactProvenance`. [PR #89](https://github.com/dutiona/memory-engine/pull/89)  |
+| ✅ [#78](https://github.com/dutiona/memory-engine/issues/78) | feat      | Dedicated `surfaced_at` column for due facts. [PR #92](https://github.com/dutiona/memory-engine/pull/92) |
+| [#79](https://github.com/dutiona/memory-engine/issues/79)    | refactor  | Drop `RwLock` guards before DB read in `explain_fact`                                                    |
+| ✅ [#80](https://github.com/dutiona/memory-engine/issues/80) | fix       | Allow `VACUUM INTO` from in-memory databases. [PR #88](https://github.com/dutiona/memory-engine/pull/88) |
+| [#73](https://github.com/dutiona/memory-engine/issues/73)    | refactor  | Scope-aware session lookup in `link_session_facts`                                                       |
+| [#82](https://github.com/dutiona/memory-engine/issues/82)    | hardening | Harden sequential fallback pairing in bootstrap `filter.rs`                                              |
+| [#83](https://github.com/dutiona/memory-engine/issues/83)    | hardening | Propagate interrupted flag through bootstrap `filter.rs`                                                 |
+| [#85](https://github.com/dutiona/memory-engine/issues/85)    | hardening | Reranker output validation — subset/permutation guard                                                    |
 
 #### Phase 4b: Tooling (new workspace binaries)
 
@@ -292,8 +308,8 @@ Consumer (AI agent, CLI tool, MCP server)
 │  ingest · add_fact · query               │  ← Phase 1 ✅
 │  consolidate · forget · resolve          │  ← Phase 2 ✅
 │  resume_context · list_due · pin/unpin  │  ← Phase 3/3b ✅
-│  explain · replay · dump · statistics   │  ← Phase 4a
-│  link_session_facts                     │  ← Phase 4a
+│  explain · replay · dump · statistics   │  ← Phase 4a ✅
+│  import · export · link_session_facts  │  ← Phase 4a ✅
 │  dream_cycle · sample_dormant           │  ← Phase 5
 │  record_outcome · dedup_semantic        │  ← Phase 5 (#63, #64)
 ├──────────────────────────────────────────┤
@@ -305,7 +321,7 @@ Consumer (AI agent, CLI tool, MCP server)
 │  ├─ FTS5 (BM25, scope-filtered)          │
 │  ├─ Vector (cosine / HNSW ANN)           │
 │  ├─ Hybrid (RRF k=60)                   │
-│  └─ Reranker (cross-encoder, optional)  │  ← Phase 4a
+│  └─ Reranker (cross-encoder, optional)  │  ← Phase 4a ✅
 ├──────────────────────────────────────────┤
 │  Store                                   │
 │  ├─ EventStore (append-only, upcasting)  │
@@ -349,7 +365,7 @@ SummaryGenerator::summarize(facts) → String            ← Phase 2 ✅
 SummaryGenerator::embed(text) → Vec<f32>               ← Phase 2 ✅
 ConflictArbiter::arbitrate(old, new) → CrudDecision    ← Phase 2 ✅
 PersistenceClassifier::should_pin(fact) → bool         ← Phase 3b ✅
-Reranker::rerank(query, candidates) → Vec<ScoredFact>  ← Phase 4a
+Reranker::rerank(query, candidates) → Vec<ScoredFact>  ← Phase 4a ✅
 InsightStream::record(insight) → Result<()>             ← Phase 5
 DreamCycle::run(engine) → Result<CycleReport>           ← Phase 5
 KnowledgeBaseConnector::resolve(uri) → KnowledgeChunk  ← Phase 6
