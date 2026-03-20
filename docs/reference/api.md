@@ -134,13 +134,13 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Inspection
 
-| Method          | Signature                                              | Description                                                                                      |
-| --------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| `statistics`    | `(&self) -> Result<EngineStatistics>`                  | Aggregate counts of facts, edges, summaries, scopes, events, and storage metrics.                |
-| `explain_fact`  | `(&self, id: i64) -> Result<FactExplanation>`          | Why a fact is in its current state: provenance, graph context, scope path.                       |
-| `fact_history`  | `(&self, id: i64) -> Result<FactHistory>`              | Bi-temporal timeline of a fact's lifecycle from its temporal stamps.                             |
-| `replay_events` | `(&self, filter: &ReplayFilter) -> Result<Vec<Event>>` | Replay a filtered segment of the event log. Supports ID range, time window, session, and upcast. |
-| `dump_state`    | `(&self, format: &DumpFormat) -> Result<()>`           | Export full engine state to JSON or SQLite backup.                                               |
+| Method          | Signature                                              | Description                                                                                                   |
+| --------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `statistics`    | `(&self) -> Result<EngineStatistics>`                  | Aggregate counts of facts, edges, summaries, scopes, events, and storage metrics.                             |
+| `explain_fact`  | `(&self, id: i64) -> Result<FactExplanation>`          | Why a fact is in its current state: provenance (with source event when available), graph context, scope path. |
+| `fact_history`  | `(&self, id: i64) -> Result<FactHistory>`              | Bi-temporal timeline of a fact's lifecycle from its temporal stamps.                                          |
+| `replay_events` | `(&self, filter: &ReplayFilter) -> Result<Vec<Event>>` | Replay a filtered segment of the event log. Supports ID range, time window, session, and upcast.              |
+| `dump_state`    | `(&self, format: &DumpFormat) -> Result<()>`           | Export full engine state to JSON or SQLite backup.                                                            |
 
 ### Scheduling
 
