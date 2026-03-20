@@ -186,7 +186,7 @@ engine.dump_state(&DumpFormat::JsonGzip("snapshot.json.gz".into()))?;
 // Zstd-compressed JSON (requires `compress-zstd` feature)
 engine.dump_state(&DumpFormat::JsonZstd("snapshot.json.zst".into()))?;
 
-// SQLite backup via VACUUM INTO (file-backed only)
+// SQLite backup via VACUUM INTO (file-backed and in-memory)
 engine.dump_state(&DumpFormat::Sqlite("backup.db".into()))?;
 ```
 
@@ -197,7 +197,7 @@ engine.dump_state(&DumpFormat::Sqlite("backup.db".into()))?;
 | JSON      | High (any lang) | Slower | Yes                | Yes (large output)  | —               |
 | JSON+gzip | High            | Medium | Yes                | Yes (compressed)    | `compress-gzip` |
 | JSON+zstd | High            | Medium | Yes                | Yes (compressed)    | `compress-zstd` |
-| SQLite    | Native (SQLite) | Fast   | No (returns error) | Yes (binary BLOB)   | —               |
+| SQLite    | Native (SQLite) | Fast   | Yes (SQLite 3.27+) | Yes (binary BLOB)   | —               |
 
 The JSON dump produces an `EngineSnapshot` containing all facts, edges, summaries,
 scopes, events, and config. Raw events are stored (not upcasted) for snapshot fidelity.

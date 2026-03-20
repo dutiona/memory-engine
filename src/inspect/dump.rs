@@ -59,11 +59,12 @@ fn write_snapshot(writer: impl Write, snapshot: &EngineSnapshot) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`] on SQL failure or
-/// [`MemoryError::Internal`] on I/O or serialization failure.
+/// Returns [`MemoryError::Database`] on SQL failure,
+/// [`MemoryError::Io`] on filesystem failure, or
+/// [`MemoryError::Serialization`] on JSON serialization failure.
 pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
     let snapshot = build_snapshot(conn, embed_dim)?;
-    let file = File::create(path).map_err(|e| MemoryError::Internal(e.to_string()))?;
+    let file = File::create(path)?;
     write_snapshot(BufWriter::new(file), &snapshot)
 }
 
@@ -71,12 +72,13 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`] on SQL failure or
-/// [`MemoryError::Internal`] on I/O or serialization failure.
+/// Returns [`MemoryError::Database`] on SQL failure,
+/// [`MemoryError::Io`] on filesystem failure, or
+/// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-gzip")]
 pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
     let snapshot = build_snapshot(conn, embed_dim)?;
-    let file = File::create(path).map_err(|e| MemoryError::Internal(e.to_string()))?;
+    let file = File::create(path)?;
     let encoder =
         flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::default());
     write_snapshot(encoder, &snapshot)
@@ -86,55 +88,50 @@ pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`] on SQL failure or
-/// [`MemoryError::Internal`] on I/O or serialization failure.
+/// Returns [`MemoryError::Database`] on SQL failure,
+/// [`MemoryError::Io`] on filesystem or zstd I/O failure, or
+/// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-zstd")]
 pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
     let snapshot = build_snapshot(conn, embed_dim)?;
-    let file = File::create(path).map_err(|e| MemoryError::Internal(e.to_string()))?;
-    let mut encoder = zstd::Encoder::new(BufWriter::new(file), zstd::DEFAULT_COMPRESSION_LEVEL)
-        .map_err(|e| MemoryError::Internal(format!("zstd encoder init failed: {e}")))?;
+    let file = File::create(path)?;
+    let mut encoder = zstd::Encoder::new(BufWriter::new(file), zstd::DEFAULT_COMPRESSION_LEVEL)?;
     serde_json::to_writer(&mut encoder, &snapshot)?;
-    encoder
-        .finish()
-        .map_err(|e| MemoryError::Internal(format!("zstd finish failed: {e}")))?;
+    encoder.finish()?;
     Ok(())
 }
 
 /// Create an atomic `SQLite` backup via `VACUUM INTO`.
 ///
+/// Works for both file-backed and in-memory databases (`SQLite` 3.27+).
+///
 /// # Errors
 ///
-/// Returns [`MemoryError::Internal`] if the database is in-memory or
-/// the `VACUUM INTO` statement fails.
+/// Returns [`MemoryError::Io`] on filesystem failures or
+/// [`MemoryError::Internal`] if `VACUUM INTO` fails.
 pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
-    // Check if this is an in-memory database
+    // Detect whether this is a file-backed database.
     let db_path: String = conn
         .query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
         .map_err(|e| MemoryError::Internal(format!("cannot read database path: {e}")))?;
 
-    if db_path.is_empty() || db_path == ":memory:" {
-        return Err(MemoryError::Internal(
-            "cannot create SQLite backup from in-memory database; use DumpFormat::Json instead"
-                .to_string(),
-        ));
-    }
+    let is_file_backed = !db_path.is_empty() && db_path != ":memory:";
 
     // Guard: refuse to dump onto the live database file (or a symlink resolving to it).
-    let source = std::fs::canonicalize(&db_path)
-        .map_err(|e| MemoryError::Internal(format!("cannot canonicalize db path: {e}")))?;
-    if let Ok(target) = std::fs::canonicalize(path) {
-        if target == source {
-            return Err(MemoryError::Internal(
-                "dump target resolves to the live database file".to_string(),
-            ));
+    if is_file_backed {
+        let source = std::fs::canonicalize(&db_path)?;
+        if let Ok(target) = std::fs::canonicalize(path) {
+            if target == source {
+                return Err(MemoryError::Conflict(
+                    "dump target resolves to the live database file".to_string(),
+                ));
+            }
         }
     }
 
     // Remove existing file to avoid VACUUM INTO failure on re-run.
     if path.exists() {
-        std::fs::remove_file(path)
-            .map_err(|e| MemoryError::Internal(format!("cannot remove existing dump file: {e}")))?;
+        std::fs::remove_file(path)?;
     }
 
     let escaped = path.to_string_lossy().replace('\'', "''");
@@ -189,16 +186,40 @@ mod tests {
         assert_eq!(snapshot.facts.len(), 1);
         assert_eq!(snapshot.facts[0].content, "test fact");
         assert_eq!(snapshot.embed_dim, DIM);
-        assert!(snapshot.scopes.len() >= 1); // root scope
+        assert!(!snapshot.scopes.is_empty()); // root scope
     }
 
     #[test]
-    fn sqlite_dump_fails_for_in_memory() {
+    fn sqlite_dump_from_in_memory() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
+        engine
+            .add_fact(
+                "in-memory fact",
+                FactType::Semantic,
+                None,
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("dump.db");
-        let result = engine.dump_state(&DumpFormat::Sqlite(db_path));
-        assert!(result.is_err());
+        engine
+            .dump_state(&DumpFormat::Sqlite(db_path.clone()))
+            .unwrap();
+
+        // Verify the dump is a valid SQLite database with our data.
+        let dump_conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = dump_conn
+            .query_row("SELECT count(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[cfg(feature = "compress-gzip")]
