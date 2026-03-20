@@ -17,11 +17,11 @@ use output::OutputFormat;
     about = "Operator tool for agent memory databases",
     long_about = "memory-engine-cli is a command-line inspector for memory-engine databases.\n\n\
         It provides read-only access to facts, events, statistics, and provenance.\n\
-        For data portability, use export/import for JSON snapshots or SQLite backups.",
+        For data portability, use export/import for JSON snapshots or `SQLite` backups.",
     after_help = "Set MEMORY_ENGINE_DB to avoid passing --db on every invocation."
 )]
 struct Cli {
-    /// Path to the memory-engine SQLite database
+    /// Path to the memory-engine `SQLite` database
     #[arg(long, env = "MEMORY_ENGINE_DB")]
     db: PathBuf,
 
@@ -49,7 +49,7 @@ enum Commands {
     },
     /// Search facts by text (FTS5 full-text search)
     Query(commands::query::QueryArgs),
-    /// Export engine state to file (JSON, SQLite, compressed)
+    /// Export engine state to file (JSON, `SQLite`, compressed)
     Export(commands::export::ExportArgs),
     /// Import a JSON snapshot into a new database
     Import(commands::import::ImportArgs),
