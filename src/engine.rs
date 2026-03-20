@@ -20,7 +20,7 @@ use crate::store::summaries::SummaryStore;
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
-    EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, SummaryGenerator,
+    EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, Reranker, SummaryGenerator,
 };
 use crate::types::{AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact};
 
@@ -70,6 +70,7 @@ pub struct MemoryEngine {
     graph: RwLock<MemoryGraph>,
     scope_tree: RwLock<ScopeTree>,
     vector_strategy: Box<dyn VectorSearchStrategy>,
+    reranker: Option<Box<dyn Reranker>>,
     #[cfg(feature = "ann")]
     hnsw_strategy: Option<crate::search::ann::HnswStrategy>,
     #[cfg_attr(not(feature = "ann"), allow(dead_code))]
@@ -83,6 +84,7 @@ impl std::fmt::Debug for MemoryEngine {
             .field("embed_dim", &self.embed_dim)
             .field("vector_strategy", &self.vector_strategy.name())
             .field("active_strategy", &self.active_strategy_name())
+            .field("reranker", &self.reranker_name())
             .finish_non_exhaustive()
     }
 }
@@ -108,6 +110,7 @@ impl MemoryEngine {
             config.embed_dim,
             config.search_config.clone(),
             config.upcaster_registry.clone(),
+            None,
         )
     }
 
@@ -118,7 +121,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` if the connection or schema setup fails.
     pub fn open_memory(embed_dim: usize) -> Result<Self> {
         let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(pool, embed_dim, None, UpcasterRegistry::new())
+        Self::init_from_pool(pool, embed_dim, None, UpcasterRegistry::new(), None)
     }
 
     /// Open an in-memory engine with optional search config for testing.
@@ -131,7 +134,59 @@ impl MemoryEngine {
         search_config: Option<SearchConfig>,
     ) -> Result<Self> {
         let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(pool, embed_dim, search_config, UpcasterRegistry::new())
+        Self::init_from_pool(
+            pool,
+            embed_dim,
+            search_config,
+            UpcasterRegistry::new(),
+            None,
+        )
+    }
+
+    /// Open a file-backed engine with an optional reranker.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
+    pub fn open_with_reranker(
+        config: &EngineConfig,
+        reranker: Option<Box<dyn Reranker>>,
+    ) -> Result<Self> {
+        let pool = ConnectionPool::open(
+            &config.path,
+            config.embed_dim,
+            config.read_pool_size,
+            config.backup_dir.as_deref(),
+        )?;
+        Self::init_from_pool(
+            pool,
+            config.embed_dim,
+            config.search_config.clone(),
+            config.upcaster_registry.clone(),
+            reranker,
+        )
+    }
+
+    /// Open an in-memory engine with optional search config and reranker.
+    ///
+    /// Subsumes `open_memory_with_config()` — allows combining both.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` if the connection or schema setup fails.
+    pub fn open_memory_with(
+        embed_dim: usize,
+        search_config: Option<SearchConfig>,
+        reranker: Option<Box<dyn Reranker>>,
+    ) -> Result<Self> {
+        let pool = ConnectionPool::open_memory(embed_dim)?;
+        Self::init_from_pool(
+            pool,
+            embed_dim,
+            search_config,
+            UpcasterRegistry::new(),
+            reranker,
+        )
     }
 
     /// Shared constructor logic: validate embed_dim, load graph and scope tree.
@@ -140,6 +195,7 @@ impl MemoryEngine {
         embed_dim: usize,
         search_config: Option<SearchConfig>,
         upcaster_registry: UpcasterRegistry,
+        reranker: Option<Box<dyn Reranker>>,
     ) -> Result<Self> {
         // Scope the MutexGuard so it drops before we move `pool` into the struct.
         let (graph, scope_tree) = {
@@ -171,11 +227,18 @@ impl MemoryEngine {
             graph: RwLock::new(graph),
             scope_tree: RwLock::new(scope_tree),
             vector_strategy: Box::new(BruteForce),
+            reranker,
             #[cfg(feature = "ann")]
             hnsw_strategy,
             search_config,
             upcaster_registry,
         })
+    }
+
+    /// Returns the name of the active reranker, if any.
+    #[must_use]
+    pub fn reranker_name(&self) -> Option<&str> {
+        self.reranker.as_ref().map(|r| r.name())
     }
 
     /// Name of the strategy that would be used for a query right now.
@@ -386,9 +449,20 @@ impl MemoryEngine {
         #[cfg(not(feature = "ann"))]
         let strategy: &dyn VectorSearchStrategy = &*self.vector_strategy;
 
-        self.with_read(|conn| {
+        let mut results = self.with_read(|conn| {
             hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
-        })
+        })?;
+
+        // Apply reranker if present and query has text (cross-encoder needs query text).
+        // Runs OUTSIDE the read lock — reranking may involve slow inference/API calls.
+        if let (Some(reranker), Some(text)) = (&self.reranker, &query.text) {
+            results = reranker.rerank(text, results)?;
+        }
+
+        // Always truncate to limit — rerank_depth may have over-fetched from hybrid_search.
+        results.truncate(query.limit);
+
+        Ok(results)
     }
 
     // --- Public API: MemoryQuery ---
@@ -531,6 +605,7 @@ impl MemoryEngine {
             embedding: query.embedding.clone(),
             mode,
             limit,
+            rerank_depth: None,
             valid_at: search_cutoff,
             fact_type: query.fact_type.clone(),
             scope: query.scope.clone(),
@@ -1307,6 +1382,7 @@ mod tests {
             embedding: None,
             mode: SearchMode::Fts,
             limit: 10,
+            rerank_depth: None,
             valid_at: None,
             fact_type: None,
             scope: None,
@@ -1677,6 +1753,7 @@ mod tests {
                         embedding: None,
                         mode: SearchMode::Fts,
                         limit: 10,
+                        rerank_depth: None,
                         valid_at: None,
                         fact_type: None,
                         scope: None,
@@ -1724,6 +1801,7 @@ mod tests {
                     embedding: None,
                     mode: SearchMode::Fts,
                     limit: 10,
+                    rerank_depth: None,
                     valid_at: None,
                     fact_type: None,
                     scope: None,
@@ -1848,6 +1926,7 @@ mod tests {
             embedding: None,
             mode: SearchMode::Fts,
             limit: 10,
+            rerank_depth: None,
             valid_at: None,
             fact_type: None,
             scope: Some(ScopeQuery::Exact("nonexistent/scope".into())),
@@ -1928,6 +2007,7 @@ mod tests {
                 embedding: None,
                 mode: SearchMode::Fts,
                 limit: 10,
+                rerank_depth: None,
                 valid_at: None,
                 fact_type: None,
                 scope: None,
@@ -1945,6 +2025,7 @@ mod tests {
                 embedding: None,
                 mode: SearchMode::Fts,
                 limit: 10,
+                rerank_depth: None,
                 valid_at: None,
                 fact_type: None,
                 scope: None,
@@ -2532,5 +2613,486 @@ mod tests {
 
         let results = engine.execute_query(&MemoryQuery::new()).unwrap();
         assert_eq!(results.len(), 50); // default limit
+    }
+
+    // --- Reranker tests ---
+
+    struct ReverseReranker;
+    impl Reranker for ReverseReranker {
+        fn rerank(
+            &self,
+            _query: &str,
+            mut candidates: Vec<SearchResult>,
+        ) -> Result<Vec<SearchResult>> {
+            candidates.reverse();
+            Ok(candidates)
+        }
+        fn name(&self) -> &str {
+            "reverse"
+        }
+    }
+
+    struct FailingReranker;
+    impl Reranker for FailingReranker {
+        fn rerank(
+            &self,
+            _query: &str,
+            _candidates: Vec<SearchResult>,
+        ) -> Result<Vec<SearchResult>> {
+            Err(MemoryError::Reranker("cross-encoder timeout".into()))
+        }
+        fn name(&self) -> &str {
+            "failing"
+        }
+    }
+
+    /// Records how many candidates it received, then passes through.
+    struct SpyReranker {
+        seen_count: std::sync::atomic::AtomicUsize,
+    }
+    impl SpyReranker {
+        fn new() -> Self {
+            Self {
+                seen_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn seen(&self) -> usize {
+            self.seen_count.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+    impl Reranker for SpyReranker {
+        fn rerank(&self, _query: &str, candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>> {
+            self.seen_count
+                .store(candidates.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(candidates)
+        }
+        fn name(&self) -> &str {
+            "spy"
+        }
+    }
+
+    #[test]
+    fn reranker_none_results_unchanged() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "alpha fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "beta fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = engine
+            .query(&SearchQuery {
+                text: Some("fact".into()),
+                embedding: None,
+                mode: SearchMode::Fts,
+                limit: 10,
+                rerank_depth: None,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn reranker_reverses_order() {
+        let engine =
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "alpha fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "beta fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Get baseline order (no reranker)
+        let baseline_engine = MemoryEngine::open_memory(DIM).unwrap();
+        baseline_engine
+            .add_fact(
+                "alpha fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        baseline_engine
+            .add_fact(
+                "beta fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let baseline = baseline_engine
+            .query(&SearchQuery {
+                text: Some("fact".into()),
+                embedding: None,
+                mode: SearchMode::Fts,
+                limit: 10,
+                rerank_depth: None,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+
+        let reranked = engine
+            .query(&SearchQuery {
+                text: Some("fact".into()),
+                embedding: None,
+                mode: SearchMode::Fts,
+                limit: 10,
+                rerank_depth: None,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+
+        assert_eq!(baseline.len(), reranked.len());
+        assert_eq!(baseline.len(), 2);
+        // Reversed order
+        assert_eq!(baseline[0].fact.content, reranked[1].fact.content);
+        assert_eq!(baseline[1].fact.content, reranked[0].fact.content);
+    }
+
+    #[test]
+    fn reranker_skipped_for_vector_only_no_text() {
+        let engine =
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "alpha",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "beta",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = engine
+            .query(&SearchQuery {
+                text: None,
+                embedding: Some(vec![0.5; DIM]),
+                mode: SearchMode::Vector,
+                limit: 10,
+                rerank_depth: None,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+
+        // Reranker should NOT have fired (no text) — order should match vector similarity.
+        // Both have identical embeddings, so they're equivalent; just check we got results.
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn reranker_applies_to_fts_only_mode() {
+        let engine =
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "alpha fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "beta fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // FTS-only with text → reranker should fire
+        let results = engine
+            .query(&SearchQuery {
+                text: Some("fact".into()),
+                embedding: None,
+                mode: SearchMode::Fts,
+                limit: 10,
+                rerank_depth: None,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        // Results are reversed by ReverseReranker
+    }
+
+    #[test]
+    fn reranker_applies_to_vector_mode_with_text() {
+        let engine =
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "alpha",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "beta",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Vector mode WITH text → reranker should fire
+        let results = engine
+            .query(&SearchQuery {
+                text: Some("alpha".into()),
+                embedding: Some(vec![0.5; DIM]),
+                mode: SearchMode::Vector,
+                limit: 10,
+                rerank_depth: None,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+
+        // Should still get results (vector search ignores text, but reranker fires)
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn rerank_depth_overfetches_then_truncates() {
+        let spy = std::sync::Arc::new(SpyReranker::new());
+        // Clone Arc into Box<dyn Reranker> — SpyReranker is Send+Sync
+        let engine = MemoryEngine::open_memory_with(
+            DIM,
+            None,
+            Some(Box::new(SpyRerankerWrapper(spy.clone()))),
+        )
+        .unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        // Insert 10 facts
+        for i in 0..10 {
+            engine
+                .add_fact(
+                    &format!("rerank test fact {i}"),
+                    FactType::Episodic,
+                    None,
+                    &embedder,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let results = engine
+            .query(&SearchQuery {
+                text: Some("rerank test fact".into()),
+                embedding: None,
+                mode: SearchMode::Fts,
+                limit: 3,
+                rerank_depth: Some(8),
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+
+        // Reranker should have seen up to 8 candidates
+        assert!(
+            spy.seen() > 3,
+            "reranker should see more than limit (saw {})",
+            spy.seen()
+        );
+        assert!(
+            spy.seen() <= 8,
+            "reranker should see at most rerank_depth (saw {})",
+            spy.seen()
+        );
+        // But final output truncated to limit
+        assert!(results.len() <= 3);
+    }
+
+    /// Wrapper to allow `Arc<SpyReranker>` to be `Box<dyn Reranker>`.
+    struct SpyRerankerWrapper(std::sync::Arc<SpyReranker>);
+    impl Reranker for SpyRerankerWrapper {
+        fn rerank(&self, query: &str, candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>> {
+            self.0.rerank(query, candidates)
+        }
+        fn name(&self) -> &str {
+            "spy_wrapper"
+        }
+    }
+
+    #[test]
+    fn reranker_error_propagates() {
+        let engine =
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(FailingReranker))).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "test fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let result = engine.query(&SearchQuery {
+            text: Some("test".into()),
+            embedding: None,
+            mode: SearchMode::Fts,
+            limit: 10,
+            rerank_depth: None,
+            valid_at: None,
+            fact_type: None,
+            scope: None,
+        });
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MemoryError::Reranker(_)));
+    }
+
+    #[test]
+    fn reranker_name_accessor() {
+        let engine_none = MemoryEngine::open_memory(DIM).unwrap();
+        assert_eq!(engine_none.reranker_name(), None);
+
+        let engine_some =
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+        assert_eq!(engine_some.reranker_name(), Some("reverse"));
+    }
+
+    #[test]
+    fn debug_output_includes_reranker() {
+        let engine =
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+        let debug = format!("{engine:?}");
+        assert!(
+            debug.contains("reverse"),
+            "Debug output should include reranker name"
+        );
+    }
+
+    #[test]
+    fn rerank_depth_none_falls_back_to_limit() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        for i in 0..10 {
+            engine
+                .add_fact(
+                    &format!("limit test fact {i}"),
+                    FactType::Episodic,
+                    None,
+                    &embedder,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let results = engine
+            .query(&SearchQuery {
+                text: Some("limit test fact".into()),
+                embedding: None,
+                mode: SearchMode::Fts,
+                limit: 5,
+                rerank_depth: None,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            results.len(),
+            5,
+            "should respect limit when rerank_depth is None"
+        );
     }
 }

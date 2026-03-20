@@ -64,6 +64,7 @@ fn main() -> Result<(), MemoryError> {
         embedding: Some(vec![0.1; 4]),
         mode: SearchMode::Hybrid,
         limit: 5,
+        rerank_depth: None,
         valid_at: None,
         fact_type: None,
         scope: None,

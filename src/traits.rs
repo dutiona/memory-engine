@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::search::hybrid::SearchResult;
 use crate::types::Fact;
 
 // --- Phase 1: Embedding provider (fully used) ---
@@ -77,6 +78,32 @@ pub trait PersistenceClassifier {
         let _ = fact;
         false
     }
+}
+
+// --- Phase 4a: Reranker ---
+
+/// Trait for reranking search results after initial retrieval (Phase 4a).
+///
+/// Cross-encoder rerankers score (query, candidate) pairs precisely,
+/// improving nDCG@10 by 5-15% on top-K candidates after RRF merge.
+///
+/// Optional — when no reranker is provided, RRF results pass through unchanged.
+///
+/// # Contract
+///
+/// - Input: query text + candidates from hybrid search (FTS + vector + RRF)
+/// - Output: reordered/rescored candidates (may filter, must not add new facts)
+/// - The returned vec length must be <= input length
+pub trait Reranker: Send + Sync {
+    /// Rerank candidates for the given query text.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Reranker` if reranking fails (e.g., API call, inference error).
+    fn rerank(&self, query: &str, candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>>;
+
+    /// Human-readable name for logging and debug output.
+    fn name(&self) -> &str;
 }
 
 /// Configuration for the consolidation process (Phase 2).
