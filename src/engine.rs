@@ -1303,16 +1303,23 @@ impl MemoryEngine {
     /// Returns `MemoryError::NotFound` if the fact doesn't exist.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
-        let graph = self.graph.read();
+        // Snapshot graph context before the DB call to release the graph lock
+        // early — connected-component traversal is the expensive part.
+        let graph_context = {
+            let graph = self.graph.read();
+            crate::inspect::explain::build_graph_context(&graph, id)
+        };
+        // scope_tree lock is still held across with_read because scope_path
+        // resolution requires fact.scope_id, which comes from the DB.
         let scope_tree = self.scope_tree.read();
         self.with_read(|conn| {
             crate::inspect::explain::explain_fact(
                 conn,
-                &graph,
                 &scope_tree,
                 self.embed_dim,
                 id,
                 &self.upcaster_registry,
+                graph_context.clone(),
             )
         })
     }

@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::graph::MemoryGraph;
 use crate::scope::tree::ScopeTree;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
@@ -26,11 +25,11 @@ use super::types::{
 /// Returns [`MemoryError::Database`] on SQL failure.
 pub fn explain_fact(
     conn: &Connection,
-    graph: &MemoryGraph,
     scope_tree: &ScopeTree,
     embed_dim: usize,
     fact_id: i64,
     registry: &UpcasterRegistry,
+    graph_context: GraphContext,
 ) -> Result<FactExplanation> {
     let store = FactStore::new(conn, embed_dim);
     let fact = store.get(fact_id)?;
@@ -38,7 +37,6 @@ pub fn explain_fact(
 
     let state = determine_state(&fact, now);
     let provenance = build_provenance(conn, registry, &fact)?;
-    let graph_context = build_graph_context(graph, fact_id);
     let scope_path = scope_tree
         .path_for_id(fact.scope_id)
         .unwrap_or_else(|| format!("scope:{}", fact.scope_id));
@@ -101,7 +99,7 @@ fn build_provenance(
     })
 }
 
-fn build_graph_context(graph: &MemoryGraph, fact_id: i64) -> GraphContext {
+pub(crate) fn build_graph_context(graph: &crate::graph::MemoryGraph, fact_id: i64) -> GraphContext {
     let degree = graph.degree(fact_id);
     // Use connected_component to get ALL neighbors (in + out), consistent with degree.
     // `neighbors()` only returns outgoing, which would be inconsistent with degree.
