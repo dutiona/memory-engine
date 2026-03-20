@@ -159,3 +159,43 @@ fn fact_history_not_found() {
     let err = engine.fact_history(999);
     assert!(err.is_err());
 }
+
+/// `list_due` stamps `surfaced_at` on first return, and subsequent calls
+/// preserve the original timestamp (idempotent stamping).
+#[test]
+fn stamp_surfaced_on_list_due() {
+    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let now = Utc::now();
+
+    // Add a fact with t_valid in the past so it is immediately due.
+    let opts = AddFactOptions {
+        t_valid: Some(now - Duration::hours(1)),
+        ..Default::default()
+    };
+    engine
+        .add_fact(
+            "due reminder",
+            FactType::Episodic,
+            None,
+            &TestEmbed,
+            None,
+            Some(&opts),
+            None,
+        )
+        .unwrap();
+
+    // First call: surfaced_at should be stamped.
+    let due1 = engine.list_due(now, None).unwrap();
+    assert_eq!(due1.len(), 1);
+    let ts1 = due1[0]
+        .surfaced_at
+        .expect("surfaced_at should be Some after first list_due");
+
+    // Second call: surfaced_at must be identical (not re-stamped).
+    let due2 = engine.list_due(now + Duration::seconds(5), None).unwrap();
+    assert_eq!(due2.len(), 1);
+    let ts2 = due2[0]
+        .surfaced_at
+        .expect("surfaced_at should still be Some on second call");
+    assert_eq!(ts1, ts2, "surfaced_at must not change across calls");
+}

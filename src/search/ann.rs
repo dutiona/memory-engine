@@ -425,6 +425,7 @@ mod tests {
                     access_count: 0,
                     last_accessed: Utc::now(),
                     metadata: serde_json::json!({}),
+                    is_pinned: false,
                 };
                 let id = store.insert(&fact).unwrap();
                 ids.push(id);
@@ -467,6 +468,7 @@ mod tests {
                 access_count: 0,
                 last_accessed: Utc::now(),
                 metadata: serde_json::json!({}),
+                is_pinned: false,
             };
             let new_id = store.insert(&new_fact).unwrap();
             strategy.notify_insert(new_id, &new_emb);

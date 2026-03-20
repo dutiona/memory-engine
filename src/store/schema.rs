@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -146,6 +146,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrate_v2_to_v3, true),
     (migrate_v3_to_v4, false),
     (migrate_v4_to_v5, false),
+    (migrate_v5_to_v6, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -520,6 +521,12 @@ fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add `surfaced_at` column for tracking when due facts are first returned to consumers.
+fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
+    conn.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")?;
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -554,7 +561,8 @@ CREATE TABLE IF NOT EXISTS facts (
     metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
     scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
     is_pinned INTEGER NOT NULL DEFAULT 0,
-    importance_score REAL NOT NULL DEFAULT 0.5
+    importance_score REAL NOT NULL DEFAULT 0.5,
+    surfaced_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -944,6 +952,80 @@ CREATE INDEX IF NOT EXISTS idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid
 CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, sequence_id);
 ";
 
+    /// Frozen v5 schema for testing v5→v6 migration.
+    /// Identical to v4 but with `event_revision` on events table.
+    fn init_schema_v5(conn: &Connection) -> Result<()> {
+        conn.execute_batch(TABLES_V5_DDL)?;
+        conn.execute_batch(SCOPES_DDL_V4)?;
+        conn.execute_batch(FTS5_DDL_V4)?;
+        conn.execute_batch(TRIGGERS_DDL_V4)?;
+        conn.execute_batch(INDEXES_V4_DDL)?;
+        set_config(conn, "schema_version", "5")?;
+        Ok(())
+    }
+
+    const TABLES_V5_DDL: &str = "
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    session_id TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
+    origin_node_id TEXT NOT NULL DEFAULT 'local',
+    sequence_id INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    event_revision INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')),
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    t_valid TEXT,
+    t_invalid TEXT,
+    source_event_id INTEGER REFERENCES events(id),
+    importance REAL NOT NULL DEFAULT 0.5,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)),
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    importance_score REAL NOT NULL DEFAULT 0.5
+);
+
+CREATE TABLE IF NOT EXISTS edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    target_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    relation_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    t_created TEXT NOT NULL,
+    t_expired TEXT,
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+);
+
+CREATE TABLE IF NOT EXISTS summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    level TEXT NOT NULL CHECK(level IN ('local', 'cluster', 'global')),
+    source_fact_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id)
+);
+
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
     #[test]
     fn init_schema_creates_all_tables() {
         let conn = open_memory().unwrap();
@@ -1038,13 +1120,13 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
         // migrate is a no-op on fresh DB
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
     }
 
@@ -1059,7 +1141,7 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
     }
 
@@ -1071,7 +1153,7 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
     }
 
@@ -1105,7 +1187,7 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
 
         // Data survived both migrations
@@ -1195,7 +1277,7 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
 
         // After migration: orphan scope_id fails (FK enforced)
@@ -1323,17 +1405,17 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
     }
 
     #[test]
-    fn fresh_db_creates_v5_schema() {
+    fn fresh_db_creates_v6_schema() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
         conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, is_pinned, importance_score)
@@ -1495,7 +1577,7 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
     }
 
@@ -1517,7 +1599,7 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
 
         // Existing events get default revision = 1
@@ -1601,7 +1683,7 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("5".to_string())
+            Some("6".to_string())
         );
 
         // Event survived all migrations, got default revision
@@ -1614,6 +1696,95 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
             .unwrap();
         assert_eq!(source, "v1-src");
         assert_eq!(revision, 1);
+    }
+
+    // --- v5→v6 migration tests ---
+
+    #[test]
+    fn migrate_v5_to_v6_adds_surfaced_at() {
+        let conn = open_memory().unwrap();
+        init_schema_v5(&conn).unwrap();
+
+        // Insert a fact at v5 (no surfaced_at column yet)
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed)
+             VALUES ('test fact', 'h', X'00', 'episodic', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("6".to_string())
+        );
+
+        // Existing facts have surfaced_at = NULL
+        let surfaced_at: Option<String> = conn
+            .query_row(
+                "SELECT surfaced_at FROM facts WHERE content = 'test fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            surfaced_at.is_none(),
+            "pre-existing facts should have NULL surfaced_at"
+        );
+
+        // New facts can have surfaced_at set
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, surfaced_at)
+             VALUES ('new fact', 'h2', X'00', 'episodic', datetime('now'), datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let surfaced: Option<String> = conn
+            .query_row(
+                "SELECT surfaced_at FROM facts WHERE content = 'new fact'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(surfaced.is_some(), "new facts can have surfaced_at set");
+    }
+
+    #[test]
+    fn fresh_db_has_surfaced_at_column() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        // Insert with explicit surfaced_at
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, surfaced_at)
+             VALUES ('test', 'h', X'00', 'episodic', datetime('now'), datetime('now'), '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let ts: Option<String> = conn
+            .query_row(
+                "SELECT surfaced_at FROM facts WHERE content = 'test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ts, Some("2026-01-01T00:00:00Z".to_string()));
+
+        // Default is NULL
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed)
+             VALUES ('test2', 'h2', X'00', 'episodic', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let ts_default: Option<String> = conn
+            .query_row(
+                "SELECT surfaced_at FROM facts WHERE content = 'test2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(ts_default.is_none());
     }
 
     // --- Schema snapshot test (insta) ---
@@ -1644,11 +1815,11 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
     }
 
     #[test]
-    fn schema_v5_snapshot() {
+    fn schema_v6_snapshot() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         let schema = deterministic_schema_dump(&conn);
-        insta::assert_snapshot!("schema_v5", schema);
+        insta::assert_snapshot!("schema_v6", schema);
     }
 
     // --- Property-based migration tests (proptest) ---

@@ -73,8 +73,8 @@ impl<'a> FactStore<'a> {
             "INSERT INTO facts (content, content_hash, embedding, fact_type,
                 t_created, t_expired, t_valid, t_invalid,
                 source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                is_pinned, importance_score)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                is_pinned, importance_score, surfaced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL)",
             params![
                 fact.content,
                 hash,
@@ -107,7 +107,7 @@ impl<'a> FactStore<'a> {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts WHERE id = ?1",
         )?;
         let dim = self.embed_dim;
@@ -129,7 +129,7 @@ impl<'a> FactStore<'a> {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts WHERE t_expired IS NULL",
         )?;
         let dim = self.embed_dim;
@@ -155,7 +155,7 @@ impl<'a> FactStore<'a> {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts
              WHERE t_expired IS NULL
                AND (t_valid IS NULL OR t_valid <= ?1)
@@ -234,7 +234,7 @@ impl<'a> FactStore<'a> {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts
              WHERE t_expired IS NULL AND scope_id = ?1
              ORDER BY importance DESC
@@ -267,7 +267,7 @@ impl<'a> FactStore<'a> {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
@@ -290,7 +290,7 @@ impl<'a> FactStore<'a> {
         let base = "SELECT id, content, content_hash, embedding, fact_type,
                         t_created, t_expired, t_valid, t_invalid,
                         source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                        is_pinned, importance_score
+                        is_pinned, importance_score, surfaced_at
                  FROM facts WHERE t_expired IS NULL AND is_pinned = 1";
         let dim = self.embed_dim;
         if scope_ids.is_empty() {
@@ -319,7 +319,7 @@ impl<'a> FactStore<'a> {
         let base = "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts
              WHERE t_expired IS NULL AND t_valid IS NOT NULL AND t_valid <= ?1
              AND (t_invalid IS NULL OR t_invalid > ?1)";
@@ -387,6 +387,38 @@ impl<'a> FactStore<'a> {
         }
     }
 
+    /// Stamp `surfaced_at` for facts that have not yet been surfaced.
+    /// Returns the persisted `(fact_id, surfaced_at)` pairs for ALL requested IDs
+    /// (including those already stamped by a prior caller).
+    pub fn stamp_surfaced(
+        &self,
+        fact_ids: &[i64],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(i64, DateTime<Utc>)>> {
+        if fact_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let now_str = now.to_rfc3339();
+        let ids_json = serde_json::to_string(fact_ids)?;
+        // Stamp only unsurfaced facts (idempotent for already-stamped ones)
+        self.conn.execute(
+            "UPDATE facts SET surfaced_at = ?1 WHERE id IN (SELECT value FROM json_each(?2)) AND surfaced_at IS NULL",
+            params![now_str, ids_json],
+        )?;
+        // Re-read persisted values for ALL requested IDs (handles concurrent races)
+        let mut stmt = self.conn.prepare(
+            "SELECT id, surfaced_at FROM facts WHERE id IN (SELECT value FROM json_each(?1)) AND surfaced_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![ids_json], |row| {
+            let id: i64 = row.get(0)?;
+            let ts_str: String = row.get(1)?;
+            let ts = parse_timestamp(&ts_str)?;
+            Ok((id, ts))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Set the pinned flag on a fact.
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
         let rows = self.conn.execute(
@@ -409,7 +441,7 @@ impl<'a> FactStore<'a> {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts ORDER BY id ASC",
         )?;
         let dim = self.embed_dim;
@@ -444,7 +476,7 @@ impl<'a> FactStore<'a> {
         let base = "SELECT id, content, content_hash, embedding, fact_type,
                         t_created, t_expired, t_valid, t_invalid,
                         source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                        is_pinned, importance_score
+                        is_pinned, importance_score, surfaced_at
                  FROM facts
                  WHERE t_expired IS NULL AND importance_score >= ?1
                    AND id NOT IN (SELECT value FROM json_each(?2))";
@@ -521,7 +553,7 @@ impl<'a> FactStore<'a> {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
@@ -588,7 +620,7 @@ impl<'a> FactStore<'a> {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score
+                    is_pinned, importance_score, surfaced_at
              FROM facts
              WHERE {where_clause}
              ORDER BY importance_score DESC"
@@ -634,6 +666,8 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
     let t_valid = parse_optional_timestamp(t_valid_str.as_deref())?;
     let t_invalid = parse_optional_timestamp(t_invalid_str.as_deref())?;
     let last_accessed = parse_timestamp(&last_accessed_str)?;
+    let surfaced_at_str: Option<String> = row.get("surfaced_at")?;
+    let surfaced_at = parse_optional_timestamp(surfaced_at_str.as_deref())?;
 
     let fact_type = str_to_fact_type(&fact_type_str).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -667,6 +701,7 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
         scope_id: row.get("scope_id")?,
         is_pinned: is_pinned_i64 != 0,
         importance_score: row.get("importance_score")?,
+        surfaced_at,
     })
 }
 

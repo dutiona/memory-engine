@@ -144,10 +144,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Scheduling
 
-| Method          | Signature                                                               | Description                                                                                           |
-| --------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `list_due`      | `(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>>` | List active facts whose `t_valid <= now` (future memory that has surfaced). `None` scope = root only. |
-| `next_due_time` | `(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>>`         | Scheduling hint: earliest `t_valid` among active future-dated facts. `None` scope = root only.        |
+| Method          | Signature                                                               | Description                                                                                                                                                                                                 |
+| --------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_due`      | `(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>>` | List active facts whose `t_valid <= now` (future memory that has surfaced). Stamps `surfaced_at` on first return so callers can distinguish newly-due from previously-surfaced facts — the old heuristic (`access_count > 0 && last_accessed > t_valid`) was unreliable for bootstrap/past-dated facts. `None` scope = root only. |
+| `next_due_time` | `(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>>`         | Scheduling hint: earliest `t_valid` among active future-dated facts. `None` scope = root only.                                                                                                              |
 
 ### Resume
 

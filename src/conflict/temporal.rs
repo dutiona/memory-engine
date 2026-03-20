@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
 use crate::graph::{EdgeData, MemoryGraph};
@@ -63,6 +63,7 @@ pub fn resolve_conflict(
         metadata: new_fact.metadata.clone(),
         is_pinned: new_fact.is_pinned,
         importance_score: 0.5,
+        surfaced_at: None,
     };
 
     let decision = arbiter.arbitrate(&old_fact, &new_as_fact)?;

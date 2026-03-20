@@ -103,6 +103,8 @@ pub struct Fact {
     pub scope_id: i64,
     pub is_pinned: bool,
     pub importance_score: f64,
+    #[serde(default)]
+    pub surfaced_at: Option<DateTime<Utc>>,
 }
 
 /// A graph edge between two facts.
@@ -285,8 +287,65 @@ mod tests {
             scope_id: 1,
             is_pinned: false,
             importance_score: 0.5,
+            surfaced_at: None,
         };
         assert!(fact.t_expired.is_none());
         assert!(fact.t_valid.is_none());
+    }
+
+    #[test]
+    fn serde_fact_without_surfaced_at() {
+        // JSON without the surfaced_at field — serde(default) should yield None.
+        let json = r#"{
+            "id": 1,
+            "content": "hello",
+            "content_hash": "abc123",
+            "embedding": [0.1, 0.2],
+            "fact_type": "Semantic",
+            "t_created": "2026-01-01T00:00:00Z",
+            "t_expired": null,
+            "t_valid": null,
+            "t_invalid": null,
+            "source_event_id": null,
+            "importance": 0.5,
+            "access_count": 0,
+            "last_accessed": "2026-01-01T00:00:00Z",
+            "metadata": {},
+            "scope_id": 1,
+            "is_pinned": false,
+            "importance_score": 0.5
+        }"#;
+        let fact: Fact = serde_json::from_str(json).unwrap();
+        assert!(
+            fact.surfaced_at.is_none(),
+            "missing surfaced_at should deserialize as None"
+        );
+
+        // JSON with surfaced_at present — should round-trip correctly.
+        let json_with = r#"{
+            "id": 2,
+            "content": "world",
+            "content_hash": "def456",
+            "embedding": [0.3],
+            "fact_type": "Episodic",
+            "t_created": "2026-01-01T00:00:00Z",
+            "t_expired": null,
+            "t_valid": null,
+            "t_invalid": null,
+            "source_event_id": null,
+            "importance": 0.7,
+            "access_count": 1,
+            "last_accessed": "2026-01-01T00:00:00Z",
+            "metadata": {},
+            "scope_id": 1,
+            "is_pinned": false,
+            "importance_score": 0.7,
+            "surfaced_at": "2026-03-15T12:00:00Z"
+        }"#;
+        let fact2: Fact = serde_json::from_str(json_with).unwrap();
+        let ts = fact2
+            .surfaced_at
+            .expect("surfaced_at should deserialize when present");
+        assert_eq!(ts.to_rfc3339(), "2026-03-15T12:00:00+00:00");
     }
 }
