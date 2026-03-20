@@ -94,10 +94,10 @@ Pinned facts model agent identity, core beliefs, and critical knowledge that sho
 
 Facts with `t_valid` set in the future are invisible to present-time queries but surface when their time arrives. The scheduling API supports this:
 
-- `list_due(now, scope)` — returns facts whose `t_valid <= now` (they have become valid)
+- `list_due(now, scope)` — returns facts whose `t_valid <= now` (they have become valid). Stamps `surfaced_at` on first return.
 - `next_due_time(scope)` — returns the earliest future `t_valid`, so the consumer knows when to poll again
 
-This enables reminders, deferred knowledge, and time-triggered agent behavior.
+The `surfaced_at` timestamp lets callers distinguish newly-due facts from previously-surfaced ones. This enables reminders, deferred knowledge, and time-triggered agent behavior.
 
 ## Scoping
 

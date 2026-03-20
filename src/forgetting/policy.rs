@@ -188,6 +188,7 @@ mod tests {
             metadata: serde_json::json!({}),
             is_pinned: false,
             importance_score: 0.5,
+            surfaced_at: None,
         };
 
         // Fact B: old, rarely accessed, isolated, low importance
@@ -209,6 +210,7 @@ mod tests {
             metadata: serde_json::json!({}),
             is_pinned: false,
             importance_score: 0.5,
+            surfaced_at: None,
         };
 
         let importance_a = compute_importance(&fact_a, 5, now, &policy);
@@ -249,6 +251,7 @@ mod tests {
             metadata: serde_json::json!({}),
             is_pinned: false,
             importance_score: 0.5,
+            surfaced_at: None,
         };
 
         let mut procedural_fact = base_fact.clone();

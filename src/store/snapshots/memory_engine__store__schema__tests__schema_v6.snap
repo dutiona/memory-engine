@@ -1,6 +1,6 @@
 ---
 source: src/store/schema.rs
-assertion_line: 1618
+assertion_line: 1822
 expression: schema
 ---
 -- index: idx_edges_expired
@@ -70,7 +70,7 @@ CREATE TABLE edges ( id INTEGER PRIMARY KEY AUTOINCREMENT, source_fact_id INTEGE
 CREATE TABLE events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1 );
 
 -- table: facts
-CREATE TABLE facts ( id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, content_hash TEXT NOT NULL, -- blake3 hex[:16] for dedup embedding BLOB NOT NULL, fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')), t_created TEXT NOT NULL, t_expired TEXT, t_valid TEXT, t_invalid TEXT, source_event_id INTEGER REFERENCES events(id), importance REAL NOT NULL DEFAULT 0.5, access_count INTEGER NOT NULL DEFAULT 0, last_accessed TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)), scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), is_pinned INTEGER NOT NULL DEFAULT 0, importance_score REAL NOT NULL DEFAULT 0.5 );
+CREATE TABLE facts ( id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, content_hash TEXT NOT NULL, -- blake3 hex[:16] for dedup embedding BLOB NOT NULL, fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')), t_created TEXT NOT NULL, t_expired TEXT, t_valid TEXT, t_invalid TEXT, source_event_id INTEGER REFERENCES events(id), importance REAL NOT NULL DEFAULT 0.5, access_count INTEGER NOT NULL DEFAULT 0, last_accessed TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)), scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), is_pinned INTEGER NOT NULL DEFAULT 0, importance_score REAL NOT NULL DEFAULT 0.5, surfaced_at TEXT );
 
 -- table: facts_fts
 CREATE VIRTUAL TABLE facts_fts USING fts5( content, content='facts', content_rowid='id', tokenize='porter unicode61' );

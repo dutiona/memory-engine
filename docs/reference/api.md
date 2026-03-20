@@ -32,10 +32,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Bootstrap
 
-| Method                | Signature                                                                                                    | Description                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                        | Bootstrap a single JSONL session log. Savepoint-wrapped for crash safety. Uses marker event for idempotency.            |
-| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                    | Bootstrap all top-level `*.jsonl` files in a directory. Aggregates reports. Individual failures are logged and skipped.  |
+| Method                | Signature                                                                                 | Description                                                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`     | Bootstrap a single JSONL session log. Savepoint-wrapped for crash safety. Uses marker event for idempotency.            |
+| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>` | Bootstrap all top-level `*.jsonl` files in a directory. Aggregates reports. Individual failures are logged and skipped. |
 
 ### Facts
 
@@ -141,10 +141,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Scheduling
 
-| Method          | Signature                                                               | Description                                                                                           |
-| --------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `list_due`      | `(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>>` | List active facts whose `t_valid <= now` (future memory that has surfaced). `None` scope = root only. |
-| `next_due_time` | `(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>>`         | Scheduling hint: earliest `t_valid` among active future-dated facts. `None` scope = root only.        |
+| Method          | Signature                                                               | Description                                                                                                                                                                                                 |
+| --------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_due`      | `(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>>` | List active facts whose `t_valid <= now` (future memory that has surfaced). Stamps `surfaced_at` on first return so callers can distinguish newly-due from previously-seen facts. `None` scope = root only. |
+| `next_due_time` | `(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>>`         | Scheduling hint: earliest `t_valid` among active future-dated facts. `None` scope = root only.                                                                                                              |
 
 ### Resume
 
@@ -172,10 +172,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Bootstrap
 
-| Method                | Signature                                                                                                                   | Description                                                                                                                                                      |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                                       | Parse a single JSONL session log and import noteworthy episodes as historical facts. Uses savepoint transactions for crash safety and event-based idempotency.   |
-| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>`                                   | Discover and bootstrap all top-level `*.jsonl` files in a directory. Individual session failures are logged and skipped. Returns an aggregated report.            |
+| Method                | Signature                                                                                 | Description                                                                                                                                                    |
+| --------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`     | Parse a single JSONL session log and import noteworthy episodes as historical facts. Uses savepoint transactions for crash safety and event-based idempotency. |
+| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>` | Discover and bootstrap all top-level `*.jsonl` files in a directory. Individual session failures are logged and skipped. Returns an aggregated report.         |
 
 `BootstrapConfig` fields:
 

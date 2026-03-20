@@ -58,8 +58,8 @@ match &explanation.state {
     FactState::Active => println!("Alive and well"),
     FactState::Expired { reason } => println!("Expired: {reason:?}"),
     FactState::Pinned => println!("Pinned (unforgettable)"),
-    FactState::Due { t_valid, surfaced } => {
-        println!("Due since {t_valid}, surfaced={surfaced}")
+    FactState::Due { t_valid, surfaced_at } => {
+        println!("Due since {t_valid}, surfaced_at={surfaced_at:?}")
     }
     FactState::Invalidated { t_invalid } => {
         println!("Invalidated at {t_invalid}")

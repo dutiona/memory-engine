@@ -62,13 +62,10 @@ fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     }
     if let Some(t_valid) = fact.t_valid {
         if t_valid <= now && (fact.t_invalid.is_none() || fact.t_invalid.unwrap() > now) {
-            // Heuristic: `surfaced` checks whether the fact was accessed after it
-            // became valid. This is unreliable when `last_accessed` equals insertion
-            // time (no explicit access yet) — a past-dated fact will appear surfaced
-            // even if the scheduler never returned it. A dedicated `surfaced_at`
-            // column would fix this; for now, treat the flag as best-effort.
-            let surfaced = fact.access_count > 0 && fact.last_accessed > t_valid;
-            return FactState::Due { t_valid, surfaced };
+            return FactState::Due {
+                t_valid,
+                surfaced_at: fact.surfaced_at,
+            };
         }
     }
     FactState::Active
