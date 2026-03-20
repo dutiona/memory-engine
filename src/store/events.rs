@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::upcaster::UpcasterRegistry;
@@ -180,6 +180,33 @@ impl<'a> EventStore<'a> {
             events.push(row?);
         }
         Ok(events)
+    }
+
+    /// Iterate all events row-by-row, calling `f` for each.
+    ///
+    /// Unlike [`Self::list`], this never allocates a `Vec` — each event is
+    /// deserialized, passed to the callback, and dropped before the next
+    /// row is read.  Suitable for streaming serialization of large databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// error returned by `f`.
+    pub fn for_each<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(Event) -> Result<()>,
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
+                    origin_node_id, sequence_id, created_at, event_revision
+             FROM events ORDER BY id ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let event = row_to_event(row)?;
+            f(event)?;
+        }
+        Ok(())
     }
 
     /// Count events matching the filter.
@@ -377,9 +404,11 @@ mod tests {
         };
         let results = store.list(&filter).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .all(|e| e.session_id == Some("sess-1".into())));
+        assert!(
+            results
+                .iter()
+                .all(|e| e.session_id == Some("sess-1".into()))
+        );
     }
 
     #[test]

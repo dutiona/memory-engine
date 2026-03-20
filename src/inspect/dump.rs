@@ -3,28 +3,25 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use rusqlite::Connection;
+use serde::Serialize;
 
 use crate::error::{MemoryError, Result};
+use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
-use crate::store::events::{EventFilter, EventStore};
+use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, list_config};
 use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
-use crate::store::UpcasterRegistry;
 
-use super::types::EngineSnapshot;
-
-/// Build an [`EngineSnapshot`] from the current database state.
-fn build_snapshot(conn: &Connection, embed_dim: usize) -> Result<EngineSnapshot> {
+/// Stream engine state as JSON to `writer`, one entity at a time.
+///
+/// Produces the same JSON format as [`super::types::EngineSnapshot`] but never
+/// holds more than one entity in memory per collection.  Peak memory drops from
+/// O(total entities) to O(1), making this suitable for databases with 100K+
+/// facts.
+fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W) -> Result<()> {
     let registry = UpcasterRegistry::new(); // raw events, no upcasting
-
-    let facts = FactStore::new(conn, embed_dim).list_all()?;
-    let edges = EdgeStore::new(conn).list_all()?;
-    let summaries = SummaryStore::new(conn, embed_dim).list_all()?;
-    let scopes = ScopeStore::new(conn).list_all()?;
-    let events = EventStore::new(conn, &registry).list(&EventFilter::default())?;
-    let config = list_config(conn)?;
 
     let schema_version: u32 = get_config(conn, "schema_version")?
         .and_then(|v| v.parse().ok())
@@ -33,29 +30,68 @@ fn build_snapshot(conn: &Connection, embed_dim: usize) -> Result<EngineSnapshot>
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    Ok(EngineSnapshot {
-        schema_version,
-        storage_epoch,
-        embed_dim,
-        facts,
-        edges,
-        summaries,
-        scopes,
-        events,
-        config,
-    })
+    // Scalar header fields
+    write!(
+        writer,
+        r#"{{"schema_version":{schema_version},"storage_epoch":{storage_epoch},"embed_dim":{embed_dim}"#
+    )?;
+
+    // Stream each collection row-by-row
+
+    write!(writer, r#","facts":"#)?;
+    stream_for_each(writer, |cb| FactStore::new(conn, embed_dim).for_each(cb))?;
+
+    write!(writer, r#","edges":"#)?;
+    stream_for_each(writer, |cb| EdgeStore::new(conn).for_each(cb))?;
+
+    write!(writer, r#","summaries":"#)?;
+    stream_for_each(writer, |cb| SummaryStore::new(conn, embed_dim).for_each(cb))?;
+
+    write!(writer, r#","scopes":"#)?;
+    stream_for_each(writer, |cb| ScopeStore::new(conn).for_each(cb))?;
+
+    write!(writer, r#","events":"#)?;
+    stream_for_each(writer, |cb| EventStore::new(conn, &registry).for_each(cb))?;
+
+    // Config is always small — serialize directly.
+    let config = list_config(conn)?;
+    write!(writer, r#","config":"#)?;
+    serde_json::to_writer(&mut *writer, &config)?;
+
+    write!(writer, "}}")?;
+    writer.flush()?;
+    Ok(())
 }
 
-/// Serialize an [`EngineSnapshot`] to a writer.
-fn write_snapshot(writer: impl Write, snapshot: &EngineSnapshot) -> Result<()> {
-    serde_json::to_writer(writer, snapshot)?;
+/// Write a JSON array by streaming entities through a `for_each`-style callback.
+///
+/// `iterate` must call the provided closure once per entity.  Each entity is
+/// serialized to the writer immediately, then dropped — only one `T` is live
+/// at a time.
+fn stream_for_each<W, T, F>(writer: &mut W, iterate: F) -> Result<()>
+where
+    W: Write,
+    T: Serialize,
+    F: FnOnce(Box<dyn FnMut(T) -> Result<()> + '_>) -> Result<()>,
+{
+    writer.write_all(b"[")?;
+    let mut first = true;
+    iterate(Box::new(|item: T| {
+        if !first {
+            writer.write_all(b",")?;
+        }
+        first = false;
+        serde_json::to_writer(&mut *writer, &item)?;
+        Ok(())
+    }))?;
+    writer.write_all(b"]")?;
     Ok(())
 }
 
 /// Dump engine state to a JSON file.
 ///
-/// Serializes all facts, edges, summaries, scopes, events, and config
-/// via `serde_json::to_writer`. Works for both file-backed and in-memory engines.
+/// Streams entities one-by-one via [`stream_snapshot`], keeping peak memory
+/// constant regardless of database size.
 ///
 /// # Errors
 ///
@@ -63,9 +99,9 @@ fn write_snapshot(writer: impl Write, snapshot: &EngineSnapshot) -> Result<()> {
 /// [`MemoryError::Io`] on filesystem failure, or
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let snapshot = build_snapshot(conn, embed_dim)?;
     let file = File::create(path)?;
-    write_snapshot(BufWriter::new(file), &snapshot)
+    let mut buf = BufWriter::new(file);
+    stream_snapshot(conn, embed_dim, &mut buf)
 }
 
 /// Dump engine state to a gzip-compressed JSON file.
@@ -77,11 +113,12 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-gzip")]
 pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let snapshot = build_snapshot(conn, embed_dim)?;
     let file = File::create(path)?;
-    let encoder =
+    let mut encoder =
         flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::default());
-    write_snapshot(encoder, &snapshot)
+    stream_snapshot(conn, embed_dim, &mut encoder)?;
+    encoder.finish()?;
+    Ok(())
 }
 
 /// Dump engine state to a zstd-compressed JSON file.
@@ -93,10 +130,9 @@ pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-zstd")]
 pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let snapshot = build_snapshot(conn, embed_dim)?;
     let file = File::create(path)?;
     let mut encoder = zstd::Encoder::new(BufWriter::new(file), zstd::DEFAULT_COMPRESSION_LEVEL)?;
-    serde_json::to_writer(&mut encoder, &snapshot)?;
+    stream_snapshot(conn, embed_dim, &mut encoder)?;
     encoder.finish()?;
     Ok(())
 }
@@ -151,7 +187,7 @@ pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
-    use crate::inspect::types::DumpFormat;
+    use crate::inspect::types::{DumpFormat, EngineSnapshot};
     use crate::traits::EmbeddingProvider;
     use crate::types::FactType;
 
@@ -191,6 +227,73 @@ mod tests {
         assert_eq!(snapshot.facts.len(), 1);
         assert_eq!(snapshot.facts[0].content, "test fact");
         assert_eq!(snapshot.embed_dim, DIM);
+        assert!(!snapshot.scopes.is_empty()); // root scope
+    }
+
+    /// Verify that streaming produces valid JSON that round-trips through
+    /// `EngineSnapshot` deserialization — the format contract with restore.
+    #[test]
+    fn streaming_output_matches_snapshot_schema() {
+        use crate::store::schema::{init_schema, migrate, open_memory};
+        use crate::store::serialize_embedding;
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        // Insert test data via raw SQL to avoid MemoryEngine dependencies.
+        // Timestamps must be RFC3339 — SQLite's datetime('now') produces a
+        // format that the row mappers cannot parse.
+        let emb = serialize_embedding(&[0.1, 0.2, 0.3, 0.4]);
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type,
+                    t_created, last_accessed, metadata, scope_id, is_pinned, importance_score)
+             VALUES ('alpha', 'h1', ?1, 'semantic', ?2, ?2, '{}', 1, 0, 0.0)",
+            rusqlite::params![emb, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type,
+                    t_created, last_accessed, metadata, scope_id, is_pinned, importance_score)
+             VALUES ('beta', 'h2', ?1, 'episodic', ?2, ?2, '{}', 1, 0, 0.0)",
+            rusqlite::params![emb, now],
+        )
+        .unwrap();
+
+        // Stream to an in-memory buffer.
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+
+        // Must deserialize cleanly into EngineSnapshot.
+        let snapshot: EngineSnapshot =
+            serde_json::from_slice(&buf).expect("streaming output must be valid EngineSnapshot");
+
+        assert_eq!(snapshot.facts.len(), 2);
+        assert_eq!(snapshot.edges.len(), 0);
+        assert!(!snapshot.scopes.is_empty());
+        assert_eq!(snapshot.embed_dim, DIM);
+        assert!(snapshot.schema_version > 0);
+    }
+
+    /// Verify empty database produces a valid (empty) snapshot.
+    #[test]
+    fn streaming_empty_database() {
+        use crate::store::schema::{init_schema, migrate, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+
+        let snapshot: EngineSnapshot =
+            serde_json::from_slice(&buf).expect("empty streaming output must be valid");
+
+        assert_eq!(snapshot.facts.len(), 0);
+        assert_eq!(snapshot.edges.len(), 0);
+        assert_eq!(snapshot.summaries.len(), 0);
         assert!(!snapshot.scopes.is_empty()); // root scope
     }
 
