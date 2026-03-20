@@ -50,7 +50,9 @@ println!("DB size:      {} bytes", stats.storage.main_db_bytes);
 ## Explain Fact
 
 Answers "why is this fact in its current state?" Returns provenance, graph context,
-and the resolved scope path.
+and the resolved scope path. For due facts, the `surfaced_at` timestamp records
+when `list_due()` or `resume_context()` first returned the fact — `None` means it
+has not yet been surfaced to any consumer.
 
 ```rust
 let explanation = engine.explain_fact(fact_id)?;
@@ -58,8 +60,8 @@ match &explanation.state {
     FactState::Active => println!("Alive and well"),
     FactState::Expired { reason } => println!("Expired: {reason:?}"),
     FactState::Pinned => println!("Pinned (unforgettable)"),
-    FactState::Due { t_valid, surfaced } => {
-        println!("Due since {t_valid}, surfaced={surfaced}")
+    FactState::Due { t_valid, surfaced_at } => {
+        println!("Due since {t_valid}, surfaced_at={surfaced_at:?}")
     }
     FactState::Invalidated { t_invalid } => {
         println!("Invalidated at {t_invalid}")

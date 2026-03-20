@@ -222,6 +222,7 @@ fn bootstrap_within_savepoint(
                     scope_id,
                     is_pinned: false,
                     importance_score: fact.importance,
+                    surfaced_at: None,
                 };
                 c.should_pin(&temp)
             });

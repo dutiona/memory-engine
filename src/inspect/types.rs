@@ -33,7 +33,7 @@ pub enum FactState {
     },
     Due {
         t_valid: DateTime<Utc>,
-        surfaced: bool,
+        surfaced_at: Option<DateTime<Utc>>,
     },
 }
 

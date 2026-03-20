@@ -369,6 +369,7 @@ impl MemoryEngine {
                     scope_id: 0,
                     is_pinned: false,
                     importance_score: base_importance,
+                    surfaced_at: None,
                 };
                 c.should_pin(&temp)
             }),
@@ -1126,15 +1127,38 @@ impl MemoryEngine {
 
     // --- Public API: Scheduling ---
 
-    /// List facts whose scheduled time has arrived.
     /// Returns active facts where `t_valid <= now` and `t_valid IS NOT NULL`.
     ///
-    /// This is a read-only query — facts are not consumed or marked as delivered.
-    /// Consumers should track delivery state externally if incremental delivery
-    /// is needed, or use `pin_fact()`/`forget()` to manage fact lifecycle.
+    /// On first return, stamps `surfaced_at` for facts that have not yet been
+    /// surfaced. Subsequent calls return the original timestamp. The returned
+    /// facts always carry the DB-authoritative `surfaced_at` value.
     pub fn list_due(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>> {
         let scope_ids = self.resolve_scope_ids(scope)?;
-        self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_due(now, &scope_ids))
+        let mut facts =
+            self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_due(now, &scope_ids))?;
+
+        // Stamp surfaced_at for newly-surfaced facts
+        let unsurfaced_ids: Vec<i64> = facts
+            .iter()
+            .filter(|f| f.surfaced_at.is_none())
+            .map(|f| f.id)
+            .collect();
+
+        if !unsurfaced_ids.is_empty() {
+            let conn = self.write_conn();
+            let stamped =
+                FactStore::new(&conn, self.embed_dim).stamp_surfaced(&unsurfaced_ids, now)?;
+            // Update in-place with DB-authoritative timestamps
+            let stamped_map: std::collections::HashMap<i64, chrono::DateTime<chrono::Utc>> =
+                stamped.into_iter().collect();
+            for fact in &mut facts {
+                if let Some(&ts) = stamped_map.get(&fact.id) {
+                    fact.surfaced_at = Some(ts);
+                }
+            }
+        }
+
+        Ok(facts)
     }
 
     /// Scheduling hint: when should the consumer next call `list_due()`?
@@ -1484,10 +1508,34 @@ impl MemoryEngine {
             }
         }; // scope_tree read lock dropped here
 
-        // Step 2: Query DB (no locks held)
-        self.with_read(|conn| {
+        // Step 2: Query DB on read connection
+        let mut ctx = self.with_read(|conn| {
             crate::resume::resume_context(conn, &scope_ids, self.embed_dim, config)
-        })
+        })?;
+
+        // Step 3: Stamp surfaced_at on the final due facts (post-filter, post-cap).
+        // Must use write_conn — read connections have query_only = ON.
+        let unsurfaced_ids: Vec<i64> = ctx
+            .due
+            .iter()
+            .filter(|f| f.surfaced_at.is_none())
+            .map(|f| f.id)
+            .collect();
+
+        if !unsurfaced_ids.is_empty() {
+            let conn = self.write_conn();
+            let stamped = FactStore::new(&conn, self.embed_dim)
+                .stamp_surfaced(&unsurfaced_ids, config.now)?;
+            let stamped_map: std::collections::HashMap<i64, DateTime<Utc>> =
+                stamped.into_iter().collect();
+            for fact in &mut ctx.due {
+                if let Some(&ts) = stamped_map.get(&fact.id) {
+                    fact.surfaced_at = Some(ts);
+                }
+            }
+        }
+
+        Ok(ctx)
     }
 }
 
