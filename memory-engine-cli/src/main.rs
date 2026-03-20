@@ -1,16 +1,48 @@
-use clap::Parser;
+mod commands;
+mod db;
+mod output;
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+
+use output::OutputFormat;
 
 /// memory-engine-cli — operator tool for agent memory databases
 #[derive(Parser)]
 #[command(name = "memory-engine-cli", version, about)]
 struct Cli {
     /// Path to the memory-engine SQLite database
-    #[arg(long, env = "MEMORY_ENGINE_DB")]
-    db: std::path::PathBuf,
+    #[arg(long, global = true, env = "MEMORY_ENGINE_DB")]
+    db: PathBuf,
+
+    /// Output format
+    #[arg(long, global = true, default_value = "table")]
+    format: OutputFormat,
+
+    #[command(subcommand)]
+    command: Commands,
 }
 
-fn main() {
-    let _cli = Cli::parse();
-    eprintln!("memory-engine-cli: not yet implemented");
-    std::process::exit(1);
+#[derive(Subcommand)]
+enum Commands {
+    /// Show engine statistics
+    Stats,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+
+    let result = match cli.command {
+        Commands::Stats => commands::stats::run(&cli.db, cli.format),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
