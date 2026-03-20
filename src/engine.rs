@@ -22,7 +22,9 @@ use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
     EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, Reranker, SummaryGenerator,
 };
-use crate::types::{AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact};
+use crate::types::{
+    AddFactOptions, ConsolidationLevel, Fact, FactType, NewEdge, NewEvent, NewFact,
+};
 
 /// Configuration for opening a [`MemoryEngine`] backed by a file.
 #[derive(Debug, Clone)]
@@ -954,6 +956,100 @@ impl MemoryEngine {
         Ok(resolution)
     }
 
+    // --- Public API: Co-session edge creation ---
+
+    /// Relation type for edges linking facts that co-occur in the same session.
+    const CO_SESSION_RELATION: &str = "co_session";
+    /// Default weight for co-session edges — weaker than explicit semantic
+    /// relationships by design intent. Note: the current forgetting system uses
+    /// raw `graph.degree()` (unweighted), so the weight does not yet reduce
+    /// connectivity impact. It will matter once weighted traversal ships (Phase 5).
+    const CO_SESSION_WEIGHT: f64 = 0.5;
+    /// Scope ID for co-session edges — root scope, since co-session is cross-scope.
+    const CO_SESSION_SCOPE_ID: i64 = 1;
+
+    /// Create `co_session` edges between all active facts sharing a session.
+    ///
+    /// Edges are bidirectional (A→B and B→A), with weight
+    /// [`CO_SESSION_WEIGHT`](Self::CO_SESSION_WEIGHT) and
+    /// `scope_id =` [`CO_SESSION_SCOPE_ID`](Self::CO_SESSION_SCOPE_ID)
+    /// (root — cross-scope by nature). Idempotent: calling twice for the same
+    /// session does not create duplicate edges.
+    ///
+    /// Returns the number of new edges created.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn link_session_facts(&self, session_id: &str) -> Result<usize> {
+        use crate::graph::EdgeData;
+        use crate::store::edges::EdgeStore;
+
+        let conn = self.write_conn();
+        let facts = FactStore::new(&conn, self.embed_dim).list_active_by_session(session_id)?;
+
+        if facts.len() < 2 {
+            drop(conn);
+            return Ok(0);
+        }
+
+        let now = Utc::now();
+        let mut new_edges: Vec<(i64, i64, i64)> = Vec::new(); // (edge_id, src, tgt)
+
+        {
+            let tx = conn.unchecked_transaction()?;
+            let edge_store = EdgeStore::new(&tx);
+
+            // Batch-fetch existing co_session edges for dedup (1 query instead of N²)
+            let fact_ids: Vec<i64> = facts.iter().map(|f| f.id).collect();
+            let existing =
+                edge_store.list_active_pairs_by_facts(&fact_ids, Self::CO_SESSION_RELATION)?;
+
+            for i in 0..facts.len() {
+                for j in (i + 1)..facts.len() {
+                    let a_id = facts[i].id;
+                    let b_id = facts[j].id;
+
+                    for (src, tgt) in [(a_id, b_id), (b_id, a_id)] {
+                        if !existing.contains(&(src, tgt)) {
+                            let edge_id = edge_store.insert(&NewEdge {
+                                source_fact_id: src,
+                                target_fact_id: tgt,
+                                relation_type: Self::CO_SESSION_RELATION.to_string(),
+                                weight: Self::CO_SESSION_WEIGHT,
+                                scope_id: Self::CO_SESSION_SCOPE_ID,
+                                t_created: now,
+                                t_expired: None,
+                            })?;
+                            new_edges.push((edge_id, src, tgt));
+                        }
+                    }
+                }
+            }
+
+            tx.commit()?;
+        }
+        drop(conn);
+
+        // Sync in-memory graph after successful commit
+        if !new_edges.is_empty() {
+            let mut graph = self.graph.write();
+            for &(edge_id, src, tgt) in &new_edges {
+                graph.add_edge(
+                    src,
+                    tgt,
+                    EdgeData {
+                        edge_id,
+                        relation_type: Self::CO_SESSION_RELATION.to_string(),
+                        weight: Self::CO_SESSION_WEIGHT,
+                    },
+                );
+            }
+        }
+
+        Ok(new_edges.len())
+    }
+
     // --- Public API: Graph queries (no lock exposure) ---
 
     /// Get the degree (in + out edges) for a fact in the graph.
@@ -1309,7 +1405,7 @@ mod tests {
         }
     }
 
-    /// Test helper: insert a raw fact via the write connection (bypasses engine's add_fact).
+    /// Test helper: insert a raw fact via the write connection (bypasses engine's `add_fact`).
     fn insert_raw_fact(engine: &MemoryEngine, fact: &NewFact) -> i64 {
         let conn = engine.pool.write();
         FactStore::new(&conn, engine.embed_dim)
@@ -3094,5 +3190,155 @@ mod tests {
             5,
             "should respect limit when rerank_depth is None"
         );
+    }
+
+    // --- Co-session edge tests ---
+
+    /// Helper: ingest an event with a `session_id` and add a fact linked to it.
+    fn add_session_fact(engine: &MemoryEngine, content: &str, session_id: &str) -> (i64, i64) {
+        let embedder = MockEmbedder { dim: DIM };
+        let event = NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::Interaction,
+            payload: serde_json::json!({"msg": content}),
+            source: "test".into(),
+            session_id: Some(session_id.into()),
+            scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        let event_id = engine.ingest(&event).unwrap();
+        let fact_id = engine
+            .add_fact(
+                content,
+                FactType::Semantic,
+                Some(event_id),
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        (event_id, fact_id)
+    }
+
+    #[test]
+    fn link_session_facts_creates_bidirectional_edges() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let (_, f1) = add_session_fact(&engine, "fact a", "s1");
+        let (_, f2) = add_session_fact(&engine, "fact b", "s1");
+
+        let created = engine.link_session_facts("s1").unwrap();
+        assert_eq!(created, 2); // A→B and B→A
+
+        // Verify edges in DB
+        let co_edges = {
+            let conn = engine.pool.read();
+            let edges = crate::store::edges::EdgeStore::new(&conn)
+                .list_active()
+                .unwrap();
+            edges
+                .into_iter()
+                .filter(|e| e.relation_type == "co_session")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(co_edges.len(), 2);
+
+        // Both directions present
+        assert!(co_edges
+            .iter()
+            .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2));
+        assert!(co_edges
+            .iter()
+            .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1));
+
+        // Weight matches constant
+        for e in &co_edges {
+            assert!((e.weight - MemoryEngine::CO_SESSION_WEIGHT).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn link_session_facts_three_facts_six_edges() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        add_session_fact(&engine, "a", "s1");
+        add_session_fact(&engine, "b", "s1");
+        add_session_fact(&engine, "c", "s1");
+
+        let created = engine.link_session_facts("s1").unwrap();
+        assert_eq!(created, 6); // 3 pairs × 2 directions
+    }
+
+    #[test]
+    fn link_session_facts_single_fact_noop() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        add_session_fact(&engine, "lonely", "s1");
+
+        let created = engine.link_session_facts("s1").unwrap();
+        assert_eq!(created, 0);
+    }
+
+    #[test]
+    fn link_session_facts_empty_session_noop() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let created = engine.link_session_facts("nonexistent").unwrap();
+        assert_eq!(created, 0);
+    }
+
+    #[test]
+    fn link_session_facts_idempotent() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        add_session_fact(&engine, "a", "s1");
+        add_session_fact(&engine, "b", "s1");
+
+        let first = engine.link_session_facts("s1").unwrap();
+        assert_eq!(first, 2);
+
+        let second = engine.link_session_facts("s1").unwrap();
+        assert_eq!(second, 0); // no new edges
+
+        // Total edge count unchanged
+        let (_, edge_count) = engine.graph_stats();
+        assert_eq!(edge_count, 2);
+    }
+
+    #[test]
+    fn link_session_facts_graph_degree() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let (_, f1) = add_session_fact(&engine, "a", "s1");
+        let (_, f2) = add_session_fact(&engine, "b", "s1");
+        let (_, f3) = add_session_fact(&engine, "c", "s1");
+
+        // Before linking — no edges
+        assert_eq!(engine.graph_degree(f1), 0);
+
+        engine.link_session_facts("s1").unwrap();
+
+        // After: each fact has 2 outgoing + 2 incoming = degree 4
+        assert_eq!(engine.graph_degree(f1), 4);
+        assert_eq!(engine.graph_degree(f2), 4);
+        assert_eq!(engine.graph_degree(f3), 4);
+    }
+
+    #[test]
+    fn link_session_facts_ignores_expired() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let (_, f1) = add_session_fact(&engine, "active1", "s1");
+        add_session_fact(&engine, "active2", "s1");
+        let (_, f3) = add_session_fact(&engine, "will_expire", "s1");
+
+        // Expire f3 before linking
+        {
+            let conn = engine.pool.write();
+            FactStore::new(&conn, DIM).expire(f3, Utc::now()).unwrap();
+        }
+
+        let created = engine.link_session_facts("s1").unwrap();
+        assert_eq!(created, 2); // Only f1↔active2, not f3
+
+        // f3 should have no edges
+        assert_eq!(engine.graph_degree(f3), 0);
+        assert_eq!(engine.graph_degree(f1), 2); // 1 out + 1 in
     }
 }

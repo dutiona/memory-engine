@@ -474,6 +474,32 @@ impl<'a> FactStore<'a> {
         }
     }
 
+    // --- Co-session edge support ---
+
+    /// List active facts belonging to a session (via `source_event_id → events.session_id`).
+    ///
+    /// Returns lightweight [`SessionFact`] structs (no embeddings) sorted by id.
+    /// Facts without `source_event_id` are excluded by the INNER JOIN.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_active_by_session(&self, session_id: &str) -> Result<Vec<SessionFact>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id
+             FROM facts f
+             INNER JOIN events e ON f.source_event_id = e.id
+             WHERE e.session_id = ?1
+               AND f.t_expired IS NULL
+             ORDER BY f.id",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(SessionFact { id: row.get(0)? })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(MemoryError::Database)
+    }
+
     /// List active facts in a set of scopes, excluding specific fact IDs,
     /// ordered by `t_created` DESC (most recent first).
     ///
@@ -584,6 +610,13 @@ impl<'a> FactStore<'a> {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+}
+
+/// Lightweight fact info for session-based edge creation.
+/// Avoids deserializing embeddings — only carries the fact id needed for pairwise edge wiring.
+#[derive(Debug, Clone)]
+pub struct SessionFact {
+    pub id: i64,
 }
 
 fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fact> {
@@ -864,6 +897,70 @@ mod tests {
         fs.set_pinned(id, false).unwrap();
         let fact = fs.get(id).unwrap();
         assert!(!fact.is_pinned);
+    }
+
+    // --- Co-session edge support tests ---
+
+    /// Insert an event with a `session_id`, return the event id.
+    fn insert_event(conn: &Connection, session_id: Option<&str>) -> i64 {
+        conn.execute(
+            "INSERT INTO events (timestamp, event_type, payload, source, session_id, scope_id, origin_node_id, sequence_id)
+             VALUES (datetime('now'), 'interaction', '{}', 'test', ?1, 1, 'local', 0)",
+            params![session_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Insert a fact linked to an event via `source_event_id`.
+    fn insert_fact_with_event(conn: &Connection, content: &str, event_id: i64) -> i64 {
+        let store = FactStore::new(conn, DIM);
+        let mut fact = make_fact(content, vec![0.1; DIM]);
+        fact.source_event_id = Some(event_id);
+        store.insert(&fact).unwrap()
+    }
+
+    #[test]
+    fn list_active_by_session_returns_matching() {
+        let conn = setup();
+        let e1 = insert_event(&conn, Some("s1"));
+        let e2 = insert_event(&conn, Some("s1"));
+        let e3 = insert_event(&conn, Some("s2")); // different session
+
+        let f1 = insert_fact_with_event(&conn, "fact a", e1);
+        let f2 = insert_fact_with_event(&conn, "fact b", e2);
+        let _f3 = insert_fact_with_event(&conn, "fact c", e3);
+
+        let store = FactStore::new(&conn, DIM);
+        let session_facts = store.list_active_by_session("s1").unwrap();
+        assert_eq!(session_facts.len(), 2);
+        assert_eq!(session_facts[0].id, f1);
+        assert_eq!(session_facts[1].id, f2);
+    }
+
+    #[test]
+    fn list_active_by_session_excludes_expired() {
+        let conn = setup();
+        let e1 = insert_event(&conn, Some("s1"));
+        let e2 = insert_event(&conn, Some("s1"));
+
+        let f1 = insert_fact_with_event(&conn, "active", e1);
+        let f2 = insert_fact_with_event(&conn, "will expire", e2);
+
+        let store = FactStore::new(&conn, DIM);
+        store.expire(f2, Utc::now()).unwrap();
+
+        let session_facts = store.list_active_by_session("s1").unwrap();
+        assert_eq!(session_facts.len(), 1);
+        assert_eq!(session_facts[0].id, f1);
+    }
+
+    #[test]
+    fn list_active_by_session_empty_for_unknown() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let result = store.list_active_by_session("nonexistent").unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]

@@ -13,11 +13,23 @@ On `MemoryEngine::open`, all active (non-expired) edges are loaded from SQLite i
 
 ## How edges are created
 
-Edges are not created directly through a public API. They are produced by two internal processes:
+Edges are produced by three processes -- two internal and one consumer-triggered:
 
 **Conflict resolution** -- When `resolve_conflict` determines that a new fact supersedes an old one (via `CrudDecision::Update`), the engine inserts a directed edge from the new fact to the old fact with relation type `"supersedes"`. The old fact is soft-deleted (`t_expired` set).
 
 **Consolidation** -- During three-pass consolidation, when duplicate facts are identified and merged, edges may be created to track the dedup lineage.
+
+**Co-session linking** -- `link_session_facts(session_id)` creates bidirectional `co_session` edges between all active facts that share a `session_id` (via the `events` table). This captures write-time co-occurrence: facts mentioned in the same conversation session are contextually related even when their content is semantically dissimilar. Inspired by [DiffMem](https://github.com/Growth-Kinetics/DiffMem), where files modified in the same commit are implicitly linked.
+
+Co-session edges have weight `0.5` (strong enough to influence importance scoring, weaker than explicit semantic relationships) and `scope_id = 1` (root scope, since co-session is cross-scope by nature). The method is idempotent -- calling it twice for the same session does not create duplicate edges.
+
+```rust
+// After ingesting all facts for a session:
+let new_edges = engine.link_session_facts("session-abc-123")?;
+println!("Created {new_edges} co-session edges");
+```
+
+The consumer calls `link_session_facts()` after completing a session's fact ingestion. This follows the existing pattern where `consolidate()` and `forget()` are also consumer-triggered.
 
 ## The `Edge` and `NewEdge` structs
 
@@ -50,7 +62,7 @@ pub struct NewEdge {
 }
 ```
 
-The `relation_type` is a free-form string. Built-in processes use `"supersedes"` (conflict resolution) and `"duplicates"` (consolidation), but the schema does not constrain it.
+The `relation_type` is a free-form string. Built-in processes use `"supersedes"` (conflict resolution), `"duplicates"` (consolidation), and `"co_session"` (session co-occurrence), but the schema does not constrain it.
 
 ## In-memory edge data
 
