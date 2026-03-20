@@ -509,6 +509,81 @@ impl<'a> FactStore<'a> {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(MemoryError::Database)
     }
+
+    /// List active facts whose validity interval overlaps the given period `[start, end)`.
+    ///
+    /// A fact with `[t_valid, t_invalid)` overlaps `[start, end)` when:
+    /// `(t_valid IS NULL OR t_valid < end) AND (t_invalid IS NULL OR t_invalid > start)`
+    ///
+    /// NULL `t_valid` = unbounded start (valid since creation).
+    /// NULL `t_invalid` = unbounded end (still valid).
+    ///
+    /// Optionally filters by scope and fact type.
+    /// Ordered by `importance_score DESC`.
+    pub fn list_active_in_period(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        scope_ids: &[i64],
+        fact_type: Option<&FactType>,
+    ) -> Result<Vec<Fact>> {
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+        let dim = self.embed_dim;
+
+        let mut conditions = vec![
+            "t_expired IS NULL".to_string(),
+            "(t_valid IS NULL OR t_valid < ?1)".to_string(),
+            "(t_invalid IS NULL OR t_invalid > ?2)".to_string(),
+        ];
+
+        let mut param_idx = 3u32;
+        let scope_json;
+        if !scope_ids.is_empty() {
+            scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
+            conditions.push(format!(
+                "scope_id IN (SELECT value FROM json_each(?{param_idx}))"
+            ));
+            param_idx += 1;
+        } else {
+            scope_json = String::new();
+        }
+
+        let ft_str;
+        if let Some(ft) = fact_type {
+            ft_str = fact_type_to_str(ft).to_string();
+            conditions.push(format!("fact_type = ?{param_idx}"));
+        } else {
+            ft_str = String::new();
+        }
+
+        let where_clause = conditions.join(" AND ");
+        let sql = format!(
+            "SELECT id, content, content_hash, embedding, fact_type,
+                    t_created, t_expired, t_valid, t_invalid,
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score
+             FROM facts
+             WHERE {where_clause}
+             ORDER BY importance_score DESC"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(end_str), Box::new(start_str)];
+        if !scope_ids.is_empty() {
+            params.push(Box::new(scope_json));
+        }
+        if fact_type.is_some() {
+            params.push(Box::new(ft_str));
+        }
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            row_to_fact(row, dim)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
 }
 
 fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fact> {
@@ -803,5 +878,172 @@ mod tests {
         let expected = &blake3::hash(content.as_bytes()).to_hex()[..32];
         assert_eq!(fact.content_hash, expected);
         assert_eq!(fact.content_hash.len(), 32);
+    }
+
+    // --- list_active_in_period tests ---
+
+    #[test]
+    fn period_overlap_fully_contained() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        let mut fact = make_fact("contained", vec![0.1; DIM]);
+        fact.t_valid = Some(now - TimeDelta::hours(2));
+        fact.t_invalid = Some(now - TimeDelta::hours(1));
+        fs.insert(&fact).unwrap();
+
+        // Period [now-3h, now) fully contains [now-2h, now-1h)
+        let results = fs
+            .list_active_in_period(now - TimeDelta::hours(3), now, &[], None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "contained");
+    }
+
+    #[test]
+    fn period_overlap_partial() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        let mut fact = make_fact("partial", vec![0.1; DIM]);
+        fact.t_valid = Some(now - TimeDelta::hours(2));
+        fact.t_invalid = Some(now + TimeDelta::hours(2));
+        fs.insert(&fact).unwrap();
+
+        // Period [now-1h, now+1h) partially overlaps [now-2h, now+2h)
+        let results = fs
+            .list_active_in_period(
+                now - TimeDelta::hours(1),
+                now + TimeDelta::hours(1),
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn period_no_overlap_before() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        let mut fact = make_fact("future", vec![0.1; DIM]);
+        fact.t_valid = Some(now + TimeDelta::hours(1));
+        fact.t_invalid = Some(now + TimeDelta::hours(3));
+        fs.insert(&fact).unwrap();
+
+        // Period [now-2h, now-1h) is entirely before [now+1h, now+3h)
+        let results = fs
+            .list_active_in_period(
+                now - TimeDelta::hours(2),
+                now - TimeDelta::hours(1),
+                &[],
+                None,
+            )
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn period_null_t_valid_matches_any() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        // No t_valid = unbounded start → always overlaps any period
+        let fact = make_fact("unbounded start", vec![0.1; DIM]);
+        fs.insert(&fact).unwrap();
+
+        let results = fs
+            .list_active_in_period(
+                now - TimeDelta::hours(1),
+                now + TimeDelta::hours(1),
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn period_null_t_invalid_matches_any() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        let mut fact = make_fact("unbounded end", vec![0.1; DIM]);
+        fact.t_valid = Some(now - TimeDelta::hours(2));
+        // t_invalid is None → still valid → unbounded end
+        fs.insert(&fact).unwrap();
+
+        let results = fs
+            .list_active_in_period(now - TimeDelta::hours(1), now, &[], None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn period_with_scope_filter() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        // Create a second scope via SQL (root scope 1 exists from schema init)
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'child', 1)",
+            [],
+        )
+        .unwrap();
+
+        let mut f1 = make_fact("scope 1", vec![0.1; DIM]);
+        f1.scope_id = 1;
+        f1.t_valid = Some(now - TimeDelta::hours(1));
+        fs.insert(&f1).unwrap();
+
+        let mut f2 = make_fact("scope 2", vec![0.2; DIM]);
+        f2.scope_id = 2;
+        f2.t_valid = Some(now - TimeDelta::hours(1));
+        fs.insert(&f2).unwrap();
+
+        let results = fs
+            .list_active_in_period(
+                now - TimeDelta::hours(2),
+                now + TimeDelta::hours(1),
+                &[1],
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "scope 1");
+    }
+
+    #[test]
+    fn period_with_fact_type_filter() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        let mut f1 = make_fact("episodic", vec![0.1; DIM]);
+        f1.t_valid = Some(now - TimeDelta::hours(1));
+        fs.insert(&f1).unwrap();
+
+        let mut f2 = make_fact("semantic", vec![0.2; DIM]);
+        f2.fact_type = FactType::Semantic;
+        f2.t_valid = Some(now - TimeDelta::hours(1));
+        fs.insert(&f2).unwrap();
+
+        let results = fs
+            .list_active_in_period(
+                now - TimeDelta::hours(2),
+                now + TimeDelta::hours(1),
+                &[],
+                Some(&FactType::Semantic),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "semantic");
     }
 }

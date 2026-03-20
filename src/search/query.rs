@@ -1,0 +1,188 @@
+use chrono::{DateTime, Utc};
+
+use crate::search::hybrid::SearchMode;
+use crate::types::{FactType, ScopeQuery};
+
+/// Default limit for queries when not explicitly set.
+const DEFAULT_LIMIT: usize = 50;
+
+/// Fluent query builder for composing memory extraction queries.
+///
+/// All filters are optional and combine with AND semantics.
+/// An empty query returns all temporally-valid active facts sorted by `importance_score`.
+/// Future-dated facts (`t_valid > now`) are excluded by default (scheduling model invariant).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // Semantic search within a scope and time period
+/// let results = engine.execute_query(
+///     &MemoryQuery::new()
+///         .scope_subtree("user:michael/project:demo")
+///         .period(week_ago, now)
+///         .text("deployment issue")
+///         .min_importance_score(0.3)
+///         .limit(20)
+/// )?;
+///
+/// // All pinned facts
+/// let pinned = engine.execute_query(
+///     &MemoryQuery::new().pinned_only()
+/// )?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct MemoryQuery {
+    /// Scope filter (exact, subtree, ancestors, or inherited).
+    pub scope: Option<ScopeQuery>,
+    /// Period overlap start (inclusive). Must be set together with `period_end`.
+    pub period_start: Option<DateTime<Utc>>,
+    /// Period overlap end (exclusive). Must be set together with `period_start`.
+    pub period_end: Option<DateTime<Utc>>,
+    /// Text query for FTS search.
+    pub text: Option<String>,
+    /// Embedding vector for vector similarity search.
+    pub embedding: Option<Vec<f32>>,
+    /// Search mode override. When `None`, inferred from `text`/`embedding` presence (D7).
+    pub search_mode: Option<SearchMode>,
+    /// Filter by fact type (Episodic, Semantic, Procedural).
+    pub fact_type: Option<FactType>,
+    /// Minimum materialized importance score threshold (filters on `Fact.importance_score`).
+    pub min_importance_score: Option<f64>,
+    /// Return only pinned (unforgettable) facts.
+    pub pinned_only: bool,
+    /// Maximum number of results. Default: 50.
+    pub limit: Option<usize>,
+    /// Point-in-time temporal filter (mutually exclusive with `period`).
+    pub valid_at: Option<DateTime<Utc>>,
+}
+
+impl MemoryQuery {
+    /// Create a new empty query. All filters default to `None`/`false`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Effective limit, applying the default when not explicitly set.
+    #[must_use]
+    pub fn effective_limit(&self) -> usize {
+        self.limit.unwrap_or(DEFAULT_LIMIT)
+    }
+
+    /// Whether this query involves text/vector search (vs. store-only path).
+    #[must_use]
+    pub fn has_search(&self) -> bool {
+        self.text.is_some() || self.embedding.is_some()
+    }
+
+    /// Whether a temporal period filter is set.
+    #[must_use]
+    pub fn has_period(&self) -> bool {
+        self.period_start.is_some() || self.period_end.is_some()
+    }
+
+    // --- Scope ---
+
+    /// Filter to facts at exactly this scope path.
+    #[must_use]
+    pub fn scope_exact(mut self, path: impl Into<String>) -> Self {
+        self.scope = Some(ScopeQuery::Exact(path.into()));
+        self
+    }
+
+    /// Filter to facts at this scope path and all descendants.
+    #[must_use]
+    pub fn scope_subtree(mut self, path: impl Into<String>) -> Self {
+        self.scope = Some(ScopeQuery::Subtree(path.into()));
+        self
+    }
+
+    /// Filter to facts at this scope path and all ancestors up to root.
+    #[must_use]
+    pub fn scope_ancestors(mut self, path: impl Into<String>) -> Self {
+        self.scope = Some(ScopeQuery::Ancestors(path.into()));
+        self
+    }
+
+    /// Filter to facts at ancestors + subtree (full inherited context).
+    #[must_use]
+    pub fn scope_inherited(mut self, path: impl Into<String>) -> Self {
+        self.scope = Some(ScopeQuery::Inherited(path.into()));
+        self
+    }
+
+    // --- Temporal ---
+
+    /// Point-in-time filter (existing `SearchQuery` semantics).
+    /// Mutually exclusive with [`period`](Self::period).
+    #[must_use]
+    pub fn valid_at(mut self, at: DateTime<Utc>) -> Self {
+        self.valid_at = Some(at);
+        self
+    }
+
+    /// Period overlap filter: facts whose `[t_valid, t_invalid)` overlaps `[start, end)`.
+    /// Mutually exclusive with [`valid_at`](Self::valid_at).
+    #[must_use]
+    pub fn period(mut self, start: DateTime<Utc>, end: DateTime<Utc>) -> Self {
+        self.period_start = Some(start);
+        self.period_end = Some(end);
+        self
+    }
+
+    // --- Semantic search ---
+
+    /// Set text query for FTS search.
+    #[must_use]
+    pub fn text(mut self, query: impl Into<String>) -> Self {
+        self.text = Some(query.into());
+        self
+    }
+
+    /// Set embedding vector for vector similarity search.
+    #[must_use]
+    pub fn embedding(mut self, emb: Vec<f32>) -> Self {
+        self.embedding = Some(emb);
+        self
+    }
+
+    /// Override the inferred search mode.
+    /// Returns `MemoryError::Conflict` at execution time if incompatible with `text`/`embedding`.
+    #[must_use]
+    pub fn search_mode(mut self, mode: SearchMode) -> Self {
+        self.search_mode = Some(mode);
+        self
+    }
+
+    // --- Fact filters ---
+
+    /// Filter by fact type.
+    #[must_use]
+    pub fn fact_type(mut self, ft: FactType) -> Self {
+        self.fact_type = Some(ft);
+        self
+    }
+
+    /// Filter by minimum materialized importance score (not the base importance hint).
+    #[must_use]
+    pub fn min_importance_score(mut self, threshold: f64) -> Self {
+        self.min_importance_score = Some(threshold);
+        self
+    }
+
+    /// Return only pinned (unforgettable) facts.
+    #[must_use]
+    pub fn pinned_only(mut self) -> Self {
+        self.pinned_only = true;
+        self
+    }
+
+    // --- Pagination ---
+
+    /// Set the maximum number of results. Default: 50.
+    #[must_use]
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
+        self
+    }
+}
