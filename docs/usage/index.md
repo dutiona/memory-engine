@@ -8,4 +8,5 @@ adding-facts
 querying-memory
 graph-relationships
 inspection
+bootstrapping-sessions
 ```

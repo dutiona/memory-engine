@@ -274,6 +274,8 @@ impl MemoryEngine {
         let now = Utc::now();
         let opts = opts.cloned().unwrap_or_default();
         let base_importance = opts.importance.unwrap_or(0.5);
+        let effective_created = opts.t_created.unwrap_or(now);
+        let effective_last_accessed = opts.last_accessed.unwrap_or(now);
 
         // Classify OUTSIDE the write lock (potentially slow — LLM, I/O, etc.)
         // Uses scope_id=0 placeholder; classifiers should rely on content/type/importance/metadata.
@@ -286,14 +288,14 @@ impl MemoryEngine {
                     content_hash: String::new(),
                     embedding: embedding.clone(),
                     fact_type: fact_type.clone(),
-                    t_created: now,
+                    t_created: effective_created,
                     t_expired: None,
                     t_valid: opts.t_valid,
                     t_invalid: opts.t_invalid,
                     source_event_id,
                     importance: base_importance,
                     access_count: 0,
-                    last_accessed: now,
+                    last_accessed: effective_last_accessed,
                     metadata: opts
                         .metadata
                         .clone()
@@ -328,7 +330,7 @@ impl MemoryEngine {
                 content_hash: String::new(), // FactStore::insert computes this via blake3
                 embedding,
                 fact_type,
-                t_created: now,
+                t_created: effective_created,
                 t_expired: None,
                 t_valid: opts.t_valid,
                 t_invalid: opts.t_invalid,
@@ -336,7 +338,7 @@ impl MemoryEngine {
                 scope_id,
                 importance: opts.importance.unwrap_or(0.5),
                 access_count: 0,
-                last_accessed: now,
+                last_accessed: effective_last_accessed,
                 metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
                 is_pinned,
             };
@@ -407,6 +409,93 @@ impl MemoryEngine {
     pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
         let conn = self.write_conn();
         set_config(&conn, key, value)
+    }
+
+    // --- Public API: Bootstrap ---
+
+    /// Bootstrap a single JSONL session log into historical memory.
+    ///
+    /// Parses the session log, extracts noteworthy episodes via keyword
+    /// pre-filter, classifies session outcome, and ingests extracted facts.
+    /// The entire session import is wrapped in a SQLite savepoint for
+    /// crash safety (all-or-nothing per session).
+    ///
+    /// For LLM-powered extraction, provide a custom [`SessionExtractor`].
+    /// The default [`KeywordExtractor`] requires no LLM.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from embedding, DB insertion, or scope resolution.
+    pub fn bootstrap_session(
+        &self,
+        reader: impl std::io::BufRead,
+        embedder: &dyn EmbeddingProvider,
+        extractor: &dyn crate::bootstrap::SessionExtractor,
+        config: &crate::bootstrap::BootstrapConfig,
+        classifier: Option<&dyn PersistenceClassifier>,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let conn = self.write_conn();
+        let scope_id = match &config.scope {
+            Some(path) => {
+                let scope_store = ScopeStore::new(&conn);
+                let id = scope_store.ensure_path(path)?;
+                let node = scope_store.get(id)?;
+                self.scope_tree.write().insert(node);
+                id
+            }
+            None => 1,
+        };
+        crate::bootstrap::bootstrap_session_inner(
+            &conn,
+            self.embed_dim,
+            &self.upcaster_registry,
+            reader,
+            embedder,
+            extractor,
+            config,
+            classifier,
+            scope_id,
+        )
+    }
+
+    /// Bootstrap all JSONL session logs in a directory.
+    ///
+    /// Discovers top-level `*.jsonl` files (not subagent subdirectories).
+    /// Each session is processed independently within its own savepoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Io` for directory traversal failures.
+    pub fn bootstrap_directory(
+        &self,
+        dir: &std::path::Path,
+        embedder: &dyn EmbeddingProvider,
+        extractor: &dyn crate::bootstrap::SessionExtractor,
+        config: &crate::bootstrap::BootstrapConfig,
+        classifier: Option<&dyn PersistenceClassifier>,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let conn = self.write_conn();
+        let scope_id = match &config.scope {
+            Some(path) => {
+                let scope_store = ScopeStore::new(&conn);
+                let id = scope_store.ensure_path(path)?;
+                let node = scope_store.get(id)?;
+                self.scope_tree.write().insert(node);
+                id
+            }
+            None => 1,
+        };
+        crate::bootstrap::bootstrap_directory_inner(
+            &conn,
+            self.embed_dim,
+            &self.upcaster_registry,
+            dir,
+            embedder,
+            extractor,
+            config,
+            classifier,
+            scope_id,
+        )
     }
 
     // --- Public API: Consolidation ---
