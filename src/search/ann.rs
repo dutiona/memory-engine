@@ -116,12 +116,12 @@ impl HnswStrategy {
             let (fact_id, blob) = row?;
             let embedding = deserialize_embedding(&blob, embed_dim)?;
             let hnsw_id = index.insert(embedding, &mut searcher);
-            assert_eq!(
-                hnsw_id,
-                index_to_fact.len(),
-                "HNSW index must assign sequential IDs (got {hnsw_id}, expected {})",
-                index_to_fact.len()
-            );
+            if hnsw_id != index_to_fact.len() {
+                return Err(crate::error::MemoryError::Internal(format!(
+                    "HNSW index must assign sequential IDs (got {hnsw_id}, expected {})",
+                    index_to_fact.len()
+                )));
+            }
             index_to_fact.push(fact_id);
             fact_to_hnsw.insert(fact_id, hnsw_id);
         }
@@ -252,7 +252,7 @@ impl VectorSearchStrategy for HnswStrategy {
         let vec = embedding.to_vec();
         let mut searcher: Searcher<u32> = Searcher::default();
         let hnsw_id = inner.index.insert(vec, &mut searcher);
-        assert_eq!(
+        debug_assert_eq!(
             hnsw_id,
             inner.index_to_fact.len(),
             "HNSW sequential ID invariant violated on insert"
