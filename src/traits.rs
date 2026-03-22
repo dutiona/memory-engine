@@ -206,6 +206,15 @@ impl ForgetPolicy {
         {
             return Err(MemoryError::Conflict("weights must be >= 0".into()));
         }
+        let sum = self.recency_weight
+            + self.frequency_weight
+            + self.graph_degree_weight
+            + self.base_importance_weight;
+        if (sum - 1.0).abs() > 1e-6 {
+            return Err(MemoryError::Conflict(format!(
+                "importance weights must sum to 1.0 (got {sum})"
+            )));
+        }
         Ok(())
     }
 }
