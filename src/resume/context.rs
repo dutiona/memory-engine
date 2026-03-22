@@ -8,7 +8,7 @@ use crate::store::facts::FactStore;
 use crate::types::Fact;
 
 /// Configuration for [`resume_context`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResumeConfig {
     /// Scope path to resume from. None = root only.
     pub scope_path: Option<String>,
@@ -41,7 +41,7 @@ impl Default for ResumeConfig {
 }
 
 /// Result of [`resume_context`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResumeContext {
     /// Pinned (unforgettable) facts — agent identity, core beliefs.
     pub pinned: Vec<Fact>,
