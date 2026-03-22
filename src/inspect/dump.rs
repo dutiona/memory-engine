@@ -135,6 +135,11 @@ pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
     }
 
     let escaped = path.to_string_lossy().replace('\'', "''");
+    if escaped.contains('\0') {
+        return Err(MemoryError::Internal(
+            "dump path contains null byte".to_string(),
+        ));
+    }
     let sql = format!("VACUUM INTO '{escaped}'");
     conn.execute_batch(&sql)
         .map_err(|e| MemoryError::Internal(format!("VACUUM INTO failed: {e}")))?;
