@@ -219,7 +219,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | Feature                                                                           | Description                                                                                                 |
 | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | Read-only open path ([#103](https://github.com/dutiona/memory-engine/issues/103)) | `MemoryEngine::open_readonly()` — prerequisite for CLI/MCP operator tools to avoid write-lock contention    |
-| CLI inspector ([#44](https://github.com/dutiona/memory-engine/issues/44))         | `memory-engine-cli` — operator tool (subcommands: inspect, dump, query, explain, stats, import, export)     |
+| CLI inspector ([#44](https://github.com/dutiona/memory-engine/issues/44))         | `memory-engine-cli` — operator tool (subcommands: inspect, dump, query, explain, stats, import, export) ✅  |
 | MCP server ([#45](https://github.com/dutiona/memory-engine/issues/45))            | `memory-engine-mcp` — maps 1:1 to engine API. Includes pre-compaction flush endpoint for push-based capture |
 | ↳ MCP P1 tools ([#95](https://github.com/dutiona/memory-engine/issues/95))        | consolidate, forget, dump_state, pin/unpin                                                                  |
 | ↳ MCP P2 tools ([#96](https://github.com/dutiona/memory-engine/issues/96))        | replay_events, fact_history, bootstrap                                                                      |

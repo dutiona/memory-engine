@@ -15,7 +15,9 @@ Companion repos:
 
 ```bash
 cargo build                           # debug build
+cargo build -p memory-engine-cli      # CLI inspector binary
 cargo test                            # all tests
+cargo test -p memory-engine-cli       # CLI integration tests
 cargo test --all-features             # with async + HNSW + compression
 cargo clippy --all-targets            # lint (pedantic + nursery)
 cargo fmt --check                     # format check
@@ -54,6 +56,7 @@ Read these docs when working on the relevant area:
 | Bi-temporal semantics          | `docs/advanced/bi-temporal-semantics.md` |
 | Consolidation pipeline         | `docs/advanced/consolidation.md`         |
 | Hybrid search tuning           | `docs/advanced/hybrid-search.md`         |
+| CLI inspector usage            | `docs/reference/cli-inspector.md`        |
 
 ## Key Design Decisions
 
@@ -65,4 +68,4 @@ Read these docs when working on the relevant area:
 
 ## Status
 
-Phase 4a ✅ (inspection APIs, import/export, bootstrap, reranker). Next: Phase 4b (CLI + MCP server), then Phase 5 (cognitive pipelines — DreamCycle, outcome tracking, provenance). See `docs/ROADMAP.md` for open issues and dependency graph.
+Phase 4a ✅ (inspection APIs, import/export, bootstrap, reranker). Phase 4b in progress: CLI inspector ✅ (`memory-engine-cli`), MCP server next. Then Phase 5 (cognitive pipelines — DreamCycle, outcome tracking, provenance). See `docs/ROADMAP.md` for open issues and dependency graph.

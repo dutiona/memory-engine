@@ -26,9 +26,9 @@ pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
             [],
             |row| row.get::<_, String>(0),
         )
-        .map_err(|_| {
+        .map_err(|e| {
             anyhow::anyhow!(
-                "database has no embed_dim in config table — is this a memory-engine database?"
+                "database has no embed_dim in config table — is this a memory-engine database? ({e})"
             )
         })?
         .parse()
