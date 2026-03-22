@@ -133,3 +133,32 @@ A `KnowledgeBaseConnector` trait that lets the engine reference external knowled
 **Rationale:** Memory and knowledge are distinct (see [Research Basis](research-basis.md)). The engine stores what the agent has internalized; knowledge bases store raw content. But facts should be able to cite their sources. The connector trait keeps the boundary clean: the engine never fetches content directly, but it can tell the consumer where to look.
 
 **Degradation:** When the KB is unreachable, the engine returns a "memory lapse" marker. The consumer retries later.
+
+---
+
+## Read-Only Open Path **{Implemented}**
+
+`MemoryEngine::open()` with `EngineConfig::read_only = true` opens a database without write capability — no `init_schema()`, no `migrate()`, no writable connection pool.
+
+**What:** A `read_only: bool` flag on `EngineConfig` that, when set:
+
+1. Validates schema version and epoch compatibility without writing
+2. Opens all connections with `PRAGMA query_only = ON` (including the internal slot used for cache loading)
+3. Guards all write methods with `MemoryError::ReadOnly` at the Rust level
+
+**Why:** Identified during PR #99 (CLI inspector) code review. The standard `open()` path always creates a writable connection pool and may run schema migrations. For operator tools (CLI inspect, MCP read-only queries, monitoring dashboards) that only need to read facts and statistics, this is undesirable:
+
+- An accidental schema upgrade on a live database could corrupt data if the migration has bugs, or conflict with a concurrent agent writing to the same DB
+- Migration creates WAL-safe backups, which consumes disk space and I/O on production databases that the operator only intended to inspect
+- The Principle of Least Privilege: inspection tools should not require write access to the database they are inspecting
+
+This mirrors a common pattern in database tooling: `psql` vs `pg_dump --read-only`, SQLite's `PRAGMA query_only`, and Redis's `--readonly` flag for replicas. The motivation is both operational safety and defense against accidental mutation.
+
+**How — defense in depth:**
+
+1. **File existence guard:** `open_read_only` rejects nonexistent paths before SQLite can create an empty file (which would be a write side effect)
+2. **Schema validation without mutation:** `validate_schema_version()` checks epoch and version compatibility using only SELECT queries — no DDL, no config writes
+3. **SQLite-level enforcement:** All connections have `PRAGMA query_only = ON`, so even if a code path bypasses the Rust guard, SQLite rejects the write
+4. **Rust-level enforcement:** `pool.try_write()` checks the `read_only` flag and returns `MemoryError::ReadOnly` before acquiring the mutex
+
+**Trade-off:** `list_due()` and `resume_context()` have write side effects (stamping `surfaced_at`). In read-only mode, these return `ReadOnly` if unsurfaced facts exist. CLI tools should use `list_active_facts()` for inspection. A future follow-up (#93) may add a read-only variant that skips stamping.
