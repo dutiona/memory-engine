@@ -24,10 +24,8 @@ pub struct OutcomeSignals {
     pub has_commit: bool,
     pub tests_passed: bool,
     pub has_error_loops: bool,
-    /// Approximated via `is_error` on the last tool call — the underlying
-    /// `ToolCallRecord` does not carry the raw `interrupted` flag from the
-    /// session log.  This is a known limitation; a future refinement can
-    /// propagate `ToolUseResult::interrupted` through filter.rs.
+    /// True when the last tool call in the session was interrupted, as reported
+    /// by `ToolUseResult::interrupted` propagated through `filter.rs`.
     pub was_interrupted: bool,
     pub final_user_sentiment: Option<Sentiment>,
 }
@@ -53,13 +51,13 @@ pub enum Sentiment {
 /// | `has_commit` | `"git commit"` in tool input **or** commit-like patterns (`[main`, `[master`, 7+ hex chars) in stdout |
 /// | `tests_passed` | `"test result: ok"` / `"passed"` with test-runner patterns in stdout |
 /// | `has_error_loops` | Same stderr prefix (first 100 chars) in 3+ consecutive tool calls |
-/// | `was_interrupted` | Last `ToolCallRecord` has `is_error == true` (proxy — see [`OutcomeSignals::was_interrupted`]) |
+/// | `was_interrupted` | Last `ToolCallRecord` has `interrupted == true` (from `ToolUseResult::interrupted`) |
 /// | `final_user_sentiment` | Keyword match on the last user message |
 ///
 /// # Classification
 ///
 /// - **Success**: `(has_commit && !has_error_loops) || (tests_passed && !was_interrupted)`
-/// - **Failure**: `(has_error_loops && was_interrupted) || (negative sentiment && !has_commit)`
+/// - **Failure**: `has_error_loops || was_interrupted || (negative sentiment && !has_commit)`
 /// - **Indeterminate**: everything else
 pub fn classify_outcome(
     turns: &[super::filter::ConversationTurn],
@@ -80,7 +78,8 @@ pub fn classify_outcome(
 
     let outcome = if (has_commit && !has_error_loops) || (tests_passed && !was_interrupted) {
         SessionOutcome::Success
-    } else if (has_error_loops && was_interrupted)
+    } else if has_error_loops
+        || was_interrupted
         || (final_user_sentiment == Sentiment::Negative && !has_commit)
     {
         SessionOutcome::Failure
@@ -198,14 +197,14 @@ fn detect_error_loops(turns: &[super::filter::ConversationTurn]) -> bool {
     false
 }
 
-/// Proxy for interruption: the very last tool call's `is_error` flag.
+/// True when the very last tool call was interrupted.
 fn detect_interrupted(turns: &[super::filter::ConversationTurn]) -> bool {
     turns
         .iter()
         .rev()
         .flat_map(|t| t.tool_calls.iter().rev())
         .next()
-        .is_some_and(|tc| tc.is_error)
+        .is_some_and(|tc| tc.interrupted)
 }
 
 /// Keyword-based sentiment of the final user message.
@@ -270,6 +269,7 @@ mod tests {
             stdout: stdout.map(Into::into),
             stderr: stderr.map(Into::into),
             is_error,
+            interrupted: false,
         }
     }
 
@@ -306,7 +306,31 @@ mod tests {
     }
 
     #[test]
-    fn classify_failure_error_loop() {
+    fn classify_failure_error_loop_with_interruption() {
+        let err = "error[E0308]: mismatched types";
+        let mut last_call = make_tool_call(None, Some(err), true);
+        last_call.interrupted = true;
+        let turns = vec![
+            make_turn(
+                "fix it",
+                "trying",
+                vec![make_tool_call(None, Some(err), true)],
+            ),
+            make_turn(
+                "fix it",
+                "trying",
+                vec![make_tool_call(None, Some(err), true)],
+            ),
+            make_turn("fix it", "trying", vec![last_call]),
+        ];
+        let (outcome, signals) = classify_outcome(&turns);
+        assert_eq!(outcome, SessionOutcome::Failure);
+        assert!(signals.has_error_loops);
+        assert!(signals.was_interrupted);
+    }
+
+    #[test]
+    fn error_loop_without_interruption_is_failure() {
         let err = "error[E0308]: mismatched types";
         let turns = vec![
             make_turn(
@@ -326,9 +350,10 @@ mod tests {
             ),
         ];
         let (outcome, signals) = classify_outcome(&turns);
+        // Error loops alone are sufficient for Failure classification
         assert_eq!(outcome, SessionOutcome::Failure);
         assert!(signals.has_error_loops);
-        assert!(signals.was_interrupted); // last tool call has is_error=true
+        assert!(!signals.was_interrupted);
     }
 
     #[test]
@@ -388,6 +413,7 @@ mod tests {
             stdout: None,
             stderr: None,
             is_error: false,
+            interrupted: false,
         };
         let turns = vec![make_turn("commit", "ok", vec![tc])];
         let (_, signals) = classify_outcome(&turns);
@@ -415,6 +441,23 @@ mod tests {
         ];
         let (_, signals) = classify_outcome(&turns);
         assert!(!signals.has_error_loops);
+    }
+
+    #[test]
+    fn interrupted_flag_true_triggers_was_interrupted() {
+        let mut tc = make_tool_call(Some("output"), None, false);
+        tc.interrupted = true;
+        let turns = vec![make_turn("do thing", "ok", vec![tc])];
+        let (_, signals) = classify_outcome(&turns);
+        assert!(signals.was_interrupted);
+    }
+
+    #[test]
+    fn is_error_alone_does_not_trigger_was_interrupted() {
+        let tc_err = make_tool_call(None, Some("fail"), true);
+        let turns = vec![make_turn("do thing", "ok", vec![tc_err])];
+        let (_, signals) = classify_outcome(&turns);
+        assert!(!signals.was_interrupted);
     }
 
     #[test]
