@@ -8,8 +8,8 @@
 use std::collections::HashSet;
 
 use memory_engine::engine::{EngineConfig, MemoryEngine};
-use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::search::SearchConfig;
+use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::FactType;
 
@@ -52,10 +52,26 @@ fn hnsw_recall_at_k_exceeds_threshold() {
     for i in 0..N {
         let content = format!("fact number {i} about topic {}", i % 50);
         engine_bf
-            .add_fact(&content, FactType::Semantic, None, &embedder, None, None)
+            .add_fact(
+                &content,
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         engine_ann
-            .add_fact(&content, FactType::Semantic, None, &embedder, None, None)
+            .add_fact(
+                &content,
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
             .unwrap();
     }
 

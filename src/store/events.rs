@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::upcaster::UpcasterRegistry;
@@ -404,9 +404,11 @@ mod tests {
         };
         let results = store.list(&filter).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .all(|e| e.session_id == Some("sess-1".into())));
+        assert!(
+            results
+                .iter()
+                .all(|e| e.session_id == Some("sess-1".into()))
+        );
     }
 
     #[test]
@@ -528,8 +530,8 @@ mod tests {
         let conn = setup();
         let mut registry = UpcasterRegistry::new();
         // Interaction has upcasters 1→2 and 2→3, so latest = 3
-        registry.register("Interaction", 1, |v| Ok(v));
-        registry.register("Interaction", 2, |v| Ok(v));
+        registry.register("Interaction", 1, Ok);
+        registry.register("Interaction", 2, Ok);
         let store = EventStore::new(&conn, &registry);
 
         let id = store.insert(&make_event("test", None)).unwrap();

@@ -340,8 +340,8 @@ mod tests {
     #[test]
     fn hnsw_spike_basic_search() {
         use hnsw::{Hnsw, Searcher};
-        use rand::rngs::SmallRng;
         use rand::SeedableRng;
+        use rand::rngs::SmallRng;
         use space::Neighbor;
 
         // Build a small index: 5 vectors, dim=4, M=8, M0=16

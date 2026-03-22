@@ -1,9 +1,9 @@
 //! Integration tests for import/export round-trips.
 
+use memory_engine::EmbeddingProvider;
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::inspect_types::DumpFormat;
 use memory_engine::types::FactType;
-use memory_engine::EmbeddingProvider;
 
 const DIM: usize = 4;
 

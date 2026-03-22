@@ -176,7 +176,7 @@ mod tests {
     fn missing_in_chain_errors() {
         let mut registry = UpcasterRegistry::new();
         // Register 2→3 but NOT 1→2 — creates a gap
-        registry.register("ToolCall", 2, |v| Ok(v));
+        registry.register("ToolCall", 2, Ok);
 
         let payload = serde_json::json!({});
         let err = registry.upcast("ToolCall", 1, payload).unwrap_err();

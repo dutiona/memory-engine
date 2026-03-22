@@ -2,13 +2,13 @@
 //!
 //! Run with: `cargo run --example custom_traits`
 
+use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, ForgetPolicy,
     SummaryGenerator,
 };
 use memory_engine::types::{Fact, FactType, NewFact};
-use memory_engine::MemoryEngine;
 
 // --- EmbeddingProvider: consumers bring their own embedding model ---
 

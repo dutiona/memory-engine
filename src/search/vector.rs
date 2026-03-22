@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::Result;
 use crate::store::deserialize_embedding;
@@ -24,11 +24,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         norm_b = y.mul_add(y, norm_b);
     }
     let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        dot / denom
-    }
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 /// Brute-force vector similarity search over active facts.
