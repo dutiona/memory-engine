@@ -540,7 +540,7 @@ impl<'a> FactStore<'a> {
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(MemoryError::Database)
         } else {
-            let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
+            let scope_json = serde_json::to_string(scope_ids)?;
             let mut stmt = self.conn.prepare(
                 "SELECT f.id
                  FROM facts f
