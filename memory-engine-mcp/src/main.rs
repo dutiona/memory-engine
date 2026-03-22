@@ -81,40 +81,38 @@ async fn main() -> Result<(), BoxError> {
 }
 
 /// Build the embedding provider from config + CLI, using the probed embed_dim.
+///
+/// CLI flags override TOML values (endpoint, model, api_key) when provided,
+/// enabling operators to inject runtime secrets via env/CLI.
 fn build_embedder(
     cli: &Cli,
     mcp_config: &config::McpConfig,
     embed_dim: usize,
 ) -> Result<Option<Arc<embedding::HttpEmbeddingProvider>>, BoxError> {
-    // Priority: TOML [embedding] section > CLI flags
-    if let Some(ref emb_config) = mcp_config.embedding {
-        return Ok(Some(Arc::new(
-            embedding::HttpEmbeddingProvider::new(
-                emb_config.endpoint.clone(),
-                emb_config.model.clone(),
-                emb_config.api_key.clone(),
-                embed_dim, // Use probed dim, not config dim
-                emb_config.timeout_secs,
-            )
-            .map_err(|e| format!("failed to create embedding provider: {e}"))?,
-        )));
-    }
+    // Merge TOML + CLI: CLI overrides individual fields
+    let base = mcp_config.embedding.as_ref();
 
-    // Build from CLI flags if available
-    if let (Some(url), Some(model)) = (&cli.embed_url, &cli.embed_model) {
-        return Ok(Some(Arc::new(
-            embedding::HttpEmbeddingProvider::new(
-                url.clone(),
-                model.clone(),
-                cli.embed_api_key.clone(),
-                embed_dim,
-                30,
-            )
-            .map_err(|e| format!("failed to create embedding provider: {e}"))?,
-        )));
-    }
+    let endpoint = cli
+        .embed_url
+        .clone()
+        .or_else(|| base.map(|b| b.endpoint.clone()));
+    let model = cli
+        .embed_model
+        .clone()
+        .or_else(|| base.map(|b| b.model.clone()));
+    let api_key = cli
+        .embed_api_key
+        .clone()
+        .or_else(|| base.and_then(|b| b.api_key.clone()));
+    let timeout = base.map_or(30, |b| b.timeout_secs);
 
-    Ok(None)
+    match (endpoint, model) {
+        (Some(url), Some(mdl)) => Ok(Some(Arc::new(
+            embedding::HttpEmbeddingProvider::new(url, mdl, api_key, embed_dim, timeout)
+                .map_err(|e| format!("failed to create embedding provider: {e}"))?,
+        ))),
+        _ => Ok(None),
+    }
 }
 
 /// Load configuration from TOML file with CLI overrides.

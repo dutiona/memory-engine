@@ -438,10 +438,10 @@ fn handle_query(
 
     let mut query = memory_engine::MemoryQuery::new();
 
-    // Parse and validate search mode
-    let mode = match get_str(&args, "mode") {
-        Some(s) => parse_search_mode(&s)?,
-        None => SearchMode::Hybrid,
+    // Parse and validate search mode (if explicit)
+    let explicit_mode = match get_str(&args, "mode") {
+        Some(s) => Some(parse_search_mode(&s)?),
+        None => None,
     };
 
     // Parse embedding (with proper error on malformed input)
@@ -450,28 +450,40 @@ fn handle_query(
     if let Some(text) = get_str(&args, "text") {
         query = query.text(text.clone());
 
-        // For hybrid/vector mode, compute embedding from text
-        if mode != SearchMode::Fts {
+        // Determine effective mode for embedding decision
+        let needs_embedding = match explicit_mode {
+            Some(SearchMode::Fts) => false,
+            Some(SearchMode::Vector | SearchMode::Hybrid) => true,
+            None => true, // Default: try to provide embedding for hybrid if possible
+        };
+
+        if needs_embedding {
             if let Some(emb) = pre_emb {
                 query = query.embedding(emb);
             } else if let Some(emb_provider) = embedder {
                 let emb = emb_provider.embed(&text).map_err(to_mcp_error)?;
                 query = query.embedding(emb);
-            } else {
+            } else if explicit_mode.is_some() {
+                // User explicitly asked for vector/hybrid but no embedder available
                 return Err(ErrorData::invalid_params(
                     format!(
-                        "mode '{mode:?}' requires an embedding provider or pre-computed embedding"
+                        "mode '{:?}' requires an embedding provider or pre-computed embedding",
+                        explicit_mode.unwrap()
                     ),
                     None,
                 ));
             }
+            // If no explicit mode and no embedder, let engine infer FTS-only
         }
     } else if let Some(emb) = pre_emb {
         query = query.embedding(emb);
     }
 
-    // Explicitly set search mode — don't rely on engine inference
-    query = query.search_mode(mode);
+    // Only set search_mode when user explicitly requested one.
+    // Otherwise let the engine infer from available data (text, embedding, both).
+    if let Some(mode) = explicit_mode {
+        query = query.search_mode(mode);
+    }
 
     // Scope
     if let Some(scope) = get_str(&args, "scope") {
