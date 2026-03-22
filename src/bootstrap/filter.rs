@@ -32,6 +32,7 @@ pub struct ToolCallRecord {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub is_error: bool,
+    pub interrupted: bool,
 }
 
 /// Category of a noteworthy episode detected by keyword pre-filter.
@@ -283,6 +284,7 @@ fn extract_tool_calls(
                 stdout: None,
                 stderr: None,
                 is_error: false,
+                interrupted: false,
             });
         }
     }
@@ -297,6 +299,7 @@ fn extract_tool_calls(
             calls[i].stdout.clone_from(&result.stdout);
             calls[i].stderr.clone_from(&result.stderr);
             calls[i].is_error = result.is_error.unwrap_or(false);
+            calls[i].interrupted = result.interrupted.unwrap_or(false);
         }
     }
 
@@ -566,6 +569,29 @@ mod tests {
         }
     }
 
+    fn user_with_interrupted_tool_result(uuid: &str, parent: &str, secs: i64) -> SessionEntry {
+        SessionEntry {
+            entry_type: EntryType::User,
+            session_id: Some("sess-1".into()),
+            timestamp: ts(secs).map(|t| t.to_rfc3339()),
+            uuid: opt(uuid),
+            parent_uuid: opt(parent),
+            cwd: None,
+            git_branch: None,
+            message: Some(MessagePayload {
+                role: Some("user".into()),
+                content: Some(json!([{"type": "text", "text": ""}])),
+            }),
+            tool_use_result: Some(ToolUseResult {
+                stdout: None,
+                stderr: Some("interrupted".into()),
+                interrupted: Some(true),
+                is_error: Some(false),
+            }),
+            data: None,
+        }
+    }
+
     // -- reconstruct_turns tests --
 
     #[test]
@@ -616,6 +642,32 @@ mod tests {
         assert!(!turns[0].tool_calls[0].is_error);
     }
 
+    #[test]
+    fn reconstruct_propagates_interrupted_flag() {
+        let entries = vec![
+            user_entry("u1", "", "run ls", 100),
+            assistant_with_tool("a1", "u1", "Sure", "Bash", 101),
+            user_with_interrupted_tool_result("u2", "a1", 102),
+        ];
+        let turns = reconstruct_turns(&entries);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].tool_calls.len(), 1);
+        assert!(turns[0].tool_calls[0].interrupted);
+        assert!(!turns[0].tool_calls[0].is_error);
+    }
+
+    #[test]
+    fn reconstruct_interrupted_false_by_default() {
+        let entries = vec![
+            user_entry("u1", "", "run ls", 100),
+            assistant_with_tool("a1", "u1", "Sure", "Bash", 101),
+            user_with_tool_result("u2", "a1", "", Some("ok"), None, false, 102),
+        ];
+        let turns = reconstruct_turns(&entries);
+        assert_eq!(turns.len(), 1);
+        assert!(!turns[0].tool_calls[0].interrupted);
+    }
+
     // -- keyword_prefilter tests --
 
     fn make_turn(user: &str, assistant: &str) -> ConversationTurn {
@@ -639,6 +691,7 @@ mod tests {
                 stdout: None,
                 stderr: Some(stderr.into()),
                 is_error: true,
+                interrupted: false,
             }],
             uuid: "t1".into(),
         }
