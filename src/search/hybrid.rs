@@ -61,14 +61,14 @@ pub struct SearchResult {
 pub fn rrf_merge(fts: &[(i64, f64)], vec: &[(i64, f32)], k: u32) -> Vec<(i64, f64)> {
     let mut scores: HashMap<i64, f64> = HashMap::new();
     for (rank, &(id, _)) in fts.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        let rank_u32 = rank as u32;
-        *scores.entry(id).or_default() += 1.0 / f64::from(k + rank_u32 + 1);
+        let rank_u32 = u32::try_from(rank).unwrap_or(u32::MAX);
+        *scores.entry(id).or_default() +=
+            1.0 / f64::from(k.saturating_add(rank_u32).saturating_add(1));
     }
     for (rank, &(id, _)) in vec.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
-        let rank_u32 = rank as u32;
-        *scores.entry(id).or_default() += 1.0 / f64::from(k + rank_u32 + 1);
+        let rank_u32 = u32::try_from(rank).unwrap_or(u32::MAX);
+        *scores.entry(id).or_default() +=
+            1.0 / f64::from(k.saturating_add(rank_u32).saturating_add(1));
     }
     let mut merged: Vec<_> = scores.into_iter().collect();
     merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

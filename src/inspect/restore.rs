@@ -10,15 +10,11 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
-use crate::store::schema::set_config;
+use crate::store::events::event_type_to_str;
+use crate::store::schema::{set_config, CURRENT_SCHEMA_VERSION, STORAGE_EPOCH};
 use crate::store::serialize_embedding;
 
 use super::types::EngineSnapshot;
-
-// Current schema constants — duplicated here to avoid exposing schema internals.
-// Keep in sync with `src/store/schema.rs`.
-const CURRENT_SCHEMA_VERSION: u32 = 5;
-const STORAGE_EPOCH: u16 = 1;
 
 /// Config keys managed by `init_schema`/`migrate` — never imported from snapshots.
 const MANAGED_CONFIG_KEYS: &[&str] = &["schema_version", "storage_epoch"];
@@ -36,10 +32,14 @@ enum Compression {
 }
 
 /// Detect compression from magic bytes at the start of a file.
-fn detect_compression(path: &Path) -> Result<Compression> {
-    let mut file = File::open(path)?;
+///
+/// Reads the first 4 bytes from the given file handle and seeks back to the
+/// start so the caller can continue reading from the beginning.
+fn detect_compression(file: &mut File) -> Result<Compression> {
+    use std::io::Seek;
     let mut magic = [0u8; 4];
     let n = file.read(&mut magic)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
     if n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
         Ok(Compression::Gzip)
     } else if n >= 4 && magic[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
@@ -53,6 +53,9 @@ fn detect_compression(path: &Path) -> Result<Compression> {
 // Snapshot reading
 // ---------------------------------------------------------------------------
 
+/// Maximum snapshot file size (4 GiB). Prevents OOM from crafted snapshots.
+const MAX_SNAPSHOT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Deserialize an [`EngineSnapshot`] from a (possibly compressed) JSON file.
 ///
 /// Auto-detects compression from magic bytes. Returns a clear error if the
@@ -63,9 +66,19 @@ fn detect_compression(path: &Path) -> Result<Compression> {
 /// - [`MemoryError::Io`] on file access failure.
 /// - [`MemoryError::Serialization`] on malformed JSON.
 /// - [`MemoryError::NotImplemented`] if compression detected but feature disabled.
+/// - [`MemoryError::Internal`] if the file exceeds 4 GiB.
 pub fn read_snapshot(path: &Path) -> Result<EngineSnapshot> {
-    let compression = detect_compression(path)?;
-    let file = File::open(path)?;
+    // Open the file once and perform all checks on the handle to avoid TOCTOU.
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_SNAPSHOT_SIZE {
+        return Err(MemoryError::Internal(format!(
+            "snapshot file too large: {} bytes (max {MAX_SNAPSHOT_SIZE})",
+            metadata.len()
+        )));
+    }
+
+    let compression = detect_compression(&mut file)?;
     let reader = BufReader::new(file);
 
     match compression {
@@ -218,7 +231,7 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         )?;
         for event in &snapshot.events {
             let ts = event.timestamp.to_rfc3339();
-            let et = format!("{:?}", event.event_type);
+            let et = event_type_to_str(&event.event_type);
             let payload = event.payload.to_string();
             let created = event.created_at.map(|dt| dt.to_rfc3339());
             stmt.execute(rusqlite::params![
@@ -242,8 +255,8 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         let mut stmt = tx.prepare(
             "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, \
              t_expired, t_valid, t_invalid, source_event_id, importance, access_count, \
-             last_accessed, metadata, scope_id, is_pinned, importance_score) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             last_accessed, metadata, scope_id, is_pinned, importance_score, surfaced_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )?;
         for fact in &snapshot.facts {
             let embedding_blob = serialize_embedding(&fact.embedding);
@@ -272,6 +285,7 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
                 fact.scope_id,
                 fact.is_pinned,
                 fact.importance_score,
+                fact.surfaced_at.map(|dt| dt.to_rfc3339()),
             ])?;
         }
     }
@@ -405,7 +419,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.json");
         std::fs::write(&path, r#"{"hello":"world"}"#).unwrap();
-        assert_eq!(detect_compression(&path).unwrap(), Compression::None);
+        let mut f = File::open(&path).unwrap();
+        assert_eq!(detect_compression(&mut f).unwrap(), Compression::None);
     }
 
     #[cfg(feature = "compress-gzip")]
@@ -415,7 +430,8 @@ mod tests {
         let path = dir.path().join("test.gz");
         // Write minimal gzip header
         std::fs::write(&path, &[0x1f, 0x8b, 0x08, 0x00]).unwrap();
-        assert_eq!(detect_compression(&path).unwrap(), Compression::Gzip);
+        let mut f = File::open(&path).unwrap();
+        assert_eq!(detect_compression(&mut f).unwrap(), Compression::Gzip);
     }
 
     #[cfg(feature = "compress-zstd")]
@@ -424,7 +440,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.zst");
         std::fs::write(&path, &[0x28, 0xb5, 0x2f, 0xfd]).unwrap();
-        assert_eq!(detect_compression(&path).unwrap(), Compression::Zstd);
+        let mut f = File::open(&path).unwrap();
+        assert_eq!(detect_compression(&mut f).unwrap(), Compression::Zstd);
     }
 
     // --- Validation tests ---
