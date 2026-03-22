@@ -43,6 +43,7 @@ fn main() -> Result<(), MemoryError> {
         &embedder,
         None,       // root scope
         None,       // default options
+        None,       // no persistence classifier
     )?;
 
     // Query with hybrid search
@@ -52,6 +53,7 @@ fn main() -> Result<(), MemoryError> {
         embedding: Some(embedder.embed("ownership data races")?),
         mode: SearchMode::Hybrid,
         limit: 5,
+        rerank_depth: None,
         valid_at: None,
         fact_type: None,
         scope: None,
@@ -69,7 +71,7 @@ fn main() -> Result<(), MemoryError> {
 - **Hybrid search** — FTS5 (BM25) + vector (cosine) merged via Reciprocal Rank Fusion
 - **Bi-temporal facts** — 4 timestamps per fact: system time (created/expired) + real-world validity
 - **Event sourcing** — append-only log enables replay, audit, and storage migration
-- **Trait-based extensibility** — `EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`
+- **Trait-based extensibility** — `EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker`
 - **Hierarchical scoping** — isolate facts by context (e.g., `"user:alice/project:demo"`)
 - **Thread-safe** — `Send + Sync` via connection pool and `RwLock` caches
 - **Zero external services** — SQLite bundled, pure Rust vector search
@@ -99,7 +101,9 @@ Consumer (AI agent, CLI tool, MCP server)
 │  Traits (consumer-provided)          │
 │  ├─ EmbeddingProvider                │
 │  ├─ SummaryGenerator                 │
-│  └─ ConflictArbiter                  │
+│  ├─ ConflictArbiter                  │
+│  ├─ PersistenceClassifier            │
+│  └─ Reranker                         │
 └──────────────────────────────────────┘
 ```
 
@@ -132,7 +136,7 @@ memory-engine = { git = "https://github.com/dutiona/memory-engine", features = [
 
 ## Research Foundation
 
-Built on analysis of 9 papers including CoALA, Graphiti, Mem0, A-Mem, and the Memory Survey.
+Built on analysis of 15 papers including CoALA, Graphiti, Mem0, A-Mem, and the Memory Survey.
 See [research basis](docs/design/research-basis.md) and [ADRs](docs/design/adr/) for the full rationale.
 
 ## License
