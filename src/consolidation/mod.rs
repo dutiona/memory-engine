@@ -51,10 +51,19 @@ pub fn consolidate(
 
     let (duplicates_removed, expired_ids) =
         local_dedup(&tx, embed_dim, config.dedup_threshold, last, now)?;
+
+    // usize::MAX is a sentinel from local_dedup meaning "skipped due to safety cap".
+    let dedup_skipped = duplicates_removed == usize::MAX;
+    let duplicates_removed = if dedup_skipped { 0 } else { duplicates_removed };
+
     let clusters_created = cluster_fusion(&tx, generator, embed_dim, config.min_cluster_size)?;
     let global_summaries = global_integration(&tx, generator, embed_dim)?;
 
-    set_config(&tx, "last_consolidated_at", &now.to_rfc3339())?;
+    // Only advance the watermark if dedup actually ran. When skipped, facts
+    // ingested during the over-cap period must be retried on the next run.
+    if !dedup_skipped {
+        set_config(&tx, "last_consolidated_at", &now.to_rfc3339())?;
+    }
 
     tx.commit()?;
 

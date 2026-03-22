@@ -25,7 +25,7 @@ pub struct EventStore<'a> {
     registry: &'a UpcasterRegistry,
 }
 
-const fn event_type_to_str(et: &EventType) -> &'static str {
+pub(crate) const fn event_type_to_str(et: &EventType) -> &'static str {
     match et {
         EventType::Interaction => "Interaction",
         EventType::ToolCall => "ToolCall",

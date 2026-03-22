@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -13,7 +13,7 @@ const CURRENT_SCHEMA_VERSION: u32 = 6;
 /// the migration chain. Bumping the epoch signals a breaking architectural
 /// change (e.g., dropping old migration support). Libraries reject DBs
 /// from future epochs with [`MemoryError::UnsupportedEpoch`].
-const STORAGE_EPOCH: u16 = 1;
+pub(crate) const STORAGE_EPOCH: u16 = 1;
 
 /// Open a `SQLite` connection to a file, with pragmas set.
 ///
