@@ -26,6 +26,25 @@ pub fn open_connection(path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open a read-only `SQLite` connection to a file, with safe pragmas.
+///
+/// Uses `SQLITE_OPEN_READ_ONLY` flags — no file creation, no WAL mutation.
+/// Skips `journal_mode` and `synchronous` pragmas (read-only connections
+/// cannot set them and don't need to).
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` if the connection or pragma setup fails.
+pub fn open_connection_read_only(path: &str) -> Result<Connection> {
+    use rusqlite::OpenFlags;
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    set_pragmas_read_only(&conn)?;
+    Ok(conn)
+}
+
 /// Open an in-memory `SQLite` connection, with pragmas set.
 ///
 /// # Errors
@@ -35,6 +54,15 @@ pub fn open_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     set_pragmas(&conn)?;
     Ok(conn)
+}
+
+/// Pragmas safe for read-only connections — skip WAL and synchronous.
+fn set_pragmas_read_only(conn: &Connection) -> Result<()> {
+    for pragma in &["PRAGMA foreign_keys = ON", "PRAGMA busy_timeout = 5000"] {
+        let mut stmt = conn.prepare(pragma)?;
+        let _ = stmt.query([])?;
+    }
+    Ok(())
 }
 
 fn set_pragmas(conn: &Connection) -> Result<()> {

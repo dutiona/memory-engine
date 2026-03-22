@@ -5,7 +5,8 @@ use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
 use crate::store::schema::{
-    init_schema, migrate, open_connection, open_memory as open_memory_conn,
+    init_schema, migrate, open_connection, open_connection_read_only,
+    open_memory as open_memory_conn,
 };
 
 /// A connection pool with N read connections and 1 write connection.
@@ -149,25 +150,21 @@ impl ConnectionPool {
     pub fn open_read_only(path: &Path, embed_dim: usize, read_pool_size: usize) -> Result<Self> {
         use crate::store::schema::validate_schema_version;
 
-        // Reject nonexistent files — don't let SQLite create an empty DB
-        if !path.exists() {
+        // Reject nonexistent or non-file paths before SQLite can act
+        if !path.is_file() {
             return Err(MemoryError::Migration(format!(
-                "database file does not exist: {}; cannot open read-only",
+                "database path is not a regular file: {}; cannot open read-only",
                 path.display()
             )));
         }
 
-        // Open a connection to validate schema — then reuse as internal read slot
-        let conn = open_connection(&path.to_string_lossy())?;
+        // Open with SQLITE_OPEN_READ_ONLY — no file creation, no WAL mutation
+        let conn = open_connection_read_only(&path.to_string_lossy())?;
         validate_schema_version(&conn)?;
-        conn.execute_batch("PRAGMA query_only = ON")
-            .map_err(MemoryError::Database)?;
 
         let mut read_conns = Vec::with_capacity(read_pool_size);
         for _ in 0..read_pool_size {
-            let c = open_connection(&path.to_string_lossy())?;
-            c.execute_batch("PRAGMA query_only = ON")
-                .map_err(MemoryError::Database)?;
+            let c = open_connection_read_only(&path.to_string_lossy())?;
             read_conns.push(c);
         }
 
