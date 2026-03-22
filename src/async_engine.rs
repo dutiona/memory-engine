@@ -258,6 +258,20 @@ impl AsyncMemoryEngine {
             .map_err(join_err)?
     }
 
+    /// Create co-session edges between facts sharing a session.
+    pub async fn link_session_facts(
+        &self,
+        session_id: String,
+        scope: Option<String>,
+    ) -> Result<usize> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            engine.link_session_facts(&session_id, scope.as_deref())
+        })
+        .await
+        .map_err(join_err)?
+    }
+
     /// Async wrapper for [`MemoryEngine::statistics`].
     ///
     /// # Errors
@@ -292,10 +306,7 @@ impl AsyncMemoryEngine {
     ///
     /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
     /// [`MemoryError::Database`] on SQL failure.
-    pub async fn explain_fact(
-        &self,
-        id: i64,
-    ) -> Result<crate::inspect::FactExplanation> {
+    pub async fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
         let engine = self.inner.clone();
         tokio::task::spawn_blocking(move || engine.explain_fact(id))
             .await
@@ -308,10 +319,7 @@ impl AsyncMemoryEngine {
     ///
     /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
     /// [`MemoryError::Database`] on SQL failure.
-    pub async fn fact_history(
-        &self,
-        id: i64,
-    ) -> Result<crate::inspect::FactHistory> {
+    pub async fn fact_history(&self, id: i64) -> Result<crate::inspect::FactHistory> {
         let engine = self.inner.clone();
         tokio::task::spawn_blocking(move || engine.fact_history(id))
             .await
@@ -324,10 +332,7 @@ impl AsyncMemoryEngine {
     ///
     /// Returns [`MemoryError::Internal`] on I/O or serialization failure,
     /// or [`MemoryError::Database`] on SQL failure.
-    pub async fn dump_state(
-        &self,
-        format: &crate::inspect::DumpFormat,
-    ) -> Result<()> {
+    pub async fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
         let engine = self.inner.clone();
         let format = format.clone();
         tokio::task::spawn_blocking(move || engine.dump_state(&format))
@@ -394,11 +399,10 @@ impl AsyncMemoryEngine {
 
     /// Async wrapper for [`MemoryEngine::restore_json_memory`].
     pub async fn restore_json_memory(snapshot_path: std::path::PathBuf) -> Result<Self> {
-        let engine = tokio::task::spawn_blocking(move || {
-            MemoryEngine::restore_json_memory(&snapshot_path)
-        })
-        .await
-        .map_err(join_err)??;
+        let engine =
+            tokio::task::spawn_blocking(move || MemoryEngine::restore_json_memory(&snapshot_path))
+                .await
+                .map_err(join_err)??;
         Ok(Self::new(engine))
     }
 
