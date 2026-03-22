@@ -10,15 +10,11 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
-use crate::store::schema::set_config;
+use crate::store::events::event_type_to_str;
+use crate::store::schema::{set_config, CURRENT_SCHEMA_VERSION, STORAGE_EPOCH};
 use crate::store::serialize_embedding;
 
 use super::types::EngineSnapshot;
-
-// Current schema constants — duplicated here to avoid exposing schema internals.
-// Keep in sync with `src/store/schema.rs`.
-const CURRENT_SCHEMA_VERSION: u32 = 5;
-const STORAGE_EPOCH: u16 = 1;
 
 /// Config keys managed by `init_schema`/`migrate` — never imported from snapshots.
 const MANAGED_CONFIG_KEYS: &[&str] = &["schema_version", "storage_epoch"];
@@ -218,7 +214,7 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         )?;
         for event in &snapshot.events {
             let ts = event.timestamp.to_rfc3339();
-            let et = format!("{:?}", event.event_type);
+            let et = event_type_to_str(&event.event_type);
             let payload = event.payload.to_string();
             let created = event.created_at.map(|dt| dt.to_rfc3339());
             stmt.execute(rusqlite::params![
@@ -242,8 +238,8 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         let mut stmt = tx.prepare(
             "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, \
              t_expired, t_valid, t_invalid, source_event_id, importance, access_count, \
-             last_accessed, metadata, scope_id, is_pinned, importance_score) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             last_accessed, metadata, scope_id, is_pinned, importance_score, surfaced_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )?;
         for fact in &snapshot.facts {
             let embedding_blob = serialize_embedding(&fact.embedding);
@@ -272,6 +268,7 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
                 fact.scope_id,
                 fact.is_pinned,
                 fact.importance_score,
+                fact.surfaced_at.map(|dt| dt.to_rfc3339()),
             ])?;
         }
     }
