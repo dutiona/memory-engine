@@ -182,6 +182,10 @@ This means reranking applies to FTS, Hybrid, and Vector+text queries. Pure vecto
 
 The `Reranker::rerank()` method is failable (`-> Result<Vec<SearchResult>>`). Errors propagate as `MemoryError::Reranker`. This allows consumers to handle inference failures, timeouts, or API errors gracefully.
 
+### Contract Enforcement
+
+After each `rerank()` call, the engine validates that the output is a valid subset of the input candidates — no fabricated fact IDs, no duplicates, and output length <= input length. Violations produce `MemoryError::Reranker` with a diagnostic message identifying the specific breach. See the [Reranker trait documentation](../../src/traits.rs) for the full contract.
+
 See [Extensibility](extensibility.md) for trait definition, implementation example, and engine wiring.
 
 ## Content Hashing
