@@ -21,6 +21,7 @@ pub struct ConnectionPool {
     path: Option<PathBuf>,
     embed_dim: usize,
     read_pool_size: usize,
+    read_only: bool,
 }
 
 /// RAII guard that returns a read connection to the pool on drop.
@@ -107,6 +108,7 @@ impl ConnectionPool {
             path: Some(path.to_path_buf()),
             embed_dim,
             read_pool_size,
+            read_only: false,
         })
     }
 
@@ -126,6 +128,57 @@ impl ConnectionPool {
             path: None,
             embed_dim,
             read_pool_size: 0,
+            read_only: false,
+        })
+    }
+
+    /// Open a file-backed pool in read-only mode.
+    ///
+    /// The database file must already exist and have been initialized by a prior
+    /// read-write open. This constructor validates schema compatibility without
+    /// running `init_schema()` or `migrate()`.
+    ///
+    /// All connections have `PRAGMA query_only = ON`, including the internal slot
+    /// used for cache loading during initialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Migration` if the file does not exist, the schema
+    /// is uninitialized, or the schema needs migration.
+    /// Returns `MemoryError::UnsupportedEpoch` if the DB epoch is from the future.
+    pub fn open_read_only(path: &Path, embed_dim: usize, read_pool_size: usize) -> Result<Self> {
+        use crate::store::schema::validate_schema_version;
+
+        // Reject nonexistent files — don't let SQLite create an empty DB
+        if !path.exists() {
+            return Err(MemoryError::Migration(format!(
+                "database file does not exist: {}; cannot open read-only",
+                path.display()
+            )));
+        }
+
+        // Open a connection to validate schema — then reuse as internal read slot
+        let conn = open_connection(&path.to_string_lossy())?;
+        validate_schema_version(&conn)?;
+        conn.execute_batch("PRAGMA query_only = ON")
+            .map_err(MemoryError::Database)?;
+
+        let mut read_conns = Vec::with_capacity(read_pool_size);
+        for _ in 0..read_pool_size {
+            let c = open_connection(&path.to_string_lossy())?;
+            c.execute_batch("PRAGMA query_only = ON")
+                .map_err(MemoryError::Database)?;
+            read_conns.push(c);
+        }
+
+        Ok(Self {
+            write_conn: Mutex::new(conn),
+            read_conns: Mutex::new(read_conns),
+            read_available: Condvar::new(),
+            path: Some(path.to_path_buf()),
+            embed_dim,
+            read_pool_size,
+            read_only: true,
         })
     }
 
@@ -154,6 +207,22 @@ impl ConnectionPool {
     /// Lock the write connection.
     pub fn write(&self) -> MutexGuard<'_, Connection> {
         self.write_conn.lock()
+    }
+
+    /// Attempt to lock the write connection.
+    ///
+    /// Returns `MemoryError::ReadOnly` if the pool was opened read-only.
+    pub fn try_write(&self) -> Result<MutexGuard<'_, Connection>> {
+        if self.read_only {
+            return Err(MemoryError::ReadOnly);
+        }
+        Ok(self.write_conn.lock())
+    }
+
+    /// Whether this pool was opened in read-only mode.
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Embedding dimension configured for this pool.
@@ -248,5 +317,50 @@ mod tests {
 
         let mem_pool = ConnectionPool::open_memory(4).unwrap();
         assert!(!mem_pool.is_file_backed());
+    }
+
+    #[test]
+    fn pool_open_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        // First create a valid DB
+        let _pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
+        drop(_pool);
+
+        // Now open read-only
+        let pool = ConnectionPool::open_read_only(&db_path, 4, 2).unwrap();
+        assert!(pool.is_file_backed());
+        assert!(pool.is_read_only());
+
+        // Read should work
+        let r = pool.read();
+        let v = get_config(&r, "schema_version").unwrap();
+        assert!(v.is_some());
+    }
+
+    #[test]
+    fn pool_read_only_write_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let _pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
+        drop(_pool);
+
+        let pool = ConnectionPool::open_read_only(&db_path, 4, 2).unwrap();
+        let err = pool.try_write().unwrap_err();
+        assert!(matches!(err, MemoryError::ReadOnly));
+    }
+
+    #[test]
+    fn pool_open_read_only_nonexistent_file_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nonexistent.db");
+        let result = ConnectionPool::open_read_only(&db_path, 4, 2);
+        assert!(matches!(result, Err(MemoryError::Migration(_))));
+    }
+
+    #[test]
+    fn pool_not_read_only_by_default() {
+        let pool = ConnectionPool::open_memory(4).unwrap();
+        assert!(!pool.is_read_only());
     }
 }
