@@ -161,12 +161,16 @@ impl MemoryEngine {
         config: &EngineConfig,
         reranker: Option<Box<dyn Reranker>>,
     ) -> Result<Self> {
-        let pool = ConnectionPool::open(
-            &config.path,
-            config.embed_dim,
-            config.read_pool_size,
-            config.backup_dir.as_deref(),
-        )?;
+        let pool = if config.read_only {
+            ConnectionPool::open_read_only(&config.path, config.embed_dim, config.read_pool_size)?
+        } else {
+            ConnectionPool::open(
+                &config.path,
+                config.embed_dim,
+                config.read_pool_size,
+                config.backup_dir.as_deref(),
+            )?
+        };
         Self::init_from_pool(
             pool,
             config.embed_dim,

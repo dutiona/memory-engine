@@ -84,3 +84,19 @@ fn read_only_engine_query_works() {
     let val = engine.get_config("test_key").unwrap();
     assert_eq!(val, Some("test_value".to_string()));
 }
+
+#[test]
+fn open_read_only_with_reranker() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    {
+        let config = EngineConfig::new(db_path.clone(), DIM);
+        let _engine = MemoryEngine::open(&config).unwrap();
+    }
+
+    let mut config = EngineConfig::new(db_path, DIM);
+    config.read_only = true;
+    let engine = MemoryEngine::open_with_reranker(&config, None).unwrap();
+    assert!(engine.is_read_only());
+}
