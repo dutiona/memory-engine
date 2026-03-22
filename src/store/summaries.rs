@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{deserialize_embedding, parse_timestamp, serialize_embedding};
@@ -122,6 +122,32 @@ impl<'a> SummaryStore<'a> {
             .query_map([], |row| self.row_to_summary(row))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(summaries)
+    }
+
+    /// Iterate all summaries row-by-row, calling `f` for each.
+    ///
+    /// Unlike [`Self::list_all`], this never allocates a `Vec` — each summary
+    /// is deserialized, passed to the callback, and dropped before the next
+    /// row is read.  Suitable for streaming serialization of large databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// error returned by `f`.
+    pub fn for_each<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(Summary) -> Result<()>,
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
+             FROM summaries ORDER BY id ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let summary = self.row_to_summary(row)?;
+            f(summary)?;
+        }
+        Ok(())
     }
 
     /// Delete all summaries at the given level. Returns count deleted.
@@ -298,10 +324,12 @@ mod tests {
 
         let deleted = store.delete_by_level(&ConsolidationLevel::Cluster).unwrap();
         assert_eq!(deleted, 2);
-        assert!(store
-            .list_by_level(&ConsolidationLevel::Cluster)
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .list_by_level(&ConsolidationLevel::Cluster)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             store
                 .list_by_level(&ConsolidationLevel::Global)

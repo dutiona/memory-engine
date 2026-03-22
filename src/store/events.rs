@@ -182,6 +182,33 @@ impl<'a> EventStore<'a> {
         Ok(events)
     }
 
+    /// Iterate all events row-by-row, calling `f` for each.
+    ///
+    /// Unlike [`Self::list`], this never allocates a `Vec` — each event is
+    /// deserialized, passed to the callback, and dropped before the next
+    /// row is read.  Suitable for streaming serialization of large databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// error returned by `f`.
+    pub fn for_each<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(Event) -> Result<()>,
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
+                    origin_node_id, sequence_id, created_at, event_revision
+             FROM events ORDER BY timestamp ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let event = row_to_event(row)?;
+            f(event)?;
+        }
+        Ok(())
+    }
+
     /// Count events matching the filter.
     ///
     /// # Errors

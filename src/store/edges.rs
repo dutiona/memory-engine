@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{parse_optional_timestamp, parse_timestamp};
@@ -120,6 +120,32 @@ impl<'a> EdgeStore<'a> {
         let rows = stmt.query_map([], row_to_edge)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Iterate all edges row-by-row, calling `f` for each.
+    ///
+    /// Unlike [`Self::list_all`], this never allocates a `Vec` — each edge is
+    /// deserialized, passed to the callback, and dropped before the next
+    /// row is read.  Suitable for streaming serialization of large databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// error returned by `f`.
+    pub fn for_each<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(Edge) -> Result<()>,
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
+             FROM edges ORDER BY id ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let edge = row_to_edge(row)?;
+            f(edge)?;
+        }
+        Ok(())
     }
 
     /// List all active edges (`t_expired IS NULL`).
