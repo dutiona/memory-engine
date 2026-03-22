@@ -16,8 +16,9 @@ use super::types::{
 
 /// Explain why a fact is in its current state.
 ///
-/// When the fact has a `source_event_id`, the originating event is fetched via
-/// [`EventStore::get_upcasted`] and included in the provenance output.
+/// Computes graph context, temporal state, provenance, and scope path for the
+/// given fact. When the fact has a `source_event_id`, the originating event is
+/// fetched via [`EventStore::get_upcasted`] and included in the provenance.
 ///
 /// # Errors
 ///
@@ -32,13 +33,42 @@ pub fn explain_fact(
     fact_id: i64,
     registry: &UpcasterRegistry,
 ) -> Result<FactExplanation> {
+    let graph_context = build_graph_context(graph, fact_id);
+    explain_fact_with_graph_context(
+        conn,
+        scope_tree,
+        embed_dim,
+        fact_id,
+        registry,
+        graph_context,
+    )
+}
+
+/// Like [`explain_fact`], but accepts a pre-computed [`GraphContext`].
+///
+/// Used by [`MemoryEngine::explain_fact`] to release the graph `RwLock` before
+/// acquiring the database connection, reducing lock contention.
+///
+/// # Consistency note
+///
+/// The graph context may reflect a slightly older graph state than the database
+/// snapshot if a concurrent writer commits between the graph traversal and the
+/// DB read. This is acceptable for an informational/debugging API — the
+/// explanation is best-effort, not transactionally consistent.
+pub(crate) fn explain_fact_with_graph_context(
+    conn: &Connection,
+    scope_tree: &ScopeTree,
+    embed_dim: usize,
+    fact_id: i64,
+    registry: &UpcasterRegistry,
+    graph_context: GraphContext,
+) -> Result<FactExplanation> {
     let store = FactStore::new(conn, embed_dim);
     let fact = store.get(fact_id)?;
     let now = Utc::now();
 
     let state = determine_state(&fact, now);
     let provenance = build_provenance(conn, registry, &fact)?;
-    let graph_context = build_graph_context(graph, fact_id);
     let scope_path = scope_tree
         .path_for_id(fact.scope_id)
         .unwrap_or_else(|| format!("scope:{}", fact.scope_id));
@@ -101,7 +131,7 @@ fn build_provenance(
     })
 }
 
-fn build_graph_context(graph: &MemoryGraph, fact_id: i64) -> GraphContext {
+pub(crate) fn build_graph_context(graph: &crate::graph::MemoryGraph, fact_id: i64) -> GraphContext {
     let degree = graph.degree(fact_id);
     // Use connected_component to get ALL neighbors (in + out), consistent with degree.
     // `neighbors()` only returns outgoing, which would be inconsistent with degree.

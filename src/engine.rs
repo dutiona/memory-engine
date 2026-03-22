@@ -1302,17 +1302,35 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::NotFound` if the fact doesn't exist.
     /// Returns `MemoryError::Database` on SQL failure.
+    ///
+    /// # Lock strategy
+    ///
+    /// The graph `RwLock` is acquired and released *before* the database read
+    /// to reduce lock contention — connected-component traversal is the expensive
+    /// part and does not need to be held across the DB call. The `scope_tree`
+    /// lock is kept across `with_read` because scope-path resolution depends on
+    /// `fact.scope_id` fetched from the database.
+    ///
+    /// This means the graph context may reflect a slightly older snapshot than the
+    /// database state under concurrent writes. This trade-off is intentional for
+    /// an informational API — see [`inspect::explain::explain_fact_with_graph_context`].
     pub fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
-        let graph = self.graph.read();
+        // Snapshot graph context under the graph lock, then release it.
+        let graph_context = {
+            let graph = self.graph.read();
+            crate::inspect::explain::build_graph_context(&graph, id)
+        };
+        // scope_tree lock is still held across with_read because scope_path
+        // resolution requires fact.scope_id, which comes from the DB.
         let scope_tree = self.scope_tree.read();
         self.with_read(|conn| {
-            crate::inspect::explain::explain_fact(
+            crate::inspect::explain::explain_fact_with_graph_context(
                 conn,
-                &graph,
                 &scope_tree,
                 self.embed_dim,
                 id,
                 &self.upcaster_registry,
+                graph_context,
             )
         })
     }
