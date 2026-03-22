@@ -123,7 +123,7 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | `graph_component`    | `(&self, fact_id: i64) -> Vec<i64>`          | All fact IDs in the connected component containing `fact_id`.                                                                            |
 | `graph_stats`        | `(&self) -> (usize, usize)`                  | `(node_count, edge_count)`.                                                                                                              |
 | `graph_has_node`     | `(&self, fact_id: i64) -> bool`              | Whether a node exists in the graph.                                                                                                      |
-| `link_session_facts` | `(&self, session_id: &str) -> Result<usize>` | Create bidirectional `co_session` edges between all active facts sharing a session. Idempotent. Returns the number of new edges created. |
+| `link_session_facts` | `(&self, session_id: &str, scope: Option<&str>) -> Result<usize>` | Create bidirectional `co_session` edges between all active facts sharing a session. When `scope` is `Some`, only facts within that scope subtree are considered. Idempotent. Returns the number of new edges created. |
 
 ### Pinning
 

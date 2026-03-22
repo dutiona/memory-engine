@@ -513,23 +513,49 @@ impl<'a> FactStore<'a> {
     /// Returns lightweight [`SessionFact`] structs (no embeddings) sorted by id.
     /// Facts without `source_event_id` are excluded by the INNER JOIN.
     ///
+    /// When `scope_ids` is non-empty, only facts whose `scope_id` is in the
+    /// provided set are returned. When empty, all scopes are included
+    /// (backward-compatible global lookup).
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn list_active_by_session(&self, session_id: &str) -> Result<Vec<SessionFact>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT f.id
-             FROM facts f
-             INNER JOIN events e ON f.source_event_id = e.id
-             WHERE e.session_id = ?1
-               AND f.t_expired IS NULL
-             ORDER BY f.id",
-        )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            Ok(SessionFact { id: row.get(0)? })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(MemoryError::Database)
+    pub fn list_active_by_session(
+        &self,
+        session_id: &str,
+        scope_ids: &[i64],
+    ) -> Result<Vec<SessionFact>> {
+        if scope_ids.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT f.id
+                 FROM facts f
+                 INNER JOIN events e ON f.source_event_id = e.id
+                 WHERE e.session_id = ?1
+                   AND f.t_expired IS NULL
+                 ORDER BY f.id",
+            )?;
+            let rows = stmt.query_map(params![session_id], |row| {
+                Ok(SessionFact { id: row.get(0)? })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(MemoryError::Database)
+        } else {
+            let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
+            let mut stmt = self.conn.prepare(
+                "SELECT f.id
+                 FROM facts f
+                 INNER JOIN events e ON f.source_event_id = e.id
+                 WHERE e.session_id = ?1
+                   AND f.t_expired IS NULL
+                   AND f.scope_id IN (SELECT value FROM json_each(?2))
+                 ORDER BY f.id",
+            )?;
+            let rows = stmt.query_map(params![session_id, scope_json], |row| {
+                Ok(SessionFact { id: row.get(0)? })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(MemoryError::Database)
+        }
     }
 
     /// List active facts in a set of scopes, excluding specific fact IDs,
@@ -967,7 +993,7 @@ mod tests {
         let _f3 = insert_fact_with_event(&conn, "fact c", e3);
 
         let store = FactStore::new(&conn, DIM);
-        let session_facts = store.list_active_by_session("s1").unwrap();
+        let session_facts = store.list_active_by_session("s1", &[]).unwrap();
         assert_eq!(session_facts.len(), 2);
         assert_eq!(session_facts[0].id, f1);
         assert_eq!(session_facts[1].id, f2);
@@ -985,7 +1011,7 @@ mod tests {
         let store = FactStore::new(&conn, DIM);
         store.expire(f2, Utc::now()).unwrap();
 
-        let session_facts = store.list_active_by_session("s1").unwrap();
+        let session_facts = store.list_active_by_session("s1", &[]).unwrap();
         assert_eq!(session_facts.len(), 1);
         assert_eq!(session_facts[0].id, f1);
     }
@@ -994,8 +1020,66 @@ mod tests {
     fn list_active_by_session_empty_for_unknown() {
         let conn = setup();
         let store = FactStore::new(&conn, DIM);
-        let result = store.list_active_by_session("nonexistent").unwrap();
+        let result = store.list_active_by_session("nonexistent", &[]).unwrap();
         assert!(result.is_empty());
+    }
+
+    fn insert_scoped_fact_with_event(
+        conn: &Connection,
+        content: &str,
+        event_id: i64,
+        scope_id: i64,
+    ) -> i64 {
+        let store = FactStore::new(conn, DIM);
+        let mut fact = make_fact(content, vec![0.1; DIM]);
+        fact.source_event_id = Some(event_id);
+        fact.scope_id = scope_id;
+        store.insert(&fact).unwrap()
+    }
+
+    #[test]
+    fn list_active_by_session_filters_by_scope() {
+        let conn = setup();
+
+        // Create child scopes under root (id=1)
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'alice', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (3, 1, 'bob', 1)",
+            [],
+        )
+        .unwrap();
+
+        let e1 = insert_event(&conn, Some("s1"));
+        let e2 = insert_event(&conn, Some("s1"));
+        let e3 = insert_event(&conn, Some("s1"));
+
+        let f1 = insert_scoped_fact_with_event(&conn, "alice fact", e1, 2);
+        let f2 = insert_scoped_fact_with_event(&conn, "alice fact 2", e2, 2);
+        let _f3 = insert_scoped_fact_with_event(&conn, "bob fact", e3, 3);
+
+        let store = FactStore::new(&conn, DIM);
+
+        // Filter by alice's scope
+        let alice_facts = store.list_active_by_session("s1", &[2]).unwrap();
+        assert_eq!(alice_facts.len(), 2);
+        assert_eq!(alice_facts[0].id, f1);
+        assert_eq!(alice_facts[1].id, f2);
+
+        // Filter by bob's scope
+        let bob_facts = store.list_active_by_session("s1", &[3]).unwrap();
+        assert_eq!(bob_facts.len(), 1);
+
+        // No filter (empty slice) returns all
+        let all_facts = store.list_active_by_session("s1", &[]).unwrap();
+        assert_eq!(all_facts.len(), 3);
+
+        // Multiple scopes
+        let both = store.list_active_by_session("s1", &[2, 3]).unwrap();
+        assert_eq!(both.len(), 3);
     }
 
     #[test]

@@ -19,13 +19,18 @@ Edges are produced by three processes -- two internal and one consumer-triggered
 
 **Consolidation** -- During three-pass consolidation, when duplicate facts are identified and merged, edges may be created to track the dedup lineage.
 
-**Co-session linking** -- `link_session_facts(session_id)` creates bidirectional `co_session` edges between all active facts that share a `session_id` (via the `events` table). This captures write-time co-occurrence: facts mentioned in the same conversation session are contextually related even when their content is semantically dissimilar. Inspired by [DiffMem](https://github.com/Growth-Kinetics/DiffMem), where files modified in the same commit are implicitly linked.
+**Co-session linking** -- `link_session_facts(session_id, scope)` creates bidirectional `co_session` edges between all active facts that share a `session_id` (via the `events` table). This captures write-time co-occurrence: facts mentioned in the same conversation session are contextually related even when their content is semantically dissimilar. Inspired by [DiffMem](https://github.com/Growth-Kinetics/DiffMem), where files modified in the same commit are implicitly linked.
 
 Co-session edges have weight `0.5` (strong enough to influence importance scoring, weaker than explicit semantic relationships) and `scope_id = 1` (root scope, since co-session is cross-scope by nature). The method is idempotent -- calling it twice for the same session does not create duplicate edges.
 
+The optional `scope` parameter restricts the lookup to facts within a scope subtree. When `None`, all scopes are included (global lookup). In multi-tenant deployments where different scopes might reuse session IDs, passing `Some("user:alice")` prevents cross-scope edge creation between unrelated tenants.
+
 ```rust
-// After ingesting all facts for a session:
-let new_edges = engine.link_session_facts("session-abc-123")?;
+// Global lookup (backward-compatible):
+let new_edges = engine.link_session_facts("session-abc-123", None)?;
+
+// Scope-aware lookup (multi-tenant safe):
+let new_edges = engine.link_session_facts("session-abc-123", Some("user:alice"))?;
 println!("Created {new_edges} co-session edges");
 ```
 
