@@ -977,17 +977,36 @@ impl MemoryEngine {
     /// (root — cross-scope by nature). Idempotent: calling twice for the same
     /// session does not create duplicate edges.
     ///
+    /// When `scope` is `Some`, only facts within that scope subtree are
+    /// considered. When `None`, all scopes are included (global lookup,
+    /// backward-compatible).
+    ///
     /// Returns the number of new edges created.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on SQL failure.
-    pub fn link_session_facts(&self, session_id: &str) -> Result<usize> {
+    /// Returns `MemoryError::NotFound` if `scope` is `Some` but the path
+    /// does not exist.
+    pub fn link_session_facts(&self, session_id: &str, scope: Option<&str>) -> Result<usize> {
         use crate::graph::EdgeData;
         use crate::store::edges::EdgeStore;
 
+        // Resolve scope path → subtree IDs (short-lived read lock)
+        let scope_ids: Vec<i64> = match scope {
+            Some(path) => {
+                let tree = self.scope_tree.read();
+                let id = tree
+                    .resolve_path(path)
+                    .ok_or_else(|| MemoryError::NotFound(format!("scope path: {path}")))?;
+                tree.subtree(id)
+            }
+            None => Vec::new(),
+        };
+
         let conn = self.write_conn();
-        let facts = FactStore::new(&conn, self.embed_dim).list_active_by_session(session_id)?;
+        let facts =
+            FactStore::new(&conn, self.embed_dim).list_active_by_session(session_id, &scope_ids)?;
 
         if facts.len() < 2 {
             drop(conn);
@@ -3458,7 +3477,7 @@ mod tests {
         let (_, f1) = add_session_fact(&engine, "fact a", "s1");
         let (_, f2) = add_session_fact(&engine, "fact b", "s1");
 
-        let created = engine.link_session_facts("s1").unwrap();
+        let created = engine.link_session_facts("s1", None).unwrap();
         assert_eq!(created, 2); // A→B and B→A
 
         // Verify edges in DB
@@ -3495,7 +3514,7 @@ mod tests {
         add_session_fact(&engine, "b", "s1");
         add_session_fact(&engine, "c", "s1");
 
-        let created = engine.link_session_facts("s1").unwrap();
+        let created = engine.link_session_facts("s1", None).unwrap();
         assert_eq!(created, 6); // 3 pairs × 2 directions
     }
 
@@ -3504,14 +3523,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         add_session_fact(&engine, "lonely", "s1");
 
-        let created = engine.link_session_facts("s1").unwrap();
+        let created = engine.link_session_facts("s1", None).unwrap();
         assert_eq!(created, 0);
     }
 
     #[test]
     fn link_session_facts_empty_session_noop() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
-        let created = engine.link_session_facts("nonexistent").unwrap();
+        let created = engine.link_session_facts("nonexistent", None).unwrap();
         assert_eq!(created, 0);
     }
 
@@ -3521,10 +3540,10 @@ mod tests {
         add_session_fact(&engine, "a", "s1");
         add_session_fact(&engine, "b", "s1");
 
-        let first = engine.link_session_facts("s1").unwrap();
+        let first = engine.link_session_facts("s1", None).unwrap();
         assert_eq!(first, 2);
 
-        let second = engine.link_session_facts("s1").unwrap();
+        let second = engine.link_session_facts("s1", None).unwrap();
         assert_eq!(second, 0); // no new edges
 
         // Total edge count unchanged
@@ -3542,7 +3561,7 @@ mod tests {
         // Before linking — no edges
         assert_eq!(engine.graph_degree(f1), 0);
 
-        engine.link_session_facts("s1").unwrap();
+        engine.link_session_facts("s1", None).unwrap();
 
         // After: each fact has 2 outgoing + 2 incoming = degree 4
         assert_eq!(engine.graph_degree(f1), 4);
@@ -3563,11 +3582,107 @@ mod tests {
             FactStore::new(&conn, DIM).expire(f3, Utc::now()).unwrap();
         }
 
-        let created = engine.link_session_facts("s1").unwrap();
+        let created = engine.link_session_facts("s1", None).unwrap();
         assert_eq!(created, 2); // Only f1↔active2, not f3
 
         // f3 should have no edges
         assert_eq!(engine.graph_degree(f3), 0);
         assert_eq!(engine.graph_degree(f1), 2); // 1 out + 1 in
+    }
+
+    // --- Scope-aware session linking tests ---
+
+    /// Helper: add a fact in a specific scope, linked to a session.
+    fn add_scoped_session_fact(
+        engine: &MemoryEngine,
+        content: &str,
+        session_id: &str,
+        scope_path: &str,
+    ) -> (i64, i64) {
+        let embedder = MockEmbedder { dim: DIM };
+        let event = NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::Interaction,
+            payload: serde_json::json!({"msg": content}),
+            source: "test".into(),
+            session_id: Some(session_id.into()),
+            scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        let event_id = engine.ingest(&event).unwrap();
+        let fact_id = engine
+            .add_fact(
+                content,
+                FactType::Semantic,
+                Some(event_id),
+                &embedder,
+                Some(scope_path),
+                None,
+                None,
+            )
+            .unwrap();
+        (event_id, fact_id)
+    }
+
+    #[test]
+    fn link_session_facts_scope_filters_cross_scope() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+        // Two facts in user:alice, one in user:bob — same session_id
+        let (_, f1) = add_scoped_session_fact(&engine, "alice a", "s1", "user:alice");
+        let (_, f2) = add_scoped_session_fact(&engine, "alice b", "s1", "user:alice");
+        let (_, f3) = add_scoped_session_fact(&engine, "bob c", "s1", "user:bob");
+
+        // Scope-filtered: only link alice's facts
+        let created = engine.link_session_facts("s1", Some("user:alice")).unwrap();
+        assert_eq!(created, 2); // f1↔f2
+
+        assert_eq!(engine.graph_degree(f1), 2); // 1 out + 1 in
+        assert_eq!(engine.graph_degree(f2), 2);
+        assert_eq!(engine.graph_degree(f3), 0); // bob excluded
+    }
+
+    #[test]
+    fn link_session_facts_scope_none_links_all() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+        add_scoped_session_fact(&engine, "alice a", "s1", "user:alice");
+        add_scoped_session_fact(&engine, "bob b", "s1", "user:bob");
+        add_scoped_session_fact(&engine, "root c", "s1", "user:charlie");
+
+        // None = global lookup (backward-compatible)
+        let created = engine.link_session_facts("s1", None).unwrap();
+        assert_eq!(created, 6); // 3 facts × 2 directions
+    }
+
+    #[test]
+    fn link_session_facts_scope_subtree() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+        // Create facts at different depths under user:alice
+        let (_, f1) = add_scoped_session_fact(&engine, "top", "s1", "user:alice");
+        let (_, f2) = add_scoped_session_fact(&engine, "nested", "s1", "user:alice/project:x");
+        let (_, f3) = add_scoped_session_fact(&engine, "other", "s1", "user:bob");
+
+        // Subtree from user:alice should include both alice and alice/project:x
+        let created = engine.link_session_facts("s1", Some("user:alice")).unwrap();
+        assert_eq!(created, 2); // f1↔f2
+        assert_eq!(engine.graph_degree(f1), 2);
+        assert_eq!(engine.graph_degree(f2), 2);
+        assert_eq!(engine.graph_degree(f3), 0);
+    }
+
+    #[test]
+    fn link_session_facts_scope_not_found() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        add_session_fact(&engine, "a", "s1");
+
+        let result = engine.link_session_facts("s1", Some("user:nonexistent"));
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), MemoryError::NotFound(msg) if msg.contains("scope path"))
+        );
     }
 }
