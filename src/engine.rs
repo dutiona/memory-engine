@@ -41,6 +41,8 @@ pub struct EngineConfig {
     /// Upcaster registry for event payload versioning.
     /// Defaults to empty (all event types at revision 1).
     pub upcaster_registry: UpcasterRegistry,
+    /// Open in read-only mode: skip init/migration, reject writes.
+    pub read_only: bool,
 }
 
 impl EngineConfig {
@@ -54,6 +56,7 @@ impl EngineConfig {
             search_config: None,
             backup_dir: None,
             upcaster_registry: UpcasterRegistry::new(),
+            read_only: false,
         }
     }
 }
@@ -101,12 +104,16 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub fn open(config: &EngineConfig) -> Result<Self> {
-        let pool = ConnectionPool::open(
-            &config.path,
-            config.embed_dim,
-            config.read_pool_size,
-            config.backup_dir.as_deref(),
-        )?;
+        let pool = if config.read_only {
+            ConnectionPool::open_read_only(&config.path, config.embed_dim, config.read_pool_size)?
+        } else {
+            ConnectionPool::open(
+                &config.path,
+                config.embed_dim,
+                config.read_pool_size,
+                config.backup_dir.as_deref(),
+            )?
+        };
         Self::init_from_pool(
             pool,
             config.embed_dim,
@@ -199,8 +206,15 @@ impl MemoryEngine {
         upcaster_registry: UpcasterRegistry,
         reranker: Option<Box<dyn Reranker>>,
     ) -> Result<Self> {
-        // Scope the MutexGuard so it drops before we move `pool` into the struct.
-        let (graph, scope_tree) = {
+        // Scope the guard so it drops before we move `pool` into the struct.
+        let (graph, scope_tree) = if pool.is_read_only() {
+            // Read-only: use read connection, validate only (no set)
+            let conn = pool.read();
+            Self::validate_embed_dim(&conn, embed_dim)?;
+            let graph = MemoryGraph::load_from_db(&conn)?;
+            let scope_tree = ScopeTree::load(&conn)?;
+            (graph, scope_tree)
+        } else {
             let conn = pool.write();
             Self::validate_or_set_embed_dim(&conn, embed_dim)?;
             let graph = MemoryGraph::load_from_db(&conn)?;
@@ -208,11 +222,11 @@ impl MemoryEngine {
             (graph, scope_tree)
         };
 
+        // HNSW build is read-only — always use a read connection.
         #[cfg(feature = "ann")]
         let hnsw_strategy = if let Some(ref cfg) = search_config {
-            // Skip building the index if the threshold is unreachable.
             if cfg.ann_threshold < usize::MAX {
-                let conn = pool.write();
+                let conn = pool.read();
                 Some(crate::search::ann::HnswStrategy::build_from_db(
                     &conn, embed_dim,
                 )?)
@@ -285,6 +299,31 @@ impl MemoryEngine {
         Ok(())
     }
 
+    /// Validate stored embed_dim matches requested — read-only, never writes.
+    fn validate_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
+        if let Some(stored) = get_config(conn, "embed_dim")? {
+            let stored_dim: usize = stored.parse().map_err(|_| {
+                MemoryError::Migration(format!("invalid stored embed_dim: {stored}"))
+            })?;
+            if stored_dim != embed_dim {
+                return Err(MemoryError::Migration(format!(
+                    "embed_dim mismatch: stored {stored_dim} vs requested {embed_dim}"
+                )));
+            }
+            Ok(())
+        } else {
+            Err(MemoryError::Migration(
+                "embed_dim not set in database; open in read-write mode first".to_string(),
+            ))
+        }
+    }
+
+    /// Whether this engine was opened in read-only mode.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.pool.is_read_only()
+    }
+
     // --- Private connection dispatch helpers ---
 
     /// Execute a read operation on a connection from the read pool.
@@ -299,8 +338,10 @@ impl MemoryEngine {
     /// Lock the write connection and return the guard directly.
     /// Callers use this when they need to hold the write lock across
     /// multiple operations (e.g., DB mutation + cache update).
-    fn write_conn(&self) -> MutexGuard<'_, Connection> {
-        self.pool.write()
+    ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
+    fn write_conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.pool.try_write()
     }
 
     // --- Public API: Ingest ---
@@ -311,7 +352,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on insert failure.
     pub fn ingest(&self, event: &NewEvent) -> Result<i64> {
-        let conn = self.write_conn();
+        let conn = self.write_conn()?;
         EventStore::new(&conn, &self.upcaster_registry).insert(event)
     }
 
@@ -380,7 +421,7 @@ impl MemoryEngine {
         let emb_copy = embedding.clone();
 
         let fact_id = {
-            let conn = self.write_conn();
+            let conn = self.write_conn()?;
             let scope_id = match scope {
                 Some(path) => {
                     let scope_store = ScopeStore::new(&conn);
@@ -747,7 +788,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on write failure.
     pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self.write_conn();
+        let conn = self.write_conn()?;
         set_config(&conn, key, value)
     }
 
@@ -774,7 +815,7 @@ impl MemoryEngine {
         config: &crate::bootstrap::BootstrapConfig,
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
-        let conn = self.write_conn();
+        let conn = self.write_conn()?;
         let scope_id = match &config.scope {
             Some(path) => {
                 let scope_store = ScopeStore::new(&conn);
@@ -814,7 +855,7 @@ impl MemoryEngine {
         config: &crate::bootstrap::BootstrapConfig,
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
-        let conn = self.write_conn();
+        let conn = self.write_conn()?;
         let scope_id = match &config.scope {
             Some(path) => {
                 let scope_store = ScopeStore::new(&conn);
@@ -851,7 +892,7 @@ impl MemoryEngine {
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
         let (stats, expired_ids) = {
-            let conn = self.write_conn();
+            let conn = self.write_conn()?;
             let (stats, expired_ids) =
                 crate::consolidation::consolidate(&conn, generator, self.embed_dim, config)?;
 
@@ -889,7 +930,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
         let (stats, pruned_ids) = {
-            let conn = self.write_conn();
+            let conn = self.write_conn()?;
             let mut graph = self.graph.write();
             crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())?
         };
@@ -925,7 +966,7 @@ impl MemoryEngine {
         #[cfg(feature = "ann")]
         let embedding = new_fact.embedding.clone();
         let resolution = {
-            let conn = self.write_conn();
+            let conn = self.write_conn()?;
             let mut graph = self.graph.write();
             crate::conflict::resolve_conflict(
                 &conn,
@@ -1007,7 +1048,7 @@ impl MemoryEngine {
             None => Vec::new(),
         };
 
-        let conn = self.write_conn();
+        let conn = self.write_conn()?;
         let facts =
             FactStore::new(&conn, self.embed_dim).list_active_by_session(session_id, &scope_ids)?;
 
@@ -1167,7 +1208,7 @@ impl MemoryEngine {
             .collect();
 
         if !unsurfaced_ids.is_empty() {
-            let conn = self.write_conn();
+            let conn = self.write_conn()?;
             let stamped =
                 FactStore::new(&conn, self.embed_dim).stamp_surfaced(&unsurfaced_ids, now)?;
             // Update in-place with DB-authoritative timestamps
@@ -1196,13 +1237,13 @@ impl MemoryEngine {
 
     /// Pin a fact (make it unforgettable).
     pub fn pin_fact(&self, id: i64) -> Result<()> {
-        let conn = self.write_conn();
+        let conn = self.write_conn()?;
         FactStore::new(&conn, self.embed_dim).set_pinned(id, true)
     }
 
     /// Unpin a fact (allow forgetting).
     pub fn unpin_fact(&self, id: i64) -> Result<()> {
-        let conn = self.write_conn();
+        let conn = self.write_conn()?;
         FactStore::new(&conn, self.embed_dim).set_pinned(id, false)
     }
 
@@ -1325,7 +1366,7 @@ impl MemoryEngine {
                 "zstd compression requires the `compress-zstd` feature".into(),
             )),
             crate::inspect::DumpFormat::Sqlite(path) => {
-                let conn = self.write_conn();
+                let conn = self.write_conn()?;
                 crate::inspect::dump::dump_sqlite(&conn, path)
             }
             _ => Err(MemoryError::NotImplemented(
@@ -1583,7 +1624,7 @@ impl MemoryEngine {
             .collect();
 
         if !unsurfaced_ids.is_empty() {
-            let conn = self.write_conn();
+            let conn = self.write_conn()?;
             let stamped = FactStore::new(&conn, self.embed_dim)
                 .stamp_surfaced(&unsurfaced_ids, config.now)?;
             let stamped_map: std::collections::HashMap<i64, DateTime<Utc>> =
