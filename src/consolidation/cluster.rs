@@ -29,13 +29,10 @@ pub fn cluster_fusion(
     embed_dim: usize,
     min_cluster_size: usize,
 ) -> Result<usize> {
-    let summary_store = SummaryStore::new(conn, embed_dim);
-
-    // Idempotent: clear previous cluster summaries
-    summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
-
     /// Maximum number of active facts for clustering. Beyond this, the O(N^2)
     /// greedy clustering becomes impractical. Skip with a warning.
+    /// Checked BEFORE deleting existing summaries to avoid wiping them
+    /// without producing replacements.
     const MAX_CLUSTER_FACTS: usize = 50_000;
 
     let fact_store = FactStore::new(conn, embed_dim);
@@ -49,6 +46,11 @@ pub fn cluster_fusion(
         );
         return Ok(0);
     }
+
+    let summary_store = SummaryStore::new(conn, embed_dim);
+
+    // Idempotent: clear previous cluster summaries (safe — we know we'll rebuild them)
+    summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
 
     // Greedy single-linkage clustering
     let clusters = greedy_cluster(&active_facts, CLUSTER_SIMILARITY_THRESHOLD);

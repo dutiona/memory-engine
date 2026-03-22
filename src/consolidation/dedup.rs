@@ -37,9 +37,12 @@ pub fn local_dedup(
         tracing::warn!(
             count = active_facts.len(),
             max = MAX_DEDUP_FACTS,
-            "dedup skipped: too many active facts for O(N*M) comparison"
+            "dedup skipped: too many active facts for O(N*M) comparison; \
+             watermark will NOT advance so skipped facts are retried when corpus shrinks"
         );
-        return Ok((0, vec![]));
+        // Return sentinel value usize::MAX to signal "skipped" to the orchestrator.
+        // The orchestrator must NOT advance last_consolidated_at in this case.
+        return Ok((usize::MAX, vec![]));
     }
 
     // Split into "new" (to compare) and "all active" (to compare against)

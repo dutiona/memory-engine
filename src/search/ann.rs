@@ -252,10 +252,13 @@ impl VectorSearchStrategy for HnswStrategy {
         let vec = embedding.to_vec();
         let mut searcher: Searcher<u32> = Searcher::default();
         let hnsw_id = inner.index.insert(vec, &mut searcher);
-        debug_assert_eq!(
+        assert_eq!(
             hnsw_id,
             inner.index_to_fact.len(),
-            "HNSW sequential ID invariant violated on insert"
+            "HNSW sequential ID invariant violated on insert: got {hnsw_id}, \
+             expected {}. This indicates a bug in the hnsw crate or a \
+             concurrent modification. Index is now corrupt.",
+            inner.index_to_fact.len()
         );
         inner.index_to_fact.push(fact_id);
         inner.fact_to_hnsw.insert(fact_id, hnsw_id);
