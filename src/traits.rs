@@ -94,6 +94,11 @@ pub trait PersistenceClassifier {
 /// - Input: query text + candidates from hybrid search (FTS + vector + RRF)
 /// - Output: reordered/rescored candidates (may filter, must not add new facts)
 /// - The returned vec length must be <= input length
+/// - Every returned fact ID must be present in the input candidates (no fabrication)
+/// - No duplicate fact IDs in the output
+///
+/// These invariants are enforced at runtime by `MemoryEngine::query()`.
+/// Violations produce `MemoryError::Reranker`.
 pub trait Reranker: Send + Sync {
     /// Rerank candidates for the given query text.
     ///

@@ -231,6 +231,8 @@ let engine = MemoryEngine::open_memory_with(dim, None, Some(Box::new(my_reranker
 assert_eq!(engine.reranker_name(), Some("cross_encoder"));
 ```
 
+**Contract enforcement:** The engine validates reranker output at runtime (defense-in-depth). After each `rerank()` call, `query()` checks that: (1) every output fact ID was present in the input candidates, (2) no duplicate IDs appear, and (3) output length does not exceed input length. Violations produce `MemoryError::Reranker` with a diagnostic message. This guards against buggy reranker implementations while preserving the trusted-consumer model for well-behaved code.
+
 **Lock semantics:** Reranking runs _outside_ the database read lock. This is critical because cross-encoder inference (local model or API call) can take 10-100ms per candidate. The read lock is held only for `hybrid_search()`, then released before reranking begins.
 
 **Research rationale:** Four-layer cognitive architecture research shows cross-encoder reranking on top-20 candidates improves nDCG@10 by 5-15%. The engine is positioned at layer 2 (retrieval + reranking), while layers 3-4 (semantic extraction, context adaptation) are consumer responsibilities.
