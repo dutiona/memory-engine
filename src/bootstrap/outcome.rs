@@ -57,7 +57,7 @@ pub enum Sentiment {
 /// # Classification
 ///
 /// - **Success**: `(has_commit && !has_error_loops) || (tests_passed && !was_interrupted)`
-/// - **Failure**: `(has_error_loops && was_interrupted) || (negative sentiment && !has_commit)`
+/// - **Failure**: `has_error_loops || was_interrupted || (negative sentiment && !has_commit)`
 /// - **Indeterminate**: everything else
 pub fn classify_outcome(
     turns: &[super::filter::ConversationTurn],
@@ -78,7 +78,8 @@ pub fn classify_outcome(
 
     let outcome = if (has_commit && !has_error_loops) || (tests_passed && !was_interrupted) {
         SessionOutcome::Success
-    } else if (has_error_loops && was_interrupted)
+    } else if has_error_loops
+        || was_interrupted
         || (final_user_sentiment == Sentiment::Negative && !has_commit)
     {
         SessionOutcome::Failure
@@ -329,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn error_loop_without_interruption_is_indeterminate() {
+    fn error_loop_without_interruption_is_failure() {
         let err = "error[E0308]: mismatched types";
         let turns = vec![
             make_turn(
@@ -349,8 +350,8 @@ mod tests {
             ),
         ];
         let (outcome, signals) = classify_outcome(&turns);
-        // Error loops without interruption no longer classified as Failure
-        assert_eq!(outcome, SessionOutcome::Indeterminate);
+        // Error loops alone are sufficient for Failure classification
+        assert_eq!(outcome, SessionOutcome::Failure);
         assert!(signals.has_error_loops);
         assert!(!signals.was_interrupted);
     }
