@@ -66,15 +66,8 @@ async fn main() -> Result<(), BoxError> {
     let engine = Arc::new(engine);
 
     // 4. Initialize embedding provider (optional)
-    let embedder = mcp_config.embedding.map(|emb_config| {
-        Arc::new(embedding::HttpEmbeddingProvider::new(
-            emb_config.endpoint,
-            emb_config.model,
-            emb_config.api_key,
-            emb_config.dimensions,
-            emb_config.timeout_secs,
-        ))
-    });
+    // Use the resolved embed_dim (from DB probe or config), not the TOML value.
+    let embedder = build_embedder(&cli, &mcp_config, embed_dim)?;
 
     // 5. Construct and serve
     let mcp_server = server::MemoryMcpServer::new(engine, embedder, embed_dim);
@@ -85,6 +78,43 @@ async fn main() -> Result<(), BoxError> {
     service.waiting().await?;
 
     Ok(())
+}
+
+/// Build the embedding provider from config + CLI, using the probed embed_dim.
+fn build_embedder(
+    cli: &Cli,
+    mcp_config: &config::McpConfig,
+    embed_dim: usize,
+) -> Result<Option<Arc<embedding::HttpEmbeddingProvider>>, BoxError> {
+    // Priority: TOML [embedding] section > CLI flags
+    if let Some(ref emb_config) = mcp_config.embedding {
+        return Ok(Some(Arc::new(
+            embedding::HttpEmbeddingProvider::new(
+                emb_config.endpoint.clone(),
+                emb_config.model.clone(),
+                emb_config.api_key.clone(),
+                embed_dim, // Use probed dim, not config dim
+                emb_config.timeout_secs,
+            )
+            .map_err(|e| format!("failed to create embedding provider: {e}"))?,
+        )));
+    }
+
+    // Build from CLI flags if available
+    if let (Some(url), Some(model)) = (&cli.embed_url, &cli.embed_model) {
+        return Ok(Some(Arc::new(
+            embedding::HttpEmbeddingProvider::new(
+                url.clone(),
+                model.clone(),
+                cli.embed_api_key.clone(),
+                embed_dim,
+                30,
+            )
+            .map_err(|e| format!("failed to create embedding provider: {e}"))?,
+        )));
+    }
+
+    Ok(None)
 }
 
 /// Load configuration from TOML file with CLI overrides.
@@ -115,18 +145,8 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
         mcp_config.engine.db_path = db_path.clone();
     }
 
-    // Build embedding config from CLI if not in TOML
-    if mcp_config.embedding.is_none() {
-        if let (Some(url), Some(model)) = (&cli.embed_url, &cli.embed_model) {
-            mcp_config.embedding = Some(config::EmbeddingSection {
-                endpoint: url.clone(),
-                model: model.clone(),
-                api_key: cli.embed_api_key.clone(),
-                dimensions: mcp_config.engine.embed_dim.unwrap_or(384),
-                timeout_secs: 30,
-            });
-        }
-    }
+    // NOTE: Embedding config from CLI is handled in build_embedder(),
+    // which runs after embed_dim probe to avoid dimension mismatch.
 
     Ok(mcp_config)
 }

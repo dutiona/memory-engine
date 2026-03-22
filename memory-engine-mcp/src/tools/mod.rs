@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use memory_engine::engine::MemoryEngine;
 use memory_engine::inspect_types::FactExplanation;
 use memory_engine::resume::ResumeConfig;
+use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, EventType, FactType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
@@ -30,7 +31,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                     "payload": { "description": "Event payload (arbitrary JSON)" },
                     "source": { "type": "string", "description": "Event source identifier" },
                     "session_id": { "type": "string", "description": "Session identifier (optional)" },
-                    "scope": { "type": "string", "description": "Scope path (e.g. '/project/x'). Created if missing." },
+                    "scope": { "type": "string", "description": "Scope path (e.g. 'project/x'). Created if missing. No leading slash." },
                     "timestamp": { "type": "string", "format": "date-time", "description": "ISO 8601 timestamp. Defaults to now." }
                 },
                 "required": ["event_type", "payload", "source"]
@@ -257,6 +258,28 @@ fn get_depth(args: &Map<String, Value>) -> Depth {
         .unwrap_or_default()
 }
 
+/// Parse an embedding from a JSON value, returning an error if present but malformed.
+fn parse_embedding(args: &Map<String, Value>) -> Result<Option<Vec<f32>>, ErrorData> {
+    match args.get("embedding") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => serde_json::from_value::<Vec<f32>>(v.clone())
+            .map(Some)
+            .map_err(|e| ErrorData::invalid_params(format!("invalid embedding: {e}"), None)),
+    }
+}
+
+fn parse_search_mode(s: &str) -> Result<SearchMode, ErrorData> {
+    match s {
+        "fts" => Ok(SearchMode::Fts),
+        "vector" => Ok(SearchMode::Vector),
+        "hybrid" => Ok(SearchMode::Hybrid),
+        other => Err(ErrorData::invalid_params(
+            format!("unknown search mode: {other}"),
+            None,
+        )),
+    }
+}
+
 fn parse_event_type(s: &str) -> Result<EventType, ValidationError> {
     match s {
         "Interaction" => Ok(EventType::Interaction),
@@ -354,9 +377,7 @@ fn handle_add_fact(
     let metadata = args.get("metadata").cloned();
 
     // Pre-computed embedding or server-side embedding
-    let pre_computed: Option<Vec<f32>> = args
-        .get("embedding")
-        .and_then(|v| serde_json::from_value::<Vec<f32>>(v.clone()).ok());
+    let pre_computed = parse_embedding(&args)?;
 
     if let Some(ref emb) = pre_computed {
         if emb.len() != embed_dim {
@@ -417,31 +438,40 @@ fn handle_query(
 
     let mut query = memory_engine::MemoryQuery::new();
 
+    // Parse and validate search mode
+    let mode = match get_str(&args, "mode") {
+        Some(s) => parse_search_mode(&s)?,
+        None => SearchMode::Hybrid,
+    };
+
+    // Parse embedding (with proper error on malformed input)
+    let pre_emb = parse_embedding(&args)?;
+
     if let Some(text) = get_str(&args, "text") {
         query = query.text(text.clone());
 
         // For hybrid/vector mode, compute embedding from text
-        let mode = get_str(&args, "mode").unwrap_or_else(|| "hybrid".to_owned());
-        if mode != "fts" {
-            // Try pre-computed embedding first
-            if let Some(emb) = args
-                .get("embedding")
-                .and_then(|v| serde_json::from_value::<Vec<f32>>(v.clone()).ok())
-            {
+        if mode != SearchMode::Fts {
+            if let Some(emb) = pre_emb {
                 query = query.embedding(emb);
             } else if let Some(emb_provider) = embedder {
                 let emb = emb_provider.embed(&text).map_err(to_mcp_error)?;
                 query = query.embedding(emb);
+            } else {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "mode '{mode:?}' requires an embedding provider or pre-computed embedding"
+                    ),
+                    None,
+                ));
             }
-            // If no embedder and no pre-computed, fall through — engine will do FTS-only
         }
-    } else if let Some(emb) = args
-        .get("embedding")
-        .and_then(|v| serde_json::from_value::<Vec<f32>>(v.clone()).ok())
-    {
-        // Vector-only query with pre-computed embedding
+    } else if let Some(emb) = pre_emb {
         query = query.embedding(emb);
     }
+
+    // Explicitly set search mode — don't rely on engine inference
+    query = query.search_mode(mode);
 
     // Scope
     if let Some(scope) = get_str(&args, "scope") {
@@ -454,12 +484,20 @@ fn handle_query(
         };
     }
 
-    // Temporal filters
-    if let (Some(start), Some(end)) = (
-        get_datetime(&args, "period_start")?,
-        get_datetime(&args, "period_end")?,
-    ) {
-        query = query.period(start, end);
+    // Temporal filters — reject one-sided periods
+    let period_start = get_datetime(&args, "period_start")?;
+    let period_end = get_datetime(&args, "period_end")?;
+    match (period_start, period_end) {
+        (Some(start), Some(end)) => {
+            query = query.period(start, end);
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(ErrorData::invalid_params(
+                "both period_start and period_end must be provided, or neither",
+                None,
+            ));
+        }
+        (None, None) => {}
     }
 
     if let Some(ft) = get_str(&args, "fact_type") {
@@ -621,6 +659,13 @@ fn handle_flush_insights(
 
         let scope = get_str(obj, "scope");
         let importance = get_f64(obj, "importance");
+
+        if let Some(imp) = importance {
+            if !(0.0..=1.0).contains(&imp) {
+                failed.push(json!({ "index": i, "error": format!("importance must be in [0.0, 1.0], got {imp}") }));
+                continue;
+            }
+        }
 
         let mut metadata = obj.get("metadata").cloned().unwrap_or(json!({}));
         if let Value::Object(ref mut m) = metadata {

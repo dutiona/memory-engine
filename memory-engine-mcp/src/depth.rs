@@ -61,6 +61,7 @@ pub fn shape_fact(fact: &Fact, depth: Depth, scope_path: Option<&str>) -> Value 
             "source_event_id": fact.source_event_id,
             "access_count": fact.access_count,
             "last_accessed": fact.last_accessed,
+            "surfaced_at": fact.surfaced_at,
             "metadata": fact.metadata,
         }),
         Depth::Full => {

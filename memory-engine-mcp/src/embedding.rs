@@ -14,24 +14,27 @@ pub struct HttpEmbeddingProvider {
 }
 
 impl HttpEmbeddingProvider {
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed (e.g., TLS init failure).
     pub fn new(
         endpoint: String,
         model: String,
         api_key: Option<String>,
         expected_dim: usize,
         timeout_secs: u64,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let client = reqwest::blocking::ClientBuilder::new()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
-            .expect("failed to build HTTP client");
-        Self {
+            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        Ok(Self {
             client,
             endpoint,
             model,
             api_key,
             expected_dim,
-        }
+        })
     }
 }
 

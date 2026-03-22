@@ -9,7 +9,7 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
-use crate::search::hybrid::{hybrid_search, MatchType, SearchMode, SearchQuery, SearchResult};
+use crate::search::hybrid::{MatchType, SearchMode, SearchQuery, SearchResult, hybrid_search};
 use crate::search::query::MemoryQuery;
 use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
 use crate::store::events::EventStore;
@@ -2651,9 +2651,11 @@ mod tests {
 
         let results = engine.execute_query(&MemoryQuery::new()).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .all(|r| r.match_type == MatchType::ImportanceRank));
+        assert!(
+            results
+                .iter()
+                .all(|r| r.match_type == MatchType::ImportanceRank)
+        );
     }
 
     #[test]
@@ -2760,9 +2762,11 @@ mod tests {
             .unwrap();
         // fact_type filtering in store path — list_by_importance_score doesn't filter by fact_type,
         // so it should be post-filtered
-        assert!(results
-            .iter()
-            .all(|r| r.fact.fact_type == FactType::Semantic));
+        assert!(
+            results
+                .iter()
+                .all(|r| r.fact.fact_type == FactType::Semantic)
+        );
     }
 
     #[test]
@@ -3619,12 +3623,16 @@ mod tests {
         assert_eq!(co_edges.len(), 2);
 
         // Both directions present
-        assert!(co_edges
-            .iter()
-            .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2));
-        assert!(co_edges
-            .iter()
-            .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1));
+        assert!(
+            co_edges
+                .iter()
+                .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2)
+        );
+        assert!(
+            co_edges
+                .iter()
+                .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1)
+        );
 
         // Weight matches constant
         for e in &co_edges {
