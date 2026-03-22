@@ -25,9 +25,22 @@ pub fn local_dedup(
     since: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Result<(usize, Vec<i64>)> {
+    /// Maximum number of active facts for dedup. Beyond this, the O(N*M)
+    /// pairwise comparison becomes impractical. Skip with a warning.
+    const MAX_DEDUP_FACTS: usize = 50_000;
+
     let fact_store = FactStore::new(conn, embed_dim);
     let edge_store = EdgeStore::new(conn);
     let active_facts = fact_store.list_active()?;
+
+    if active_facts.len() > MAX_DEDUP_FACTS {
+        tracing::warn!(
+            count = active_facts.len(),
+            max = MAX_DEDUP_FACTS,
+            "dedup skipped: too many active facts for O(N*M) comparison"
+        );
+        return Ok((0, vec![]));
+    }
 
     // Split into "new" (to compare) and "all active" (to compare against)
     let new_facts: Vec<_> = since.map_or_else(

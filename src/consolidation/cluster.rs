@@ -34,8 +34,21 @@ pub fn cluster_fusion(
     // Idempotent: clear previous cluster summaries
     summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
 
+    /// Maximum number of active facts for clustering. Beyond this, the O(N^2)
+    /// greedy clustering becomes impractical. Skip with a warning.
+    const MAX_CLUSTER_FACTS: usize = 50_000;
+
     let fact_store = FactStore::new(conn, embed_dim);
     let active_facts = fact_store.list_active()?;
+
+    if active_facts.len() > MAX_CLUSTER_FACTS {
+        tracing::warn!(
+            count = active_facts.len(),
+            max = MAX_CLUSTER_FACTS,
+            "clustering skipped: too many active facts for O(N^2) comparison"
+        );
+        return Ok(0);
+    }
 
     // Greedy single-linkage clustering
     let clusters = greedy_cluster(&active_facts, CLUSTER_SIMILARITY_THRESHOLD);
