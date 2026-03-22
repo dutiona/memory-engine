@@ -45,7 +45,7 @@ pub struct SearchQuery {
 }
 
 /// A search result with the full fact, combined score, and match source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub fact: Fact,
     pub score: f64,
