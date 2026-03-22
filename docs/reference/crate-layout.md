@@ -31,7 +31,7 @@ memory_engine (lib.rs)
 : Core data types returned by and passed into the engine. Includes full structs (`Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`), insertion structs (`NewEvent`, `NewFact`, `NewEdge`, `NewSummary`), enums (`EventType`, `FactType`, `ConsolidationLevel`, `ScopeQuery`), and option structs (`AddFactOptions`).
 
 `error`
-: `MemoryError` enum with `thiserror` derivation. Variants: `NotFound`, `Database` (from `rusqlite`), `Serialization` (from `serde_json`), `EmbeddingDimension`, `Conflict`, `Migration`, `NotImplemented`, `Pool`. Also exports `Result<T>` as an alias for `std::result::Result<T, MemoryError>`.
+: `MemoryError` enum with `thiserror` derivation. Variants: `NotFound`, `Database` (from `rusqlite`), `Serialization` (from `serde_json`), `EmbeddingDimension`, `Conflict`, `Migration`, `NotImplemented`, `Pool`, `UnsupportedEpoch`, `Internal`, `Io`, `Bootstrap`, `Reranker`, `ReadOnly`. Also exports `Result<T>` as an alias for `std::result::Result<T, MemoryError>`.
 
 `traits`
 : Consumer-implemented traits that the engine delegates to for domain-specific behavior:
@@ -77,7 +77,7 @@ memory_engine (lib.rs)
 : Bi-temporal conflict resolution. Given an existing fact and a candidate, delegates to a `ConflictArbiter` for the decision (`Add`, `Update`, `Delete`, `Noop`). On `Update`, the old fact is expired and a `superseded_by` edge is created in the graph. All mutations run in a single transaction.
 
 `pool`
-: `ConnectionPool` wrapping SQLite connections. Uses `parking_lot::Mutex` for the single write connection and a bounded pool of read connections. Supports both file-backed and in-memory modes. Configurable read pool size (default: 4).
+: `ConnectionPool` wrapping SQLite connections. Uses `parking_lot::Mutex` for the single write connection and a bounded pool of read connections. Supports both file-backed and in-memory modes. Configurable read pool size (default: 4). Read-only mode (`open_read_only`) validates schema version without init/migrate and guards all writes with `MemoryError::ReadOnly`.
 
 `scope`
 : `ScopeTree` -- in-memory cache of the hierarchical scope tree. Loaded from the `scopes` table on engine open. Resolves `ScopeQuery` variants (`Exact`, `Subtree`, `Ancestors`, `Inherited`) to sets of scope IDs without hitting the database.

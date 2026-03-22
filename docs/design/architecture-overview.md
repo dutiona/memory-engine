@@ -94,7 +94,7 @@ The crate is organized into modules with clear responsibilities:
 | `consolidation/` | Three-pass memory compression: local dedup, cluster fusion, global integration.                                                          |
 | `forgetting/`    | Ebbinghaus decay with multi-signal importance scoring.                                                                                   |
 | `conflict/`      | Bi-temporal conflict resolution delegated to `ConflictArbiter`.                                                                          |
-| `pool/`          | `ConnectionPool`: N reader connections + 1 writer connection.                                                                            |
+| `pool/`          | `ConnectionPool`: N reader connections + 1 writer connection. Supports read-only mode for operator tools.                                |
 | `traits`         | Consumer-provided trait definitions. Zero LLM/network dependencies in core.                                                              |
 | `types`          | All data types: `Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`, `ScopeQuery`, enums.                                                    |
 | `error`          | `MemoryError` enum with `thiserror` derivations.                                                                                         |
@@ -106,7 +106,7 @@ The crate is organized into modules with clear responsibilities:
 
 Thread safety is provided by three mechanisms:
 
-1. **ConnectionPool** -- Bounded pool of N SQLite reader connections (default 4) protected by a semaphore, plus 1 exclusive writer connection behind a `parking_lot::Mutex`. Readers use SQLite WAL mode for concurrent access without blocking writes.
+1. **ConnectionPool** -- Bounded pool of N SQLite reader connections (default 4) protected by a semaphore, plus 1 exclusive writer connection behind a `parking_lot::Mutex`. Readers use SQLite WAL mode for concurrent access without blocking writes. In read-only mode (`EngineConfig::read_only`), the writer slot holds a read-only connection and `try_write()` returns `MemoryError::ReadOnly`.
 
 2. **RwLock\<MemoryGraph\>** -- The in-memory petgraph is behind a `parking_lot::RwLock`. Read operations (`graph_degree`, `graph_neighbors`, etc.) take a shared read lock. Mutations (conflict resolution, forgetting, consolidation) take an exclusive write lock.
 

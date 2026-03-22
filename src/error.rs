@@ -39,6 +39,10 @@ pub enum MemoryError {
 
     #[error("reranker error: {0}")]
     Reranker(String),
+
+    /// Attempted a write operation on a read-only engine.
+    #[error("operation requires write access, but engine was opened read-only")]
+    ReadOnly,
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.
@@ -72,6 +76,15 @@ mod tests {
     fn reranker_error_display() {
         let err = MemoryError::Reranker("cross-encoder timeout".into());
         assert_eq!(err.to_string(), "reranker error: cross-encoder timeout");
+    }
+
+    #[test]
+    fn read_only_error_display() {
+        let err = MemoryError::ReadOnly;
+        assert_eq!(
+            err.to_string(),
+            "operation requires write access, but engine was opened read-only"
+        );
     }
 
     #[test]
