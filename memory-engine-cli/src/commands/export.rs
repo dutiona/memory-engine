@@ -23,7 +23,7 @@ pub fn run(db: &Path, args: &ExportArgs) -> anyhow::Result<()> {
         "sqlite" => DumpFormat::Sqlite(args.output.clone()),
         "json-gz" => DumpFormat::JsonGzip(args.output.clone()),
         "json-zst" => DumpFormat::JsonZstd(args.output.clone()),
-        other => anyhow::bail!("unknown export format: {other}"),
+        _ => unreachable!("clap value_parser prevents unknown formats"),
     };
 
     engine.dump_state(&format)?;

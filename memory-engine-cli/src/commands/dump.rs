@@ -53,13 +53,35 @@ pub fn run(db: &Path, args: &DumpArgs, format: OutputFormat) -> anyhow::Result<(
     match args.target.as_str() {
         "facts" => dump_facts(&engine, args.limit, format),
         "events" => dump_events(&engine, args.limit, format),
-        "all" => {
-            dump_facts(&engine, args.limit, format)?;
-            println!();
-            dump_events(&engine, args.limit, format)
-        }
+        "all" => dump_all(&engine, args.limit, format),
         _ => unreachable!(),
     }
+}
+
+fn dump_all(
+    engine: &memory_engine::MemoryEngine,
+    limit: usize,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
+    if format == OutputFormat::Json {
+        let mut facts = engine.list_active_facts()?;
+        facts.truncate(limit);
+        let filter = ReplayFilter {
+            limit: Some(limit),
+            ..ReplayFilter::default()
+        };
+        let events = engine.replay_events(&filter)?;
+        let combined = serde_json::json!({
+            "facts": facts,
+            "events": events,
+        });
+        output::print_json(&combined)?;
+    } else {
+        dump_facts(engine, limit, format)?;
+        println!();
+        dump_events(engine, limit, format)?;
+    }
+    Ok(())
 }
 
 fn dump_facts(
