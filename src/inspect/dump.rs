@@ -1,3 +1,4 @@
+use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -6,13 +7,20 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::error::{MemoryError, Result};
-use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, list_config};
 use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
+use crate::store::UpcasterRegistry;
+
+/// Build a sibling temporary path for atomic write-then-rename.
+fn tmp_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
 
 /// Stream engine state as JSON to `writer`, one entity at a time.
 ///
@@ -99,9 +107,19 @@ where
 /// [`MemoryError::Io`] on filesystem failure, or
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let file = File::create(path)?;
+    let tmp = tmp_path(path);
+    let file = File::create(&tmp)?;
     let mut buf = BufWriter::new(file);
-    stream_snapshot(conn, embed_dim, &mut buf)
+    match stream_snapshot(conn, embed_dim, &mut buf) {
+        Ok(()) => {
+            fs::rename(&tmp, path)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Dump engine state to a gzip-compressed JSON file.
@@ -113,12 +131,21 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-gzip")]
 pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let file = File::create(path)?;
+    let tmp = tmp_path(path);
+    let file = File::create(&tmp)?;
     let mut encoder =
         flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::default());
-    stream_snapshot(conn, embed_dim, &mut encoder)?;
-    encoder.finish()?;
-    Ok(())
+    match stream_snapshot(conn, embed_dim, &mut encoder) {
+        Ok(()) => {
+            encoder.finish()?;
+            fs::rename(&tmp, path)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Dump engine state to a zstd-compressed JSON file.
@@ -130,11 +157,20 @@ pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-zstd")]
 pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let file = File::create(path)?;
+    let tmp = tmp_path(path);
+    let file = File::create(&tmp)?;
     let mut encoder = zstd::Encoder::new(BufWriter::new(file), zstd::DEFAULT_COMPRESSION_LEVEL)?;
-    stream_snapshot(conn, embed_dim, &mut encoder)?;
-    encoder.finish()?;
-    Ok(())
+    match stream_snapshot(conn, embed_dim, &mut encoder) {
+        Ok(()) => {
+            encoder.finish()?;
+            fs::rename(&tmp, path)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Create an atomic `SQLite` backup via `VACUUM INTO`.

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
 use crate::store::upcaster::UpcasterRegistry;
@@ -199,7 +199,7 @@ impl<'a> EventStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
                     origin_node_id, sequence_id, created_at, event_revision
-             FROM events ORDER BY id ASC",
+             FROM events ORDER BY timestamp ASC",
         )?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -404,11 +404,9 @@ mod tests {
         };
         let results = store.list(&filter).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(
-            results
-                .iter()
-                .all(|e| e.session_id == Some("sess-1".into()))
-        );
+        assert!(results
+            .iter()
+            .all(|e| e.session_id == Some("sess-1".into())));
     }
 
     #[test]
