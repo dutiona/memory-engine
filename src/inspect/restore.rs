@@ -59,7 +59,18 @@ fn detect_compression(path: &Path) -> Result<Compression> {
 /// - [`MemoryError::Io`] on file access failure.
 /// - [`MemoryError::Serialization`] on malformed JSON.
 /// - [`MemoryError::NotImplemented`] if compression detected but feature disabled.
+/// Maximum snapshot file size (4 GiB). Prevents OOM from crafted snapshots.
+const MAX_SNAPSHOT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
 pub fn read_snapshot(path: &Path) -> Result<EngineSnapshot> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_SNAPSHOT_SIZE {
+        return Err(MemoryError::Internal(format!(
+            "snapshot file too large: {} bytes (max {MAX_SNAPSHOT_SIZE})",
+            metadata.len()
+        )));
+    }
+
     let compression = detect_compression(path)?;
     let file = File::open(path)?;
     let reader = BufReader::new(file);
