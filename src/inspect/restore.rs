@@ -32,10 +32,14 @@ enum Compression {
 }
 
 /// Detect compression from magic bytes at the start of a file.
-fn detect_compression(path: &Path) -> Result<Compression> {
-    let mut file = File::open(path)?;
+///
+/// Reads the first 4 bytes from the given file handle and seeks back to the
+/// start so the caller can continue reading from the beginning.
+fn detect_compression(file: &mut File) -> Result<Compression> {
+    use std::io::Seek;
     let mut magic = [0u8; 4];
     let n = file.read(&mut magic)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
     if n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
         Ok(Compression::Gzip)
     } else if n >= 4 && magic[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
@@ -63,7 +67,9 @@ fn detect_compression(path: &Path) -> Result<Compression> {
 const MAX_SNAPSHOT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 pub fn read_snapshot(path: &Path) -> Result<EngineSnapshot> {
-    let metadata = std::fs::metadata(path)?;
+    // Open the file once and perform all checks on the handle to avoid TOCTOU.
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
     if metadata.len() > MAX_SNAPSHOT_SIZE {
         return Err(MemoryError::Internal(format!(
             "snapshot file too large: {} bytes (max {MAX_SNAPSHOT_SIZE})",
@@ -71,8 +77,7 @@ pub fn read_snapshot(path: &Path) -> Result<EngineSnapshot> {
         )));
     }
 
-    let compression = detect_compression(path)?;
-    let file = File::open(path)?;
+    let compression = detect_compression(&mut file)?;
     let reader = BufReader::new(file);
 
     match compression {
@@ -413,7 +418,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.json");
         std::fs::write(&path, r#"{"hello":"world"}"#).unwrap();
-        assert_eq!(detect_compression(&path).unwrap(), Compression::None);
+        let mut f = File::open(&path).unwrap();
+        assert_eq!(detect_compression(&mut f).unwrap(), Compression::None);
     }
 
     #[cfg(feature = "compress-gzip")]
@@ -423,7 +429,8 @@ mod tests {
         let path = dir.path().join("test.gz");
         // Write minimal gzip header
         std::fs::write(&path, &[0x1f, 0x8b, 0x08, 0x00]).unwrap();
-        assert_eq!(detect_compression(&path).unwrap(), Compression::Gzip);
+        let mut f = File::open(&path).unwrap();
+        assert_eq!(detect_compression(&mut f).unwrap(), Compression::Gzip);
     }
 
     #[cfg(feature = "compress-zstd")]
@@ -432,7 +439,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.zst");
         std::fs::write(&path, &[0x28, 0xb5, 0x2f, 0xfd]).unwrap();
-        assert_eq!(detect_compression(&path).unwrap(), Compression::Zstd);
+        let mut f = File::open(&path).unwrap();
+        assert_eq!(detect_compression(&mut f).unwrap(), Compression::Zstd);
     }
 
     // --- Validation tests ---
