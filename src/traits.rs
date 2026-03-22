@@ -206,15 +206,10 @@ impl ForgetPolicy {
         {
             return Err(MemoryError::Conflict("weights must be >= 0".into()));
         }
-        let sum = self.recency_weight
-            + self.frequency_weight
-            + self.graph_degree_weight
-            + self.base_importance_weight;
-        if (sum - 1.0).abs() > 1e-6 {
-            return Err(MemoryError::Conflict(format!(
-                "importance weights must sum to 1.0 (got {sum})"
-            )));
-        }
+        // Note: weights intentionally do NOT need to sum to 1.0 (ADR-0006).
+        // Each signal is independently normalized to [0,1] via ln_1p + ceilings,
+        // so the weighted sum naturally falls in [0, sum_of_weights].
+        // The result is compared against min_importance, not against 1.0.
         Ok(())
     }
 }
