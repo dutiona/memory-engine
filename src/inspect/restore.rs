@@ -53,6 +53,9 @@ fn detect_compression(file: &mut File) -> Result<Compression> {
 // Snapshot reading
 // ---------------------------------------------------------------------------
 
+/// Maximum snapshot file size (4 GiB). Prevents OOM from crafted snapshots.
+const MAX_SNAPSHOT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Deserialize an [`EngineSnapshot`] from a (possibly compressed) JSON file.
 ///
 /// Auto-detects compression from magic bytes. Returns a clear error if the
@@ -63,9 +66,7 @@ fn detect_compression(file: &mut File) -> Result<Compression> {
 /// - [`MemoryError::Io`] on file access failure.
 /// - [`MemoryError::Serialization`] on malformed JSON.
 /// - [`MemoryError::NotImplemented`] if compression detected but feature disabled.
-/// Maximum snapshot file size (4 GiB). Prevents OOM from crafted snapshots.
-const MAX_SNAPSHOT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
-
+/// - [`MemoryError::Internal`] if the file exceeds 4 GiB.
 pub fn read_snapshot(path: &Path) -> Result<EngineSnapshot> {
     // Open the file once and perform all checks on the handle to avoid TOCTOU.
     let mut file = File::open(path)?;
