@@ -443,17 +443,20 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_flag_drives_was_interrupted() {
+    fn interrupted_flag_true_triggers_was_interrupted() {
         let mut tc = make_tool_call(Some("output"), None, false);
         tc.interrupted = true;
         let turns = vec![make_turn("do thing", "ok", vec![tc])];
         let (_, signals) = classify_outcome(&turns);
         assert!(signals.was_interrupted);
-        // is_error alone no longer triggers was_interrupted
+    }
+
+    #[test]
+    fn is_error_alone_does_not_trigger_was_interrupted() {
         let tc_err = make_tool_call(None, Some("fail"), true);
-        let turns2 = vec![make_turn("do thing", "ok", vec![tc_err])];
-        let (_, signals2) = classify_outcome(&turns2);
-        assert!(!signals2.was_interrupted);
+        let turns = vec![make_turn("do thing", "ok", vec![tc_err])];
+        let (_, signals) = classify_outcome(&turns);
+        assert!(!signals.was_interrupted);
     }
 
     #[test]
