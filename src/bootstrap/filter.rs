@@ -146,17 +146,14 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
             && !entry_uuid.is_empty()
             && !used.contains(entry_uuid)
         {
-            // Find the index of the next genuine user entry after i.
-            let next_user_bound = relevant[i + 1..]
+            // Search for an assistant, stopping at the next genuine user entry.
+            let assistant = relevant[i + 1..]
                 .iter()
-                .position(|e| matches!(e.entry_type, EntryType::User) && !is_tool_result(e))
-                .map_or(relevant.len(), |offset| i + 1 + offset);
-
-            // Search for an assistant only within [i+1 .. next_user_bound).
-            let assistant = relevant[i + 1..next_user_bound].iter().find(|a| {
-                matches!(a.entry_type, EntryType::Assistant)
-                    && a.uuid.as_deref().is_some_and(|u| !used.contains(u))
-            });
+                .take_while(|e| !(matches!(e.entry_type, EntryType::User) && !is_tool_result(e)))
+                .find(|a| {
+                    matches!(a.entry_type, EntryType::Assistant)
+                        && a.uuid.as_deref().is_some_and(|u| !used.contains(u))
+                });
 
             if let Some(assistant) = assistant {
                 let tool_results = collect_tool_result_entries(&relevant, assistant);
