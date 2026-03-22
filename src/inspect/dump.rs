@@ -333,6 +333,41 @@ mod tests {
         assert!(!snapshot.scopes.is_empty()); // root scope
     }
 
+    /// Stress test: 10K facts streamed to buffer. Verifies correctness at scale.
+    #[test]
+    fn streaming_10k_facts_roundtrips() {
+        use crate::store::schema::{init_schema, migrate, open_memory};
+        use crate::store::serialize_embedding;
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        let emb = serialize_embedding(&[0.1, 0.2, 0.3, 0.4]);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Batch-insert 10K facts via raw SQL for speed.
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..10_000 {
+            conn.execute(
+                "INSERT INTO facts (content, content_hash, embedding, fact_type,
+                        t_created, last_accessed, metadata, scope_id, is_pinned, importance_score)
+                 VALUES (?1, ?2, ?3, 'semantic', ?4, ?4, '{}', 1, 0, 0.0)",
+                rusqlite::params![format!("fact-{i}"), format!("h-{i}"), emb, now],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("COMMIT").unwrap();
+
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+
+        let snapshot: EngineSnapshot =
+            serde_json::from_slice(&buf).expect("10K streaming output must be valid");
+        assert_eq!(snapshot.facts.len(), 10_000);
+        assert_eq!(snapshot.embed_dim, DIM);
+    }
+
     #[test]
     fn sqlite_dump_from_in_memory() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
