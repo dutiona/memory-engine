@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{
@@ -448,6 +448,36 @@ impl<'a> FactStore<'a> {
         let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Iterate all facts row-by-row, calling `f` for each.
+    ///
+    /// Unlike [`Self::list_all`], this never allocates a `Vec` — each fact is
+    /// deserialized, passed to the callback, and dropped before the next
+    /// row is read.  Suitable for streaming serialization of large databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// error returned by `f`.
+    pub fn for_each<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(Fact) -> Result<()>,
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, content_hash, embedding, fact_type,
+                    t_created, t_expired, t_valid, t_invalid,
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score, surfaced_at
+             FROM facts ORDER BY id ASC",
+        )?;
+        let dim = self.embed_dim;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let fact = row_to_fact(row, dim)?;
+            f(fact)?;
+        }
+        Ok(())
     }
 
     /// Update the materialized importance score for a fact.

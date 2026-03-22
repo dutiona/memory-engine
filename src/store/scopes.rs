@@ -151,6 +151,35 @@ impl<'a> ScopeStore<'a> {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+    /// Iterate all scopes row-by-row, calling `f` for each.
+    ///
+    /// Unlike [`Self::list_all`], this never allocates a `Vec` — each scope
+    /// is read, passed to the callback, and dropped before the next row.
+    /// Suitable for streaming serialization of large databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// error returned by `f`.
+    pub fn for_each<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(ScopeNode) -> Result<()>,
+    {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, parent_id, label, depth FROM scopes ORDER BY id")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let scope = ScopeNode {
+                id: row.get(0)?,
+                parent_id: row.get(1)?,
+                label: row.get(2)?,
+                depth: row.get(3)?,
+            };
+            f(scope)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
