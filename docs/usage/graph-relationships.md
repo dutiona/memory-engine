@@ -23,7 +23,7 @@ Edges are produced by three processes -- two internal and one consumer-triggered
 
 Co-session edges have weight `0.5` (strong enough to influence importance scoring, weaker than explicit semantic relationships) and `scope_id = 1` (root scope, since co-session is cross-scope by nature). The method is idempotent -- calling it twice for the same session does not create duplicate edges.
 
-The optional `scope` parameter restricts the lookup to facts within a scope subtree. When `None`, all scopes are included (global lookup). In multi-tenant deployments where different scopes might reuse session IDs, passing `Some("user:alice")` prevents cross-scope edge creation between unrelated tenants.
+The optional `scope` parameter restricts the lookup to facts within a scope subtree. When `None`, all scopes are included (global lookup). This matters in multi-tenant deployments where different scopes might reuse session IDs (e.g., `user:alice/session:1` and `user:bob/session:1`): without scope filtering, unrelated facts could be linked, and those edges influence `graph_degree` in importance scoring (`forget()`), meaning one tenant's session could change pruning decisions for another. Passing `Some("user:alice")` prevents this cross-scope contamination. (See [issue #73](https://github.com/dutiona/memory-engine/issues/73), identified during [PR #67 review](https://github.com/dutiona/memory-engine/pull/67#discussion_r2957128940).)
 
 ```rust
 // Global lookup (backward-compatible):
