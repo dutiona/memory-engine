@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::error::Result;
+use crate::graph::MemoryGraph;
 use crate::scope::tree::ScopeTree;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
@@ -15,8 +16,9 @@ use super::types::{
 
 /// Explain why a fact is in its current state.
 ///
-/// When the fact has a `source_event_id`, the originating event is fetched via
-/// [`EventStore::get_upcasted`] and included in the provenance output.
+/// Computes graph context, temporal state, provenance, and scope path for the
+/// given fact. When the fact has a `source_event_id`, the originating event is
+/// fetched via [`EventStore::get_upcasted`] and included in the provenance.
 ///
 /// # Errors
 ///
@@ -24,6 +26,36 @@ use super::types::{
 /// Returns [`MemoryError::Migration`] if the source event cannot be upcasted.
 /// Returns [`MemoryError::Database`] on SQL failure.
 pub fn explain_fact(
+    conn: &Connection,
+    graph: &MemoryGraph,
+    scope_tree: &ScopeTree,
+    embed_dim: usize,
+    fact_id: i64,
+    registry: &UpcasterRegistry,
+) -> Result<FactExplanation> {
+    let graph_context = build_graph_context(graph, fact_id);
+    explain_fact_with_graph_context(
+        conn,
+        scope_tree,
+        embed_dim,
+        fact_id,
+        registry,
+        graph_context,
+    )
+}
+
+/// Like [`explain_fact`], but accepts a pre-computed [`GraphContext`].
+///
+/// Used by [`MemoryEngine::explain_fact`] to release the graph `RwLock` before
+/// acquiring the database connection, reducing lock contention.
+///
+/// # Consistency note
+///
+/// The graph context may reflect a slightly older graph state than the database
+/// snapshot if a concurrent writer commits between the graph traversal and the
+/// DB read. This is acceptable for an informational/debugging API — the
+/// explanation is best-effort, not transactionally consistent.
+pub(crate) fn explain_fact_with_graph_context(
     conn: &Connection,
     scope_tree: &ScopeTree,
     embed_dim: usize,
