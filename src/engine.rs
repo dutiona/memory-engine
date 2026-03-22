@@ -9,7 +9,7 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
-use crate::search::hybrid::{MatchType, SearchMode, SearchQuery, SearchResult, hybrid_search};
+use crate::search::hybrid::{hybrid_search, MatchType, SearchMode, SearchQuery, SearchResult};
 use crate::search::query::MemoryQuery;
 use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
 use crate::store::events::EventStore;
@@ -348,6 +348,18 @@ impl MemoryEngine {
         self.pool.try_write()
     }
 
+    /// Ensure a scope path exists using an already-held connection.
+    ///
+    /// Shared helper for [`ensure_scope_path()`] and [`add_fact()`] to avoid
+    /// duplicating scope resolution logic.
+    fn ensure_scope_with_conn(&self, conn: &Connection, path: &str) -> Result<i64> {
+        let scope_store = ScopeStore::new(conn);
+        let id = scope_store.ensure_path(path)?;
+        let node = scope_store.get(id)?;
+        self.scope_tree.write().insert(node);
+        Ok(id)
+    }
+
     // --- Public API: Ingest ---
 
     /// Append an event to the event log. Returns the assigned event id.
@@ -427,13 +439,7 @@ impl MemoryEngine {
         let fact_id = {
             let conn = self.write_conn()?;
             let scope_id = match scope {
-                Some(path) => {
-                    let scope_store = ScopeStore::new(&conn);
-                    let id = scope_store.ensure_path(path)?;
-                    let node = scope_store.get(id)?;
-                    self.scope_tree.write().insert(node);
-                    id
-                }
+                Some(path) => self.ensure_scope_with_conn(&conn, path)?,
                 None => 1, // root scope
             };
 
@@ -1171,19 +1177,12 @@ impl MemoryEngine {
     /// intermediate path segments are created in the database and the in-memory
     /// scope tree is updated.
     ///
-    /// Mirrors the scope resolution logic in [`add_fact()`] — both call sites
-    /// must stay in sync.
-    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on insert failure.
     pub fn ensure_scope_path(&self, path: &str) -> Result<i64> {
         let conn = self.write_conn();
-        let scope_store = ScopeStore::new(&conn);
-        let id = scope_store.ensure_path(path)?;
-        let node = scope_store.get(id)?;
-        self.scope_tree.write().insert(node);
-        Ok(id)
+        self.ensure_scope_with_conn(&conn, path)
     }
 
     // --- Public API: Direct data access ---
@@ -2652,11 +2651,9 @@ mod tests {
 
         let results = engine.execute_query(&MemoryQuery::new()).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(
-            results
-                .iter()
-                .all(|r| r.match_type == MatchType::ImportanceRank)
-        );
+        assert!(results
+            .iter()
+            .all(|r| r.match_type == MatchType::ImportanceRank));
     }
 
     #[test]
@@ -2763,11 +2760,9 @@ mod tests {
             .unwrap();
         // fact_type filtering in store path — list_by_importance_score doesn't filter by fact_type,
         // so it should be post-filtered
-        assert!(
-            results
-                .iter()
-                .all(|r| r.fact.fact_type == FactType::Semantic)
-        );
+        assert!(results
+            .iter()
+            .all(|r| r.fact.fact_type == FactType::Semantic));
     }
 
     #[test]
@@ -3624,16 +3619,12 @@ mod tests {
         assert_eq!(co_edges.len(), 2);
 
         // Both directions present
-        assert!(
-            co_edges
-                .iter()
-                .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2)
-        );
-        assert!(
-            co_edges
-                .iter()
-                .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1)
-        );
+        assert!(co_edges
+            .iter()
+            .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2));
+        assert!(co_edges
+            .iter()
+            .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1));
 
         // Weight matches constant
         for e in &co_edges {
