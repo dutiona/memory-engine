@@ -242,6 +242,70 @@ pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// Validate that the database schema is compatible with this library version
+/// without attempting any writes (no migrations, no init).
+///
+/// Returns `Ok(())` if the schema version matches [`CURRENT_SCHEMA_VERSION`]
+/// and the epoch is compatible. Returns an error if:
+/// - The database has no config table (fresh/uninitialized)
+/// - The schema version is newer than supported
+/// - The schema version is older and needs migration
+/// - The storage epoch is from the future
+///
+/// This is the read-only counterpart of [`init_schema`] + [`migrate`].
+pub fn validate_schema_version(conn: &Connection) -> Result<()> {
+    // Check if config table exists
+    let has_config: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='config'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(MemoryError::Database)?;
+
+    if !has_config {
+        return Err(MemoryError::Migration(
+            "database has no config table; cannot open read-only on an uninitialized database"
+                .to_string(),
+        ));
+    }
+
+    // Check epoch
+    let epoch_str = get_config(conn, "storage_epoch")?;
+    let epoch_raw = epoch_str.as_deref().unwrap_or("1");
+    let db_epoch: u16 = epoch_raw
+        .parse()
+        .map_err(|_| MemoryError::Migration(format!("invalid storage_epoch: {epoch_raw}")))?;
+    if db_epoch > STORAGE_EPOCH {
+        return Err(MemoryError::UnsupportedEpoch {
+            db_epoch,
+            supported_epoch: STORAGE_EPOCH,
+        });
+    }
+
+    // Check schema version
+    let version_str = get_config(conn, "schema_version")?.unwrap_or_else(|| "1".to_string());
+    let version: u32 = version_str
+        .parse()
+        .map_err(|_| MemoryError::Migration(format!("invalid schema_version: {version_str}")))?;
+
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(MemoryError::Migration(format!(
+            "schema_version {version} is newer than supported {CURRENT_SCHEMA_VERSION}; \
+             consider upgrading the memory-engine crate"
+        )));
+    }
+
+    if version < CURRENT_SCHEMA_VERSION {
+        return Err(MemoryError::Migration(format!(
+            "schema_version {version} needs migration to {CURRENT_SCHEMA_VERSION}; \
+             open in read-write mode first to run migrations"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Create a WAL-safe backup of the database before running migrations.
 ///
 /// Uses `VACUUM INTO` which produces an atomic, consistent copy regardless
@@ -1915,5 +1979,51 @@ CREATE TABLE IF NOT EXISTS config (
                 .unwrap();
             assert!(violations.is_empty(), "FK violations: {violations:?}");
         }
+    }
+
+    #[test]
+    fn validate_schema_version_current_ok() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        validate_schema_version(&conn).unwrap();
+    }
+
+    #[test]
+    fn validate_schema_version_future_version_err() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        set_config(&conn, "schema_version", "999").unwrap();
+        let err = validate_schema_version(&conn).unwrap_err();
+        assert!(matches!(err, MemoryError::Migration(_)));
+    }
+
+    #[test]
+    fn validate_schema_version_future_epoch_err() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        set_config(&conn, "storage_epoch", "999").unwrap();
+        let err = validate_schema_version(&conn).unwrap_err();
+        assert!(matches!(err, MemoryError::UnsupportedEpoch { .. }));
+    }
+
+    #[test]
+    fn validate_schema_version_fresh_db_err() {
+        let conn = open_memory().unwrap();
+        let err = validate_schema_version(&conn).unwrap_err();
+        assert!(matches!(err, MemoryError::Migration(_)));
+    }
+
+    #[test]
+    fn validate_schema_version_old_version_err() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        let old = (CURRENT_SCHEMA_VERSION - 1).to_string();
+        set_config(&conn, "schema_version", &old).unwrap();
+        let err = validate_schema_version(&conn).unwrap_err();
+        assert!(matches!(err, MemoryError::Migration(_)));
     }
 }
