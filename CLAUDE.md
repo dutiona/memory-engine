@@ -65,6 +65,7 @@ Read these docs when working on the relevant area:
 3. **Soft deletion** — facts are expired (`t_expired` set), never hard-deleted. Full audit trail for temporal reasoning.
 4. **Bi-temporal** — 4 timestamps per fact: `t_created`/`t_expired` (system), `t_valid`/`t_invalid` (real-world). From Graphiti.
 5. **`unsafe_code = "forbid"`** — no unsafe code anywhere.
+6. **Read-only open path** — `EngineConfig::read_only` opens without write capability. Defense in depth: file existence check + `validate_schema_version()` (read-only) + SQLite `query_only` pragma + Rust-level `try_write()` guard.
 
 ## Status
 
