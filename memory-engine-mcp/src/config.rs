@@ -59,6 +59,12 @@ const fn default_timeout() -> u64 {
 ///
 /// Returns an error if the database doesn't exist or has no `embed_dim` config.
 pub fn probe_embed_dim(db_path: &Path) -> Result<usize, String> {
+    if !db_path.is_file() {
+        return Err(format!(
+            "database path is not a file or does not exist: {}",
+            db_path.display()
+        ));
+    }
     let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,

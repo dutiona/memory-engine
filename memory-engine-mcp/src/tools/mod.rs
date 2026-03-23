@@ -463,12 +463,11 @@ fn handle_query(
             } else if let Some(emb_provider) = embedder {
                 let emb = emb_provider.embed(&text).map_err(to_mcp_error)?;
                 query = query.embedding(emb);
-            } else if explicit_mode.is_some() {
+            } else if let Some(mode) = explicit_mode {
                 // User explicitly asked for vector/hybrid but no embedder available
                 return Err(ErrorData::invalid_params(
                     format!(
-                        "mode '{:?}' requires an embedding provider or pre-computed embedding",
-                        explicit_mode.unwrap()
+                        "mode '{mode:?}' requires an embedding provider or pre-computed embedding"
                     ),
                     None,
                 ));

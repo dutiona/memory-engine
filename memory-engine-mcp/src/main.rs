@@ -119,6 +119,9 @@ fn build_embedder(
 fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
     // Start with TOML file if provided
     let mut mcp_config = if let Some(config_path) = &cli.config {
+        if !config_path.is_file() {
+            return Err(format!("config path is not a file: {}", config_path.display()).into());
+        }
         let content = std::fs::read_to_string(config_path)
             .map_err(|e| format!("cannot read config file {}: {e}", config_path.display()))?;
         toml::from_str::<config::McpConfig>(&content)

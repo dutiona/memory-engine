@@ -130,7 +130,10 @@ pub fn shape_explanation(explanation: &FactExplanation, depth: Depth) -> Value {
         }),
         Depth::Full => {
             // Full: serialize the entire explanation including source_event.
-            serde_json::to_value(explanation).unwrap_or(json!(null))
+            serde_json::to_value(explanation).unwrap_or_else(|e| {
+                tracing::error!("failed to serialize FactExplanation: {e}");
+                json!(null)
+            })
         }
     }
 }
