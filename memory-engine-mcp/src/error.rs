@@ -50,6 +50,11 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
         MemoryError::NotImplemented(msg) => {
             ErrorData::internal_error(format!("not implemented: {msg}"), None)
         }
+
+        MemoryError::ReadOnly => ErrorData::invalid_request(
+            "engine opened in read-only mode — write operations are not available",
+            None,
+        ),
     }
 }
 

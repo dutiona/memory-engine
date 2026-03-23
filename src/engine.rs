@@ -1181,7 +1181,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on insert failure.
     pub fn ensure_scope_path(&self, path: &str) -> Result<i64> {
-        let conn = self.write_conn();
+        let conn = self.write_conn()?;
         self.ensure_scope_with_conn(&conn, path)
     }
 
