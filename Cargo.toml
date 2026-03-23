@@ -1,5 +1,5 @@
 [workspace]
-members = ["memory-engine-cli"]
+members = ["memory-engine-cli", "memory-engine-mcp"]
 exclude = [".worktrees"]
 
 [package]

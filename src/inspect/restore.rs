@@ -11,7 +11,7 @@ use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
 use crate::store::events::event_type_to_str;
-use crate::store::schema::{set_config, CURRENT_SCHEMA_VERSION, STORAGE_EPOCH};
+use crate::store::schema::{CURRENT_SCHEMA_VERSION, STORAGE_EPOCH, set_config};
 use crate::store::serialize_embedding;
 
 use super::types::EngineSnapshot;
@@ -429,7 +429,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.gz");
         // Write minimal gzip header
-        std::fs::write(&path, &[0x1f, 0x8b, 0x08, 0x00]).unwrap();
+        std::fs::write(&path, [0x1f, 0x8b, 0x08, 0x00]).unwrap();
         let mut f = File::open(&path).unwrap();
         assert_eq!(detect_compression(&mut f).unwrap(), Compression::Gzip);
     }
@@ -439,7 +439,7 @@ mod tests {
     fn detect_zstd_magic() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.zst");
-        std::fs::write(&path, &[0x28, 0xb5, 0x2f, 0xfd]).unwrap();
+        std::fs::write(&path, [0x28, 0xb5, 0x2f, 0xfd]).unwrap();
         let mut f = File::open(&path).unwrap();
         assert_eq!(detect_compression(&mut f).unwrap(), Compression::Zstd);
     }

@@ -7,13 +7,13 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::error::{MemoryError, Result};
+use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, list_config};
 use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
-use crate::store::UpcasterRegistry;
 
 /// Build a sibling temporary path for atomic write-then-rename.
 fn tmp_path(path: &Path) -> std::path::PathBuf {
