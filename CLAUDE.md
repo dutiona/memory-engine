@@ -16,8 +16,10 @@ Companion repos:
 ```bash
 cargo build                           # debug build
 cargo build -p memory-engine-cli      # CLI inspector binary
+cargo build -p memory-engine-mcp      # MCP server binary
 cargo test                            # all tests
 cargo test -p memory-engine-cli       # CLI integration tests
+cargo test -p memory-engine-mcp       # MCP server tests
 cargo test --all-features             # with async + HNSW + compression
 cargo clippy --all-targets            # lint (pedantic + nursery)
 cargo fmt --check                     # format check
@@ -57,6 +59,7 @@ Read these docs when working on the relevant area:
 | Consolidation pipeline         | `docs/advanced/consolidation.md`         |
 | Hybrid search tuning           | `docs/advanced/hybrid-search.md`         |
 | CLI inspector usage            | `docs/reference/cli-inspector.md`        |
+| MCP server usage               | `docs/reference/mcp-server.md`           |
 
 ## Key Design Decisions
 
@@ -69,4 +72,4 @@ Read these docs when working on the relevant area:
 
 ## Status
 
-Phase 4a ✅ (inspection APIs, import/export, bootstrap, reranker). Phase 4b in progress: CLI inspector ✅ (`memory-engine-cli`), MCP server next. Then Phase 5 (cognitive pipelines — DreamCycle, outcome tracking, provenance). See `docs/ROADMAP.md` for open issues and dependency graph.
+Phase 4a ✅ (inspection APIs, import/export, bootstrap, reranker). Phase 4b in progress: CLI inspector ✅ (`memory-engine-cli`), MCP server ✅ (`memory-engine-mcp`, 10 P0 tools + tiered depth). P1 tools (#95) and P2 tools (#96) pending. Then Phase 5 (cognitive pipelines — DreamCycle, outcome tracking, provenance). See `docs/ROADMAP.md` for open issues and dependency graph.

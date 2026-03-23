@@ -21,8 +21,8 @@ pub fn to_event_filter(filter: &ReplayFilter) -> EventFilter {
 mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
-    use crate::store::events::EventStore;
     use crate::store::UpcasterRegistry;
+    use crate::store::events::EventStore;
     use crate::types::{EventType, NewEvent};
     use chrono::Utc;
 

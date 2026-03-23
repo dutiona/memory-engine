@@ -20,7 +20,7 @@
 //! - SQLite WAL mode + OS page cache → warm-cache after first iteration.
 //!   This is realistic for interactive use where the DB is already open.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::search::cosine_similarity;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};

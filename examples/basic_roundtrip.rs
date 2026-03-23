@@ -2,11 +2,11 @@
 //!
 //! Run with: `cargo run --example basic_roundtrip`
 
+use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{EventType, FactType, NewEvent};
-use memory_engine::MemoryEngine;
 
 /// Zero-vector embedder for examples (no external model needed).
 struct DummyEmbedder;

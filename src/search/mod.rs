@@ -10,8 +10,8 @@ pub mod vector;
 
 #[cfg(feature = "ann")]
 pub use ann::HnswStrategy;
-pub use fts::{fts_search, FtsResult};
-pub use hybrid::{hybrid_search, rrf_merge, MatchType, SearchMode, SearchQuery, SearchResult};
+pub use fts::{FtsResult, fts_search};
+pub use hybrid::{MatchType, SearchMode, SearchQuery, SearchResult, hybrid_search, rrf_merge};
 pub use query::MemoryQuery;
 pub use strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
-pub use vector::{cosine_similarity, vector_search, VectorResult};
+pub use vector::{VectorResult, cosine_similarity, vector_search};
