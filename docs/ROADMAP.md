@@ -231,6 +231,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | [#150](https://github.com/dutiona/memory-engine/issues/150) | P1       | MCP: batch embedding + batch `add_fact` for `flush_insights` |
 | [#96](https://github.com/dutiona/memory-engine/issues/96)   | P2       | MCP tools: replay_events, fact_history, bootstrap            |
 | [#151](https://github.com/dutiona/memory-engine/issues/151) | P2       | MCP: integration tests for tool handlers                     |
+| [#152](https://github.com/dutiona/memory-engine/issues/152) | P1       | Abstention type exposure in Query results (4-type taxonomy)  |
 
 #### Phase 4c: Quality & Cold Storage
 
@@ -359,6 +360,10 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 | Vitality boosts on access ([#134](https://github.com/dutiona/memory-engine/issues/134))                                                                               | Access-triggered importance boost with distance decay to graph neighbors (RMH). Strengthens frequently-used clusters                                                                                                                                                                        |
 | Grow-and-refine semantic dedup ([#64](https://github.com/dutiona/memory-engine/issues/64))                                                                            | Lightweight maintenance between DreamCycles — incremental dedup without full batch pipeline (R12)                                                                                                                                                                                           |
 | Recursive sub-query decomposition ([#138](https://github.com/dutiona/memory-engine/issues/138))                                                                       | Multi-hop retrieval via automatic sub-query decomposition (RMH constraint 2). Consumer-provided decomposer trait                                                                                                                                                                            |
+| Graph-walk pruning ([#153](https://github.com/dutiona/memory-engine/issues/153))                                                                                      | BFS from seed facts through relationship edges — prune low-relevance subgraphs before returning results. Complements spreading activation (#133). Source: note 18 §6                                                                                                                        |
+| Reasoning-strategy-aware reranking ([#155](https://github.com/dutiona/memory-engine/issues/155))                                                                      | Extend `Reranker` trait with reasoning-strategy signal — consumer injects task-type context so reranking adapts to CoT vs. direct retrieval. Source: note 18 Table 7                                                                                                                        |
+| Decay-as-deliberate-abstention ([#156](https://github.com/dutiona/memory-engine/issues/156))                                                                          | Formalize forgetting as deliberate abstention — decayed facts surfaced as "I used to know this" rather than silently omitted. 4th abstention type. Source: note 18 §10.3                                                                                                                    |
+| Mimir 5-signal retrieval weight study ([#157](https://github.com/dutiona/memory-engine/issues/157))                                                                   | Research: explicit signal weighting (BM25, semantic, vividness, mood, recency) vs RRF for episodic memory. Source: note 19 §2.1                                                                                                                                                             |
 
 #### Sub-phasing
 
@@ -371,8 +376,8 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
   - Three-layer identity output
   - `FactType::Prediction` with `t_predicted` (#132)
   - Spreading activation on retrieval (#133)
-- **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path, grow-and-refine semantic dedup (#64, R12), hierarchical workflow composition (R13), recursive sub-query decomposition (#138)
-- **Phase 5 (independent, any time):** `sample_dormant()` API, vitality boosts on access (#134)
+- **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path, grow-and-refine semantic dedup (#64, R12), hierarchical workflow composition (R13), recursive sub-query decomposition (#138), retrieval-induced forgetting (#154)
+- **Phase 5 (independent, any time):** `sample_dormant()` API, vitality boosts on access (#134), graph-walk pruning (#153), reasoning-strategy-aware reranking (#155), decay-as-deliberate-abstention (#156), Mimir 5-signal weight study (#157)
 - **Deferred (not in Phase 5):** `compress_behavior()` hook on DreamCycle (depends on consumer LLM integration)
 
 ---
