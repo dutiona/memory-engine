@@ -36,7 +36,7 @@ pub fn cluster_fusion(
     const MAX_CLUSTER_FACTS: usize = 50_000;
 
     let fact_store = FactStore::new(conn, embed_dim);
-    let active_facts = fact_store.list_active()?;
+    let active_facts = fact_store.list_active(None)?;
 
     if active_facts.len() > MAX_CLUSTER_FACTS {
         tracing::warn!(

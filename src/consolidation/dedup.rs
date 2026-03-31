@@ -31,7 +31,7 @@ pub fn local_dedup(
 
     let fact_store = FactStore::new(conn, embed_dim);
     let edge_store = EdgeStore::new(conn);
-    let active_facts = fact_store.list_active()?;
+    let active_facts = fact_store.list_active(None)?;
 
     if active_facts.len() > MAX_DEDUP_FACTS {
         tracing::warn!(
@@ -169,7 +169,7 @@ mod tests {
 
         // Lower importance (B) should be expired
         let store = FactStore::new(&conn, dim);
-        let active = store.list_active().unwrap();
+        let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "fact A");
     }
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(removed, 0);
 
         let store = FactStore::new(&conn, dim);
-        assert_eq!(store.list_active().unwrap().len(), 2);
+        assert_eq!(store.list_active(None).unwrap().len(), 2);
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
         let (removed, _) = local_dedup(&conn, dim, 0.90, Some(since), Utc::now()).unwrap();
         assert_eq!(removed, 1); // new duplicate should be expired against old
 
-        let active = store.list_active().unwrap();
+        let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "old fact"); // old survives (higher importance wins)
     }
@@ -261,7 +261,7 @@ mod tests {
         local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
 
         let store = FactStore::new(&conn, dim);
-        let active = store.list_active().unwrap();
+        let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "high importance");
     }
@@ -276,7 +276,7 @@ mod tests {
         local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
 
         let store = FactStore::new(&conn, dim);
-        let active = store.list_active().unwrap();
+        let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "older fact");
     }
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(removed, 0);
 
         let store = FactStore::new(&conn, dim);
-        let active = store.list_active().unwrap();
+        let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 2);
     }
 
@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(removed, 0);
 
         let store = FactStore::new(&conn, dim);
-        assert_eq!(store.list_active().unwrap().len(), 2);
+        assert_eq!(store.list_active(None).unwrap().len(), 2);
     }
 
     #[test]
@@ -375,7 +375,7 @@ mod tests {
 
         local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
 
-        let active = store.list_active().unwrap();
+        let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "high imp");
         // Survivor inherits max base importance (0.9 > 0.3)

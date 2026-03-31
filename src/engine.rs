@@ -1205,13 +1205,16 @@ impl MemoryEngine {
         self.with_read(|conn| FactStore::new(conn, self.embed_dim).get(id))
     }
 
-    /// List all active (non-expired) facts.
+    /// List active (non-expired) facts, optionally limited.
+    ///
+    /// When `limit` is `Some(n)`, a SQL `LIMIT` clause avoids materializing
+    /// the entire corpus. `None` returns all active facts.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn list_active_facts(&self) -> Result<Vec<Fact>> {
-        self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_active())
+    pub fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
+        self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_active(limit))
     }
 
     /// List summaries by consolidation level.
@@ -1930,7 +1933,7 @@ mod tests {
         let stats = engine.consolidate(&MockGen, &config).unwrap();
         assert_eq!(stats.duplicates_removed, 1);
 
-        let active = engine.list_active_facts().unwrap();
+        let active = engine.list_active_facts(None).unwrap();
         assert_eq!(active.len(), 1);
     }
 
@@ -1957,7 +1960,7 @@ mod tests {
         // Second run should find 0 new duplicates
         assert_eq!(stats2.duplicates_removed, 0);
         // Both facts still active
-        assert_eq!(engine.list_active_facts().unwrap().len(), 2);
+        assert_eq!(engine.list_active_facts(None).unwrap().len(), 2);
     }
 
     #[test]

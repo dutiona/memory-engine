@@ -481,7 +481,7 @@ mod tests {
         assert!(old.t_invalid.is_none());
 
         // No new facts should exist
-        let active = FactStore::new(&conn, dim).list_active().unwrap();
+        let active = FactStore::new(&conn, dim).list_active(None).unwrap();
         assert_eq!(active.len(), 1);
     }
 }

@@ -45,7 +45,7 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | Method              | Signature                                                     | Description                                           |
 | ------------------- | ------------------------------------------------------------- | ----------------------------------------------------- |
 | `get_fact`          | `(&self, id: i64) -> Result<Fact>`                            | Retrieve a fact by ID. Returns `NotFound` if missing. |
-| `list_active_facts` | `(&self) -> Result<Vec<Fact>>`                                | List all non-expired facts.                           |
+| `list_active_facts` | `(&self, limit: Option<usize>) -> Result<Vec<Fact>>`          | List non-expired facts; `Some(n)` pushes SQL `LIMIT`. |
 | `list_summaries`    | `(&self, level: &ConsolidationLevel) -> Result<Vec<Summary>>` | List summaries filtered by consolidation level.       |
 
 ### Query
@@ -116,13 +116,13 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Graph
 
-| Method               | Signature                                    | Description                                                                                                                              |
-| -------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `graph_degree`       | `(&self, fact_id: i64) -> usize`             | In + out edge count for a fact.                                                                                                          |
-| `graph_neighbors`    | `(&self, fact_id: i64) -> Vec<i64>`          | Outgoing neighbor fact IDs.                                                                                                              |
-| `graph_component`    | `(&self, fact_id: i64) -> Vec<i64>`          | All fact IDs in the connected component containing `fact_id`.                                                                            |
-| `graph_stats`        | `(&self) -> (usize, usize)`                  | `(node_count, edge_count)`.                                                                                                              |
-| `graph_has_node`     | `(&self, fact_id: i64) -> bool`              | Whether a node exists in the graph.                                                                                                      |
+| Method               | Signature                                                         | Description                                                                                                                                                                                                           |
+| -------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `graph_degree`       | `(&self, fact_id: i64) -> usize`                                  | In + out edge count for a fact.                                                                                                                                                                                       |
+| `graph_neighbors`    | `(&self, fact_id: i64) -> Vec<i64>`                               | Outgoing neighbor fact IDs.                                                                                                                                                                                           |
+| `graph_component`    | `(&self, fact_id: i64) -> Vec<i64>`                               | All fact IDs in the connected component containing `fact_id`.                                                                                                                                                         |
+| `graph_stats`        | `(&self) -> (usize, usize)`                                       | `(node_count, edge_count)`.                                                                                                                                                                                           |
+| `graph_has_node`     | `(&self, fact_id: i64) -> bool`                                   | Whether a node exists in the graph.                                                                                                                                                                                   |
 | `link_session_facts` | `(&self, session_id: &str, scope: Option<&str>) -> Result<usize>` | Create bidirectional `co_session` edges between all active facts sharing a session. When `scope` is `Some`, only facts within that scope subtree are considered. Idempotent. Returns the number of new edges created. |
 
 ### Pinning
@@ -144,10 +144,10 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Scheduling
 
-| Method          | Signature                                                               | Description                                                                                                                                                                                                 |
-| --------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Method          | Signature                                                               | Description                                                                                                                                                                                                                                                                                                                       |
+| --------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `list_due`      | `(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>>` | List active facts whose `t_valid <= now` (future memory that has surfaced). Stamps `surfaced_at` on first return so callers can distinguish newly-due from previously-surfaced facts — the old heuristic (`access_count > 0 && last_accessed > t_valid`) was unreliable for bootstrap/past-dated facts. `None` scope = root only. |
-| `next_due_time` | `(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>>`         | Scheduling hint: earliest `t_valid` among active future-dated facts. `None` scope = root only.                                                                                                              |
+| `next_due_time` | `(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>>`         | Scheduling hint: earliest `t_valid` among active future-dated facts. `None` scope = root only.                                                                                                                                                                                                                                    |
 
 ### Resume
 

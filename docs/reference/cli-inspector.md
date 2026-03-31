@@ -123,5 +123,5 @@ The `open_engine()` function sets `backup_dir` adjacent to the database as a saf
 ### Known Limitations
 
 - **No vector search in `query`**: The CLI doesn't implement `EmbeddingProvider`, so only FTS5 text matching works. Vector/hybrid search requires embeddings.
-- **`dump --limit` is post-hoc**: `list_active_facts()` loads all facts before truncating. Fine for operator use but won't scale to very large databases. Tracked in #104.
+- **`dump --limit` pushes SQL LIMIT**: `list_active_facts(Some(n))` adds a `LIMIT` clause to avoid materializing the full corpus.
 - **Import schema version**: Export/import roundtrip fails due to schema v6 vs restore v5 mismatch. Tracked in #80.
