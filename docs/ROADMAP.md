@@ -324,17 +324,16 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
     ▼
  Phase 5a ◀── CRITICAL PATH
  (#48,#49,#55,#56,#57,#63,#132,#133
-  + NEW: agent_id, evidence_basis,
-  importance_rationale, adversarial_review)
+  + #158,#159,#160,#161)
     │
     ▼
  Phase 5b
  (#64,#138, quarantine/suppress
-  + NEW: feedback_loop, shadow_mode)
+  + #162,#163)
     │
     ▼
  Phase 6  (#50,#51,#52
-  + NEW: pub/sub, ACL, dosing, reputation)
+  + #164,#165,#166,#167,#168)
     │
     ▼
  Phase 7  (#13)
@@ -392,11 +391,11 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
   - Three-layer identity output
   - `FactType::Prediction` with `t_predicted` (#132)
   - Spreading activation on retrieval (#133)
-    - `agent_id` on Event and Fact schemas (NEW) — schema migration, `agent_id: Option<String>`, prerequisite for all multi-agent work
-  - Evidence-basis enum on Fact (NEW) — `EvidenceBasis { Observed, Inferred, Synthesized }`, prevents frequency-based strengthening of ungrounded claims, pairs with #55
-  - Metacognitive rationale field on Fact (NEW) — `importance_rationale: Option<String>`, WHY rated important, improves DreamCycle promotion quality
-  - Adversarial self-review in DreamCycle promotion gate (NEW) — "Wait a minute" pattern before promoting to Wisdom tier, references Cheng et al. sycophancy findings
-- **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path, grow-and-refine semantic dedup (#64, R12), hierarchical workflow composition (R13), recursive sub-query decomposition (#138), retrieval-induced forgetting (#154), behavioral feedback loop (NEW) — usage outcomes feed retrieval weights (#63 records, #134 boosts, this closes the loop), shadow/dry-run mode (NEW) — full pipeline execution without committing, returns what would change (Signet pattern)
+  - `agent_id` on Event and Fact schemas (#158) — schema migration, `agent_id: Option<String>`, prerequisite for all multi-agent work
+  - Evidence-basis enum on Fact (#159) — `EvidenceBasis { Observed, Inferred, Synthesized }`, prevents frequency-based strengthening of ungrounded claims, pairs with #55
+  - Metacognitive rationale field on Fact ([#160](https://github.com/dutiona/memory-engine/issues/160)) — `importance_rationale: Option<String>`, WHY rated important, improves DreamCycle promotion quality
+  - Adversarial self-review in DreamCycle promotion gate (#161) — "Wait a minute" pattern before promoting to Wisdom tier, references Cheng et al. sycophancy findings
+- **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path, grow-and-refine semantic dedup (#64, R12), hierarchical workflow composition (R13), recursive sub-query decomposition (#138), retrieval-induced forgetting (#154), behavioral feedback loop ([#162](https://github.com/dutiona/memory-engine/issues/162)) — usage outcomes feed retrieval weights (#63 records, #134 boosts, this closes the loop), shadow/dry-run mode ([#163](https://github.com/dutiona/memory-engine/issues/163)) — full pipeline execution without committing, returns what would change (Signet pattern)
 - **Phase 5 (independent, any time):** `sample_dormant()` API, vitality boosts on access (#134), graph-walk pruning (#153), reasoning-strategy-aware reranking (#155), decay-as-deliberate-abstention (#156), Mimir 5-signal weight study (#157)
 - **Deferred (not in Phase 5):** `compress_behavior()` hook on DreamCycle (depends on consumer LLM integration)
 
@@ -412,11 +411,11 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 | Knowledge change notification ([#51](https://github.com/dutiona/memory-engine/issues/51))                                          | When KB content is superseded/updated, notify memory to re-evaluate dependent facts. **Expand:** pub/sub emission for ME→agent direction (not just KB→ME)                                              |
 | research-index bridge ([#52](https://github.com/dutiona/memory-engine/issues/52))                                                  | `memory-kb-research-index` middleware crate implementing `KnowledgeBaseConnector`                                                                                                                      |
 | Cross-layer session propagation                                                                                                    | Propagate KB ingestion `session_id` (dutiona/knowledge-base#128) through bridge → #62 co-session edges                                                                                                 |
-| Pub/sub event emission on fact append (NEW)                                                                                        | Emit `FactWritten`/`FactExpired`/`FactSuperseded` notifications. Transport: Kafka vs NATS JetStream vs embedded. Includes DLQ design                                                                   |
-| Fact notification schema design (NEW)                                                                                              | Schema for notifications with Schema Registry enforcement                                                                                                                                              |
-| MCP server ACL layer (NEW)                                                                                                         | Capability-token-based auth. Agent identity verification before scope access                                                                                                                           |
-| Injection dosing framework (NEW)                                                                                                   | Principled injection volume calibration. IBM: +28.5pp hard, -5.6pp over-injection easy                                                                                                                 |
-| Bayesian reputation as consumer trait (NEW)                                                                                        | `trust_prior: Beta(alpha, beta)` per consumer-source pair. RAPS shows 5.2% drop under 60% adversarial                                                                                                  |
+| Pub/sub event emission on fact append ([#164](https://github.com/dutiona/memory-engine/issues/164))                                | Emit `FactWritten`/`FactExpired`/`FactSuperseded` notifications. Transport: Kafka vs NATS JetStream vs embedded. Includes DLQ design                                                                   |
+| Fact notification schema design ([#165](https://github.com/dutiona/memory-engine/issues/165))                                      | Schema for notifications with Schema Registry enforcement                                                                                                                                              |
+| MCP server ACL layer ([#166](https://github.com/dutiona/memory-engine/issues/166))                                                 | Capability-token-based auth. Agent identity verification before scope access                                                                                                                           |
+| Injection dosing framework ([#167](https://github.com/dutiona/memory-engine/issues/167))                                           | Principled injection volume calibration. IBM: +28.5pp hard, -5.6pp over-injection easy                                                                                                                 |
+| Bayesian reputation as consumer trait ([#168](https://github.com/dutiona/memory-engine/issues/168))                                | `trust_prior: Beta(alpha, beta)` per consumer-source pair. RAPS shows 5.2% drop under 60% adversarial                                                                                                  |
 
 ---
 
@@ -432,26 +431,26 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 
 Tracked as individual GitHub issues. Not scheduled for any phase — each has a trigger condition.
 
-| Item                                                                                        | Trigger                                                                                                                                                  |
-| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth ([#14](https://github.com/dutiona/memory-engine/issues/14))                            | **Trigger update:** multi-agent safety is the trigger, not just multi-user deployment. Deployment layer concern, not engine core                         |
-| SaaS Sync ([#15](https://github.com/dutiona/memory-engine/issues/15))                       | Product decision for multi-device. CRDT event-log merge + E2EE. Requires determinism guarantees first                                                    |
-| Hierarchical summarization ([#17](https://github.com/dutiona/memory-engine/issues/17))      | Usage exceeds flat consolidation. Memento-style multi-level abstractions                                                                                 |
-| Determinism guarantees ([#19](https://github.com/dutiona/memory-engine/issues/19))          | Before sync work begins. Replay, merge, idempotency rules                                                                                                |
-| Cross-session memory sharing ([#36](https://github.com/dutiona/memory-engine/issues/36))    | Multi-agent deployments. Session isolation or namespace via ScopeTree                                                                                    |
-| Multimodal memory ([#37](https://github.com/dutiona/memory-engine/issues/37))               | Non-text memories needed. Schema supports it (BLOB embeddings)                                                                                           |
-| Multi-node sync ([#38](https://github.com/dutiona/memory-engine/issues/38))                 | Multi-device eventual consistency. Event envelope fields are forward-compatible                                                                          |
-| GEPA meta-optimization ([#65](https://github.com/dutiona/memory-engine/issues/65))          | Evolutionary optimization of DreamCycle consumer prompts. Trigger: sufficient DreamCycle execution data (>100 runs). Research: GEPA (arXiv:2507.19457)   |
-| Keyword-weighted hybrid search ([#66](https://github.com/dutiona/memory-engine/issues/66))  | Weight FTS5 higher than vector for `FactType::Procedural` retrieval. Trigger: after #42 (Reranker) ships. Research: APC (arXiv:2506.14852)               |
-| Energy-based forgetting ([#135](https://github.com/dutiona/memory-engine/issues/135))       | Unify temporal + representational + structural saliency into single energy metric. Trigger: Phase 5a ships, empirical data on current forgetting gaps    |
-| State-delta updates ([#136](https://github.com/dutiona/memory-engine/issues/136))           | High-frequency memory operations via incremental deltas instead of full fact replacement. JEPA-inspired. Trigger: performance profiling shows bottleneck |
-| Attention-based retrieval ([#137](https://github.com/dutiona/memory-engine/issues/137))     | Attention mechanism over memory store for context-sensitive retrieval. JEPA-inspired. Trigger: Phase 5a evaluation shows retrieval quality gap           |
-| Optimal decay-zone boundaries ([#139](https://github.com/dutiona/memory-engine/issues/139)) | Derive identity/knowledge/operations multipliers statistically. Trigger: sufficient forgetting telemetry from deployed agents                            |
-| ANCHOR promotion threshold ([#140](https://github.com/dutiona/memory-engine/issues/140))    | Derive promotion threshold statistically rather than heuristic. Trigger: sufficient DreamCycle data (Q12 from debate)                                    |
-| Context-triggered injection prototype — Level 2 (NEW)                                       | Harness runs reasoning context against K/M between thinking blocks. Cross-repo (ME + KB + harness). Trigger: Phase 5a + KB Phase 2 complete              |
-| Byzantine fault tolerance for DreamCycle (NEW)                                              | Design needed before multi-agent DreamCycle. Trigger: multi-agent deployment decision                                                                    |
-| Latency-aware memory materialization (NEW)                                                  | FAISS/in-memory cache tier for real-time use cases. Trigger: latency profiling shows retrieval bottleneck in production                                  |
-| Protocol conformance test suite (NEW)                                                       | LAM-style fixtures for memory protocol contract. Trigger: external consumers adopt the engine                                                            |
+| Item                                                                                                          | Trigger                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth ([#14](https://github.com/dutiona/memory-engine/issues/14))                                              | **Trigger update:** multi-agent safety is the trigger, not just multi-user deployment. Deployment layer concern, not engine core                         |
+| SaaS Sync ([#15](https://github.com/dutiona/memory-engine/issues/15))                                         | Product decision for multi-device. CRDT event-log merge + E2EE. Requires determinism guarantees first                                                    |
+| Hierarchical summarization ([#17](https://github.com/dutiona/memory-engine/issues/17))                        | Usage exceeds flat consolidation. Memento-style multi-level abstractions                                                                                 |
+| Determinism guarantees ([#19](https://github.com/dutiona/memory-engine/issues/19))                            | Before sync work begins. Replay, merge, idempotency rules                                                                                                |
+| Cross-session memory sharing ([#36](https://github.com/dutiona/memory-engine/issues/36))                      | Multi-agent deployments. Session isolation or namespace via ScopeTree                                                                                    |
+| Multimodal memory ([#37](https://github.com/dutiona/memory-engine/issues/37))                                 | Non-text memories needed. Schema supports it (BLOB embeddings)                                                                                           |
+| Multi-node sync ([#38](https://github.com/dutiona/memory-engine/issues/38))                                   | Multi-device eventual consistency. Event envelope fields are forward-compatible                                                                          |
+| GEPA meta-optimization ([#65](https://github.com/dutiona/memory-engine/issues/65))                            | Evolutionary optimization of DreamCycle consumer prompts. Trigger: sufficient DreamCycle execution data (>100 runs). Research: GEPA (arXiv:2507.19457)   |
+| Keyword-weighted hybrid search ([#66](https://github.com/dutiona/memory-engine/issues/66))                    | Weight FTS5 higher than vector for `FactType::Procedural` retrieval. Trigger: after #42 (Reranker) ships. Research: APC (arXiv:2506.14852)               |
+| Energy-based forgetting ([#135](https://github.com/dutiona/memory-engine/issues/135))                         | Unify temporal + representational + structural saliency into single energy metric. Trigger: Phase 5a ships, empirical data on current forgetting gaps    |
+| State-delta updates ([#136](https://github.com/dutiona/memory-engine/issues/136))                             | High-frequency memory operations via incremental deltas instead of full fact replacement. JEPA-inspired. Trigger: performance profiling shows bottleneck |
+| Attention-based retrieval ([#137](https://github.com/dutiona/memory-engine/issues/137))                       | Attention mechanism over memory store for context-sensitive retrieval. JEPA-inspired. Trigger: Phase 5a evaluation shows retrieval quality gap           |
+| Optimal decay-zone boundaries ([#139](https://github.com/dutiona/memory-engine/issues/139))                   | Derive identity/knowledge/operations multipliers statistically. Trigger: sufficient forgetting telemetry from deployed agents                            |
+| ANCHOR promotion threshold ([#140](https://github.com/dutiona/memory-engine/issues/140))                      | Derive promotion threshold statistically rather than heuristic. Trigger: sufficient DreamCycle data (Q12 from debate)                                    |
+| Context-triggered injection prototype - Level 2 ([#169](https://github.com/dutiona/memory-engine/issues/169)) | Harness runs reasoning context against K/M between thinking blocks. Cross-repo (ME + KB + harness). Trigger: Phase 5a + KB Phase 2 complete              |
+| Byzantine fault tolerance for DreamCycle ([#170](https://github.com/dutiona/memory-engine/issues/170))        | Design needed before multi-agent DreamCycle. Trigger: multi-agent deployment decision                                                                    |
+| Latency-aware memory materialization ([#171](https://github.com/dutiona/memory-engine/issues/171))            | FAISS/in-memory cache tier for real-time use cases. Trigger: latency profiling shows retrieval bottleneck in production                                  |
+| Protocol conformance test suite ([#172](https://github.com/dutiona/memory-engine/issues/172))                 | LAM-style fixtures for memory protocol contract. Trigger: external consumers adopt the engine                                                            |
 
 ---
 
