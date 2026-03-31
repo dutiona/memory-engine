@@ -510,10 +510,19 @@ impl MemoryEngine {
         // Apply reranker if present and query has text (cross-encoder needs query text).
         // Runs OUTSIDE the read lock — reranking may involve slow inference/API calls.
         if let (Some(reranker), Some(text)) = (&self.reranker, &query.text) {
-            // Snapshot input IDs before reranking for subset validation (#85).
-            let input_snapshot: Vec<_> = results.iter().map(|r| r.fact.id).collect();
-            results = reranker.rerank(text, results)?;
-            Self::validate_reranker_output(&input_snapshot, &results)?;
+            let ranked = reranker.rerank(text, &results)?;
+            Self::validate_reranker_output(results.len(), &ranked)?;
+            // Reconstruct results from indices — move, don't clone (#144).
+            // Safe: validate_reranker_output guarantees unique indices.
+            let mut candidates: Vec<_> = results.into_iter().map(Some).collect();
+            results = ranked
+                .into_iter()
+                .map(|(idx, score)| {
+                    let mut r = candidates[idx].take().expect("index validated as unique");
+                    r.score = score;
+                    r
+                })
+                .collect();
         }
 
         // Always truncate to limit — rerank_depth may have over-fetched from hybrid_search.
@@ -1569,37 +1578,39 @@ impl MemoryEngine {
 
     // --- Private helpers ---
 
-    /// Validate that reranker output is a subset of input candidates.
+    /// Validate reranker output indices and scores.
     ///
-    /// Checks three invariants:
-    /// 1. Every output fact ID was present in the input candidates
-    /// 2. No duplicate fact IDs in the output
-    /// 3. Output length does not exceed input length (implied by 1+2, checked for clarity)
-    fn validate_reranker_output(input_ids: &[i64], output: &[SearchResult]) -> Result<()> {
+    /// Checks four invariants:
+    /// 1. Output length does not exceed input length
+    /// 2. Every index is within `0..num_candidates`
+    /// 3. No duplicate indices
+    /// 4. All scores are finite (not NaN or Inf)
+    fn validate_reranker_output(num_candidates: usize, output: &[(usize, f64)]) -> Result<()> {
         use std::collections::HashSet;
 
-        if output.len() > input_ids.len() {
+        if output.len() > num_candidates {
             return Err(MemoryError::Reranker(format!(
-                "reranker violated subset contract: output length ({}) exceeds input length ({})",
+                "reranker violated subset contract: output length ({}) exceeds input length ({num_candidates})",
                 output.len(),
-                input_ids.len(),
             )));
         }
 
-        let input_set: HashSet<i64> = input_ids.iter().copied().collect();
         let mut seen = HashSet::with_capacity(output.len());
 
-        for result in output {
-            let id = result.fact.id;
-            if !input_set.contains(&id) {
+        for &(idx, score) in output {
+            if idx >= num_candidates {
                 return Err(MemoryError::Reranker(format!(
-                    "reranker violated subset contract: output contains fact id {id} \
-                     not present in input candidates",
+                    "reranker returned out-of-bounds index {idx} (candidates length: {num_candidates})",
                 )));
             }
-            if !seen.insert(id) {
+            if !seen.insert(idx) {
                 return Err(MemoryError::Reranker(format!(
-                    "reranker violated subset contract: duplicate fact id {id} in output",
+                    "reranker violated subset contract: duplicate index {idx} in output",
+                )));
+            }
+            if !score.is_finite() {
+                return Err(MemoryError::Reranker(format!(
+                    "reranker returned non-finite score {score} for index {idx}",
                 )));
             }
         }
@@ -3092,13 +3103,9 @@ mod tests {
 
     struct ReverseReranker;
     impl Reranker for ReverseReranker {
-        fn rerank(
-            &self,
-            _query: &str,
-            mut candidates: Vec<SearchResult>,
-        ) -> Result<Vec<SearchResult>> {
-            candidates.reverse();
-            Ok(candidates)
+        fn rerank(&self, _query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
+            let n = candidates.len();
+            Ok((0..n).rev().map(|i| (i, candidates[i].score)).collect())
         }
         fn name(&self) -> &str {
             "reverse"
@@ -3107,11 +3114,7 @@ mod tests {
 
     struct FailingReranker;
     impl Reranker for FailingReranker {
-        fn rerank(
-            &self,
-            _query: &str,
-            _candidates: Vec<SearchResult>,
-        ) -> Result<Vec<SearchResult>> {
+        fn rerank(&self, _query: &str, _candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
             Err(MemoryError::Reranker("cross-encoder timeout".into()))
         }
         fn name(&self) -> &str {
@@ -3134,10 +3137,12 @@ mod tests {
         }
     }
     impl Reranker for SpyReranker {
-        fn rerank(&self, _query: &str, candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>> {
+        fn rerank(&self, _query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
             self.seen_count
                 .store(candidates.len(), std::sync::atomic::Ordering::Relaxed);
-            Ok(candidates)
+            Ok((0..candidates.len())
+                .map(|i| (i, candidates[i].score))
+                .collect())
         }
         fn name(&self) -> &str {
             "spy"
@@ -3469,7 +3474,7 @@ mod tests {
     /// Wrapper to allow `Arc<SpyReranker>` to be `Box<dyn Reranker>`.
     struct SpyRerankerWrapper(std::sync::Arc<SpyReranker>);
     impl Reranker for SpyRerankerWrapper {
-        fn rerank(&self, query: &str, candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>> {
+        fn rerank(&self, query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
             self.0.rerank(query, candidates)
         }
         fn name(&self) -> &str {
@@ -3822,57 +3827,28 @@ mod tests {
     // --- Reranker subset/permutation guard (issue #85) ---
 
     /// Returns all candidates plus a fabricated fact with a bogus ID.
-    struct FabricatingReranker;
-    impl Reranker for FabricatingReranker {
-        fn rerank(
-            &self,
-            _query: &str,
-            mut candidates: Vec<SearchResult>,
-        ) -> Result<Vec<SearchResult>> {
-            // Inject a fact that was NOT in the input candidates
-            candidates.push(SearchResult {
-                fact: Fact {
-                    id: 999_999,
-                    content: "fabricated".into(),
-                    content_hash: "fake_hash".into(),
-                    embedding: vec![0.0; DIM],
-                    fact_type: FactType::Episodic,
-                    t_created: Utc::now(),
-                    t_expired: None,
-                    t_valid: None,
-                    t_invalid: None,
-                    source_event_id: None,
-                    importance: 0.0,
-                    access_count: 0,
-                    last_accessed: Utc::now(),
-                    metadata: serde_json::Value::Null,
-                    scope_id: 0,
-                    is_pinned: false,
-                    importance_score: 0.0,
-                    surfaced_at: None,
-                },
-                score: 1.0,
-                match_type: MatchType::Fts,
-            });
-            Ok(candidates)
+    /// Returns a single out-of-bounds index.
+    struct OutOfBoundsReranker;
+    impl Reranker for OutOfBoundsReranker {
+        fn rerank(&self, _query: &str, _candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
+            Ok(vec![(999_999, 1.0)])
         }
         fn name(&self) -> &str {
-            "fabricating"
+            "out_of_bounds"
         }
     }
 
-    /// Replaces the last candidate with a clone of the first (same length, duplicate ID).
+    /// Returns first two candidates with the same index (duplicate).
     struct DuplicatingReranker;
     impl Reranker for DuplicatingReranker {
-        fn rerank(
-            &self,
-            _query: &str,
-            mut candidates: Vec<SearchResult>,
-        ) -> Result<Vec<SearchResult>> {
+        fn rerank(&self, _query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
             if candidates.len() >= 2 {
-                candidates[1] = candidates[0].clone();
+                Ok(vec![(0, candidates[0].score), (0, candidates[0].score)])
+            } else {
+                Ok((0..candidates.len())
+                    .map(|i| (i, candidates[i].score))
+                    .collect())
             }
-            Ok(candidates)
         }
         fn name(&self) -> &str {
             "duplicating"
@@ -3880,9 +3856,9 @@ mod tests {
     }
 
     #[test]
-    fn reranker_rejects_fabricated_facts() {
+    fn reranker_rejects_out_of_bounds_index() {
         let engine =
-            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(FabricatingReranker))).unwrap();
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(OutOfBoundsReranker))).unwrap();
         let embedder = MockEmbedder { dim: DIM };
         engine
             .add_fact(
@@ -3907,15 +3883,15 @@ mod tests {
             scope: None,
         });
 
-        assert!(result.is_err(), "should reject fabricated facts");
+        assert!(result.is_err(), "should reject out-of-bounds index");
         let err = result.unwrap_err();
         assert!(
             matches!(err, MemoryError::Reranker(_)),
             "should be a Reranker error, got: {err}"
         );
         assert!(
-            err.to_string().contains("subset"),
-            "error message should mention subset violation, got: {err}"
+            err.to_string().contains("out-of-bounds"),
+            "error message should mention out-of-bounds, got: {err}"
         );
     }
 
@@ -4026,10 +4002,13 @@ mod tests {
             fn rerank(
                 &self,
                 _query: &str,
-                mut candidates: Vec<SearchResult>,
-            ) -> Result<Vec<SearchResult>> {
-                candidates.truncate(1);
-                Ok(candidates)
+                candidates: &[SearchResult],
+            ) -> Result<Vec<(usize, f64)>> {
+                if candidates.is_empty() {
+                    Ok(vec![])
+                } else {
+                    Ok(vec![(0, candidates[0].score)])
+                }
             }
             fn name(&self) -> &str {
                 "filtering"
@@ -4079,5 +4058,63 @@ mod tests {
             result.err()
         );
         assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reranker_rejects_non_finite_score() {
+        struct NanScoreReranker;
+        impl Reranker for NanScoreReranker {
+            fn rerank(
+                &self,
+                _query: &str,
+                candidates: &[SearchResult],
+            ) -> Result<Vec<(usize, f64)>> {
+                if candidates.is_empty() {
+                    Ok(vec![])
+                } else {
+                    Ok(vec![(0, f64::NAN)])
+                }
+            }
+            fn name(&self) -> &str {
+                "nan_score"
+            }
+        }
+
+        let engine =
+            MemoryEngine::open_memory_with(DIM, None, Some(Box::new(NanScoreReranker))).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                "score test fact",
+                FactType::Episodic,
+                None,
+                &embedder,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let result = engine.query(&SearchQuery {
+            text: Some("score".into()),
+            embedding: None,
+            mode: SearchMode::Fts,
+            limit: 10,
+            rerank_depth: None,
+            valid_at: None,
+            fact_type: None,
+            scope: None,
+        });
+
+        assert!(result.is_err(), "should reject NaN score");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Reranker(_)),
+            "should be a Reranker error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("non-finite"),
+            "error message should mention non-finite score, got: {err}"
+        );
     }
 }
