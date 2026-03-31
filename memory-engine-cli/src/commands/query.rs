@@ -78,7 +78,8 @@ pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<
         query = query.pinned_only();
     }
 
-    let results = engine.execute_query(&query)?;
+    let response = engine.execute_query(&query)?;
+    let results = response.results;
 
     match format {
         OutputFormat::Json => output::print_json(&results)?,

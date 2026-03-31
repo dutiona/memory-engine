@@ -82,6 +82,50 @@ pub fn fts_search(
     Ok(results)
 }
 
+/// Count expired facts matching the FTS5 query (abstention diagnostics).
+///
+/// Mirrors [`fts_search`] but queries `t_expired IS NOT NULL` and returns
+/// only a count — no row materialisation, no embedding deserialisation.
+///
+/// FTS5 syntax errors return `Ok(0)` (same fallback as `fts_search`).
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` for non-FTS5 database errors.
+pub fn fts_count_expired(
+    conn: &Connection,
+    query: &str,
+    fact_type: Option<&FactType>,
+    scope_ids: Option<&[i64]>,
+) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT COUNT(*) \
+         FROM facts_fts \
+         JOIN facts AS f ON f.id = facts_fts.rowid \
+         WHERE facts_fts MATCH ?1 \
+           AND f.t_expired IS NOT NULL \
+           AND (?2 IS NULL OR f.fact_type = ?2) \
+           AND (?3 IS NULL OR f.scope_id IN (SELECT value FROM json_each(?3)))",
+    )?;
+
+    let fact_type_str: Option<&str> = fact_type.map(fact_type_to_str);
+    let scope_ids_json: Option<String> =
+        scope_ids.map(|ids| serde_json::to_string(ids).expect("serialize scope_ids"));
+
+    match stmt.query_row(
+        rusqlite::params![query, fact_type_str, scope_ids_json],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(n) => Ok(n as usize),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(e) => {
+            // FTS5 syntax errors are caught here, same as fts_search.
+            tracing::warn!("FTS5 count_expired query failed (likely syntax error): {e}");
+            Ok(0)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +283,93 @@ mod tests {
 
         let results = fts_search(&conn, "Rust", 10, None, None).unwrap();
         assert!(results.is_empty());
+    }
+
+    // --- fts_count_expired tests ---
+
+    #[test]
+    fn fts_count_expired_returns_zero_when_no_expired() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("Rust language")).unwrap();
+        store.insert(&make_fact("Python language")).unwrap();
+
+        let count = fts_count_expired(&conn, "language", None, None).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn fts_count_expired_counts_matching_expired() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id1 = store.insert(&make_fact("Rust language")).unwrap();
+        let id2 = store.insert(&make_fact("Rust compiler")).unwrap();
+        store.insert(&make_fact("Python language")).unwrap(); // active, not expired
+        store.expire(id1, Utc::now()).unwrap();
+        store.expire(id2, Utc::now()).unwrap();
+
+        // Both expired facts match "Rust"
+        let count = fts_count_expired(&conn, "Rust", None, None).unwrap();
+        assert_eq!(count, 2);
+
+        // Only one expired fact matches "language" (id1, not id2="compiler")
+        let count = fts_count_expired(&conn, "language", None, None).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn fts_count_expired_respects_scope_filter() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut fact1 = make_fact("Rust language");
+        fact1.scope_id = 1;
+        let id1 = store.insert(&fact1).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'test', 1)",
+            [],
+        )
+        .unwrap();
+        let mut fact2 = make_fact("Rust compiler");
+        fact2.scope_id = 2;
+        let id2 = store.insert(&fact2).unwrap();
+        store.expire(id1, Utc::now()).unwrap();
+        store.expire(id2, Utc::now()).unwrap();
+
+        // Scope [1] should only count fact1
+        let count = fts_count_expired(&conn, "Rust", None, Some(&[1])).unwrap();
+        assert_eq!(count, 1);
+
+        // Scope [1, 2] should count both
+        let count = fts_count_expired(&conn, "Rust", None, Some(&[1, 2])).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn fts_count_expired_respects_fact_type_filter() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut semantic = make_fact("Rust language");
+        semantic.fact_type = FactType::Semantic;
+        let id1 = store.insert(&semantic).unwrap();
+        let id2 = store.insert(&make_fact("Rust compiler")).unwrap(); // Episodic
+        store.expire(id1, Utc::now()).unwrap();
+        store.expire(id2, Utc::now()).unwrap();
+
+        let count = fts_count_expired(&conn, "Rust", Some(&FactType::Semantic), None).unwrap();
+        assert_eq!(count, 1);
+
+        let count = fts_count_expired(&conn, "Rust", Some(&FactType::Episodic), None).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn fts_count_expired_syntax_error_returns_zero() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = store.insert(&make_fact("some content")).unwrap();
+        store.expire(id, Utc::now()).unwrap();
+
+        let count = fts_count_expired(&conn, "\"unbalanced", None, None).unwrap();
+        assert_eq!(count, 0);
     }
 }

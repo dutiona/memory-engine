@@ -42,7 +42,7 @@ pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionE
 pub use engine::{EngineConfig, MemoryEngine};
 pub use error::*;
 pub use inspect::types as inspect_types;
-pub use search::MemoryQuery;
+pub use search::{MemoryQuery, QueryDiagnostics, QueryResponse};
 pub use store::{UpcasterRegistry, deserialize_embedding, serialize_embedding};
 pub use traits::{EmbeddingProvider, Reranker};
 pub use types::*;

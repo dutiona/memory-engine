@@ -9,7 +9,10 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
-use crate::search::hybrid::{MatchType, SearchMode, SearchQuery, SearchResult, hybrid_search};
+use crate::search::hybrid::{
+    hybrid_search, MatchType, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery,
+    SearchResult,
+};
 use crate::search::query::MemoryQuery;
 use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
 use crate::store::events::EventStore;
@@ -515,7 +518,7 @@ impl MemoryEngine {
         #[cfg(not(feature = "ann"))]
         let strategy: &dyn VectorSearchStrategy = &*self.vector_strategy;
 
-        let mut results = self.with_read(|conn| {
+        let (mut results, _diagnostics) = self.with_read(|conn| {
             hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
         })?;
 
@@ -560,7 +563,7 @@ impl MemoryEngine {
     /// - `search_mode` conflicts with available text/embedding inputs
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn execute_query(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>> {
+    pub fn execute_query(&self, query: &MemoryQuery) -> Result<QueryResponse> {
         // --- Validation ---
         self.validate_memory_query(query)?;
 
@@ -570,7 +573,12 @@ impl MemoryEngine {
                 let resolved = self.scope_tree.read().resolve_query(sq);
                 match resolved {
                     Some(ids) => Some(ids),
-                    None => return Ok(vec![]), // scope doesn't exist → no results
+                    None => {
+                        return Ok(QueryResponse {
+                            results: vec![],
+                            diagnostics: QueryDiagnostics::default(),
+                        });
+                    }
                 }
             }
             None => None,
@@ -661,7 +669,7 @@ impl MemoryEngine {
         scope_ids: Option<&[i64]>,
         effective_cutoff: Option<DateTime<Utc>>,
         limit: usize,
-    ) -> Result<Vec<SearchResult>> {
+    ) -> Result<QueryResponse> {
         let mode = Self::infer_search_mode(query);
 
         // When period is set, effective_cutoff is None — but hybrid_search defaults
@@ -698,7 +706,7 @@ impl MemoryEngine {
         #[cfg(not(feature = "ann"))]
         let strategy: &dyn VectorSearchStrategy = &*self.vector_strategy;
 
-        let mut results = self.with_read(|conn| {
+        let (mut results, mut diagnostics) = self.with_read(|conn| {
             hybrid_search(conn, &search_query, self.embed_dim, scope_ids, strategy)
         })?;
 
@@ -718,7 +726,24 @@ impl MemoryEngine {
         }
 
         results.truncate(limit);
-        Ok(results)
+        diagnostics.results_returned = results.len();
+
+        // Expired-facts probe (opt-in, FTS-only).
+        if query.include_expired_probe {
+            if let Some(text) = &query.text {
+                let fact_type_ref = query.fact_type.as_ref();
+                let expired_count = self.with_read(|conn| {
+                    crate::search::fts::fts_count_expired(conn, text, fact_type_ref, scope_ids)
+                })?;
+                diagnostics.expired_matches = Some(expired_count);
+            }
+            // Vector-only queries: expired_matches stays None (documented limitation).
+        }
+
+        Ok(QueryResponse {
+            results,
+            diagnostics,
+        })
     }
 
     /// Store path: no text/vector search, use FactStore directly.
@@ -731,7 +756,7 @@ impl MemoryEngine {
         scope_ids: Option<&[i64]>,
         effective_cutoff: Option<DateTime<Utc>>,
         limit: usize,
-    ) -> Result<Vec<SearchResult>> {
+    ) -> Result<QueryResponse> {
         let scope_slice = scope_ids.unwrap_or(&[]);
 
         // Fetch a broad candidate set. Use the most selective SQL query available,
@@ -792,6 +817,7 @@ impl MemoryEngine {
         }
 
         // Sort by importance_score DESC and truncate
+        let candidates_before_filter = facts.len();
         facts.sort_by(|a, b| {
             b.importance_score
                 .partial_cmp(&a.importance_score)
@@ -799,7 +825,17 @@ impl MemoryEngine {
         });
         facts.truncate(limit);
 
-        Ok(facts.into_iter().map(fact_to_search_result).collect())
+        let results: Vec<SearchResult> = facts.into_iter().map(fact_to_search_result).collect();
+        let diagnostics = QueryDiagnostics {
+            candidates_before_filter,
+            results_returned: results.len(),
+            // Store path has no FTS/vector search — no expired probe possible.
+            ..QueryDiagnostics::default()
+        };
+        Ok(QueryResponse {
+            results,
+            diagnostics,
+        })
     }
 
     // --- Public API: Config ---
@@ -2822,13 +2858,11 @@ mod tests {
             )
             .unwrap();
 
-        let results = engine.execute_query(&MemoryQuery::new()).unwrap();
+        let results = engine.execute_query(&MemoryQuery::new()).unwrap().results;
         assert_eq!(results.len(), 2);
-        assert!(
-            results
-                .iter()
-                .all(|r| r.match_type == MatchType::ImportanceRank)
-        );
+        assert!(results
+            .iter()
+            .all(|r| r.match_type == MatchType::ImportanceRank));
     }
 
     #[test]
@@ -2860,7 +2894,8 @@ mod tests {
 
         let results = engine
             .execute_query(&MemoryQuery::new().text("Rust"))
-            .unwrap();
+            .unwrap()
+            .results;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.content, "Rust systems programming");
         assert_eq!(results[0].match_type, MatchType::Fts);
@@ -2898,7 +2933,8 @@ mod tests {
 
         let results = engine
             .execute_query(&MemoryQuery::new().scope_exact("project:demo"))
-            .unwrap();
+            .unwrap()
+            .results;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.content, "scoped fact");
     }
@@ -2932,14 +2968,13 @@ mod tests {
 
         let results = engine
             .execute_query(&MemoryQuery::new().fact_type(FactType::Semantic))
-            .unwrap();
+            .unwrap()
+            .results;
         // fact_type filtering in store path — list_by_importance_score doesn't filter by fact_type,
         // so it should be post-filtered
-        assert!(
-            results
-                .iter()
-                .all(|r| r.fact.fact_type == FactType::Semantic)
-        );
+        assert!(results
+            .iter()
+            .all(|r| r.fact.fact_type == FactType::Semantic));
     }
 
     #[test]
@@ -2980,7 +3015,8 @@ mod tests {
 
         let results = engine
             .execute_query(&MemoryQuery::new().min_importance_score(0.5))
-            .unwrap();
+            .unwrap()
+            .results;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.content, "high importance");
     }
@@ -3017,7 +3053,8 @@ mod tests {
 
         let results = engine
             .execute_query(&MemoryQuery::new().pinned_only())
-            .unwrap();
+            .unwrap()
+            .results;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.content, "pinned");
         assert!(results[0].fact.is_pinned);
@@ -3059,14 +3096,15 @@ mod tests {
             .unwrap();
 
         // Empty query should NOT return the future-dated fact
-        let results = engine.execute_query(&MemoryQuery::new()).unwrap();
+        let results = engine.execute_query(&MemoryQuery::new()).unwrap().results;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.content, "present fact");
 
         // Scope-only query should also exclude future-dated facts
         let results2 = engine
             .execute_query(&MemoryQuery::new().min_importance_score(0.0))
-            .unwrap();
+            .unwrap()
+            .results;
         assert_eq!(results2.len(), 1);
         assert_eq!(results2[0].fact.content, "present fact");
     }
@@ -3116,7 +3154,8 @@ mod tests {
         // Text-only → should infer FTS mode
         let results = engine
             .execute_query(&MemoryQuery::new().text("Rust"))
-            .unwrap();
+            .unwrap()
+            .results;
         assert!(!results.is_empty());
         assert_eq!(results[0].match_type, MatchType::Fts);
     }
@@ -3164,7 +3203,8 @@ mod tests {
                 now - chrono::Duration::hours(4),
                 now - chrono::Duration::minutes(30),
             ))
-            .unwrap();
+            .unwrap()
+            .results;
 
         // Both should match: past fact has [t_valid, t_invalid) overlapping the period,
         // and current fact has NULL t_valid/t_invalid (unbounded, overlaps everything)
@@ -3222,7 +3262,8 @@ mod tests {
         // Text "Rust" + importance >= 0.5 → only "Rust high importance"
         let results = engine
             .execute_query(&MemoryQuery::new().text("Rust").min_importance_score(0.5))
-            .unwrap();
+            .unwrap()
+            .results;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.content, "Rust high importance");
     }
@@ -3233,7 +3274,8 @@ mod tests {
 
         let results = engine
             .execute_query(&MemoryQuery::new().text("nonexistent"))
-            .unwrap();
+            .unwrap()
+            .results;
         assert!(results.is_empty());
     }
 
@@ -3257,7 +3299,7 @@ mod tests {
                 .unwrap();
         }
 
-        let results = engine.execute_query(&MemoryQuery::new()).unwrap();
+        let results = engine.execute_query(&MemoryQuery::new()).unwrap().results;
         assert_eq!(results.len(), 50); // default limit
     }
 
@@ -3790,16 +3832,12 @@ mod tests {
         assert_eq!(co_edges.len(), 2);
 
         // Both directions present
-        assert!(
-            co_edges
-                .iter()
-                .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2)
-        );
-        assert!(
-            co_edges
-                .iter()
-                .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1)
-        );
+        assert!(co_edges
+            .iter()
+            .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2));
+        assert!(co_edges
+            .iter()
+            .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1));
 
         // Weight matches constant
         for e in &co_edges {

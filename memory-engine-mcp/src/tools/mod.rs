@@ -80,6 +80,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                     "min_importance": { "type": "number" },
                     "pinned_only": { "type": "boolean", "default": false },
                     "limit": { "type": "integer", "default": 10 },
+                    "include_expired_probe": { "type": "boolean", "default": false, "description": "Run a secondary probe for expired facts matching the query. Adds one SQL query. Only effective with text search." },
                     "depth": { "type": "string", "enum": ["sparse", "standard", "full"], "default": "standard" }
                 }
             }),
@@ -658,15 +659,21 @@ fn handle_query(
     if let Some(limit) = get_usize(&args, "limit") {
         query = query.limit(limit);
     }
+    if get_bool(&args, "include_expired_probe").unwrap_or(false) {
+        query = query.include_expired_probe();
+    }
 
-    let results = engine.execute_query(&query).map_err(to_mcp_error)?;
+    let response = engine.execute_query(&query).map_err(to_mcp_error)?;
 
-    let shaped: Vec<Value> = results
+    let shaped: Vec<Value> = response
+        .results
         .iter()
         .map(|r| depth::shape_search_result(r, depth_level, None))
         .collect();
 
-    ok_json(json!({ "results": shaped, "count": shaped.len() }))
+    let diagnostics = depth::shape_diagnostics(&response.diagnostics, depth_level);
+
+    ok_json(json!({ "results": shaped, "count": shaped.len(), "diagnostics": diagnostics }))
 }
 
 fn handle_resume_context(

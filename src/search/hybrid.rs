@@ -52,6 +52,43 @@ pub struct SearchResult {
     pub match_type: MatchType,
 }
 
+/// Diagnostic signals from a query execution, enabling consumer-side
+/// abstention classification.
+///
+/// The engine computes mechanical retrieval signals. The consumer interprets
+/// them alongside content understanding to classify the four abstention types
+/// (Retrieval / Evidence / Reasoning / Decay) from research note 18.
+///
+/// ## Interpreting `expired_matches`
+///
+/// `expired_matches` counts ALL expired facts matching the query, regardless
+/// of expiry reason (Ebbinghaus decay, conflict resolution, deduplication).
+/// The engine does not currently track expiry provenance — `t_expired` is a
+/// generic tombstone. Consumers wanting true decay-only counts should
+/// cross-reference with `ExpiredReason` via `explain_fact()`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct QueryDiagnostics {
+    /// Total candidates found before post-filters (temporal, importance, pinned).
+    pub candidates_before_filter: usize,
+    /// Total results returned after all filters and truncation.
+    pub results_returned: usize,
+    /// Number of expired facts matching the FTS5 query.
+    /// `None` = probe not run (opt-in via `include_expired_probe`).
+    /// `None` also when query is vector-only (no FTS5 terms to probe).
+    pub expired_matches: Option<usize>,
+    /// Number of FTS candidates before merge.
+    pub fts_candidates: usize,
+    /// Number of vector candidates before merge.
+    pub vector_candidates: usize,
+}
+
+/// Complete query response including results and diagnostic metadata.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QueryResponse {
+    pub results: Vec<SearchResult>,
+    pub diagnostics: QueryDiagnostics,
+}
+
 /// Reciprocal Rank Fusion merge of two ranked result lists.
 ///
 /// Each item's RRF score = sum of `1 / (k + rank + 1)` across all lists
@@ -89,7 +126,7 @@ pub fn hybrid_search(
     embed_dim: usize,
     scope_ids: Option<&[i64]>,
     vector_strategy: &dyn VectorSearchStrategy,
-) -> Result<Vec<SearchResult>> {
+) -> Result<(Vec<SearchResult>, QueryDiagnostics)> {
     // Effective candidate target: rerank_depth widens the pool, but never below limit.
     let effective_target = query.rerank_depth.unwrap_or(query.limit).max(query.limit);
     // Over-fetch 3x to compensate for post-filter attrition.
@@ -122,6 +159,9 @@ pub fn hybrid_search(
     } else {
         vec![]
     };
+
+    let fts_candidate_count = fts_results.len();
+    let vec_candidate_count = vec_results.len();
 
     // Build ID sets for match_type determination
     let fts_ids: HashSet<i64> = fts_results.iter().map(|r| r.fact_id).collect();
@@ -190,7 +230,14 @@ pub fn hybrid_search(
         });
     }
 
-    Ok(results)
+    let diagnostics = QueryDiagnostics {
+        candidates_before_filter: results.len(),
+        fts_candidates: fts_candidate_count,
+        vector_candidates: vec_candidate_count,
+        ..QueryDiagnostics::default()
+    };
+
+    Ok((results, diagnostics))
 }
 
 #[cfg(test)]
@@ -329,7 +376,7 @@ mod tests {
             scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert!(!results.is_empty());
         assert!(results.len() <= 3);
         // Results matching both FTS and vector should have MatchType::Both
@@ -359,7 +406,7 @@ mod tests {
             scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].match_type, MatchType::Fts);
     }
@@ -386,7 +433,7 @@ mod tests {
             scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].match_type, MatchType::Vector);
         assert_eq!(results[0].fact.content, "fact one");
@@ -422,7 +469,7 @@ mod tests {
             scope: None,
         };
 
-        let results = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.fact_type, FactType::Semantic);
     }
