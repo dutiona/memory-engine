@@ -512,11 +512,13 @@ impl MemoryEngine {
         if let (Some(reranker), Some(text)) = (&self.reranker, &query.text) {
             let ranked = reranker.rerank(text, &results)?;
             Self::validate_reranker_output(results.len(), &ranked)?;
-            // Reconstruct results from indices — original Fact/MatchType preserved (#144).
+            // Reconstruct results from indices — move, don't clone (#144).
+            // Safe: validate_reranker_output guarantees unique indices.
+            let mut candidates: Vec<_> = results.into_iter().map(Some).collect();
             results = ranked
                 .into_iter()
                 .map(|(idx, score)| {
-                    let mut r = results[idx].clone();
+                    let mut r = candidates[idx].take().expect("index validated as unique");
                     r.score = score;
                     r
                 })
