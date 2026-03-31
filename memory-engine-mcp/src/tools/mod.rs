@@ -423,6 +423,17 @@ fn parse_fact_type(s: &str) -> Result<FactType, ValidationError> {
     }
 }
 
+/// Like `get_f64`, but returns a validation error if the key is present with a non-numeric type.
+/// Prevents silent fallback to defaults on type mismatches (e.g., `"half_life_days": "1"`).
+fn require_f64_if_present(args: &Map<String, Value>, key: &str) -> Result<Option<f64>, ErrorData> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_f64().map(Some).ok_or_else(|| {
+            ErrorData::invalid_params(format!("{key} must be a number, got {v}"), None)
+        }),
+    }
+}
+
 fn ok_json(value: Value) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::json(value)?]))
 }
@@ -886,36 +897,49 @@ fn handle_forget(
 ) -> Result<CallToolResult, ErrorData> {
     let mut policy = ForgetPolicy::default();
 
-    if let Some(v) = get_f64(&args, "half_life_days") {
+    if let Some(v) = require_f64_if_present(&args, "half_life_days")? {
         policy.half_life_days = v;
     }
-    if let Some(v) = get_f64(&args, "min_importance") {
+    if let Some(v) = require_f64_if_present(&args, "min_importance")? {
         policy.min_importance = v;
     }
-    if let Some(v) = get_f64(&args, "recency_weight") {
+    if let Some(v) = require_f64_if_present(&args, "recency_weight")? {
         policy.recency_weight = v;
     }
-    if let Some(v) = get_f64(&args, "frequency_weight") {
+    if let Some(v) = require_f64_if_present(&args, "frequency_weight")? {
         policy.frequency_weight = v;
     }
-    if let Some(v) = get_f64(&args, "graph_degree_weight") {
+    if let Some(v) = require_f64_if_present(&args, "graph_degree_weight")? {
         policy.graph_degree_weight = v;
     }
-    if let Some(v) = get_f64(&args, "base_importance_weight") {
+    if let Some(v) = require_f64_if_present(&args, "base_importance_weight")? {
         policy.base_importance_weight = v;
     }
 
     // Parse per-FactType half-life overrides: {"Episodic": 30.0, "Procedural": 365.0}
-    if let Some(Value::Object(overrides)) = args.get("half_life_overrides") {
-        let mut map = HashMap::new();
-        for (key, val) in overrides {
-            let ft = parse_fact_type(key)?;
-            let hl = val.as_f64().ok_or_else(|| {
-                ValidationError::Other(format!("half_life_overrides[\"{key}\"] must be a number"))
-            })?;
-            map.insert(ft, hl);
+    if let Some(val) = args.get("half_life_overrides") {
+        match val {
+            Value::Object(overrides) => {
+                let mut map = HashMap::new();
+                for (key, v) in overrides {
+                    let ft = parse_fact_type(key)?;
+                    let hl = v.as_f64().ok_or_else(|| {
+                        ValidationError::Other(format!(
+                            "half_life_overrides[\"{key}\"] must be a number"
+                        ))
+                    })?;
+                    map.insert(ft, hl);
+                }
+                policy.half_life_overrides = map;
+            }
+            Value::Null => {} // explicitly null — use default
+            _ => {
+                return Err(ValidationError::Other(
+                    "half_life_overrides must be a JSON object".to_owned(),
+                )
+                .into());
+            }
         }
-        policy.half_life_overrides = map;
     }
 
     policy.validate().map_err(to_mcp_error)?;
@@ -943,9 +967,26 @@ fn handle_dump_state(
     };
 
     let path = match get_str(&args, "path") {
-        Some(p) => PathBuf::from(p),
+        Some(p) => {
+            let p = PathBuf::from(p);
+            // Security: restrict client-supplied paths to the system temp directory.
+            // Without this, an MCP client could overwrite arbitrary files.
+            let temp = std::env::temp_dir();
+            let canonical = p
+                .parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok())
+                .unwrap_or_default();
+            if !canonical.starts_with(&temp) {
+                return Err(ValidationError::Other(format!(
+                    "dump path must be within the temp directory ({})",
+                    temp.display()
+                ))
+                .into());
+            }
+            p
+        }
         None => {
-            let timestamp = Utc::now().format("%Y%m%dT%H%M%S");
+            let timestamp = Utc::now().format("%Y%m%dT%H%M%S%3f");
             std::env::temp_dir().join(format!("memory-dump-{timestamp}.{ext}"))
         }
     };

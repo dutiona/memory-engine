@@ -93,6 +93,14 @@ impl SummaryGenerator for HttpSummaryGenerator {
             .json()
             .map_err(|e| MemoryError::Internal(format!("summary response parse error: {e}")))?;
 
+        // Check for API-level error in a 200 response (some providers do this)
+        if let Some(error) = body.get("error") {
+            return Err(MemoryError::Internal(format!(
+                "summary API returned error: {}",
+                serde_json::to_string(error).unwrap_or_default()
+            )));
+        }
+
         // Auto-detect response format:
         // OpenAI: { "choices": [{ "message": { "content": "..." } }] }
         // Ollama: { "message": { "content": "..." } }

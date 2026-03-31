@@ -7,6 +7,18 @@ description = "MCP server for memory-engine — exposes agent memory as MCP tool
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"
 
+[lib]
+name = "memory_engine_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "memory-engine-mcp"
+path = "src/main.rs"
+
+[[test]]
+name = "tools"
+path = "tests/tools.rs"
+
 [dependencies]
 memory-engine = { path = "..", features = ["async"] }
 rmcp = { version = "1", features = ["server", "transport-io"] }
