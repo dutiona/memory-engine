@@ -221,7 +221,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | ✅ [#82](https://github.com/dutiona/memory-engine/issues/82)   | hardening | Harden sequential fallback pairing in bootstrap `filter.rs`. [PR #97](https://github.com/dutiona/memory-engine/pull/97)              |
 | ✅ [#83](https://github.com/dutiona/memory-engine/issues/83)   | hardening | Propagate interrupted flag through bootstrap `filter.rs`. [PR #100](https://github.com/dutiona/memory-engine/pull/100)               |
 | ✅ [#85](https://github.com/dutiona/memory-engine/issues/85)   | hardening | Reranker output validation — subset/permutation guard. [PR #102](https://github.com/dutiona/memory-engine/pull/102)                  |
-| [#93](https://github.com/dutiona/memory-engine/issues/93)      | feat      | Stamp `surfaced_at` for due facts in non-due `resume_context` tiers                                                                  |
+| ✅ [#93](https://github.com/dutiona/memory-engine/issues/93)   | fix       | Stamp `surfaced_at` for due facts in non-due `resume_context` tiers. [PR #174](https://github.com/dutiona/memory-engine/pull/174)    |
 | ✅ [#104](https://github.com/dutiona/memory-engine/issues/104) | perf      | Add `LIMIT` to `list_active_facts` query. [PR #173](https://github.com/dutiona/memory-engine/pull/173)                               |
 | ✅ [#105](https://github.com/dutiona/memory-engine/issues/105) | docs      | Mark issue #82 as complete in ROADMAP.md                                                                                             |
 | ✅ [#106](https://github.com/dutiona/memory-engine/issues/106) | docs      | Fix incorrect `MemoryEngine::open` API usage in GEMINI.md. [commit bb35f03](https://github.com/dutiona/memory-engine/commit/bb35f03) |
@@ -312,7 +312,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
     ▼                ▼                 ▼
  Phase 4            Phase 4c         super-qa
  follow-ups         (#16,#46,#31)    (25 issues)
- (#93-#151)         independent      parallel track
+ (#95-#151)         independent      parallel track
  parallel track     of each other
     │                │
     │           ┌────┴────┐
@@ -341,7 +341,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 
 **Parallelizable right now (4 independent tracks):**
 
-1. **Phase 4 follow-ups** (6 open: #93, #95, #96, #150, #151) — all non-blocking
+1. **Phase 4 follow-ups** (5 open: #95, #96, #150, #151) — all non-blocking
 2. **Phase 4c** (#16, #46, #31) — #16 evaluation harness benefits from MCP being live; #31 depends on #46
 3. **Super-qa sweep** (25 open issues) — incremental, any order
 4. **Phase 5a design + implementation** — the critical path forward
