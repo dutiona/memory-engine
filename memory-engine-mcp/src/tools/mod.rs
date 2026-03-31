@@ -1,8 +1,10 @@
+use std::io::Cursor;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use memory_engine::bootstrap::{BootstrapConfig, KeywordExtractor};
 use memory_engine::engine::MemoryEngine;
-use memory_engine::inspect_types::FactExplanation;
+use memory_engine::inspect_types::{FactExplanation, ReplayFilter, ReplayOrder};
 use memory_engine::resume::ResumeConfig;
 use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::EmbeddingProvider;
@@ -172,6 +174,52 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "required": ["insights"]
             }),
         ),
+        // ----- P2 tools (debugging / operator) -----
+        tool_def(
+            "memory_replay_events",
+            "Replay events from the append-only event log with filtering. Debugging tool for inspecting consolidation/forgetting/conflict decisions.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "since": { "type": "string", "format": "date-time", "description": "Temporal lower bound (inclusive)" },
+                    "until": { "type": "string", "format": "date-time", "description": "Temporal upper bound (inclusive)" },
+                    "id_range_start": { "type": "integer", "minimum": 0, "description": "Event ID lower bound (inclusive). Must provide both start and end." },
+                    "id_range_end": { "type": "integer", "minimum": 0, "description": "Event ID upper bound (inclusive). Must provide both start and end." },
+                    "session_id": { "type": "string", "description": "Filter by session identifier" },
+                    "event_type": { "type": "string", "enum": ["Interaction", "ToolCall", "MemoryOp", "SystemEvent"] },
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Maximum events to return (0 = no limit)" },
+                    "upcast": { "type": "boolean", "default": false, "description": "Apply event payload upcasting" },
+                    "order": { "type": "string", "enum": ["insertion", "timestamp"], "default": "insertion" },
+                    "depth": { "type": "string", "enum": ["sparse", "standard", "full"], "default": "standard" }
+                }
+            }),
+        ),
+        tool_def(
+            "memory_fact_history",
+            "Get the temporal timeline for a single fact — created, became valid, became invalid, expired.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fact_id": { "type": "integer", "description": "Fact ID to inspect" },
+                    "depth": { "type": "string", "enum": ["sparse", "standard", "full"], "default": "standard" }
+                },
+                "required": ["fact_id"]
+            }),
+        ),
+        tool_def(
+            "memory_bootstrap_session",
+            "Bulk import facts from a Claude Code JSONL session log. Requires embedding provider.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "jsonl_data": { "type": "string", "description": "Raw JSONL session log content" },
+                    "scope": { "type": "string", "description": "Scope path for imported facts" },
+                    "max_turns": { "type": "integer", "minimum": 0, "default": 0, "description": "Max turns to process (0 = unlimited)" },
+                    "skip_existing": { "type": "boolean", "default": true, "description": "Skip sessions already bootstrapped" }
+                },
+                "required": ["jsonl_data"]
+            }),
+        ),
     ]
 }
 
@@ -206,6 +254,9 @@ pub fn dispatch(
         "memory_get_fact" => handle_get_fact(args, engine),
         "memory_statistics" => handle_statistics(engine),
         "memory_flush_insights" => handle_flush_insights(args, engine, embedder),
+        "memory_replay_events" => handle_replay_events(args, engine),
+        "memory_fact_history" => handle_fact_history(args, engine),
+        "memory_bootstrap_session" => handle_bootstrap_session(args, engine, embedder),
         _ => Err(ErrorData::invalid_params(
             format!("unknown tool: {name}"),
             None,
@@ -711,4 +762,139 @@ fn handle_flush_insights(
         "failed": failed,
         "failed_count": failed.len(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// P2 tool handlers (debugging / operator)
+// ---------------------------------------------------------------------------
+
+fn parse_replay_order(s: &str) -> Result<ReplayOrder, ErrorData> {
+    match s {
+        "insertion" => Ok(ReplayOrder::InsertionOrder),
+        "timestamp" => Ok(ReplayOrder::TimestampOrder),
+        other => Err(ErrorData::invalid_params(
+            format!("unknown replay order: {other}"),
+            None,
+        )),
+    }
+}
+
+fn handle_replay_events(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let depth_level = get_depth(&args);
+
+    let since = get_datetime(&args, "since")?;
+    let until = get_datetime(&args, "until")?;
+
+    // Both-or-neither validation (like period_start/period_end in handle_query)
+    if since.is_some() && until.is_some() {
+        if since.unwrap() > until.unwrap() {
+            return Err(ErrorData::invalid_params("since must be <= until", None));
+        }
+    }
+
+    let id_start = get_i64(&args, "id_range_start");
+    let id_end = get_i64(&args, "id_range_end");
+    let id_range = match (id_start, id_end) {
+        (Some(s), Some(e)) => {
+            if s > e {
+                return Err(ErrorData::invalid_params(
+                    "id_range_start must be <= id_range_end",
+                    None,
+                ));
+            }
+            Some((s, e))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(ErrorData::invalid_params(
+                "both id_range_start and id_range_end must be provided, or neither",
+                None,
+            ));
+        }
+    };
+
+    let session_id = get_str(&args, "session_id");
+    let event_type = match get_str(&args, "event_type") {
+        Some(s) => Some(parse_event_type(&s)?),
+        None => None,
+    };
+    // 0 = no limit (unbounded), absent = default cap of 100
+    let limit = match get_usize(&args, "limit") {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => Some(100),
+    };
+    let upcast = get_bool(&args, "upcast").unwrap_or(false);
+    let order = match get_str(&args, "order") {
+        Some(s) => parse_replay_order(&s)?,
+        None => ReplayOrder::InsertionOrder,
+    };
+
+    let filter = ReplayFilter {
+        since,
+        until,
+        id_range,
+        session_id,
+        event_type,
+        limit,
+        upcast,
+        order,
+    };
+
+    let events = engine.replay_events(&filter).map_err(to_mcp_error)?;
+
+    let shaped: Vec<Value> = events
+        .iter()
+        .map(|e| depth::shape_event(e, depth_level, None))
+        .collect();
+
+    ok_json(json!({ "events": shaped, "count": shaped.len() }))
+}
+
+fn handle_fact_history(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let fact_id = get_i64(&args, "fact_id")
+        .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
+    let depth_level = get_depth(&args);
+
+    let history = engine.fact_history(fact_id).map_err(to_mcp_error)?;
+    let shaped = depth::shape_fact_history(&history, depth_level);
+
+    ok_json(shaped)
+}
+
+fn handle_bootstrap_session(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+    embedder: Option<&HttpEmbeddingProvider>,
+) -> Result<CallToolResult, ErrorData> {
+    let jsonl_data = get_str(&args, "jsonl_data")
+        .ok_or_else(|| ErrorData::invalid_params("missing jsonl_data", None))?;
+
+    let emb = embedder.ok_or(ErrorData::invalid_params(
+        "embedding provider not configured — required for bootstrap_session",
+        None,
+    ))?;
+
+    let config = BootstrapConfig {
+        scope: get_str(&args, "scope"),
+        max_turns: get_usize(&args, "max_turns").unwrap_or(0),
+        skip_existing: get_bool(&args, "skip_existing").unwrap_or(true),
+    };
+
+    let reader = Cursor::new(jsonl_data.into_bytes());
+    let extractor = KeywordExtractor;
+
+    let report = engine
+        .bootstrap_session(reader, emb, &extractor, &config, None)
+        .map_err(to_mcp_error)?;
+
+    let value = serde_json::to_value(&report)
+        .map_err(|e| ErrorData::internal_error(format!("serialize report: {e}"), None))?;
+    ok_json(value)
 }

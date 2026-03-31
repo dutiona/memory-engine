@@ -1,5 +1,7 @@
 //! Bootstrap configuration, reporting, and pre-warming metrics.
 
+use serde::Serialize;
+
 /// Configuration for the bootstrap pipeline.
 #[derive(Debug, Clone)]
 pub struct BootstrapConfig {
@@ -22,7 +24,7 @@ impl Default for BootstrapConfig {
 }
 
 /// Report returned by the bootstrap pipeline.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct BootstrapReport {
     pub sessions_processed: usize,
     pub sessions_skipped: usize,
@@ -72,7 +74,7 @@ impl BootstrapReport {
 }
 
 /// Outcome classification counts.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct OutcomeCounts {
     pub success: usize,
     pub failure: usize,
@@ -80,7 +82,7 @@ pub struct OutcomeCounts {
 }
 
 /// Episode category counts.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CategoryCounts {
     pub bug: usize,
     pub decision: usize,
@@ -89,7 +91,7 @@ pub struct CategoryCounts {
 }
 
 /// Pre-warming quality metrics (R3, APC).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PrewarmMetrics {
     pub episodic_count: usize,
     pub semantic_count: usize,
