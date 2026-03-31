@@ -1,0 +1,14 @@
+---
+source: memory-engine-mcp/tests/depth_shaping.rs
+assertion_line: 372
+expression: body
+---
+due: []
+high_importance: []
+kb_stubs: []
+pinned:
+  - content: Critical pinned fact
+    id: 1
+    importance_score: 0.95
+    scope: ""
+recent: []

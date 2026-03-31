@@ -24,9 +24,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 
 [dev-dependencies]
+blake3 = "1"
 wiremock = "0.6"
 tempfile = "3"
 insta = { version = "1", features = ["yaml"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,0 +1,13 @@
+---
+source: memory-engine-mcp/tests/depth_shaping.rs
+assertion_line: 282
+expression: body
+---
+count: 1
+results:
+  - content: Neural networks learn representations
+    id: 1
+    importance_score: 0.5
+    match_type: Fts
+    scope: ""
+    score: -0.000001
