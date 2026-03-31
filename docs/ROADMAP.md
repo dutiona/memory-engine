@@ -242,7 +242,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | [#95](https://github.com/dutiona/memory-engine/issues/95)   | P1       | MCP tools: consolidate, forget, dump_state, pin/unpin        |
 | [#150](https://github.com/dutiona/memory-engine/issues/150) | P1       | MCP: batch embedding + batch `add_fact` for `flush_insights` |
 | [#96](https://github.com/dutiona/memory-engine/issues/96)   | P2       | MCP tools: replay_events, fact_history, bootstrap            |
-| [#151](https://github.com/dutiona/memory-engine/issues/151) | P2       | MCP: integration tests for tool handlers                     |
+| [#151](https://github.com/dutiona/memory-engine/issues/151) | P2       | ✅ MCP: integration tests for tool handlers (PR #176)        |
 | [#152](https://github.com/dutiona/memory-engine/issues/152) | P1       | Abstention type exposure in Query results (4-type taxonomy)  |
 
 #### Phase 4c: Quality & Cold Storage
@@ -341,7 +341,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 
 **Parallelizable right now (4 independent tracks):**
 
-1. **Phase 4 follow-ups** (5 open: #95, #96, #150, #151) — all non-blocking
+1. **Phase 4 follow-ups** (4 open: #95, #96, #150, #152; #151 ✅) — all non-blocking
 2. **Phase 4c** (#16, #46, #31) — #16 evaluation harness benefits from MCP being live; #31 depends on #46
 3. **Super-qa sweep** (25 open issues) — incremental, any order
 4. **Phase 5a design + implementation** — the critical path forward
