@@ -10,11 +10,11 @@ use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, EventType, FactType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::depth::{self, Depth};
 use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
-use crate::error::{to_mcp_error, ValidationError};
+use crate::error::{ValidationError, to_mcp_error};
 
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)
