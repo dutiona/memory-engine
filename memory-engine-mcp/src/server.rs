@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use memory_engine::engine::MemoryEngine;
+use memory_engine::traits::SummaryGenerator;
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
@@ -20,6 +21,7 @@ use crate::tools;
 pub struct MemoryMcpServer {
     pub engine: Arc<MemoryEngine>,
     pub embedder: Option<Arc<HttpEmbeddingProvider>>,
+    pub summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
     pub embed_dim: usize,
 }
 
@@ -27,11 +29,13 @@ impl MemoryMcpServer {
     pub fn new(
         engine: Arc<MemoryEngine>,
         embedder: Option<Arc<HttpEmbeddingProvider>>,
+        summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
         embed_dim: usize,
     ) -> Self {
         Self {
             engine,
             embedder,
+            summary_gen,
             embed_dim,
         }
     }
@@ -59,6 +63,8 @@ impl ServerHandler for MemoryMcpServer {
                 "Memory engine MCP server. Tools: memory_ingest, memory_add_fact, memory_query, \
              memory_resume_context, memory_list_due, memory_next_due_time, memory_explain_fact, \
              memory_get_fact, memory_statistics, memory_flush_insights, \
+             memory_consolidate, memory_forget, memory_dump_state, \
+             memory_pin_fact, memory_unpin_fact, \
              memory_replay_events, memory_fact_history, memory_bootstrap_session. \
              Use depth=sparse|standard|full on query tools to control response verbosity.",
             )
@@ -82,12 +88,20 @@ impl ServerHandler for MemoryMcpServer {
 
         let engine = Arc::clone(&self.engine);
         let embedder = self.embedder.clone();
+        let summary_gen = self.summary_gen.clone();
         let embed_dim = self.embed_dim;
 
         // Dispatch to tool handlers on the blocking thread pool.
         // Engine operations are sync (SQLite) — must not run on the async runtime.
         let result = tokio::task::spawn_blocking(move || {
-            tools::dispatch(&name, args, &engine, embedder.as_deref(), embed_dim)
+            tools::dispatch(
+                &name,
+                args,
+                &engine,
+                embedder.as_deref(),
+                summary_gen.as_deref(),
+                embed_dim,
+            )
         })
         .await
         .map_err(|e| {

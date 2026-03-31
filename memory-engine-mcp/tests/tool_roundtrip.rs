@@ -7,7 +7,7 @@
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine_mcp::tools;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 const DIM: usize = 8;
 
@@ -89,6 +89,7 @@ fn ingest_minimal() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -110,6 +111,7 @@ fn ingest_with_all_optional_fields() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -128,6 +130,7 @@ fn ingest_invalid_event_type() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     assert!(result.is_err());
@@ -144,6 +147,7 @@ fn ingest_missing_required_field() {
             "payload": {}
         })),
         &engine,
+        None,
         None,
         DIM,
     );
@@ -165,6 +169,7 @@ fn add_fact_with_precomputed_embedding() {
             "embedding": emb,
         })),
         &engine,
+        None,
         None,
         DIM,
     );
@@ -191,6 +196,7 @@ fn add_fact_all_options() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -208,6 +214,7 @@ fn add_fact_importance_out_of_range() {
             "embedding": vec![0.1; DIM],
         })),
         &engine,
+        None,
         None,
         DIM,
     );
@@ -227,6 +234,7 @@ fn add_fact_temporal_inconsistency() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     assert!(result.is_err());
@@ -243,6 +251,7 @@ fn add_fact_wrong_embedding_dim() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     assert!(result.is_err());
@@ -257,6 +266,7 @@ fn add_fact_no_embedder_no_embedding() {
             "content": "test without embedding",
         })),
         &engine,
+        None,
         None,
         DIM,
     );
@@ -305,6 +315,7 @@ fn query_fts_returns_results() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -339,6 +350,7 @@ fn query_with_precomputed_embedding() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -356,6 +368,7 @@ fn query_one_sided_period_rejected() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     assert!(result.is_err());
@@ -372,6 +385,7 @@ fn query_empty_engine() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -385,7 +399,14 @@ fn query_empty_engine() {
 #[test]
 fn resume_context_empty_engine() {
     let engine = make_engine();
-    let result = tools::dispatch("memory_resume_context", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch(
+        "memory_resume_context",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+    );
     let body = unwrap_ok(result);
     // All tiers should be empty arrays
     assert!(body["pinned"].as_array().unwrap().is_empty());
@@ -416,7 +437,14 @@ fn resume_context_with_pinned_fact() {
         )
         .unwrap();
 
-    let result = tools::dispatch("memory_resume_context", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch(
+        "memory_resume_context",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+    );
     let body = unwrap_ok(result);
     assert!(!body["pinned"].as_array().unwrap().is_empty());
 }
@@ -428,7 +456,7 @@ fn resume_context_with_pinned_fact() {
 #[test]
 fn list_due_empty() {
     let engine = make_engine();
-    let result = tools::dispatch("memory_list_due", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch("memory_list_due", args(json!({})), &engine, None, None, DIM);
     let body = unwrap_ok(result);
     assert_eq!(body["count"].as_u64().unwrap(), 0);
 }
@@ -440,7 +468,14 @@ fn list_due_empty() {
 #[test]
 fn next_due_time_empty() {
     let engine = make_engine();
-    let result = tools::dispatch("memory_next_due_time", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch(
+        "memory_next_due_time",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+    );
     let body = unwrap_ok(result);
     assert!(body["next_due"].is_null());
 }
@@ -471,6 +506,7 @@ fn explain_fact_existing() {
         args(json!({ "fact_id": fact_id })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -485,6 +521,7 @@ fn explain_fact_nonexistent() {
         args(json!({ "fact_id": 9999 })),
         &engine,
         None,
+        None,
         DIM,
     );
     assert!(result.is_err());
@@ -493,7 +530,14 @@ fn explain_fact_nonexistent() {
 #[test]
 fn explain_fact_missing_id() {
     let engine = make_engine();
-    let result = tools::dispatch("memory_explain_fact", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch(
+        "memory_explain_fact",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+    );
     assert!(result.is_err());
 }
 
@@ -523,6 +567,7 @@ fn get_fact_existing() {
         args(json!({ "fact_id": fact_id })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -538,6 +583,7 @@ fn get_fact_nonexistent() {
         args(json!({ "fact_id": 9999 })),
         &engine,
         None,
+        None,
         DIM,
     );
     assert!(result.is_err());
@@ -550,7 +596,14 @@ fn get_fact_nonexistent() {
 #[test]
 fn statistics_empty_engine() {
     let engine = make_engine();
-    let result = tools::dispatch("memory_statistics", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch(
+        "memory_statistics",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+    );
     let body = unwrap_ok(result);
     // Should return stats even on empty engine
     assert!(body.is_object());
@@ -584,7 +637,14 @@ fn statistics_after_ingestion() {
         )
         .unwrap();
 
-    let result = tools::dispatch("memory_statistics", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch(
+        "memory_statistics",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+    );
     let body = unwrap_ok(result);
     assert!(body.is_object());
 }
@@ -605,6 +665,7 @@ fn flush_insights_no_embedder() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     // Requires embedder — should fail
@@ -614,7 +675,14 @@ fn flush_insights_no_embedder() {
 #[test]
 fn flush_insights_missing_array() {
     let engine = make_engine();
-    let result = tools::dispatch("memory_flush_insights", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch(
+        "memory_flush_insights",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+    );
     assert!(result.is_err());
 }
 
@@ -625,7 +693,14 @@ fn flush_insights_missing_array() {
 #[test]
 fn unknown_tool_returns_error() {
     let engine = make_engine();
-    let result = tools::dispatch("memory_nonexistent", args(json!({})), &engine, None, DIM);
+    let result = tools::dispatch(
+        "memory_nonexistent",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+    );
     assert!(result.is_err());
 }
 
@@ -634,9 +709,9 @@ fn unknown_tool_returns_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_tool_definitions_returns_10() {
+fn all_tool_definitions_returns_18() {
     let defs = tools::all_tool_definitions();
-    assert_eq!(defs.len(), 10, "expected exactly 10 P0 tools");
+    assert_eq!(defs.len(), 18, "expected 10 P0 + 5 P1 + 3 P2 tools");
 }
 
 #[test]

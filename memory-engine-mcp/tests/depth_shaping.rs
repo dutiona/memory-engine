@@ -106,6 +106,7 @@ fn get_fact_sparse() {
         args(json!({ "fact_id": fact_id, "depth": "sparse" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     redact(&mut body);
@@ -133,6 +134,7 @@ fn get_fact_standard() {
         args(json!({ "fact_id": fact_id, "depth": "standard" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     redact(&mut body);
@@ -159,6 +161,7 @@ fn get_fact_full() {
         "memory_get_fact",
         args(json!({ "fact_id": fact_id, "depth": "full" })),
         &engine,
+        None,
         None,
         DIM,
     ));
@@ -191,6 +194,7 @@ fn explain_fact_sparse() {
         args(json!({ "fact_id": fact_id, "depth": "sparse" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     redact(&mut body);
@@ -218,6 +222,7 @@ fn explain_fact_standard() {
         args(json!({ "fact_id": fact_id, "depth": "standard" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     redact(&mut body);
@@ -244,6 +249,7 @@ fn explain_fact_full() {
         "memory_explain_fact",
         args(json!({ "fact_id": fact_id, "depth": "full" })),
         &engine,
+        None,
         None,
         DIM,
     ));
@@ -276,6 +282,7 @@ fn query_result_sparse() {
         args(json!({ "text": "neural", "mode": "fts", "depth": "sparse" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     redact(&mut body);
@@ -303,6 +310,7 @@ fn query_result_standard() {
         args(json!({ "text": "neural", "mode": "fts", "depth": "standard" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     redact(&mut body);
@@ -329,6 +337,7 @@ fn query_result_full() {
         "memory_query",
         args(json!({ "text": "neural", "mode": "fts", "depth": "full" })),
         &engine,
+        None,
         None,
         DIM,
     ));
@@ -366,6 +375,7 @@ fn resume_context_sparse() {
         args(json!({ "depth": "sparse" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     redact(&mut body);
@@ -397,6 +407,7 @@ fn resume_context_standard() {
         "memory_resume_context",
         args(json!({ "depth": "standard" })),
         &engine,
+        None,
         None,
         DIM,
     ));
@@ -430,6 +441,7 @@ fn resume_context_full() {
         args(json!({ "depth": "full" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     redact(&mut body);
@@ -447,6 +459,7 @@ fn list_due_sparse() {
         "memory_list_due",
         args(json!({ "depth": "sparse" })),
         &engine,
+        None,
         None,
         DIM,
     ));
@@ -479,6 +492,7 @@ fn sparse_has_exactly_4_fields() {
         args(json!({ "fact_id": fact_id, "depth": "sparse" })),
         &engine,
         None,
+        None,
         DIM,
     ));
     assert_eq!(body.as_object().unwrap().len(), 4);
@@ -504,6 +518,7 @@ fn standard_excludes_embedding_and_hash() {
         "memory_get_fact",
         args(json!({ "fact_id": fact_id, "depth": "standard" })),
         &engine,
+        None,
         None,
         DIM,
     ));
@@ -533,6 +548,7 @@ fn full_includes_embedding_dim_and_hash() {
         "memory_get_fact",
         args(json!({ "fact_id": fact_id, "depth": "full" })),
         &engine,
+        None,
         None,
         DIM,
     ));
@@ -567,6 +583,7 @@ fn default_depth_is_standard() {
         "memory_get_fact",
         args(json!({ "fact_id": fact_id })),
         &engine,
+        None,
         None,
         DIM,
     ));
