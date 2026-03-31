@@ -10,11 +10,11 @@ use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, EventType, FactType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::depth::{self, Depth};
 use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
-use crate::error::{ValidationError, to_mcp_error};
+use crate::error::{to_mcp_error, ValidationError};
 
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)
@@ -821,7 +821,12 @@ fn handle_replay_events(
         Some(s) => Some(parse_event_type(&s)?),
         None => None,
     };
-    let limit = get_usize(&args, "limit").or(Some(100));
+    // 0 = no limit (unbounded), absent = default cap of 100
+    let limit = match get_usize(&args, "limit") {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => Some(100),
+    };
     let upcast = get_bool(&args, "upcast").unwrap_or(false);
     let order = match get_str(&args, "order") {
         Some(s) => parse_replay_order(&s)?,
