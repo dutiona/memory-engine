@@ -109,7 +109,7 @@ fn main() -> Result<(), MemoryError> {
     )?; // duplicate
 
     println!("Added 4 facts (1 duplicate)");
-    println!("Active facts: {}", engine.list_active_facts()?.len());
+    println!("Active facts: {}", engine.list_active_facts(None)?.len());
 
     // --- Consolidation: uses SummaryGenerator ---
     let summarizer = ConcatSummarizer;
@@ -126,7 +126,7 @@ fn main() -> Result<(), MemoryError> {
     );
     println!(
         "Active facts after consolidation: {}",
-        engine.list_active_facts()?.len()
+        engine.list_active_facts(None)?.len()
     );
 
     // --- Forgetting: uses ForgetPolicy (configurable struct, not a trait) ---
@@ -178,7 +178,7 @@ fn main() -> Result<(), MemoryError> {
     );
 
     // Final state
-    let facts = engine.list_active_facts()?;
+    let facts = engine.list_active_facts(None)?;
     println!("\nFinal active facts: {}", facts.len());
     for f in &facts {
         println!("  [id={}] {}", f.id, f.content);

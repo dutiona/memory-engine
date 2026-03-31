@@ -64,8 +64,7 @@ fn dump_all(
     format: OutputFormat,
 ) -> anyhow::Result<()> {
     if format == OutputFormat::Json {
-        let mut facts = engine.list_active_facts()?;
-        facts.truncate(limit);
+        let facts = engine.list_active_facts(Some(limit))?;
         let filter = ReplayFilter {
             limit: Some(limit),
             ..ReplayFilter::default()
@@ -89,8 +88,7 @@ fn dump_facts(
     limit: usize,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
-    let mut facts = engine.list_active_facts()?;
-    facts.truncate(limit);
+    let facts = engine.list_active_facts(Some(limit))?;
 
     match format {
         OutputFormat::Json => output::print_json(&facts)?,

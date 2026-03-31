@@ -186,10 +186,10 @@ impl AsyncMemoryEngine {
             .map_err(join_err)?
     }
 
-    /// List all active facts.
-    pub async fn list_active_facts(&self) -> Result<Vec<Fact>> {
+    /// List active facts, optionally limited.
+    pub async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
         let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.list_active_facts())
+        tokio::task::spawn_blocking(move || engine.list_active_facts(limit))
             .await
             .map_err(join_err)?
     }

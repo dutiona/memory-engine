@@ -89,7 +89,7 @@ pub fn prune(
     policy.validate()?;
 
     let fact_store = FactStore::new(conn, embed_dim);
-    let active_facts = fact_store.list_active()?;
+    let active_facts = fact_store.list_active(None)?;
     let facts_evaluated = active_facts.len();
 
     // Score all facts before mutating, so degree values are consistent.
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(stats.facts_evaluated, 2);
 
         // Pinned fact still active
-        let active = fact_store.list_active().unwrap();
+        let active = fact_store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert!(active[0].is_pinned);
     }
