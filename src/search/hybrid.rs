@@ -72,7 +72,11 @@ pub struct QueryDiagnostics {
     pub candidates_before_filter: usize,
     /// Total results returned after all filters and truncation.
     pub results_returned: usize,
-    /// Number of expired facts matching the FTS5 query.
+    /// Number of expired facts matching the FTS5 query text with the same
+    /// `fact_type` and `scope` filters. Does NOT apply `min_importance_score`
+    /// or `pinned_only` — the probe answers "how many expired facts match
+    /// the search terms?" not "how many would survive the full filter chain?"
+    ///
     /// `None` = probe not run (opt-in via `include_expired_probe`).
     /// `None` also when query is vector-only (no FTS5 terms to probe).
     pub expired_matches: Option<usize>,
@@ -188,6 +192,7 @@ pub fn hybrid_search(
     // Collect up to effective_target candidates (rerank_depth widens the pool).
     // Clamped to at least query.limit so rerank_depth can never shrink results.
     let effective_limit = effective_target;
+    let ranked_count = ranked.len();
     let store = FactStore::new(conn, embed_dim);
     let mut results = Vec::new();
     for (id, score) in ranked {
@@ -231,7 +236,7 @@ pub fn hybrid_search(
     }
 
     let diagnostics = QueryDiagnostics {
-        candidates_before_filter: results.len(),
+        candidates_before_filter: ranked_count,
         fts_candidates: fts_candidate_count,
         vector_candidates: vec_candidate_count,
         ..QueryDiagnostics::default()

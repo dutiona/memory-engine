@@ -791,6 +791,9 @@ impl MemoryEngine {
 
         // --- Post-filters: apply ALL filters for AND semantics ---
 
+        // Capture candidate count before post-filters for diagnostics.
+        let candidates_before_filter = facts.len();
+
         // Temporal safety: exclude future-dated facts
         if let Some(cutoff) = effective_cutoff {
             facts.retain(|f| passes_temporal_cutoff(f, cutoff));
@@ -817,7 +820,6 @@ impl MemoryEngine {
         }
 
         // Sort by importance_score DESC and truncate
-        let candidates_before_filter = facts.len();
         facts.sort_by(|a, b| {
             b.importance_score
                 .partial_cmp(&a.importance_score)
