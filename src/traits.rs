@@ -92,20 +92,28 @@ pub trait PersistenceClassifier {
 /// # Contract
 ///
 /// - Input: query text + candidates from hybrid search (FTS + vector + RRF)
-/// - Output: reordered/rescored candidates (may filter, must not add new facts)
+/// - Output: `Vec<(usize, f64)>` — each tuple is `(index_into_candidates, new_score)`
 /// - The returned vec length must be <= input length
-/// - Every returned fact ID must be present in the input candidates (no fabrication)
-/// - No duplicate fact IDs in the output
+/// - Every index must be in range `0..candidates.len()`
+/// - No duplicate indices in the output
+/// - All scores must be finite (not NaN or Inf)
+///
+/// Returning indices instead of full `SearchResult` values **structurally prevents**
+/// the reranker from mutating fact content, embeddings, or match types (issue #144).
 ///
 /// These invariants are enforced at runtime by `MemoryEngine::query()`.
 /// Violations produce `MemoryError::Reranker`.
 pub trait Reranker: Send + Sync {
     /// Rerank candidates for the given query text.
     ///
+    /// Returns `(index, score)` pairs referencing positions in the `candidates` slice.
+    /// The engine reconstructs the final result set from these indices, preserving
+    /// the original `Fact` and `MatchType` values unchanged.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Reranker` if reranking fails (e.g., API call, inference error).
-    fn rerank(&self, query: &str, candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>>;
+    fn rerank(&self, query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>>;
 
     /// Human-readable name for logging and debug output.
     fn name(&self) -> &str;
