@@ -210,9 +210,14 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         } else if let Some(arr) = body.get("embeddings").and_then(|e| e.as_array()) {
             Self::parse_ollama_batch(arr, texts.len())?
         } else {
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
+            let truncated = if body_str.len() > 1000 {
+                format!("{}... (truncated)", &body_str[..1000])
+            } else {
+                body_str
+            };
             return Err(MemoryError::Internal(format!(
-                "cannot extract embeddings from batch response: {}",
-                serde_json::to_string(&body).unwrap_or_default()
+                "cannot extract embeddings from batch response: {truncated}"
             )));
         };
 
