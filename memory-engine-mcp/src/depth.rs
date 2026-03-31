@@ -1,7 +1,7 @@
-use memory_engine::inspect_types::FactExplanation;
+use memory_engine::inspect_types::{FactExplanation, FactHistory};
 use memory_engine::resume::ResumeContext;
 use memory_engine::search::hybrid::SearchResult;
-use memory_engine::types::Fact;
+use memory_engine::types::{Event, Fact};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -155,6 +155,69 @@ pub fn shape_resume_context(ctx: &ResumeContext, depth: Depth) -> Value {
     })
 }
 
+/// Shape an [`Event`] according to the requested depth.
+///
+/// `scope_path` is resolved externally (via `engine.get_scope_path()`) to provide
+/// human-readable context, consistent with other shapers.
+pub fn shape_event(event: &Event, depth: Depth, scope_path: Option<&str>) -> Value {
+    match depth {
+        Depth::Sparse => json!({
+            "id": event.id,
+            "event_type": event.event_type,
+            "timestamp": event.timestamp,
+            "scope": scope_path.unwrap_or(""),
+        }),
+        Depth::Standard => json!({
+            "id": event.id,
+            "event_type": event.event_type,
+            "timestamp": event.timestamp,
+            "source": event.source,
+            "session_id": event.session_id,
+            "scope": scope_path.unwrap_or(""),
+        }),
+        Depth::Full => json!({
+            "id": event.id,
+            "event_type": event.event_type,
+            "timestamp": event.timestamp,
+            "source": event.source,
+            "session_id": event.session_id,
+            "scope_id": event.scope_id,
+            "scope": scope_path.unwrap_or(""),
+            "payload": event.payload,
+            "origin_node_id": event.origin_node_id,
+            "sequence_id": event.sequence_id,
+            "created_at": event.created_at,
+            "event_revision": event.event_revision,
+        }),
+    }
+}
+
+/// Shape a [`FactHistory`] according to the requested depth.
+pub fn shape_fact_history(history: &FactHistory, depth: Depth) -> Value {
+    match depth {
+        Depth::Sparse => json!({
+            "fact_id": history.fact_id,
+            "event_count": history.timeline.len(),
+        }),
+        Depth::Standard | Depth::Full => {
+            let timeline: Vec<Value> = history
+                .timeline
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "timestamp": entry.timestamp,
+                        "kind": format!("{:?}", entry.kind),
+                    })
+                })
+                .collect();
+            json!({
+                "fact_id": history.fact_id,
+                "timeline": timeline,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +305,104 @@ mod tests {
         // Should not split the emoji
         assert!(truncated.len() <= 8);
         assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    // --- Event shaping tests ---
+
+    fn make_test_event() -> Event {
+        use memory_engine::types::EventType;
+        Event {
+            id: 7,
+            timestamp: Utc::now(),
+            event_type: EventType::Interaction,
+            payload: serde_json::json!({"role": "user", "text": "hello"}),
+            source: "test-agent".into(),
+            session_id: Some("sess-001".into()),
+            scope_id: 2,
+            origin_node_id: "node-1".into(),
+            sequence_id: 42,
+            created_at: Some(Utc::now()),
+            event_revision: 1,
+        }
+    }
+
+    #[test]
+    fn shape_event_sparse_has_4_fields() {
+        let event = make_test_event();
+        let shaped = shape_event(&event, Depth::Sparse, Some("project/test"));
+        let obj = shaped.as_object().unwrap();
+        assert_eq!(obj.len(), 4);
+        assert!(obj.contains_key("id"));
+        assert!(obj.contains_key("event_type"));
+        assert!(obj.contains_key("timestamp"));
+        assert!(obj.contains_key("scope"));
+        // payload must NOT be present at sparse depth
+        assert!(!obj.contains_key("payload"));
+    }
+
+    #[test]
+    fn shape_event_standard_includes_source_excludes_payload() {
+        let event = make_test_event();
+        let shaped = shape_event(&event, Depth::Standard, None);
+        let obj = shaped.as_object().unwrap();
+        assert!(obj.contains_key("source"));
+        assert!(obj.contains_key("session_id"));
+        assert!(!obj.contains_key("payload"));
+        assert!(!obj.contains_key("origin_node_id"));
+    }
+
+    #[test]
+    fn shape_event_full_includes_payload() {
+        let event = make_test_event();
+        let shaped = shape_event(&event, Depth::Full, Some("root"));
+        let obj = shaped.as_object().unwrap();
+        assert!(obj.contains_key("payload"));
+        assert!(obj.contains_key("origin_node_id"));
+        assert!(obj.contains_key("sequence_id"));
+        assert!(obj.contains_key("created_at"));
+        assert!(obj.contains_key("event_revision"));
+        assert_eq!(obj["scope"], "root");
+    }
+
+    // --- FactHistory shaping tests ---
+
+    fn make_test_history() -> FactHistory {
+        use memory_engine::inspect_types::{FactHistoryEntry, HistoryEventKind};
+        FactHistory {
+            fact_id: 42,
+            timeline: vec![
+                FactHistoryEntry {
+                    timestamp: Utc::now(),
+                    kind: HistoryEventKind::Created,
+                },
+                FactHistoryEntry {
+                    timestamp: Utc::now(),
+                    kind: HistoryEventKind::BecameValid,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn shape_fact_history_sparse_only_count() {
+        let history = make_test_history();
+        let shaped = shape_fact_history(&history, Depth::Sparse);
+        let obj = shaped.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj["fact_id"], 42);
+        assert_eq!(obj["event_count"], 2);
+        assert!(!obj.contains_key("timeline"));
+    }
+
+    #[test]
+    fn shape_fact_history_standard_includes_timeline() {
+        let history = make_test_history();
+        let shaped = shape_fact_history(&history, Depth::Standard);
+        let obj = shaped.as_object().unwrap();
+        assert_eq!(obj["fact_id"], 42);
+        let timeline = obj["timeline"].as_array().unwrap();
+        assert_eq!(timeline.len(), 2);
+        assert_eq!(timeline[0]["kind"], "Created");
+        assert_eq!(timeline[1]["kind"], "BecameValid");
     }
 }
