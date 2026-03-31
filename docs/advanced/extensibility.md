@@ -170,12 +170,14 @@ Called during `query()` to refine the top-K search results using a cross-encoder
 
 ```rust
 pub trait Reranker: Send + Sync {
-    fn rerank(&self, query: &str, candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>>;
+    fn rerank(&self, query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>>;
     fn name(&self) -> &str;
 }
 ```
 
-The `rerank` method receives the query text and the candidate results from `hybrid_search()`. It returns a reordered (and optionally re-scored) vector of results. The method is failable -- errors propagate as `MemoryError::Reranker`.
+The `rerank` method receives the query text and a borrowed slice of candidate results from `hybrid_search()`. It returns `(index, score)` pairs referencing positions in the input slice. The engine reconstructs the final result set from these indices, preserving the original `Fact` and `MatchType` values unchanged — this structurally prevents the reranker from mutating fact content, embeddings, or match types.
+
+The method is failable -- errors propagate as `MemoryError::Reranker`. All returned scores must be finite (not NaN or Inf).
 
 `Send + Sync` bounds are required because `MemoryEngine` is shared across threads via `Arc`.
 
@@ -191,23 +193,21 @@ struct CrossEncoderReranker {
 }
 
 impl Reranker for CrossEncoderReranker {
-    fn rerank(&self, query: &str, mut candidates: Vec<SearchResult>) -> Result<Vec<SearchResult>> {
+    fn rerank(&self, query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
         // Score each (query, document) pair with the cross-encoder
-        let mut scored: Vec<(f64, SearchResult)> = candidates
-            .into_iter()
-            .map(|r| {
+        let mut scored: Vec<(usize, f64)> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
                 let score = self.cross_encode(query, &r.fact.content)?;
-                Ok((score, r))
+                Ok((i, score))
             })
             .collect::<Result<Vec<_>>>()?;
 
         // Sort by cross-encoder score descending
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        Ok(scored.into_iter().map(|(score, mut r)| {
-            r.score = score;  // replace RRF score with cross-encoder score
-            r
-        }).collect())
+        Ok(scored)
     }
 
     fn name(&self) -> &str {
