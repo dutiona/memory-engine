@@ -1,0 +1,9 @@
+---
+source: memory-engine-mcp/tests/depth_shaping.rs
+assertion_line: 112
+expression: body
+---
+content: Rust is a systems programming language with zero-cost abstractions
+id: 1
+importance_score: 0.5
+scope: ""

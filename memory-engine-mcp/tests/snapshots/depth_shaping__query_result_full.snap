@@ -1,0 +1,28 @@
+---
+source: memory-engine-mcp/tests/depth_shaping.rs
+assertion_line: 336
+expression: body
+---
+count: 1
+results:
+  - access_count: 0
+    content: Neural networks learn representations
+    content_hash: 7abe56521634402afac5a6f961d4f700
+    embedding_dim: 8
+    fact_type: Semantic
+    id: 1
+    importance: 0.5
+    importance_score: 0.5
+    is_pinned: false
+    last_accessed: "[REDACTED]"
+    match_type: Fts
+    metadata: {}
+    scope: ""
+    scope_id: 1
+    score: -0.000001
+    source_event_id: ~
+    surfaced_at: "[REDACTED]"
+    t_created: "[REDACTED]"
+    t_expired: "[REDACTED]"
+    t_invalid: "[REDACTED]"
+    t_valid: "[REDACTED]"

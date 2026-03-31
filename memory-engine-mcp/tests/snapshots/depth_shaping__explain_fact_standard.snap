@@ -1,0 +1,17 @@
+---
+source: memory-engine-mcp/tests/depth_shaping.rs
+assertion_line: 224
+expression: body
+---
+fact_id: 1
+graph:
+  component_size: 0
+  degree: 0
+provenance:
+  access_count: 0
+  importance: 0.5
+  importance_score: 0.5
+  is_pinned: false
+  source_event_id: ~
+scope_path: /
+state: Active

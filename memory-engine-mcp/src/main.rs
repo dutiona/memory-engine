@@ -1,14 +1,8 @@
-mod config;
-mod depth;
-mod embedding;
-mod error;
-mod server;
-mod tools;
-
 use std::sync::Arc;
 
 use clap::Parser;
 use memory_engine::engine::{EngineConfig, MemoryEngine};
+use memory_engine_mcp::{config, embedding, server};
 use rmcp::ServiceExt;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
