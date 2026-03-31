@@ -58,7 +58,8 @@ impl ServerHandler for MemoryMcpServer {
             .with_instructions(
                 "Memory engine MCP server. Tools: memory_ingest, memory_add_fact, memory_query, \
              memory_resume_context, memory_list_due, memory_next_due_time, memory_explain_fact, \
-             memory_get_fact, memory_statistics, memory_flush_insights. \
+             memory_get_fact, memory_statistics, memory_flush_insights, \
+             memory_replay_events, memory_fact_history, memory_bootstrap_session. \
              Use depth=sparse|standard|full on query tools to control response verbosity.",
             )
     }
