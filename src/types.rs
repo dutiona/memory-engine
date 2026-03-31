@@ -184,6 +184,26 @@ pub struct AddFactOptions {
     pub last_accessed: Option<DateTime<Utc>>,
 }
 
+// --- Batch input ---
+
+/// Input descriptor for [`crate::engine::MemoryEngine::add_facts_batch`].
+///
+/// Each entry describes one fact to insert. The engine handles embedding,
+/// classification, scope resolution, and DB insertion atomically for the batch.
+#[derive(Debug, Clone)]
+pub struct BatchFactEntry {
+    /// The fact text to embed and store.
+    pub content: String,
+    /// Semantic, episodic, procedural, etc.
+    pub fact_type: FactType,
+    /// Optional link to the originating event.
+    pub source_event_id: Option<i64>,
+    /// Scope path (e.g., `"project/sub"`). `None` → root scope.
+    pub scope: Option<String>,
+    /// Optional overrides (importance, metadata, temporal bounds, pinned).
+    pub opts: Option<AddFactOptions>,
+}
+
 // --- New* structs (without id, for insertion) ---
 
 /// Event to insert (DB assigns id).

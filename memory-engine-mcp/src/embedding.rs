@@ -38,6 +38,78 @@ impl HttpEmbeddingProvider {
     }
 }
 
+impl HttpEmbeddingProvider {
+    /// Parse OpenAI batch response: `data` array with `index` + `embedding` fields.
+    /// Sorts by `index` to handle out-of-order responses.
+    fn parse_openai_batch(
+        data: &[serde_json::Value],
+        expected_count: usize,
+    ) -> Result<Vec<Vec<f32>>, MemoryError> {
+        if data.len() != expected_count {
+            return Err(MemoryError::Internal(format!(
+                "batch embedding: expected {expected_count} results, got {}",
+                data.len()
+            )));
+        }
+
+        // Extract (index, embedding) pairs
+        let mut pairs: Vec<(usize, Vec<f32>)> = Vec::with_capacity(expected_count);
+        for item in data {
+            let idx = item.get("index").and_then(|v| v.as_u64()).ok_or_else(|| {
+                MemoryError::Internal("batch embedding: missing 'index' in data item".into())
+            })? as usize;
+
+            let embedding = item
+                .get("embedding")
+                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok())
+                .ok_or_else(|| {
+                    MemoryError::Internal(format!(
+                        "batch embedding: cannot parse embedding at index {idx}"
+                    ))
+                })?;
+
+            pairs.push((idx, embedding));
+        }
+
+        // Sort by index and validate continuity (0..N-1, no duplicates/gaps)
+        pairs.sort_by_key(|(idx, _)| *idx);
+        for (i, (idx, _)) in pairs.iter().enumerate() {
+            if *idx != i {
+                return Err(MemoryError::Internal(format!(
+                    "batch embedding: expected index {i}, got {idx} (gap or duplicate)"
+                )));
+            }
+        }
+
+        Ok(pairs.into_iter().map(|(_, emb)| emb).collect())
+    }
+
+    /// Parse Ollama batch response: `embeddings` is an array of arrays.
+    fn parse_ollama_batch(
+        embeddings: &[serde_json::Value],
+        expected_count: usize,
+    ) -> Result<Vec<Vec<f32>>, MemoryError> {
+        if embeddings.len() != expected_count {
+            return Err(MemoryError::Internal(format!(
+                "batch embedding: expected {expected_count} results, got {}",
+                embeddings.len()
+            )));
+        }
+
+        embeddings
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                serde_json::from_value::<Vec<f32>>(v.clone()).map_err(|_| {
+                    MemoryError::Internal(format!(
+                        "batch embedding: cannot parse embedding at index {i}"
+                    ))
+                })
+            })
+            .collect()
+    }
+}
+
 impl EmbeddingProvider for HttpEmbeddingProvider {
     fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
         let mut req = self.client.post(&self.endpoint).json(&serde_json::json!({
@@ -99,6 +171,68 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 
         Ok(embedding)
     }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut req = self.client.post(&self.endpoint).json(&serde_json::json!({
+            "model": &self.model,
+            "input": texts,
+        }));
+
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+
+        let resp = req
+            .send()
+            .map_err(|e| MemoryError::Internal(format!("embedding HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(MemoryError::Internal(format!(
+                "embedding endpoint returned {status}: {body}"
+            )));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))?;
+
+        // Auto-detect response format and extract all embeddings:
+        // OpenAI: { "data": [{ "index": 0, "embedding": [...] }, ...] }
+        // Ollama: { "embeddings": [[...], [...]] }
+        let embeddings = if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+            Self::parse_openai_batch(data, texts.len())?
+        } else if let Some(arr) = body.get("embeddings").and_then(|e| e.as_array()) {
+            Self::parse_ollama_batch(arr, texts.len())?
+        } else {
+            return Err(MemoryError::Internal(format!(
+                "cannot extract embeddings from batch response: {}",
+                serde_json::to_string(&body).unwrap_or_default()
+            )));
+        };
+
+        // Validate all dimensions
+        for (i, emb) in embeddings.iter().enumerate() {
+            if emb.len() != self.expected_dim {
+                return Err(MemoryError::EmbeddingDimension {
+                    expected: self.expected_dim,
+                    actual: emb.len(),
+                });
+            }
+            if emb.iter().any(|v| v.is_nan() || v.is_infinite()) {
+                return Err(MemoryError::Internal(format!(
+                    "embedding at index {i} contains NaN or Inf"
+                )));
+            }
+        }
+
+        Ok(embeddings)
+    }
 }
 
 /// Pass-through embedder for pre-computed embeddings supplied by the caller.
@@ -118,6 +252,17 @@ impl EmbeddingProvider for PassthroughEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
         Ok(self.embedding.clone())
     }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
+        if texts.len() != 1 {
+            return Err(MemoryError::Internal(format!(
+                "PassthroughEmbedder holds a single pre-computed embedding \
+                 and cannot batch-embed {} texts",
+                texts.len()
+            )));
+        }
+        Ok(vec![self.embedding.clone()])
+    }
 }
 
 #[cfg(test)]
@@ -130,5 +275,84 @@ mod tests {
         let provider = PassthroughEmbedder::new(emb.clone());
         let result = provider.embed("anything").unwrap();
         assert_eq!(result, emb);
+    }
+
+    #[test]
+    fn passthrough_batch_single_text_ok() {
+        let emb = vec![0.1, 0.2, 0.3];
+        let provider = PassthroughEmbedder::new(emb.clone());
+        let result = provider.embed_batch(&["anything"]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], emb);
+    }
+
+    #[test]
+    fn passthrough_batch_multiple_texts_rejected() {
+        let provider = PassthroughEmbedder::new(vec![0.1, 0.2, 0.3]);
+        let result = provider.embed_batch(&["a", "b"]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot batch-embed 2 texts")
+        );
+    }
+
+    #[test]
+    fn parse_openai_batch_valid() {
+        let data = vec![
+            serde_json::json!({"index": 1, "embedding": [0.2, 0.3]}),
+            serde_json::json!({"index": 0, "embedding": [0.1, 0.4]}),
+        ];
+        let result = HttpEmbeddingProvider::parse_openai_batch(&data, 2).unwrap();
+        // Should be sorted by index: index 0 first, then index 1
+        assert_eq!(result[0], vec![0.1, 0.4]);
+        assert_eq!(result[1], vec![0.2, 0.3]);
+    }
+
+    #[test]
+    fn parse_openai_batch_count_mismatch() {
+        let data = vec![serde_json::json!({"index": 0, "embedding": [0.1]})];
+        let result = HttpEmbeddingProvider::parse_openai_batch(&data, 2);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected 2 results, got 1")
+        );
+    }
+
+    #[test]
+    fn parse_openai_batch_gap_in_indices() {
+        let data = vec![
+            serde_json::json!({"index": 0, "embedding": [0.1]}),
+            serde_json::json!({"index": 2, "embedding": [0.2]}), // gap: missing index 1
+        ];
+        let result = HttpEmbeddingProvider::parse_openai_batch(&data, 2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("gap or duplicate"));
+    }
+
+    #[test]
+    fn parse_ollama_batch_valid() {
+        let data = vec![serde_json::json!([0.1, 0.2]), serde_json::json!([0.3, 0.4])];
+        let result = HttpEmbeddingProvider::parse_ollama_batch(&data, 2).unwrap();
+        assert_eq!(result[0], vec![0.1f32, 0.2]);
+        assert_eq!(result[1], vec![0.3f32, 0.4]);
+    }
+
+    #[test]
+    fn parse_ollama_batch_count_mismatch() {
+        let data = vec![serde_json::json!([0.1])];
+        let result = HttpEmbeddingProvider::parse_ollama_batch(&data, 3);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected 3 results, got 1")
+        );
     }
 }
