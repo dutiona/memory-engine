@@ -9,7 +9,7 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
-use crate::search::hybrid::{MatchType, SearchMode, SearchQuery, SearchResult, hybrid_search};
+use crate::search::hybrid::{hybrid_search, MatchType, SearchMode, SearchQuery, SearchResult};
 use crate::search::query::MemoryQuery;
 use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
 use crate::store::events::EventStore;
@@ -346,6 +346,18 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     fn write_conn(&self) -> Result<MutexGuard<'_, Connection>> {
         self.pool.try_write()
+    }
+
+    /// Stamp `surfaced_at` for the given fact IDs and return the DB-authoritative
+    /// `(id, timestamp)` pairs. Shared by `list_due()` and `resume_context()`.
+    fn stamp_surfaced_facts(
+        &self,
+        fact_ids: &[i64],
+        now: DateTime<Utc>,
+    ) -> Result<std::collections::HashMap<i64, DateTime<Utc>>> {
+        let conn = self.write_conn()?;
+        let stamped = FactStore::new(&conn, self.embed_dim).stamp_surfaced(fact_ids, now)?;
+        Ok(stamped.into_iter().collect())
     }
 
     /// Ensure a scope path exists using an already-held connection.
@@ -1234,17 +1246,8 @@ impl MemoryEngine {
             .collect();
 
         if !unsurfaced_ids.is_empty() {
-            let conn = self.write_conn()?;
-            let stamped =
-                FactStore::new(&conn, self.embed_dim).stamp_surfaced(&unsurfaced_ids, now)?;
-            // Update in-place with DB-authoritative timestamps
-            let stamped_map: std::collections::HashMap<i64, chrono::DateTime<chrono::Utc>> =
-                stamped.into_iter().collect();
-            for fact in &mut facts {
-                if let Some(&ts) = stamped_map.get(&fact.id) {
-                    fact.surfaced_at = Some(ts);
-                }
-            }
+            let stamped = self.stamp_surfaced_facts(&unsurfaced_ids, now)?;
+            apply_surfaced_stamps(facts.iter_mut(), &stamped);
         }
 
         Ok(facts)
@@ -1658,10 +1661,13 @@ impl MemoryEngine {
         })?;
 
         // Step 3: Stamp surfaced_at on ALL due facts across ALL tiers (#93).
-        // A fact is "due" if t_valid <= now, regardless of which tier claimed it.
+        // A fact is "due" if t_valid <= now AND not bi-temporally invalidated,
+        // regardless of which tier claimed it. Matches FactStore::list_due() predicate.
         // Must use write_conn — read connections have query_only = ON.
-        let is_due = |f: &Fact| -> bool {
-            f.t_valid.is_some_and(|tv| tv <= config.now) && f.surfaced_at.is_none()
+        let is_unsurfaced_due = |f: &Fact| -> bool {
+            f.surfaced_at.is_none()
+                && f.t_valid.is_some_and(|tv| tv <= config.now)
+                && f.t_invalid.is_none_or(|ti| ti > config.now)
         };
         let unsurfaced_ids: Vec<i64> = ctx
             .pinned
@@ -1669,30 +1675,35 @@ impl MemoryEngine {
             .chain(ctx.high_importance.iter())
             .chain(ctx.due.iter())
             .chain(ctx.recent.iter())
-            .filter(|f| is_due(f))
+            .filter(|f| is_unsurfaced_due(f))
             .map(|f| f.id)
             .collect();
 
         if !unsurfaced_ids.is_empty() {
-            let conn = self.write_conn()?;
-            let stamped = FactStore::new(&conn, self.embed_dim)
-                .stamp_surfaced(&unsurfaced_ids, config.now)?;
-            let stamped_map: std::collections::HashMap<i64, DateTime<Utc>> =
-                stamped.into_iter().collect();
-            for fact in ctx
-                .pinned
-                .iter_mut()
-                .chain(ctx.high_importance.iter_mut())
-                .chain(ctx.due.iter_mut())
-                .chain(ctx.recent.iter_mut())
-            {
-                if let Some(&ts) = stamped_map.get(&fact.id) {
-                    fact.surfaced_at = Some(ts);
-                }
-            }
+            let stamped = self.stamp_surfaced_facts(&unsurfaced_ids, config.now)?;
+            apply_surfaced_stamps(
+                ctx.pinned
+                    .iter_mut()
+                    .chain(ctx.high_importance.iter_mut())
+                    .chain(ctx.due.iter_mut())
+                    .chain(ctx.recent.iter_mut()),
+                &stamped,
+            );
         }
 
         Ok(ctx)
+    }
+}
+
+/// Apply DB-authoritative `surfaced_at` timestamps to in-memory facts.
+fn apply_surfaced_stamps<'a>(
+    facts: impl Iterator<Item = &'a mut Fact>,
+    stamped_map: &std::collections::HashMap<i64, DateTime<Utc>>,
+) {
+    for fact in facts {
+        if let Some(&ts) = stamped_map.get(&fact.id) {
+            fact.surfaced_at = Some(ts);
+        }
     }
 }
 
@@ -2457,6 +2468,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resume_does_not_stamp_invalidated_pinned_due_fact() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let now = Utc::now();
+        let past = now - chrono::Duration::hours(2);
+        let past_invalid = now - chrono::Duration::hours(1);
+
+        // Pinned fact that WAS due but is now bi-temporally invalidated:
+        // t_valid in the past, t_invalid ALSO in the past (before now).
+        engine
+            .add_fact(
+                "old CI timeout no longer valid",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&AddFactOptions {
+                    pinned: Some(true),
+                    t_valid: Some(past),
+                    t_invalid: Some(past_invalid),
+                    importance: Some(0.9),
+                    ..Default::default()
+                }),
+                None,
+            )
+            .unwrap();
+
+        let config = ResumeConfig {
+            now,
+            ..ResumeConfig::default()
+        };
+        let ctx = engine.resume_context(&config).unwrap();
+
+        // Fact lands in pinned tier (it's pinned and not expired)
+        assert_eq!(ctx.pinned.len(), 1);
+
+        // But surfaced_at must NOT be stamped — the fact is bi-temporally
+        // invalidated (t_invalid <= now), so it's no longer "due".
+        assert!(
+            ctx.pinned[0].surfaced_at.is_none(),
+            "invalidated fact must not have surfaced_at stamped"
+        );
+    }
+
     // --- Phase 3b / T6: SearchConfig in EngineConfig ---
 
     #[test]
@@ -2754,11 +2810,9 @@ mod tests {
 
         let results = engine.execute_query(&MemoryQuery::new()).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(
-            results
-                .iter()
-                .all(|r| r.match_type == MatchType::ImportanceRank)
-        );
+        assert!(results
+            .iter()
+            .all(|r| r.match_type == MatchType::ImportanceRank));
     }
 
     #[test]
@@ -2865,11 +2919,9 @@ mod tests {
             .unwrap();
         // fact_type filtering in store path — list_by_importance_score doesn't filter by fact_type,
         // so it should be post-filtered
-        assert!(
-            results
-                .iter()
-                .all(|r| r.fact.fact_type == FactType::Semantic)
-        );
+        assert!(results
+            .iter()
+            .all(|r| r.fact.fact_type == FactType::Semantic));
     }
 
     #[test]
@@ -3726,16 +3778,12 @@ mod tests {
         assert_eq!(co_edges.len(), 2);
 
         // Both directions present
-        assert!(
-            co_edges
-                .iter()
-                .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2)
-        );
-        assert!(
-            co_edges
-                .iter()
-                .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1)
-        );
+        assert!(co_edges
+            .iter()
+            .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2));
+        assert!(co_edges
+            .iter()
+            .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1));
 
         // Weight matches constant
         for e in &co_edges {
