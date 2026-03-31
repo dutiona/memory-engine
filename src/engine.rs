@@ -1657,12 +1657,19 @@ impl MemoryEngine {
             crate::resume::resume_context(conn, &scope_ids, self.embed_dim, config)
         })?;
 
-        // Step 3: Stamp surfaced_at on the final due facts (post-filter, post-cap).
+        // Step 3: Stamp surfaced_at on ALL due facts across ALL tiers (#93).
+        // A fact is "due" if t_valid <= now, regardless of which tier claimed it.
         // Must use write_conn — read connections have query_only = ON.
+        let is_due = |f: &Fact| -> bool {
+            f.t_valid.is_some_and(|tv| tv <= config.now) && f.surfaced_at.is_none()
+        };
         let unsurfaced_ids: Vec<i64> = ctx
-            .due
+            .pinned
             .iter()
-            .filter(|f| f.surfaced_at.is_none())
+            .chain(ctx.high_importance.iter())
+            .chain(ctx.due.iter())
+            .chain(ctx.recent.iter())
+            .filter(|f| is_due(f))
             .map(|f| f.id)
             .collect();
 
@@ -1672,7 +1679,13 @@ impl MemoryEngine {
                 .stamp_surfaced(&unsurfaced_ids, config.now)?;
             let stamped_map: std::collections::HashMap<i64, DateTime<Utc>> =
                 stamped.into_iter().collect();
-            for fact in &mut ctx.due {
+            for fact in ctx
+                .pinned
+                .iter_mut()
+                .chain(ctx.high_importance.iter_mut())
+                .chain(ctx.due.iter_mut())
+                .chain(ctx.recent.iter_mut())
+            {
                 if let Some(&ts) = stamped_map.get(&fact.id) {
                     fact.surfaced_at = Some(ts);
                 }
@@ -2352,6 +2365,96 @@ mod tests {
         };
         let err = engine.resume_context(&config).unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
+    }
+
+    // --- Issue #93: surfaced_at for due facts in non-due tiers ---
+
+    #[test]
+    fn resume_stamps_surfaced_at_on_pinned_due_fact() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let now = Utc::now();
+        let past = now - chrono::Duration::hours(1);
+
+        // Pinned fact that is ALSO due (t_valid in the past).
+        // It will land in the pinned tier, not the due tier.
+        engine
+            .add_fact(
+                "CI pipeline uses 30min timeout",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&AddFactOptions {
+                    pinned: Some(true),
+                    t_valid: Some(past),
+                    importance: Some(0.9),
+                    ..Default::default()
+                }),
+                None,
+            )
+            .unwrap();
+
+        let config = ResumeConfig {
+            now,
+            ..ResumeConfig::default()
+        };
+        let ctx = engine.resume_context(&config).unwrap();
+
+        // Fact should appear in pinned tier (not due tier)
+        assert_eq!(ctx.pinned.len(), 1);
+        assert!(ctx.due.is_empty() || !ctx.due.iter().any(|f| f.content.contains("CI")));
+
+        // Bug: surfaced_at should be stamped because the fact IS due,
+        // even though it landed in the pinned tier.
+        assert!(
+            ctx.pinned[0].surfaced_at.is_some(),
+            "pinned-but-due fact must have surfaced_at stamped"
+        );
+    }
+
+    #[test]
+    fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let now = Utc::now();
+        let past = now - chrono::Duration::hours(1);
+
+        // High-importance fact that is ALSO due. Not pinned.
+        // importance=0.9 → importance_score=0.9, which exceeds the 0.7 threshold.
+        // It will land in high_importance tier, not due tier.
+        engine
+            .add_fact(
+                "user prefers tabs over spaces",
+                FactType::Semantic,
+                None,
+                &embedder,
+                None,
+                Some(&AddFactOptions {
+                    importance: Some(0.9),
+                    t_valid: Some(past),
+                    ..Default::default()
+                }),
+                None,
+            )
+            .unwrap();
+
+        let config = ResumeConfig {
+            now,
+            high_importance_min: 0.7,
+            ..ResumeConfig::default()
+        };
+        let ctx = engine.resume_context(&config).unwrap();
+
+        // Fact should appear in high_importance tier (not due tier)
+        assert_eq!(ctx.high_importance.len(), 1);
+        assert!(ctx.due.is_empty());
+
+        // Bug: surfaced_at should be stamped because the fact IS due.
+        assert!(
+            ctx.high_importance[0].surfaced_at.is_some(),
+            "high-importance-but-due fact must have surfaced_at stamped"
+        );
     }
 
     // --- Phase 3b / T6: SearchConfig in EngineConfig ---
