@@ -119,19 +119,32 @@ impl<'a> FactStore<'a> {
         }
     }
 
-    /// List all active facts (`t_expired IS NULL`).
+    /// List active facts (`t_expired IS NULL`), optionally limited.
+    ///
+    /// When `limit` is `Some(n)`, a SQL `LIMIT n` clause is pushed into the
+    /// query so that at most `n` rows are materialized. `None` returns all.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn list_active(&self) -> Result<Vec<Fact>> {
-        let mut stmt = self.conn.prepare(
+    pub fn list_active(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
+        let sql = if let Some(n) = limit {
+            format!(
+                "SELECT id, content, content_hash, embedding, fact_type,
+                        t_created, t_expired, t_valid, t_invalid,
+                        source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                        is_pinned, importance_score, surfaced_at
+                 FROM facts WHERE t_expired IS NULL LIMIT {n}"
+            )
+        } else {
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
                     is_pinned, importance_score, surfaced_at
-             FROM facts WHERE t_expired IS NULL",
-        )?;
+             FROM facts WHERE t_expired IS NULL"
+                .to_owned()
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
         let dim = self.embed_dim;
         let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
         let mut facts = Vec::new();
@@ -841,14 +854,36 @@ mod tests {
         let id2 = store.insert(&make_fact("fact 2", vec![0.2; DIM])).unwrap();
 
         // Both active
-        let active = store.list_active().unwrap();
+        let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 2);
 
         // Expire fact 1
         store.expire(id1, Utc::now()).unwrap();
-        let active = store.list_active().unwrap();
+        let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, id2);
+    }
+
+    #[test]
+    fn list_active_with_limit() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("fact 1", vec![0.1; DIM])).unwrap();
+        store.insert(&make_fact("fact 2", vec![0.2; DIM])).unwrap();
+        store.insert(&make_fact("fact 3", vec![0.3; DIM])).unwrap();
+
+        // No limit returns all
+        assert_eq!(store.list_active(None).unwrap().len(), 3);
+
+        // Limit returns at most N
+        assert_eq!(store.list_active(Some(2)).unwrap().len(), 2);
+        assert_eq!(store.list_active(Some(1)).unwrap().len(), 1);
+
+        // Limit larger than corpus returns all
+        assert_eq!(store.list_active(Some(100)).unwrap().len(), 3);
+
+        // Limit zero returns empty
+        assert_eq!(store.list_active(Some(0)).unwrap().len(), 0);
     }
 
     #[test]

@@ -86,7 +86,7 @@ fn main() -> Result<(), MemoryError> {
 
     // 4. Check engine stats
     let (nodes, edges) = engine.graph_stats();
-    let facts = engine.list_active_facts()?;
+    let facts = engine.list_active_facts(None)?;
     println!(
         "\nEngine stats: {} facts, {} graph nodes, {} edges",
         facts.len(),
