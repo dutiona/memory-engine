@@ -1,10 +1,10 @@
+use memory_engine::ResumeContext;
 use memory_engine::inspect_types::{FactExplanation, FactHistory};
 use memory_engine::search::hybrid::{QueryDiagnostics, SearchResult};
 use memory_engine::types::{Event, Fact};
-use memory_engine::ResumeContext;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Tiered retrieval depth for MCP responses.
 ///

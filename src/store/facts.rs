@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{
@@ -36,6 +36,7 @@ fn content_hash(content: &str) -> String {
     hash.to_hex()[..32].to_string()
 }
 
+#[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> FactStore<'a> {
     /// Create a new `FactStore` borrowing the given connection.
     #[must_use]

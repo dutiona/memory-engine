@@ -20,6 +20,7 @@ pub struct ConnectionPool {
     read_conns: Mutex<Vec<Connection>>,
     read_available: Condvar,
     path: Option<PathBuf>,
+    #[allow(dead_code)] // complete pool API — used after #108 engine split
     embed_dim: usize,
     read_pool_size: usize,
     read_only: bool,
@@ -224,6 +225,7 @@ impl ConnectionPool {
 
     /// Embedding dimension configured for this pool.
     #[must_use]
+    #[allow(dead_code)] // complete pool API — used after #108 engine split
     pub const fn embed_dim(&self) -> usize {
         self.embed_dim
     }

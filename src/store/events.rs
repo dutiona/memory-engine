@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::upcaster::UpcasterRegistry;
@@ -404,9 +404,11 @@ mod tests {
         };
         let results = store.list(&filter).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .all(|e| e.session_id == Some("sess-1".into())));
+        assert!(
+            results
+                .iter()
+                .all(|e| e.session_id == Some("sess-1".into()))
+        );
     }
 
     #[test]

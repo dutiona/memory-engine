@@ -8,6 +8,7 @@ pub struct ScopeStore<'a> {
     conn: &'a Connection,
 }
 
+#[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> ScopeStore<'a> {
     pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }

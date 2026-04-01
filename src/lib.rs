@@ -48,5 +48,6 @@ pub use error::*;
 pub use inspect::types as inspect_types;
 pub use resume::{ResumeConfig, ResumeContext};
 pub use search::{MemoryQuery, QueryDiagnostics, QueryResponse};
+pub use store::UpcasterRegistry;
 pub use traits::{EmbeddingProvider, Reranker};
 pub use types::*;

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{parse_optional_timestamp, parse_timestamp};
@@ -26,6 +26,7 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
     })
 }
 
+#[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> EdgeStore<'a> {
     /// Create a new `EdgeStore` borrowing the given connection.
     #[must_use]

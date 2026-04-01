@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{deserialize_embedding, parse_timestamp, serialize_embedding};
@@ -31,6 +31,7 @@ pub struct SummaryStore<'a> {
     embed_dim: usize,
 }
 
+#[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> SummaryStore<'a> {
     /// Create a new `SummaryStore` borrowing the given connection.
     #[must_use]
@@ -324,10 +325,12 @@ mod tests {
 
         let deleted = store.delete_by_level(&ConsolidationLevel::Cluster).unwrap();
         assert_eq!(deleted, 2);
-        assert!(store
-            .list_by_level(&ConsolidationLevel::Cluster)
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .list_by_level(&ConsolidationLevel::Cluster)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             store
                 .list_by_level(&ConsolidationLevel::Global)
