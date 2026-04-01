@@ -253,6 +253,14 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | ✅ Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback). [PR #196](https://github.com/dutiona/memory-engine/pull/196)                                                                     |
 | ✅ Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot (PR #195)                                                                                                                                                                |
 
+#### Snapshot V2 improvements (follow-ups from #31 review)
+
+| Issue                                                                                              | Priority | Description                                                         |
+| -------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------- |
+| Shutdown perf ([#199](https://github.com/dutiona/memory-engine/issues/199))                        | HIGH     | Avoid DB re-scan in `to_snapshot` — cache vectors or use HNSW serde |
+| Direct HNSW serde ([#200](https://github.com/dutiona/memory-engine/issues/200))                    | MEDIUM   | Skip O(N log N) rebuild via `hnsw` crate `serde1` feature           |
+| Snapshot compression ([#201](https://github.com/dutiona/memory-engine/issues/201))                 | LOW      | zstd-wrap payload for large deployments (100k+ facts)               |
+
 #### Code Quality Sweep (super-qa — parallel track)
 
 Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/memory-engine/pull/131) auto-fixed 10 findings). Remaining issues are non-blocking and can be addressed incrementally alongside Phase 4b/5 work.

@@ -431,6 +431,12 @@ impl MemoryEngine {
     /// No-op for in-memory engines or read-only engines.
     /// Returns `Ok(false)` if skipped, `Ok(true)` if written.
     ///
+    /// # Preconditions
+    ///
+    /// Assumes single-writer semantics: only one `MemoryEngine` instance per
+    /// database file. If multiple instances share the same file, the snapshot
+    /// may reflect stale in-memory state while the fingerprint matches the DB.
+    ///
     /// # No-panic contract
     ///
     /// This method never panics. All internal operations use checked access
