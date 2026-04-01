@@ -259,14 +259,14 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 
 **High severity:**
 
-| Issue                                                       | Category    | Description                                                               |
-| ----------------------------------------------------------- | ----------- | ------------------------------------------------------------------------- |
-| [#108](https://github.com/dutiona/memory-engine/issues/108) | refactoring | ~~`engine.rs` is a 3573-line god module — extract subsystems~~ ✅ PR #186 |
-| [#109](https://github.com/dutiona/memory-engine/issues/109) | refactoring | `add_fact` takes 8 parameters — introduce builder or struct               |
-| [#110](https://github.com/dutiona/memory-engine/issues/110) | refactoring | All modules are `pub` in `lib.rs` — no encapsulation                      |
-| [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | `proptest` and `insta` dev-dependencies never used                        |
-| [#128](https://github.com/dutiona/memory-engine/issues/128) | testing     | `traits.rs` and `query.rs` have zero unit tests ✅ (#185)                 |
-| [#187](https://github.com/dutiona/memory-engine/issues/187) | bug         | `depth_shaping` insta snapshots stale after #180 QueryDiagnostics         |
+| Issue                                                       | Category    | Description                                                                      |
+| ----------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------- |
+| [#108](https://github.com/dutiona/memory-engine/issues/108) | refactoring | ~~`engine.rs` is a 3573-line god module — extract subsystems~~ ✅ PR #186        |
+| [#109](https://github.com/dutiona/memory-engine/issues/109) | refactoring | `add_fact` takes 8 parameters — introduce builder or struct                      |
+| [#110](https://github.com/dutiona/memory-engine/issues/110) | refactoring | All modules are `pub` in `lib.rs` — no encapsulation                             |
+| [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | `proptest` and `insta` dev-dependencies never used                               |
+| [#128](https://github.com/dutiona/memory-engine/issues/128) | testing     | `traits.rs` and `query.rs` have zero unit tests ✅ (#185)                        |
+| [#187](https://github.com/dutiona/memory-engine/issues/187) | bug         | ~~`depth_shaping` insta snapshots stale after #180 QueryDiagnostics~~ ✅ PR #193 |
 
 **Medium severity:**
 
@@ -346,7 +346,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 
 1. **Phase 4 follow-ups** (all resolved: #95 ✅, #96 ✅, #150 ✅, #151 ✅, #152 ✅)
 1. **Phase 4c** (#16, #46, #31) — #16 evaluation harness benefits from MCP being live; #31 depends on #46
-1. **Super-qa sweep** (25 open issues; #108 ✅, #128 ✅; +#191, +#192 from #186 review) — incremental, any order
+1. **Super-qa sweep** (24 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review) — incremental, any order
 1. **Phase 5a design + implementation** — the critical path forward
 
 **Phase 5 internal dependencies:**
