@@ -58,6 +58,7 @@ Read these docs when working on the relevant area:
 | Bi-temporal semantics          | `docs/advanced/bi-temporal-semantics.md` |
 | Consolidation pipeline         | `docs/advanced/consolidation.md`         |
 | Hybrid search tuning           | `docs/advanced/hybrid-search.md`         |
+| Schema evolution policy        | `docs/design/schema-evolution-policy.md` |
 | CLI inspector usage            | `docs/reference/cli-inspector.md`        |
 | MCP server usage               | `docs/reference/mcp-server.md`           |
 
