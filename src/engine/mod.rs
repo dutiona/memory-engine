@@ -371,7 +371,7 @@ impl MemoryEngine {
 
     #[cfg(feature = "ann")]
     fn should_use_hnsw(&self) -> bool {
-        self.hnsw_strategy.as_ref().map_or(false, |hnsw| {
+        self.hnsw_strategy.as_ref().is_some_and(|hnsw| {
             hnsw.active_count()
                 >= self
                     .search_config
