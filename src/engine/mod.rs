@@ -30,6 +30,9 @@ mod restore;
 mod resume;
 mod scheduling;
 
+#[cfg(feature = "archive")]
+mod archive;
+
 #[cfg(test)]
 mod tests;
 
