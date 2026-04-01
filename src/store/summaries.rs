@@ -31,6 +31,7 @@ pub struct SummaryStore<'a> {
     embed_dim: usize,
 }
 
+#[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> SummaryStore<'a> {
     /// Create a new `SummaryStore` borrowing the given connection.
     #[must_use]
