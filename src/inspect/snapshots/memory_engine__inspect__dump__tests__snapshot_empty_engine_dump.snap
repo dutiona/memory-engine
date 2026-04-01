@@ -1,0 +1,20 @@
+---
+source: src/inspect/dump.rs
+assertion_line: 471
+expression: snapshot
+---
+schema_version: 6
+storage_epoch: 1
+embed_dim: 4
+facts: []
+edges: []
+summaries: []
+scopes:
+  - id: 1
+    parent_id: ~
+    label: root
+    depth: 0
+events: []
+config:
+  schema_version: "6"
+  storage_epoch: "1"

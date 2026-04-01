@@ -455,4 +455,55 @@ mod tests {
         assert!(bytes.len() > 4, "file too small");
         assert_eq!(&bytes[..4], &[0x28, 0xb5, 0x2f, 0xfd], "zstd magic bytes");
     }
+
+    #[test]
+    fn snapshot_empty_engine_dump() {
+        use crate::store::schema::{init_schema, migrate, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+        let snapshot: EngineSnapshot = serde_json::from_slice(&buf).unwrap();
+
+        insta::assert_yaml_snapshot!(snapshot, {
+            ".config" => insta::sorted_redaction(),
+        });
+    }
+
+    #[test]
+    fn snapshot_populated_engine_dump() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        engine
+            .add_fact(
+                "snapshot fact",
+                FactType::Semantic,
+                None,
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("dump.json");
+        engine
+            .dump_state(&DumpFormat::Json(json_path.clone()))
+            .unwrap();
+
+        let content = std::fs::read_to_string(&json_path).unwrap();
+        let snapshot: EngineSnapshot = serde_json::from_str(&content).unwrap();
+
+        insta::assert_yaml_snapshot!(snapshot, {
+            ".facts[].t_created" => "[timestamp]",
+            ".facts[].last_accessed" => "[timestamp]",
+            ".facts[].embedding" => "[embedding]",
+            ".facts[].content_hash" => "[hash]",
+            ".events" => "[]",
+            ".config" => "{}",
+        });
+    }
 }

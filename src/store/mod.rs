@@ -109,4 +109,29 @@ mod tests {
         let recovered = deserialize_embedding(&blob, 0).unwrap();
         assert!(recovered.is_empty());
     }
+
+    mod proptest_embedding {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn roundtrip(embedding in proptest::collection::vec(any::<f32>(), 0..512)) {
+                let blob = serialize_embedding(&embedding);
+                let recovered = deserialize_embedding(&blob, embedding.len()).unwrap();
+                prop_assert_eq!(recovered, embedding);
+            }
+
+            #[test]
+            fn wrong_dim_rejects(
+                embedding in proptest::collection::vec(any::<f32>(), 1..128usize),
+                delta in 1..64usize,
+            ) {
+                let blob = serialize_embedding(&embedding);
+                let wrong_dim = embedding.len() + delta;
+                let result = deserialize_embedding(&blob, wrong_dim);
+                prop_assert!(result.is_err());
+            }
+        }
+    }
 }

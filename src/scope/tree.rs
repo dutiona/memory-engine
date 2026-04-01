@@ -283,4 +283,61 @@ mod tests {
         assert_eq!(tree.nodes.len(), node_count_before + 1);
         assert!(tree.children.get(&1).unwrap().contains(&999));
     }
+
+    mod proptest_scope {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn scope_segment() -> impl Strategy<Value = String> {
+            "[a-z]{1,8}:[a-z]{1,8}".prop_map(|s| s)
+        }
+
+        fn scope_path(max_depth: usize) -> impl Strategy<Value = String> {
+            proptest::collection::vec(scope_segment(), 1..max_depth).prop_map(|segs| segs.join("/"))
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(32))]
+
+            #[test]
+            fn resolve_roundtrip(path in scope_path(4)) {
+                let conn = open_memory().unwrap();
+                init_schema(&conn).unwrap();
+                migrate(&conn, None).unwrap();
+
+                let store = ScopeStore::new(&conn);
+                store.ensure_path(&path).unwrap();
+                let tree = ScopeTree::load(&conn).unwrap();
+
+                let resolved = tree.resolve_path(&path);
+                prop_assert!(resolved.is_some(),
+                    "path '{path}' was created but not resolvable");
+
+                let id = resolved.unwrap();
+                let reconstructed = tree.path_for_id(id);
+                prop_assert_eq!(reconstructed.as_deref(), Some(path.as_str()),
+                    "path_for_id roundtrip failed");
+            }
+
+            #[test]
+            fn ancestors_always_end_at_root(path in scope_path(4)) {
+                let conn = open_memory().unwrap();
+                init_schema(&conn).unwrap();
+                migrate(&conn, None).unwrap();
+
+                let store = ScopeStore::new(&conn);
+                store.ensure_path(&path).unwrap();
+                let tree = ScopeTree::load(&conn).unwrap();
+
+                let id = tree.resolve_path(&path).unwrap();
+                let ancestors = tree.ancestors(id);
+
+                prop_assert!(!ancestors.is_empty());
+                prop_assert_eq!(*ancestors.last().unwrap(), tree.root_id(),
+                    "ancestor chain should end at root");
+                prop_assert_eq!(ancestors[0], id,
+                    "ancestor chain should start at the node itself");
+            }
+        }
+    }
 }

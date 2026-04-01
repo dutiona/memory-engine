@@ -150,4 +150,42 @@ mod tests {
         // Weighted average: (0.6*3 + 0.8*5) / 8 = 5.8/8 = 0.725
         assert!((a.prewarm_metrics.avg_importance - 0.725).abs() < 0.001);
     }
+
+    #[test]
+    fn snapshot_default_report() {
+        let report = BootstrapReport::default();
+        insta::assert_yaml_snapshot!(report);
+    }
+
+    #[test]
+    fn snapshot_populated_report() {
+        let report = BootstrapReport {
+            sessions_processed: 3,
+            sessions_skipped: 1,
+            entries_parsed: 42,
+            entries_malformed: 2,
+            turns_reconstructed: 18,
+            candidates_found: 12,
+            facts_created: 8,
+            events_ingested: 15,
+            outcome_counts: OutcomeCounts {
+                success: 5,
+                failure: 2,
+                indeterminate: 1,
+            },
+            category_counts: CategoryCounts {
+                bug: 3,
+                decision: 2,
+                convention: 1,
+                learning: 2,
+            },
+            prewarm_metrics: PrewarmMetrics {
+                episodic_count: 3,
+                semantic_count: 3,
+                procedural_count: 2,
+                avg_importance: 0.72,
+            },
+        };
+        insta::assert_yaml_snapshot!(report);
+    }
 }

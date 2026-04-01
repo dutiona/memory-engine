@@ -1,0 +1,28 @@
+---
+source: src/inspect/statistics.rs
+assertion_line: 216
+expression: stats
+---
+facts:
+  total: 0
+  active: 0
+  expired: 0
+  pinned: 0
+  due: 0
+edges:
+  total: 0
+  active: 0
+  expired: 0
+summaries:
+  total: 0
+  by_level: {}
+scopes:
+  total: 1
+  max_depth: 0
+events:
+  total: 0
+storage:
+  page_count: "[page_count]"
+  page_size: "[page_size]"
+  main_db_bytes: "[db_bytes]"
+  file_path: ~

@@ -1,0 +1,27 @@
+---
+source: src/bootstrap/metrics.rs
+assertion_line: 189
+expression: report
+---
+sessions_processed: 3
+sessions_skipped: 1
+entries_parsed: 42
+entries_malformed: 2
+turns_reconstructed: 18
+candidates_found: 12
+facts_created: 8
+events_ingested: 15
+outcome_counts:
+  success: 5
+  failure: 2
+  indeterminate: 1
+category_counts:
+  bug: 3
+  decision: 2
+  convention: 1
+  learning: 2
+prewarm_metrics:
+  episodic_count: 3
+  semantic_count: 3
+  procedural_count: 2
+  avg_importance: 0.72
