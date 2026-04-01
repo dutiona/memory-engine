@@ -27,7 +27,7 @@ pub enum MatchType {
     /// Result came from importance-ranked store query (no text/vector search).
     ImportanceRank,
     /// Result came from a decompressed archive `.pak` file (slow fallback).
-    #[cfg(feature = "archive")]
+    /// Always present in the enum for serde ABI stability across feature combinations.
     Archive,
 }
 

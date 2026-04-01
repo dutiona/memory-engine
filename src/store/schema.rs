@@ -621,6 +621,10 @@ fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
 }
 
 /// Add `archive_manifest` table to track `.pak` archive files.
+///
+/// The table is created unconditionally (not gated on the `archive` feature)
+/// so that schema version is consistent regardless of feature flags. The Rust
+/// code that reads/writes this table is gated behind `#[cfg(feature = "archive")]`.
 fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS archive_manifest (

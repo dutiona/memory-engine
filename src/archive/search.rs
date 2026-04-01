@@ -43,6 +43,10 @@ pub fn search_archives(
 
     for entry in manifest_entries {
         let pak_path = archive_dir.join(&entry.pak_path);
+        // Path traversal guard: ensure resolved path stays inside archive_dir
+        if !pak_path.starts_with(archive_dir) {
+            continue;
+        }
         if !pak_path.exists() {
             continue;
         }

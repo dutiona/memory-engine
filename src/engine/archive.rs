@@ -40,6 +40,11 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` on SQL failure.
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
     pub fn archive(&self, policy: &ArchivePolicy) -> Result<Option<ArchiveStats>> {
+        // Fail fast on read-only engines before any filesystem I/O.
+        // write_conn() checks this too, but we want to avoid writing
+        // an orphan .pak file that would never be committed.
+        drop(self.pool.try_write()?);
+
         if !self.is_file_backed() {
             return Err(MemoryError::Archive(
                 "archival requires a file-backed engine".to_string(),
@@ -115,6 +120,16 @@ impl MemoryEngine {
         let mut results = Vec::with_capacity(entries.len());
         for entry in &entries {
             let pak_path = archive_dir.join(&entry.pak_path);
+            // Path traversal guard
+            if !pak_path.starts_with(&archive_dir) {
+                results.push(ArchiveVerifyResult {
+                    manifest_id: entry.id,
+                    pak_path: entry.pak_path.clone(),
+                    ok: false,
+                    error: Some("path traversal detected".to_string()),
+                });
+                continue;
+            }
             let result = if pak_path.exists() {
                 Self::verify_single_archive(entry, &pak_path)
             } else {
