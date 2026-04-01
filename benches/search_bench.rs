@@ -374,10 +374,7 @@ fn setup_hnsw_engine(n: usize) -> MemoryEngine {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench_hnsw.db");
     let mut config = EngineConfig::new(db_path, DIM);
-    config.search_config = Some(SearchConfig {
-        ann_threshold: 0,
-        ..Default::default()
-    });
+    config.search_config = Some(SearchConfig { ann_threshold: 0 });
     let engine = MemoryEngine::open(&config).expect("open engine");
     let embedder = ConstEmbedder { dim: DIM };
     for i in 0..n {
