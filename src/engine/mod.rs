@@ -42,6 +42,9 @@ struct SnapshotData {
 #[cfg(feature = "archive")]
 mod archive;
 
+#[cfg(feature = "archive")]
+mod archive;
+
 #[cfg(test)]
 mod tests;
 
