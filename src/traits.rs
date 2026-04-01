@@ -215,11 +215,11 @@ impl ForgetPolicy {
     pub fn validate(&self) -> Result<()> {
         use crate::error::MemoryError;
 
-        if self.half_life_days <= 0.0 {
+        if !self.half_life_days.is_finite() || self.half_life_days <= 0.0 {
             return Err(MemoryError::Conflict("half_life_days must be > 0".into()));
         }
         for (ft, &hl) in &self.half_life_overrides {
-            if hl <= 0.0 {
+            if !hl.is_finite() || hl <= 0.0 {
                 return Err(MemoryError::Conflict(format!(
                     "half_life for {ft:?} must be > 0"
                 )));
@@ -230,7 +230,11 @@ impl ForgetPolicy {
                 "min_importance must be in [0, 1]".into(),
             ));
         }
-        if self.recency_weight < 0.0
+        if !self.recency_weight.is_finite()
+            || !self.frequency_weight.is_finite()
+            || !self.graph_degree_weight.is_finite()
+            || !self.base_importance_weight.is_finite()
+            || self.recency_weight < 0.0
             || self.frequency_weight < 0.0
             || self.graph_degree_weight < 0.0
             || self.base_importance_weight < 0.0
@@ -444,6 +448,71 @@ mod tests {
         p.validate().unwrap();
     }
 
+    // --- NaN rejection (IEEE 754: NaN comparisons always return false) ---
+
+    #[test]
+    fn validate_rejects_nan_half_life() {
+        let p = ForgetPolicy {
+            half_life_days: f64::NAN,
+            ..Default::default()
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_infinity_half_life() {
+        let p = ForgetPolicy {
+            half_life_days: f64::INFINITY,
+            ..Default::default()
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_nan_override_half_life() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(FactType::Semantic, f64::NAN);
+        let p = ForgetPolicy {
+            half_life_overrides: overrides,
+            ..Default::default()
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_nan_weight() {
+        let cases = [
+            ForgetPolicy {
+                recency_weight: f64::NAN,
+                ..Default::default()
+            },
+            ForgetPolicy {
+                frequency_weight: f64::NAN,
+                ..Default::default()
+            },
+            ForgetPolicy {
+                graph_degree_weight: f64::NAN,
+                ..Default::default()
+            },
+            ForgetPolicy {
+                base_importance_weight: f64::NAN,
+                ..Default::default()
+            },
+        ];
+        for (i, p) in cases.iter().enumerate() {
+            assert!(p.validate().is_err(), "NaN weight case {i} should reject");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_nan_min_importance() {
+        let p = ForgetPolicy {
+            min_importance: f64::NAN,
+            ..Default::default()
+        };
+        assert!(p.validate().is_err());
+    }
+
     // --- Trait object safety ---
 
     #[test]
@@ -525,7 +594,9 @@ mod tests {
         let results = c.embed_batch(&["a", "b", "c"]).unwrap();
         assert_eq!(results.len(), 3);
         assert_eq!(c.0.load(std::sync::atomic::Ordering::Relaxed), 3);
-        assert_eq!(results[0], vec![1.0, 2.0]);
+        assert!(results.iter().all(|v| v.len() == 2
+            && (v[0] - 1.0).abs() < f32::EPSILON
+            && (v[1] - 2.0).abs() < f32::EPSILON));
     }
 
     #[test]

@@ -239,8 +239,8 @@ mod tests {
     // --- effective_limit ---
 
     #[test]
-    fn effective_limit_returns_50_when_unset() {
-        assert_eq!(MemoryQuery::new().effective_limit(), 50);
+    fn effective_limit_returns_default_when_unset() {
+        assert_eq!(MemoryQuery::new().effective_limit(), DEFAULT_LIMIT);
     }
 
     #[test]
@@ -288,8 +288,11 @@ mod tests {
     #[test]
     fn has_period_true_with_period() {
         let now = chrono::Utc::now();
-        let q = MemoryQuery::new().period(now - chrono::Duration::hours(1), now);
+        let start = now - chrono::Duration::hours(1);
+        let q = MemoryQuery::new().period(start, now);
         assert!(q.has_period());
+        assert_eq!(q.period_start, Some(start));
+        assert_eq!(q.period_end, Some(now));
     }
 
     // --- Scope builders ---
