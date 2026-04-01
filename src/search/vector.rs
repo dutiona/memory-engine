@@ -262,4 +262,54 @@ mod tests {
             vector_search(&conn, &query, DIM, 10, Some(&FactType::Semantic), None).unwrap();
         assert_eq!(results.len(), 1);
     }
+
+    mod proptest_cosine {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Bounded to avoid f32 overflow in squared-sum (x*x).
+        // Real embeddings are typically in [-1, 1] or small magnitudes.
+        fn bounded_f32() -> impl Strategy<Value = f32> {
+            -1e18_f32..1e18_f32
+        }
+
+        fn nonzero_vec(max_len: usize) -> impl Strategy<Value = Vec<f32>> {
+            proptest::collection::vec(bounded_f32(), 1..max_len)
+                .prop_filter("at least one nonzero", |v| v.iter().any(|&x| x != 0.0))
+        }
+
+        proptest! {
+            #[test]
+            fn symmetry(
+                a in proptest::collection::vec(bounded_f32(), 1..64usize),
+                b in proptest::collection::vec(bounded_f32(), 1..64usize),
+            ) {
+                let len = a.len().min(b.len());
+                let a = &a[..len];
+                let b = &b[..len];
+                let ab = cosine_similarity(a, b);
+                let ba = cosine_similarity(b, a);
+                prop_assert!((ab - ba).abs() < 1e-6,
+                    "symmetry violated: cos(a,b)={ab} != cos(b,a)={ba}");
+            }
+
+            #[test]
+            fn identical_vectors_equal_one(v in nonzero_vec(64)) {
+                let sim = cosine_similarity(&v, &v);
+                prop_assert!((sim - 1.0).abs() < 1e-5,
+                    "identical vectors should give 1.0, got {sim}");
+            }
+
+            #[test]
+            fn bounded(
+                a in proptest::collection::vec(bounded_f32(), 1..64usize),
+                b in proptest::collection::vec(bounded_f32(), 1..64usize),
+            ) {
+                let len = a.len().min(b.len());
+                let sim = cosine_similarity(&a[..len], &b[..len]);
+                prop_assert!(sim >= -1.0 - 1e-5 && sim <= 1.0 + 1e-5,
+                    "cosine similarity {sim} out of [-1, 1] bounds");
+            }
+        }
+    }
 }

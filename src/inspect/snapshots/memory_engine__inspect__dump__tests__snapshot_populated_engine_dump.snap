@@ -1,0 +1,36 @@
+---
+source: src/inspect/dump.rs
+assertion_line: 498
+expression: snapshot
+---
+schema_version: 6
+storage_epoch: 1
+embed_dim: 4
+facts:
+  - id: 1
+    content: snapshot fact
+    content_hash: "[hash]"
+    embedding: "[embedding]"
+    fact_type: Semantic
+    t_created: "[timestamp]"
+    t_expired: ~
+    t_valid: ~
+    t_invalid: ~
+    source_event_id: ~
+    importance: 0.5
+    access_count: 0
+    last_accessed: "[timestamp]"
+    metadata: {}
+    scope_id: 1
+    is_pinned: false
+    importance_score: 0.5
+    surfaced_at: ~
+edges: []
+summaries: []
+scopes:
+  - id: 1
+    parent_id: ~
+    label: root
+    depth: 0
+events: "[]"
+config: "{}"

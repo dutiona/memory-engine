@@ -1328,4 +1328,26 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "semantic");
     }
+
+    mod proptest_content_hash {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn deterministic(s in ".*") {
+                let h1 = content_hash(&s);
+                let h2 = content_hash(&s);
+                prop_assert_eq!(&h1, &h2, "content_hash is not deterministic");
+            }
+
+            #[test]
+            fn always_32_hex_chars(s in ".*") {
+                let h = content_hash(&s);
+                prop_assert_eq!(h.len(), 32, "expected 32 chars, got {}", h.len());
+                prop_assert!(h.chars().all(|c| c.is_ascii_hexdigit()),
+                    "non-hex character in hash: {h}");
+            }
+        }
+    }
 }
