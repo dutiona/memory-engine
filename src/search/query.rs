@@ -204,3 +204,196 @@ impl MemoryQuery {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- new() / Default ---
+
+    #[test]
+    fn new_produces_all_none_defaults() {
+        let q = MemoryQuery::new();
+        assert!(q.scope.is_none());
+        assert!(q.period_start.is_none());
+        assert!(q.period_end.is_none());
+        assert!(q.text.is_none());
+        assert!(q.embedding.is_none());
+        assert!(q.search_mode.is_none());
+        assert!(q.fact_type.is_none());
+        assert!(q.min_importance_score.is_none());
+        assert!(!q.pinned_only);
+        assert!(q.limit.is_none());
+        assert!(q.valid_at.is_none());
+        assert!(!q.include_expired_probe);
+    }
+
+    #[test]
+    fn new_equals_default() {
+        let new = MemoryQuery::new();
+        let def = MemoryQuery::default();
+        // Both should have identical field values
+        assert_eq!(format!("{new:?}"), format!("{def:?}"));
+    }
+
+    // --- effective_limit ---
+
+    #[test]
+    fn effective_limit_returns_50_when_unset() {
+        assert_eq!(MemoryQuery::new().effective_limit(), 50);
+    }
+
+    #[test]
+    fn effective_limit_returns_set_value() {
+        let q = MemoryQuery::new().limit(10);
+        assert_eq!(q.effective_limit(), 10);
+    }
+
+    #[test]
+    fn effective_limit_respects_zero() {
+        let q = MemoryQuery::new().limit(0);
+        assert_eq!(q.effective_limit(), 0);
+    }
+
+    // --- has_search ---
+
+    #[test]
+    fn has_search_false_by_default() {
+        assert!(!MemoryQuery::new().has_search());
+    }
+
+    #[test]
+    fn has_search_true_with_text() {
+        assert!(MemoryQuery::new().text("hello").has_search());
+    }
+
+    #[test]
+    fn has_search_true_with_embedding() {
+        assert!(MemoryQuery::new().embedding(vec![1.0]).has_search());
+    }
+
+    #[test]
+    fn has_search_true_with_both() {
+        let q = MemoryQuery::new().text("hello").embedding(vec![1.0]);
+        assert!(q.has_search());
+    }
+
+    // --- has_period ---
+
+    #[test]
+    fn has_period_false_by_default() {
+        assert!(!MemoryQuery::new().has_period());
+    }
+
+    #[test]
+    fn has_period_true_with_period() {
+        let now = chrono::Utc::now();
+        let q = MemoryQuery::new().period(now - chrono::Duration::hours(1), now);
+        assert!(q.has_period());
+    }
+
+    // --- Scope builders ---
+
+    #[test]
+    fn scope_exact_sets_exact_variant() {
+        let q = MemoryQuery::new().scope_exact("user:alice");
+        assert_eq!(q.scope, Some(ScopeQuery::Exact("user:alice".into())));
+    }
+
+    #[test]
+    fn scope_subtree_sets_subtree_variant() {
+        let q = MemoryQuery::new().scope_subtree("project:demo");
+        assert_eq!(q.scope, Some(ScopeQuery::Subtree("project:demo".into())));
+    }
+
+    #[test]
+    fn scope_ancestors_sets_ancestors_variant() {
+        let q = MemoryQuery::new().scope_ancestors("deep/path");
+        assert_eq!(q.scope, Some(ScopeQuery::Ancestors("deep/path".into())));
+    }
+
+    #[test]
+    fn scope_inherited_sets_inherited_variant() {
+        let q = MemoryQuery::new().scope_inherited("ctx");
+        assert_eq!(q.scope, Some(ScopeQuery::Inherited("ctx".into())));
+    }
+
+    #[test]
+    fn scope_last_wins() {
+        let q = MemoryQuery::new().scope_exact("a").scope_subtree("b");
+        assert_eq!(q.scope, Some(ScopeQuery::Subtree("b".into())));
+    }
+
+    // --- Temporal builders ---
+
+    #[test]
+    fn valid_at_sets_point_in_time() {
+        let now = chrono::Utc::now();
+        let q = MemoryQuery::new().valid_at(now);
+        assert_eq!(q.valid_at, Some(now));
+    }
+
+    // --- Fact filter builders ---
+
+    #[test]
+    fn fact_type_sets_filter() {
+        let q = MemoryQuery::new().fact_type(FactType::Episodic);
+        assert_eq!(q.fact_type, Some(FactType::Episodic));
+    }
+
+    #[test]
+    fn min_importance_score_sets_threshold() {
+        let q = MemoryQuery::new().min_importance_score(0.7);
+        assert!((q.min_importance_score.unwrap() - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pinned_only_sets_flag() {
+        let q = MemoryQuery::new().pinned_only();
+        assert!(q.pinned_only);
+    }
+
+    #[test]
+    fn include_expired_probe_sets_flag() {
+        let q = MemoryQuery::new().include_expired_probe();
+        assert!(q.include_expired_probe);
+    }
+
+    #[test]
+    fn search_mode_sets_override() {
+        let q = MemoryQuery::new().search_mode(SearchMode::Hybrid);
+        assert_eq!(q.search_mode, Some(SearchMode::Hybrid));
+    }
+
+    // --- Builder chaining preserves fields ---
+
+    #[test]
+    fn chaining_preserves_all_fields() {
+        let now = chrono::Utc::now();
+        let q = MemoryQuery::new()
+            .scope_exact("s")
+            .text("hello")
+            .embedding(vec![1.0, 2.0])
+            .fact_type(FactType::Procedural)
+            .min_importance_score(0.5)
+            .pinned_only()
+            .limit(10)
+            .valid_at(now)
+            .include_expired_probe()
+            .search_mode(SearchMode::Fts);
+
+        assert_eq!(q.scope, Some(ScopeQuery::Exact("s".into())));
+        assert_eq!(q.text.as_deref(), Some("hello"));
+        assert_eq!(q.embedding, Some(vec![1.0, 2.0]));
+        assert_eq!(q.fact_type, Some(FactType::Procedural));
+        assert!((q.min_importance_score.unwrap() - 0.5).abs() < f64::EPSILON);
+        assert!(q.pinned_only);
+        assert_eq!(q.limit, Some(10));
+        assert_eq!(q.valid_at, Some(now));
+        assert!(q.include_expired_probe);
+        assert_eq!(q.search_mode, Some(SearchMode::Fts));
+        assert_eq!(q.effective_limit(), 10);
+        assert!(q.has_search());
+        assert!(!q.has_period());
+    }
+}
