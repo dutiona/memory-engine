@@ -206,6 +206,47 @@ impl MemoryGraph {
 
         Ok(graph)
     }
+
+    /// Extract all edges for snapshotting.
+    ///
+    /// No isolated nodes — matches `load_from_db` semantics (edges only).
+    pub(crate) fn to_snapshot(&self) -> crate::engine::snapshot::GraphSnapshot {
+        use crate::engine::snapshot::{GraphEdgeSnapshot, GraphSnapshot};
+        let edges = self
+            .graph
+            .edge_references()
+            .map(|e| {
+                let source = self.graph[e.source()];
+                let target = self.graph[e.target()];
+                let data = e.weight();
+                GraphEdgeSnapshot {
+                    edge_id: data.edge_id,
+                    source,
+                    target,
+                    relation_type: data.relation_type.clone(),
+                    weight: data.weight,
+                }
+            })
+            .collect();
+        GraphSnapshot { edges }
+    }
+
+    /// Rebuild graph from a snapshot (same logic as `load_from_db`).
+    pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::GraphSnapshot) -> Self {
+        let mut graph = Self::new();
+        for edge in &snap.edges {
+            graph.add_edge(
+                edge.source,
+                edge.target,
+                EdgeData {
+                    edge_id: edge.edge_id,
+                    relation_type: edge.relation_type.clone(),
+                    weight: edge.weight,
+                },
+            );
+        }
+        graph
+    }
 }
 
 impl Default for MemoryGraph {

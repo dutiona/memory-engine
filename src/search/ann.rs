@@ -136,6 +136,85 @@ impl HnswStrategy {
             embed_dim,
         })
     }
+
+    /// Snapshot active embeddings for fast cold-start.
+    ///
+    /// Reads embeddings from DB (vectors are not kept in memory). Returns
+    /// compact data: only active facts, ordered by fact_id. On load,
+    /// `from_snapshot` rebuilds a fresh compact HNSW index from this data.
+    pub(crate) fn to_snapshot(
+        &self,
+        conn: &Connection,
+        embed_dim: usize,
+    ) -> Result<crate::engine::snapshot::HnswSnapshot> {
+        use crate::engine::snapshot::{HnswEntry, HnswSnapshot};
+
+        let mut stmt =
+            conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            let (fact_id, blob) = row?;
+            let embedding = deserialize_embedding(&blob, embed_dim)?;
+            entries.push(HnswEntry { fact_id, embedding });
+        }
+
+        Ok(HnswSnapshot { entries })
+    }
+
+    /// Rebuild a compact HNSW index from snapshot data (no DB I/O needed).
+    ///
+    /// Uses the same seed and parameters as `build_from_db` for deterministic
+    /// topology.
+    pub(crate) fn from_snapshot(
+        snap: &crate::engine::snapshot::HnswSnapshot,
+        embed_dim: usize,
+    ) -> Result<Self> {
+        use rand::SeedableRng;
+
+        const HNSW_SEED: u64 = 42;
+        let mut index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32> = Hnsw::new_params_and_prng(
+            CosineMetric,
+            hnsw::Params::new().ef_construction(200),
+            SmallRng::seed_from_u64(HNSW_SEED),
+        );
+        let mut searcher: Searcher<u32> = Searcher::default();
+        let mut index_to_fact = Vec::new();
+        let mut fact_to_hnsw = HashMap::new();
+
+        for entry in &snap.entries {
+            if entry.embedding.len() != embed_dim {
+                return Err(crate::error::MemoryError::EmbeddingDimension {
+                    expected: embed_dim,
+                    actual: entry.embedding.len(),
+                });
+            }
+            let hnsw_id = index.insert(entry.embedding.clone(), &mut searcher);
+            if hnsw_id != index_to_fact.len() {
+                return Err(crate::error::MemoryError::Internal(format!(
+                    "HNSW index must assign sequential IDs (got {hnsw_id}, expected {})",
+                    index_to_fact.len()
+                )));
+            }
+            index_to_fact.push(entry.fact_id);
+            fact_to_hnsw.insert(entry.fact_id, hnsw_id);
+        }
+
+        Ok(Self {
+            inner: RwLock::new(HnswInner {
+                index,
+                index_to_fact,
+                fact_to_hnsw,
+                tombstones: HashSet::new(),
+            }),
+            embed_dim,
+        })
+    }
 }
 
 impl VectorSearchStrategy for HnswStrategy {
