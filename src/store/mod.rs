@@ -116,7 +116,10 @@ mod tests {
 
         proptest! {
             #[test]
-            fn roundtrip(embedding in proptest::collection::vec(any::<f32>(), 0..512)) {
+            fn roundtrip(embedding in proptest::collection::vec(
+                any::<f32>().prop_filter("NaN != NaN in PartialEq", |f| !f.is_nan()),
+                0..512,
+            )) {
                 let blob = serialize_embedding(&embedding);
                 let recovered = deserialize_embedding(&blob, embedding.len()).unwrap();
                 prop_assert_eq!(recovered, embedding);
