@@ -21,34 +21,40 @@ fn create_test_db() -> (TempDir, PathBuf) {
 
     engine
         .add_fact(
-            "The sky is blue",
-            memory_engine::FactType::Semantic,
-            None,
+            &memory_engine::AddFactRequest {
+                content: "The sky is blue".into(),
+                fact_type: memory_engine::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Rust is fast",
-            memory_engine::FactType::Procedural,
-            None,
+            &memory_engine::AddFactRequest {
+                content: "Rust is fast".into(),
+                fact_type: memory_engine::FactType::Procedural,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Memory engines consolidate facts",
-            memory_engine::FactType::Episodic,
-            None,
+            &memory_engine::AddFactRequest {
+                content: "Memory engines consolidate facts".into(),
+                fact_type: memory_engine::FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();

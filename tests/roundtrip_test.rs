@@ -3,7 +3,7 @@ use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::search::hybrid::{MatchType, SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::{EventType, FactType, NewEvent};
+use memory_engine::types::{AddFactRequest, EventType, FactType, NewEvent};
 
 /// Mock embedder that returns a vector pointing in the direction
 /// determined by a simple hash of the text, so different texts
@@ -57,34 +57,40 @@ fn full_roundtrip() {
     // 2. Add facts derived from the event
     let fact1_id = engine
         .add_fact(
-            "Rust is a systems programming language",
-            FactType::Semantic,
-            Some(event_id),
+            &AddFactRequest {
+                content: "Rust is a systems programming language".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: Some(event_id),
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     let fact2_id = engine
         .add_fact(
-            "Rust has zero-cost abstractions and memory safety",
-            FactType::Semantic,
-            Some(event_id),
+            &AddFactRequest {
+                content: "Rust has zero-cost abstractions and memory safety".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: Some(event_id),
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     let fact3_id = engine
         .add_fact(
-            "Python is popular for machine learning",
-            FactType::Episodic,
-            Some(event_id),
+            &AddFactRequest {
+                content: "Python is popular for machine learning".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: Some(event_id),
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();

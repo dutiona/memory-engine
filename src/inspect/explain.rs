@@ -196,7 +196,7 @@ mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
     use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactOptions, EventType, FactType, NewEvent};
+    use crate::types::{AddFactOptions, AddFactRequest, EventType, FactType, NewEvent};
     use chrono::Duration;
 
     const DIM: usize = 4;
@@ -213,12 +213,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let id = engine
             .add_fact(
-                "test fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "test fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -237,12 +239,14 @@ mod tests {
         };
         let id = engine
             .add_fact(
-                "pinned",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "pinned".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(opts),
+                },
                 &FakeEmbed,
-                None,
-                Some(&opts),
                 None,
             )
             .unwrap();
@@ -260,12 +264,14 @@ mod tests {
         };
         let id = engine
             .add_fact(
-                "due fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "due fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(opts),
+                },
                 &FakeEmbed,
-                None,
-                Some(&opts),
                 None,
             )
             .unwrap();
@@ -290,12 +296,14 @@ mod tests {
         };
         let id = engine
             .add_fact(
-                "temporal",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "temporal".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(opts),
+                },
                 &FakeEmbed,
-                None,
-                Some(&opts),
                 None,
             )
             .unwrap();
@@ -322,12 +330,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let id = engine
             .add_fact(
-                "simple",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "simple".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -360,12 +370,14 @@ mod tests {
         // Create a fact linked to that event
         let fact_id = engine
             .add_fact(
-                "fact from event",
-                FactType::Semantic,
-                Some(event_id),
+                &AddFactRequest {
+                    content: "fact from event".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: Some(event_id),
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -386,12 +398,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let fact_id = engine
             .add_fact(
-                "standalone fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "standalone fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -406,12 +420,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         let id = engine
             .add_fact(
-                "snapshot test fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "snapshot test fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();

@@ -1,4 +1,4 @@
-use memory_engine::{EmbeddingProvider, EngineConfig, FactType, MemoryEngine};
+use memory_engine::{AddFactRequest, EmbeddingProvider, EngineConfig, FactType, MemoryEngine};
 
 struct FakeEmbed;
 impl EmbeddingProvider for FakeEmbed {
@@ -18,56 +18,67 @@ fn main() {
 
     engine
         .add_fact(
-            "User prefers concise responses without filler words",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "User prefers concise responses without filler words".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &e,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Project uses Rust 2024 edition with clap for CLI parsing",
-            FactType::Procedural,
-            None,
+            &AddFactRequest {
+                content: "Project uses Rust 2024 edition with clap for CLI parsing".into(),
+                fact_type: FactType::Procedural,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &e,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Meeting discussed Q2 roadmap: Phase 4b CLI inspector then MCP server",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Meeting discussed Q2 roadmap: Phase 4b CLI inspector then MCP server"
+                    .into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &e,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "The database schema migrated from v5 to v6 on 2026-03-15",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "The database schema migrated from v5 to v6 on 2026-03-15".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &e,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Agent successfully resolved 3 merge conflicts in the auth module",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Agent successfully resolved 3 merge conflicts in the auth module".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &e,
-            None,
-            None,
             None,
         )
         .unwrap();

@@ -9,7 +9,7 @@ use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::{AddFactOptions, FactType};
+use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
 struct DummyEmbedder;
 
@@ -26,47 +26,53 @@ fn main() -> Result<(), MemoryError> {
 
     // Fact valid from yesterday, no expiry
     engine.add_fact(
-        "The project deadline is March 15",
-        FactType::Semantic,
-        None,
+        &AddFactRequest {
+            content: "The project deadline is March 15".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: Some(AddFactOptions {
+                importance: Some(0.9),
+                t_valid: Some(now - Duration::days(1)),
+                t_invalid: Some(now + Duration::days(5)),
+                ..Default::default()
+            }),
+        },
         &embedder,
-        None,
-        Some(&AddFactOptions {
-            importance: Some(0.9),
-            t_valid: Some(now - Duration::days(1)),
-            t_invalid: Some(now + Duration::days(5)),
-            ..Default::default()
-        }),
         None,
     )?;
 
     // Fact valid only in the future (scheduled memory)
     engine.add_fact(
-        "Remember to review PR after March 20",
-        FactType::Procedural,
-        None,
+        &AddFactRequest {
+            content: "Remember to review PR after March 20".into(),
+            fact_type: FactType::Procedural,
+            source_event_id: None,
+            scope: None,
+            opts: Some(AddFactOptions {
+                importance: Some(0.8),
+                t_valid: Some(now + Duration::days(10)),
+                ..Default::default()
+            }),
+        },
         &embedder,
-        None,
-        Some(&AddFactOptions {
-            importance: Some(0.8),
-            t_valid: Some(now + Duration::days(10)),
-            ..Default::default()
-        }),
         None,
     )?;
 
     // Fact that expired yesterday (historical knowledge)
     engine.add_fact(
-        "The meeting was scheduled for March 8",
-        FactType::Episodic,
-        None,
+        &AddFactRequest {
+            content: "The meeting was scheduled for March 8".into(),
+            fact_type: FactType::Episodic,
+            source_event_id: None,
+            scope: None,
+            opts: Some(AddFactOptions {
+                t_valid: Some(now - Duration::days(5)),
+                t_invalid: Some(now - Duration::days(1)),
+                ..Default::default()
+            }),
+        },
         &embedder,
-        None,
-        Some(&AddFactOptions {
-            t_valid: Some(now - Duration::days(5)),
-            t_invalid: Some(now - Duration::days(1)),
-            ..Default::default()
-        }),
         None,
     )?;
 

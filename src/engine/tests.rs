@@ -6,7 +6,7 @@ use crate::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, ForgetPolicy,
     PersistenceClassifier, SummaryGenerator,
 };
-use crate::types::{AddFactOptions, BatchFactEntry, EventType, Fact, FactType, NewEvent, NewFact};
+use crate::types::{AddFactOptions, AddFactRequest, EventType, Fact, FactType, NewEvent, NewFact};
 
 const DIM: usize = 4;
 
@@ -104,12 +104,14 @@ fn add_fact_returns_fact_id() {
     let embedder = MockEmbedder { dim: DIM };
     let id = engine
         .add_fact(
-            "Rust is fast",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust is fast".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -122,12 +124,14 @@ fn query_returns_results_after_adding_facts() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "Rust is a systems programming language",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust is a systems programming language".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -381,12 +385,14 @@ fn add_fact_with_custom_importance() {
     };
     let id = engine
         .add_fact(
-            "important fact",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "important fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts),
             None,
         )
         .unwrap();
@@ -406,12 +412,14 @@ fn add_fact_with_temporal_bounds() {
     };
     let id = engine
         .add_fact(
-            "temporal fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "temporal fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts),
             None,
         )
         .unwrap();
@@ -426,12 +434,14 @@ fn add_fact_with_scope_path() {
     let embedder = MockEmbedder { dim: DIM };
     let id = engine
         .add_fact(
-            "scoped fact",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "scoped fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: Some("user:test/project:demo".into()),
+                opts: None,
+            },
             &embedder,
-            Some("user:test/project:demo"),
-            None,
             None,
         )
         .unwrap();
@@ -445,12 +455,14 @@ fn add_fact_none_opts_uses_defaults() {
     let embedder = MockEmbedder { dim: DIM };
     let id = engine
         .add_fact(
-            "default fact",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "default fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -477,23 +489,27 @@ fn engine_concurrent_reads() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "Rust is fast",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust is fast".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Python is flexible",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Python is flexible".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -536,12 +552,14 @@ fn engine_write_then_read_across_threads() {
     let writer = std::thread::spawn(move || {
         let embedder = MockEmbedder { dim: DIM };
         e1.add_fact(
-            "Concurrent write test",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Concurrent write test".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -592,12 +610,14 @@ fn resume_with_facts() {
     };
     engine
         .add_fact(
-            "user prefers Rust",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "user prefers Rust".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_pinned.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_pinned),
             None,
         )
         .unwrap();
@@ -609,12 +629,14 @@ fn resume_with_facts() {
     };
     engine
         .add_fact(
-            "had coffee today",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "had coffee today".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_low.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_low),
             None,
         )
         .unwrap();
@@ -653,17 +675,19 @@ fn resume_stamps_surfaced_at_on_pinned_due_fact() {
     // It will land in the pinned tier, not the due tier.
     engine
         .add_fact(
-            "CI pipeline uses 30min timeout",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "CI pipeline uses 30min timeout".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(AddFactOptions {
+                    pinned: Some(true),
+                    t_valid: Some(past),
+                    importance: Some(0.9),
+                    ..Default::default()
+                }),
+            },
             &embedder,
-            None,
-            Some(&AddFactOptions {
-                pinned: Some(true),
-                t_valid: Some(past),
-                importance: Some(0.9),
-                ..Default::default()
-            }),
             None,
         )
         .unwrap();
@@ -698,16 +722,18 @@ fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
     // It will land in high_importance tier, not due tier.
     engine
         .add_fact(
-            "user prefers tabs over spaces",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "user prefers tabs over spaces".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(AddFactOptions {
+                    importance: Some(0.9),
+                    t_valid: Some(past),
+                    ..Default::default()
+                }),
+            },
             &embedder,
-            None,
-            Some(&AddFactOptions {
-                importance: Some(0.9),
-                t_valid: Some(past),
-                ..Default::default()
-            }),
             None,
         )
         .unwrap();
@@ -742,18 +768,20 @@ fn resume_does_not_stamp_invalidated_pinned_due_fact() {
     // t_valid in the past, t_invalid ALSO in the past (before now).
     engine
         .add_fact(
-            "old CI timeout no longer valid",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "old CI timeout no longer valid".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(AddFactOptions {
+                    pinned: Some(true),
+                    t_valid: Some(past),
+                    t_invalid: Some(past_invalid),
+                    importance: Some(0.9),
+                    ..Default::default()
+                }),
+            },
             &embedder,
-            None,
-            Some(&AddFactOptions {
-                pinned: Some(true),
-                t_valid: Some(past),
-                t_invalid: Some(past_invalid),
-                importance: Some(0.9),
-                ..Default::default()
-            }),
             None,
         )
         .unwrap();
@@ -800,12 +828,14 @@ fn query_nonexistent_scope_returns_empty() {
     // Add a fact at root scope so there's something to find if search were unscoped
     engine
         .add_fact(
-            "visible without scope",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "visible without scope".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -841,15 +871,17 @@ fn list_due_returns_scheduled_facts() {
     // Past-due fact
     engine
         .add_fact(
-            "check release",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "check release".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(AddFactOptions {
+                    t_valid: Some(past),
+                    ..Default::default()
+                }),
+            },
             &embedder,
-            None,
-            Some(&AddFactOptions {
-                t_valid: Some(past),
-                ..Default::default()
-            }),
             None,
         )
         .unwrap();
@@ -857,15 +889,17 @@ fn list_due_returns_scheduled_facts() {
     // Future fact
     engine
         .add_fact(
-            "future check",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "future check".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(AddFactOptions {
+                    t_valid: Some(future),
+                    ..Default::default()
+                }),
+            },
             &embedder,
-            None,
-            Some(&AddFactOptions {
-                t_valid: Some(future),
-                ..Default::default()
-            }),
             None,
         )
         .unwrap();
@@ -873,12 +907,14 @@ fn list_due_returns_scheduled_facts() {
     // Regular fact (no t_valid)
     engine
         .add_fact(
-            "regular",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "regular".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -930,12 +966,14 @@ fn pin_unpin_fact() {
     let embedder = MockEmbedder { dim: DIM };
     let id = engine
         .add_fact(
-            "pinnable",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "pinnable".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -957,12 +995,14 @@ fn add_fact_with_explicit_pin() {
     };
     let id = engine
         .add_fact(
-            "identity",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "identity".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts),
             None,
         )
         .unwrap();
@@ -984,12 +1024,14 @@ fn add_fact_with_classifier() {
 
     let id = engine
         .add_fact(
-            "auto-pinned",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "auto-pinned".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             Some(&classifier),
         )
         .unwrap();
@@ -997,12 +1039,14 @@ fn add_fact_with_classifier() {
 
     let id2 = engine
         .add_fact(
-            "not pinned",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "not pinned".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             Some(&classifier),
         )
         .unwrap();
@@ -1029,12 +1073,14 @@ fn explicit_pin_overrides_classifier() {
     };
     let id = engine
         .add_fact(
-            "not pinned despite classifier",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "not pinned despite classifier".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts),
             Some(&classifier),
         )
         .unwrap();
@@ -1049,23 +1095,27 @@ fn execute_query_empty_returns_active_facts() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "fact one",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "fact one".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "fact two",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "fact two".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1085,23 +1135,27 @@ fn execute_query_text_search() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "Rust systems programming",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Rust systems programming".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Python machine learning",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Python machine learning".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1123,24 +1177,28 @@ fn execute_query_scope_only() {
     // Add fact to "project:demo" scope (auto-created by add_fact)
     engine
         .add_fact(
-            "scoped fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "scoped fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: Some("project:demo".into()),
+                opts: None,
+            },
             &embedder,
-            Some("project:demo"),
-            None,
             None,
         )
         .unwrap();
     // Add fact to root scope
     engine
         .add_fact(
-            "root fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "root fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1159,23 +1217,27 @@ fn execute_query_fact_type_filter() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "episodic",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "episodic".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "semantic",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "semantic".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1208,23 +1270,27 @@ fn execute_query_importance_threshold() {
     };
     engine
         .add_fact(
-            "low importance",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "low importance".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_low.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_low),
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "high importance",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "high importance".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_high.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_high),
             None,
         )
         .unwrap();
@@ -1244,12 +1310,14 @@ fn execute_query_pinned_only() {
 
     let id = engine
         .add_fact(
-            "pinned",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "pinned".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1257,12 +1325,14 @@ fn execute_query_pinned_only() {
 
     engine
         .add_fact(
-            "normal",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "normal".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1284,12 +1354,14 @@ fn execute_query_future_dated_excluded() {
     // Regular fact
     engine
         .add_fact(
-            "present fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "present fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1301,12 +1373,14 @@ fn execute_query_future_dated_excluded() {
     };
     engine
         .add_fact(
-            "future fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "future fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(future_opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&future_opts),
             None,
         )
         .unwrap();
@@ -1357,12 +1431,14 @@ fn execute_query_search_mode_inference() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "Rust programming",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Rust programming".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1390,12 +1466,14 @@ fn execute_query_period_filter() {
     };
     engine
         .add_fact(
-            "past fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "past fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(past_opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&past_opts),
             None,
         )
         .unwrap();
@@ -1403,12 +1481,14 @@ fn execute_query_period_filter() {
     // Fact still valid
     engine
         .add_fact(
-            "current fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "current fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1443,34 +1523,40 @@ fn execute_query_composed_filters() {
 
     engine
         .add_fact(
-            "Rust high importance",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust high importance".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_high.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_high),
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Rust low importance",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust low importance".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_low.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_low),
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Python high importance",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Python high importance".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_high.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_high),
             None,
         )
         .unwrap();
@@ -1504,12 +1590,14 @@ fn execute_query_default_limit() {
     for i in 0..60 {
         engine
             .add_fact(
-                &format!("fact {i}"),
-                FactType::Episodic,
-                None,
+                &AddFactRequest {
+                    content: format!("fact {i}").to_string(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &embedder,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -1575,23 +1663,27 @@ fn reranker_none_results_unchanged() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "alpha fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "alpha fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "beta fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "beta fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1619,23 +1711,27 @@ fn reranker_reverses_order() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "alpha fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "alpha fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "beta fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "beta fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1644,23 +1740,27 @@ fn reranker_reverses_order() {
     let baseline_engine = MemoryEngine::open_memory(DIM).unwrap();
     baseline_engine
         .add_fact(
-            "alpha fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "alpha fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     baseline_engine
         .add_fact(
-            "beta fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "beta fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1705,23 +1805,27 @@ fn reranker_skipped_for_vector_only_no_text() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "alpha",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "alpha".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "beta",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "beta".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1751,23 +1855,27 @@ fn reranker_applies_to_fts_only_mode() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "alpha fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "alpha fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "beta fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "beta fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1797,23 +1905,27 @@ fn reranker_applies_to_vector_mode_with_text() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "alpha",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "alpha".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "beta",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "beta".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1849,12 +1961,14 @@ fn rerank_depth_overfetches_then_truncates() {
     for i in 0..10 {
         engine
             .add_fact(
-                &format!("rerank test fact {i}"),
-                FactType::Episodic,
-                None,
+                &AddFactRequest {
+                    content: format!("rerank test fact {i}").to_string(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &embedder,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -1906,12 +2020,14 @@ fn reranker_error_propagates() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "test fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "test fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -1960,12 +2076,14 @@ fn rerank_depth_none_falls_back_to_limit() {
     for i in 0..10 {
         engine
             .add_fact(
-                &format!("limit test fact {i}"),
-                FactType::Episodic,
-                None,
+                &AddFactRequest {
+                    content: format!("limit test fact {i}").to_string(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &embedder,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -2010,12 +2128,14 @@ fn add_session_fact(engine: &MemoryEngine, content: &str, session_id: &str) -> (
     let event_id = engine.ingest(&event).unwrap();
     let fact_id = engine
         .add_fact(
-            content,
-            FactType::Semantic,
-            Some(event_id),
+            &AddFactRequest {
+                content: content.into(),
+                fact_type: FactType::Semantic,
+                source_event_id: Some(event_id),
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -2169,12 +2289,14 @@ fn add_scoped_session_fact(
     let event_id = engine.ingest(&event).unwrap();
     let fact_id = engine
         .add_fact(
-            content,
-            FactType::Semantic,
-            Some(event_id),
+            &AddFactRequest {
+                content: content.into(),
+                fact_type: FactType::Semantic,
+                source_event_id: Some(event_id),
+                scope: Some(scope_path.into()),
+                opts: None,
+            },
             &embedder,
-            Some(scope_path),
-            None,
             None,
         )
         .unwrap();
@@ -2279,12 +2401,14 @@ fn reranker_rejects_out_of_bounds_index() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "real fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "real fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -2319,23 +2443,27 @@ fn reranker_rejects_duplicates() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "dup fact alpha",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "dup fact alpha".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "dup fact beta",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "dup fact beta".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -2371,23 +2499,27 @@ fn reranker_allows_valid_subset() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "guard alpha",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "guard alpha".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "guard beta",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "guard beta".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -2433,23 +2565,27 @@ fn reranker_allows_filtering_subset() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "filterable first",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "filterable first".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "filterable second",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "filterable second".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -2494,12 +2630,14 @@ fn reranker_rejects_non_finite_score() {
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
-            "score test fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "score test fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -2572,8 +2710,8 @@ fn add_facts_batch_inserts_all_facts() {
     let engine = MemoryEngine::open_memory(DIM).unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
-    let entries: Vec<BatchFactEntry> = (0..5)
-        .map(|i| BatchFactEntry {
+    let entries: Vec<AddFactRequest> = (0..5)
+        .map(|i| AddFactRequest {
             content: format!("batch fact {i}"),
             fact_type: FactType::Semantic,
             source_event_id: None,
@@ -2612,21 +2750,21 @@ fn add_facts_batch_with_scopes() {
     let embedder = MockEmbedder { dim: DIM };
 
     let entries = vec![
-        BatchFactEntry {
+        AddFactRequest {
             content: "fact in project/a".into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
             scope: Some("project/a".into()),
             opts: None,
         },
-        BatchFactEntry {
+        AddFactRequest {
             content: "fact in project/b".into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
             scope: Some("project/b".into()),
             opts: None,
         },
-        BatchFactEntry {
+        AddFactRequest {
             content: "fact in root".into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
@@ -2659,7 +2797,7 @@ fn add_facts_batch_with_classifier() {
     let embedder = MockEmbedder { dim: DIM };
     let classifier = AlwaysPin;
 
-    let entries = vec![BatchFactEntry {
+    let entries = vec![AddFactRequest {
         content: "important fact".into(),
         fact_type: FactType::Semantic,
         source_event_id: None,
@@ -2690,14 +2828,14 @@ fn add_facts_batch_rejects_embedding_count_mismatch() {
 
     let engine = MemoryEngine::open_memory(DIM).unwrap();
     let entries = vec![
-        BatchFactEntry {
+        AddFactRequest {
             content: "a".into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
             scope: None,
             opts: None,
         },
-        BatchFactEntry {
+        AddFactRequest {
             content: "b".into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
@@ -2738,21 +2876,21 @@ fn add_facts_batch_rollback_on_insert_failure() {
 
     // Use scoped entries to verify scopes also roll back
     let entries = vec![
-        BatchFactEntry {
+        AddFactRequest {
             content: "rollback test 0".into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
             scope: Some("rollback/scope-a".into()),
             opts: None,
         },
-        BatchFactEntry {
+        AddFactRequest {
             content: "rollback test 1".into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
             scope: Some("rollback/scope-b".into()),
             opts: None,
         },
-        BatchFactEntry {
+        AddFactRequest {
             content: "rollback test 2".into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
@@ -2786,7 +2924,7 @@ fn add_facts_batch_rollback_on_insert_failure() {
     // Verify scope atomicity: scopes should NOT exist after rollback.
     // A successful add_facts_batch with the same scopes should create
     // them fresh (proving they were rolled back from the failed attempt).
-    let good_entries = vec![BatchFactEntry {
+    let good_entries = vec![AddFactRequest {
         content: "after rollback".into(),
         fact_type: FactType::Semantic,
         source_event_id: None,
@@ -2809,8 +2947,8 @@ fn add_facts_batch_temporal_consistency() {
     let engine = MemoryEngine::open_memory(DIM).unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
-    let entries: Vec<BatchFactEntry> = (0..3)
-        .map(|i| BatchFactEntry {
+    let entries: Vec<AddFactRequest> = (0..3)
+        .map(|i| AddFactRequest {
             content: format!("temporal {i}"),
             fact_type: FactType::Semantic,
             source_event_id: None,
