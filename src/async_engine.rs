@@ -397,6 +397,58 @@ impl AsyncMemoryEngine {
         self.inner.embed_dim()
     }
 
+    // --- Archive ---
+
+    /// Async wrapper for [`MemoryEngine::archive`].
+    ///
+    /// Moves expired, non-pinned facts into a `.pak` file (zstd + blake3),
+    /// records a manifest row, and hard-deletes them from SQLite.
+    ///
+    /// Returns `None` if fewer than `policy.min_facts` candidates exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Archive`] on I/O failure, or
+    /// [`MemoryError::Database`] on SQL failure.
+    #[cfg(feature = "archive")]
+    pub async fn archive(
+        &self,
+        policy: crate::archive::ArchivePolicy,
+    ) -> Result<Option<crate::archive::ArchiveStats>> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.archive(&policy))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Async wrapper for [`MemoryEngine::list_archives`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
+    #[cfg(feature = "archive")]
+    pub async fn list_archives(&self) -> Result<Vec<crate::archive::ArchiveManifestEntry>> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.list_archives())
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Async wrapper for [`MemoryEngine::verify_archives`].
+    ///
+    /// Checks each manifest entry's blake3 hash against the actual file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
+    #[cfg(feature = "archive")]
+    pub async fn verify_archives(&self) -> Result<Vec<crate::archive::ArchiveVerifyResult>> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.verify_archives())
+            .await
+            .map_err(join_err)?
+    }
+
     // --- Restore (static constructors) ---
 
     /// Async wrapper for [`MemoryEngine::restore_json`].

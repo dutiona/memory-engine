@@ -5,14 +5,14 @@ use crate::archive::types::ArchiveManifestEntry;
 use crate::error::Result;
 
 /// Store for archive manifest entries — tracks `.pak` files in the database.
-pub(crate) struct ArchiveManifestStore<'a> {
+pub struct ArchiveManifestStore<'a> {
     conn: &'a Connection,
 }
 
 impl<'a> ArchiveManifestStore<'a> {
     /// Create a new `ArchiveManifestStore` borrowing the given connection.
     #[must_use]
-    pub fn new(conn: &'a Connection) -> Self {
+    pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 
@@ -109,6 +109,8 @@ impl<'a> ArchiveManifestStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on SQL failure.
+    // Forward-looking: archive management CLI will use this.
+    #[allow(dead_code)]
     pub fn delete(&self, id: i64) -> Result<bool> {
         let deleted = self.conn.execute(
             "DELETE FROM archive_manifest WHERE id = ?1",
@@ -129,9 +131,7 @@ mod tests {
         conn
     }
 
-    fn make_entry(
-        pak_path: &str,
-    ) -> (
+    type EntryArgs = (
         String,
         DateTime<Utc>,
         i64,
@@ -142,7 +142,9 @@ mod tests {
         DateTime<Utc>,
         i64,
         String,
-    ) {
+    );
+
+    fn make_entry(pak_path: &str) -> EntryArgs {
         let now = Utc::now();
         (
             pak_path.to_string(),

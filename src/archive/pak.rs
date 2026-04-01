@@ -9,6 +9,10 @@ use crate::error::{MemoryError, Result};
 const MAX_PAK_DECOMPRESSED_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Write an `ArchivePak` as zstd-compressed JSON (convenience wrapper).
+///
+/// Thin wrapper over [`write_pak_and_hash`] for callers that don't need the hash.
+// Used in unit tests below; restore tooling will also use this.
+#[allow(dead_code)]
 pub fn write_pak(pak: &ArchivePak, path: &Path) -> Result<()> {
     write_pak_and_hash(pak, path)?;
     Ok(())

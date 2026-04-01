@@ -211,7 +211,7 @@ impl MemoryQuery {
     /// Requires the `archive` feature.
     #[cfg(feature = "archive")]
     #[must_use]
-    pub fn include_archives(mut self) -> Self {
+    pub const fn include_archives(mut self) -> Self {
         self.include_archives = true;
         self
     }

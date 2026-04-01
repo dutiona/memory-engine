@@ -1,12 +1,12 @@
 #![cfg(feature = "archive")]
 
 use chrono::{Duration, Utc};
+use memory_engine::ArchivePolicy;
+use memory_engine::MemoryQuery;
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::error::Result;
 use memory_engine::traits::{EmbeddingProvider, ForgetPolicy};
 use memory_engine::types::{AddFactRequest, FactType};
-use memory_engine::ArchivePolicy;
-use memory_engine::MemoryQuery;
 
 const DIM: usize = 8;
 

@@ -2,14 +2,14 @@ use chrono::{DateTime, Utc};
 
 use crate::error::{MemoryError, Result};
 use crate::search::hybrid::{
-    hybrid_search, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
+    QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult, hybrid_search,
 };
 use crate::search::query::MemoryQuery;
 use crate::search::strategy::VectorSearchStrategy;
 use crate::store::facts::FactStore;
 use crate::types::Fact;
 
-use super::{fact_overlaps_period, fact_to_search_result, passes_temporal_cutoff, MemoryEngine};
+use super::{MemoryEngine, fact_overlaps_period, fact_to_search_result, passes_temporal_cutoff};
 
 impl MemoryEngine {
     /// Query facts using hybrid search (FTS5 + vector + RRF).
@@ -277,9 +277,9 @@ impl MemoryEngine {
                     results.truncate(limit);
                 }
                 Ok(None) => {}
-                Err(_e) => {
+                Err(e) => {
                     // Archive search is best-effort; silently skip on error.
-                    tracing::warn!("archive search fallback failed: {_e}");
+                    tracing::warn!("archive search fallback failed: {e}");
                 }
             }
         }

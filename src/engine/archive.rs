@@ -300,9 +300,8 @@ impl MemoryEngine {
         query: &crate::search::query::MemoryQuery,
         limit: usize,
     ) -> Result<Option<crate::archive::search::ArchiveSearchResult>> {
-        let archive_dir = match self.archive_dir() {
-            Ok(d) => d,
-            Err(_) => return Ok(None),
+        let Ok(archive_dir) = self.archive_dir() else {
+            return Ok(None);
         };
         let entries = self.with_read(|conn| ArchiveManifestStore::new(conn).list())?;
         if entries.is_empty() {

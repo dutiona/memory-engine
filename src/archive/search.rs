@@ -15,7 +15,7 @@ use crate::search::query::MemoryQuery;
 use crate::search::vector::cosine_similarity;
 
 /// Summary result from scanning archives.
-pub(crate) struct ArchiveSearchResult {
+pub struct ArchiveSearchResult {
     pub results: Vec<SearchResult>,
     pub paks_scanned: usize,
     pub search_ms: u64,
@@ -31,7 +31,7 @@ pub(crate) struct ArchiveSearchResult {
 /// # Errors
 ///
 /// Returns `MemoryError::Archive` on I/O or decompression failure.
-pub(crate) fn search_archives(
+pub fn search_archives(
     archive_dir: &Path,
     manifest_entries: &[ArchiveManifestEntry],
     query: &MemoryQuery,
