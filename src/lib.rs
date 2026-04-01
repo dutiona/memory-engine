@@ -40,6 +40,8 @@ pub(crate) mod pool;
 pub(crate) mod resume;
 pub(crate) mod scope;
 pub(crate) mod store;
+#[cfg(feature = "archive")]
+pub(crate) mod archive;
 
 // === Re-exports: flat access to the most-used consumer types ===
 pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
