@@ -79,6 +79,9 @@ pub enum ValidationError {
     #[error("embedding provider not configured — required for this operation")]
     NoEmbeddingProvider,
 
+    #[error("summary generator not configured — required for consolidation")]
+    NoSummaryProvider,
+
     #[error("{0}")]
     Other(String),
 }

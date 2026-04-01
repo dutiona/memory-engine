@@ -2,7 +2,7 @@
 
 ## What
 
-A stdio-based MCP server binary that exposes memory-engine as 10 tools for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
+A stdio-based MCP server binary that exposes memory-engine as 15 tools (10 P0 + 5 P1) for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
 
 ## Why
 
@@ -70,18 +70,23 @@ Add to `.claude/settings.json`:
 
 ### Tools
 
-| Tool                    | Purpose                      | Depth                |
-| ----------------------- | ---------------------------- | -------------------- |
-| `memory_ingest`         | Append event to log          | —                    |
-| `memory_add_fact`       | Add fact with embedding      | —                    |
-| `memory_query`          | Hybrid FTS + vector search   | sparse/standard/full |
-| `memory_resume_context` | 5-tier cognitive boot        | sparse/standard/full |
-| `memory_list_due`       | Scheduled fact surfacing     | sparse/standard/full |
-| `memory_next_due_time`  | Next scheduled time          | —                    |
-| `memory_explain_fact`   | Fact provenance              | sparse/standard/full |
-| `memory_get_fact`       | Single fact by ID            | sparse/standard/full |
-| `memory_statistics`     | Aggregate stats              | —                    |
-| `memory_flush_insights` | Batch pre-compaction capture | —                    |
+| Tool                    | Priority | Purpose                              | Depth                |
+| ----------------------- | -------- | ------------------------------------ | -------------------- |
+| `memory_ingest`         | P0       | Append event to log                  | —                    |
+| `memory_add_fact`       | P0       | Add fact with embedding              | —                    |
+| `memory_query`          | P0       | Hybrid FTS + vector search           | sparse/standard/full |
+| `memory_resume_context` | P0       | 5-tier cognitive boot                | sparse/standard/full |
+| `memory_list_due`       | P0       | Scheduled fact surfacing             | sparse/standard/full |
+| `memory_next_due_time`  | P0       | Next scheduled time                  | —                    |
+| `memory_explain_fact`   | P0       | Fact provenance                      | sparse/standard/full |
+| `memory_get_fact`       | P0       | Single fact by ID                    | sparse/standard/full |
+| `memory_statistics`     | P0       | Aggregate stats                      | —                    |
+| `memory_flush_insights` | P0       | Batch pre-compaction capture         | —                    |
+| `memory_consolidate`    | P1       | Dedup + cluster facts into summaries | —                    |
+| `memory_forget`         | P1       | Ebbinghaus decay pruning             | —                    |
+| `memory_dump_state`     | P1       | Export snapshot (JSON/SQLite)         | —                    |
+| `memory_pin_fact`       | P1       | Make fact unforgettable              | —                    |
+| `memory_unpin_fact`     | P1       | Allow forgetting a pinned fact       | —                    |
 
 ### Tiered Depth
 
@@ -109,15 +114,46 @@ For `memory_add_fact`, callers can bypass server-side embedding by passing a pre
 
 `memory_flush_insights` accepts a batch of insights for agents to capture before context window compaction. Each insight becomes a fact with `metadata.source = "pre_compaction_flush"`. Supports partial success — individual failures are reported without aborting the batch.
 
+### Consolidation (`memory_consolidate`)
+
+Requires a summary generator (chat-completions endpoint) configured via `[summary]` in TOML or `--summary-url` / `--summary-model` CLI flags. If not configured, the tool returns a clear error.
+
+The summary generator also requires an embedding provider (summaries must be embedded into the same vector space as facts). If `--summary-url` is set but no embedding provider is configured, the server logs a warning and disables consolidation.
+
+Parameters: `dedup_threshold` (default 0.92), `min_cluster_size` (default 3).
+
+### Forget (`memory_forget`)
+
+All parameters are optional — defaults from `ForgetPolicy::default()`:
+
+| Parameter                | Default | Description                            |
+| ------------------------ | ------- | -------------------------------------- |
+| `half_life_days`         | 69.0    | Base Ebbinghaus half-life              |
+| `min_importance`         | 0.1     | Threshold below which facts are pruned |
+| `recency_weight`         | 0.3     | Weight for recency signal              |
+| `frequency_weight`       | 0.2     | Weight for access frequency            |
+| `graph_degree_weight`    | 0.3     | Weight for graph connectivity          |
+| `base_importance_weight` | 0.2     | Weight for base importance             |
+| `half_life_overrides`    | `{}`    | Per-FactType overrides, e.g. `{"Episodic": 30.0}` |
+
+### Dump State (`memory_dump_state`)
+
+Exports the full engine snapshot. Formats: `json`, `sqlite`. Client-supplied paths are restricted to the system temp directory for security. Default: `{temp_dir}/memory-dump-{timestamp}.json`.
+
+### Pin / Unpin
+
+`memory_pin_fact` and `memory_unpin_fact` toggle a fact's persistence. Pinned facts are immune to `memory_forget`.
+
 ### Architecture
 
 ```
 Agent (Claude, etc.) → stdio JSON-RPC → memory-engine-mcp → MemoryEngine (SQLite)
                                          ├── config.rs (TOML + env + CLI)
                                          ├── server.rs (ServerHandler, spawn_blocking)
-                                         ├── tools/   (10 handlers + dispatch)
+                                         ├── tools/   (15 handlers + dispatch)
                                          ├── depth.rs (response shaping)
-                                         ├── embedding.rs (HTTP provider)
+                                         ├── embedding.rs (HTTP embedding provider)
+                                         ├── summary.rs (HTTP summary generator)
                                          └── error.rs (MemoryError → MCP)
 ```
 

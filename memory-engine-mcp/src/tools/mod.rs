@@ -1,26 +1,30 @@
+use std::collections::HashMap;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use memory_engine::bootstrap::{BootstrapConfig, KeywordExtractor};
 use memory_engine::engine::MemoryEngine;
-use memory_engine::inspect_types::{FactExplanation, ReplayFilter, ReplayOrder};
+use memory_engine::inspect_types::{DumpFormat, FactExplanation, ReplayFilter, ReplayOrder};
 use memory_engine::resume::ResumeConfig;
 use memory_engine::search::hybrid::SearchMode;
-use memory_engine::traits::EmbeddingProvider;
+use memory_engine::traits::{
+    ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
+};
 use memory_engine::types::{AddFactOptions, EventType, FactType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::depth::{self, Depth};
 use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
-use crate::error::{ValidationError, to_mcp_error};
+use crate::error::{to_mcp_error, ValidationError};
 
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)
 // ---------------------------------------------------------------------------
 
-/// Returns all P0 tool definitions with JSON schemas.
+/// Returns all tool definitions (P0 + P1) with JSON schemas.
 pub fn all_tool_definitions() -> Vec<Tool> {
     vec![
         tool_def(
@@ -174,6 +178,67 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "required": ["insights"]
             }),
         ),
+        // -- P1 tools --
+        tool_def(
+            "memory_consolidate",
+            "Run consolidation: deduplicate near-identical facts and cluster related ones into summaries. Requires summary generator to be configured.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "dedup_threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Cosine similarity threshold for deduplication (default: 0.92)" },
+                    "min_cluster_size": { "type": "integer", "minimum": 2, "description": "Minimum facts to form a cluster (default: 3)" }
+                }
+            }),
+        ),
+        tool_def(
+            "memory_forget",
+            "Prune stale facts using Ebbinghaus decay and multi-signal importance scoring. Pinned facts are never pruned.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "half_life_days": { "type": "number", "exclusiveMinimum": 0, "description": "Base Ebbinghaus half-life in days (default: 69)" },
+                    "half_life_overrides": { "type": "object", "description": "Per-FactType half-life overrides, e.g. {\"Episodic\": 30.0, \"Procedural\": 365.0}" },
+                    "min_importance": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Threshold below which facts are expired (default: 0.1)" },
+                    "recency_weight": { "type": "number", "minimum": 0.0, "description": "Weight for recency signal (default: 0.3)" },
+                    "frequency_weight": { "type": "number", "minimum": 0.0, "description": "Weight for access frequency signal (default: 0.2)" },
+                    "graph_degree_weight": { "type": "number", "minimum": 0.0, "description": "Weight for graph connectivity signal (default: 0.3)" },
+                    "base_importance_weight": { "type": "number", "minimum": 0.0, "description": "Weight for base importance (default: 0.2)" }
+                }
+            }),
+        ),
+        tool_def(
+            "memory_dump_state",
+            "Export a full engine snapshot to a file. Returns the output file path.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "format": { "type": "string", "enum": ["json", "sqlite"], "default": "json", "description": "Output format" },
+                    "path": { "type": "string", "description": "Output file path. Defaults to temp directory with timestamp." }
+                }
+            }),
+        ),
+        tool_def(
+            "memory_pin_fact",
+            "Pin a fact to make it unforgettable (immune to forget/prune).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fact_id": { "type": "integer", "description": "Fact ID to pin" }
+                },
+                "required": ["fact_id"]
+            }),
+        ),
+        tool_def(
+            "memory_unpin_fact",
+            "Unpin a fact to allow forgetting.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fact_id": { "type": "integer", "description": "Fact ID to unpin" }
+                },
+                "required": ["fact_id"]
+            }),
+        ),
         // ----- P2 tools (debugging / operator) -----
         tool_def(
             "memory_replay_events",
@@ -241,6 +306,7 @@ pub fn dispatch(
     args: Map<String, Value>,
     engine: &MemoryEngine,
     embedder: Option<&HttpEmbeddingProvider>,
+    summary_gen: Option<&(dyn SummaryGenerator + Send + Sync)>,
     embed_dim: usize,
 ) -> Result<CallToolResult, ErrorData> {
     match name {
@@ -254,6 +320,13 @@ pub fn dispatch(
         "memory_get_fact" => handle_get_fact(args, engine),
         "memory_statistics" => handle_statistics(engine),
         "memory_flush_insights" => handle_flush_insights(args, engine, embedder),
+        // P1 tools
+        "memory_consolidate" => handle_consolidate(args, engine, summary_gen),
+        "memory_forget" => handle_forget(args, engine),
+        "memory_dump_state" => handle_dump_state(args, engine),
+        "memory_pin_fact" => handle_pin_fact(args, engine),
+        "memory_unpin_fact" => handle_unpin_fact(args, engine),
+        // P2 tools
         "memory_replay_events" => handle_replay_events(args, engine),
         "memory_fact_history" => handle_fact_history(args, engine),
         "memory_bootstrap_session" => handle_bootstrap_session(args, engine, embedder),
@@ -347,6 +420,17 @@ fn parse_fact_type(s: &str) -> Result<FactType, ValidationError> {
         "Semantic" => Ok(FactType::Semantic),
         "Procedural" => Ok(FactType::Procedural),
         other => Err(ValidationError::UnknownFactType(other.to_owned())),
+    }
+}
+
+/// Like `get_f64`, but returns a validation error if the key is present with a non-numeric type.
+/// Prevents silent fallback to defaults on type mismatches (e.g., `"half_life_days": "1"`).
+fn require_f64_if_present(args: &Map<String, Value>, key: &str) -> Result<Option<f64>, ErrorData> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_f64().map(Some).ok_or_else(|| {
+            ErrorData::invalid_params(format!("{key} must be a number, got {v}"), None)
+        }),
     }
 }
 
@@ -762,6 +846,184 @@ fn handle_flush_insights(
         "failed": failed,
         "failed_count": failed.len(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// P1 tool handlers
+// ---------------------------------------------------------------------------
+
+fn handle_consolidate(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+    summary_gen: Option<&(dyn SummaryGenerator + Send + Sync)>,
+) -> Result<CallToolResult, ErrorData> {
+    let generator = summary_gen.ok_or(ValidationError::NoSummaryProvider)?;
+
+    let dedup_threshold = get_f64(&args, "dedup_threshold").unwrap_or(0.92) as f32;
+    if !(0.0..=1.0).contains(&dedup_threshold) {
+        return Err(ValidationError::Other(format!(
+            "dedup_threshold must be in [0.0, 1.0], got {dedup_threshold}"
+        ))
+        .into());
+    }
+
+    let min_cluster_size = get_usize(&args, "min_cluster_size").unwrap_or(3);
+    if min_cluster_size < 2 {
+        return Err(ValidationError::Other(format!(
+            "min_cluster_size must be >= 2, got {min_cluster_size}"
+        ))
+        .into());
+    }
+
+    let config = ConsolidationConfig {
+        dedup_threshold,
+        min_cluster_size,
+    };
+
+    let stats = engine
+        .consolidate(generator, &config)
+        .map_err(to_mcp_error)?;
+
+    ok_json(json!({
+        "duplicates_removed": stats.duplicates_removed,
+        "clusters_created": stats.clusters_created,
+        "global_summaries": stats.global_summaries,
+    }))
+}
+
+fn handle_forget(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let mut policy = ForgetPolicy::default();
+
+    if let Some(v) = require_f64_if_present(&args, "half_life_days")? {
+        policy.half_life_days = v;
+    }
+    if let Some(v) = require_f64_if_present(&args, "min_importance")? {
+        policy.min_importance = v;
+    }
+    if let Some(v) = require_f64_if_present(&args, "recency_weight")? {
+        policy.recency_weight = v;
+    }
+    if let Some(v) = require_f64_if_present(&args, "frequency_weight")? {
+        policy.frequency_weight = v;
+    }
+    if let Some(v) = require_f64_if_present(&args, "graph_degree_weight")? {
+        policy.graph_degree_weight = v;
+    }
+    if let Some(v) = require_f64_if_present(&args, "base_importance_weight")? {
+        policy.base_importance_weight = v;
+    }
+
+    // Parse per-FactType half-life overrides: {"Episodic": 30.0, "Procedural": 365.0}
+    if let Some(val) = args.get("half_life_overrides") {
+        match val {
+            Value::Object(overrides) => {
+                let mut map = HashMap::new();
+                for (key, v) in overrides {
+                    let ft = parse_fact_type(key)?;
+                    let hl = v.as_f64().ok_or_else(|| {
+                        ValidationError::Other(format!(
+                            "half_life_overrides[\"{key}\"] must be a number"
+                        ))
+                    })?;
+                    map.insert(ft, hl);
+                }
+                policy.half_life_overrides = map;
+            }
+            Value::Null => {} // explicitly null — use default
+            _ => {
+                return Err(ValidationError::Other(
+                    "half_life_overrides must be a JSON object".to_owned(),
+                )
+                .into());
+            }
+        }
+    }
+
+    policy.validate().map_err(to_mcp_error)?;
+
+    let stats = engine.forget(&policy).map_err(to_mcp_error)?;
+
+    ok_json(json!({
+        "facts_expired": stats.facts_expired,
+        "facts_evaluated": stats.facts_evaluated,
+    }))
+}
+
+fn handle_dump_state(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let format_str = get_str(&args, "format").unwrap_or_else(|| "json".to_owned());
+
+    let ext = match format_str.as_str() {
+        "json" => "json",
+        "sqlite" => "db",
+        other => {
+            return Err(ValidationError::Other(format!("unsupported dump format: {other}")).into());
+        }
+    };
+
+    let path = match get_str(&args, "path") {
+        Some(p) => {
+            let p = PathBuf::from(p);
+            // Security: restrict client-supplied paths to the system temp directory.
+            // Without this, an MCP client could overwrite arbitrary files.
+            let temp = std::env::temp_dir();
+            let canonical = p
+                .parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok())
+                .unwrap_or_default();
+            if !canonical.starts_with(&temp) {
+                return Err(ValidationError::Other(format!(
+                    "dump path must be within the temp directory ({})",
+                    temp.display()
+                ))
+                .into());
+            }
+            p
+        }
+        None => {
+            let timestamp = Utc::now().format("%Y%m%dT%H%M%S%3f");
+            std::env::temp_dir().join(format!("memory-dump-{timestamp}.{ext}"))
+        }
+    };
+
+    let dump_format = match format_str.as_str() {
+        "json" => DumpFormat::Json(path.clone()),
+        "sqlite" => DumpFormat::Sqlite(path.clone()),
+        _ => unreachable!(), // validated above
+    };
+
+    engine.dump_state(&dump_format).map_err(to_mcp_error)?;
+
+    ok_json(json!({ "path": path.display().to_string() }))
+}
+
+fn handle_pin_fact(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let fact_id = get_i64(&args, "fact_id")
+        .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
+
+    engine.pin_fact(fact_id).map_err(to_mcp_error)?;
+
+    ok_json(json!({ "fact_id": fact_id, "pinned": true }))
+}
+
+fn handle_unpin_fact(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let fact_id = get_i64(&args, "fact_id")
+        .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
+
+    engine.unpin_fact(fact_id).map_err(to_mcp_error)?;
+
+    ok_json(json!({ "fact_id": fact_id, "pinned": false }))
 }
 
 // ---------------------------------------------------------------------------
