@@ -15,6 +15,24 @@ pub trait EmbeddingProvider {
     ///
     /// Returns an error if embedding computation fails.
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Compute embedding vectors for multiple texts in a single call.
+    ///
+    /// The default implementation loops `embed()` sequentially.
+    /// Providers with native batch APIs (e.g., OpenAI `/v1/embeddings`)
+    /// should override this for a single HTTP round-trip.
+    ///
+    /// # Contract
+    ///
+    /// The returned `Vec` **must** have the same length as `texts`.
+    /// Each element corresponds positionally to the input text at that index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any embedding computation fails.
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
 }
 
 // --- Phase 2 placeholder traits and types ---

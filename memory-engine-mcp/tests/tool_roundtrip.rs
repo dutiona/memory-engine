@@ -7,7 +7,7 @@
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine_mcp::tools;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 const DIM: usize = 8;
 

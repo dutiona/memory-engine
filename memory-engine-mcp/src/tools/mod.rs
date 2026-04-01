@@ -12,13 +12,13 @@ use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
 };
-use memory_engine::types::{AddFactOptions, EventType, FactType, NewEvent};
+use memory_engine::types::{AddFactOptions, BatchFactEntry, EventType, FactType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::depth::{self, Depth};
 use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
-use crate::error::{to_mcp_error, ValidationError};
+use crate::error::{ValidationError, to_mcp_error};
 
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)
@@ -779,8 +779,10 @@ fn handle_flush_insights(
         None,
     ))?;
 
-    let mut fact_ids = Vec::new();
-    let mut failed = Vec::new();
+    // --- Phase 1: Parse + validate all insights upfront ---
+    let mut entries: Vec<BatchFactEntry> = Vec::new();
+    let mut entry_indices: Vec<usize> = Vec::new(); // original index for each valid entry
+    let mut failed: Vec<Value> = Vec::new();
 
     for (i, insight) in insights.iter().enumerate() {
         let obj = match insight.as_object() {
@@ -831,21 +833,31 @@ fn handle_flush_insights(
             ..Default::default()
         };
 
-        match engine.add_fact(
-            &content,
+        entries.push(BatchFactEntry {
+            content,
             fact_type,
-            None,
-            emb,
-            scope.as_deref(),
-            Some(&opts),
-            None,
-        ) {
-            Ok(id) => fact_ids.push(id),
+            source_event_id: None,
+            scope,
+            opts: Some(opts),
+        });
+        entry_indices.push(i);
+    }
+
+    // --- Phase 2: Batch insert ---
+    let fact_ids = if entries.is_empty() {
+        Vec::new()
+    } else {
+        match engine.add_facts_batch(&entries, emb, None) {
+            Ok(ids) => ids,
             Err(e) => {
-                failed.push(json!({ "index": i, "error": e.to_string() }));
+                // Batch failed — all valid entries become failures
+                for &original_idx in &entry_indices {
+                    failed.push(json!({ "index": original_idx, "error": e.to_string() }));
+                }
+                Vec::new()
             }
         }
-    }
+    };
 
     ok_json(json!({
         "fact_ids": fact_ids,
