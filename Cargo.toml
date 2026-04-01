@@ -44,6 +44,10 @@ proptest = "1"
 name = "search_bench"
 harness = false
 
+[[bench]]
+name = "lifecycle_bench"
+harness = false
+
 [features]
 default = []
 async = ["dep:tokio"]
