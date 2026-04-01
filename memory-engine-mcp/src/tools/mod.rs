@@ -7,18 +7,18 @@ use chrono::{DateTime, Utc};
 use memory_engine::bootstrap::{BootstrapConfig, KeywordExtractor};
 use memory_engine::engine::MemoryEngine;
 use memory_engine::inspect_types::{DumpFormat, FactExplanation, ReplayFilter, ReplayOrder};
-use memory_engine::resume::ResumeConfig;
 use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
 };
 use memory_engine::types::{AddFactOptions, BatchFactEntry, EventType, FactType, NewEvent};
+use memory_engine::ResumeConfig;
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::depth::{self, Depth};
 use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
-use crate::error::{ValidationError, to_mcp_error};
+use crate::error::{to_mcp_error, ValidationError};
 
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)

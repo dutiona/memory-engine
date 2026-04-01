@@ -20,29 +20,33 @@
 //! connection pool (N readers + 1 writer) and `RwLock`-protected caches.
 //! Consumers can share via `Arc<MemoryEngine>`.
 
+// === Public modules (consumer-facing API) ===
 #[cfg(feature = "async")]
 pub mod async_engine;
 pub mod bootstrap;
-pub mod conflict;
-pub mod consolidation;
 pub mod engine;
 pub mod error;
-pub mod forgetting;
-pub mod graph;
 pub mod inspect;
-pub mod pool;
-pub mod resume;
-pub mod scope;
 pub mod search;
-pub mod store;
 pub mod traits;
 pub mod types;
 
+// === Internal modules (implementation details) ===
+pub(crate) mod conflict;
+pub(crate) mod consolidation;
+pub(crate) mod forgetting;
+pub(crate) mod graph;
+pub(crate) mod pool;
+pub(crate) mod resume;
+pub(crate) mod scope;
+pub(crate) mod store;
+
+// === Re-exports: flat access to the most-used consumer types ===
 pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
 pub use engine::{EngineConfig, MemoryEngine};
 pub use error::*;
 pub use inspect::types as inspect_types;
+pub use resume::{ResumeConfig, ResumeContext};
 pub use search::{MemoryQuery, QueryDiagnostics, QueryResponse};
-pub use store::{UpcasterRegistry, deserialize_embedding, serialize_embedding};
 pub use traits::{EmbeddingProvider, Reranker};
 pub use types::*;
