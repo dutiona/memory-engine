@@ -237,13 +237,13 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 
 #### Phase 4b Follow-ups (MCP completeness)
 
-| Issue                                                          | Priority | Description                                                                                                         |
-| -------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------- |
-| ✅ [#95](https://github.com/dutiona/memory-engine/issues/95)   | P1       | MCP tools: consolidate, forget, dump_state, pin/unpin. [PR #177](https://github.com/dutiona/memory-engine/pull/177) |
-| [#150](https://github.com/dutiona/memory-engine/issues/150)    | P1       | MCP: batch embedding + batch `add_fact` for `flush_insights`                                                        |
-| ✅ [#96](https://github.com/dutiona/memory-engine/issues/96)   | P2       | MCP tools: replay_events, fact_history, bootstrap. [PR #179](https://github.com/dutiona/memory-engine/pull/179)     |
-| ✅ [#151](https://github.com/dutiona/memory-engine/issues/151) | P2       | MCP: integration tests for tool handlers. [PR #176](https://github.com/dutiona/memory-engine/pull/176)              |
-| [#152](https://github.com/dutiona/memory-engine/issues/152)    | P1       | Abstention type exposure in Query results (4-type taxonomy)                                                         |
+| Issue                                                          | Priority | Description                                                                                                               |
+| -------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------- |
+| ✅ [#95](https://github.com/dutiona/memory-engine/issues/95)   | P1       | MCP tools: consolidate, forget, dump_state, pin/unpin. [PR #177](https://github.com/dutiona/memory-engine/pull/177)       |
+| [#150](https://github.com/dutiona/memory-engine/issues/150)    | P1       | MCP: batch embedding + batch `add_fact` for `flush_insights`                                                              |
+| ✅ [#96](https://github.com/dutiona/memory-engine/issues/96)   | P2       | MCP tools: replay_events, fact_history, bootstrap. [PR #179](https://github.com/dutiona/memory-engine/pull/179)           |
+| ✅ [#151](https://github.com/dutiona/memory-engine/issues/151) | P2       | MCP: integration tests for tool handlers. [PR #176](https://github.com/dutiona/memory-engine/pull/176)                    |
+| ✅ [#152](https://github.com/dutiona/memory-engine/issues/152) | P1       | Abstention type exposure in Query results (4-type taxonomy). [PR #180](https://github.com/dutiona/memory-engine/pull/180) |
 
 #### Phase 4c: Quality & Cold Storage
 
