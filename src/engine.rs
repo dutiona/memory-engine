@@ -530,7 +530,7 @@ impl MemoryEngine {
 
         let prepared: Vec<_> = entries
             .iter()
-            .zip(embeddings.into_iter())
+            .zip(embeddings)
             .map(|(entry, embedding)| {
                 let opts = entry.opts.clone().unwrap_or_default();
                 let base_importance = opts.importance.unwrap_or(0.5);
