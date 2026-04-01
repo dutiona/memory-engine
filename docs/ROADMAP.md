@@ -277,7 +277,7 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 | [#114](https://github.com/dutiona/memory-engine/issues/114) | refactoring | `Edge.relation_type` is stringly-typed                                 |
 | [#115](https://github.com/dutiona/memory-engine/issues/115) | refactoring | `MemoryError` variants are stringly-typed catch-alls                   |
 | [#116](https://github.com/dutiona/memory-engine/issues/116) | refactoring | `SummaryGenerator::embed` duplicates `EmbeddingProvider`               |
-| [#117](https://github.com/dutiona/memory-engine/issues/117) | refactoring | Scope resolution duplicated across query paths                         |
+| [#117](https://github.com/dutiona/memory-engine/issues/117) | refactoring | Scope resolution duplicated across query, bootstrap, and resume paths  |
 | [#118](https://github.com/dutiona/memory-engine/issues/118) | refactoring | Synthetic `Fact` construction duplicated                               |
 | [#119](https://github.com/dutiona/memory-engine/issues/119) | correctness | `unreachable!()` in `infer_search_mode`                                |
 | [#120](https://github.com/dutiona/memory-engine/issues/120) | refactoring | Test helpers duplicated across 15+ modules                             |
@@ -288,6 +288,8 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 | [#127](https://github.com/dutiona/memory-engine/issues/127) | docs        | `DumpFormat::Sqlite` doc contradicts implementation                    |
 | [#129](https://github.com/dutiona/memory-engine/issues/129) | testing     | Missing tests for inspect types, consolidation orchestrator, bootstrap |
 | [#130](https://github.com/dutiona/memory-engine/issues/130) | testing     | Untested engine query/restore error paths                              |
+| [#191](https://github.com/dutiona/memory-engine/issues/191) | bug         | `restore_sqlite` uses `exists()` instead of `is_file()`                |
+| [#192](https://github.com/dutiona/memory-engine/issues/192) | refactoring | `should_use_hnsw` uses `map_or(false, ..)` instead of `is_some_and()`  |
 | [#141](https://github.com/dutiona/memory-engine/issues/141) | security    | Compressed snapshot can bypass file size limit (decompression bomb)    |
 | [#142](https://github.com/dutiona/memory-engine/issues/142) | correctness | `usize::MAX` sentinel leaks via public `local_dedup` API               |
 | [#149](https://github.com/dutiona/memory-engine/issues/149) | refactoring | Consider builder pattern for `EngineConfig` (related to #113)          |
@@ -301,7 +303,7 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 
 ---
 
-### Execution Order & Critical Path (as of 2026-03-23)
+### Execution Order & Critical Path (as of 2026-04-01)
 
 Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical path**. The remaining Phase 4 follow-ups, Phase 4c, and the super-qa sweep are all parallel tracks that do not gate Phase 5.
 
@@ -344,7 +346,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 
 1. **Phase 4 follow-ups** (all resolved: #95 ✅, #96 ✅, #150 ✅, #151 ✅, #152 ✅)
 1. **Phase 4c** (#16, #46, #31) — #16 evaluation harness benefits from MCP being live; #31 depends on #46
-1. **Super-qa sweep** (24 open issues, #108 ✅) — incremental, any order
+1. **Super-qa sweep** (25 open issues; #108 ✅, #128 ✅; +#191, +#192 from #186 review) — incremental, any order
 1. **Phase 5a design + implementation** — the critical path forward
 
 **Phase 5 internal dependencies:**
