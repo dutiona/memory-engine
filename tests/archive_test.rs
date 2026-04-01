@@ -1,11 +1,12 @@
 #![cfg(feature = "archive")]
 
 use chrono::{Duration, Utc};
-use memory_engine::ArchivePolicy;
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::error::Result;
 use memory_engine::traits::{EmbeddingProvider, ForgetPolicy};
 use memory_engine::types::{AddFactRequest, FactType};
+use memory_engine::ArchivePolicy;
+use memory_engine::MemoryQuery;
 
 const DIM: usize = 8;
 
@@ -182,4 +183,81 @@ fn archive_returns_none_below_min_facts() {
     };
     let result = engine.archive(&archive_policy).unwrap();
     assert!(result.is_none(), "expected None for empty engine");
+}
+
+#[test]
+fn archive_search_finds_archived_facts() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open_file_engine(dir.path());
+    let embedder = TestEmbedder;
+
+    // Add 20 facts about deployment issues
+    for i in 0..20 {
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: format!("deployment issue on server {i}"),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                &embedder,
+                None,
+            )
+            .unwrap();
+    }
+
+    // Expire all facts aggressively
+    let forget_policy = ForgetPolicy {
+        half_life_days: 0.0001,
+        min_importance: 1.0, // expire everything
+        ..ForgetPolicy::default()
+    };
+    let prune_stats = engine.forget(&forget_policy).unwrap();
+    assert!(
+        prune_stats.facts_expired >= 20,
+        "expected >=20 expired facts, got {}",
+        prune_stats.facts_expired
+    );
+
+    // Archive all expired facts
+    let archive_policy = ArchivePolicy {
+        expired_before: Utc::now() + Duration::hours(1),
+        min_facts: 1,
+    };
+    let stats = engine
+        .archive(&archive_policy)
+        .unwrap()
+        .expect("should produce archive stats");
+    assert_eq!(stats.facts_archived, 20);
+
+    // Normal search finds nothing (facts are gone from live DB)
+    let query = MemoryQuery::new().text("deployment");
+    let response = engine.execute_query(&query).unwrap();
+    assert_eq!(
+        response.results.len(),
+        0,
+        "normal search should find nothing after archive"
+    );
+
+    // Archive search finds them
+    let query = MemoryQuery::new().text("deployment").include_archives();
+    let response = engine.execute_query(&query).unwrap();
+    assert!(
+        !response.results.is_empty(),
+        "archive search should find archived facts"
+    );
+    assert!(
+        response.diagnostics.archive_paks_scanned > 0,
+        "expected archive_paks_scanned > 0"
+    );
+    // All returned results should have MatchType::Archive
+    for r in &response.results {
+        assert_eq!(
+            r.match_type,
+            memory_engine::search::hybrid::MatchType::Archive,
+            "expected MatchType::Archive for all results"
+        );
+    }
 }

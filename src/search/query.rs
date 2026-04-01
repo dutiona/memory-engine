@@ -59,6 +59,13 @@ pub struct MemoryQuery {
     /// (vector-only queries have no FTS5 terms to probe — `expired_matches`
     /// will be `None`).
     pub include_expired_probe: bool,
+    /// When `true`, brute-force search archived `.pak` files after the normal
+    /// search. Results are merged and re-ranked by score. This is a slow
+    /// fallback — use only when recalling archived facts is required.
+    ///
+    /// Requires the `archive` feature.
+    #[cfg(feature = "archive")]
+    pub include_archives: bool,
 }
 
 impl MemoryQuery {
@@ -192,6 +199,20 @@ impl MemoryQuery {
     #[must_use]
     pub const fn include_expired_probe(mut self) -> Self {
         self.include_expired_probe = true;
+        self
+    }
+
+    /// Enable brute-force archive search as a fallback after the normal search.
+    ///
+    /// Decompresses all `.pak` files in the archive directory and searches them
+    /// with text substring matching and cosine similarity. Slow — use only when
+    /// recall of archived facts is required.
+    ///
+    /// Requires the `archive` feature.
+    #[cfg(feature = "archive")]
+    #[must_use]
+    pub fn include_archives(mut self) -> Self {
+        self.include_archives = true;
         self
     }
 

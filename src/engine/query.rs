@@ -2,14 +2,14 @@ use chrono::{DateTime, Utc};
 
 use crate::error::{MemoryError, Result};
 use crate::search::hybrid::{
-    QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult, hybrid_search,
+    hybrid_search, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
 };
 use crate::search::query::MemoryQuery;
 use crate::search::strategy::VectorSearchStrategy;
 use crate::store::facts::FactStore;
 use crate::types::Fact;
 
-use super::{MemoryEngine, fact_overlaps_period, fact_to_search_result, passes_temporal_cutoff};
+use super::{fact_overlaps_period, fact_to_search_result, passes_temporal_cutoff, MemoryEngine};
 
 impl MemoryEngine {
     /// Query facts using hybrid search (FTS5 + vector + RRF).
@@ -259,6 +259,29 @@ impl MemoryEngine {
                 diagnostics.expired_matches = Some(expired_count);
             }
             // Vector-only queries: expired_matches stays None (documented limitation).
+        }
+
+        // Archive fallback (opt-in, best-effort).
+        #[cfg(feature = "archive")]
+        if query.include_archives {
+            match self.search_archives_fallback(query, limit) {
+                Ok(Some(archive_results)) => {
+                    diagnostics.archive_paks_scanned = archive_results.paks_scanned;
+                    diagnostics.archive_search_ms = archive_results.search_ms;
+                    results.extend(archive_results.results);
+                    results.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    results.truncate(limit);
+                }
+                Ok(None) => {}
+                Err(_e) => {
+                    // Archive search is best-effort; silently skip on error.
+                    tracing::warn!("archive search fallback failed: {_e}");
+                }
+            }
         }
 
         Ok(QueryResponse {

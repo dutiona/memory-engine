@@ -286,6 +286,32 @@ impl MemoryEngine {
         }
     }
 
+    /// Search all archived `.pak` files for facts matching `query`.
+    ///
+    /// Returns `Ok(None)` when there is no file-backed engine, no archive
+    /// directory, or no manifest entries — not an error, just nothing to search.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on manifest read failure.
+    /// Returns `MemoryError::Archive` on `.pak` I/O or decompression failure.
+    pub(crate) fn search_archives_fallback(
+        &self,
+        query: &crate::search::query::MemoryQuery,
+        limit: usize,
+    ) -> Result<Option<crate::archive::search::ArchiveSearchResult>> {
+        let archive_dir = match self.archive_dir() {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        let entries = self.with_read(|conn| ArchiveManifestStore::new(conn).list())?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let result = crate::archive::search::search_archives(&archive_dir, &entries, query, limit)?;
+        Ok(Some(result))
+    }
+
     /// Resolve the archive directory (sibling of DB file + `/archives/`).
     fn archive_dir(&self) -> Result<PathBuf> {
         let db_path = self.pool.path().ok_or_else(|| {
