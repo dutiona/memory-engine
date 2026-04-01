@@ -5,7 +5,7 @@ use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
-use crate::types::{AddFactOptions, BatchFactEntry, Fact, FactType, NewEvent, NewFact};
+use crate::types::{AddFactOptions, AddFactRequest, Fact, NewEvent, NewFact};
 
 #[cfg(feature = "ann")]
 use crate::search::strategy::VectorSearchStrategy;
@@ -34,21 +34,16 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns errors from embedding computation, dimension validation, or DB insert.
-    #[allow(clippy::too_many_arguments)]
     pub fn add_fact(
         &self,
-        content: &str,
-        fact_type: FactType,
-        source_event_id: Option<i64>,
+        req: &AddFactRequest,
         embedder: &dyn EmbeddingProvider,
-        scope: Option<&str>,
-        opts: Option<&AddFactOptions>,
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<i64> {
         // Embed OUTSIDE the write lock (potentially slow)
-        let embedding = embedder.embed(content)?;
+        let embedding = embedder.embed(&req.content)?;
         let now = Utc::now();
-        let opts = opts.cloned().unwrap_or_default();
+        let opts = req.opts.clone().unwrap_or_default();
         let base_importance = opts.importance.unwrap_or(0.5);
         let effective_created = opts.t_created.unwrap_or(now);
         let effective_last_accessed = opts.last_accessed.unwrap_or(now);
@@ -60,15 +55,15 @@ impl MemoryEngine {
             None => classifier.is_some_and(|c| {
                 let temp = Fact {
                     id: 0,
-                    content: content.into(),
+                    content: req.content.clone(),
                     content_hash: String::new(),
                     embedding: embedding.clone(),
-                    fact_type: fact_type.clone(),
+                    fact_type: req.fact_type.clone(),
                     t_created: effective_created,
                     t_expired: None,
                     t_valid: opts.t_valid,
                     t_invalid: opts.t_invalid,
-                    source_event_id,
+                    source_event_id: req.source_event_id,
                     importance: base_importance,
                     access_count: 0,
                     last_accessed: effective_last_accessed,
@@ -91,21 +86,21 @@ impl MemoryEngine {
 
         let fact_id = {
             let conn = self.write_conn()?;
-            let scope_id = match scope {
+            let scope_id = match &req.scope {
                 Some(path) => self.ensure_scope_with_conn(&conn, path)?,
                 None => 1, // root scope
             };
 
             let new_fact = NewFact {
-                content: content.into(),
+                content: req.content.clone(),
                 content_hash: String::new(), // FactStore::insert computes this via blake3
                 embedding,
-                fact_type,
+                fact_type: req.fact_type.clone(),
                 t_created: effective_created,
                 t_expired: None,
                 t_valid: opts.t_valid,
                 t_invalid: opts.t_invalid,
-                source_event_id,
+                source_event_id: req.source_event_id,
                 scope_id,
                 importance: opts.importance.unwrap_or(0.5),
                 access_count: 0,
@@ -143,7 +138,7 @@ impl MemoryEngine {
     /// Returns errors from batch embedding, dimension validation, or DB insert.
     pub fn add_facts_batch(
         &self,
-        entries: &[BatchFactEntry],
+        entries: &[AddFactRequest],
         embedder: &dyn EmbeddingProvider,
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<Vec<i64>> {

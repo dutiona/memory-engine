@@ -11,7 +11,7 @@ use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::search::SearchConfig;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::FactType;
+use memory_engine::types::{AddFactRequest, FactType};
 
 const DIM: usize = 32;
 const N: usize = 5_000;
@@ -53,23 +53,27 @@ fn hnsw_recall_at_k_exceeds_threshold() {
         let content = format!("fact number {i} about topic {}", i % 50);
         engine_bf
             .add_fact(
-                &content,
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: content.clone(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &embedder,
-                None,
-                None,
                 None,
             )
             .unwrap();
         engine_ann
             .add_fact(
-                &content,
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content,
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &embedder,
-                None,
-                None,
                 None,
             )
             .unwrap();

@@ -56,12 +56,14 @@ let opts = AddFactOptions {
 };
 
 let id = engine.add_fact(
-    "deployment freeze until tomorrow",
-    FactType::Semantic,
-    None,
+    &AddFactRequest {
+        content: "deployment freeze until tomorrow".into(),
+        fact_type: FactType::Semantic,
+        opts: Some(opts),
+        ..Default::default()
+    },
     &embedder,
     None,
-    Some(&opts),
 )?;
 ```
 
@@ -113,8 +115,13 @@ let opts = AddFactOptions {
     ..Default::default()
 };
 engine.add_fact(
-    "new API version goes live next week",
-    FactType::Semantic, None, &embedder, None, Some(&opts), None,
+    &AddFactRequest {
+        content: "new API version goes live next week".into(),
+        fact_type: FactType::Semantic,
+        opts: Some(opts),
+        ..Default::default()
+    },
+    &embedder, None,
 )?;
 ```
 

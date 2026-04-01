@@ -6,6 +6,7 @@
 
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
+use memory_engine::types::AddFactRequest;
 use memory_engine_mcp::tools;
 use serde_json::{Map, Value, json};
 
@@ -286,23 +287,27 @@ fn query_fts_returns_results() {
     // Seed some facts
     engine
         .add_fact(
-            "Rust has zero-cost abstractions",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust has zero-cost abstractions".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Python is great for ML",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Python is great for ML".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -330,12 +335,14 @@ fn query_with_precomputed_embedding() {
 
     engine
         .add_fact(
-            "Memory consolidation during sleep",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Memory consolidation during sleep".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -427,12 +434,14 @@ fn resume_context_with_pinned_fact() {
     };
     engine
         .add_fact(
-            "Critical system invariant",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Critical system invariant".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts),
+            },
             &embedder,
-            None,
-            Some(&opts),
             None,
         )
         .unwrap();
@@ -491,12 +500,14 @@ fn explain_fact_existing() {
 
     let fact_id = engine
         .add_fact(
-            "Fact to explain",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Fact to explain".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -552,12 +563,14 @@ fn get_fact_existing() {
 
     let fact_id = engine
         .add_fact(
-            "Retrievable fact",
-            memory_engine::types::FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Retrievable fact".into(),
+                fact_type: memory_engine::types::FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -616,23 +629,27 @@ fn statistics_after_ingestion() {
 
     engine
         .add_fact(
-            "Fact 1",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Fact 1".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Fact 2",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Fact 2".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();

@@ -127,7 +127,7 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
 mod tests {
     use crate::engine::MemoryEngine;
     use crate::traits::EmbeddingProvider;
-    use crate::types::FactType;
+    use crate::types::{AddFactRequest, FactType};
 
     const DIM: usize = 4;
 
@@ -165,23 +165,27 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "fact one",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "fact one".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
         engine
             .add_fact(
-                "fact two",
-                FactType::Episodic,
-                None,
+                &AddFactRequest {
+                    content: "fact two".into(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -192,12 +196,14 @@ mod tests {
         };
         engine
             .add_fact(
-                "pinned fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "pinned fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(pin_opts),
+                },
                 &FakeEmbed,
-                None,
-                Some(&pin_opts),
                 None,
             )
             .unwrap();
@@ -227,23 +233,27 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "fact one",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "fact one".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
         engine
             .add_fact(
-                "fact two",
-                FactType::Episodic,
-                None,
+                &AddFactRequest {
+                    content: "fact two".into(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -253,12 +263,14 @@ mod tests {
         };
         engine
             .add_fact(
-                "pinned fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "pinned fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(pin_opts.clone()),
+                },
                 &FakeEmbed,
-                None,
-                Some(&pin_opts),
                 None,
             )
             .unwrap();

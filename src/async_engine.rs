@@ -17,7 +17,7 @@ use crate::traits::{
     EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, SummaryGenerator,
 };
 use crate::types::{
-    AddFactOptions, BatchFactEntry, ConsolidationLevel, Fact, FactType, NewEvent, NewFact, Summary,
+    AddFactOptions, AddFactRequest, ConsolidationLevel, Fact, FactType, NewEvent, NewFact, Summary,
 };
 
 /// Async wrapper around [`MemoryEngine`].
@@ -28,8 +28,9 @@ use crate::types::{
 /// ```rust,ignore
 /// let engine = MemoryEngine::open_memory(768)?;
 /// let async_engine = AsyncMemoryEngine::new(engine);
-/// let id = async_engine.add_fact("hello".into(), FactType::Semantic, None,
-///     embedder, None, None).await?;
+/// let req = AddFactRequest { content: "hello".into(), fact_type: FactType::Semantic,
+///     source_event_id: None, scope: None, opts: None };
+/// let id = async_engine.add_fact(req, embedder, None).await?;
 /// ```
 #[derive(Clone)]
 pub struct AsyncMemoryEngine {
@@ -95,26 +96,17 @@ impl AsyncMemoryEngine {
     }
 
     /// Add a fact with embedding computation.
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_fact(
         &self,
-        content: String,
-        fact_type: FactType,
-        source_event_id: Option<i64>,
+        req: AddFactRequest,
         embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
-        scope: Option<String>,
-        opts: Option<AddFactOptions>,
         classifier: Option<Arc<dyn PersistenceClassifier + Send + Sync>>,
     ) -> Result<i64> {
         let engine = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             engine.add_fact(
-                &content,
-                fact_type,
-                source_event_id,
+                &req,
                 embedder.as_ref(),
-                scope.as_deref(),
-                opts.as_ref(),
                 classifier
                     .as_ref()
                     .map(|c| c.as_ref() as &dyn PersistenceClassifier),
@@ -129,7 +121,7 @@ impl AsyncMemoryEngine {
     /// Async wrapper around [`MemoryEngine::add_facts_batch`].
     pub async fn add_facts_batch(
         &self,
-        entries: Vec<BatchFactEntry>,
+        entries: Vec<AddFactRequest>,
         embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
         classifier: Option<Arc<dyn PersistenceClassifier + Send + Sync>>,
     ) -> Result<Vec<i64>> {
@@ -467,12 +459,14 @@ mod tests {
             Arc::new(MockEmbedder { dim: DIM });
         let id = engine
             .add_fact(
-                "async test fact".into(),
-                FactType::Semantic,
-                None,
+                AddFactRequest {
+                    content: "async test fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 embedder,
-                None,
-                None,
                 None,
             )
             .await
@@ -502,12 +496,14 @@ mod tests {
             Arc::new(MockEmbedder { dim: DIM });
         engine
             .add_fact(
-                "concurrent test".into(),
-                FactType::Semantic,
-                None,
+                AddFactRequest {
+                    content: "concurrent test".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 embedder,
-                None,
-                None,
                 None,
             )
             .await
@@ -564,12 +560,14 @@ mod tests {
         };
         engine
             .add_fact(
-                "reminder".into(),
-                FactType::Semantic,
-                None,
+                AddFactRequest {
+                    content: "reminder".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(opts),
+                },
                 embedder,
-                None,
-                Some(opts),
                 None,
             )
             .await
@@ -587,12 +585,14 @@ mod tests {
             Arc::new(MockEmbedder { dim: DIM });
         let id = engine
             .add_fact(
-                "pinnable".into(),
-                FactType::Semantic,
-                None,
+                AddFactRequest {
+                    content: "pinnable".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 embedder,
-                None,
-                None,
                 None,
             )
             .await

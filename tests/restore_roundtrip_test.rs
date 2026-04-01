@@ -3,7 +3,7 @@
 use memory_engine::EmbeddingProvider;
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::inspect_types::DumpFormat;
-use memory_engine::types::FactType;
+use memory_engine::types::{AddFactRequest, FactType};
 
 const DIM: usize = 4;
 
@@ -19,23 +19,27 @@ fn make_engine() -> MemoryEngine {
     let engine = MemoryEngine::open_memory(DIM).unwrap();
     engine
         .add_fact(
-            "alpha fact",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "alpha fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "beta fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "beta fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -63,12 +67,14 @@ fn json_restore_to_file_engine() {
     // Verify engine is functional: can add new facts.
     let new_id = restored
         .add_fact(
-            "gamma fact",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "gamma fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -97,12 +103,14 @@ fn sqlite_restore_roundtrip() {
     let engine = MemoryEngine::open(&source_config).unwrap();
     engine
         .add_fact(
-            "sqlite test",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "sqlite test".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -125,12 +133,14 @@ fn sqlite_restore_roundtrip() {
     // Engine is functional.
     let new_id = restored
         .add_fact(
-            "new fact",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "new fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -230,12 +240,14 @@ fn post_restore_ids_dont_collide() {
     for i in 0..5 {
         let id = restored
             .add_fact(
-                &format!("new fact {i}"),
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: format!("new fact {i}"),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();

@@ -6,7 +6,7 @@ use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::{EventType, FactType, NewEvent};
+use memory_engine::types::{AddFactRequest, EventType, FactType, NewEvent};
 
 /// Zero-vector embedder for examples (no external model needed).
 struct DummyEmbedder;
@@ -37,23 +37,28 @@ fn main() -> Result<(), MemoryError> {
 
     // 2. Add facts derived from the interaction
     let fact1 = engine.add_fact(
-        "Rust is a systems programming language focused on safety and performance",
-        FactType::Semantic,
-        Some(event_id),
+        &AddFactRequest {
+            content: "Rust is a systems programming language focused on safety and performance"
+                .into(),
+            fact_type: FactType::Semantic,
+            source_event_id: Some(event_id),
+            scope: None,
+            opts: None,
+        },
         &embedder,
-        None, // root scope
-        None, // default options
         None, // no persistence classifier
     )?;
     println!("Added fact id={fact1}");
 
     let fact2 = engine.add_fact(
-        "Alice asked about Rust programming",
-        FactType::Episodic,
-        Some(event_id),
+        &AddFactRequest {
+            content: "Alice asked about Rust programming".into(),
+            fact_type: FactType::Episodic,
+            source_event_id: Some(event_id),
+            scope: None,
+            opts: None,
+        },
         &embedder,
-        None,
-        None,
         None,
     )?;
     println!("Added fact id={fact2}");

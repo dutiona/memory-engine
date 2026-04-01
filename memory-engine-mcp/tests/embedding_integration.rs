@@ -305,17 +305,20 @@ async fn bearer_auth_sent_when_configured() {
 // flush_insights with wiremock embedder
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn flush_insights_with_http_embedder() {
     let server = MockServer::start().await;
     let emb = make_embedding(DIM);
 
+    // Batch embed: one call with both texts, response needs index fields
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "embedding": emb }]
+            "data": [
+                { "index": 0, "embedding": emb.clone() },
+                { "index": 1, "embedding": emb }
+            ]
         })))
-        .expect(2) // Two insights = two embedding calls
         .mount(&server)
         .await;
 
@@ -351,15 +354,16 @@ async fn flush_insights_with_http_embedder() {
     assert_eq!(body["failed_count"].as_u64().unwrap(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn flush_insights_partial_failure() {
     let server = MockServer::start().await;
     let emb = make_embedding(DIM);
 
+    // Only 1 valid insight passes pre-validation → batch embed with 1 text
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{ "embedding": emb }]
+            "data": [{ "index": 0, "embedding": emb }]
         })))
         .mount(&server)
         .await;

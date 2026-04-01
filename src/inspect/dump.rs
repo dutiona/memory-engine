@@ -225,7 +225,7 @@ mod tests {
     use crate::engine::MemoryEngine;
     use crate::inspect::types::{DumpFormat, EngineSnapshot};
     use crate::traits::EmbeddingProvider;
-    use crate::types::FactType;
+    use crate::types::{AddFactRequest, FactType};
 
     const DIM: usize = 4;
 
@@ -241,12 +241,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "test fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "test fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -373,12 +375,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "in-memory fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "in-memory fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -407,12 +411,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "gzip test",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "gzip test".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -435,12 +441,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "zstd test",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "zstd test".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -478,12 +486,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "snapshot fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "snapshot fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
