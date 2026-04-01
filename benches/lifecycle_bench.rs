@@ -20,14 +20,16 @@
 //! - `ConstEmbedder` mirrors `search_bench.rs` for consistency.
 //! - `ConcatSummaryGenerator` joins fact content and produces a constant
 //!   embedding — no LLM cost, deterministic output.
-//! - Criterion's `b.iter()` excludes setup from measurement.
+//! - `consolidate()` and `forget()` are idempotent — `iter_with_setup`
+//!   creates a fresh engine per iteration to measure actual work, not no-ops.
 
+use chrono::{Duration, Utc};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
 };
-use memory_engine::types::{AddFactRequest, Fact, FactType};
+use memory_engine::types::{AddFactOptions, AddFactRequest, Fact, FactType};
 
 const DIM: usize = 128;
 
@@ -93,7 +95,9 @@ const TOPICS: [&str; 10] = [
     "Real-time operating systems embedded",
 ];
 
-fn setup_engine(n: usize) -> MemoryEngine {
+/// Create a file-backed engine pre-populated with `n` facts.
+/// Returns `(engine, _dir)` — the `_dir` handle keeps the tempdir alive.
+fn setup_engine(n: usize) -> (MemoryEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench.db");
     let config = EngineConfig::new(db_path, DIM);
@@ -118,9 +122,44 @@ fn setup_engine(n: usize) -> MemoryEngine {
             .expect("add_fact");
     }
 
-    // Leak the tempdir so the DB file persists for the benchmark duration.
-    std::mem::forget(dir);
-    engine
+    (engine, dir)
+}
+
+/// Create a file-backed engine with `n` old, low-importance facts that will
+/// actually be expired by `forget()`. Without this, fresh high-importance facts
+/// all survive and the benchmark only measures scan overhead.
+fn setup_forgettable_engine(n: usize) -> (MemoryEngine, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("bench.db");
+    let config = EngineConfig::new(db_path, DIM);
+    let engine = MemoryEngine::open(&config).expect("open engine");
+    let embedder = ConstEmbedder { dim: DIM };
+
+    let old = Utc::now() - Duration::days(120);
+    for i in 0..n {
+        let topic = TOPICS[i % TOPICS.len()];
+        let content = format!("{topic} — stale fact {i}");
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content,
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(AddFactOptions {
+                        importance: Some(0.1),
+                        t_created: Some(old),
+                        last_accessed: Some(old),
+                        ..Default::default()
+                    }),
+                },
+                &embedder,
+                None,
+            )
+            .expect("add_fact");
+    }
+
+    (engine, dir)
 }
 
 fn make_requests(n: usize) -> Vec<AddFactRequest> {
@@ -145,23 +184,24 @@ fn make_requests(n: usize) -> Vec<AddFactRequest> {
 fn bench_consolidation(c: &mut Criterion) {
     let mut group = c.benchmark_group("consolidation");
 
-    let generator = ConcatSummaryGenerator {
-        embedder: ConstEmbedder { dim: DIM },
-    };
-    let config = ConsolidationConfig {
-        dedup_threshold: 0.95,
-        min_cluster_size: 3,
-    };
-
     for &size in &[100, 1_000, 5_000, 10_000, 50_000] {
         let samples = if size >= 10_000 { 10 } else { 20 };
         group.sample_size(samples);
 
-        let engine = setup_engine(size);
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
-            b.iter(|| {
-                engine.consolidate(&generator, &config).unwrap();
-            });
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
+            b.iter_with_setup(
+                || setup_engine(n),
+                |(engine, _dir)| {
+                    let generator = ConcatSummaryGenerator {
+                        embedder: ConstEmbedder { dim: DIM },
+                    };
+                    let config = ConsolidationConfig {
+                        dedup_threshold: 0.95,
+                        min_cluster_size: 3,
+                    };
+                    engine.consolidate(&generator, &config).unwrap();
+                },
+            );
         });
     }
     group.finish();
@@ -174,17 +214,21 @@ fn bench_consolidation(c: &mut Criterion) {
 fn bench_forgetting(c: &mut Criterion) {
     let mut group = c.benchmark_group("forgetting");
 
-    let policy = ForgetPolicy::default();
-
     for &size in &[100, 1_000, 5_000, 10_000, 50_000] {
         let samples = if size >= 10_000 { 10 } else { 20 };
         group.sample_size(samples);
 
-        let engine = setup_engine(size);
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
-            b.iter(|| {
-                engine.forget(&policy).unwrap();
-            });
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
+            b.iter_with_setup(
+                || setup_forgettable_engine(n),
+                |(engine, _dir)| {
+                    let policy = ForgetPolicy {
+                        min_importance: 0.3,
+                        ..Default::default()
+                    };
+                    engine.forget(&policy).unwrap();
+                },
+            );
         });
     }
     group.finish();
@@ -202,30 +246,28 @@ fn bench_add_fact_single(c: &mut Criterion) {
         let samples = if corpus_size >= 10_000 { 10 } else { 20 };
         group.sample_size(samples);
 
-        let engine = setup_engine(corpus_size);
-        let mut counter: usize = 0;
-
         group.bench_with_input(
             BenchmarkId::new("corpus", corpus_size),
             &corpus_size,
-            |b, _| {
-                b.iter(|| {
-                    counter += 1;
-                    let content = format!("incremental fact {counter}");
-                    engine
-                        .add_fact(
-                            &AddFactRequest {
-                                content,
-                                fact_type: FactType::Semantic,
-                                source_event_id: None,
-                                scope: None,
-                                opts: None,
-                            },
-                            &embedder,
-                            None,
-                        )
-                        .unwrap();
-                });
+            |b, &n| {
+                b.iter_with_setup(
+                    || setup_engine(n),
+                    |(engine, _dir)| {
+                        engine
+                            .add_fact(
+                                &AddFactRequest {
+                                    content: "benchmark insertion probe".to_string(),
+                                    fact_type: FactType::Semantic,
+                                    source_event_id: None,
+                                    scope: None,
+                                    opts: None,
+                                },
+                                &embedder,
+                                None,
+                            )
+                            .unwrap();
+                    },
+                );
             },
         );
     }
@@ -252,16 +294,13 @@ fn bench_add_facts_batch(c: &mut Criterion) {
             |b, _| {
                 b.iter_with_setup(
                     || {
-                        // Fresh engine per iteration to avoid unbounded growth.
                         let dir = tempfile::tempdir().expect("tempdir");
                         let db_path = dir.path().join("bench_batch.db");
                         let config = EngineConfig::new(db_path, DIM);
                         let engine = MemoryEngine::open(&config).expect("open engine");
-                        // Leak to keep DB alive.
-                        std::mem::forget(dir);
-                        engine
+                        (engine, dir)
                     },
-                    |engine| {
+                    |(engine, _dir)| {
                         engine.add_facts_batch(&requests, &embedder, None).unwrap();
                     },
                 );
