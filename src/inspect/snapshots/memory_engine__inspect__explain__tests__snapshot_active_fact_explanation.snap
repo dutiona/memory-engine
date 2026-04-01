@@ -1,0 +1,19 @@
+---
+source: src/inspect/explain.rs
+assertion_line: 419
+expression: explanation
+---
+fact_id: 1
+state: Active
+provenance:
+  source_event_id: ~
+  source_event: ~
+  importance: 0.5
+  importance_score: 0.5
+  is_pinned: false
+  access_count: 0
+graph_context:
+  degree: 0
+  neighbor_ids: []
+  component_size: 0
+scope_path: /

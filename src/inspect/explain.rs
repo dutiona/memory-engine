@@ -400,4 +400,22 @@ mod tests {
         assert_eq!(explanation.provenance.source_event_id, None);
         assert!(explanation.provenance.source_event.is_none());
     }
+
+    #[test]
+    fn snapshot_active_fact_explanation() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let id = engine
+            .add_fact(
+                "snapshot test fact",
+                FactType::Semantic,
+                None,
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let explanation = engine.explain_fact(id).unwrap();
+        insta::assert_yaml_snapshot!(explanation);
+    }
 }

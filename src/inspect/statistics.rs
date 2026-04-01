@@ -208,4 +208,66 @@ mod tests {
         assert_eq!(stats.facts.expired, 0);
         assert_eq!(stats.facts.pinned, 1);
     }
+
+    #[test]
+    fn snapshot_empty_engine_statistics() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let stats = engine.statistics().unwrap();
+        insta::assert_yaml_snapshot!(stats, {
+            ".storage.page_count" => "[page_count]",
+            ".storage.page_size" => "[page_size]",
+            ".storage.main_db_bytes" => "[db_bytes]",
+        });
+    }
+
+    #[test]
+    fn snapshot_populated_statistics() {
+        use crate::types::AddFactOptions;
+
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        engine
+            .add_fact(
+                "fact one",
+                FactType::Semantic,
+                None,
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .add_fact(
+                "fact two",
+                FactType::Episodic,
+                None,
+                &FakeEmbed,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let pin_opts = AddFactOptions {
+            pinned: Some(true),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                "pinned fact",
+                FactType::Semantic,
+                None,
+                &FakeEmbed,
+                None,
+                Some(&pin_opts),
+                None,
+            )
+            .unwrap();
+
+        let stats = engine.statistics().unwrap();
+        insta::assert_yaml_snapshot!(stats, {
+            ".storage.page_count" => "[page_count]",
+            ".storage.page_size" => "[page_size]",
+            ".storage.main_db_bytes" => "[db_bytes]",
+        });
+    }
 }

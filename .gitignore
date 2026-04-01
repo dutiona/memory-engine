@@ -27,6 +27,9 @@ Thumbs.db
 # Worktrees
 .worktrees/
 
+# Proptest regressions
+proptest-regressions/
+
 # Build artifacts
 *.o
 *.so

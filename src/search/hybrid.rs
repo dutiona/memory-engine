@@ -478,4 +478,64 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].fact.fact_type, FactType::Semantic);
     }
+
+    mod proptest_rrf {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn fts_list(max_len: usize) -> impl Strategy<Value = Vec<(i64, f64)>> {
+            proptest::collection::vec((1..1000i64, any::<f64>()), 0..max_len)
+        }
+
+        fn vec_list(max_len: usize) -> impl Strategy<Value = Vec<(i64, f32)>> {
+            proptest::collection::vec((1..1000i64, any::<f32>()), 0..max_len)
+        }
+
+        proptest! {
+            #[test]
+            fn all_input_ids_appear_in_output(
+                fts in fts_list(32),
+                vec_results in vec_list(32),
+                k in 1..120u32,
+            ) {
+                let merged = rrf_merge(&fts, &vec_results, k);
+                let merged_ids: std::collections::HashSet<i64> =
+                    merged.iter().map(|&(id, _)| id).collect();
+                for &(id, _) in &fts {
+                    prop_assert!(merged_ids.contains(&id),
+                        "FTS id {id} missing from merged output");
+                }
+                for &(id, _) in &vec_results {
+                    prop_assert!(merged_ids.contains(&id),
+                        "Vec id {id} missing from merged output");
+                }
+            }
+
+            #[test]
+            fn descending_order(
+                fts in fts_list(16),
+                vec_results in vec_list(16),
+                k in 1..120u32,
+            ) {
+                let merged = rrf_merge(&fts, &vec_results, k);
+                for window in merged.windows(2) {
+                    prop_assert!(window[0].1 >= window[1].1,
+                        "not descending: {} < {}", window[0].1, window[1].1);
+                }
+            }
+
+            #[test]
+            fn scores_are_positive(
+                fts in fts_list(16),
+                vec_results in vec_list(16),
+                k in 1..120u32,
+            ) {
+                let merged = rrf_merge(&fts, &vec_results, k);
+                for &(id, score) in &merged {
+                    prop_assert!(score > 0.0,
+                        "id {id} has non-positive RRF score {score}");
+                }
+            }
+        }
+    }
 }
