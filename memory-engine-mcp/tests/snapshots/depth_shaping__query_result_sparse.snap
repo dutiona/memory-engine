@@ -1,9 +1,11 @@
 ---
 source: memory-engine-mcp/tests/depth_shaping.rs
-assertion_line: 282
 expression: body
 ---
 count: 1
+diagnostics:
+  expired_matches: ~
+  results_returned: 1
 results:
   - content: Neural networks learn representations
     id: 1
