@@ -54,6 +54,11 @@ pub struct MemoryQuery {
     pub limit: Option<usize>,
     /// Point-in-time temporal filter (mutually exclusive with `period`).
     pub valid_at: Option<DateTime<Utc>>,
+    /// Run a secondary probe for expired facts matching the FTS5 query.
+    /// Adds one SQL COUNT query per execute. Only effective when `text` is set
+    /// (vector-only queries have no FTS5 terms to probe — `expired_matches`
+    /// will be `None`).
+    pub include_expired_probe: bool,
 }
 
 impl MemoryQuery {
@@ -174,6 +179,19 @@ impl MemoryQuery {
     #[must_use]
     pub fn pinned_only(mut self) -> Self {
         self.pinned_only = true;
+        self
+    }
+
+    // --- Diagnostics ---
+
+    /// Enable the expired-facts probe for abstention diagnostics.
+    ///
+    /// When enabled, `execute_query` runs an additional FTS5 COUNT query
+    /// against expired facts matching the search terms. Only effective when
+    /// `text` is set — vector-only queries produce `expired_matches: None`.
+    #[must_use]
+    pub const fn include_expired_probe(mut self) -> Self {
+        self.include_expired_probe = true;
         self
     }
 

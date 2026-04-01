@@ -1,10 +1,10 @@
 use memory_engine::inspect_types::{FactExplanation, FactHistory};
 use memory_engine::resume::ResumeContext;
-use memory_engine::search::hybrid::SearchResult;
+use memory_engine::search::hybrid::{QueryDiagnostics, SearchResult};
 use memory_engine::types::{Event, Fact};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Tiered retrieval depth for MCP responses.
 ///
@@ -188,6 +188,26 @@ pub fn shape_event(event: &Event, depth: Depth, scope_path: Option<&str>) -> Val
             "sequence_id": event.sequence_id,
             "created_at": event.created_at,
             "event_revision": event.event_revision,
+        }),
+    }
+}
+
+/// Shape [`QueryDiagnostics`] according to the requested depth.
+///
+/// - **Sparse**: minimal — just result count and expired matches.
+/// - **Standard / Full**: all diagnostic fields.
+pub fn shape_diagnostics(diagnostics: &QueryDiagnostics, depth: Depth) -> Value {
+    match depth {
+        Depth::Sparse => json!({
+            "results_returned": diagnostics.results_returned,
+            "expired_matches": diagnostics.expired_matches,
+        }),
+        Depth::Standard | Depth::Full => json!({
+            "candidates_before_filter": diagnostics.candidates_before_filter,
+            "results_returned": diagnostics.results_returned,
+            "expired_matches": diagnostics.expired_matches,
+            "fts_candidates": diagnostics.fts_candidates,
+            "vector_candidates": diagnostics.vector_candidates,
         }),
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::engine::{EngineConfig, MemoryEngine};
 use crate::error::{MemoryError, Result};
 use crate::resume::context::{ResumeConfig, ResumeContext};
-use crate::search::hybrid::{SearchQuery, SearchResult};
+use crate::search::hybrid::{QueryResponse, SearchQuery, SearchResult};
 use chrono::{DateTime, Utc};
 
 use crate::traits::{
@@ -136,7 +136,7 @@ impl AsyncMemoryEngine {
     pub async fn execute_query(
         &self,
         query: crate::search::query::MemoryQuery,
-    ) -> Result<Vec<SearchResult>> {
+    ) -> Result<QueryResponse> {
         let engine = self.inner.clone();
         tokio::task::spawn_blocking(move || engine.execute_query(&query))
             .await
