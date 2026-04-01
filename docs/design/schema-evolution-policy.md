@@ -8,7 +8,7 @@ memory-engine tracks four independent version numbers:
 
 | Axis             | Location       | Purpose                          | Example |
 | ---------------- | -------------- | -------------------------------- | ------- |
-| `schema_version` | `config` table | DDL version of the SQLite schema | `5`     |
+| `schema_version` | `config` table | DDL version of the SQLite schema | `6`     |
 | `storage_epoch`  | `config` table | Coarse compatibility gate        | `1`     |
 | Crate semver     | `Cargo.toml`   | Rust API compatibility           | `0.1.0` |
 | MCP API version  | MCP server     | Wire protocol compatibility      | `1.0`   |
@@ -52,6 +52,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrate_v2_to_v3, true),    // Table rebuild for FK constraints
     (migrate_v3_to_v4, false),   // Add is_pinned, importance_score, envelope
     (migrate_v4_to_v5, false),   // Add event_revision
+    (migrate_v5_to_v6, false),   // Add depth_shaping / query diagnostics
 ];
 ```
 
@@ -131,7 +132,7 @@ Upcasting must produce **semantically equivalent** results — the upcasted payl
 
 ### Schema Snapshot (insta)
 
-The `schema_v5_snapshot` test captures the complete DDL of a fresh database via a deterministic projection (sorted by type+name, whitespace-normalized). This snapshot:
+The `schema_v6_snapshot` test captures the complete DDL of a fresh database via a deterministic projection (sorted by type+name, whitespace-normalized). This snapshot:
 
 - Breaks when any DDL constant changes (catches unintentional schema drift).
 - Is version-controlled alongside the code.
@@ -141,14 +142,14 @@ The `schema_v5_snapshot` test captures the complete DDL of a fresh database via 
 
 Three property-based tests verify migration invariants across random inputs:
 
-| Test                                      | Property                                                   |
-| ----------------------------------------- | ---------------------------------------------------------- |
-| `migration_preserves_event_count`         | Event count is identical before and after v1->v5 migration |
-| `migration_preserves_fact_content_hashes` | Content hashes survive the full migration chain unchanged  |
-| `migration_v1_to_v5_fk_integrity`         | `PRAGMA foreign_key_check` is clean after migration        |
+| Test                                      | Property                                                       |
+| ----------------------------------------- | -------------------------------------------------------------- |
+| `migration_preserves_event_count`         | Event count is identical before and after full migration chain |
+| `migration_preserves_fact_content_hashes` | Content hashes survive the full migration chain unchanged      |
+| `migration_v1_to_v5_fk_integrity`         | `PRAGMA foreign_key_check` is clean after migration            |
 
 ### Frozen DDL Snapshots
 
-Each major schema version has a complete, standalone DDL snapshot in the test module (`init_schema_v1`, `init_schema_v2`, `init_schema_v4`). These depend on NO live DDL constants, preventing fixture drift when tables evolve.
+Each major schema version has a complete, standalone DDL snapshot in the test module (`init_schema_v1`, `init_schema_v2`, `init_schema_v4`, `init_schema_v5`). These depend on NO live DDL constants, preventing fixture drift when tables evolve.
 
 This allows migration tests to start from any historical version and verify the migration chain produces the correct result.
