@@ -247,11 +247,11 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 
 #### Phase 4c: Quality & Cold Storage
 
-| Feature                                                                          | Description                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Evaluation harness ([#16](https://github.com/dutiona/memory-engine/issues/16))   | Regression corpus for retrieval quality, consolidation correctness, forgetting behavior. After 4a/4b ship. **Research update:** context collapse detection (R4, DC/ACE), outcome-based retrieval quality (R5, ACE/Reflexion) |
-| ✅ Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback). [PR #196](https://github.com/dutiona/memory-engine/pull/196)                                                                      |
-| Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot                                                                                                                                                                          |
+| Feature                                                                             | Description                                                                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Evaluation harness ([#16](https://github.com/dutiona/memory-engine/issues/16))      | Regression corpus for retrieval quality, consolidation correctness, forgetting behavior. After 4a/4b ship. **Research update:** context collapse detection (R4, DC/ACE), outcome-based retrieval quality (R5, ACE/Reflexion) |
+| ✅ Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback). [PR #196](https://github.com/dutiona/memory-engine/pull/196)                                                                     |
+| ✅ Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot (PR #195)                                                                                                                                                                |
 
 #### Code Quality Sweep (super-qa — parallel track)
 
@@ -264,7 +264,7 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 | [#108](https://github.com/dutiona/memory-engine/issues/108) | refactoring | ~~`engine.rs` is a 3573-line god module — extract subsystems~~ ✅ PR #186        |
 | [#109](https://github.com/dutiona/memory-engine/issues/109) | refactoring | ~~`add_fact` takes 8 parameters — introduce builder or struct~~ ✅ PR #194       |
 | [#110](https://github.com/dutiona/memory-engine/issues/110) | refactoring | ~~All modules are `pub` in `lib.rs` — no encapsulation~~ ✅ PR #188              |
-| [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | ~~`proptest` and `insta` dev-dependencies never used~~ ✅ PR #189               |
+| [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | ~~`proptest` and `insta` dev-dependencies never used~~ ✅ PR #189                |
 | [#128](https://github.com/dutiona/memory-engine/issues/128) | testing     | `traits.rs` and `query.rs` have zero unit tests ✅ (#185)                        |
 | [#187](https://github.com/dutiona/memory-engine/issues/187) | bug         | ~~`depth_shaping` insta snapshots stale after #180 QueryDiagnostics~~ ✅ PR #193 |
 

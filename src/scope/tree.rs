@@ -166,6 +166,28 @@ impl ScopeTree {
         segments.reverse();
         Some(segments.join("/"))
     }
+
+    /// Snapshot all nodes for serialization.
+    pub(crate) fn to_snapshot(&self) -> crate::engine::snapshot::ScopeTreeSnapshot {
+        crate::engine::snapshot::ScopeTreeSnapshot {
+            nodes: self.nodes.values().cloned().collect(),
+        }
+    }
+
+    /// Rebuild tree from a snapshot (same logic as `load` but from snapshot data).
+    pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::ScopeTreeSnapshot) -> Self {
+        let mut nodes = HashMap::with_capacity(snap.nodes.len());
+        let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
+
+        for node in &snap.nodes {
+            if let Some(pid) = node.parent_id {
+                children.entry(pid).or_default().push(node.id);
+            }
+            nodes.insert(node.id, node.clone());
+        }
+
+        Self { nodes, children }
+    }
 }
 
 #[cfg(test)]

@@ -2970,3 +2970,180 @@ fn add_facts_batch_temporal_consistency() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot integration tests
+// ---------------------------------------------------------------------------
+
+mod snapshot_integration {
+    use super::*;
+
+    fn open_file_engine(dir: &std::path::Path) -> MemoryEngine {
+        let config = EngineConfig::new(dir.join("test.db"), DIM);
+        MemoryEngine::open(&config).unwrap()
+    }
+
+    fn add_test_fact(engine: &MemoryEngine, content: &str) -> i64 {
+        let embedder = MockEmbedder { dim: DIM };
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: content.into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                &embedder,
+                None,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn snapshot_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create engine, add data, write snapshot
+        {
+            let engine = open_file_engine(dir.path());
+            add_test_fact(&engine, "fact one");
+            add_test_fact(&engine, "fact two");
+            engine.write_snapshot().unwrap();
+        }
+
+        // Verify snapshot file exists
+        let snap_path = super::snapshot::snapshot_path(&db_path);
+        assert!(snap_path.exists(), "snapshot file should exist");
+
+        // Re-open — should load from snapshot
+        let engine = open_file_engine(dir.path());
+        let facts = engine.list_active_facts(None).unwrap();
+        assert_eq!(facts.len(), 2);
+    }
+
+    #[test]
+    fn snapshot_fallback_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create engine, add data, do NOT write snapshot
+        {
+            let config = EngineConfig::new(dir.path().join("test.db"), DIM);
+            let engine = MemoryEngine::open(&config).unwrap();
+            add_test_fact(&engine, "fact one");
+            // Remove snapshot if Drop wrote one
+            let snap_path = super::snapshot::snapshot_path(&dir.path().join("test.db"));
+            let _ = std::fs::remove_file(&snap_path);
+        }
+
+        // Re-open — should fall back to full rebuild
+        let engine = open_file_engine(dir.path());
+        let facts = engine.list_active_facts(None).unwrap();
+        assert_eq!(facts.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_fallback_on_stale_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let snap_path = super::snapshot::snapshot_path(&db_path);
+
+        // Phase 1: create engine with one fact, write snapshot explicitly.
+        {
+            let engine = open_file_engine(dir.path());
+            add_test_fact(&engine, "original fact");
+            engine.write_snapshot().unwrap();
+        }
+
+        // Save the snapshot bytes so we can restore them later.
+        let snapshot_bytes = std::fs::read(&snap_path).unwrap();
+
+        // Phase 2: add more data. Drop writes a fresh (updated) snapshot.
+        {
+            let engine = open_file_engine(dir.path());
+            add_test_fact(&engine, "second fact");
+            // Drop writes snapshot with fingerprint reflecting 2 facts.
+        }
+
+        // Phase 3: overwrite the snapshot with the stale one from phase 1.
+        std::fs::write(&snap_path, &snapshot_bytes).unwrap();
+
+        // Phase 4: re-open — stale snapshot fingerprint should mismatch,
+        // engine falls back to full rebuild and sees both facts.
+        let engine = open_file_engine(dir.path());
+        let facts = engine.list_active_facts(None).unwrap();
+        assert_eq!(facts.len(), 2, "should see both facts via full rebuild");
+    }
+
+    #[test]
+    fn snapshot_skipped_for_memory_engine() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let result = engine.write_snapshot().unwrap();
+        assert!(!result, "in-memory engine should skip snapshot");
+    }
+
+    #[test]
+    fn snapshot_skipped_for_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // First open in read-write to create the DB
+        {
+            let _engine = open_file_engine(dir.path());
+        }
+
+        // Open read-only
+        let mut config = EngineConfig::new(dir.path().join("test.db"), DIM);
+        config.read_only = true;
+        let engine = MemoryEngine::open(&config).unwrap();
+        let result = engine.write_snapshot().unwrap();
+        assert!(!result, "read-only engine should skip snapshot");
+    }
+
+    #[test]
+    fn drop_writes_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let snap_path = super::snapshot::snapshot_path(&db_path);
+
+        {
+            let engine = open_file_engine(dir.path());
+            add_test_fact(&engine, "will be snapshotted");
+            // Do NOT call write_snapshot — let Drop do it
+        }
+
+        assert!(snap_path.exists(), "Drop should write snapshot file");
+    }
+
+    #[test]
+    fn snapshot_and_full_rebuild_agree() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create engine with data
+        {
+            let engine = open_file_engine(dir.path());
+            add_test_fact(&engine, "alpha");
+            add_test_fact(&engine, "beta");
+            add_test_fact(&engine, "gamma");
+            engine.write_snapshot().unwrap();
+        }
+
+        // Load from snapshot
+        let engine_snap = open_file_engine(dir.path());
+        let snap_facts = engine_snap.list_active_facts(None).unwrap();
+        let snap_graph_nodes = engine_snap.graph.read().node_count();
+        let snap_graph_edges = engine_snap.graph.read().edge_count();
+
+        // Delete snapshot, force full rebuild
+        let snap_path = super::snapshot::snapshot_path(&dir.path().join("test.db"));
+        std::fs::remove_file(&snap_path).unwrap();
+        let engine_rebuild = open_file_engine(dir.path());
+        let rebuild_facts = engine_rebuild.list_active_facts(None).unwrap();
+        let rebuild_graph_nodes = engine_rebuild.graph.read().node_count();
+        let rebuild_graph_edges = engine_rebuild.graph.read().edge_count();
+
+        assert_eq!(snap_facts.len(), rebuild_facts.len());
+        assert_eq!(snap_graph_nodes, rebuild_graph_nodes);
+        assert_eq!(snap_graph_edges, rebuild_graph_edges);
+    }
+}

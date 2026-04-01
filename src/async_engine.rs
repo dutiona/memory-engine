@@ -485,6 +485,16 @@ impl AsyncMemoryEngine {
         .map_err(join_err)??;
         Ok(Self::new(engine))
     }
+
+    /// Write a snapshot of in-memory state to the sidecar file.
+    ///
+    /// Delegates to [`MemoryEngine::write_snapshot`] on a blocking task.
+    pub async fn write_snapshot(&self) -> Result<bool> {
+        let engine = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || engine.write_snapshot())
+            .await
+            .map_err(join_err)?
+    }
 }
 
 #[cfg(test)]
