@@ -78,11 +78,13 @@ let event_id = engine.ingest(&event)?;
 
 // Later, extract a fact from this event
 engine.add_fact(
-    "The capital of France is Paris",
-    FactType::Semantic,
-    Some(event_id),  // links fact back to source event
+    &AddFactRequest {
+        content: "The capital of France is Paris".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: Some(event_id),
+        ..Default::default()
+    },
     &embedder,
-    None,
     None,
 )?;
 ```

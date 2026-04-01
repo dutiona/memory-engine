@@ -21,7 +21,7 @@ Consumers bring their own embedding model, summarizer, and conflict resolver via
 ## Quick Example
 
 ```rust
-use memory_engine::{EngineConfig, MemoryEngine, FactType, EmbeddingProvider, MemoryError};
+use memory_engine::{EngineConfig, MemoryEngine, FactType, AddFactRequest, EmbeddingProvider, MemoryError};
 
 // Consumers implement EmbeddingProvider with their model of choice
 struct DummyEmbedder;
@@ -37,13 +37,15 @@ fn main() -> Result<(), MemoryError> {
 
     // Add a fact (embedding computed automatically)
     let id = engine.add_fact(
-        "Rust's ownership model prevents data races at compile time",
-        FactType::Semantic,
-        None,       // no source event
+        &AddFactRequest {
+            content: "Rust's ownership model prevents data races at compile time".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        },
         &embedder,
-        None,       // root scope
-        None,       // default options
-        None,       // no persistence classifier
+        None, // no persistence classifier
     )?;
 
     // Query with hybrid search

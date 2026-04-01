@@ -22,28 +22,41 @@ pub enum FactType {
 
 ## The `add_fact` method
 
+`add_fact` takes an `AddFactRequest` struct that bundles the fact's content, type, provenance, scope, and options:
+
 ```rust
 pub fn add_fact(
     &self,
-    content: &str,
-    fact_type: FactType,
-    source_event_id: Option<i64>,
+    req: &AddFactRequest,
     embedder: &dyn EmbeddingProvider,
-    scope: Option<&str>,
-    opts: Option<&AddFactOptions>,
     classifier: Option<&dyn PersistenceClassifier>,
 ) -> Result<i64>
 ```
 
-| Parameter         | Description                                                                                      |
+```rust
+pub struct AddFactRequest {
+    pub content: String,
+    pub fact_type: FactType,
+    pub source_event_id: Option<i64>,
+    pub scope: Option<String>,
+    pub opts: Option<AddFactOptions>,
+}
+```
+
+| Field             | Description                                                                                      |
 | ----------------- | ------------------------------------------------------------------------------------------------ |
 | `content`         | The textual content of the fact.                                                                 |
 | `fact_type`       | `Episodic`, `Semantic`, or `Procedural`.                                                         |
 | `source_event_id` | Optional link back to the originating event for provenance.                                      |
-| `embedder`        | Implementation of `EmbeddingProvider` to compute the embedding vector.                           |
 | `scope`           | Optional hierarchical scope path (e.g., `"user:michael/project:demo"`). `None` means root scope. |
-| `opts`            | Optional overrides for importance, metadata, temporal bounds, and pinning.                       |
-| `classifier`      | Optional `PersistenceClassifier` for auto-pinning. Pass `None` to skip.                          |
+| `opts`            | Optional `AddFactOptions` with overrides for importance, metadata, temporal bounds, and pinning. |
+
+The remaining parameters on `add_fact` itself:
+
+| Parameter    | Description                                                             |
+| ------------ | ----------------------------------------------------------------------- |
+| `embedder`   | Implementation of `EmbeddingProvider` to compute the embedding vector.  |
+| `classifier` | Optional `PersistenceClassifier` for auto-pinning. Pass `None` to skip. |
 
 The method computes the embedding **before** acquiring the write lock. This means slow embedding calls (e.g., network API round-trips) do not block concurrent readers.
 
@@ -64,7 +77,7 @@ The returned vector must match the `embed_dim` configured when opening the engin
 Here is a minimal example using a zero-vector embedder (useful for testing, not for production):
 
 ```rust
-use memory_engine::{MemoryEngine, FactType};
+use memory_engine::{MemoryEngine, FactType, AddFactRequest};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::error::Result;
 
@@ -83,13 +96,15 @@ let engine = MemoryEngine::open_memory(dim)?;
 let embedder = ZeroEmbedder { dim };
 
 let fact_id = engine.add_fact(
-    "Rust guarantees memory safety without a garbage collector",
-    FactType::Semantic,
-    None,       // no source event
+    &AddFactRequest {
+        content: "Rust guarantees memory safety without a garbage collector".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    },
     &embedder,
-    None,       // root scope
-    None,       // default options
-    None,       // no auto-pin classifier
+    None, // no auto-pin classifier
 )?;
 ```
 
@@ -132,13 +147,15 @@ let opts = AddFactOptions {
 };
 
 let id = engine.add_fact(
-    "Production API latency is 42ms p99",
-    FactType::Episodic,
-    Some(event_id),
+    &AddFactRequest {
+        content: "Production API latency is 42ms p99".into(),
+        fact_type: FactType::Episodic,
+        source_event_id: Some(event_id),
+        scope: Some("team:backend/service:api".into()),
+        opts: Some(opts),
+    },
     &embedder,
-    Some("team:backend/service:api"),
-    Some(&opts),
-    None,  // no auto-pin classifier
+    None, // no auto-pin classifier
 )?;
 ```
 
@@ -169,12 +186,32 @@ When `scope` is `None`, the fact is placed at the root scope (ID 1), which is vi
 
 ```rust
 // Facts at different scopes
-engine.add_fact("Global preference", FactType::Semantic, None, &embedder,
-    None, None, None)?;  // root scope
+engine.add_fact(
+    &AddFactRequest {
+        content: "Global preference".into(),
+        fact_type: FactType::Semantic,
+        ..Default::default()
+    },
+    &embedder, None,
+)?;
 
-engine.add_fact("Michael's preference", FactType::Semantic, None, &embedder,
-    Some("user:michael"), None, None)?;
+engine.add_fact(
+    &AddFactRequest {
+        content: "Michael's preference".into(),
+        fact_type: FactType::Semantic,
+        scope: Some("user:michael".into()),
+        ..Default::default()
+    },
+    &embedder, None,
+)?;
 
-engine.add_fact("Project-specific config", FactType::Procedural, None, &embedder,
-    Some("user:michael/project:demo"), None, None)?;
+engine.add_fact(
+    &AddFactRequest {
+        content: "Project-specific config".into(),
+        fact_type: FactType::Procedural,
+        scope: Some("user:michael/project:demo".into()),
+        ..Default::default()
+    },
+    &embedder, None,
+)?;
 ```
