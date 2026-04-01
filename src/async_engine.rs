@@ -17,7 +17,7 @@ use crate::traits::{
     EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, SummaryGenerator,
 };
 use crate::types::{
-    AddFactOptions, ConsolidationLevel, Fact, FactType, NewEvent, NewFact, Summary,
+    AddFactOptions, BatchFactEntry, ConsolidationLevel, Fact, FactType, NewEvent, NewFact, Summary,
 };
 
 /// Async wrapper around [`MemoryEngine`].
@@ -115,6 +115,29 @@ impl AsyncMemoryEngine {
                 embedder.as_ref(),
                 scope.as_deref(),
                 opts.as_ref(),
+                classifier
+                    .as_ref()
+                    .map(|c| c.as_ref() as &dyn PersistenceClassifier),
+            )
+        })
+        .await
+        .map_err(join_err)?
+    }
+
+    /// Add multiple facts atomically via batch embedding + single transaction.
+    ///
+    /// Async wrapper around [`MemoryEngine::add_facts_batch`].
+    pub async fn add_facts_batch(
+        &self,
+        entries: Vec<BatchFactEntry>,
+        embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
+        classifier: Option<Arc<dyn PersistenceClassifier + Send + Sync>>,
+    ) -> Result<Vec<i64>> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            engine.add_facts_batch(
+                &entries,
+                embedder.as_ref(),
                 classifier
                     .as_ref()
                     .map(|c| c.as_ref() as &dyn PersistenceClassifier),

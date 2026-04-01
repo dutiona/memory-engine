@@ -112,7 +112,7 @@ For `memory_add_fact`, callers can bypass server-side embedding by passing a pre
 
 ### Pre-Compaction Flush
 
-`memory_flush_insights` accepts a batch of insights for agents to capture before context window compaction. Each insight becomes a fact with `metadata.source = "pre_compaction_flush"`. Supports partial success — individual failures are reported without aborting the batch.
+`memory_flush_insights` accepts a batch of insights for agents to capture before context window compaction. Each insight becomes a fact with `metadata.source = "pre_compaction_flush"`. Insights are validated individually (malformed entries reported as failures), then valid entries are batch-embedded and inserted atomically in a single transaction. If the batch insert fails (e.g., embedding API error), all valid entries are reported as failed.
 
 ### Consolidation (`memory_consolidate`)
 

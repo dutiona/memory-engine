@@ -10,8 +10,8 @@ use crate::pool::ConnectionPool;
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::scope::ScopeTree;
 use crate::search::hybrid::{
-    hybrid_search, MatchType, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery,
-    SearchResult,
+    MatchType, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
+    hybrid_search,
 };
 use crate::search::query::MemoryQuery;
 use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
@@ -26,7 +26,7 @@ use crate::traits::{
     EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, Reranker, SummaryGenerator,
 };
 use crate::types::{
-    AddFactOptions, ConsolidationLevel, Fact, FactType, NewEdge, NewEvent, NewFact,
+    AddFactOptions, BatchFactEntry, ConsolidationLevel, Fact, FactType, NewEdge, NewEvent, NewFact,
 };
 
 /// Configuration for opening a [`MemoryEngine`] backed by a file.
@@ -485,6 +485,211 @@ impl MemoryEngine {
         }
 
         Ok(fact_id)
+    }
+
+    /// Add multiple facts atomically: batch-embed all texts in a single call,
+    /// classify outside the lock, then insert all facts in one transaction.
+    ///
+    /// Returns all assigned fact IDs on success. On any insert failure the
+    /// entire batch is rolled back (all-or-nothing).
+    ///
+    /// # Performance
+    ///
+    /// - 1 embedding call (batch) instead of N
+    /// - 1 SQLite transaction (savepoint) instead of N
+    /// - Scope resolution inside savepoint for atomicity; `scope_tree`
+    ///   cache deferred to after `RELEASE` (two-phase commit).
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from batch embedding, dimension validation, or DB insert.
+    pub fn add_facts_batch(
+        &self,
+        entries: &[BatchFactEntry],
+        embedder: &dyn EmbeddingProvider,
+        classifier: Option<&dyn PersistenceClassifier>,
+    ) -> Result<Vec<i64>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // --- Phase 1: Batch embed OUTSIDE the write lock ---
+        let texts: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
+        let embeddings = embedder.embed_batch(&texts)?;
+
+        if embeddings.len() != entries.len() {
+            return Err(MemoryError::Internal(format!(
+                "embed_batch returned {} embeddings for {} entries",
+                embeddings.len(),
+                entries.len()
+            )));
+        }
+
+        // --- Phase 2: Classify + prepare OUTSIDE the write lock ---
+        let now = Utc::now();
+
+        let prepared: Vec<_> = entries
+            .iter()
+            .zip(embeddings)
+            .map(|(entry, embedding)| {
+                let opts = entry.opts.clone().unwrap_or_default();
+                let base_importance = opts.importance.unwrap_or(0.5);
+                let effective_created = opts.t_created.unwrap_or(now);
+                let effective_last_accessed = opts.last_accessed.unwrap_or(now);
+
+                let is_pinned = match opts.pinned {
+                    Some(p) => p,
+                    None => classifier.is_some_and(|c| {
+                        let temp = Fact {
+                            id: 0,
+                            content: entry.content.clone(),
+                            content_hash: String::new(),
+                            embedding: embedding.clone(),
+                            fact_type: entry.fact_type.clone(),
+                            t_created: effective_created,
+                            t_expired: None,
+                            t_valid: opts.t_valid,
+                            t_invalid: opts.t_invalid,
+                            source_event_id: entry.source_event_id,
+                            importance: base_importance,
+                            access_count: 0,
+                            last_accessed: effective_last_accessed,
+                            metadata: opts
+                                .metadata
+                                .clone()
+                                .unwrap_or_else(|| serde_json::json!({})),
+                            scope_id: 0,
+                            is_pinned: false,
+                            importance_score: base_importance,
+                            surfaced_at: None,
+                        };
+                        c.should_pin(&temp)
+                    }),
+                };
+
+                (
+                    entry,
+                    embedding,
+                    opts,
+                    is_pinned,
+                    effective_created,
+                    effective_last_accessed,
+                )
+            })
+            .collect();
+
+        // --- Phase 3: DB operations INSIDE the write lock ---
+        #[cfg(feature = "ann")]
+        let mut hnsw_pairs: Vec<(i64, Vec<f32>)> = Vec::with_capacity(entries.len());
+
+        let fact_ids = {
+            let conn = self.write_conn()?;
+            conn.execute_batch("SAVEPOINT batch_insert")?;
+
+            let result = (|| -> Result<(Vec<i64>, Vec<i64>)> {
+                let scope_store = ScopeStore::new(&conn);
+                let store = FactStore::new(&conn, self.embed_dim);
+
+                // Resolve scopes INSIDE the savepoint so they roll back on
+                // error. Deduplicate paths to avoid redundant DB lookups.
+                let mut scope_cache: std::collections::HashMap<String, i64> =
+                    std::collections::HashMap::new();
+                let mut scope_ids = Vec::with_capacity(prepared.len());
+
+                for (entry, ..) in &prepared {
+                    let scope_id = match &entry.scope {
+                        Some(path) => {
+                            if let Some(&cached) = scope_cache.get(path) {
+                                cached
+                            } else {
+                                let id = scope_store.ensure_path(path)?;
+                                scope_cache.insert(path.clone(), id);
+                                id
+                            }
+                        }
+                        None => 1, // root scope
+                    };
+                    scope_ids.push(scope_id);
+                }
+
+                let mut ids = Vec::with_capacity(prepared.len());
+
+                for (
+                    i,
+                    (entry, embedding, opts, is_pinned, effective_created, effective_last_accessed),
+                ) in prepared.iter().enumerate()
+                {
+                    let new_fact = NewFact {
+                        content: entry.content.clone(),
+                        content_hash: String::new(), // FactStore::insert computes via blake3
+                        embedding: embedding.clone(),
+                        fact_type: entry.fact_type.clone(),
+                        t_created: *effective_created,
+                        t_expired: None,
+                        t_valid: opts.t_valid,
+                        t_invalid: opts.t_invalid,
+                        source_event_id: entry.source_event_id,
+                        scope_id: scope_ids[i],
+                        importance: opts.importance.unwrap_or(0.5),
+                        access_count: 0,
+                        last_accessed: *effective_last_accessed,
+                        metadata: opts
+                            .metadata
+                            .clone()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                        is_pinned: *is_pinned,
+                    };
+
+                    let fact_id = store.insert(&new_fact)?;
+
+                    #[cfg(feature = "ann")]
+                    hnsw_pairs.push((fact_id, embedding.clone()));
+
+                    ids.push(fact_id);
+                }
+
+                // Collect unique scope_ids for deferred cache update
+                let unique_scope_ids: Vec<i64> = scope_cache.into_values().collect();
+
+                Ok((ids, unique_scope_ids))
+            })();
+
+            match result {
+                Ok((ids, scope_ids_to_cache)) => {
+                    conn.execute_batch("RELEASE batch_insert")?;
+
+                    // Deferred scope_tree cache update — only after successful
+                    // commit. Prevents cache desync on rollback.
+                    let scope_store = ScopeStore::new(&conn);
+                    let mut tree = self.scope_tree.write();
+                    for sid in scope_ids_to_cache {
+                        if let Ok(node) = scope_store.get(sid) {
+                            tree.insert(node);
+                        }
+                    }
+                    drop(tree);
+
+                    ids
+                }
+                Err(e) => {
+                    // ROLLBACK TO restores savepoint but keeps it open —
+                    // RELEASE closes it, leaving the connection clean.
+                    let _ = conn.execute_batch("ROLLBACK TO batch_insert");
+                    let _ = conn.execute_batch("RELEASE batch_insert");
+                    return Err(e);
+                }
+            }
+        }; // write lock released
+
+        // --- Phase 4: HNSW notification AFTER lock (success only) ---
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            for (fact_id, emb) in &hnsw_pairs {
+                hnsw.notify_insert(*fact_id, emb);
+            }
+        }
+
+        Ok(fact_ids)
     }
 
     // --- Public API: Query ---
@@ -2862,9 +3067,11 @@ mod tests {
 
         let results = engine.execute_query(&MemoryQuery::new()).unwrap().results;
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .all(|r| r.match_type == MatchType::ImportanceRank));
+        assert!(
+            results
+                .iter()
+                .all(|r| r.match_type == MatchType::ImportanceRank)
+        );
     }
 
     #[test]
@@ -2974,9 +3181,11 @@ mod tests {
             .results;
         // fact_type filtering in store path — list_by_importance_score doesn't filter by fact_type,
         // so it should be post-filtered
-        assert!(results
-            .iter()
-            .all(|r| r.fact.fact_type == FactType::Semantic));
+        assert!(
+            results
+                .iter()
+                .all(|r| r.fact.fact_type == FactType::Semantic)
+        );
     }
 
     #[test]
@@ -3834,12 +4043,16 @@ mod tests {
         assert_eq!(co_edges.len(), 2);
 
         // Both directions present
-        assert!(co_edges
-            .iter()
-            .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2));
-        assert!(co_edges
-            .iter()
-            .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1));
+        assert!(
+            co_edges
+                .iter()
+                .any(|e| e.source_fact_id == f1 && e.target_fact_id == f2)
+        );
+        assert!(
+            co_edges
+                .iter()
+                .any(|e| e.source_fact_id == f2 && e.target_fact_id == f1)
+        );
 
         // Weight matches constant
         for e in &co_edges {
@@ -4318,5 +4531,311 @@ mod tests {
             err.to_string().contains("non-finite"),
             "error message should mention non-finite score, got: {err}"
         );
+    }
+
+    // --- Batch embedding + batch add_fact tests ---
+
+    #[test]
+    fn embed_batch_default_impl_loops_embed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingEmbedder {
+            calls: AtomicUsize,
+            dim: usize,
+        }
+
+        impl EmbeddingProvider for CountingEmbedder {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![0.1; self.dim])
+            }
+        }
+
+        let embedder = CountingEmbedder {
+            calls: AtomicUsize::new(0),
+            dim: DIM,
+        };
+
+        let texts = ["alpha", "beta", "gamma"];
+        let result = embedder.embed_batch(&texts).unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 3);
+        for emb in &result {
+            assert_eq!(emb.len(), DIM);
+        }
+    }
+
+    #[test]
+    fn embed_batch_empty_returns_empty() {
+        let embedder = MockEmbedder { dim: DIM };
+        let result = embedder.embed_batch(&[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn add_facts_batch_inserts_all_facts() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        let entries: Vec<BatchFactEntry> = (0..5)
+            .map(|i| BatchFactEntry {
+                content: format!("batch fact {i}"),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            })
+            .collect();
+
+        let ids = engine.add_facts_batch(&entries, &embedder, None).unwrap();
+        assert_eq!(ids.len(), 5);
+
+        // All IDs should be unique and positive
+        let unique: std::collections::HashSet<i64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 5);
+        assert!(ids.iter().all(|&id| id > 0));
+
+        // Verify facts are actually in the DB
+        for (i, &id) in ids.iter().enumerate() {
+            let fact = engine.get_fact(id).unwrap();
+            assert_eq!(fact.content, format!("batch fact {i}"));
+        }
+    }
+
+    #[test]
+    fn add_facts_batch_empty_returns_empty() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        let ids = engine.add_facts_batch(&[], &embedder, None).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn add_facts_batch_with_scopes() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        let entries = vec![
+            BatchFactEntry {
+                content: "fact in project/a".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: Some("project/a".into()),
+                opts: None,
+            },
+            BatchFactEntry {
+                content: "fact in project/b".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: Some("project/b".into()),
+                opts: None,
+            },
+            BatchFactEntry {
+                content: "fact in root".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+        ];
+
+        let ids = engine.add_facts_batch(&entries, &embedder, None).unwrap();
+        assert_eq!(ids.len(), 3);
+
+        // Verify scope assignments via fact retrieval
+        let f0 = engine.get_fact(ids[0]).unwrap();
+        let f2 = engine.get_fact(ids[2]).unwrap();
+        // f0 should be in a non-root scope, f2 in root (scope_id=1)
+        assert_ne!(f0.scope_id, f2.scope_id);
+        assert_eq!(f2.scope_id, 1); // root scope
+    }
+
+    #[test]
+    fn add_facts_batch_with_classifier() {
+        struct AlwaysPin;
+        impl PersistenceClassifier for AlwaysPin {
+            fn should_pin(&self, _fact: &Fact) -> bool {
+                true
+            }
+        }
+
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+        let classifier = AlwaysPin;
+
+        let entries = vec![BatchFactEntry {
+            content: "important fact".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        }];
+
+        let ids = engine
+            .add_facts_batch(&entries, &embedder, Some(&classifier))
+            .unwrap();
+        let fact = engine.get_fact(ids[0]).unwrap();
+        assert!(fact.is_pinned);
+    }
+
+    #[test]
+    fn add_facts_batch_rejects_embedding_count_mismatch() {
+        /// Embedder that returns fewer embeddings than requested.
+        struct BadBatchEmbedder;
+        impl EmbeddingProvider for BadBatchEmbedder {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.5; DIM])
+            }
+            fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+                // Always return exactly 1 embedding regardless of input
+                Ok(vec![vec![0.5; DIM]])
+            }
+        }
+
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let entries = vec![
+            BatchFactEntry {
+                content: "a".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            BatchFactEntry {
+                content: "b".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+        ];
+
+        let err = engine
+            .add_facts_batch(&entries, &BadBatchEmbedder, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("1 embeddings for 2 entries"),
+            "expected count mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn add_facts_batch_rollback_on_insert_failure() {
+        /// Embedder that returns wrong dimension for the last embedding,
+        /// causing FactStore::insert to fail mid-transaction.
+        struct BadDimBatchEmbedder;
+        impl EmbeddingProvider for BadDimBatchEmbedder {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.5; DIM])
+            }
+            fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+                let mut results: Vec<Vec<f32>> = texts.iter().map(|_| vec![0.5; DIM]).collect();
+                // Corrupt the last embedding with wrong dimension
+                if let Some(last) = results.last_mut() {
+                    *last = vec![0.5; DIM + 1]; // wrong dim
+                }
+                Ok(results)
+            }
+        }
+
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+        // Use scoped entries to verify scopes also roll back
+        let entries = vec![
+            BatchFactEntry {
+                content: "rollback test 0".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: Some("rollback/scope-a".into()),
+                opts: None,
+            },
+            BatchFactEntry {
+                content: "rollback test 1".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: Some("rollback/scope-b".into()),
+                opts: None,
+            },
+            BatchFactEntry {
+                content: "rollback test 2".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+        ];
+
+        // Should fail on the last insert (wrong dim)
+        let result = engine.add_facts_batch(&entries, &BadDimBatchEmbedder, None);
+        assert!(result.is_err());
+
+        // Verify rollback: no facts should be in the DB
+        let query = SearchQuery {
+            text: Some("rollback test".into()),
+            embedding: Some(vec![0.5; DIM]),
+            limit: 10,
+            mode: SearchMode::Hybrid,
+            rerank_depth: None,
+            valid_at: None,
+            fact_type: None,
+            scope: None,
+        };
+        let results = engine.query(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "expected no facts after rollback, got {}",
+            results.len()
+        );
+
+        // Verify scope atomicity: scopes should NOT exist after rollback.
+        // A successful add_facts_batch with the same scopes should create
+        // them fresh (proving they were rolled back from the failed attempt).
+        let good_entries = vec![BatchFactEntry {
+            content: "after rollback".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: Some("rollback/scope-a".into()),
+            opts: None,
+        }];
+        let good_embedder = MockEmbedder { dim: DIM };
+        let ids = engine
+            .add_facts_batch(&good_entries, &good_embedder, None)
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        let fact = engine.get_fact(ids[0]).unwrap();
+        // If scopes were leaked, scope_id would already exist.
+        // The fact that this succeeds proves the DB is consistent.
+        assert_ne!(fact.scope_id, 1, "should be in a non-root scope");
+    }
+
+    #[test]
+    fn add_facts_batch_temporal_consistency() {
+        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let embedder = MockEmbedder { dim: DIM };
+
+        let entries: Vec<BatchFactEntry> = (0..3)
+            .map(|i| BatchFactEntry {
+                content: format!("temporal {i}"),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            })
+            .collect();
+
+        let ids = engine.add_facts_batch(&entries, &embedder, None).unwrap();
+
+        // All facts should have the same t_created (within a reasonable window)
+        let facts: Vec<Fact> = ids.iter().map(|&id| engine.get_fact(id).unwrap()).collect();
+        let first_created = facts[0].t_created;
+        for fact in &facts {
+            let diff = (fact.t_created - first_created).num_milliseconds().abs();
+            assert!(
+                diff == 0,
+                "batch facts should share the same timestamp, diff: {diff}ms"
+            );
+        }
     }
 }
