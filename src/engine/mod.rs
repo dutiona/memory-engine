@@ -334,6 +334,14 @@ impl MemoryEngine {
             (Some(cfg), Some(ref hnsw_snap)) if cfg.ann_threshold < usize::MAX => Some(
                 crate::search::ann::HnswStrategy::from_snapshot(hnsw_snap, embed_dim)?,
             ),
+            (Some(cfg), None) if cfg.ann_threshold < usize::MAX => {
+                // Snapshot was created without HNSW data (e.g. non-ann build),
+                // but current config requires ANN. Fall back to DB rebuild.
+                let conn = pool.read();
+                Some(crate::search::ann::HnswStrategy::build_from_db(
+                    &conn, embed_dim,
+                )?)
+            }
             _ => None,
         };
 
