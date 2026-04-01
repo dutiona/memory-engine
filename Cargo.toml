@@ -48,6 +48,7 @@ async = ["dep:tokio"]
 ann = ["dep:hnsw", "dep:space", "dep:rand"]
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
+archive = ["compress-zstd"]
 
 [lints.rust]
 unsafe_code = "forbid"

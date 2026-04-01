@@ -42,6 +42,9 @@ pub enum MemoryError {
     #[error("reranker error: {0}")]
     Reranker(String),
 
+    #[error("archive error: {0}")]
+    Archive(String),
+
     /// Attempted a write operation on a read-only engine.
     #[error("operation requires write access, but engine was opened read-only")]
     ReadOnly,

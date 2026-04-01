@@ -264,6 +264,36 @@ impl<'a> EdgeStore<'a> {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(edges)
     }
+
+    /// Hard-delete edges where BOTH endpoints are in the given fact ID set.
+    ///
+    /// Used after successful archival to remove edges whose facts have been
+    /// moved to a `.pak` file. Edges where only one endpoint is archived are
+    /// left intact (they may reference facts still in the live DB).
+    ///
+    /// Returns the number of rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn hard_delete_by_facts(&self, fact_ids: &[i64]) -> Result<usize> {
+        if fact_ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: String = fact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "DELETE FROM edges WHERE source_fact_id IN ({placeholders}) AND target_fact_id IN ({placeholders})"
+        );
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(fact_ids.len() * 2);
+        for id in fact_ids {
+            params.push(id as &dyn rusqlite::types::ToSql);
+        }
+        for id in fact_ids {
+            params.push(id as &dyn rusqlite::types::ToSql);
+        }
+        let deleted = self.conn.execute(&sql, params.as_slice())?;
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
@@ -407,5 +437,55 @@ mod tests {
         let active = store.list_active().unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].relation_type, "d");
+    }
+
+    // --- hard_delete_by_facts tests ---
+
+    #[test]
+    fn hard_delete_by_facts_only_deletes_internal_edges() {
+        // facts: 1, 2, 3
+        // edges: f1→f2 (both in archive set), f2→f3 (f3 not in set)
+        // delete by [f1, f2] — only f1→f2 should be deleted
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        store.insert(&make_edge(1, 2, "internal")).unwrap();
+        store.insert(&make_edge(2, 3, "cross_boundary")).unwrap();
+
+        let deleted = store.hard_delete_by_facts(&[1, 2]).unwrap();
+        assert_eq!(deleted, 1, "only the fully-internal edge should be deleted");
+
+        let remaining = store.list_all().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].relation_type, "cross_boundary");
+    }
+
+    #[test]
+    fn hard_delete_by_facts_empty_slice_is_noop() {
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+        store.insert(&make_edge(1, 2, "a")).unwrap();
+
+        let deleted = store.hard_delete_by_facts(&[]).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(store.list_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hard_delete_by_facts_removes_both_directions() {
+        // Both f1→f2 and f2→f1 are internal when set is [f1, f2]
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        store.insert(&make_edge(1, 2, "forward")).unwrap();
+        store.insert(&make_edge(2, 1, "backward")).unwrap();
+        store.insert(&make_edge(1, 3, "external")).unwrap(); // f3 not in set
+
+        let deleted = store.hard_delete_by_facts(&[1, 2]).unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = store.list_all().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].relation_type, "external");
     }
 }

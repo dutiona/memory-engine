@@ -250,7 +250,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | Feature                                                                          | Description                                                                                                                                                                                                                  |
 | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Evaluation harness ([#16](https://github.com/dutiona/memory-engine/issues/16))   | Regression corpus for retrieval quality, consolidation correctness, forgetting behavior. After 4a/4b ship. **Research update:** context collapse detection (R4, DC/ACE), outcome-based retrieval quality (R5, ACE/Reflexion) |
-| Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback)                                                                                                                                   |
+| ✅ Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback). [PR #196](https://github.com/dutiona/memory-engine/pull/196)                                                                      |
 | Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot                                                                                                                                                                          |
 
 #### Code Quality Sweep (super-qa — parallel track)
@@ -345,7 +345,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 **Parallelizable right now (4 independent tracks):**
 
 1. **Phase 4 follow-ups** (all resolved: #95 ✅, #96 ✅, #150 ✅, #151 ✅, #152 ✅)
-1. **Phase 4c** (#16, #46, #31) — #16 evaluation harness benefits from MCP being live; #31 depends on #46
+1. **Phase 4c** (#16, #46 ✅, #31) — #46 archival compression done ([PR #196](https://github.com/dutiona/memory-engine/pull/196)); #31 fast cold-start unblocked; #16 evaluation harness benefits from MCP being live
 1. **Super-qa sweep** (24 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review) — incremental, any order
 1. **Phase 5a design + implementation** — the critical path forward
 

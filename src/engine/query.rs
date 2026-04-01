@@ -261,6 +261,29 @@ impl MemoryEngine {
             // Vector-only queries: expired_matches stays None (documented limitation).
         }
 
+        // Archive fallback (opt-in, best-effort).
+        #[cfg(feature = "archive")]
+        if query.include_archives {
+            match self.search_archives_fallback(query, limit) {
+                Ok(Some(archive_results)) => {
+                    diagnostics.archive_paks_scanned = archive_results.paks_scanned;
+                    diagnostics.archive_search_ms = archive_results.search_ms;
+                    results.extend(archive_results.results);
+                    results.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    results.truncate(limit);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // Archive search is best-effort; silently skip on error.
+                    tracing::warn!("archive search fallback failed: {e}");
+                }
+            }
+        }
+
         Ok(QueryResponse {
             results,
             diagnostics,
