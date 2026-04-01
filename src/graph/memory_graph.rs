@@ -75,6 +75,17 @@ impl MemoryGraph {
         }
     }
 
+    /// Remove a node and all its edges from the graph.
+    ///
+    /// No-op if the fact id is not in the graph.
+    /// Used by archival after hard-deleting facts from `SQLite`.
+    pub fn remove_node(&mut self, fact_id: i64) {
+        let Some(idx) = self.node_map.remove(&fact_id) else {
+            return;
+        };
+        self.graph.remove_node(idx);
+    }
+
     /// Remove all edges involving a given fact id (as source or target).
     ///
     /// Uses directed edge iterators for O(degree) instead of O(E).

@@ -26,6 +26,9 @@ pub enum MatchType {
     Both,
     /// Result came from importance-ranked store query (no text/vector search).
     ImportanceRank,
+    /// Result came from a decompressed archive `.pak` file (slow fallback).
+    /// Always present in the enum for serde ABI stability across feature combinations.
+    Archive,
 }
 
 /// A unified search query across FTS5 and vector sources.
@@ -84,6 +87,12 @@ pub struct QueryDiagnostics {
     pub fts_candidates: usize,
     /// Number of vector candidates before merge.
     pub vector_candidates: usize,
+    /// Number of archive `.pak` files scanned. `0` when archives not searched.
+    #[cfg(feature = "archive")]
+    pub archive_paks_scanned: usize,
+    /// Total milliseconds spent decompressing and searching archives.
+    #[cfg(feature = "archive")]
+    pub archive_search_ms: u64,
 }
 
 /// Complete query response including results and diagnostic metadata.

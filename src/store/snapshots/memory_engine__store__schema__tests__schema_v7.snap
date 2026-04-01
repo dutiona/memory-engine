@@ -3,6 +3,9 @@ source: src/store/schema.rs
 assertion_line: 1822
 expression: schema
 ---
+-- index: idx_archive_manifest_path
+CREATE UNIQUE INDEX idx_archive_manifest_path ON archive_manifest(pak_path);
+
 -- index: idx_edges_expired
 CREATE INDEX idx_edges_expired ON edges(t_expired);
 
@@ -59,6 +62,9 @@ CREATE UNIQUE INDEX idx_scopes_parent_label ON scopes(parent_id, label);
 
 -- index: idx_summaries_scope
 CREATE INDEX idx_summaries_scope ON summaries(scope_id);
+
+-- table: archive_manifest
+CREATE TABLE archive_manifest ( id INTEGER PRIMARY KEY AUTOINCREMENT, pak_path TEXT NOT NULL, created_at TEXT NOT NULL, fact_count INTEGER NOT NULL, edge_count INTEGER NOT NULL, fact_id_min INTEGER NOT NULL, fact_id_max INTEGER NOT NULL, t_created_min TEXT NOT NULL, t_created_max TEXT NOT NULL, size_bytes INTEGER NOT NULL, blake3_hash TEXT NOT NULL );
 
 -- table: config
 CREATE TABLE config ( key TEXT PRIMARY KEY, value TEXT NOT NULL );

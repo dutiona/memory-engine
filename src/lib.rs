@@ -32,6 +32,8 @@ pub mod traits;
 pub mod types;
 
 // === Internal modules (implementation details) ===
+#[cfg(feature = "archive")]
+pub(crate) mod archive;
 pub(crate) mod conflict;
 pub(crate) mod consolidation;
 pub(crate) mod forgetting;
@@ -42,6 +44,8 @@ pub(crate) mod scope;
 pub(crate) mod store;
 
 // === Re-exports: flat access to the most-used consumer types ===
+#[cfg(feature = "archive")]
+pub use archive::{ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVerifyResult};
 pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
 pub use engine::{EngineConfig, MemoryEngine};
 pub use error::*;
