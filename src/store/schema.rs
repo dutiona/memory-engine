@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -175,6 +175,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrate_v3_to_v4, false),
     (migrate_v4_to_v5, false),
     (migrate_v5_to_v6, false),
+    (migrate_v6_to_v7, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -619,6 +620,28 @@ fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add `archive_manifest` table to track `.pak` archive files.
+fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS archive_manifest (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pak_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            fact_count INTEGER NOT NULL,
+            edge_count INTEGER NOT NULL,
+            fact_id_min INTEGER NOT NULL,
+            fact_id_max INTEGER NOT NULL,
+            t_created_min TEXT NOT NULL,
+            t_created_max TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            blake3_hash TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_manifest_path
+            ON archive_manifest(pak_path);",
+    )?;
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -682,6 +705,23 @@ CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS archive_manifest (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pak_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    fact_count INTEGER NOT NULL,
+    edge_count INTEGER NOT NULL,
+    fact_id_min INTEGER NOT NULL,
+    fact_id_max INTEGER NOT NULL,
+    t_created_min TEXT NOT NULL,
+    t_created_max TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    blake3_hash TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_manifest_path
+    ON archive_manifest(pak_path);
 ";
 
 const SCOPES_DDL: &str = "
@@ -1200,8 +1240,8 @@ CREATE TABLE IF NOT EXISTS config (
                 |r| r.get(0),
             )
             .unwrap();
-        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes
-        assert_eq!(count, 19);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest
+        assert_eq!(count, 20);
     }
 
     // --- Migration framework tests ---
@@ -1212,13 +1252,13 @@ CREATE TABLE IF NOT EXISTS config (
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
         // migrate is a no-op on fresh DB
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
     }
 
@@ -1233,7 +1273,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
     }
 
@@ -1245,7 +1285,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
     }
 
@@ -1279,7 +1319,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
 
         // Data survived both migrations
@@ -1369,7 +1409,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
 
         // After migration: orphan scope_id fails (FK enforced)
@@ -1497,7 +1537,7 @@ CREATE TABLE IF NOT EXISTS config (
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
     }
 
@@ -1507,7 +1547,7 @@ CREATE TABLE IF NOT EXISTS config (
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
         conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, is_pinned, importance_score)
@@ -1669,7 +1709,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
     }
 
@@ -1691,7 +1731,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
 
         // Existing events get default revision = 1
@@ -1775,7 +1815,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
 
         // Event survived all migrations, got default revision
@@ -1808,7 +1848,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("6".to_string())
+            Some("7".to_string())
         );
 
         // Existing facts have surfaced_at = NULL
@@ -1907,11 +1947,11 @@ CREATE TABLE IF NOT EXISTS config (
     }
 
     #[test]
-    fn schema_v6_snapshot() {
+    fn schema_v7_snapshot() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         let schema = deterministic_schema_dump(&conn);
-        insta::assert_snapshot!("schema_v6", schema);
+        insta::assert_snapshot!("schema_v7", schema);
     }
 
     // --- Property-based migration tests (proptest) ---
@@ -2053,5 +2093,91 @@ CREATE TABLE IF NOT EXISTS config (
         set_config(&conn, "schema_version", &old).unwrap();
         let err = validate_schema_version(&conn).unwrap_err();
         assert!(matches!(err, MemoryError::Migration(_)));
+    }
+
+    // --- v6→v7 migration tests ---
+
+    /// Frozen v6 schema: v5 tables + surfaced_at on facts, no archive_manifest.
+    fn init_schema_v6(conn: &Connection) -> Result<()> {
+        conn.execute_batch(TABLES_V5_DDL)?;
+        conn.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")?;
+        conn.execute_batch(SCOPES_DDL_V4)?;
+        conn.execute_batch(FTS5_DDL_V4)?;
+        conn.execute_batch(TRIGGERS_DDL_V4)?;
+        conn.execute_batch(INDEXES_V4_DDL)?;
+        set_config(conn, "schema_version", "6")?;
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v6_to_v7_adds_archive_manifest() {
+        let conn = open_memory().unwrap();
+        init_schema_v6(&conn).unwrap();
+
+        // archive_manifest must NOT exist before migration
+        let count_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='archive_manifest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_before, 0,
+            "archive_manifest should not exist before migration"
+        );
+
+        migrate(&conn, None).unwrap();
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("7".to_string())
+        );
+
+        // archive_manifest must exist after migration
+        let count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='archive_manifest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_after, 1,
+            "archive_manifest should exist after migration"
+        );
+
+        // Unique index on pak_path must exist
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_archive_manifest_path'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            index_count, 1,
+            "idx_archive_manifest_path should exist after migration"
+        );
+    }
+
+    #[test]
+    fn fresh_db_has_archive_manifest_table() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='archive_manifest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "archive_manifest should exist in fresh v7 schema");
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("7".to_string())
+        );
     }
 }
