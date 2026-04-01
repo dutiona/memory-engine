@@ -328,9 +328,9 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
     │                │
     │           ┌────┴────┐
     │           │         │
-    │        eval #16   cold-start #31
-    │        (needs      (needs
-    │         data)       #46 first)
+    │        eval #16   cold-start #31 ✅
+    │        (needs      (PR #195)
+    │         data)
     │
     ▼
  Phase 5a ◀── CRITICAL PATH
@@ -353,7 +353,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 **Parallelizable right now (4 independent tracks):**
 
 1. **Phase 4 follow-ups** (all resolved: #95 ✅, #96 ✅, #150 ✅, #151 ✅, #152 ✅)
-1. **Phase 4c** (#16, #46 ✅, #31) — #46 archival compression done ([PR #196](https://github.com/dutiona/memory-engine/pull/196)); #31 fast cold-start unblocked; #16 evaluation harness benefits from MCP being live
+1. **Phase 4c** (#16, #46 ✅, #31 ✅) — #46 archival compression done ([PR #196](https://github.com/dutiona/memory-engine/pull/196)); #31 fast cold-start done ([PR #195](https://github.com/dutiona/memory-engine/pull/195)); #16 evaluation harness remaining
 1. **Super-qa sweep** (24 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review) — incremental, any order
 1. **Phase 5a design + implementation** — the critical path forward
 
