@@ -1,9 +1,9 @@
 //! Phase 3b integration test: full lifecycle with pinned facts, future memory, and forgetting.
 
 use chrono::Utc;
+use memory_engine::ResumeConfig;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
-use memory_engine::resume::ResumeConfig;
 use memory_engine::traits::{EmbeddingProvider, ForgetPolicy, PersistenceClassifier};
 use memory_engine::types::{AddFactOptions, Fact, FactType};
 
