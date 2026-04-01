@@ -400,7 +400,7 @@ mod tests {
     use crate::inspect::types::DumpFormat;
     use crate::store::schema::{get_config, init_schema, migrate, open_memory};
     use crate::traits::EmbeddingProvider;
-    use crate::types::FactType;
+    use crate::types::{AddFactRequest, FactType};
     use std::collections::HashMap;
 
     const DIM: usize = 4;
@@ -544,23 +544,27 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "alpha fact",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "alpha fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
         engine
             .add_fact(
-                "beta fact",
-                FactType::Episodic,
-                None,
+                &AddFactRequest {
+                    content: "beta fact".into(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -601,12 +605,14 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "existing",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "existing".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
@@ -640,23 +646,27 @@ mod tests {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         engine
             .add_fact(
-                "fact1",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "fact1".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();
         engine
             .add_fact(
-                "fact2",
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: "fact2".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &FakeEmbed,
-                None,
-                None,
                 None,
             )
             .unwrap();

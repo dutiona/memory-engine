@@ -6,6 +6,7 @@
 
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
+use memory_engine::types::AddFactRequest;
 use memory_engine_mcp::tools;
 use serde_json::{Map, Value, json};
 
@@ -91,12 +92,15 @@ fn get_fact_sparse() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Rust is a systems programming language with zero-cost abstractions",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust is a systems programming language with zero-cost abstractions"
+                    .into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -119,12 +123,15 @@ fn get_fact_standard() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Rust is a systems programming language with zero-cost abstractions",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust is a systems programming language with zero-cost abstractions"
+                    .into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -147,12 +154,15 @@ fn get_fact_full() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Rust is a systems programming language with zero-cost abstractions",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust is a systems programming language with zero-cost abstractions"
+                    .into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -179,12 +189,14 @@ fn explain_fact_sparse() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Ebbinghaus forgetting curve",
-            memory_engine::types::FactType::Procedural,
-            None,
+            &AddFactRequest {
+                content: "Ebbinghaus forgetting curve".into(),
+                fact_type: memory_engine::types::FactType::Procedural,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -207,12 +219,14 @@ fn explain_fact_standard() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Ebbinghaus forgetting curve",
-            memory_engine::types::FactType::Procedural,
-            None,
+            &AddFactRequest {
+                content: "Ebbinghaus forgetting curve".into(),
+                fact_type: memory_engine::types::FactType::Procedural,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -235,12 +249,14 @@ fn explain_fact_full() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Ebbinghaus forgetting curve",
-            memory_engine::types::FactType::Procedural,
-            None,
+            &AddFactRequest {
+                content: "Ebbinghaus forgetting curve".into(),
+                fact_type: memory_engine::types::FactType::Procedural,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -267,12 +283,14 @@ fn query_result_sparse() {
     let embedder = TestEmbedder { dim: DIM };
     engine
         .add_fact(
-            "Neural networks learn representations",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Neural networks learn representations".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -295,12 +313,14 @@ fn query_result_standard() {
     let embedder = TestEmbedder { dim: DIM };
     engine
         .add_fact(
-            "Neural networks learn representations",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Neural networks learn representations".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -323,12 +343,14 @@ fn query_result_full() {
     let embedder = TestEmbedder { dim: DIM };
     engine
         .add_fact(
-            "Neural networks learn representations",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Neural networks learn representations".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -360,12 +382,14 @@ fn resume_context_sparse() {
     };
     engine
         .add_fact(
-            "Critical pinned fact",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Critical pinned fact".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts),
             None,
         )
         .unwrap();
@@ -393,12 +417,14 @@ fn resume_context_standard() {
     };
     engine
         .add_fact(
-            "Critical pinned fact",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Critical pinned fact".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts),
             None,
         )
         .unwrap();
@@ -426,12 +452,14 @@ fn resume_context_full() {
     };
     engine
         .add_fact(
-            "Critical pinned fact",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Critical pinned fact".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts),
             None,
         )
         .unwrap();
@@ -477,12 +505,14 @@ fn sparse_has_exactly_4_fields() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Field count test",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Field count test".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -504,12 +534,14 @@ fn standard_excludes_embedding_and_hash() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Field exclusion test",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Field exclusion test".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -534,12 +566,14 @@ fn full_includes_embedding_dim_and_hash() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Full depth test",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Full depth test".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -568,12 +602,14 @@ fn default_depth_is_standard() {
     let embedder = TestEmbedder { dim: DIM };
     let fact_id = engine
         .add_fact(
-            "Default depth test",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Default depth test".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();

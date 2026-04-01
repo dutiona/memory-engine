@@ -5,7 +5,7 @@ use memory_engine::ResumeConfig;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::traits::{EmbeddingProvider, ForgetPolicy, PersistenceClassifier};
-use memory_engine::types::{AddFactOptions, Fact, FactType};
+use memory_engine::types::{AddFactOptions, AddFactRequest, Fact, FactType};
 
 const DIM: usize = 8;
 
@@ -44,12 +44,14 @@ fn full_lifecycle_pinned_and_future_memory() {
     };
     let pin_id = engine
         .add_fact(
-            "I am an AI assistant",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "I am an AI assistant".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_pin.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_pin),
             None,
         )
         .unwrap();
@@ -62,12 +64,14 @@ fn full_lifecycle_pinned_and_future_memory() {
     };
     engine
         .add_fact(
-            "Check release notes tomorrow",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Check release notes tomorrow".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_future.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_future),
             None,
         )
         .unwrap();
@@ -75,12 +79,14 @@ fn full_lifecycle_pinned_and_future_memory() {
     // 3. Add normal fact (forgettable)
     engine
         .add_fact(
-            "Had coffee today",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Had coffee today".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -158,12 +164,14 @@ fn classifier_auto_pins_semantic_facts() {
     // Semantic fact → auto-pinned by classifier
     let id1 = engine
         .add_fact(
-            "core identity",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "core identity".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             Some(&classifier),
         )
         .unwrap();
@@ -172,12 +180,14 @@ fn classifier_auto_pins_semantic_facts() {
     // Episodic fact → not pinned
     let id2 = engine
         .add_fact(
-            "ephemeral event",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "ephemeral event".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             Some(&classifier),
         )
         .unwrap();
@@ -190,12 +200,14 @@ fn classifier_auto_pins_semantic_facts() {
     };
     let id3 = engine
         .add_fact(
-            "not pinned despite classifier",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "not pinned despite classifier".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts),
+            },
             &embedder,
-            None,
-            Some(&opts),
             Some(&classifier),
         )
         .unwrap();
@@ -216,12 +228,14 @@ fn resume_context_5_tier_integration() {
     };
     engine
         .add_fact(
-            "pinned identity",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "pinned identity".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_pin.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_pin),
             None,
         )
         .unwrap();
@@ -234,12 +248,14 @@ fn resume_context_5_tier_integration() {
     };
     engine
         .add_fact(
-            "past reminder",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "past reminder".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts_due.clone()),
+            },
             &embedder,
-            None,
-            Some(&opts_due),
             None,
         )
         .unwrap();
@@ -247,12 +263,14 @@ fn resume_context_5_tier_integration() {
     // Tier 4: Regular recent fact
     engine
         .add_fact(
-            "recent observation",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "recent observation".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();

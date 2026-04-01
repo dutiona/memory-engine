@@ -184,14 +184,15 @@ pub struct AddFactOptions {
     pub last_accessed: Option<DateTime<Utc>>,
 }
 
-// --- Batch input ---
+// --- Fact request ---
 
-/// Input descriptor for [`crate::engine::MemoryEngine::add_facts_batch`].
+/// Input descriptor for [`crate::engine::MemoryEngine::add_fact`] and
+/// [`crate::engine::MemoryEngine::add_facts_batch`].
 ///
-/// Each entry describes one fact to insert. The engine handles embedding,
-/// classification, scope resolution, and DB insertion atomically for the batch.
+/// Bundles all data-level parameters for fact insertion. Infrastructure
+/// concerns (embedder, classifier) remain separate method parameters.
 #[derive(Debug, Clone)]
-pub struct BatchFactEntry {
+pub struct AddFactRequest {
     /// The fact text to embed and store.
     pub content: String,
     /// Semantic, episodic, procedural, etc.

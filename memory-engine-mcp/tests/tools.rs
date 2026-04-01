@@ -1,6 +1,6 @@
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::FactType;
+use memory_engine::types::{AddFactRequest, FactType};
 use memory_engine_mcp::tools;
 use rmcp::model::{CallToolResult, RawContent};
 use serde_json::{Map, Value, json};
@@ -26,12 +26,14 @@ fn test_engine() -> (MemoryEngine, tempfile::TempDir) {
 fn add_test_fact(engine: &MemoryEngine, content: &str) -> i64 {
     engine
         .add_fact(
-            content,
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: content.into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &FakeEmbed,
-            None,
-            None,
             None,
         )
         .unwrap()

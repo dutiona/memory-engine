@@ -65,17 +65,19 @@ let event_id = engine.ingest(&NewEvent {
 Facts are derived knowledge the agent has internalized:
 
 ```rust
-use memory_engine::FactType;
+use memory_engine::{FactType, AddFactRequest};
 
 let embedder = DummyEmbedder;
 let fact_id = engine.add_fact(
-    "Rust is a systems programming language focused on safety and performance",
-    FactType::Semantic,
-    Some(event_id),  // link to source event
+    &AddFactRequest {
+        content: "Rust is a systems programming language focused on safety and performance".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: Some(event_id),
+        scope: None,
+        opts: None,
+    },
     &embedder,
-    None,            // root scope
-    None,            // default options (importance=0.5)
-    None,            // no auto-pin classifier
+    None, // no auto-pin classifier
 )?;
 ```
 

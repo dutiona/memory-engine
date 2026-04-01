@@ -8,7 +8,7 @@ use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::inspect::types::*;
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::{AddFactOptions, FactType};
+use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
 const DIM: usize = 4;
 
@@ -29,12 +29,14 @@ fn inspection_lifecycle() {
     // Active fact
     let active_id = engine
         .add_fact(
-            "active fact",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "active fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &TestEmbed,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -46,12 +48,14 @@ fn inspection_lifecycle() {
     };
     let pinned_id = engine
         .add_fact(
-            "pinned fact",
-            FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "pinned fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(pin_opts),
+            },
             &TestEmbed,
-            None,
-            Some(&pin_opts),
             None,
         )
         .unwrap();
@@ -63,12 +67,14 @@ fn inspection_lifecycle() {
     };
     let due_id = engine
         .add_fact(
-            "due fact",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "due fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(due_opts),
+            },
             &TestEmbed,
-            None,
-            Some(&due_opts),
             None,
         )
         .unwrap();
@@ -174,12 +180,14 @@ fn stamp_surfaced_on_list_due() {
     };
     engine
         .add_fact(
-            "due reminder",
-            FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "due reminder".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts),
+            },
             &TestEmbed,
-            None,
-            Some(&opts),
             None,
         )
         .unwrap();

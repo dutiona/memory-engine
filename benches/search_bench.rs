@@ -25,7 +25,7 @@ use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::search::cosine_similarity;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::{FactType, ScopeQuery};
+use memory_engine::types::{AddFactRequest, FactType, ScopeQuery};
 
 const DIM: usize = 128;
 
@@ -73,12 +73,14 @@ fn setup_engine_with_dim(n: usize, dim: usize) -> MemoryEngine {
         let content = format!("{topic} — fact number {i}");
         engine
             .add_fact(
-                &content,
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content: content.clone(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
                 &embedder,
-                None,
-                None,
                 None,
             )
             .expect("add_fact");
@@ -113,12 +115,14 @@ fn setup_scoped_engine(n: usize) -> MemoryEngine {
         let content = format!("scoped fact number {i} in {scope}");
         engine
             .add_fact(
-                &content,
-                FactType::Semantic,
-                None,
+                &AddFactRequest {
+                    content,
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: Some(scope.into()),
+                    opts: None,
+                },
                 &embedder,
-                Some(scope),
-                None,
                 None,
             )
             .expect("add_fact");
@@ -380,7 +384,17 @@ fn setup_hnsw_engine(n: usize) -> MemoryEngine {
         let topic = TOPICS[i % TOPICS.len()];
         let content = format!("{topic} — fact number {i}");
         engine
-            .add_fact(&content, FactType::Semantic, None, &embedder, None, None)
+            .add_fact(
+                &AddFactRequest {
+                    content,
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                &embedder,
+                None,
+            )
             .expect("add_fact");
     }
     std::mem::forget(dir);

@@ -12,7 +12,7 @@ use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
 };
-use memory_engine::types::{AddFactOptions, BatchFactEntry, EventType, FactType, NewEvent};
+use memory_engine::types::{AddFactOptions, AddFactRequest, EventType, FactType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
 use serde_json::{Map, Value, json};
 
@@ -525,41 +525,29 @@ fn handle_add_fact(
         }
     }
 
-    let opts = AddFactOptions {
-        importance,
-        metadata,
-        t_valid,
-        t_invalid,
-        pinned,
-        ..Default::default()
+    let req = AddFactRequest {
+        content,
+        fact_type,
+        source_event_id,
+        scope,
+        opts: Some(AddFactOptions {
+            importance,
+            metadata,
+            t_valid,
+            t_invalid,
+            pinned,
+            ..Default::default()
+        }),
     };
 
     let fact_id = if let Some(emb) = pre_computed {
         let passthrough = PassthroughEmbedder::new(emb);
         engine
-            .add_fact(
-                &content,
-                fact_type,
-                source_event_id,
-                &passthrough,
-                scope.as_deref(),
-                Some(&opts),
-                None,
-            )
+            .add_fact(&req, &passthrough, None)
             .map_err(to_mcp_error)?
     } else {
         let emb = embedder.ok_or(ValidationError::NoEmbeddingProvider)?;
-        engine
-            .add_fact(
-                &content,
-                fact_type,
-                source_event_id,
-                emb,
-                scope.as_deref(),
-                Some(&opts),
-                None,
-            )
-            .map_err(to_mcp_error)?
+        engine.add_fact(&req, emb, None).map_err(to_mcp_error)?
     };
 
     ok_json(json!({ "fact_id": fact_id }))
@@ -780,7 +768,7 @@ fn handle_flush_insights(
     ))?;
 
     // --- Phase 1: Parse + validate all insights upfront ---
-    let mut entries: Vec<BatchFactEntry> = Vec::new();
+    let mut entries: Vec<AddFactRequest> = Vec::new();
     let mut entry_indices: Vec<usize> = Vec::new(); // original index for each valid entry
     let mut failed: Vec<Value> = Vec::new();
 
@@ -833,7 +821,7 @@ fn handle_flush_insights(
             ..Default::default()
         };
 
-        entries.push(BatchFactEntry {
+        entries.push(AddFactRequest {
             content,
             fact_type,
             source_event_id: None,

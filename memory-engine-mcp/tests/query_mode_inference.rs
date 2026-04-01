@@ -10,6 +10,7 @@
 
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
+use memory_engine::types::AddFactRequest;
 use memory_engine_mcp::tools;
 use serde_json::{Map, Value, json};
 
@@ -46,23 +47,27 @@ fn seed_facts(engine: &MemoryEngine) {
     let embedder = TestEmbedder { dim: DIM };
     engine
         .add_fact(
-            "Rust ownership model prevents data races",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust ownership model prevents data races".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Python GIL limits true parallelism",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Python GIL limits true parallelism".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
@@ -271,12 +276,14 @@ fn query_with_scope_parameters_accepted() {
 
     engine
         .add_fact(
-            "Rust borrow checker ensures safety",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust borrow checker ensures safety".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: Some("lang/rust".into()),
+                opts: None,
+            },
             &embedder,
-            Some("lang/rust"),
-            None,
             None,
         )
         .unwrap();
@@ -315,23 +322,27 @@ fn fts_with_fact_type_filter() {
 
     engine
         .add_fact(
-            "Rust compile-time guarantees",
-            memory_engine::types::FactType::Semantic,
-            None,
+            &AddFactRequest {
+                content: "Rust compile-time guarantees".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();
     engine
         .add_fact(
-            "Today I learned about Rust lifetimes",
-            memory_engine::types::FactType::Episodic,
-            None,
+            &AddFactRequest {
+                content: "Today I learned about Rust lifetimes".into(),
+                fact_type: memory_engine::types::FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
             &embedder,
-            None,
-            None,
             None,
         )
         .unwrap();

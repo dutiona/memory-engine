@@ -8,7 +8,7 @@ use memory_engine::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, ForgetPolicy,
     SummaryGenerator,
 };
-use memory_engine::types::{Fact, FactType, NewFact};
+use memory_engine::types::{AddFactRequest, Fact, FactType, NewFact};
 
 // --- EmbeddingProvider: consumers bring their own embedding model ---
 
@@ -72,39 +72,47 @@ fn main() -> Result<(), MemoryError> {
 
     // Add some facts
     engine.add_fact(
-        "Rust uses ownership for memory safety",
-        FactType::Semantic,
-        None,
+        &AddFactRequest {
+            content: "Rust uses ownership for memory safety".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        },
         &embedder,
-        None,
-        None,
         None,
     )?;
     engine.add_fact(
-        "Rust was created by Graydon Hoare",
-        FactType::Semantic,
-        None,
+        &AddFactRequest {
+            content: "Rust was created by Graydon Hoare".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        },
         &embedder,
-        None,
-        None,
         None,
     )?;
     engine.add_fact(
-        "Rust 1.85 introduced edition 2024",
-        FactType::Semantic,
-        None,
+        &AddFactRequest {
+            content: "Rust 1.85 introduced edition 2024".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        },
         &embedder,
-        None,
-        None,
         None,
     )?;
     engine.add_fact(
-        "Rust uses ownership for memory safety",
-        FactType::Semantic,
-        None,
+        &AddFactRequest {
+            content: "Rust uses ownership for memory safety".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        },
         &embedder,
-        None,
-        None,
         None,
     )?; // duplicate
 
@@ -143,12 +151,14 @@ fn main() -> Result<(), MemoryError> {
 
     // --- Conflict resolution: uses ConflictArbiter ---
     let fact_id = engine.add_fact(
-        "Rust 1.85 is the latest stable",
-        FactType::Semantic,
-        None,
+        &AddFactRequest {
+            content: "Rust 1.85 is the latest stable".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        },
         &embedder,
-        None,
-        None,
         None,
     )?;
 
