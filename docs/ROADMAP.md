@@ -263,7 +263,7 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 | ----------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------- |
 | [#108](https://github.com/dutiona/memory-engine/issues/108) | refactoring | ~~`engine.rs` is a 3573-line god module — extract subsystems~~ ✅ PR #186        |
 | [#109](https://github.com/dutiona/memory-engine/issues/109) | refactoring | `add_fact` takes 8 parameters — introduce builder or struct                      |
-| [#110](https://github.com/dutiona/memory-engine/issues/110) | refactoring | All modules are `pub` in `lib.rs` — no encapsulation                             |
+| [#110](https://github.com/dutiona/memory-engine/issues/110) | refactoring | ~~All modules are `pub` in `lib.rs` — no encapsulation~~ ✅ PR #188              |
 | [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | `proptest` and `insta` dev-dependencies never used                               |
 | [#128](https://github.com/dutiona/memory-engine/issues/128) | testing     | `traits.rs` and `query.rs` have zero unit tests ✅ (#185)                        |
 | [#187](https://github.com/dutiona/memory-engine/issues/187) | bug         | ~~`depth_shaping` insta snapshots stale after #180 QueryDiagnostics~~ ✅ PR #193 |
