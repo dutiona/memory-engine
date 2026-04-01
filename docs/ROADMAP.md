@@ -255,11 +255,11 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 
 #### Snapshot V2 improvements (follow-ups from #31 review)
 
-| Issue                                                                                              | Priority | Description                                                         |
-| -------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------- |
-| Shutdown perf ([#199](https://github.com/dutiona/memory-engine/issues/199))                        | HIGH     | Avoid DB re-scan in `to_snapshot` — cache vectors or use HNSW serde |
-| Direct HNSW serde ([#200](https://github.com/dutiona/memory-engine/issues/200))                    | MEDIUM   | Skip O(N log N) rebuild via `hnsw` crate `serde1` feature           |
-| Snapshot compression ([#201](https://github.com/dutiona/memory-engine/issues/201))                 | LOW      | zstd-wrap payload for large deployments (100k+ facts)               |
+| Issue                                                                              | Priority | Description                                                         |
+| ---------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------- |
+| Shutdown perf ([#199](https://github.com/dutiona/memory-engine/issues/199))        | HIGH     | Avoid DB re-scan in `to_snapshot` — cache vectors or use HNSW serde |
+| Direct HNSW serde ([#200](https://github.com/dutiona/memory-engine/issues/200))    | MEDIUM   | Skip O(N log N) rebuild via `hnsw` crate `serde1` feature           |
+| Snapshot compression ([#201](https://github.com/dutiona/memory-engine/issues/201)) | LOW      | zstd-wrap payload for large deployments (100k+ facts)               |
 
 #### Code Quality Sweep (super-qa — parallel track)
 
@@ -328,9 +328,8 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
     │                │
     │           ┌────┴────┐
     │           │         │
-    │        eval #16   cold-start #31 ✅
-    │        (needs      (PR #195)
-    │         data)
+    │        eval #16 ✅ cold-start #31 ✅
+    │        (done)       (PR #195)
     │
     ▼
  Phase 5a ◀── CRITICAL PATH
@@ -353,7 +352,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 **Parallelizable right now (4 independent tracks):**
 
 1. **Phase 4 follow-ups** (all resolved: #95 ✅, #96 ✅, #150 ✅, #151 ✅, #152 ✅)
-1. **Phase 4c** (#16, #46 ✅, #31 ✅) — #46 archival compression done ([PR #196](https://github.com/dutiona/memory-engine/pull/196)); #31 fast cold-start done ([PR #195](https://github.com/dutiona/memory-engine/pull/195)); #16 evaluation harness remaining
+1. **Phase 4c** (#16 ✅, #46 ✅, #31 ✅) — #16 evaluation harness (52 tests, 2-tier conformance + quality, Criterion lifecycle benchmarks); #46 archival compression ([PR #196](https://github.com/dutiona/memory-engine/pull/196)); #31 fast cold-start ([PR #195](https://github.com/dutiona/memory-engine/pull/195))
 1. **Super-qa sweep** (24 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review) — incremental, any order
 1. **Phase 5a design + implementation** — the critical path forward
 
