@@ -42,10 +42,7 @@ fn hnsw_recall_at_k_exceeds_threshold() {
     // Build HNSW engine (threshold=0 -> always use HNSW)
     let dir_ann = tempfile::tempdir().unwrap();
     let mut config_ann = EngineConfig::new(dir_ann.path().join("ann.db"), DIM);
-    config_ann.search_config = Some(SearchConfig {
-        ann_threshold: 0,
-        ..Default::default()
-    });
+    config_ann.search_config = Some(SearchConfig { ann_threshold: 0 });
     let engine_ann = MemoryEngine::open(&config_ann).unwrap();
 
     let embedder = Blake3Embedder;

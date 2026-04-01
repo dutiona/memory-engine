@@ -29,6 +29,15 @@ mod query;
 mod restore;
 mod resume;
 mod scheduling;
+pub(crate) mod snapshot;
+
+/// Data loaded from a sidecar snapshot, ready to be assembled into a `MemoryEngine`.
+struct SnapshotData {
+    graph: MemoryGraph,
+    scope_tree: ScopeTree,
+    #[cfg(feature = "ann")]
+    hnsw_strategy: Option<crate::search::ann::HnswStrategy>,
+}
 
 #[cfg(feature = "archive")]
 mod archive;
@@ -213,6 +222,10 @@ impl MemoryEngine {
     }
 
     /// Shared constructor logic: validate embed_dim, load graph and scope tree.
+    ///
+    /// Tries the snapshot fast path first (file-backed engines only). If the
+    /// sidecar validates against the current DB fingerprint, loads from it.
+    /// Otherwise falls back to full SQLite scan.
     fn init_from_pool(
         pool: ConnectionPool,
         embed_dim: usize,
@@ -220,17 +233,35 @@ impl MemoryEngine {
         upcaster_registry: UpcasterRegistry,
         reranker: Option<Box<dyn Reranker>>,
     ) -> Result<Self> {
-        // Scope the guard so it drops before we move `pool` into the struct.
-        let (graph, scope_tree) = if pool.is_read_only() {
-            // Read-only: use read connection, validate only (no set)
+        // 1. Validate embed_dim (must happen first — ensures schema is ready).
+        if pool.is_read_only() {
             let conn = pool.read();
             Self::validate_embed_dim(&conn, embed_dim)?;
-            let graph = MemoryGraph::load_from_db(&conn)?;
-            let scope_tree = ScopeTree::load(&conn)?;
-            (graph, scope_tree)
         } else {
             let conn = pool.write();
             Self::validate_or_set_embed_dim(&conn, embed_dim)?;
+        }
+
+        // 2. Try snapshot fast path (file-backed engines only).
+        if let Some(loaded) = Self::try_load_snapshot(&pool, embed_dim, &search_config)? {
+            tracing::info!("loaded from snapshot (fingerprint match)");
+            return Ok(Self {
+                pool,
+                embed_dim,
+                graph: RwLock::new(loaded.graph),
+                scope_tree: RwLock::new(loaded.scope_tree),
+                vector_strategy: Box::new(BruteForce),
+                reranker,
+                #[cfg(feature = "ann")]
+                hnsw_strategy: loaded.hnsw_strategy,
+                search_config,
+                upcaster_registry,
+            });
+        }
+
+        // 3. Full rebuild from SQLite (current behavior).
+        let (graph, scope_tree) = {
+            let conn = pool.read();
             let graph = MemoryGraph::load_from_db(&conn)?;
             let scope_tree = ScopeTree::load(&conn)?;
             (graph, scope_tree)
@@ -265,6 +296,63 @@ impl MemoryEngine {
         })
     }
 
+    /// Attempt to load in-memory structures from a sidecar snapshot.
+    ///
+    /// Returns `Ok(Some(data))` if the snapshot validated against the current
+    /// DB fingerprint. Returns `Ok(None)` if no snapshot exists or it's
+    /// stale/invalid. Returns `Err` only for unexpected DB query failures.
+    fn try_load_snapshot(
+        pool: &ConnectionPool,
+        embed_dim: usize,
+        #[cfg_attr(not(feature = "ann"), allow(unused_variables))] search_config: &Option<
+            SearchConfig,
+        >,
+    ) -> Result<Option<SnapshotData>> {
+        let Some(db_path) = pool.path() else {
+            return Ok(None); // in-memory engine
+        };
+
+        let snap_path = snapshot::snapshot_path(db_path);
+        let Some((header, payload)) = snapshot::load_from_file(&snap_path, embed_dim) else {
+            return Ok(None);
+        };
+
+        let conn = pool.read();
+        let current_fp = snapshot::read_fingerprint(&conn)?;
+        drop(conn);
+
+        if header.fingerprint != current_fp {
+            tracing::info!("snapshot stale (fingerprint mismatch), falling back to full rebuild");
+            return Ok(None);
+        }
+
+        let graph = MemoryGraph::from_snapshot(&payload.graph);
+        let scope_tree = ScopeTree::from_snapshot(&payload.scope_tree);
+
+        #[cfg(feature = "ann")]
+        let hnsw_strategy = match (search_config, payload.hnsw) {
+            (Some(cfg), Some(ref hnsw_snap)) if cfg.ann_threshold < usize::MAX => Some(
+                crate::search::ann::HnswStrategy::from_snapshot(hnsw_snap, embed_dim)?,
+            ),
+            (Some(cfg), None) if cfg.ann_threshold < usize::MAX => {
+                // Snapshot was created without HNSW data (e.g. non-ann build),
+                // but current config requires ANN. Fall back to DB rebuild.
+                let conn = pool.read();
+                Some(crate::search::ann::HnswStrategy::build_from_db(
+                    &conn, embed_dim,
+                )?)
+            }
+            _ => None,
+        };
+
+        Ok(Some(SnapshotData {
+            graph,
+            scope_tree,
+            #[cfg(feature = "ann")]
+            hnsw_strategy,
+        }))
+    }
+
     /// Returns the name of the active reranker, if any.
     #[must_use]
     pub fn reranker_name(&self) -> Option<&str> {
@@ -283,7 +371,7 @@ impl MemoryEngine {
 
     #[cfg(feature = "ann")]
     fn should_use_hnsw(&self) -> bool {
-        self.hnsw_strategy.as_ref().map_or(false, |hnsw| {
+        self.hnsw_strategy.as_ref().is_some_and(|hnsw| {
             hnsw.active_count()
                 >= self
                     .search_config
@@ -336,6 +424,60 @@ impl MemoryEngine {
     #[must_use]
     pub fn is_read_only(&self) -> bool {
         self.pool.is_read_only()
+    }
+
+    /// Write a snapshot of in-memory state to the sidecar file.
+    ///
+    /// No-op for in-memory engines or read-only engines.
+    /// Returns `Ok(false)` if skipped, `Ok(true)` if written.
+    ///
+    /// # Preconditions
+    ///
+    /// Assumes single-writer semantics: only one `MemoryEngine` instance per
+    /// database file. If multiple instances share the same file, the snapshot
+    /// may reflect stale in-memory state while the fingerprint matches the DB.
+    ///
+    /// # No-panic contract
+    ///
+    /// This method never panics. All internal operations use checked access
+    /// and propagate errors via `Result`. Safe to call from `Drop`.
+    pub fn write_snapshot(&self) -> Result<bool> {
+        let Some(db_path) = self.pool.path() else {
+            return Ok(false);
+        };
+        if self.pool.is_read_only() {
+            return Ok(false);
+        }
+
+        let conn = self.pool.read();
+        let fingerprint = snapshot::read_fingerprint(&conn)?;
+
+        let graph_snap = self.graph.read().to_snapshot();
+        let scope_snap = self.scope_tree.read().to_snapshot();
+
+        #[cfg(feature = "ann")]
+        let hnsw_snap = self
+            .hnsw_strategy
+            .as_ref()
+            .map(|h| h.to_snapshot(&conn, self.embed_dim))
+            .transpose()?;
+        #[cfg(not(feature = "ann"))]
+        let hnsw_snap: Option<snapshot::HnswSnapshot> = None;
+
+        let header = snapshot::SnapshotHeader {
+            format_version: snapshot::FORMAT_VERSION,
+            fingerprint,
+            embed_dim: self.embed_dim,
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let payload = snapshot::SnapshotPayload {
+            graph: graph_snap,
+            scope_tree: scope_snap,
+            hnsw: hnsw_snap,
+        };
+
+        snapshot::write_to_file(&header, &payload, &snapshot::snapshot_path(db_path))?;
+        Ok(true)
     }
 
     // --- Private connection dispatch helpers ---
@@ -562,5 +704,13 @@ fn fact_to_search_result(fact: Fact) -> SearchResult {
         score: fact.importance_score,
         match_type: MatchType::ImportanceRank,
         fact,
+    }
+}
+
+impl Drop for MemoryEngine {
+    fn drop(&mut self) {
+        if let Err(e) = self.write_snapshot() {
+            tracing::warn!(error = %e, "failed to write snapshot on shutdown");
+        }
     }
 }

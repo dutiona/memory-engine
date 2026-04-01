@@ -247,11 +247,19 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 
 #### Phase 4c: Quality & Cold Storage
 
-| Feature                                                                          | Description                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Evaluation harness ([#16](https://github.com/dutiona/memory-engine/issues/16))   | Regression corpus for retrieval quality, consolidation correctness, forgetting behavior. After 4a/4b ship. **Research update:** context collapse detection (R4, DC/ACE), outcome-based retrieval quality (R5, ACE/Reflexion) |
-| ✅ Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback). [PR #196](https://github.com/dutiona/memory-engine/pull/196)                                                                      |
-| Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot                                                                                                                                                                          |
+| Feature                                                                             | Description                                                                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Evaluation harness ([#16](https://github.com/dutiona/memory-engine/issues/16))      | Regression corpus for retrieval quality, consolidation correctness, forgetting behavior. After 4a/4b ship. **Research update:** context collapse detection (R4, DC/ACE), outcome-based retrieval quality (R5, ACE/Reflexion) |
+| ✅ Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback). [PR #196](https://github.com/dutiona/memory-engine/pull/196)                                                                     |
+| ✅ Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Snapshot + incremental replay for rapid engine boot (PR #195)                                                                                                                                                                |
+
+#### Snapshot V2 improvements (follow-ups from #31 review)
+
+| Issue                                                                                              | Priority | Description                                                         |
+| -------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------- |
+| Shutdown perf ([#199](https://github.com/dutiona/memory-engine/issues/199))                        | HIGH     | Avoid DB re-scan in `to_snapshot` — cache vectors or use HNSW serde |
+| Direct HNSW serde ([#200](https://github.com/dutiona/memory-engine/issues/200))                    | MEDIUM   | Skip O(N log N) rebuild via `hnsw` crate `serde1` feature           |
+| Snapshot compression ([#201](https://github.com/dutiona/memory-engine/issues/201))                 | LOW      | zstd-wrap payload for large deployments (100k+ facts)               |
 
 #### Code Quality Sweep (super-qa — parallel track)
 
@@ -264,7 +272,7 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 | [#108](https://github.com/dutiona/memory-engine/issues/108) | refactoring | ~~`engine.rs` is a 3573-line god module — extract subsystems~~ ✅ PR #186        |
 | [#109](https://github.com/dutiona/memory-engine/issues/109) | refactoring | ~~`add_fact` takes 8 parameters — introduce builder or struct~~ ✅ PR #194       |
 | [#110](https://github.com/dutiona/memory-engine/issues/110) | refactoring | ~~All modules are `pub` in `lib.rs` — no encapsulation~~ ✅ PR #188              |
-| [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | ~~`proptest` and `insta` dev-dependencies never used~~ ✅ PR #189               |
+| [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | ~~`proptest` and `insta` dev-dependencies never used~~ ✅ PR #189                |
 | [#128](https://github.com/dutiona/memory-engine/issues/128) | testing     | `traits.rs` and `query.rs` have zero unit tests ✅ (#185)                        |
 | [#187](https://github.com/dutiona/memory-engine/issues/187) | bug         | ~~`depth_shaping` insta snapshots stale after #180 QueryDiagnostics~~ ✅ PR #193 |
 
@@ -320,9 +328,9 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
     │                │
     │           ┌────┴────┐
     │           │         │
-    │        eval #16   cold-start #31
-    │        (needs      (needs
-    │         data)       #46 first)
+    │        eval #16   cold-start #31 ✅
+    │        (needs      (PR #195)
+    │         data)
     │
     ▼
  Phase 5a ◀── CRITICAL PATH
@@ -345,7 +353,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 **Parallelizable right now (4 independent tracks):**
 
 1. **Phase 4 follow-ups** (all resolved: #95 ✅, #96 ✅, #150 ✅, #151 ✅, #152 ✅)
-1. **Phase 4c** (#16, #46 ✅, #31) — #46 archival compression done ([PR #196](https://github.com/dutiona/memory-engine/pull/196)); #31 fast cold-start unblocked; #16 evaluation harness benefits from MCP being live
+1. **Phase 4c** (#16, #46 ✅, #31 ✅) — #46 archival compression done ([PR #196](https://github.com/dutiona/memory-engine/pull/196)); #31 fast cold-start done ([PR #195](https://github.com/dutiona/memory-engine/pull/195)); #16 evaluation harness remaining
 1. **Super-qa sweep** (24 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review) — incremental, any order
 1. **Phase 5a design + implementation** — the critical path forward
 
