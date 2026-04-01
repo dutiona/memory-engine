@@ -28,7 +28,7 @@ cargo doc --no-deps --open            # API reference
 uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
 ```
 
-Feature flags: `async` (tokio), `ann` (HNSW vector search), `compress-gzip`, `compress-zstd`.
+Feature flags: `async` (tokio), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`.
 
 ## Architecture
 
