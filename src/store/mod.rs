@@ -2,6 +2,8 @@
 //!
 //! Uses WAL mode for concurrent reads during writes.
 
+#[cfg(feature = "archive")]
+pub(crate) mod archive_manifest;
 pub mod edges;
 pub mod events;
 pub mod facts;

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{
@@ -712,6 +712,31 @@ impl<'a> FactStore<'a> {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+
+    /// Hard-delete facts by ID. Used after successful archival.
+    ///
+    /// Breaks from the soft-deletion pattern because the `.pak` file IS the
+    /// preservation. The FTS5 DELETE trigger fires automatically via the
+    /// `facts_fts_ad` trigger, keeping the FTS index consistent.
+    ///
+    /// Returns the number of rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn hard_delete_ids(&self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM facts WHERE id IN ({placeholders})");
+        let params: Vec<&dyn rusqlite::types::ToSql> = ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let deleted = self.conn.execute(&sql, params.as_slice())?;
+        Ok(deleted)
+    }
 }
 
 /// Lightweight fact info for session-based edge creation.
@@ -1349,5 +1374,81 @@ mod tests {
                     "non-hex character in hash: {h}");
             }
         }
+    }
+
+    // --- hard_delete_ids tests ---
+
+    #[test]
+    fn hard_delete_ids_removes_facts() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id1 = store
+            .insert(&make_fact("fact alpha", vec![0.1; DIM]))
+            .unwrap();
+        let id2 = store
+            .insert(&make_fact("fact beta", vec![0.2; DIM]))
+            .unwrap();
+        let id3 = store
+            .insert(&make_fact("fact gamma", vec![0.3; DIM]))
+            .unwrap();
+
+        let deleted = store.hard_delete_ids(&[id1, id2]).unwrap();
+        assert_eq!(deleted, 2);
+
+        // fact gamma still exists
+        let remaining = store.list_active(None).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, id3);
+
+        // deleted facts are truly gone
+        assert!(store.get(id1).is_err());
+        assert!(store.get(id2).is_err());
+    }
+
+    #[test]
+    fn hard_delete_ids_empty_slice_is_noop() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("fact", vec![0.1; DIM])).unwrap();
+
+        let deleted = store.hard_delete_ids(&[]).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(store.list_active(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hard_delete_ids_cleans_fts5() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        let unique_token = "xyzzy_unique_archival_token";
+        let id = store
+            .insert(&make_fact(
+                &format!("content containing {unique_token}"),
+                vec![0.1; DIM],
+            ))
+            .unwrap();
+
+        // FTS5 finds it before deletion
+        let fts_count_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH ?1",
+                rusqlite::params![unique_token],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count_before, 1);
+
+        store.hard_delete_ids(&[id]).unwrap();
+
+        // FTS5 is clean after deletion (trigger fired)
+        let fts_count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH ?1",
+                rusqlite::params![unique_token],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count_after, 0);
     }
 }
