@@ -75,6 +75,7 @@ async fn openai_format_embedding() {
             args(json!({ "content": "OpenAI format test" })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         );
         unwrap_ok(result)
@@ -117,6 +118,7 @@ async fn ollama_format_embedding() {
             args(json!({ "content": "Ollama format test" })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         );
         unwrap_ok(result)
@@ -159,6 +161,7 @@ async fn direct_format_embedding() {
             args(json!({ "content": "Direct format test" })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         );
         unwrap_ok(result)
@@ -201,6 +204,7 @@ async fn wrong_dimension_from_server() {
             args(json!({ "content": "Dim mismatch test" })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         )
         .is_err()
@@ -240,6 +244,7 @@ async fn server_500_propagates_error() {
             args(json!({ "content": "Server error test" })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         )
         .is_err()
@@ -286,6 +291,7 @@ async fn bearer_auth_sent_when_configured() {
             args(json!({ "content": "Auth test" })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         );
         unwrap_ok(result)
@@ -334,6 +340,7 @@ async fn flush_insights_with_http_embedder() {
             })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         );
         unwrap_ok(result)
@@ -379,6 +386,7 @@ async fn flush_insights_partial_failure() {
             })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         );
         unwrap_ok(result)
@@ -428,6 +436,7 @@ async fn query_hybrid_with_http_embedder() {
             })),
             &engine,
             None,
+            None,
             DIM,
         )
         .unwrap();
@@ -438,6 +447,7 @@ async fn query_hybrid_with_http_embedder() {
             args(json!({ "text": "async runtime", "mode": "hybrid" })),
             &engine,
             Some(&provider),
+            None,
             DIM,
         );
         unwrap_ok(result)

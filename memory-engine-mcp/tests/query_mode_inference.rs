@@ -101,6 +101,7 @@ fn explicit_fts_no_embedder_succeeds() {
         args(json!({ "text": "Rust", "mode": "fts" })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -121,6 +122,7 @@ fn explicit_vector_no_embedder_no_embedding_fails() {
         "memory_query",
         args(json!({ "text": "Rust", "mode": "vector" })),
         &engine,
+        None,
         None,
         DIM,
     );
@@ -144,6 +146,7 @@ fn explicit_vector_with_precomputed_embedding_succeeds() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -164,6 +167,7 @@ fn explicit_hybrid_no_embedder_no_embedding_fails() {
         "memory_query",
         args(json!({ "text": "Rust", "mode": "hybrid" })),
         &engine,
+        None,
         None,
         DIM,
     );
@@ -187,6 +191,7 @@ fn explicit_hybrid_with_precomputed_embedding_succeeds() {
         })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -208,6 +213,7 @@ fn inferred_mode_text_only_no_embedder_falls_back_to_fts() {
         args(json!({ "text": "Rust" })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -228,6 +234,7 @@ fn inferred_mode_embedding_only_works() {
         args(json!({ "embedding": emb })),
         &engine,
         None,
+        None,
         DIM,
     );
     let body = unwrap_ok(result);
@@ -246,6 +253,7 @@ fn unknown_mode_returns_error() {
         "memory_query",
         args(json!({ "text": "test", "mode": "bogus" })),
         &engine,
+        None,
         None,
         DIM,
     );
@@ -284,6 +292,7 @@ fn query_with_scope_parameters_accepted() {
                 "scope_mode": scope_mode,
             })),
             &engine,
+            None,
             None,
             DIM,
         );
@@ -335,6 +344,7 @@ fn fts_with_fact_type_filter() {
             "fact_type": "Episodic",
         })),
         &engine,
+        None,
         None,
         DIM,
     );

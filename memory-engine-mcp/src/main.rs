@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use memory_engine::engine::{EngineConfig, MemoryEngine};
-use memory_engine_mcp::{config, embedding, server};
+use memory_engine_mcp::{config, embedding, server, summary};
 use rmcp::ServiceExt;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -31,6 +31,18 @@ struct Cli {
     /// Embedding API key (optional, for authenticated endpoints).
     #[arg(long, env = "MEMORY_MCP_EMBED_API_KEY")]
     embed_api_key: Option<String>,
+
+    /// Summary / chat-completions endpoint URL (for consolidation).
+    #[arg(long, env = "MEMORY_MCP_SUMMARY_URL")]
+    summary_url: Option<String>,
+
+    /// Summary model name.
+    #[arg(long, env = "MEMORY_MCP_SUMMARY_MODEL")]
+    summary_model: Option<String>,
+
+    /// Summary API key (optional, for authenticated endpoints).
+    #[arg(long, env = "MEMORY_MCP_SUMMARY_API_KEY")]
+    summary_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -63,8 +75,12 @@ async fn main() -> Result<(), BoxError> {
     // Use the resolved embed_dim (from DB probe or config), not the TOML value.
     let embedder = build_embedder(&cli, &mcp_config, embed_dim)?;
 
-    // 5. Construct and serve
-    let mcp_server = server::MemoryMcpServer::new(engine, embedder, embed_dim);
+    // 5. Initialize summary generator (optional — requires embedder)
+    let summary_gen = build_summary_generator(&cli, &mcp_config, embedder.as_ref())?
+        .map(|sg| sg as Arc<dyn memory_engine::traits::SummaryGenerator + Send + Sync>);
+
+    // 6. Construct and serve
+    let mcp_server = server::MemoryMcpServer::new(engine, embedder, summary_gen, embed_dim);
 
     tracing::info!("memory-engine-mcp starting on stdio");
     let transport = rmcp::transport::io::stdio();
@@ -132,6 +148,7 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
                 embed_dim: None,
             },
             embedding: None,
+            summary: None,
         }
     };
 
@@ -144,4 +161,47 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
     // which runs after embed_dim probe to avoid dimension mismatch.
 
     Ok(mcp_config)
+}
+
+/// Build the summary generator from config + CLI.
+///
+/// Requires an existing embedder — summaries must be embedded into the same
+/// vector space as facts, so the summary generator delegates `embed()` to it.
+fn build_summary_generator(
+    cli: &Cli,
+    mcp_config: &config::McpConfig,
+    embedder: Option<&Arc<embedding::HttpEmbeddingProvider>>,
+) -> Result<Option<Arc<summary::HttpSummaryGenerator>>, BoxError> {
+    let base = mcp_config.summary.as_ref();
+
+    let endpoint = cli
+        .summary_url
+        .clone()
+        .or_else(|| base.map(|b| b.endpoint.clone()));
+    let model = cli
+        .summary_model
+        .clone()
+        .or_else(|| base.map(|b| b.model.clone()));
+    let api_key = cli
+        .summary_api_key
+        .clone()
+        .or_else(|| base.and_then(|b| b.api_key.clone()));
+    let timeout = base.map_or(120, |b| b.timeout_secs);
+
+    match (endpoint, model) {
+        (Some(url), Some(mdl)) => {
+            let Some(emb) = embedder.cloned() else {
+                tracing::warn!(
+                    "summary generator requires embedding provider — \
+                     consolidation tool will be unavailable"
+                );
+                return Ok(None);
+            };
+            Ok(Some(Arc::new(
+                summary::HttpSummaryGenerator::new(url, mdl, api_key, emb, timeout)
+                    .map_err(|e| format!("failed to create summary generator: {e}"))?,
+            )))
+        }
+        _ => Ok(None),
+    }
 }
