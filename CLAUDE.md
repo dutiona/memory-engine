@@ -14,10 +14,10 @@ Companion repos:
 ## Commands
 
 ```bash
-cargo build                           # debug build
+cargo build                           # debug build (root crate only)
 cargo build -p memory-engine-cli      # CLI inspector binary
 cargo build -p memory-engine-mcp      # MCP server binary
-cargo test                            # all tests
+cargo test                            # all tests (root crate only)
 cargo test -p memory-engine-cli       # CLI integration tests
 cargo test -p memory-engine-mcp       # MCP server tests
 cargo test --all-features             # with async + HNSW + compression
@@ -29,6 +29,16 @@ uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
 ```
 
 Feature flags: `async` (tokio), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`.
+
+**Workspace verification gate** — run before every commit, especially when modifying `error.rs`, `types.rs`, `traits.rs`, `lib.rs`, or any public API:
+
+```bash
+cargo build --workspace               # ALL crates compile
+cargo test --workspace                # ALL crates' tests pass
+cargo clippy --workspace --all-targets # ALL crates lint-clean
+```
+
+The workspace contains 3 crates: `memory-engine` (core), `memory-engine-cli`, `memory-engine-mcp`. The CLI and MCP crates consume the core's public API — changes to error variants, type definitions, or trait signatures can break them silently if only the root crate is checked.
 
 ## Architecture
 

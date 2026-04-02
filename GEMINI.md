@@ -11,8 +11,8 @@ Part of a four-layer cognitive architecture (Knowledge → Memory → Wisdom →
 ## Commands
 
 ```bash
-cargo build                           # debug build
-cargo test                            # all tests
+cargo build                           # debug build (root crate only)
+cargo test                            # all tests (root crate only)
 cargo test --all-features             # with async + HNSW + compression
 cargo clippy --all-targets            # lint (pedantic + nursery enabled)
 cargo fmt --check                     # format check
@@ -20,9 +20,17 @@ cargo bench                           # Criterion benchmarks
 cargo doc --no-deps --open            # API reference
 ```
 
-All three checks (test, clippy, fmt --check) must pass before any commit.
+**Workspace verification gate** — run before every commit:
 
-Feature flags: `async` (tokio wrapper), `ann` (HNSW vector search), `compress-gzip`, `compress-zstd`.
+```bash
+cargo build --workspace               # ALL 3 crates must compile
+cargo test --workspace                # ALL 3 crates' tests must pass
+cargo clippy --workspace --all-targets # ALL 3 crates must lint-clean
+```
+
+The workspace contains 3 crates: `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`. Changes to `error.rs`, `types.rs`, `traits.rs`, or any public API in the core crate can silently break the CLI and MCP crates if only the root crate is checked. Always use `--workspace`.
+
+Feature flags: `async` (tokio wrapper), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`.
 
 ## Project Structure
 

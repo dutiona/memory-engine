@@ -11,7 +11,7 @@ Part of a four-layer cognitive architecture. Companion repos: `knowledge-base` (
 ## Setup
 
 ```bash
-cargo build
+cargo build --workspace
 ```
 
 No external services needed — SQLite is bundled via `rusqlite`.
@@ -19,12 +19,15 @@ No external services needed — SQLite is bundled via `rusqlite`.
 ## Verify
 
 ```bash
-cargo test --all-features             # must pass before any PR
-cargo clippy --all-targets            # must pass — zero warnings (pedantic + nursery)
+cargo build --workspace               # ALL 3 crates must compile
+cargo test --workspace                # ALL 3 crates' tests must pass
+cargo clippy --workspace --all-targets # ALL 3 crates must lint-clean (pedantic + nursery)
 cargo fmt --check                     # must pass — no reformats
 ```
 
-Run all three commands after every change. Do not skip any.
+Run all four commands after every change. Do not skip any.
+
+**Critical:** The workspace contains 3 crates: `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`. Changes to `error.rs`, `types.rs`, `traits.rs`, or any public API in the core crate can break the CLI and MCP crates silently if only the root crate is checked. Always use `--workspace`.
 
 ## Project Layout
 
