@@ -5,7 +5,7 @@ use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
-use crate::types::{AddFactOptions, AddFactRequest, Fact, NewEvent, NewFact};
+use crate::types::{AddFactRequest, Fact, NewEvent, NewFact};
 
 #[cfg(feature = "ann")]
 use crate::search::strategy::VectorSearchStrategy;
