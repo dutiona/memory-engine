@@ -408,6 +408,12 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
   - Evidence-basis enum on Fact (#159) — `EvidenceBasis { Observed, Inferred, Synthesized }`, prevents frequency-based strengthening of ungrounded claims, pairs with #55
   - Metacognitive rationale field on Fact ([#160](https://github.com/dutiona/memory-engine/issues/160)) — `importance_rationale: Option<String>`, WHY rated important, improves DreamCycle promotion quality
   - Adversarial self-review in DreamCycle promotion gate (#161) — "Wait a minute" pattern before promoting to Wisdom tier, references Cheng et al. sycophancy findings
+  - High-water mark cursor on event log (#206) — idempotent reprocessing, cursor survives compaction. Pattern from Claude Code `extractMemories` (note 29)
+  - Distributed lock for DreamCycle (#207) — mtime+PID lock, 1h staleness, rollback on failure. Pattern from Claude Code `autoDream` (note 29)
+  - Circuit breaker for DreamCycle failures (#208) — 3× consecutive failures → stop. Prevents runaway API waste (note 29)
+  - Skip DreamCycle if caller already wrote facts (#209) — mutual exclusion prevents redundant runs (note 29)
+  - ContextDecayPolicy trait (#210) — importance-weighted tool-result pruning for integration layer (note 29)
+  - Dual-minimum context retention policy (#211) — tokens + fact count + hard cap for context management (note 29)
 - **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path, grow-and-refine semantic dedup (#64, R12), hierarchical workflow composition (R13), recursive sub-query decomposition (#138), retrieval-induced forgetting (#154), behavioral feedback loop ([#162](https://github.com/dutiona/memory-engine/issues/162)) — usage outcomes feed retrieval weights (#63 records, #134 boosts, this closes the loop), shadow/dry-run mode ([#163](https://github.com/dutiona/memory-engine/issues/163)) — full pipeline execution without committing, returns what would change (Signet pattern)
 - **Phase 5 (independent, any time):** `sample_dormant()` API, vitality boosts on access (#134), graph-walk pruning (#153), reasoning-strategy-aware reranking (#155), decay-as-deliberate-abstention (#156), Mimir 5-signal weight study (#157)
 - **Deferred (not in Phase 5):** `compress_behavior()` hook on DreamCycle (depends on consumer LLM integration)
