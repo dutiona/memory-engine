@@ -58,6 +58,15 @@ The following additions (Phases 5a/5b/6/Deferred) stem from the gap analysis con
 4. **Adversarial self-review** — "Wait a minute" gate in DreamCycle to counter sycophancy-driven promotion (Cheng et al.).
 5. **Closed-loop behavioral feedback** — Usage outcomes feed back into retrieval ranking weights, closing the observe-retrieve loop.
 
+### Notes 29-30 Integration (2026-04-04)
+
+Two new Phase 5 issues (#212, #213) and two existing-issue updates (#49, #133) from notes 29 (Claude Code reverse-engineering) and 30 (RAG/memory landscape scan). See `~/dev/autonomous-agent-project/docs/summaries/steal-list-notes-29-30.md`.
+
+1. **Structural invariant preservation** (#212) — post-trim validation ensuring edge pairs, session co-occurrence, and provenance chains survive context trimming together. Source: Claude Code `adjustIndexToPreserveAPIInvariants()`.
+2. **Expose recency/decay signal for KB** (#213) — public API returning decay-weighted importance scores consumable by KB retrieval ranking. Bridges ME Ebbinghaus decay with KB hybrid search.
+3. **Hindsight spreading activation parameters** (#133 update) — concrete reference defaults from BEAM SOTA system: 0.7× decay/hop, 2.0× causal boost, 100-node budget cap, 15-40ms.
+4. **PromptBreeder Lamarckian operator** (#49 update) — DreamCycle promotion mechanism: extract behavioral patterns from successful reasoning traces (Intelligence → Wisdom consolidation primitive).
+
 ---
 
 ## Phases
@@ -392,6 +401,8 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 | Reasoning-strategy-aware reranking ([#155](https://github.com/dutiona/memory-engine/issues/155))                                                                      | Extend `Reranker` trait with reasoning-strategy signal — consumer injects task-type context so reranking adapts to CoT vs. direct retrieval. Source: note 18 Table 7                                                                                                                                                                                                                                                                                                         |
 | Decay-as-deliberate-abstention ([#156](https://github.com/dutiona/memory-engine/issues/156))                                                                          | Formalize forgetting as deliberate abstention — decayed facts surfaced as "I used to know this" rather than silently omitted. 4th abstention type. Source: note 18 §10.3                                                                                                                                                                                                                                                                                                     |
 | Mimir 5-signal retrieval weight study ([#157](https://github.com/dutiona/memory-engine/issues/157))                                                                   | Research: explicit signal weighting (BM25, semantic, vividness, mood, recency) vs RRF for episodic memory. Source: note 19 §2.1                                                                                                                                                                                                                                                                                                                                              |
+| Structural invariant preservation ([#212](https://github.com/dutiona/memory-engine/issues/212))                                                                       | Post-trim validation: edge pairs, session co-occurrence, provenance chains must survive or be trimmed together. Prevents orphaned structural elements. Source: note 29 M7 (CC `adjustIndexToPreserveAPIInvariants`)                                                                                                                                                                                                                                                          |
+| Expose recency/decay signal for KB ([#213](https://github.com/dutiona/memory-engine/issues/213))                                                                      | Public API or MCP tool returning decay-weighted importance scores for fact IDs. KB uses as boost factors during hybrid search ranking. Unifies ME Ebbinghaus decay with KB retrieval. Source: note 30 M10                                                                                                                                                                                                                                                                    |
 
 #### Sub-phasing
 
@@ -415,7 +426,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
   - ContextDecayPolicy trait (#210) — importance-weighted tool-result pruning for integration layer (note 29)
   - Dual-minimum context retention policy (#211) — tokens + fact count + hard cap for context management (note 29)
 - **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path, grow-and-refine semantic dedup (#64, R12), hierarchical workflow composition (R13), recursive sub-query decomposition (#138), retrieval-induced forgetting (#154), behavioral feedback loop ([#162](https://github.com/dutiona/memory-engine/issues/162)) — usage outcomes feed retrieval weights (#63 records, #134 boosts, this closes the loop), shadow/dry-run mode ([#163](https://github.com/dutiona/memory-engine/issues/163)) — full pipeline execution without committing, returns what would change (Signet pattern)
-- **Phase 5 (independent, any time):** `sample_dormant()` API, vitality boosts on access (#134), graph-walk pruning (#153), reasoning-strategy-aware reranking (#155), decay-as-deliberate-abstention (#156), Mimir 5-signal weight study (#157)
+- **Phase 5 (independent, any time):** `sample_dormant()` API, vitality boosts on access (#134), graph-walk pruning (#153), reasoning-strategy-aware reranking (#155), decay-as-deliberate-abstention (#156), Mimir 5-signal weight study (#157), structural invariant preservation (#212), expose recency/decay signal for KB (#213)
 - **Deferred (not in Phase 5):** `compress_behavior()` hook on DreamCycle (depends on consumer LLM integration)
 
 ---
