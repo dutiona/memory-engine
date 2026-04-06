@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use memory_engine::MemoryQuery;
 use memory_engine::search::hybrid::MatchType;
 use tabled::{Table, Tabled};
@@ -31,6 +32,18 @@ pub struct QueryArgs {
     /// Show only pinned facts
     #[arg(long)]
     pinned_only: bool,
+
+    /// Filter by bi-temporal validity (RFC 3339, e.g. 2026-03-25T00:00:00Z).
+    /// Returns facts valid at this point in time:
+    /// t_valid <= dt AND (t_invalid IS NULL OR t_invalid > dt).
+    #[arg(long, value_parser = parse_datetime)]
+    valid_at: Option<DateTime<Utc>>,
+}
+
+fn parse_datetime(s: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| format!("invalid RFC 3339 datetime: {e}"))
 }
 
 #[derive(Tabled)]
@@ -45,8 +58,19 @@ struct ResultRow {
     fact_type: String,
     #[tabled(rename = "Pinned")]
     pinned: &'static str,
+    #[tabled(rename = "Valid")]
+    t_valid: String,
+    #[tabled(rename = "Invalid")]
+    t_invalid: String,
     #[tabled(rename = "Content")]
     content: String,
+}
+
+fn fmt_optional_dt(dt: Option<&DateTime<Utc>>) -> String {
+    match dt {
+        Some(t) => t.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        None => "-".into(),
+    }
 }
 
 pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<()> {
@@ -78,6 +102,10 @@ pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<
         query = query.pinned_only();
     }
 
+    if let Some(dt) = args.valid_at {
+        query = query.valid_at(dt);
+    }
+
     let response = engine.execute_query(&query)?;
     let results = response.results;
 
@@ -102,6 +130,8 @@ pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<
                     },
                     fact_type: format!("{:?}", r.fact.fact_type),
                     pinned: if r.fact.is_pinned { "yes" } else { "" },
+                    t_valid: fmt_optional_dt(r.fact.t_valid.as_ref()),
+                    t_invalid: fmt_optional_dt(r.fact.t_invalid.as_ref()),
                     content: truncate_str(&r.fact.content, 80),
                 })
                 .collect();
@@ -109,7 +139,14 @@ pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<
         }
         OutputFormat::Plain => {
             for r in &results {
-                println!("{}\t{:.4}\t{}", r.fact.id, r.score, r.fact.content);
+                println!(
+                    "{}\t{:.4}\t{}\t{}\t{}",
+                    r.fact.id,
+                    r.score,
+                    fmt_optional_dt(r.fact.t_valid.as_ref()),
+                    fmt_optional_dt(r.fact.t_invalid.as_ref()),
+                    r.fact.content,
+                );
             }
         }
     }
