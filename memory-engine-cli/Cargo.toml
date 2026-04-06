@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 memory-engine = { path = "..", features = ["compress-gzip", "compress-zstd"] }
+memory-engine-embed = { path = "../memory-engine-embed" }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

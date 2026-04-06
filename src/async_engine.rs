@@ -16,13 +16,9 @@ use crate::traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats,
     EmbeddingProvider, ForgetPolicy, PersistenceClassifier, PruneStats, SummaryGenerator,
 };
-use crate::types::{
-    AddFactRequest, ConsolidationLevel, Fact, NewEvent, NewFact, Summary,
-};
 #[cfg(test)]
-use crate::types::{
-    AddFactOptions, FactType,
-};
+use crate::types::{AddFactOptions, FactType};
+use crate::types::{AddFactRequest, ConsolidationLevel, Fact, NewEvent, NewFact, Summary};
 
 /// Async wrapper around [`MemoryEngine`].
 ///
