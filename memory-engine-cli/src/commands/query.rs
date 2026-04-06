@@ -1,12 +1,12 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use memory_engine::MemoryQuery;
 use memory_engine::search::hybrid::MatchType;
+use memory_engine::MemoryQuery;
 use tabled::{Table, Tabled};
 
 use crate::db::open_engine;
-use crate::output::{self, OutputFormat, truncate_str};
+use crate::output::{self, truncate_str, OutputFormat};
 
 #[derive(clap::Args)]
 pub struct QueryArgs {
@@ -33,7 +33,7 @@ pub struct QueryArgs {
     #[arg(long)]
     pinned_only: bool,
 
-    /// Filter by bi-temporal validity (ISO 8601, e.g. 2026-03-25T00:00:00Z).
+    /// Filter by bi-temporal validity (RFC 3339, e.g. 2026-03-25T00:00:00Z).
     /// Returns facts valid at this point in time:
     /// t_valid <= dt AND (t_invalid IS NULL OR t_invalid > dt).
     #[arg(long, value_parser = parse_datetime)]
@@ -43,7 +43,7 @@ pub struct QueryArgs {
 fn parse_datetime(s: &str) -> Result<DateTime<Utc>, String> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| format!("invalid ISO 8601 datetime: {e}"))
+        .map_err(|e| format!("invalid RFC 3339 datetime: {e}"))
 }
 
 #[derive(Tabled)]
@@ -69,7 +69,7 @@ struct ResultRow {
 fn fmt_optional_dt(dt: Option<&DateTime<Utc>>) -> String {
     match dt {
         Some(t) => t.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        None => String::new(),
+        None => "-".into(),
     }
 }
 

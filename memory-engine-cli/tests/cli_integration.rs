@@ -305,7 +305,7 @@ fn query_valid_at_invalid_format_fails() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invalid ISO 8601"));
+        .stderr(predicate::str::contains("invalid RFC 3339"));
 }
 
 #[test]
