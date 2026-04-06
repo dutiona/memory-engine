@@ -260,6 +260,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | -------------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ✅ [#214](https://github.com/dutiona/memory-engine/issues/214) | P1       | CLI `add-fact` command: create facts with pre-computed embeddings + temporal metadata. [PR #218](https://github.com/dutiona/memory-engine/pull/218) |
 | ✅ [#216](https://github.com/dutiona/memory-engine/issues/216) | P1       | CLI query: `--valid-at` temporal filtering + temporal columns in output. [PR #217](https://github.com/dutiona/memory-engine/pull/217)               |
+| ✅ [#215](https://github.com/dutiona/memory-engine/issues/215) | P1       | CLI `batch-ingest`: bulk JSONL fact loading via embedding API. Shared `memory-engine-embed` crate. [PR #219](https://github.com/dutiona/memory-engine/pull/219) |
 
 #### Phase 4c: Quality & Cold Storage
 
