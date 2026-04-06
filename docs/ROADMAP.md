@@ -254,6 +254,12 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | ✅ [#151](https://github.com/dutiona/memory-engine/issues/151) | P2       | MCP: integration tests for tool handlers. [PR #176](https://github.com/dutiona/memory-engine/pull/176)                     |
 | ✅ [#152](https://github.com/dutiona/memory-engine/issues/152) | P1       | Abstention type exposure in Query results (4-type taxonomy). [PR #180](https://github.com/dutiona/memory-engine/pull/180)  |
 
+#### Phase 4b Follow-ups (CLI enhancements)
+
+| Issue                                                          | Priority | Description                                                                                                                           |
+| -------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| ✅ [#216](https://github.com/dutiona/memory-engine/issues/216) | P1       | CLI query: `--valid-at` temporal filtering + temporal columns in output. [PR #217](https://github.com/dutiona/memory-engine/pull/217) |
+
 #### Phase 4c: Quality & Cold Storage
 
 | Feature                                                                             | Description                                                                                                                                                                                                                |
