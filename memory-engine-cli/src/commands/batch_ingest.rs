@@ -315,9 +315,10 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
     )
     .map_err(|e| anyhow::anyhow!("failed to create embedding provider: {e}"))?;
 
-    // Open input
+    // Open input — bind stdin before locking to extend lifetime
+    let stdin = std::io::stdin();
     let reader: Box<dyn Read> = if args.file.as_os_str() == "-" {
-        Box::new(std::io::stdin().lock())
+        Box::new(stdin.lock())
     } else {
         Box::new(
             std::fs::File::open(&args.file)
