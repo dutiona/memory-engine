@@ -1,4 +1,5 @@
 pub mod add_fact;
+pub mod batch_ingest;
 pub mod dump;
 pub mod explain;
 pub mod export;
