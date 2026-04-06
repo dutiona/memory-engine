@@ -1,12 +1,12 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use memory_engine::MemoryQuery;
 use memory_engine::search::hybrid::MatchType;
+use memory_engine::MemoryQuery;
 use tabled::{Table, Tabled};
 
 use crate::db::open_engine;
-use crate::output::{self, OutputFormat, truncate_str};
+use crate::output::{self, truncate_str, OutputFormat};
 
 #[derive(clap::Args)]
 pub struct QueryArgs {

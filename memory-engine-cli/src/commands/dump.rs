@@ -4,7 +4,7 @@ use memory_engine::inspect_types::ReplayFilter;
 use tabled::{Table, Tabled};
 
 use crate::db::open_engine;
-use crate::output::{self, OutputFormat, truncate_str};
+use crate::output::{self, truncate_str, OutputFormat};
 
 #[derive(clap::Args)]
 pub struct DumpArgs {
