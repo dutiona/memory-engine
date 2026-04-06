@@ -1,8 +1,8 @@
-# CLI Inspector (`memory-engine-cli`)
+# CLI Tool (`memory-engine-cli`)
 
 ## What
 
-`memory-engine-cli` is an operator tool for inspecting, querying, and managing memory-engine databases from the command line. It provides read-only access to facts, events, statistics, and provenance — plus import/export for data portability.
+`memory-engine-cli` is an operator tool for inspecting, querying, and managing memory-engine databases from the command line. It provides inspection (stats, query, explain), data portability (export/import), and bulk ingestion (batch-ingest) for agent memory.
 
 ## Why
 
@@ -92,6 +92,60 @@ Restores a JSON snapshot into a **new** database (refuses to overwrite existing)
 
 **Note:** Import currently has a known issue with schema version mismatch (v6 vs v5 in restore path, tracked in #80). The test is `#[ignore]` pending library fix.
 
+#### `batch-ingest` — Bulk Fact Loading from JSONL
+
+```bash
+# Ingest from file into existing database
+memory-engine-cli batch-ingest --file facts.jsonl \
+  --embed-url http://localhost:11434/v1/embeddings \
+  --embed-model all-minilm-l6-v2
+
+# Ingest from stdin, create new database
+cat facts.jsonl | memory-engine-cli --db new.db batch-ingest --file - \
+  --embed-url http://localhost:11434/v1/embeddings \
+  --embed-model nomic-embed-text \
+  --create --embed-dim 384
+
+# With custom batch size and scope
+memory-engine-cli batch-ingest --file facts.jsonl \
+  --embed-url https://api.openai.com/v1/embeddings \
+  --embed-model text-embedding-3-small \
+  --embed-api-key "$OPENAI_API_KEY" \
+  --batch-size 50 --scope "project/beam"
+```
+
+Bulk-ingests facts from a JSONL file (or stdin with `--file -`). Each line is a JSON object:
+
+```json
+{"content": "User moved to Istanbul in March", "fact_type": "episodic", "t_valid": "2026-03-01T00:00:00Z", "t_invalid": "2026-06-01T00:00:00Z", "importance": 0.7, "metadata": {"source": "beam-conv-3"}}
+{"content": "The capital of France is Paris", "fact_type": "semantic", "importance": 0.9}
+```
+
+**Required fields:** `content` (string), `fact_type` (`episodic`, `semantic`, or `procedural`).
+
+**Optional fields:** `importance` (float 0-1), `t_valid`/`t_invalid` (ISO 8601), `metadata` (JSON object), `scope` (string), `pinned` (bool), `source_event_id` (int), `t_created`, `last_accessed`.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--file` | required | JSONL input path (`-` for stdin) |
+| `--embed-url` | required / env `MEMORY_ENGINE_EMBED_URL` | OpenAI-compatible embedding endpoint |
+| `--embed-model` | required / env `MEMORY_ENGINE_EMBED_MODEL` | Embedding model name |
+| `--embed-api-key` | env `MEMORY_ENGINE_EMBED_API_KEY` | Bearer API key |
+| `--batch-size` | 100 | Facts per transaction batch |
+| `--embed-timeout` | 30 | HTTP timeout (seconds) |
+| `--create` | false | Create new database |
+| `--embed-dim` | — | Required with `--create` |
+| `--scope` | — | Default scope for all facts |
+
+**Error handling:** Malformed lines are skipped with a warning on stderr. Failed batches (embedding/DB errors) are skipped. Progress is reported on stderr. Exit code is non-zero only if zero facts were ingested.
+
+**Output formats:**
+- `--format json`: `{"total_ingested": N, "total_skipped": N, "failed_batches": N, "elapsed_secs": X}`
+- `--format table`: Human-readable summary
+- `--format plain`: `ingested=N skipped=N failed_batches=N elapsed_secs=X`
+
 #### `dump [facts|events|all]` — Debug Listing
 
 ```bash
@@ -122,6 +176,6 @@ The `open_engine()` function sets `backup_dir` adjacent to the database as a saf
 
 ### Known Limitations
 
-- **No vector search in `query`**: The CLI doesn't implement `EmbeddingProvider`, so only FTS5 text matching works. Vector/hybrid search requires embeddings.
+- **No vector search in `query`**: The `query` subcommand doesn't use a `EmbeddingProvider`, so only FTS5 text matching works. Vector/hybrid search requires the MCP server. (The `batch-ingest` command does use embeddings for ingestion, but `query` remains text-only.)
 - **`dump --limit` pushes SQL LIMIT**: `list_active_facts(Some(n))` adds a `LIMIT` clause to avoid materializing the full corpus.
 - **Import schema version**: Export/import roundtrip fails due to schema v6 vs restore v5 mismatch. Tracked in #80.

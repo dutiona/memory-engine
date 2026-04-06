@@ -16,9 +16,9 @@ use output::OutputFormat;
     name = "memory-engine-cli",
     version,
     about = "Operator tool for agent memory databases",
-    long_about = "memory-engine-cli is a command-line inspector for memory-engine databases.\n\n\
-        It provides read-only access to facts, events, statistics, and provenance.\n\
-        For data portability, use export/import for JSON snapshots or `SQLite` backups.",
+    long_about = "memory-engine-cli is a command-line tool for memory-engine databases.\n\n\
+        It provides inspection (stats, query, explain), data portability (export/import),\n\
+        and bulk ingestion (batch-ingest) for agent memory.",
     after_help = "Set MEMORY_ENGINE_DB to avoid passing --db on every invocation."
 )]
 struct Cli {
@@ -58,6 +58,8 @@ enum Commands {
     Dump(commands::dump::DumpArgs),
     /// Add a fact to the database with pre-computed embedding
     AddFact(commands::add_fact::AddFactArgs),
+    /// Ingest facts from a JSONL file via an embedding API
+    BatchIngest(commands::batch_ingest::BatchIngestArgs),
 }
 
 fn main() -> ExitCode {
@@ -72,6 +74,7 @@ fn main() -> ExitCode {
         Commands::Import(ref args) => commands::import::run(&cli.db, args),
         Commands::Dump(ref args) => commands::dump::run(&cli.db, args, cli.format),
         Commands::AddFact(ref args) => commands::add_fact::run(&cli.db, args, cli.format),
+        Commands::BatchIngest(ref args) => commands::batch_ingest::run(&cli.db, args, cli.format),
     };
 
     match result {
