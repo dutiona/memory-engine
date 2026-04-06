@@ -169,6 +169,156 @@ fn query_no_results() {
         .stdout(predicate::str::contains("No results"));
 }
 
+// --- query: --valid-at temporal filtering ---
+
+/// Create a test database with facts that have explicit t_valid / t_invalid
+/// temporal bounds, for testing --valid-at filtering.
+fn create_temporal_db() -> (TempDir, PathBuf) {
+    use chrono::{TimeZone, Utc};
+
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("temporal.db");
+
+    let config = memory_engine::EngineConfig::new(db_path.clone(), 4);
+    let engine = memory_engine::MemoryEngine::open(&config).unwrap();
+
+    struct FakeEmbed;
+    impl memory_engine::EmbeddingProvider for FakeEmbed {
+        fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
+            Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
+    }
+
+    // Fact 1: valid from March 1 to March 31
+    engine
+        .add_fact(
+            &memory_engine::AddFactRequest {
+                content: "March event: spring equinox observed".into(),
+                fact_type: memory_engine::FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(memory_engine::AddFactOptions {
+                    t_valid: Some(Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap()),
+                    t_invalid: Some(Utc.with_ymd_and_hms(2026, 3, 31, 0, 0, 0).unwrap()),
+                    ..Default::default()
+                }),
+            },
+            &FakeEmbed,
+            None,
+        )
+        .unwrap();
+
+    // Fact 2: valid from April 1, no end (still valid)
+    engine
+        .add_fact(
+            &memory_engine::AddFactRequest {
+                content: "April event: daylight saving adjustment".into(),
+                fact_type: memory_engine::FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(memory_engine::AddFactOptions {
+                    t_valid: Some(Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap()),
+                    ..Default::default()
+                }),
+            },
+            &FakeEmbed,
+            None,
+        )
+        .unwrap();
+
+    // Fact 3: no temporal bounds (always valid)
+    engine
+        .add_fact(
+            &memory_engine::AddFactRequest {
+                content: "Timeless event: gravity exists".into(),
+                fact_type: memory_engine::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            &FakeEmbed,
+            None,
+        )
+        .unwrap();
+
+    drop(engine);
+    (dir, db_path)
+}
+
+#[test]
+fn query_valid_at_filters_to_march() {
+    let (_dir, db_path) = create_temporal_db();
+    // March 15 should match: March event (in range) + timeless (no bounds)
+    // but NOT April event (t_valid = April 1 > March 15)
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+            "query",
+            "event",
+            "--valid-at",
+            "2026-03-15T00:00:00Z",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("spring equinox"))
+        .stdout(predicate::str::contains("gravity"))
+        .stdout(predicate::str::contains("daylight").not());
+}
+
+#[test]
+fn query_valid_at_filters_to_april() {
+    let (_dir, db_path) = create_temporal_db();
+    // April 5 should match: April event (in range) + timeless (no bounds)
+    // but NOT March event (t_invalid = March 31 <= April 5)
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+            "query",
+            "event",
+            "--valid-at",
+            "2026-04-05T00:00:00Z",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("daylight"))
+        .stdout(predicate::str::contains("gravity"))
+        .stdout(predicate::str::contains("spring equinox").not());
+}
+
+#[test]
+fn query_valid_at_invalid_format_fails() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "query",
+            "sky",
+            "--valid-at",
+            "not-a-date",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid ISO 8601"));
+}
+
+#[test]
+fn query_table_output_shows_temporal_columns() {
+    let (_dir, db_path) = create_temporal_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "query", "event"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Valid"))
+        .stdout(predicate::str::contains("Invalid"));
+}
+
 // --- export + import roundtrip ---
 
 // NOTE: Skipped due to pre-existing library bug — restore.rs has
