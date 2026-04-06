@@ -94,24 +94,27 @@ pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Resul
         anyhow::ensure!(tv < ti, "t-valid ({tv}) must be before t-invalid ({ti})");
     }
 
-    // Parse and validate metadata
+    // Parse and validate metadata (explicit null treated as absent)
     let metadata = match &args.metadata {
         Some(raw) => {
             let val: serde_json::Value = serde_json::from_str(raw)
                 .map_err(|e| anyhow::anyhow!("invalid metadata JSON: {e}"))?;
-            anyhow::ensure!(
-                val.is_object(),
-                "metadata must be a JSON object, got {}",
-                match &val {
-                    serde_json::Value::Array(_) => "array",
-                    serde_json::Value::String(_) => "string",
-                    serde_json::Value::Number(_) => "number",
-                    serde_json::Value::Bool(_) => "boolean",
-                    serde_json::Value::Null => "null",
-                    serde_json::Value::Object(_) => unreachable!(),
-                }
-            );
-            Some(val)
+            if val.is_null() {
+                None
+            } else {
+                anyhow::ensure!(
+                    val.is_object(),
+                    "metadata must be a JSON object, got {}",
+                    match &val {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Null | serde_json::Value::Object(_) => unreachable!(),
+                    }
+                );
+                Some(val)
+            }
         }
         None => None,
     };

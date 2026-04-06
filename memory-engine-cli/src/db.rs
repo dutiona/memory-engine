@@ -4,7 +4,11 @@ use memory_engine::{EngineConfig, MemoryEngine};
 
 /// Peek `embed_dim` from an existing database's config table.
 fn peek_embed_dim(path: &Path) -> anyhow::Result<usize> {
-    anyhow::ensure!(path.exists(), "database not found: {}", path.display());
+    anyhow::ensure!(
+        path.is_file(),
+        "database not found (or is a directory): {}",
+        path.display()
+    );
 
     let conn = rusqlite::Connection::open_with_flags(
         path,
