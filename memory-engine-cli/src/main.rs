@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod embedding;
 mod output;
 
 use std::path::PathBuf;
@@ -55,6 +56,8 @@ enum Commands {
     Import(commands::import::ImportArgs),
     /// Dump facts or events to stdout (debug/inspection)
     Dump(commands::dump::DumpArgs),
+    /// Add a fact to the database with pre-computed embedding
+    AddFact(commands::add_fact::AddFactArgs),
 }
 
 fn main() -> ExitCode {
@@ -68,6 +71,7 @@ fn main() -> ExitCode {
         Commands::Export(ref args) => commands::export::run(&cli.db, args),
         Commands::Import(ref args) => commands::import::run(&cli.db, args),
         Commands::Dump(ref args) => commands::dump::run(&cli.db, args, cli.format),
+        Commands::AddFact(ref args) => commands::add_fact::run(&cli.db, args, cli.format),
     };
 
     match result {

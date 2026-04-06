@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use memory_engine::inspect_types::DumpFormat;
 
-use crate::db::open_engine;
+use crate::db::open_engine_writable;
 
 #[derive(clap::Args)]
 pub struct ExportArgs {
@@ -16,7 +16,7 @@ pub struct ExportArgs {
 }
 
 pub fn run(db: &Path, args: &ExportArgs) -> anyhow::Result<()> {
-    let engine = open_engine(db)?;
+    let engine = open_engine_writable(db)?;
 
     let format = match args.export_format.as_str() {
         "json" => DumpFormat::Json(args.output.clone()),
