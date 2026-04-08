@@ -495,6 +495,52 @@ impl AsyncMemoryEngine {
             .await
             .map_err(join_err)?
     }
+
+    // --- Phase 5a: Cognitive pipeline ---
+
+    /// Sample dormant facts semantically related to a context.
+    ///
+    /// See [`MemoryEngine::sample_dormant`] for details.
+    pub async fn sample_dormant(
+        &self,
+        n: usize,
+        context: Vec<f32>,
+        scope_ids: Option<Vec<i64>>,
+    ) -> Result<Vec<Fact>> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            engine.sample_dormant(n, &context, scope_ids.as_deref())
+        })
+        .await
+        .map_err(join_err)?
+    }
+
+    /// Record a high-value insight via the provided `InsightStream`.
+    ///
+    /// See [`MemoryEngine::record_insight`] for details.
+    pub async fn record_insight(
+        &self,
+        insight: crate::types::Insight,
+        stream: Arc<dyn crate::traits::InsightStream + Send + Sync>,
+    ) -> Result<()> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.record_insight(insight, stream.as_ref()))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Run a DreamCycle using a capability-restricted `DreamContext`.
+    ///
+    /// See [`MemoryEngine::run_dream_cycle`] for details.
+    pub async fn run_dream_cycle(
+        &self,
+        cycle: Arc<dyn crate::traits::DreamCycle + Send + Sync>,
+    ) -> Result<crate::types::CycleReport> {
+        let engine = self.inner.clone();
+        tokio::task::spawn_blocking(move || engine.run_dream_cycle(cycle.as_ref()))
+            .await
+            .map_err(join_err)?
+    }
 }
 
 #[cfg(test)]

@@ -19,8 +19,10 @@ use crate::traits::Reranker;
 use crate::types::{ConsolidationLevel, Fact};
 
 mod bootstrap;
+pub mod cognitive;
 mod conflict;
 mod consolidation;
+mod dormant;
 mod forgetting;
 mod graph;
 mod ingest;
