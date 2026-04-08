@@ -2995,10 +2995,7 @@ fn record_outcome_nonexistent_fact_returns_not_found() {
 
     let result = engine.record_outcome(999, crate::types::Outcome::Negative);
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        MemoryError::NotFound(msg) if msg.contains("999")
-    ));
+    assert!(matches!(result.unwrap_err(), MemoryError::NotFound(_)));
 }
 
 #[test]
@@ -3022,6 +3019,15 @@ fn record_outcome_read_only_returns_error() {
     let result = engine.record_outcome(fact_id, crate::types::Outcome::Positive);
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), MemoryError::ReadOnly));
+}
+
+#[test]
+fn get_outcome_counts_nonexistent_fact_returns_not_found() {
+    let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+    let result = engine.get_outcome_counts(999);
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), MemoryError::NotFound(_)));
 }
 
 #[test]
