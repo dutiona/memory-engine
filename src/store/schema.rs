@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 7;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -176,6 +176,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrate_v4_to_v5, false),
     (migrate_v5_to_v6, false),
     (migrate_v6_to_v7, false),
+    (migrate_v7_to_v8, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -646,6 +647,20 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS lineage (
+            lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id),
+            source_fact_ids TEXT NOT NULL CHECK(json_valid(source_fact_ids)),
+            provenance TEXT NOT NULL CHECK(json_valid(provenance))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_wisdom_fact_id
+            ON lineage(wisdom_fact_id);",
+    )?;
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -726,6 +741,16 @@ CREATE TABLE IF NOT EXISTS archive_manifest (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_manifest_path
     ON archive_manifest(pak_path);
+
+CREATE TABLE IF NOT EXISTS lineage (
+    lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    source_fact_ids TEXT NOT NULL CHECK(json_valid(source_fact_ids)),
+    provenance TEXT NOT NULL CHECK(json_valid(provenance))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_wisdom_fact_id
+    ON lineage(wisdom_fact_id);
 ";
 
 const SCOPES_DDL: &str = "
@@ -1244,8 +1269,8 @@ CREATE TABLE IF NOT EXISTS config (
                 |r| r.get(0),
             )
             .unwrap();
-        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest
-        assert_eq!(count, 20);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage
+        assert_eq!(count, 21);
     }
 
     // --- Migration framework tests ---
@@ -1256,13 +1281,13 @@ CREATE TABLE IF NOT EXISTS config (
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
         // migrate is a no-op on fresh DB
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
     }
 
@@ -1277,7 +1302,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
     }
 
@@ -1289,7 +1314,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
     }
 
@@ -1323,7 +1348,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
 
         // Data survived both migrations
@@ -1413,7 +1438,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
 
         // After migration: orphan scope_id fails (FK enforced)
@@ -1541,7 +1566,7 @@ CREATE TABLE IF NOT EXISTS config (
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
     }
 
@@ -1551,7 +1576,7 @@ CREATE TABLE IF NOT EXISTS config (
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
         conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, is_pinned, importance_score)
@@ -1713,7 +1738,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
     }
 
@@ -1735,7 +1760,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
 
         // Existing events get default revision = 1
@@ -1819,7 +1844,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
 
         // Event survived all migrations, got default revision
@@ -1852,7 +1877,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
 
         // Existing facts have surfaced_at = NULL
@@ -2135,7 +2160,7 @@ CREATE TABLE IF NOT EXISTS config (
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
 
         // archive_manifest must exist after migration
@@ -2177,11 +2202,92 @@ CREATE TABLE IF NOT EXISTS config (
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1, "archive_manifest should exist in fresh v7 schema");
+        assert_eq!(count, 1, "archive_manifest should exist in fresh schema");
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("7".to_string())
+            Some("8".to_string())
         );
+    }
+
+    /// Create a v7 schema by initing v8 and removing lineage artifacts.
+    fn init_schema_v7(conn: &Connection) -> Result<()> {
+        init_schema(conn)?;
+        conn.execute_batch("DROP TABLE IF EXISTS lineage;")?;
+        conn.execute_batch("DROP INDEX IF EXISTS idx_lineage_wisdom_fact_id;")?;
+        set_config(conn, "schema_version", "7")?;
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v7_to_v8_adds_lineage_table() {
+        let conn = open_memory().unwrap();
+        init_schema_v7(&conn).unwrap();
+
+        // lineage must NOT exist before migration
+        let count_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lineage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_before, 0, "lineage should not exist before migration");
+
+        migrate(&conn, None).unwrap();
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some("8".to_string())
+        );
+
+        // lineage table must exist after migration
+        let count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lineage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_after, 1, "lineage should exist after migration");
+
+        // Verify expected columns
+        let col_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('lineage')
+                 WHERE name IN ('lineage_id', 'wisdom_fact_id', 'source_fact_ids', 'provenance')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col_count, 4, "lineage table should have 4 expected columns");
+
+        // Unique index on wisdom_fact_id must exist
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_lineage_wisdom_fact_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_count, 1,
+            "unique index on wisdom_fact_id should exist"
+        );
+    }
+
+    #[test]
+    fn fresh_db_has_lineage_table() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('lineage')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(count > 0, "fresh DB should have lineage table");
     }
 }
