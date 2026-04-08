@@ -651,7 +651,7 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS lineage (
             lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id),
+            wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
             source_fact_ids TEXT NOT NULL CHECK(json_valid(source_fact_ids)),
             provenance TEXT NOT NULL CHECK(json_valid(provenance))
         );
@@ -744,7 +744,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_manifest_path
 
 CREATE TABLE IF NOT EXISTS lineage (
     lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id),
+    wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
     source_fact_ids TEXT NOT NULL CHECK(json_valid(source_fact_ids)),
     provenance TEXT NOT NULL CHECK(json_valid(provenance))
 );

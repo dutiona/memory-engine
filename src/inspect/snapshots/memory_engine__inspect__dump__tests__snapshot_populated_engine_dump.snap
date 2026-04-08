@@ -32,4 +32,5 @@ scopes:
     label: root
     depth: 0
 events: "[]"
+lineage: []
 config: "{}"

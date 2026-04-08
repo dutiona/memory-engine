@@ -60,9 +60,7 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
             None,
         ),
 
-        MemoryError::Lineage(msg) => {
-            ErrorData::internal_error(format!("lineage error: {msg}"), None)
-        }
+        MemoryError::Lineage(msg) => ErrorData::resource_not_found(format!("lineage: {msg}"), None),
     }
 }
 

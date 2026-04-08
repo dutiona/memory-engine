@@ -11,6 +11,7 @@ use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
+use crate::store::lineage::LineageStore;
 use crate::store::schema::{get_config, list_config};
 use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
@@ -60,6 +61,9 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
 
     write!(writer, r#","events":"#)?;
     stream_for_each(writer, |cb| EventStore::new(conn, &registry).for_each(cb))?;
+
+    write!(writer, r#","lineage":"#)?;
+    stream_for_each(writer, |cb| LineageStore::new(conn).for_each(cb))?;
 
     // Config is always small — serialize directly.
     let config = list_config(conn)?;

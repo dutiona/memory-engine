@@ -14,6 +14,7 @@ scopes:
     label: root
     depth: 0
 events: []
+lineage: []
 config:
   schema_version: "8"
   storage_epoch: "1"

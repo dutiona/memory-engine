@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
-use crate::types::{LineageRecord, NewLineageRecord, PromotionProvenance};
+use crate::types::{LineageRecord, LineageSnapshotEntry, NewLineageRecord, PromotionProvenance};
 
 /// Store for the `lineage` sidecar table — provenance tracking for promoted wisdom facts.
 pub struct LineageStore<'a> {
@@ -19,11 +19,13 @@ impl<'a> LineageStore<'a> {
     /// Insert a new lineage record with its provenance envelope.
     /// Returns the auto-assigned `lineage_id`.
     ///
-    /// The `provenance.lineage_id` field is ignored on input — the DB assigns
-    /// the ID, and the returned value is the authoritative one.
+    /// Validates that all `source_fact_ids` reference existing facts before
+    /// inserting. The `provenance.lineage_id` field is not stored in the JSON
+    /// (`skip_serializing`) — the row PK is authoritative.
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::Lineage` if any source fact ID does not exist.
     /// Returns `MemoryError::Database` on insert failure (e.g., duplicate
     /// `wisdom_fact_id`, FK violation).
     pub fn insert(
@@ -31,6 +33,27 @@ impl<'a> LineageStore<'a> {
         record: &NewLineageRecord,
         provenance: &PromotionProvenance,
     ) -> Result<i64> {
+        // Validate that all source fact IDs exist.
+        if !record.source_fact_ids.is_empty() {
+            let placeholders: String = record
+                .source_fact_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!("SELECT COUNT(*) FROM facts WHERE id IN ({placeholders})");
+            let count: i64 = self.conn.query_row(&query, [], |r| r.get(0))?;
+            let expected = i64::try_from(record.source_fact_ids.len())
+                .map_err(|e| MemoryError::Internal(e.to_string()))?;
+            if count != expected {
+                return Err(MemoryError::Lineage(format!(
+                    "source_fact_ids contains nonexistent fact IDs \
+                     (expected {} to exist, found {count})",
+                    record.source_fact_ids.len()
+                )));
+            }
+        }
+
         let source_ids_json = serde_json::to_string(&record.source_fact_ids)?;
         let prov_json = serde_json::to_string(provenance)?;
 
@@ -40,6 +63,31 @@ impl<'a> LineageStore<'a> {
             params![record.wisdom_fact_id, source_ids_json, prov_json],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Insert a raw lineage row with an explicit `lineage_id` (for snapshot restore).
+    ///
+    /// Skips source fact validation — the caller (restore) is responsible for
+    /// inserting facts before lineage.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on insert failure.
+    pub fn insert_raw(&self, entry: &LineageSnapshotEntry) -> Result<()> {
+        let source_ids_json = serde_json::to_string(&entry.source_fact_ids)?;
+        let prov_json = serde_json::to_string(&entry.provenance)?;
+
+        self.conn.execute(
+            "INSERT INTO lineage (lineage_id, wisdom_fact_id, source_fact_ids, provenance)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                entry.lineage_id,
+                entry.wisdom_fact_id,
+                source_ids_json,
+                prov_json,
+            ],
+        )?;
+        Ok(())
     }
 
     /// Look up the lineage record and provenance for a promoted wisdom fact.
@@ -133,6 +181,39 @@ impl<'a> LineageStore<'a> {
             |r| r.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// Iterate over all lineage rows (for snapshot dump).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Serialization` on malformed stored JSON.
+    pub fn for_each<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(LineageSnapshotEntry) -> Result<()>,
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT lineage_id, wisdom_fact_id, source_fact_ids, provenance
+             FROM lineage ORDER BY lineage_id ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let lineage_id: i64 = row.get(0)?;
+            let wisdom_fact_id: i64 = row.get(1)?;
+            let source_ids_json: String = row.get(2)?;
+            let prov_json: String = row.get(3)?;
+            let source_fact_ids: Vec<i64> = serde_json::from_str(&source_ids_json)?;
+            let mut provenance: PromotionProvenance = serde_json::from_str(&prov_json)?;
+            provenance.lineage_id = lineage_id;
+            f(LineageSnapshotEntry {
+                lineage_id,
+                wisdom_fact_id,
+                source_fact_ids,
+                provenance,
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -276,5 +357,52 @@ mod tests {
         // Second insert with same wisdom_fact_id should fail (unique index)
         let err = store.insert(&new_rec, &test_provenance()).unwrap_err();
         assert!(matches!(err, MemoryError::Database(_)));
+    }
+
+    #[test]
+    fn insert_rejects_nonexistent_source_facts() {
+        let conn = setup();
+        let store = LineageStore::new(&conn);
+        let new_rec = NewLineageRecord {
+            wisdom_fact_id: 1,
+            source_fact_ids: vec![10, 999], // 999 does not exist
+        };
+        let err = store.insert(&new_rec, &test_provenance()).unwrap_err();
+        assert!(matches!(err, MemoryError::Lineage(_)));
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn for_each_iterates_all_rows() {
+        let conn = setup();
+        let store = LineageStore::new(&conn);
+        // Insert two lineage records (need a second wisdom fact)
+        conn.execute(
+            "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, last_accessed, scope_id, importance_score)
+             VALUES (2, 'wisdom 2', 'w2', X'00000000', 'semantic', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 0.8)",
+            [],
+        ).unwrap();
+
+        let rec1 = NewLineageRecord {
+            wisdom_fact_id: 1,
+            source_fact_ids: vec![10],
+        };
+        let rec2 = NewLineageRecord {
+            wisdom_fact_id: 2,
+            source_fact_ids: vec![20],
+        };
+        store.insert(&rec1, &test_provenance()).unwrap();
+        store.insert(&rec2, &test_provenance()).unwrap();
+
+        let mut entries = Vec::new();
+        store
+            .for_each(|entry| {
+                entries.push(entry);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].wisdom_fact_id, 1);
+        assert_eq!(entries[1].wisdom_fact_id, 2);
     }
 }

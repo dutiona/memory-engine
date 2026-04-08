@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ConsolidationLevel, Edge, Event, EventType, Fact, ScopeNode, Summary};
+use crate::types::{
+    ConsolidationLevel, Edge, Event, EventType, Fact, LineageSnapshotEntry, ScopeNode, Summary,
+};
 
 // ---------------------------------------------------------------------------
 // Fact explanation
@@ -155,6 +157,10 @@ pub struct EngineSnapshot {
     pub summaries: Vec<Summary>,
     pub scopes: Vec<ScopeNode>,
     pub events: Vec<Event>,
+    /// Lineage records for promoted wisdom facts (Phase 5a).
+    /// Absent in pre-v8 snapshots — defaults to empty.
+    #[serde(default)]
+    pub lineage: Vec<LineageSnapshotEntry>,
     pub config: HashMap<String, String>,
 }
 

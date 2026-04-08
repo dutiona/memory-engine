@@ -198,6 +198,9 @@ pub enum ScopeQuery {
 /// Carries summary statistics about the promotion (how many source facts,
 /// across how many sessions, confidence score). The full source chain lives
 /// in the sidecar `lineage` table, loaded on demand via `lineage_id`.
+///
+/// `lineage_id` is reconstructed from the DB row PK on read and is
+/// **not** persisted in the JSON column (skipped during serialization).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromotionProvenance {
     pub source_count: u32,
@@ -209,6 +212,8 @@ pub struct PromotionProvenance {
     /// 3-5 most representative source fact IDs (for quick human review).
     pub representative_ids: Vec<i64>,
     /// Foreign key to the `lineage` table for the full source chain.
+    /// Reconstructed from the row PK on read — not stored in the provenance JSON.
+    #[serde(skip_serializing, default)]
     pub lineage_id: i64,
 }
 
@@ -225,6 +230,18 @@ pub struct LineageRecord {
 pub struct NewLineageRecord {
     pub wisdom_fact_id: i64,
     pub source_fact_ids: Vec<i64>,
+}
+
+/// Complete lineage row for snapshot dump/restore.
+///
+/// Combines the `LineageRecord` fields with the full `PromotionProvenance`
+/// envelope into a single serializable entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LineageSnapshotEntry {
+    pub lineage_id: i64,
+    pub wisdom_fact_id: i64,
+    pub source_fact_ids: Vec<i64>,
+    pub provenance: PromotionProvenance,
 }
 
 // --- Options ---
@@ -452,8 +469,13 @@ mod tests {
             lineage_id: 42,
         };
         let json = serde_json::to_string(&prov).unwrap();
+        // lineage_id is skip_serializing — should not appear in JSON
+        assert!(!json.contains("lineage_id"));
         let back: PromotionProvenance = serde_json::from_str(&json).unwrap();
-        assert_eq!(prov, back);
+        // lineage_id defaults to 0 on deserialization (not round-tripped)
+        assert_eq!(back.lineage_id, 0);
+        assert_eq!(back.source_count, prov.source_count);
+        assert_eq!(back.method_version, prov.method_version);
     }
 
     #[test]
