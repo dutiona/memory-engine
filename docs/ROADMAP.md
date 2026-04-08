@@ -193,48 +193,46 @@ Two new Phase 5 issues (#212, #213) and two existing-issue updates (#49, #133) f
 
 ---
 
-### Phase 4: Operability & MCP Server (4a ✅ 4b ✅ 4c 🔲)
+### Phase 4: Operability & MCP Server ✅
 
 **Design:** [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md)
 
-#### Prerequisites (gate Phase 4 — can be done in parallel)
+#### Prerequisites (gate Phase 4 — completed in parallel)
 
-| Item                                                                                    | Description                                                                                                                                                               |
-| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Documentation gap ([#35](https://github.com/dutiona/memory-engine/issues/35))           | ✅ Updated 13 doc files for Phase 3b features (pinned facts, 5-tier resume, scheduling API, classifier). [PR #60](https://github.com/dutiona/memory-engine/pull/60)       |
-| Schema evolution discipline ([#18](https://github.com/dutiona/memory-engine/issues/18)) | ✅ Storage epoch versioning, WAL-safe backup, event envelope versioning, upcaster registry, migration testing. [PR #61](https://github.com/dutiona/memory-engine/pull/61) |
+| Item                                                                                       | Description                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ✅ Documentation gap ([#35](https://github.com/dutiona/memory-engine/issues/35))           | Updated 13 doc files for Phase 3b features. [PR #60](https://github.com/dutiona/memory-engine/pull/60)                                                                 |
+| ✅ Schema evolution discipline ([#18](https://github.com/dutiona/memory-engine/issues/18)) | Storage epoch versioning, WAL-safe backup, event envelope versioning, upcaster registry, migration testing. [PR #61](https://github.com/dutiona/memory-engine/pull/61) |
 
 #### Phase 4a: Introspection & Data (library) ✅
 
-| Feature                                                                                    | Description                                                                                                                                                                                 |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ✅ Inspection APIs ([#39](https://github.com/dutiona/memory-engine/issues/39))             | `explain_fact()`, `fact_history()`, `replay_events()`, `dump_state()`, `statistics()`                                                                                                       |
-| ✅ Import/export ([#40](https://github.com/dutiona/memory-engine/issues/40))               | JSON event log + SQLite backup, gzip/zstd compression                                                                                                                                       |
-| ✅ Semantic extraction queries ([#41](https://github.com/dutiona/memory-engine/issues/41)) | `MemoryQuery` fluent builder: scope + temporal period + FTS/vector + importance/pinned filters. `execute_query()` on engine + async mirror. `#[non_exhaustive]` `MatchType::ImportanceRank` |
-| ✅ `Reranker` trait ([#42](https://github.com/dutiona/memory-engine/issues/42))            | Cross-encoder reranking on top-K candidates after RRF (+5-15% nDCG@10). Consumer-provided                                                                                                   |
-| ✅ Session log bootstrap ([#43](https://github.com/dutiona/memory-engine/issues/43))       | Parse Claude Code JSONL session logs into historical memory facts. Success-gated ingestion (AWM), workflow extraction (AWM/APC), pre-warming semantics (APC)                                |
-| ✅ Co-session edges ([#62](https://github.com/dutiona/memory-engine/issues/62))            | Auto-create `co_session` edges between facts sharing a `session_id`. [PR #67](https://github.com/dutiona/memory-engine/pull/67). Pairs with #43                                             |
+| Feature                                                                                    | Description                                                                                                                                       |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ✅ Inspection APIs ([#39](https://github.com/dutiona/memory-engine/issues/39))             | `explain_fact()`, `fact_history()`, `replay_events()`, `dump_state()`, `statistics()`. [PR #70](https://github.com/dutiona/memory-engine/pull/70) |
+| ✅ Import/export ([#40](https://github.com/dutiona/memory-engine/issues/40))               | JSON event log + SQLite backup, gzip/zstd compression. [PR #86](https://github.com/dutiona/memory-engine/pull/86)                                 |
+| ✅ Semantic extraction queries ([#41](https://github.com/dutiona/memory-engine/issues/41)) | `MemoryQuery` fluent builder. `execute_query()` on engine + async mirror. [PR #71](https://github.com/dutiona/memory-engine/pull/71)              |
+| ✅ Reranker trait ([#42](https://github.com/dutiona/memory-engine/issues/42))              | Cross-encoder reranking on top-K candidates after RRF (+5-15% nDCG@10). [PR #68](https://github.com/dutiona/memory-engine/pull/68)                |
+| ✅ Session log bootstrap ([#43](https://github.com/dutiona/memory-engine/issues/43))       | Parse Claude Code JSONL session logs into historical memory facts. [PR #69](https://github.com/dutiona/memory-engine/pull/69)                     |
+| ✅ Co-session edges ([#62](https://github.com/dutiona/memory-engine/issues/62))            | Auto-create `co_session` edges between facts sharing a `session_id`. [PR #67](https://github.com/dutiona/memory-engine/pull/67)                   |
 
-#### Phase 4a Follow-ups (polish & hardening)
+#### Phase 4a follow-ups (polish & hardening) — 14/14 resolved ✅
 
-Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c. **9/14 resolved.**
-
-| Issue                                                          | Category  | Description                                                                                                                          |
-| -------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| ✅ [#73](https://github.com/dutiona/memory-engine/issues/73)   | refactor  | Scope-aware session lookup in `link_session_facts`. [PR #101](https://github.com/dutiona/memory-engine/pull/101)                     |
-| ✅ [#76](https://github.com/dutiona/memory-engine/issues/76)   | perf      | Streaming JSON dump for large databases. [PR #98](https://github.com/dutiona/memory-engine/pull/98)                                  |
-| ✅ [#77](https://github.com/dutiona/memory-engine/issues/77)   | feat      | Populate `source_event` in `FactProvenance`. [PR #89](https://github.com/dutiona/memory-engine/pull/89)                              |
-| ✅ [#78](https://github.com/dutiona/memory-engine/issues/78)   | feat      | Dedicated `surfaced_at` column for due facts. [PR #92](https://github.com/dutiona/memory-engine/pull/92)                             |
-| ✅ [#79](https://github.com/dutiona/memory-engine/issues/79)   | refactor  | Drop `RwLock` guards before DB read in `explain_fact`. [PR #94](https://github.com/dutiona/memory-engine/pull/94)                    |
-| ✅ [#80](https://github.com/dutiona/memory-engine/issues/80)   | fix       | Allow `VACUUM INTO` from in-memory databases. [PR #88](https://github.com/dutiona/memory-engine/pull/88)                             |
-| ✅ [#82](https://github.com/dutiona/memory-engine/issues/82)   | hardening | Harden sequential fallback pairing in bootstrap `filter.rs`. [PR #97](https://github.com/dutiona/memory-engine/pull/97)              |
-| ✅ [#83](https://github.com/dutiona/memory-engine/issues/83)   | hardening | Propagate interrupted flag through bootstrap `filter.rs`. [PR #100](https://github.com/dutiona/memory-engine/pull/100)               |
-| ✅ [#85](https://github.com/dutiona/memory-engine/issues/85)   | hardening | Reranker output validation — subset/permutation guard. [PR #102](https://github.com/dutiona/memory-engine/pull/102)                  |
-| ✅ [#93](https://github.com/dutiona/memory-engine/issues/93)   | fix       | Stamp `surfaced_at` for due facts in non-due `resume_context` tiers. [PR #174](https://github.com/dutiona/memory-engine/pull/174)    |
-| ✅ [#104](https://github.com/dutiona/memory-engine/issues/104) | perf      | Add `LIMIT` to `list_active_facts` query. [PR #173](https://github.com/dutiona/memory-engine/pull/173)                               |
-| ✅ [#105](https://github.com/dutiona/memory-engine/issues/105) | docs      | Mark issue #82 as complete in ROADMAP.md                                                                                             |
-| ✅ [#106](https://github.com/dutiona/memory-engine/issues/106) | docs      | Fix incorrect `MemoryEngine::open` API usage in GEMINI.md. [commit bb35f03](https://github.com/dutiona/memory-engine/commit/bb35f03) |
-| ✅ [#144](https://github.com/dutiona/memory-engine/issues/144) | hardening | Reranker output validation — index-based trait redesign. [PR #175](https://github.com/dutiona/memory-engine/pull/175)                |
+| Issue                                                          | Category  | Description                                                                                                                       |
+| -------------------------------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| ✅ [#73](https://github.com/dutiona/memory-engine/issues/73)   | refactor  | Scope-aware session lookup in `link_session_facts`. [PR #101](https://github.com/dutiona/memory-engine/pull/101)                  |
+| ✅ [#76](https://github.com/dutiona/memory-engine/issues/76)   | perf      | Streaming JSON dump for large databases. [PR #98](https://github.com/dutiona/memory-engine/pull/98)                               |
+| ✅ [#77](https://github.com/dutiona/memory-engine/issues/77)   | feat      | Populate `source_event` in `FactProvenance`. [PR #89](https://github.com/dutiona/memory-engine/pull/89)                           |
+| ✅ [#78](https://github.com/dutiona/memory-engine/issues/78)   | feat      | Dedicated `surfaced_at` column for due facts. [PR #92](https://github.com/dutiona/memory-engine/pull/92)                          |
+| ✅ [#79](https://github.com/dutiona/memory-engine/issues/79)   | refactor  | Drop `RwLock` guards before DB read in `explain_fact`. [PR #94](https://github.com/dutiona/memory-engine/pull/94)                 |
+| ✅ [#80](https://github.com/dutiona/memory-engine/issues/80)   | fix       | Allow `VACUUM INTO` from in-memory databases. [PR #88](https://github.com/dutiona/memory-engine/pull/88)                          |
+| ✅ [#82](https://github.com/dutiona/memory-engine/issues/82)   | hardening | Harden sequential fallback pairing in bootstrap `filter.rs`. [PR #97](https://github.com/dutiona/memory-engine/pull/97)           |
+| ✅ [#83](https://github.com/dutiona/memory-engine/issues/83)   | hardening | Propagate interrupted flag through bootstrap `filter.rs`. [PR #100](https://github.com/dutiona/memory-engine/pull/100)            |
+| ✅ [#85](https://github.com/dutiona/memory-engine/issues/85)   | hardening | Reranker output validation — subset/permutation guard. [PR #102](https://github.com/dutiona/memory-engine/pull/102)               |
+| ✅ [#93](https://github.com/dutiona/memory-engine/issues/93)   | fix       | Stamp `surfaced_at` for due facts in non-due `resume_context` tiers. [PR #174](https://github.com/dutiona/memory-engine/pull/174) |
+| ✅ [#104](https://github.com/dutiona/memory-engine/issues/104) | perf      | Add `LIMIT` to `list_active_facts` query. [PR #173](https://github.com/dutiona/memory-engine/pull/173)                            |
+| ✅ [#105](https://github.com/dutiona/memory-engine/issues/105) | docs      | Mark issue #82 as complete in ROADMAP.md                                                                                          |
+| ✅ [#106](https://github.com/dutiona/memory-engine/issues/106) | docs      | Fix incorrect `MemoryEngine::open` API usage in GEMINI.md                                                                         |
+| ✅ [#144](https://github.com/dutiona/memory-engine/issues/144) | hardening | Reranker output validation — index-based trait redesign. [PR #175](https://github.com/dutiona/memory-engine/pull/175)             |
 
 #### Phase 4b: Tooling (new workspace binaries) ✅
 
@@ -244,7 +242,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | ✅ CLI inspector ([#44](https://github.com/dutiona/memory-engine/issues/44))         | `memory-engine-cli` — operator tool (inspect, dump, query, explain, stats, import, export). [PR #99](https://github.com/dutiona/memory-engine/pull/99)          |
 | ✅ MCP server ([#45](https://github.com/dutiona/memory-engine/issues/45))            | `memory-engine-mcp` — P0 tools (query, add_fact, ingest, resume_context, explain, stats, resolve). [PR #148](https://github.com/dutiona/memory-engine/pull/148) |
 
-#### Phase 4b Follow-ups (MCP completeness)
+#### Phase 4b follow-ups (MCP completeness) — 5/5 resolved ✅
 
 | Issue                                                          | Priority | Description                                                                                                                |
 | -------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -254,7 +252,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | ✅ [#151](https://github.com/dutiona/memory-engine/issues/151) | P2       | MCP: integration tests for tool handlers. [PR #176](https://github.com/dutiona/memory-engine/pull/176)                     |
 | ✅ [#152](https://github.com/dutiona/memory-engine/issues/152) | P1       | Abstention type exposure in Query results (4-type taxonomy). [PR #180](https://github.com/dutiona/memory-engine/pull/180)  |
 
-#### Phase 4b Follow-ups (CLI enhancements)
+#### Phase 4b follow-ups (CLI enhancements) — 3/3 resolved ✅
 
 | Issue                                                          | Priority | Description                                                                                                                                                     |
 | -------------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -262,15 +260,17 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | ✅ [#216](https://github.com/dutiona/memory-engine/issues/216) | P1       | CLI query: `--valid-at` temporal filtering + temporal columns in output. [PR #217](https://github.com/dutiona/memory-engine/pull/217)                           |
 | ✅ [#215](https://github.com/dutiona/memory-engine/issues/215) | P1       | CLI `batch-ingest`: bulk JSONL fact loading via embedding API. Shared `memory-engine-embed` crate. [PR #219](https://github.com/dutiona/memory-engine/pull/219) |
 
-#### Phase 4b Follow-ups (Hook integration — #221 umbrella)
+#### Phase 4b follow-ups (hook integration — #221 umbrella)
 
-| Issue                                                       | Priority | Description                                                                                                                                       |
-| ----------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ✅ [#224](https://github.com/dutiona/memory-engine/issues/224) | P0       | MCP: activity stream + session lifecycle (`record_activity`, `checkpoint_session`, `load_context`) + server-side filtering. Part of #221 umbrella. [PR #230](https://github.com/dutiona/memory-engine/pull/230) |
+[#221](https://github.com/dutiona/memory-engine/issues/221) is an umbrella spanning Phases 4b/5/6. Closes when all three sub-issues are done.
 
-See also: [#225](https://github.com/dutiona/memory-engine/issues/225) (cognitive endpoints, Phase 5a), [#226](https://github.com/dutiona/memory-engine/issues/226) (cross-layer linking, Phase 6).
+| Issue                                                          | Priority | Phase | Description                                                                                                                                                 |
+| -------------------------------------------------------------- | -------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ✅ [#224](https://github.com/dutiona/memory-engine/issues/224) | P0       | 4b    | Activity stream + session lifecycle (`record_activity`, `checkpoint_session`, `load_context`). [PR #230](https://github.com/dutiona/memory-engine/pull/230) |
+| 🔲 [#225](https://github.com/dutiona/memory-engine/issues/225) | P1       | 5a    | Cognitive pipeline MCP endpoints (`dream_cycle`, `get_recent_insights`). Prereqs: #48 ✅, #49 (trait ✅)                                                    |
+| 🔲 [#226](https://github.com/dutiona/memory-engine/issues/226) | P1       | 6     | Cross-layer linking MCP endpoints (`link`, `query_linked`). Prereqs: #50                                                                                    |
 
-#### Phase 4c: Quality & Cold Storage
+#### Phase 4c: Quality & Cold Storage ✅
 
 | Feature                                                                             | Description                                                                                                                                                                                                                |
 | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -278,119 +278,17 @@ See also: [#225](https://github.com/dutiona/memory-engine/issues/225) (cognitive
 | ✅ Archival compression ([#46](https://github.com/dutiona/memory-engine/issues/46)) | Cold storage `.pak` files for old non-pinned facts (zstd, explicit trigger, slow fallback). [PR #196](https://github.com/dutiona/memory-engine/pull/196)                                                                   |
 | ✅ Fast cold-start ([#31](https://github.com/dutiona/memory-engine/issues/31))      | Sidecar snapshot (rmp-serde named MessagePack + blake3 checksum), composite DB fingerprint, atomic write, graceful fallback to full rebuild. [PR #195](https://github.com/dutiona/memory-engine/pull/195)                  |
 
-**Snapshot follow-ups** (non-blocking, incremental improvements to #31):
+#### Phase 4c follow-ups (snapshot improvements) — 0/5 resolved
 
-| Issue                                                       | Category    | Description                                                             |
-| ----------------------------------------------------------- | ----------- | ----------------------------------------------------------------------- |
-| [#199](https://github.com/dutiona/memory-engine/issues/199) | perf        | Avoid DB re-scan in `HnswStrategy::to_snapshot` on shutdown             |
-| [#200](https://github.com/dutiona/memory-engine/issues/200) | perf        | Explore direct HNSW serde (`serde1` feature) to skip O(N log N) rebuild |
-| [#201](https://github.com/dutiona/memory-engine/issues/201) | perf        | Add zstd compression to snapshot sidecar file                           |
-| [#204](https://github.com/dutiona/memory-engine/issues/204) | bench       | Cold-start benchmark suite (10K–500K facts) per #31 requirements        |
-| [#205](https://github.com/dutiona/memory-engine/issues/205) | enhancement | Snapshot GC — keep last 2 sidecar files for rollback safety             |
+Non-blocking incremental improvements to #31.
 
-#### Code Quality Sweep (super-qa — parallel track)
-
-Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/memory-engine/pull/131) auto-fixed 10 findings). Remaining issues are non-blocking and can be addressed incrementally alongside Phase 4b/5 work.
-
-**High severity:**
-
-| Issue                                                       | Category    | Description                                                                      |
-| ----------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------- |
-| [#108](https://github.com/dutiona/memory-engine/issues/108) | refactoring | ~~`engine.rs` is a 3573-line god module — extract subsystems~~ ✅ PR #186        |
-| [#109](https://github.com/dutiona/memory-engine/issues/109) | refactoring | ~~`add_fact` takes 8 parameters — introduce builder or struct~~ ✅ PR #194       |
-| [#110](https://github.com/dutiona/memory-engine/issues/110) | refactoring | ~~All modules are `pub` in `lib.rs` — no encapsulation~~ ✅ PR #188              |
-| [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | ~~`proptest` and `insta` dev-dependencies never used~~ ✅ PR #189                |
-| [#128](https://github.com/dutiona/memory-engine/issues/128) | testing     | `traits.rs` and `query.rs` have zero unit tests ✅ (#185)                        |
-| [#187](https://github.com/dutiona/memory-engine/issues/187) | bug         | ~~`depth_shaping` insta snapshots stale after #180 QueryDiagnostics~~ ✅ PR #193 |
-
-**Medium severity:**
-
-| Issue                                                       | Category    | Description                                                            |
-| ----------------------------------------------------------- | ----------- | ---------------------------------------------------------------------- |
-| [#112](https://github.com/dutiona/memory-engine/issues/112) | security    | `VACUUM INTO` path interpolation in schema backup                      |
-| [#113](https://github.com/dutiona/memory-engine/issues/113) | refactoring | 6 constructor variants instead of builder                              |
-| [#114](https://github.com/dutiona/memory-engine/issues/114) | refactoring | `Edge.relation_type` is stringly-typed                                 |
-| [#115](https://github.com/dutiona/memory-engine/issues/115) | refactoring | `MemoryError` variants are stringly-typed catch-alls                   |
-| [#116](https://github.com/dutiona/memory-engine/issues/116) | refactoring | `SummaryGenerator::embed` duplicates `EmbeddingProvider`               |
-| [#117](https://github.com/dutiona/memory-engine/issues/117) | refactoring | Scope resolution duplicated across query, bootstrap, and resume paths  |
-| [#118](https://github.com/dutiona/memory-engine/issues/118) | refactoring | Synthetic `Fact` construction duplicated                               |
-| [#119](https://github.com/dutiona/memory-engine/issues/119) | correctness | `unreachable!()` in `infer_search_mode`                                |
-| [#120](https://github.com/dutiona/memory-engine/issues/120) | refactoring | Test helpers duplicated across 15+ modules                             |
-| [#121](https://github.com/dutiona/memory-engine/issues/121) | testing     | Zero runnable doc-tests in crate                                       |
-| [#122](https://github.com/dutiona/memory-engine/issues/122) | docs        | Stale Phase 2 labels in trait docs                                     |
-| [#123](https://github.com/dutiona/memory-engine/issues/123) | refactoring | Bootstrap functions take 9+ parameters                                 |
-| [#126](https://github.com/dutiona/memory-engine/issues/126) | refactoring | Glob re-exports in `lib.rs` hide API surface                           |
-| [#127](https://github.com/dutiona/memory-engine/issues/127) | docs        | `DumpFormat::Sqlite` doc contradicts implementation                    |
-| [#129](https://github.com/dutiona/memory-engine/issues/129) | testing     | Missing tests for inspect types, consolidation orchestrator, bootstrap |
-| [#130](https://github.com/dutiona/memory-engine/issues/130) | testing     | Untested engine query/restore error paths                              |
-| [#191](https://github.com/dutiona/memory-engine/issues/191) | bug         | `restore_sqlite` uses `exists()` instead of `is_file()`                |
-| [#192](https://github.com/dutiona/memory-engine/issues/192) | refactoring | `should_use_hnsw` uses `map_or(false, ..)` instead of `is_some_and()`  |
-| [#203](https://github.com/dutiona/memory-engine/issues/203) | bug         | Duplicate `mod archive` declaration in `engine/mod.rs`                 |
-| [#141](https://github.com/dutiona/memory-engine/issues/141) | security    | Compressed snapshot can bypass file size limit (decompression bomb)    |
-| [#142](https://github.com/dutiona/memory-engine/issues/142) | correctness | `usize::MAX` sentinel leaks via public `local_dedup` API               |
-| [#149](https://github.com/dutiona/memory-engine/issues/149) | refactoring | Consider builder pattern for `EngineConfig` (related to #113)          |
-
-**Low/Info (batched):**
-
-| Issue                                                       | Description              |
-| ----------------------------------------------------------- | ------------------------ |
-| [#124](https://github.com/dutiona/memory-engine/issues/124) | 27 low-severity findings |
-| [#125](https://github.com/dutiona/memory-engine/issues/125) | 10 info-level findings   |
-
----
-
-### Execution Order & Critical Path (as of 2026-04-08)
-
-Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5a **in progress** — trait contracts, provenance, outcome tracking, dormant resonance, and config shipped (PR #223, #228). Remaining: #57, #132, #133, #158–#161, #206–#211, #225.
-
-**#221 umbrella** (hook-based MCP endpoints) spans three phases — its critical path to closure runs through Phase 6:
-
-```text
-                         NOW
-                          │
-         ┌────────────────┼─────────────────┐
-         │                │                 │
-         ▼                ▼                 ▼
-      #224 ✅ DONE      super-qa          Phase 5a ◀── CRITICAL PATH
-      activity stream    (25 issues)       (#48✅,#49✅,#55✅,#56✅,#63✅
-      PR #230             parallel track    remaining: #57,#132,#133,#158,#159,#160,#161)
-      (part of #221)                            │
-         │                                      ├──▶ #225 (cognitive MCP endpoints)
-         │                                      │    (part of #221, #48✅ #49✅ done)
-         │                                      ▼
-         │                                   Phase 5b
-         │                                   (#64,#138, quarantine/suppress
-         │                                    + #162,#163)
-         │                                      │
-         │                                      ▼
-         │                                   Phase 6  (#50,#51,#52
-         │                                    + #164,#165,#166,#167,#168)
-         │                                      │
-         │                                      ├──▶ #226 (cross-layer linking MCP)
-         │                                      │    (part of #221, needs #50)
-         │                                      ▼
-         │                                   Phase 7  (#13)
-         │                                      │
-         └──────────────┬───────────────────────┘
-                        ▼
-                  #221 closes
-                  (when #224 + #225 + #226 all done)
-```
-
-**Parallelizable right now (3 independent tracks):**
-
-1. ~~**#224 — Activity stream + session lifecycle**~~ ✅ Done ([PR #230](https://github.com/dutiona/memory-engine/pull/230))
-1. **Super-qa sweep** (25 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review; +#203 from #195 review) — incremental, any order
-1. **Phase 5a remaining** (#57, #132, #133, #158–#161, #206–#211, #225) — critical path continues
-
-**Phase 5 internal dependencies:**
-
-- #55 (provenance) ✅ + #63 (outcome tracking) ✅ are prerequisites for #49 (DreamCycle) ✅ (trait contract)
-- #48 (InsightStream) ✅ — shipped in PR #228
-- #54 (sample_dormant) ✅ — shipped in PR #228
-- #56 (DreamCycleConfig) ✅ — shipped in PR #228
-- #132 (FactType::Prediction) and #133 (spreading activation) can be parallel — next up
-- #134 (vitality boosts) is independent, any time
+| Issue                                                          | Category | Description                                                             |
+| -------------------------------------------------------------- | -------- | ----------------------------------------------------------------------- |
+| 🔲 [#199](https://github.com/dutiona/memory-engine/issues/199) | perf     | Avoid DB re-scan in `HnswStrategy::to_snapshot` on shutdown             |
+| 🔲 [#200](https://github.com/dutiona/memory-engine/issues/200) | perf     | Explore direct HNSW serde (`serde1` feature) to skip O(N log N) rebuild |
+| 🔲 [#201](https://github.com/dutiona/memory-engine/issues/201) | perf     | Add zstd compression to snapshot sidecar file                           |
+| 🔲 [#204](https://github.com/dutiona/memory-engine/issues/204) | bench    | Cold-start benchmark suite (10K–500K facts) per #31 requirements        |
+| 🔲 [#205](https://github.com/dutiona/memory-engine/issues/205) | feat     | Snapshot GC — keep last 2 sidecar files for rollback safety             |
 
 ---
 
@@ -400,52 +298,76 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5a **in progress** — trai
 
 **Design:** Community research synthesis (5 projects) + three-way debate (Claude/Codex/Gemini, 2 rounds, 7 questions) + context adaptation survey (6 papers, 2026-03-19). See `docs/design/debate-phase5/synthesis.md`, `docs/design/2026-03-12-community-research-synthesis.md`, and `~/dev/autonomous-agent-project/docs/summaries/05-context-adaptation-research.md`.
 
-| Feature                                                                                                                                                                      | Description                                                                                                                                                                                                                                                                                                                                                        |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| ~~InsightStream trait — fast-path capture~~ ([#48](https://github.com/dutiona/memory-engine/issues/48)) ✅                                                                   | `record()` method for high-value observations. Consumer-implemented. Decision: kept as separate trait (not `FactType::Insight`). Done: [PR #228](https://github.com/dutiona/memory-engine/pull/228)                                                                                                                                                                |
-| ~~DreamCycle trait — cognitive pipeline~~ ([#49](https://github.com/dutiona/memory-engine/issues/49), [#47](https://github.com/dutiona/memory-engine/issues/47) absorbed) ✅ | Trait contract + `DreamContext` capability-restricted handle + `CycleReport` delta output. Default DBSCAN implementation deferred (follow-up PR). Done: [PR #228](https://github.com/dutiona/memory-engine/pull/228)                                                                                                                                               |
-| Outcome tracking ([#63](https://github.com/dutiona/memory-engine/issues/63))                                                                                                 | `EventType::OutcomeSignal` for fact feedback loops. `record_outcome(fact_id, outcome)` API. Feeds DreamCycle rescoring. **Research basis:** ACE, Reflexion, AWM, GEPA                                                                                                                                                                                              |
-| ~~`sample_dormant()` API~~ ([#54](https://github.com/dutiona/memory-engine/issues/54)) ✅                                                                                    | Resonance API — surfaces low-importance facts semantically related to a context embedding. Scope-filtered, cosine-sorted. Done: [PR #228](https://github.com/dutiona/memory-engine/pull/228)                                                                                                                                                                       |
-| ~~Provenance infrastructure~~ ([#55](https://github.com/dutiona/memory-engine/issues/55)) ✅                                                                                 | `PromotionProvenance` envelope + sidecar `LineageTable` in SQLite. Source fact expiry (`t_expired` set) with lineage preservation. Done: [PR #223](https://github.com/dutiona/memory-engine/pull/223). **Remaining (separate issues):** structured evidence typing `EvidenceBasis { Observed, Inferred, Synthesized }` (#159), adversarial self-review step (#161) |
-| ~~`DreamCycleConfig`~~ ([#56](https://github.com/dutiona/memory-engine/issues/56)) ✅                                                                                        | Per-`FactType` compression ratios + promotion percentile. Validated at construction. Done: [PR #228](https://github.com/dutiona/memory-engine/pull/228)                                                                                                                                                                                                            |
-| Three-layer identity output ([#57](https://github.com/dutiona/memory-engine/issues/57))                                                                                      | ANCHORS/CORE/PREDICTIONS structure in `CycleReport`. Each item: `{pattern, directive, false_positive}`                                                                                                                                                                                                                                                             |
-| `FactType::Prediction` ([#132](https://github.com/dutiona/memory-engine/issues/132))                                                                                         | Predictive memory with `t_predicted` timestamp. JEPA-inspired gap — facts that encode expectations for future validation                                                                                                                                                                                                                                           |
-| Spreading activation on retrieval ([#133](https://github.com/dutiona/memory-engine/issues/133))                                                                              | Return clusters not isolated facts — graph-walk activation propagation on retrieval (RMH). **Structure-first retrieval:** use graph topology to shape candidate pool BEFORE vector/keyword search (Signet pattern, gap G-C5). Improves coherence of returned context                                                                                               |
-| Vitality boosts on access ([#134](https://github.com/dutiona/memory-engine/issues/134))                                                                                      | Access-triggered importance boost with distance decay to graph neighbors (RMH). Strengthens frequently-used clusters                                                                                                                                                                                                                                               |
-| Grow-and-refine semantic dedup ([#64](https://github.com/dutiona/memory-engine/issues/64))                                                                                   | Lightweight maintenance between DreamCycles — incremental dedup without full batch pipeline (R12)                                                                                                                                                                                                                                                                  |
-| Recursive sub-query decomposition ([#138](https://github.com/dutiona/memory-engine/issues/138))                                                                              | Multi-hop retrieval via automatic sub-query decomposition (RMH constraint 2). Consumer-provided decomposer trait                                                                                                                                                                                                                                                   |
-| Graph-walk pruning ([#153](https://github.com/dutiona/memory-engine/issues/153))                                                                                             | BFS from seed facts through relationship edges — prune low-relevance subgraphs before returning results. Complements spreading activation (#133). Source: note 18 §6                                                                                                                                                                                               |
-| Reasoning-strategy-aware reranking ([#155](https://github.com/dutiona/memory-engine/issues/155))                                                                             | Extend `Reranker` trait with reasoning-strategy signal — consumer injects task-type context so reranking adapts to CoT vs. direct retrieval. Source: note 18 Table 7                                                                                                                                                                                               |
-| Decay-as-deliberate-abstention ([#156](https://github.com/dutiona/memory-engine/issues/156))                                                                                 | Formalize forgetting as deliberate abstention — decayed facts surfaced as "I used to know this" rather than silently omitted. 4th abstention type. Source: note 18 §10.3                                                                                                                                                                                           |
-| Mimir 5-signal retrieval weight study ([#157](https://github.com/dutiona/memory-engine/issues/157))                                                                          | Research: explicit signal weighting (BM25, semantic, vividness, mood, recency) vs RRF for episodic memory. Source: note 19 §2.1                                                                                                                                                                                                                                    |
-| Structural invariant preservation ([#212](https://github.com/dutiona/memory-engine/issues/212))                                                                              | Post-trim validation: edge pairs, session co-occurrence, provenance chains must survive or be trimmed together. Prevents orphaned structural elements. Source: note 29 M7 (CC `adjustIndexToPreserveAPIInvariants`)                                                                                                                                                |
-| Expose recency/decay signal for KB ([#213](https://github.com/dutiona/memory-engine/issues/213))                                                                             | Public API or MCP tool returning decay-weighted importance scores for fact IDs. KB uses as boost factors during hybrid search ranking. Unifies ME Ebbinghaus decay with KB retrieval. Source: note 30 M10                                                                                                                                                          |
+#### Phase 5a: Minimum Viable Cognitive Pipeline
 
-#### Sub-phasing
+**Goal:** Trait contracts, provenance, outcome tracking, and the infrastructure for DreamCycle to run end-to-end.
 
-- **Phase 5a (Minimum Viable Cognitive Pipeline):**
-  - InsightStream trait ✅ ([PR #228](https://github.com/dutiona/memory-engine/pull/228)) — kept as separate trait, not `FactType::Insight`
-  - DreamCycle trait + `DreamContext` + `CycleReport` ✅ ([PR #228](https://github.com/dutiona/memory-engine/pull/228)) — trait contract only, default DBSCAN impl deferred
-  - Outcome tracking — `EventType::OutcomeSignal` ✅ (#63, [PR merged](https://github.com/dutiona/memory-engine/commit/da5c7e6))
-  - `PromotionProvenance` + `LineageTable` ✅ ([PR #223](https://github.com/dutiona/memory-engine/pull/223))
-  - `DreamCycleConfig` ✅ ([PR #228](https://github.com/dutiona/memory-engine/pull/228)) — compression ratios + promotion percentile
-  - Three-layer identity output
-  - `FactType::Prediction` with `t_predicted` (#132)
-  - Spreading activation on retrieval (#133)
-  - `agent_id` on Event and Fact schemas (#158) — schema migration, `agent_id: Option<String>`, prerequisite for all multi-agent work
-  - Evidence-basis enum on Fact (#159) — `EvidenceBasis { Observed, Inferred, Synthesized }`, prevents frequency-based strengthening of ungrounded claims, pairs with #55
-  - Metacognitive rationale field on Fact ([#160](https://github.com/dutiona/memory-engine/issues/160)) — `importance_rationale: Option<String>`, WHY rated important, improves DreamCycle promotion quality
-  - Adversarial self-review in DreamCycle promotion gate (#161) — "Wait a minute" pattern before promoting to Wisdom tier, references Cheng et al. sycophancy findings
-  - Cognitive pipeline MCP endpoints ([#225](https://github.com/dutiona/memory-engine/issues/225)) — `dream_cycle` + `get_recent_insights` MCP tools. Part of #221 umbrella. Unblocked (#48 ✅, #49 ✅)
-  - High-water mark cursor on event log (#206) — idempotent reprocessing, cursor survives compaction. Pattern from Claude Code `extractMemories` (note 29)
-  - Distributed lock for DreamCycle (#207) — mtime+PID lock, 1h staleness, rollback on failure. Pattern from Claude Code `autoDream` (note 29)
-  - Circuit breaker for DreamCycle failures (#208) — 3× consecutive failures → stop. Prevents runaway API waste (note 29)
-  - Skip DreamCycle if caller already wrote facts (#209) — mutual exclusion prevents redundant runs (note 29)
-  - ContextDecayPolicy trait (#210) — importance-weighted tool-result pruning for integration layer (note 29)
-  - Dual-minimum context retention policy (#211) — tokens + fact count + hard cap for context management (note 29)
-- **Phase 5b (Behavioral Intelligence):** Targeted scanning (correction pairs, avoidance patterns), quarantine/suppress path, grow-and-refine semantic dedup (#64, R12), hierarchical workflow composition (R13), recursive sub-query decomposition (#138), retrieval-induced forgetting (#154), behavioral feedback loop ([#162](https://github.com/dutiona/memory-engine/issues/162)) — usage outcomes feed retrieval weights (#63 records, #134 boosts, this closes the loop), shadow/dry-run mode ([#163](https://github.com/dutiona/memory-engine/issues/163)) — full pipeline execution without committing, returns what would change (Signet pattern)
-- **Phase 5 (independent, any time):** ~~`sample_dormant()` API~~ ✅ ([PR #228](https://github.com/dutiona/memory-engine/pull/228)), vitality boosts on access (#134), graph-walk pruning (#153), reasoning-strategy-aware reranking (#155), decay-as-deliberate-abstention (#156), Mimir 5-signal weight study (#157), structural invariant preservation (#212), expose recency/decay signal for KB (#213)
-- **Deferred (not in Phase 5):** `compress_behavior()` hook on DreamCycle (depends on consumer LLM integration)
+**Completed (7/18):**
+
+| Issue                                                                | Description                                                                                                         | PR                                                           |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| ✅ [#48](https://github.com/dutiona/memory-engine/issues/48)         | InsightStream trait — `record()` fast-path capture. Kept as separate trait (not `FactType::Insight`)                | [PR #228](https://github.com/dutiona/memory-engine/pull/228) |
+| ✅ [#54](https://github.com/dutiona/memory-engine/issues/54)         | `sample_dormant()` API — resonance, surfaces low-importance facts semantically related to context embedding         | [PR #228](https://github.com/dutiona/memory-engine/pull/228) |
+| ✅ [#55](https://github.com/dutiona/memory-engine/issues/55)         | `PromotionProvenance` + `LineageTable` — sidecar provenance in SQLite, source fact expiry with lineage preservation | [PR #223](https://github.com/dutiona/memory-engine/pull/223) |
+| ✅ [#56](https://github.com/dutiona/memory-engine/issues/56)         | `DreamCycleConfig` — per-`FactType` compression ratios + promotion percentile, validated at construction            | [PR #228](https://github.com/dutiona/memory-engine/pull/228) |
+| ✅ [#63](https://github.com/dutiona/memory-engine/issues/63)         | Outcome tracking — `EventType::OutcomeSignal`, `record_outcome(fact_id, outcome)` API. Feeds DreamCycle rescoring   | [PR #222](https://github.com/dutiona/memory-engine/pull/222) |
+| ✅ [#47](https://github.com/dutiona/memory-engine/issues/47)         | Wisdom promotion API — absorbed into #49 (DreamCycle trait contract)                                                | [PR #228](https://github.com/dutiona/memory-engine/pull/228) |
+| ✅ partial [#49](https://github.com/dutiona/memory-engine/issues/49) | DreamCycle **trait contract** + `DreamContext` + `CycleReport` delta output. Default DBSCAN impl still pending      | [PR #228](https://github.com/dutiona/memory-engine/pull/228) |
+
+**Remaining (11 open):**
+
+| Issue                                                          | Category | Description                                                                                                           | Prereqs                                 |
+| -------------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| 🔲 [#49](https://github.com/dutiona/memory-engine/issues/49)   | feat     | DreamCycle **default DBSCAN implementation** — batch retroactive consolidation with review gates                      | #55 ✅, #63 ✅ (trait contract shipped) |
+| 🔲 [#57](https://github.com/dutiona/memory-engine/issues/57)   | feat     | Three-layer identity output — ANCHORS/CORE/PREDICTIONS in `CycleReport`. Each: `{pattern, directive, false_positive}` | #49 trait ✅                            |
+| 🔲 [#132](https://github.com/dutiona/memory-engine/issues/132) | feat     | `FactType::Prediction` with `t_predicted` — predictive memory (JEPA gap)                                              | None                                    |
+| 🔲 [#133](https://github.com/dutiona/memory-engine/issues/133) | feat     | Spreading activation on retrieval — return clusters not isolated facts (RMH). Structure-first retrieval               | None                                    |
+| 🔲 [#158](https://github.com/dutiona/memory-engine/issues/158) | feat     | `agent_id` on Event and Fact schemas — schema migration, prerequisite for all multi-agent work                        | None                                    |
+| 🔲 [#159](https://github.com/dutiona/memory-engine/issues/159) | feat     | `EvidenceBasis { Observed, Inferred, Synthesized }` enum on Fact — prevents frequency-based strengthening             | Pairs with #55 ✅                       |
+| 🔲 [#160](https://github.com/dutiona/memory-engine/issues/160) | feat     | `importance_rationale: Option<String>` on Fact — metacognitive transparency for DreamCycle promotion                  | None                                    |
+| 🔲 [#161](https://github.com/dutiona/memory-engine/issues/161) | feat     | Adversarial self-review step in DreamCycle promotion gate — "Wait a minute" pattern (Cheng et al.)                    | #49 trait ✅                            |
+| 🔲 [#206](https://github.com/dutiona/memory-engine/issues/206) | feat     | High-water mark cursor on event log — idempotent reprocessing, cursor survives compaction                             | None                                    |
+| 🔲 [#207](https://github.com/dutiona/memory-engine/issues/207) | feat     | Distributed lock for DreamCycle — mtime+PID lock, 1h staleness, rollback on failure                                   | None                                    |
+| 🔲 [#208](https://github.com/dutiona/memory-engine/issues/208) | feat     | Circuit breaker for DreamCycle failures — 3× consecutive → stop. Prevents runaway API waste                           | None                                    |
+| 🔲 [#209](https://github.com/dutiona/memory-engine/issues/209) | feat     | Skip DreamCycle if caller already wrote facts — mutual exclusion prevents redundant runs                              | None                                    |
+| 🔲 [#225](https://github.com/dutiona/memory-engine/issues/225) | feat     | Cognitive pipeline MCP endpoints — `dream_cycle` + `get_recent_insights`. Part of #221 umbrella                       | #48 ✅, #49 (default impl)              |
+
+**Phase 5a exit criteria:** #49 default impl ships, #57 identity output works, #225 MCP endpoints let consumers invoke the pipeline.
+
+#### Phase 5b: Behavioral Intelligence
+
+**Goal:** Targeted scanning, closed-loop feedback, and lightweight maintenance between DreamCycles.
+
+| Issue                                                          | Category | Description                                                                                                      | Prereqs          |
+| -------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------- | ---------------- |
+| 🔲 [#64](https://github.com/dutiona/memory-engine/issues/64)   | feat     | Grow-and-refine semantic dedup — lightweight maintenance between DreamCycles (R12)                               | #49 default impl |
+| 🔲 [#138](https://github.com/dutiona/memory-engine/issues/138) | feat     | Recursive sub-query decomposition for multi-hop retrieval (RMH constraint 2). Consumer-provided decomposer trait | None             |
+| 🔲 [#154](https://github.com/dutiona/memory-engine/issues/154) | feat     | Retrieval-induced forgetting — stability penalty for competitor memories                                         | None             |
+| 🔲 [#162](https://github.com/dutiona/memory-engine/issues/162) | feat     | Behavioral feedback loop — usage outcomes feed retrieval weights. Closes the observe-retrieve loop               | #63 ✅, #134     |
+| 🔲 [#163](https://github.com/dutiona/memory-engine/issues/163) | feat     | Shadow/dry-run mode — full pipeline execution without committing, returns what would change (Signet pattern)     | #49 default impl |
+
+#### Phase 5 — Design issues (context management)
+
+These are design specifications for the integration layer between memory-engine and consumer agents.
+
+| Issue                                                          | Category | Description                                                                                                       | Prereqs |
+| -------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------- | ------- |
+| 🔲 [#210](https://github.com/dutiona/memory-engine/issues/210) | design   | `ContextDecayPolicy` trait — importance-weighted tool-result pruning for integration layer                        | None    |
+| 🔲 [#211](https://github.com/dutiona/memory-engine/issues/211) | design   | Dual-minimum context retention policy — tokens + fact count + hard cap                                            | None    |
+| 🔲 [#212](https://github.com/dutiona/memory-engine/issues/212) | design   | Structural invariant preservation — post-trim validation for edge pairs, session co-occurrence, provenance chains | None    |
+
+#### Phase 5 — Independent (parallelizable, any order)
+
+No phase gate depends on these. Can be done alongside 5a/5b or after.
+
+| Issue                                                          | Category | Description                                                                                   | Prereqs                   |
+| -------------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------- | ------------------------- |
+| 🔲 [#134](https://github.com/dutiona/memory-engine/issues/134) | feat     | Vitality boosts on access — importance boost with distance decay to graph neighbors (RMH)     | None                      |
+| 🔲 [#153](https://github.com/dutiona/memory-engine/issues/153) | feat     | Graph-walk pruning — BFS from seed facts through relationship edges. Complements #133         | None (benefits from #133) |
+| 🔲 [#155](https://github.com/dutiona/memory-engine/issues/155) | feat     | Reasoning-strategy-aware reranking — extend `Reranker` trait with task-type context           | None                      |
+| 🔲 [#156](https://github.com/dutiona/memory-engine/issues/156) | feat     | Decay-as-deliberate-abstention — decayed facts as "I used to know this" (4th abstention type) | None                      |
+| 🔲 [#157](https://github.com/dutiona/memory-engine/issues/157) | research | Mimir 5-signal retrieval weight allocation for episodic memory                                | None                      |
+| 🔲 [#213](https://github.com/dutiona/memory-engine/issues/213) | feat     | Expose recency/decay signal for KB — public API returning decay-weighted importance scores    | None                      |
 
 ---
 
@@ -453,26 +375,28 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5a **in progress** — trai
 
 **Design:** [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md)
 
-| Feature                                                                                                                            | Description                                                                                                                                                                                            |
-| ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `KnowledgeBaseConnector` trait + `KnowledgeRef` + graceful degradation ([#50](https://github.com/dutiona/memory-engine/issues/50)) | Transport-agnostic trait, optional URI field on facts, "memory lapse" when KB unreachable. **Bidirectional linking** (NYX12: 10,577 bridge_links): `link(fact_id, knowledge_uri)` and `query_linked()` |
-| Cross-layer linking MCP endpoints ([#226](https://github.com/dutiona/memory-engine/issues/226))                                    | `link` + `query_linked` MCP tools. Part of #221 umbrella. Blocked on #50                                                                                                                               |
-| Knowledge change notification ([#51](https://github.com/dutiona/memory-engine/issues/51))                                          | When KB content is superseded/updated, notify memory to re-evaluate dependent facts. **Expand:** pub/sub emission for ME→agent direction (not just KB→ME)                                              |
-| research-index bridge ([#52](https://github.com/dutiona/memory-engine/issues/52))                                                  | `memory-kb-research-index` middleware crate implementing `KnowledgeBaseConnector`                                                                                                                      |
-| Cross-layer session propagation                                                                                                    | Propagate KB ingestion `session_id` (dutiona/knowledge-base#128) through bridge → #62 co-session edges                                                                                                 |
-| Pub/sub event emission on fact append ([#164](https://github.com/dutiona/memory-engine/issues/164))                                | Emit `FactWritten`/`FactExpired`/`FactSuperseded` notifications. Transport: Kafka vs NATS JetStream vs embedded. Includes DLQ design                                                                   |
-| Fact notification schema design ([#165](https://github.com/dutiona/memory-engine/issues/165))                                      | Schema for notifications with Schema Registry enforcement                                                                                                                                              |
-| MCP server ACL layer ([#166](https://github.com/dutiona/memory-engine/issues/166))                                                 | Capability-token-based auth. Agent identity verification before scope access                                                                                                                           |
-| Injection dosing framework ([#167](https://github.com/dutiona/memory-engine/issues/167))                                           | Principled injection volume calibration. IBM: +28.5pp hard, -5.6pp over-injection easy                                                                                                                 |
-| Bayesian reputation as consumer trait ([#168](https://github.com/dutiona/memory-engine/issues/168))                                | `trust_prior: Beta(alpha, beta)` per consumer-source pair. RAPS shows 5.2% drop under 60% adversarial                                                                                                  |
+**Gate:** Phase 5a minimum (DreamCycle default impl #49, cognitive MCP #225) should be complete before starting core Phase 6 work. #158 (`agent_id`) is a prerequisite for #166 (ACL).
+
+| Issue                                                          | Category | Description                                                                                                               | Prereqs       |
+| -------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| 🔲 [#50](https://github.com/dutiona/memory-engine/issues/50)   | feat     | `KnowledgeBaseConnector` trait + `KnowledgeRef` + graceful degradation. Bidirectional linking                             | Phase 5a gate |
+| 🔲 [#51](https://github.com/dutiona/memory-engine/issues/51)   | feat     | Knowledge change notification — KB updates trigger memory re-evaluation. Expand: pub/sub for ME→agent direction           | #50           |
+| 🔲 [#52](https://github.com/dutiona/memory-engine/issues/52)   | feat     | `memory-kb-research-index` bridge crate implementing `KnowledgeBaseConnector`                                             | #50           |
+| 🔲 [#164](https://github.com/dutiona/memory-engine/issues/164) | feat     | Pub/sub event emission on fact append — `FactWritten`/`FactExpired`/`FactSuperseded`. Includes DLQ design                 | #50           |
+| 🔲 [#165](https://github.com/dutiona/memory-engine/issues/165) | feat     | Fact notification schema design — Schema Registry enforcement                                                             | #164          |
+| 🔲 [#166](https://github.com/dutiona/memory-engine/issues/166) | feat     | MCP server ACL layer — capability-token auth, agent identity verification                                                 | #158          |
+| 🔲 [#167](https://github.com/dutiona/memory-engine/issues/167) | research | Injection dosing framework — principled injection volume calibration (IBM: +28.5pp hard, -5.6pp over-injection)           | None          |
+| 🔲 [#168](https://github.com/dutiona/memory-engine/issues/168) | research | Bayesian reputation as consumer trait — `trust_prior: Beta(alpha, beta)` per source pair                                  | None          |
+| 🔲 [#226](https://github.com/dutiona/memory-engine/issues/226) | feat     | Cross-layer linking MCP endpoints (`link`, `query_linked`). Part of #221 umbrella                                         | #50           |
+|                                                                | feat     | Cross-layer session propagation — propagate KB ingestion `session_id` (dutiona/knowledge-base#128) → #62 co-session edges | #50, #52      |
 
 ---
 
 ### Phase 7: Visualization 🔲
 
-| Feature                                                            | Description                                                                                                                                                                 |
-| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Web UI ([#13](https://github.com/dutiona/memory-engine/issues/13)) | WASM+Rust graph visualization. Hybrid: petgraph+fdg-sim (WASM) for layout, sigma.js (WebGL) for rendering. Scope filtering, fact editing, import/export, event log timeline |
+| Issue                                                        | Description                                                                                                                                                                          |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 🔲 [#13](https://github.com/dutiona/memory-engine/issues/13) | Web UI — WASM+Rust graph visualization. Hybrid: petgraph+fdg-sim (WASM) for layout, sigma.js (WebGL) for rendering. Scope filtering, fact editing, import/export, event log timeline |
 
 ---
 
@@ -480,26 +404,194 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5a **in progress** — trai
 
 Tracked as individual GitHub issues. Not scheduled for any phase — each has a trigger condition.
 
-| Item                                                                                                          | Trigger                                                                                                                                                  |
-| ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth ([#14](https://github.com/dutiona/memory-engine/issues/14))                                              | **Trigger update:** multi-agent safety is the trigger, not just multi-user deployment. Deployment layer concern, not engine core                         |
-| SaaS Sync ([#15](https://github.com/dutiona/memory-engine/issues/15))                                         | Product decision for multi-device. CRDT event-log merge + E2EE. Requires determinism guarantees first                                                    |
-| Hierarchical summarization ([#17](https://github.com/dutiona/memory-engine/issues/17))                        | Usage exceeds flat consolidation. Memento-style multi-level abstractions                                                                                 |
-| Determinism guarantees ([#19](https://github.com/dutiona/memory-engine/issues/19))                            | Before sync work begins. Replay, merge, idempotency rules                                                                                                |
-| Cross-session memory sharing ([#36](https://github.com/dutiona/memory-engine/issues/36))                      | Multi-agent deployments. Session isolation or namespace via ScopeTree                                                                                    |
-| Multimodal memory ([#37](https://github.com/dutiona/memory-engine/issues/37))                                 | Non-text memories needed. Schema supports it (BLOB embeddings)                                                                                           |
-| Multi-node sync ([#38](https://github.com/dutiona/memory-engine/issues/38))                                   | Multi-device eventual consistency. Event envelope fields are forward-compatible                                                                          |
-| GEPA meta-optimization ([#65](https://github.com/dutiona/memory-engine/issues/65))                            | Evolutionary optimization of DreamCycle consumer prompts. Trigger: sufficient DreamCycle execution data (>100 runs). Research: GEPA (arXiv:2507.19457)   |
-| Keyword-weighted hybrid search ([#66](https://github.com/dutiona/memory-engine/issues/66))                    | Weight FTS5 higher than vector for `FactType::Procedural` retrieval. Trigger: after #42 (Reranker) ships. Research: APC (arXiv:2506.14852)               |
-| Energy-based forgetting ([#135](https://github.com/dutiona/memory-engine/issues/135))                         | Unify temporal + representational + structural saliency into single energy metric. Trigger: Phase 5a ships, empirical data on current forgetting gaps    |
-| State-delta updates ([#136](https://github.com/dutiona/memory-engine/issues/136))                             | High-frequency memory operations via incremental deltas instead of full fact replacement. JEPA-inspired. Trigger: performance profiling shows bottleneck |
-| Attention-based retrieval ([#137](https://github.com/dutiona/memory-engine/issues/137))                       | Attention mechanism over memory store for context-sensitive retrieval. JEPA-inspired. Trigger: Phase 5a evaluation shows retrieval quality gap           |
-| Optimal decay-zone boundaries ([#139](https://github.com/dutiona/memory-engine/issues/139))                   | Derive identity/knowledge/operations multipliers statistically. Trigger: sufficient forgetting telemetry from deployed agents                            |
-| ANCHOR promotion threshold ([#140](https://github.com/dutiona/memory-engine/issues/140))                      | Derive promotion threshold statistically rather than heuristic. Trigger: sufficient DreamCycle data (Q12 from debate)                                    |
-| Context-triggered injection prototype - Level 2 ([#169](https://github.com/dutiona/memory-engine/issues/169)) | Harness runs reasoning context against K/M between thinking blocks. Cross-repo (ME + KB + harness). Trigger: Phase 5a + KB Phase 2 complete              |
-| Byzantine fault tolerance for DreamCycle ([#170](https://github.com/dutiona/memory-engine/issues/170))        | Design needed before multi-agent DreamCycle. Trigger: multi-agent deployment decision                                                                    |
-| Latency-aware memory materialization ([#171](https://github.com/dutiona/memory-engine/issues/171))            | FAISS/in-memory cache tier for real-time use cases. Trigger: latency profiling shows retrieval bottleneck in production                                  |
-| Protocol conformance test suite ([#172](https://github.com/dutiona/memory-engine/issues/172))                 | LAM-style fixtures for memory protocol contract. Trigger: external consumers adopt the engine                                                            |
+| Issue                                                          | Trigger                                                                                                                                               |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🔲 [#14](https://github.com/dutiona/memory-engine/issues/14)   | **Auth** — multi-agent safety, not just multi-user deployment. Deployment layer concern, not engine core                                              |
+| 🔲 [#15](https://github.com/dutiona/memory-engine/issues/15)   | **SaaS Sync** — product decision for multi-device. CRDT event-log merge + E2EE. Requires #19 (determinism) first                                      |
+| 🔲 [#17](https://github.com/dutiona/memory-engine/issues/17)   | **Hierarchical summarization** — usage exceeds flat consolidation. Memento-style multi-level abstractions                                             |
+| 🔲 [#19](https://github.com/dutiona/memory-engine/issues/19)   | **Determinism guarantees** — before sync work begins. Replay, merge, idempotency rules                                                                |
+| 🔲 [#36](https://github.com/dutiona/memory-engine/issues/36)   | **Cross-session memory sharing** — multi-agent deployments. Session isolation or namespace via ScopeTree                                              |
+| 🔲 [#37](https://github.com/dutiona/memory-engine/issues/37)   | **Multimodal memory** — non-text memories needed. Schema supports it (BLOB embeddings)                                                                |
+| 🔲 [#38](https://github.com/dutiona/memory-engine/issues/38)   | **Multi-node sync** — multi-device eventual consistency. Event envelope fields are forward-compatible                                                 |
+| 🔲 [#65](https://github.com/dutiona/memory-engine/issues/65)   | **GEPA meta-optimization** — evolutionary optimization of DreamCycle prompts. Trigger: >100 DreamCycle runs. Research: GEPA (arXiv:2507.19457)        |
+| 🔲 [#66](https://github.com/dutiona/memory-engine/issues/66)   | **Keyword-weighted hybrid search** — weight FTS5 higher for `FactType::Procedural`. Trigger: after #42 ✅ (shipped). Research: APC (arXiv:2506.14852) |
+| 🔲 [#135](https://github.com/dutiona/memory-engine/issues/135) | **Energy-based forgetting** — unify temporal + representational + structural saliency. Trigger: Phase 5a ships, empirical data on forgetting gaps     |
+| 🔲 [#136](https://github.com/dutiona/memory-engine/issues/136) | **State-delta updates** — incremental deltas for high-frequency ops (JEPA). Trigger: performance profiling shows bottleneck                           |
+| 🔲 [#137](https://github.com/dutiona/memory-engine/issues/137) | **Attention-based retrieval** — attention mechanism over memory store (JEPA). Trigger: Phase 5a eval shows retrieval quality gap                      |
+| 🔲 [#139](https://github.com/dutiona/memory-engine/issues/139) | **Optimal decay-zone boundaries** — derive multipliers statistically. Trigger: sufficient forgetting telemetry                                        |
+| 🔲 [#140](https://github.com/dutiona/memory-engine/issues/140) | **ANCHOR promotion threshold** — derive statistically rather than heuristic. Trigger: sufficient DreamCycle data (Q12)                                |
+| 🔲 [#169](https://github.com/dutiona/memory-engine/issues/169) | **Context-triggered injection (Level 2)** — reasoning context against K/M between thinking blocks. Trigger: Phase 5a + KB Phase 2 complete            |
+| 🔲 [#170](https://github.com/dutiona/memory-engine/issues/170) | **Byzantine fault tolerance for DreamCycle** — design needed before multi-agent DreamCycle. Trigger: multi-agent deployment decision                  |
+| 🔲 [#171](https://github.com/dutiona/memory-engine/issues/171) | **Latency-aware memory materialization** — FAISS/in-memory cache tier. Trigger: latency profiling shows retrieval bottleneck                          |
+| 🔲 [#172](https://github.com/dutiona/memory-engine/issues/172) | **Protocol conformance test suite** — LAM-style fixtures. Trigger: external consumers adopt the engine                                                |
+
+---
+
+### Code Quality Sweep (super-qa — parallel track)
+
+Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/memory-engine/pull/131) auto-fixed 10 findings). These are non-blocking and can be addressed incrementally alongside any phase work.
+
+**High severity — 6/6 resolved ✅**
+
+| Issue                                                          | Category    | Description                                                                                                        |
+| -------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------ |
+| ✅ [#108](https://github.com/dutiona/memory-engine/issues/108) | refactoring | `engine.rs` god module → partial impl files. [PR #186](https://github.com/dutiona/memory-engine/pull/186)          |
+| ✅ [#109](https://github.com/dutiona/memory-engine/issues/109) | refactoring | `add_fact` 8 params → `AddFactRequest` struct. [PR #194](https://github.com/dutiona/memory-engine/pull/194)        |
+| ✅ [#110](https://github.com/dutiona/memory-engine/issues/110) | refactoring | All modules `pub` → `pub(crate)` encapsulation. [PR #188](https://github.com/dutiona/memory-engine/pull/188)       |
+| ✅ [#111](https://github.com/dutiona/memory-engine/issues/111) | cleanup     | `proptest`/`insta` dev-deps unused → added tests. [PR #189](https://github.com/dutiona/memory-engine/pull/189)     |
+| ✅ [#128](https://github.com/dutiona/memory-engine/issues/128) | testing     | `traits.rs` and `query.rs` zero unit tests → covered. [PR #185](https://github.com/dutiona/memory-engine/pull/185) |
+| ✅ [#187](https://github.com/dutiona/memory-engine/issues/187) | bug         | Stale `depth_shaping` insta snapshots after #180. [PR #193](https://github.com/dutiona/memory-engine/pull/193)     |
+
+**Medium severity — 0/23 resolved**
+
+| Issue                                                          | Category    | Description                                                                      |
+| -------------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------- |
+| 🔲 [#112](https://github.com/dutiona/memory-engine/issues/112) | security    | `VACUUM INTO` path interpolation in schema backup                                |
+| 🔲 [#113](https://github.com/dutiona/memory-engine/issues/113) | refactoring | 6 constructor variants instead of builder                                        |
+| 🔲 [#114](https://github.com/dutiona/memory-engine/issues/114) | refactoring | `Edge.relation_type` is stringly-typed                                           |
+| 🔲 [#115](https://github.com/dutiona/memory-engine/issues/115) | refactoring | `MemoryError` variants are stringly-typed catch-alls                             |
+| 🔲 [#116](https://github.com/dutiona/memory-engine/issues/116) | refactoring | `SummaryGenerator::embed` duplicates `EmbeddingProvider`                         |
+| 🔲 [#117](https://github.com/dutiona/memory-engine/issues/117) | refactoring | Scope resolution duplicated across query, bootstrap, resume paths                |
+| 🔲 [#118](https://github.com/dutiona/memory-engine/issues/118) | refactoring | Synthetic `Fact` construction duplicated                                         |
+| 🔲 [#119](https://github.com/dutiona/memory-engine/issues/119) | correctness | `unreachable!()` in `infer_search_mode`                                          |
+| 🔲 [#120](https://github.com/dutiona/memory-engine/issues/120) | refactoring | Test helpers duplicated across 15+ modules                                       |
+| 🔲 [#121](https://github.com/dutiona/memory-engine/issues/121) | testing     | Zero runnable doc-tests in crate                                                 |
+| 🔲 [#122](https://github.com/dutiona/memory-engine/issues/122) | docs        | Stale Phase 2 labels in trait docs                                               |
+| 🔲 [#123](https://github.com/dutiona/memory-engine/issues/123) | refactoring | Bootstrap functions take 9+ parameters                                           |
+| 🔲 [#126](https://github.com/dutiona/memory-engine/issues/126) | refactoring | Glob re-exports in `lib.rs` hide API surface                                     |
+| 🔲 [#127](https://github.com/dutiona/memory-engine/issues/127) | docs        | `DumpFormat::Sqlite` doc contradicts implementation                              |
+| 🔲 [#129](https://github.com/dutiona/memory-engine/issues/129) | testing     | Missing tests for inspect types, consolidation orchestrator, bootstrap           |
+| 🔲 [#130](https://github.com/dutiona/memory-engine/issues/130) | testing     | Untested engine query/restore error paths                                        |
+| 🔲 [#141](https://github.com/dutiona/memory-engine/issues/141) | security    | Compressed snapshot can bypass file size limit (decompression bomb)              |
+| 🔲 [#142](https://github.com/dutiona/memory-engine/issues/142) | correctness | `usize::MAX` sentinel leaks via public `local_dedup` API                         |
+| 🔲 [#149](https://github.com/dutiona/memory-engine/issues/149) | refactoring | Consider builder pattern for `EngineConfig` (related to #113)                    |
+| 🔲 [#191](https://github.com/dutiona/memory-engine/issues/191) | bug         | `restore_sqlite` uses `exists()` instead of `is_file()`                          |
+| 🔲 [#192](https://github.com/dutiona/memory-engine/issues/192) | refactoring | `should_use_hnsw` uses `map_or(false, ..)` instead of `is_some_and()`            |
+| 🔲 [#203](https://github.com/dutiona/memory-engine/issues/203) | bug         | Duplicate `mod archive` declaration in `engine/mod.rs`                           |
+| 🔲 [#231](https://github.com/dutiona/memory-engine/issues/231) | testing     | Integration tests for Phase 5a cognitive APIs (sample_dormant, promote, outcome) |
+
+**Low/Info (batched):**
+
+| Issue                                                          | Description              |
+| -------------------------------------------------------------- | ------------------------ |
+| 🔲 [#124](https://github.com/dutiona/memory-engine/issues/124) | 27 low-severity findings |
+| 🔲 [#125](https://github.com/dutiona/memory-engine/issues/125) | 10 info-level findings   |
+
+---
+
+## Critical Path & Shortest Route to Phase 6
+
+### Issue counts by area
+
+| Area                     | Total   | Done   | Open   | On critical path |
+| ------------------------ | ------- | ------ | ------ | ---------------- |
+| Phase 1-3b               | 36      | 36     | 0      | —                |
+| Phase 4 (all sub-phases) | 42      | 39     | 3†     | —                |
+| Phase 5a                 | 18      | 7      | 11     | 5                |
+| Phase 5b                 | 5       | 0      | 5      | 0‡               |
+| Phase 5 independent      | 6       | 0      | 6      | 0                |
+| Phase 5 design           | 3       | 0      | 3      | 0                |
+| Phase 6                  | 10      | 0      | 10     | 5                |
+| Phase 7                  | 1       | 0      | 1      | 0                |
+| Deferred                 | 18      | 0      | 18     | 0                |
+| Code quality (super-qa)  | 31      | 6      | 25     | 0                |
+| Phase 4c follow-ups      | 5       | 0      | 5      | 0                |
+| **Total**                | **175** | **88** | **87** |                  |
+
+† Phase 4 open: #199, #200, #201, #204, #205 (snapshot follow-ups) + #225, #226 (part of #221 umbrella, tracked in Phase 5a/6).
+‡ Phase 5b is not on the critical path to Phase 6 — it can run in parallel.
+
+### Critical path diagram
+
+The **minimum chain** to unblock Phase 6 core, then complete it:
+
+```text
+                     NOW (2026-04-09)
+                      │
+     ┌────────────────┼──────────────────────────────────────┐
+     │                │                                      │
+     ▼                ▼                                      ▼
+  Phase 5a         Phase 5            Code Quality Sweep
+  CRITICAL PATH    independent        (24 open, parallel)
+     │             (6 issues,
+     │              any order)
+     │
+     ├─── #49 default impl ◄── NEXT (prereqs met: #55✅ #63✅)
+     │         │
+     │         ├─── #57 (three-layer identity, needs #49)
+     │         ├─── #161 (adversarial review, needs #49)
+     │         ├─── #225 (cognitive MCP, needs #49)
+     │         │
+     │    #158 (agent_id schema) ◄── PARALLEL with #49
+     │         │
+     │         └─── #166 (MCP ACL, needs #158) ── Phase 6
+     │
+     │    #132, #133, #159, #160, #206-#209 ◄── PARALLEL with #49
+     │
+     ▼ Phase 5a gate met (#49 impl + #225 shipped)
+     │
+     ├─── Phase 5b (5 issues, parallel with Phase 6)
+     │
+     ▼ Phase 6 START
+     │
+     ├─── #50 (KnowledgeBaseConnector) ◄── GATE
+     │         │
+     │         ├─── #51 (KB change notification)
+     │         ├─── #52 (research-index bridge)
+     │         ├─── #164 (pub/sub event emission)
+     │         │         │
+     │         │         └─── #165 (notification schema)
+     │         │
+     │         └─── #226 (cross-layer linking MCP)
+     │
+     ├─── #166 (MCP ACL) ◄── needs #158 from 5a
+     ├─── #167 (injection dosing research) ◄── independent
+     ├─── #168 (Bayesian reputation research) ◄── independent
+     │
+     ▼ Phase 6 COMPLETE
+     │
+     └─── #221 umbrella closes (when #224✅ + #225 + #226 all done)
+```
+
+### Shortest path (12 issues, strict sequence)
+
+These are the minimum issues that must ship, in order, to complete Phase 6:
+
+| Step | Issue | Description                       | Blocked by       |
+| ---- | ----- | --------------------------------- | ---------------- |
+| 1    | #49   | DreamCycle default DBSCAN impl    | Nothing (go)     |
+| 2    | #158  | `agent_id` schema migration       | Nothing (‖ #49)  |
+| 3    | #57   | Three-layer identity output       | #49              |
+| 4    | #225  | Cognitive MCP endpoints           | #49              |
+| 5    | #50   | `KnowledgeBaseConnector` trait    | #225 (5a gate)   |
+| 6    | #51   | KB change notification            | #50              |
+| 7    | #52   | Research-index bridge crate       | #50              |
+| 8    | #164  | Pub/sub event emission            | #50              |
+| 9    | #165  | Notification schema design        | #164             |
+| 10   | #166  | MCP ACL layer                     | #158             |
+| 11   | #226  | Cross-layer linking MCP endpoints | #50              |
+| 12   |       | Close #221 umbrella               | #224✅ #225 #226 |
+
+**Parallelism within the shortest path:**
+
+- Steps 1-2 are independent → run in parallel
+- Steps 3-4 both depend only on #49 → run in parallel after step 1
+- Steps 6, 7, 8, 11 all depend only on #50 → run in parallel after step 5
+- Step 9 depends on step 8
+- Step 10 depends on step 2 (can run as soon as #158 ships, parallel with Phase 6 core)
+
+**Issues NOT on the shortest path** but valuable before shipping Phase 6:
+
+- #159, #160, #161 (schema enrichments + adversarial review) — improve DreamCycle quality
+- #132, #133 (prediction facts + spreading activation) — improve retrieval quality
+- #206-#209 (DreamCycle operational hardening) — improve DreamCycle reliability
+- #167, #168 (research issues) — inform future design, not blocking
+
+### Three parallel tracks (what to work on now)
+
+1. **Critical path** → #49 (DreamCycle DBSCAN impl) + #158 (agent_id schema) — these unblock everything downstream
+2. **Phase 5 independent** → #134, #153, #155, #156, #213 — retrieval and forgetting improvements, no dependencies
+3. **Code quality** → 25 super-qa issues + 5 snapshot follow-ups — incremental, any order
 
 ---
 
@@ -516,8 +608,8 @@ Consumer (AI agent, CLI tool, MCP server)
 │  resume_context · list_due · pin/unpin  │  ← Phase 3/3b ✅
 │  explain · replay · dump · statistics   │  ← Phase 4a ✅
 │  import · export · link_session_facts  │  ← Phase 4a ✅
-│  dream_cycle · sample_dormant           │  ← Phase 5 ✅ (PR #228)
-│  record_outcome · dedup_semantic        │  ← Phase 5 (#63 ✅, #64)
+│  dream_cycle · sample_dormant           │  ← Phase 5 (traits ✅, default impl 🔲)
+│  record_outcome · dedup_semantic        │  ← Phase 5 (#63 ✅, #64 🔲)
 ├──────────────────────────────────────────┤
 │  AsyncMemoryEngine (tokio wrapper)       │  ← Phase 3 ✅
 ├──────────────────────────────────────────┤
@@ -547,11 +639,11 @@ Consumer (AI agent, CLI tool, MCP server)
 ├──────────────────────────────────────────┤
 │  Resume (5-tier cognitive boot)          │  ← Phase 3b ✅
 ├──────────────────────────────────────────┤
-│  Cognitive Pipelines                     │  ← Phase 5 ✅ (traits)
-│  ├─ InsightStream (fast-path capture)   │  ← PR #228
-│  └─ DreamCycle (full cognitive pipeline) │  ← PR #228 (trait only)
+│  Cognitive Pipelines                     │  ← Phase 5 (traits ✅)
+│  ├─ InsightStream (fast-path capture)   │  ← PR #228 ✅
+│  └─ DreamCycle (trait ✅, impl 🔲)       │  ← PR #228 / #49
 ├──────────────────────────────────────────┤
-│  Knowledge Bridge                        │  ← Phase 6
+│  Knowledge Bridge                        │  ← Phase 6 🔲
 │  ├─ KnowledgeRef (URI on facts)         │
 │  └─ ChangeNotification (KB → memory)   │
 └──────────────────────────────────────────┘
@@ -573,8 +665,8 @@ ConflictArbiter::arbitrate(old, new) → CrudDecision    ← Phase 2 ✅
 PersistenceClassifier::should_pin(fact) → bool         ← Phase 3b ✅
 Reranker::rerank(query, candidates) → Vec<ScoredFact>  ← Phase 4a ✅
 InsightStream::record(insight) → Result<()>             ← Phase 5 ✅
-DreamCycle::run(engine) → Result<CycleReport>           ← Phase 5 ✅
-KnowledgeBaseConnector::resolve(uri) → KnowledgeChunk  ← Phase 6
+DreamCycle::run(engine) → Result<CycleReport>           ← Phase 5 ✅ (trait)
+KnowledgeBaseConnector::resolve(uri) → KnowledgeChunk  ← Phase 6 🔲
 ```
 
 The engine has zero LLM/network dependencies. All intelligence is injected by the consumer via these traits.
