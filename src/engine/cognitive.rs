@@ -154,15 +154,15 @@ impl MemoryEngine {
             });
         }
 
-        // Ensure metadata is an object for provenance injection
+        // Ensure metadata is an object (normalize non-objects to avoid silent provenance loss)
         let mut metadata = match req.metadata.clone() {
             serde_json::Value::Object(map) => serde_json::Value::Object(map),
             _ => serde_json::json!({}),
         };
 
-        // Inject provenance envelope into metadata (lineage_id is skip_serializing,
-        // so only the descriptive fields are stored — the lineage table is authoritative
-        // for the lineage_id → source_fact_ids mapping).
+        // Inject provenance envelope into metadata. lineage_id has #[serde(skip_serializing)]
+        // on PromotionProvenance, so only descriptive fields are stored — the lineage table
+        // is authoritative for the lineage_id → source_fact_ids mapping.
         if let serde_json::Value::Object(ref mut map) = metadata {
             map.insert(
                 "promotion_provenance".to_owned(),

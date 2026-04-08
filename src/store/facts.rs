@@ -189,12 +189,37 @@ impl<'a> FactStore<'a> {
     /// Used by `sample_dormant()` for resonance queries. Returns facts with
     /// `importance_score < threshold` that pass temporal validity checks.
     ///
+    /// When `scope_ids` is `Some`, only facts in those scopes are returned.
+    /// When `None`, all scopes are searched.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn list_dormant(&self, importance_threshold: f64) -> Result<Vec<Fact>> {
+    pub fn list_dormant(
+        &self,
+        importance_threshold: f64,
+        scope_ids: Option<&[i64]>,
+    ) -> Result<Vec<Fact>> {
         let now_str = Utc::now().to_rfc3339();
-        let mut stmt = self.conn.prepare(
+
+        let (scope_clause, scope_params) = match scope_ids {
+            Some(ids) if !ids.is_empty() => {
+                let placeholders: Vec<String> = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("?{}", i + 3))
+                    .collect();
+                let clause = format!(" AND scope_id IN ({})", placeholders.join(","));
+                let params: Vec<Box<dyn rusqlite::types::ToSql>> = ids
+                    .iter()
+                    .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+                    .collect();
+                (clause, params)
+            }
+            _ => (String::new(), Vec::new()),
+        };
+
+        let sql = format!(
             "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
@@ -204,12 +229,20 @@ impl<'a> FactStore<'a> {
                AND is_pinned = 0
                AND importance_score < ?1
                AND (t_valid IS NULL OR t_valid <= ?2)
-               AND (t_invalid IS NULL OR t_invalid > ?2)",
-        )?;
+               AND (t_invalid IS NULL OR t_invalid > ?2){scope_clause}"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
         let dim = self.embed_dim;
-        let rows = stmt.query_map(params![importance_threshold, now_str], |row| {
-            row_to_fact(row, dim)
-        })?;
+
+        // Build params: [threshold, now, ...scope_ids]
+        let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(importance_threshold), Box::new(now_str)];
+        all_params.extend(scope_params);
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            all_params.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt.query_map(param_refs.as_slice(), |row| row_to_fact(row, dim))?;
         let mut facts = Vec::new();
         for row in rows {
             facts.push(row?);

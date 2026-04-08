@@ -501,11 +501,18 @@ impl AsyncMemoryEngine {
     /// Sample dormant facts semantically related to a context.
     ///
     /// See [`MemoryEngine::sample_dormant`] for details.
-    pub async fn sample_dormant(&self, n: usize, context: Vec<f32>) -> Result<Vec<Fact>> {
+    pub async fn sample_dormant(
+        &self,
+        n: usize,
+        context: Vec<f32>,
+        scope_ids: Option<Vec<i64>>,
+    ) -> Result<Vec<Fact>> {
         let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.sample_dormant(n, &context))
-            .await
-            .map_err(join_err)?
+        tokio::task::spawn_blocking(move || {
+            engine.sample_dormant(n, &context, scope_ids.as_deref())
+        })
+        .await
+        .map_err(join_err)?
     }
 
     /// Record a high-value insight via the provided `InsightStream`.

@@ -21,11 +21,18 @@ impl MemoryEngine {
     ///
     /// * `n` — Maximum number of facts to return.
     /// * `context` — Context embedding to compute similarity against.
+    /// * `scope_ids` — Optional scope filter. When `Some`, only facts in these
+    ///   scopes are considered. When `None`, all scopes are searched.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::EmbeddingDimension` if `context.len() != embed_dim`.
-    pub fn sample_dormant(&self, n: usize, context: &[f32]) -> Result<Vec<Fact>> {
+    pub fn sample_dormant(
+        &self,
+        n: usize,
+        context: &[f32],
+        scope_ids: Option<&[i64]>,
+    ) -> Result<Vec<Fact>> {
         if context.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
                 expected: self.embed_dim,
@@ -37,9 +44,11 @@ impl MemoryEngine {
             return Ok(Vec::new());
         }
 
-        // Query dormant facts from the store
+        // Query dormant facts from the store, filtered by scope
+        let scope_ids_owned = scope_ids.map(|s| s.to_vec());
         let candidates = self.with_read(|conn| {
-            FactStore::new(conn, self.embed_dim).list_dormant(DORMANT_THRESHOLD)
+            FactStore::new(conn, self.embed_dim)
+                .list_dormant(DORMANT_THRESHOLD, scope_ids_owned.as_deref())
         })?;
 
         // Compute cosine similarity and sort descending (resonance = most relevant dormant)
@@ -94,14 +103,16 @@ mod tests {
     #[test]
     fn sample_dormant_empty_store() {
         let engine = MemoryEngine::open_memory(4).unwrap();
-        let results = engine.sample_dormant(10, &[0.1, 0.2, 0.3, 0.4]).unwrap();
+        let results = engine
+            .sample_dormant(10, &[0.1, 0.2, 0.3, 0.4], None)
+            .unwrap();
         assert!(results.is_empty());
     }
 
     #[test]
     fn sample_dormant_wrong_dimension() {
         let engine = MemoryEngine::open_memory(4).unwrap();
-        let err = engine.sample_dormant(10, &[0.1, 0.2]).unwrap_err();
+        let err = engine.sample_dormant(10, &[0.1, 0.2], None).unwrap_err();
         assert!(matches!(
             err,
             MemoryError::EmbeddingDimension {
@@ -120,7 +131,9 @@ mod tests {
         // High importance — should NOT be returned
         add_fact_with_importance(&engine, "high importance", 0.9, vec![1.0, 0.0, 0.0, 0.0]);
 
-        let results = engine.sample_dormant(10, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let results = engine
+            .sample_dormant(10, &[1.0, 0.0, 0.0, 0.0], None)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "low importance");
     }
@@ -138,7 +151,9 @@ mod tests {
                 .unwrap();
         }
 
-        let results = engine.sample_dormant(10, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let results = engine
+            .sample_dormant(10, &[1.0, 0.0, 0.0, 0.0], None)
+            .unwrap();
         assert!(results.is_empty(), "expired facts should not appear");
     }
 
@@ -161,7 +176,9 @@ mod tests {
         };
         engine.add_fact(&req, &embedder, None).unwrap();
 
-        let results = engine.sample_dormant(10, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let results = engine
+            .sample_dormant(10, &[1.0, 0.0, 0.0, 0.0], None)
+            .unwrap();
         assert!(results.is_empty(), "pinned facts should not appear");
     }
 
@@ -175,7 +192,9 @@ mod tests {
             add_fact_with_importance(&engine, &format!("fact {i}"), 0.1, emb);
         }
 
-        let results = engine.sample_dormant(3, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let results = engine
+            .sample_dormant(3, &[1.0, 0.0, 0.0, 0.0], None)
+            .unwrap();
         assert_eq!(results.len(), 3);
     }
 
@@ -188,7 +207,9 @@ mod tests {
         // More similar
         add_fact_with_importance(&engine, "more similar", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
 
-        let results = engine.sample_dormant(10, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let results = engine
+            .sample_dormant(10, &[1.0, 0.0, 0.0, 0.0], None)
+            .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
             results[0].content, "more similar",
@@ -200,7 +221,9 @@ mod tests {
     fn sample_dormant_zero_n() {
         let engine = MemoryEngine::open_memory(4).unwrap();
         add_fact_with_importance(&engine, "fact", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
-        let results = engine.sample_dormant(0, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let results = engine
+            .sample_dormant(0, &[1.0, 0.0, 0.0, 0.0], None)
+            .unwrap();
         assert!(results.is_empty());
     }
 }
