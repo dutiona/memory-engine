@@ -269,10 +269,12 @@ mod tests {
         let data = vec![serde_json::json!({"index": 0, "embedding": [0.1]})];
         let result = HttpEmbeddingProvider::parse_openai_batch(&data, 2);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("expected 2 results, got 1"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected 2 results, got 1")
+        );
     }
 
     #[test]
@@ -299,9 +301,11 @@ mod tests {
         let data = vec![serde_json::json!([0.1])];
         let result = HttpEmbeddingProvider::parse_ollama_batch(&data, 3);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("expected 3 results, got 1"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected 3 results, got 1")
+        );
     }
 }

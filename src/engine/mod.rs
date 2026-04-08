@@ -25,6 +25,7 @@ mod forgetting;
 mod graph;
 mod ingest;
 mod inspect;
+mod lineage;
 mod outcome;
 mod query;
 mod restore;

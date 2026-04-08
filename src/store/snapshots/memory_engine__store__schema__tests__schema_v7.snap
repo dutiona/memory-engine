@@ -1,6 +1,5 @@
 ---
 source: src/store/schema.rs
-assertion_line: 1822
 expression: schema
 ---
 -- index: idx_archive_manifest_path
@@ -54,6 +53,9 @@ CREATE INDEX idx_facts_type ON facts(fact_type);
 -- index: idx_facts_valid
 CREATE INDEX idx_facts_valid ON facts(t_valid, t_invalid);
 
+-- index: idx_lineage_wisdom_fact_id
+CREATE UNIQUE INDEX idx_lineage_wisdom_fact_id ON lineage(wisdom_fact_id);
+
 -- index: idx_scopes_parent
 CREATE INDEX idx_scopes_parent ON scopes(parent_id);
 
@@ -92,6 +94,9 @@ CREATE TABLE 'facts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
 
 -- table: facts_fts_idx
 CREATE TABLE 'facts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+
+-- table: lineage
+CREATE TABLE lineage ( lineage_id INTEGER PRIMARY KEY AUTOINCREMENT, wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE, source_fact_ids TEXT NOT NULL CHECK(json_valid(source_fact_ids)), provenance TEXT NOT NULL CHECK(json_valid(provenance)) );
 
 -- table: scopes
 CREATE TABLE scopes ( id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER REFERENCES scopes(id), label TEXT NOT NULL, depth INTEGER NOT NULL DEFAULT 0 );
