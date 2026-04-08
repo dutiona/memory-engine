@@ -2,7 +2,7 @@
 
 ## What
 
-A stdio-based MCP server binary that exposes memory-engine as 15 tools (10 P0 + 5 P1) for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
+A stdio-based MCP server binary that exposes memory-engine as 18 tools (10 P0 + 5 P1 + 3 activity stream) for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
 
 ## Why
 
@@ -70,23 +70,26 @@ Add to `.claude/settings.json`:
 
 ### Tools
 
-| Tool                    | Priority | Purpose                              | Depth                |
-| ----------------------- | -------- | ------------------------------------ | -------------------- |
-| `memory_ingest`         | P0       | Append event to log                  | —                    |
-| `memory_add_fact`       | P0       | Add fact with embedding              | —                    |
-| `memory_query`          | P0       | Hybrid FTS + vector search           | sparse/standard/full |
-| `memory_resume_context` | P0       | 5-tier cognitive boot                | sparse/standard/full |
-| `memory_list_due`       | P0       | Scheduled fact surfacing             | sparse/standard/full |
-| `memory_next_due_time`  | P0       | Next scheduled time                  | —                    |
-| `memory_explain_fact`   | P0       | Fact provenance                      | sparse/standard/full |
-| `memory_get_fact`       | P0       | Single fact by ID                    | sparse/standard/full |
-| `memory_statistics`     | P0       | Aggregate stats                      | —                    |
-| `memory_flush_insights` | P0       | Batch pre-compaction capture         | —                    |
-| `memory_consolidate`    | P1       | Dedup + cluster facts into summaries | —                    |
-| `memory_forget`         | P1       | Ebbinghaus decay pruning             | —                    |
-| `memory_dump_state`     | P1       | Export snapshot (JSON/SQLite)         | —                    |
-| `memory_pin_fact`       | P1       | Make fact unforgettable              | —                    |
-| `memory_unpin_fact`     | P1       | Allow forgetting a pinned fact       | —                    |
+| Tool                        | Priority | Purpose                                | Depth                |
+| --------------------------- | -------- | -------------------------------------- | -------------------- |
+| `memory_ingest`             | P0       | Append event to log                    | —                    |
+| `memory_add_fact`           | P0       | Add fact with embedding                | —                    |
+| `memory_query`              | P0       | Hybrid FTS + vector search             | sparse/standard/full |
+| `memory_resume_context`     | P0       | 5-tier cognitive boot                  | sparse/standard/full |
+| `memory_list_due`           | P0       | Scheduled fact surfacing               | sparse/standard/full |
+| `memory_next_due_time`      | P0       | Next scheduled time                    | —                    |
+| `memory_explain_fact`       | P0       | Fact provenance                        | sparse/standard/full |
+| `memory_get_fact`           | P0       | Single fact by ID                      | sparse/standard/full |
+| `memory_statistics`         | P0       | Aggregate stats                        | —                    |
+| `memory_flush_insights`     | P0       | Batch pre-compaction capture           | —                    |
+| `memory_consolidate`        | P1       | Dedup + cluster facts into summaries   | —                    |
+| `memory_forget`             | P1       | Ebbinghaus decay pruning               | —                    |
+| `memory_dump_state`         | P1       | Export snapshot (JSON/SQLite)          | —                    |
+| `memory_pin_fact`           | P1       | Make fact unforgettable                | —                    |
+| `memory_unpin_fact`         | P1       | Allow forgetting a pinned fact         | —                    |
+| `memory_record_activity`    | Activity | Record tool invocation with dedup      | —                    |
+| `memory_checkpoint_session` | Activity | Checkpoint session state (LWW)         | —                    |
+| `memory_load_context`       | Activity | Load project context for session start | sparse/standard/full |
 
 ### Tiered Depth
 
@@ -126,14 +129,14 @@ Parameters: `dedup_threshold` (default 0.92), `min_cluster_size` (default 3).
 
 All parameters are optional — defaults from `ForgetPolicy::default()`:
 
-| Parameter                | Default | Description                            |
-| ------------------------ | ------- | -------------------------------------- |
-| `half_life_days`         | 69.0    | Base Ebbinghaus half-life              |
-| `min_importance`         | 0.1     | Threshold below which facts are pruned |
-| `recency_weight`         | 0.3     | Weight for recency signal              |
-| `frequency_weight`       | 0.2     | Weight for access frequency            |
-| `graph_degree_weight`    | 0.3     | Weight for graph connectivity          |
-| `base_importance_weight` | 0.2     | Weight for base importance             |
+| Parameter                | Default | Description                                       |
+| ------------------------ | ------- | ------------------------------------------------- |
+| `half_life_days`         | 69.0    | Base Ebbinghaus half-life                         |
+| `min_importance`         | 0.1     | Threshold below which facts are pruned            |
+| `recency_weight`         | 0.3     | Weight for recency signal                         |
+| `frequency_weight`       | 0.2     | Weight for access frequency                       |
+| `graph_degree_weight`    | 0.3     | Weight for graph connectivity                     |
+| `base_importance_weight` | 0.2     | Weight for base importance                        |
 | `half_life_overrides`    | `{}`    | Per-FactType overrides, e.g. `{"Episodic": 30.0}` |
 
 ### Dump State (`memory_dump_state`)
@@ -144,14 +147,76 @@ Exports the full engine snapshot. Formats: `json`, `sqlite`. Client-supplied pat
 
 `memory_pin_fact` and `memory_unpin_fact` toggle a fact's persistence. Pinned facts are immune to `memory_forget`.
 
+### Activity Stream (`memory_record_activity`)
+
+Records tool invocations with server-side filtering. The pipeline runs: **ignore** (drop noise) → **dedup** (collapse repeats within a configurable window) → **promote** (auto-create facts from significant actions).
+
+Parameters:
+
+| Param           | Type   | Required | Description                                                         |
+| --------------- | ------ | -------- | ------------------------------------------------------------------- |
+| `tool`          | string | yes      | Tool name that was invoked                                          |
+| `session_id`    | string | yes      | Current session ID                                                  |
+| `args`          | object | no       | Tool arguments (arbitrary JSON)                                     |
+| `result`        | string | no       | Tool result summary (truncated at 512 chars server-side)            |
+| `timestamp`     | string | no       | ISO 8601 timestamp. Defaults to now                                 |
+| `scope`         | string | no       | Scope path for the activity                                         |
+| `outcome_class` | string | no       | `"success"`, `"error"`, `"test_failure"`, etc. Default: `"success"` |
+
+Returns `{ activity_id, was_deduplicated, promoted_fact_id, status }`.
+
+Dedup key: `(session_id, tool_name, args_hash, outcome_class, scope_id)` within the configured window (default 300s). Outcome-class-aware: a passing `cargo test` and a failing one within the same window are NOT collapsed.
+
+Filtering policy is adapter-specific — the MCP adapter supplies Claude Code heuristics (ignore/promote patterns) via `activity_policy.rs`. The core engine is generic.
+
+### Session Checkpoint (`memory_checkpoint_session`)
+
+Saves session state (last-write-wins per `session_id`). Designed to be called from a Stop hook.
+
+Parameters:
+
+| Param        | Type   | Required | Description               |
+| ------------ | ------ | -------- | ------------------------- |
+| `session_id` | string | yes      | Session ID to checkpoint  |
+| `scope`      | string | no       | Scope path                |
+| `summary`    | string | no       | Free-form session summary |
+| `metadata`   | object | no       | Arbitrary JSON metadata   |
+
+Returns `{ session_id, checkpointed: true }`.
+
+### Load Context (`memory_load_context`)
+
+Loads project-scoped context for session bootstrap. Returns recent activities, the last checkpoint, and relevant scope-filtered facts in a single read snapshot (consistent cross-query results).
+
+Parameters:
+
+| Param            | Type    | Required | Description                                                 |
+| ---------------- | ------- | -------- | ----------------------------------------------------------- |
+| `scope`          | string  | yes      | Scope path                                                  |
+| `activity_limit` | integer | no       | Max recent activities (default 20)                          |
+| `fact_limit`     | integer | no       | Max relevant facts (default 10)                             |
+| `depth`          | string  | no       | `"sparse"` / `"standard"` / `"full"` (default `"standard"`) |
+
+Returns `{ scope_path, recent_activities, last_checkpoint, relevant_facts }` shaped by the requested depth level.
+
+### Schema v9
+
+The activity stream adds two tables in schema version 9:
+
+- **`activities`** — append-only log of tool invocations with dedup counters, outcome classification, and optional promotion linkage (`promoted_fact_id` FK to `facts`).
+- **`session_checkpoints`** — last-write-wins session state (scope, summary, metadata, timestamp).
+
+Migration from v8 is automatic on first open.
+
 ### Architecture
 
 ```
 Agent (Claude, etc.) → stdio JSON-RPC → memory-engine-mcp → MemoryEngine (SQLite)
                                          ├── config.rs (TOML + env + CLI)
                                          ├── server.rs (ServerHandler, spawn_blocking)
-                                         ├── tools/   (15 handlers + dispatch)
+                                         ├── tools/   (18 handlers + dispatch)
                                          ├── depth.rs (response shaping)
+                                         ├── activity_policy.rs (Claude Code filter heuristics)
                                          ├── embedding.rs (HTTP embedding provider)
                                          ├── summary.rs (HTTP summary generator)
                                          └── error.rs (MemoryError → MCP)
