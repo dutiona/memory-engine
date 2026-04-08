@@ -71,9 +71,7 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests {
     use crate::engine::MemoryEngine;
-    use crate::types::{
-        AddFactRequest, FactType, NewLineageRecord, PromotionProvenance,
-    };
+    use crate::types::{AddFactRequest, FactType, NewLineageRecord, PromotionProvenance};
     use chrono::Utc;
 
     fn test_provenance() -> PromotionProvenance {
@@ -160,9 +158,7 @@ mod tests {
             wisdom_fact_id: 1,
             source_fact_ids: vec![2, 3],
         };
-        engine
-            .record_lineage(&new_rec, &test_provenance())
-            .unwrap();
+        engine.record_lineage(&new_rec, &test_provenance()).unwrap();
 
         let ids = engine.get_full_lineage(1).unwrap();
         assert_eq!(ids, vec![2, 3]);
@@ -175,9 +171,7 @@ mod tests {
             wisdom_fact_id: 1,
             source_fact_ids: vec![2, 3],
         };
-        engine
-            .record_lineage(&new_rec, &test_provenance())
-            .unwrap();
+        engine.record_lineage(&new_rec, &test_provenance()).unwrap();
 
         let deleted = engine.delete_lineage(1).unwrap();
         assert!(deleted);

@@ -2270,10 +2270,7 @@ CREATE TABLE IF NOT EXISTS config (
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            idx_count, 1,
-            "unique index on wisdom_fact_id should exist"
-        );
+        assert_eq!(idx_count, 1, "unique index on wisdom_fact_id should exist");
     }
 
     #[test]
