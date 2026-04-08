@@ -7,6 +7,7 @@ pub mod archive_manifest;
 pub mod edges;
 pub mod events;
 pub mod facts;
+pub mod lineage;
 pub mod schema;
 pub mod scopes;
 pub mod summaries;
