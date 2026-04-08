@@ -94,7 +94,13 @@ pub fn apply_filter(
 fn format_promote_content(tool_name: &str, result: Option<&str>) -> String {
     match result {
         Some(r) if !r.is_empty() => {
-            let truncated = if r.len() > 200 { &r[..200] } else { r };
+            let truncated = if r.len() > 200 {
+                // Find the last char boundary at or before 200 bytes
+                let end = r.floor_char_boundary(200);
+                &r[..end]
+            } else {
+                r
+            };
             format!("[{tool_name}] {truncated}")
         }
         _ => format!("[{tool_name}] (no result summary)"),

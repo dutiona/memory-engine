@@ -1,6 +1,6 @@
 //! Store operations for activity records.
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
 use crate::types::{Activity, ActivityStatus, NewActivity};
@@ -39,8 +39,9 @@ impl<'a> ActivityStore<'a> {
                    AND tool_name = ?2
                    AND args_hash = ?3
                    AND outcome_class = ?4
-                   AND status IN ('recorded', 'deduplicated')
-                   AND julianday(?5) - julianday(last_seen) < ?6 / 86400.0
+                   AND scope_id = ?5
+                   AND status IN ('recorded', 'deduplicated', 'promoted')
+                   AND julianday(?6) - julianday(last_seen) < ?7 / 86400.0
                  ORDER BY last_seen DESC
                  LIMIT 1",
                 params![
@@ -48,6 +49,7 @@ impl<'a> ActivityStore<'a> {
                     activity.tool_name,
                     activity.args_hash,
                     activity.outcome_class,
+                    activity.scope_id,
                     ts,
                     dedup_window_secs,
                 ],

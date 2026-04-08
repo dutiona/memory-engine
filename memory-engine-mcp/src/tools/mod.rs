@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use memory_engine::ResumeConfig;
 use memory_engine::bootstrap::{BootstrapConfig, KeywordExtractor};
 use memory_engine::engine::MemoryEngine;
 use memory_engine::inspect_types::{DumpFormat, FactExplanation, ReplayFilter, ReplayOrder};
@@ -15,12 +14,13 @@ use memory_engine::traits::{
 use memory_engine::types::{
     AddFactOptions, AddFactRequest, EventType, FactType, NewEvent, Outcome,
 };
+use memory_engine::ResumeConfig;
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::depth::{self, Depth};
 use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
-use crate::error::{ValidationError, to_mcp_error};
+use crate::error::{to_mcp_error, ValidationError};
 
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)
@@ -1374,8 +1374,8 @@ fn handle_load_context(
 ) -> Result<CallToolResult, ErrorData> {
     let scope =
         get_str(&args, "scope").ok_or_else(|| ErrorData::invalid_params("missing scope", None))?;
-    let activity_limit = get_i64(&args, "activity_limit").unwrap_or(20) as usize;
-    let fact_limit = get_i64(&args, "fact_limit").unwrap_or(10) as usize;
+    let activity_limit = get_usize(&args, "activity_limit").unwrap_or(20);
+    let fact_limit = get_usize(&args, "fact_limit").unwrap_or(10);
     let depth_level = get_depth(&args);
 
     let ctx = engine
