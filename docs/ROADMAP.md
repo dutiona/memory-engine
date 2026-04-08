@@ -385,7 +385,7 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5 is **unblocked on the cri
 
 **Phase 5 internal dependencies:**
 
-- #55 (provenance) + #63 (outcome tracking) are prerequisites for #49 (DreamCycle)
+- #55 (provenance) ✅ + #63 (outcome tracking) are prerequisites for #49 (DreamCycle)
 - #48 (InsightStream) is independent, can ship first
 - #132 (FactType::Prediction) and #133 (spreading activation) can be parallel with #49
 - #54 (sample_dormant) and #134 (vitality boosts) are independent of everything, any time
@@ -404,7 +404,7 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5 is **unblocked on the cri
 | DreamCycle trait — cognitive pipeline ([#49](https://github.com/dutiona/memory-engine/issues/49), [#47](https://github.com/dutiona/memory-engine/issues/47) absorbed) | Full batch pipeline: consolidation → pattern detection → promotion → rescoring. Returns delta-based `CycleReport`. **Research update:** delta-based output (R7, ACE), retrieve-before-reflect (R8, DC), abstract pattern extraction (R9, AWM/APC/GEPA), hierarchical composition (R13, AWM). **Competitive urgency:** Signet, Hermes, Auto Dream implement similar pipelines. Single-agent design — multi-agent DreamCycle requires Byzantine fault tolerance (see Deferred) |
 | Outcome tracking ([#63](https://github.com/dutiona/memory-engine/issues/63))                                                                                          | `EventType::OutcomeSignal` for fact feedback loops. `record_outcome(fact_id, outcome)` API. Feeds DreamCycle rescoring. **Research basis:** ACE, Reflexion, AWM, GEPA                                                                                                                                                                                                                                                                                                        |
 | `sample_dormant()` API ([#54](https://github.com/dutiona/memory-engine/issues/54))                                                                                    | Passive resonance for autonomous agents. HNSW search filtered for dormant facts. Consumer-driven                                                                                                                                                                                                                                                                                                                                                                             |
-| Provenance infrastructure ([#55](https://github.com/dutiona/memory-engine/issues/55))                                                                                 | `PromotionProvenance` envelope + sidecar `LineageTable` in SQLite. Source fact expiry (`t_expired` set) with lineage preservation. **Structured evidence typing:** `EvidenceBasis { Observed, Inferred, Synthesized }`. **Adversarial self-review** step before promotion                                                                                                                                                                                                    |
+| ~~Provenance infrastructure~~ ([#55](https://github.com/dutiona/memory-engine/issues/55)) ✅                                                                           | `PromotionProvenance` envelope + sidecar `LineageTable` in SQLite. Source fact expiry (`t_expired` set) with lineage preservation. Done: [PR #223](https://github.com/dutiona/memory-engine/pull/223). **Remaining (separate issues):** structured evidence typing `EvidenceBasis { Observed, Inferred, Synthesized }` (#159), adversarial self-review step (#161)                                                                                                            |
 | `DreamCycleConfig` ([#56](https://github.com/dutiona/memory-engine/issues/56))                                                                                        | ±2 symmetric rescoring, quarantine path for contradictions. **Research update:** compression as opt-in archival (R10, ACE/DC), Pareto-diverse promotion (R11, GEPA)                                                                                                                                                                                                                                                                                                          |
 | Three-layer identity output ([#57](https://github.com/dutiona/memory-engine/issues/57))                                                                               | ANCHORS/CORE/PREDICTIONS structure in `CycleReport`. Each item: `{pattern, directive, false_positive}`                                                                                                                                                                                                                                                                                                                                                                       |
 | `FactType::Prediction` ([#132](https://github.com/dutiona/memory-engine/issues/132))                                                                                  | Predictive memory with `t_predicted` timestamp. JEPA-inspired gap — facts that encode expectations for future validation                                                                                                                                                                                                                                                                                                                                                     |
@@ -425,7 +425,7 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5 is **unblocked on the cri
   - InsightStream trait (or `FactType::Insight` — decide during implementation)
   - DreamCycle trait with delta-based `CycleReport` (R7) and retrieve-before-reflect (R8)
   - Outcome tracking — `EventType::OutcomeSignal` (#63, R6)
-  - `PromotionProvenance` + `LineageTable`
+  - `PromotionProvenance` + `LineageTable` ✅ ([PR #223](https://github.com/dutiona/memory-engine/pull/223))
   - `DreamCycleConfig` with compression as opt-in archival (R10)
   - Three-layer identity output
   - `FactType::Prediction` with `t_predicted` (#132)
@@ -533,7 +533,7 @@ Consumer (AI agent, CLI tool, MCP server)
 │  ├─ EdgeStore (graph persistence)        │
 │  ├─ SummaryStore                         │
 │  ├─ ScopeStore (hierarchical scoping)   │  ← Phase 3 ✅
-│  └─ LineageTable (provenance sidecar)   │  ← Phase 5
+│  └─ LineageTable (provenance sidecar)   │  ← Phase 5a ✅
 ├──────────────────────────────────────────┤
 │  Graph (petgraph DiGraph)                │  ← Phase 2 ✅
 ├──────────────────────────────────────────┤
