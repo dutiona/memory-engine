@@ -137,6 +137,49 @@ pub trait Reranker: Send + Sync {
     fn name(&self) -> &str;
 }
 
+// --- Phase 5a: Cognitive pipeline traits ---
+
+/// Fast-path capture for high-value observations from the intelligence layer.
+///
+/// Consumer-implemented. Called in real-time during conversations to record
+/// insights that should resist decay. Implementations should be cheap —
+/// typically just writing to a buffer or database.
+///
+/// Passed as `&dyn InsightStream` per-call (not stored in the engine).
+pub trait InsightStream {
+    /// Record a high-value insight.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if recording fails.
+    fn record(&self, insight: crate::types::Insight) -> Result<()>;
+}
+
+/// Periodic batch processing: consolidation, pattern detection, promotion.
+///
+/// Consumer-implemented. Called on a schedule (e.g., end of session, daily).
+/// The implementation drives the full pipeline through a capability-restricted
+/// [`DreamContext`](crate::engine::cognitive::DreamContext):
+/// consolidation → pattern detection → behavioral compression → promotion
+/// with provenance.
+///
+/// Passed as `&dyn DreamCycle` per-call (not stored in the engine).
+pub trait DreamCycle {
+    /// Run one cycle of the cognitive pipeline.
+    ///
+    /// The [`DreamContext`](crate::engine::cognitive::DreamContext) provides
+    /// read access, consolidation/forget delegation, and an atomic `promote()`
+    /// write path for wisdom promotion with lineage tracking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cycle fails.
+    fn run(
+        &self,
+        ctx: &crate::engine::cognitive::DreamContext,
+    ) -> Result<crate::types::CycleReport>;
+}
+
 /// Configuration for the consolidation process (Phase 2).
 #[derive(Debug, Clone)]
 pub struct ConsolidationConfig {
