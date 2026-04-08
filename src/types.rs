@@ -423,6 +423,28 @@ impl Default for DreamCycleConfig {
     }
 }
 
+// --- Activity stream types ---
+
+/// Status of an activity record after server-side filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ActivityStatus {
+    Recorded,
+    Deduplicated,
+    Ignored,
+    Promoted,
+}
+
+impl fmt::Display for ActivityStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Recorded => write!(f, "recorded"),
+            Self::Deduplicated => write!(f, "deduplicated"),
+            Self::Ignored => write!(f, "ignored"),
+            Self::Promoted => write!(f, "promoted"),
+        }
+    }
+}
+
 impl DreamCycleConfig {
     /// Validate configuration parameters.
     ///
@@ -484,6 +506,93 @@ pub struct PromotionResult {
     pub fact_id: FactId,
     /// Database ID of the lineage record in the sidecar table.
     pub lineage_id: LineageId,
+}
+
+impl std::str::FromStr for ActivityStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "recorded" => Ok(Self::Recorded),
+            "deduplicated" => Ok(Self::Deduplicated),
+            "ignored" => Ok(Self::Ignored),
+            "promoted" => Ok(Self::Promoted),
+            other => Err(format!("unknown activity status: {other}")),
+        }
+    }
+}
+
+/// An activity record from a tool invocation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Activity {
+    pub id: i64,
+    pub session_id: String,
+    pub tool_name: String,
+    pub args_hash: String,
+    pub args: serde_json::Value,
+    pub result_summary: Option<String>,
+    pub outcome_class: String,
+    pub status: ActivityStatus,
+    pub occurrence_count: i64,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub scope_id: i64,
+    pub promoted_fact_id: Option<i64>,
+}
+
+/// Activity to insert (DB assigns id).
+#[derive(Debug, Clone)]
+pub struct NewActivity {
+    pub session_id: String,
+    pub tool_name: String,
+    pub args_hash: String,
+    pub args: serde_json::Value,
+    pub result_summary: Option<String>,
+    pub outcome_class: String,
+    pub timestamp: DateTime<Utc>,
+    pub scope_id: i64,
+}
+
+/// A session checkpoint (last-write-wins per session_id).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCheckpoint {
+    pub session_id: String,
+    pub scope_path: Option<String>,
+    pub summary: Option<String>,
+    pub last_activity_id: Option<i64>,
+    pub checkpoint_at: DateTime<Utc>,
+    pub metadata: serde_json::Value,
+}
+
+/// Request to record a tool activity.
+#[derive(Debug, Clone)]
+pub struct RecordActivityRequest {
+    pub tool_name: String,
+    pub args: serde_json::Value,
+    pub result: Option<String>,
+    pub session_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub scope_path: Option<String>,
+    /// Outcome class (e.g. "success", "error", "test_failure"). Defaults to "success".
+    pub outcome_class: Option<String>,
+}
+
+/// Result of recording an activity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordActivityResult {
+    pub activity_id: Option<i64>,
+    pub was_deduplicated: bool,
+    pub promoted_fact_id: Option<i64>,
+    pub status: ActivityStatus,
+}
+
+/// Project-scoped context for session bootstrap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectContext {
+    pub scope_path: String,
+    pub recent_activities: Vec<Activity>,
+    pub last_checkpoint: Option<SessionCheckpoint>,
+    pub relevant_facts: Vec<Fact>,
 }
 
 #[cfg(test)]

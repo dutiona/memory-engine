@@ -108,6 +108,7 @@ fn explicit_fts_no_embedder_succeeds() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
@@ -130,6 +131,7 @@ fn explicit_vector_no_embedder_no_embedding_fails() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -153,6 +155,7 @@ fn explicit_vector_with_precomputed_embedding_succeeds() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
@@ -175,6 +178,7 @@ fn explicit_hybrid_no_embedder_no_embedding_fails() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -198,6 +202,7 @@ fn explicit_hybrid_with_precomputed_embedding_succeeds() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
@@ -220,6 +225,7 @@ fn inferred_mode_text_only_no_embedder_falls_back_to_fts() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
@@ -241,6 +247,7 @@ fn inferred_mode_embedding_only_works() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     // Should return some results via vector search
@@ -261,6 +268,7 @@ fn unknown_mode_returns_error() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -302,6 +310,7 @@ fn query_with_scope_parameters_accepted() {
             None,
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         );
         // Should succeed (no validation error), regardless of result count
         assert!(
@@ -358,6 +367,7 @@ fn fts_with_fact_type_filter() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert_eq!(body["count"].as_u64().unwrap(), 1);
