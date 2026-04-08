@@ -1,9 +1,9 @@
-use chrono::Utc;
-use rusqlite::params;
 use crate::error::Result;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::types::{EventType, NewEvent, Outcome, OutcomeCounts};
+use chrono::Utc;
+use rusqlite::params;
 
 use super::MemoryEngine;
 
