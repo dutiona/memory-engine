@@ -24,6 +24,9 @@ Thumbs.db
 # Claude Code
 .claude/
 
+# Codex CLI
+.codex
+
 # Worktrees
 .worktrees/
 
