@@ -33,23 +33,24 @@ impl<'a> LineageStore<'a> {
         record: &NewLineageRecord,
         provenance: &PromotionProvenance,
     ) -> Result<i64> {
-        // Validate that all source fact IDs exist.
+        // Validate that all distinct source fact IDs exist.
         if !record.source_fact_ids.is_empty() {
-            let placeholders: String = record
-                .source_fact_ids
+            let unique_ids: std::collections::BTreeSet<i64> =
+                record.source_fact_ids.iter().copied().collect();
+            let placeholders: String = unique_ids
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
             let query = format!("SELECT COUNT(*) FROM facts WHERE id IN ({placeholders})");
             let count: i64 = self.conn.query_row(&query, [], |r| r.get(0))?;
-            let expected = i64::try_from(record.source_fact_ids.len())
+            let expected = i64::try_from(unique_ids.len())
                 .map_err(|e| MemoryError::Internal(e.to_string()))?;
             if count != expected {
                 return Err(MemoryError::Lineage(format!(
                     "source_fact_ids contains nonexistent fact IDs \
-                     (expected {} to exist, found {count})",
-                    record.source_fact_ids.len()
+                     (expected {} distinct IDs to exist, found {count})",
+                    unique_ids.len()
                 )));
             }
         }
