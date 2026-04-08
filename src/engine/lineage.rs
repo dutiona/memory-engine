@@ -20,8 +20,7 @@ impl MemoryEngine {
         provenance: &PromotionProvenance,
     ) -> Result<i64> {
         let conn = self.write_conn()?;
-        let store = LineageStore::new(&conn);
-        store.insert(record, provenance)
+        LineageStore::new(&conn).insert(record, provenance)
     }
 
     /// Retrieve the provenance envelope and lineage record for a wisdom fact.
@@ -63,8 +62,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
     pub fn delete_lineage(&self, wisdom_fact_id: i64) -> Result<bool> {
         let conn = self.write_conn()?;
-        let store = LineageStore::new(&conn);
-        store.delete(wisdom_fact_id)
+        LineageStore::new(&conn).delete(wisdom_fact_id)
     }
 }
 

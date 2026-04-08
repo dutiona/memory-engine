@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(record.wisdom_fact_id, 1);
         assert_eq!(record.source_fact_ids, vec![10, 20]);
         assert_eq!(prov.source_count, 2);
-        assert_eq!(prov.confidence, 0.85);
+        assert!((prov.confidence - 0.85).abs() < f64::EPSILON);
         assert_eq!(prov.method_version, "dreamcycle-v1");
         assert_eq!(prov.lineage_id, lineage_id);
     }

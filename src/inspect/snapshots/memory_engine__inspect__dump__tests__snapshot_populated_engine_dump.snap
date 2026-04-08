@@ -1,9 +1,8 @@
 ---
 source: src/inspect/dump.rs
-assertion_line: 510
 expression: snapshot
 ---
-schema_version: 7
+schema_version: 8
 storage_epoch: 1
 embed_dim: 4
 facts:
