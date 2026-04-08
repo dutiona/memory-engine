@@ -726,9 +726,13 @@ fn unknown_tool_returns_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_tool_definitions_returns_18() {
+fn all_tool_definitions_returns_20() {
     let defs = tools::all_tool_definitions();
-    assert_eq!(defs.len(), 18, "expected 10 P0 + 5 P1 + 3 P2 tools");
+    assert_eq!(
+        defs.len(),
+        20,
+        "expected 10 P0 + 5 P1 + 3 P2 + 2 Phase 5a tools"
+    );
 }
 
 #[test]

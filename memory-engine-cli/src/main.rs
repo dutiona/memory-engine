@@ -60,6 +60,10 @@ enum Commands {
     AddFact(commands::add_fact::AddFactArgs),
     /// Ingest facts from a JSONL file via an embedding API
     BatchIngest(commands::batch_ingest::BatchIngestArgs),
+    /// Record an outcome signal (positive/negative/neutral) for a fact
+    RecordOutcome(commands::record_outcome::RecordOutcomeArgs),
+    /// Show aggregated outcome counts for a fact
+    OutcomeCounts(commands::outcome_counts::OutcomeCountsArgs),
 }
 
 fn main() -> ExitCode {
@@ -75,6 +79,12 @@ fn main() -> ExitCode {
         Commands::Dump(ref args) => commands::dump::run(&cli.db, args, cli.format),
         Commands::AddFact(ref args) => commands::add_fact::run(&cli.db, args, cli.format),
         Commands::BatchIngest(ref args) => commands::batch_ingest::run(&cli.db, args, cli.format),
+        Commands::RecordOutcome(ref args) => {
+            commands::record_outcome::run(&cli.db, args, cli.format)
+        }
+        Commands::OutcomeCounts(ref args) => {
+            commands::outcome_counts::run(&cli.db, args, cli.format)
+        }
     };
 
     match result {

@@ -274,3 +274,98 @@ fn test_dump_state_default_path() {
 
     std::fs::remove_file(path).ok();
 }
+
+// ---------------------------------------------------------------------------
+// Outcome tracking (Phase 5a, #63)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_record_outcome_and_counts() {
+    let (engine, _dir) = test_engine();
+    let fact_id = add_test_fact(&engine, "outcome test fact");
+
+    // Record outcomes via MCP dispatch
+    let r1 = tools::dispatch(
+        "memory_record_outcome",
+        args(&[("fact_id", json!(fact_id)), ("outcome", json!("Positive"))]),
+        &engine,
+        None,
+        None,
+        3,
+    )
+    .unwrap();
+    let v1 = extract_json(&r1);
+    assert_eq!(v1["fact_id"], fact_id);
+    assert_eq!(v1["outcome"], "Positive");
+    assert!(v1["event_id"].as_i64().unwrap() > 0);
+
+    let _ = tools::dispatch(
+        "memory_record_outcome",
+        args(&[("fact_id", json!(fact_id)), ("outcome", json!("Negative"))]),
+        &engine,
+        None,
+        None,
+        3,
+    )
+    .unwrap();
+
+    let _ = tools::dispatch(
+        "memory_record_outcome",
+        args(&[("fact_id", json!(fact_id)), ("outcome", json!("Positive"))]),
+        &engine,
+        None,
+        None,
+        3,
+    )
+    .unwrap();
+
+    // Query counts
+    let r2 = tools::dispatch(
+        "memory_outcome_counts",
+        args(&[("fact_id", json!(fact_id))]),
+        &engine,
+        None,
+        None,
+        3,
+    )
+    .unwrap();
+    let v2 = extract_json(&r2);
+    assert_eq!(v2["fact_id"], fact_id);
+    assert_eq!(v2["positive"], 2);
+    assert_eq!(v2["negative"], 1);
+    assert_eq!(v2["neutral"], 0);
+}
+
+#[test]
+fn test_record_outcome_nonexistent_fact() {
+    let (engine, _dir) = test_engine();
+
+    let result = tools::dispatch(
+        "memory_record_outcome",
+        args(&[("fact_id", json!(999)), ("outcome", json!("Positive"))]),
+        &engine,
+        None,
+        None,
+        3,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_record_outcome_invalid_variant() {
+    let (engine, _dir) = test_engine();
+    let fact_id = add_test_fact(&engine, "variant test");
+
+    let result = tools::dispatch(
+        "memory_record_outcome",
+        args(&[
+            ("fact_id", json!(fact_id)),
+            ("outcome", json!("InvalidVariant")),
+        ]),
+        &engine,
+        None,
+        None,
+        3,
+    );
+    assert!(result.is_err());
+}

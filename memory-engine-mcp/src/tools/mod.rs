@@ -12,7 +12,9 @@ use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
 };
-use memory_engine::types::{AddFactOptions, AddFactRequest, EventType, FactType, NewEvent};
+use memory_engine::types::{
+    AddFactOptions, AddFactRequest, EventType, FactType, NewEvent, Outcome,
+};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
 use serde_json::{Map, Value, json};
 
@@ -286,6 +288,30 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "required": ["jsonl_data"]
             }),
         ),
+        // Phase 5a: Outcome tracking
+        tool_def(
+            "memory_record_outcome",
+            "Record a positive, negative, or neutral outcome signal for a fact. Used by consumers to provide feedback on fact usefulness.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fact_id": { "type": "integer", "description": "Fact ID to record outcome for" },
+                    "outcome": { "type": "string", "enum": ["Positive", "Negative", "Neutral"], "description": "Outcome signal" }
+                },
+                "required": ["fact_id", "outcome"]
+            }),
+        ),
+        tool_def(
+            "memory_outcome_counts",
+            "Get aggregated outcome counts (positive/negative/neutral) for a fact.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fact_id": { "type": "integer", "description": "Fact ID to query outcome counts for" }
+                },
+                "required": ["fact_id"]
+            }),
+        ),
     ]
 }
 
@@ -331,6 +357,9 @@ pub fn dispatch(
         "memory_replay_events" => handle_replay_events(args, engine),
         "memory_fact_history" => handle_fact_history(args, engine),
         "memory_bootstrap_session" => handle_bootstrap_session(args, engine, embedder),
+        // Phase 5a: Outcome tracking
+        "memory_record_outcome" => handle_record_outcome(args, engine),
+        "memory_outcome_counts" => handle_outcome_counts(args, engine),
         _ => Err(ErrorData::invalid_params(
             format!("unknown tool: {name}"),
             None,
@@ -1058,8 +1087,8 @@ fn handle_replay_events(
     let until = get_datetime(&args, "until")?;
 
     // Both-or-neither validation (like period_start/period_end in handle_query)
-    if since.is_some() && until.is_some() {
-        if since.unwrap() > until.unwrap() {
+    if let (Some(s), Some(u)) = (since, until) {
+        if s > u {
             return Err(ErrorData::invalid_params("since must be <= until", None));
         }
     }
@@ -1166,4 +1195,58 @@ fn handle_bootstrap_session(
     let value = serde_json::to_value(&report)
         .map_err(|e| ErrorData::internal_error(format!("serialize report: {e}"), None))?;
     ok_json(value)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5a: Outcome tracking handlers
+// ---------------------------------------------------------------------------
+
+fn parse_outcome(s: &str) -> Result<Outcome, ErrorData> {
+    match s {
+        "Positive" => Ok(Outcome::Positive),
+        "Negative" => Ok(Outcome::Negative),
+        "Neutral" => Ok(Outcome::Neutral),
+        other => Err(ErrorData::invalid_params(
+            format!("invalid outcome: {other} (expected Positive, Negative, or Neutral)"),
+            None,
+        )),
+    }
+}
+
+fn handle_record_outcome(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let fact_id = get_i64(&args, "fact_id")
+        .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
+    let outcome_str = get_str(&args, "outcome")
+        .ok_or_else(|| ErrorData::invalid_params("missing outcome", None))?;
+    let outcome = parse_outcome(&outcome_str)?;
+
+    let event_id = engine
+        .record_outcome(fact_id, outcome)
+        .map_err(to_mcp_error)?;
+
+    ok_json(json!({
+        "event_id": event_id,
+        "fact_id": fact_id,
+        "outcome": outcome,
+    }))
+}
+
+fn handle_outcome_counts(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let fact_id = get_i64(&args, "fact_id")
+        .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
+
+    let counts = engine.get_outcome_counts(fact_id).map_err(to_mcp_error)?;
+
+    ok_json(json!({
+        "fact_id": fact_id,
+        "positive": counts.positive,
+        "negative": counts.negative,
+        "neutral": counts.neutral,
+    }))
 }
