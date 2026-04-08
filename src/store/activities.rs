@@ -151,20 +151,23 @@ impl<'a> ActivityStore<'a> {
         if scope_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let placeholders: String = scope_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT id, session_id, tool_name, args_hash, args, result_summary,
-                    outcome_class, status, occurrence_count, first_seen, last_seen,
-                    scope_id, promoted_fact_id
-             FROM activities
-             WHERE scope_id IN ({placeholders})
-             ORDER BY last_seen DESC
-             LIMIT {limit}"
-        );
-        let mut stmt = self.conn.prepare(&sql).map_err(MemoryError::Database)?;
-        let params = rusqlite::params_from_iter(scope_ids.iter());
+        let ids_json = serde_json::to_string(scope_ids).map_err(|e| {
+            MemoryError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        })?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, session_id, tool_name, args_hash, args, result_summary,
+                        outcome_class, status, occurrence_count, first_seen, last_seen,
+                        scope_id, promoted_fact_id
+                 FROM activities
+                 WHERE scope_id IN (SELECT value FROM json_each(?1))
+                 ORDER BY last_seen DESC
+                 LIMIT ?2",
+            )
+            .map_err(MemoryError::Database)?;
         let rows = stmt
-            .query_map(params, row_to_activity)
+            .query_map(params![ids_json, limit], row_to_activity)
             .map_err(MemoryError::Database)?;
         rows.collect::<std::result::Result<_, _>>()
             .map_err(MemoryError::Database)

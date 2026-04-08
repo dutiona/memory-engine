@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 
-use crate::engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, apply_filter};
+use crate::engine::activity_filter::{apply_filter, ActivityFilterConfig, ActivityFilterDecision};
 use crate::error::{MemoryError, Result};
 use crate::store::activities::ActivityStore;
 use crate::store::checkpoints::CheckpointStore;
@@ -71,16 +71,13 @@ impl MemoryEngine {
             .unwrap_or("success")
             .to_string();
 
-        // Step 3: Resolve scope.
+        // Steps 3+4: Resolve scope and insert/dedup under one lock acquisition.
+        let conn = self.write_conn()?;
         let scope_id = match req.scope_path.as_deref() {
-            Some(path) => {
-                let conn = self.write_conn()?;
-                self.ensure_scope_with_conn(&conn, path)?
-            }
+            Some(path) => self.ensure_scope_with_conn(&conn, path)?,
             None => 1, // root scope
         };
 
-        // Step 4: Insert or dedup.
         let new_activity = NewActivity {
             session_id: req.session_id.clone(),
             tool_name: req.tool_name.clone(),
@@ -93,10 +90,10 @@ impl MemoryEngine {
         };
 
         let (activity_id, was_deduplicated) = {
-            let conn = self.write_conn()?;
             let store = ActivityStore::new(&conn);
             store.insert_or_dedup(&new_activity, filter_config.dedup_window_secs)?
         };
+        drop(conn);
 
         // Step 5: Promote (only if new, not deduplicated).
         let mut promoted_fact_id = None;

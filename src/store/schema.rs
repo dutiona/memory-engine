@@ -684,7 +684,7 @@ fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_activities_session
             ON activities(session_id);
         CREATE INDEX IF NOT EXISTS idx_activities_dedup
-            ON activities(session_id, tool_name, args_hash, outcome_class);
+            ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
         CREATE INDEX IF NOT EXISTS idx_activities_scope_recent
             ON activities(scope_id, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_activities_status
