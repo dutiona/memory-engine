@@ -53,5 +53,8 @@ pub use inspect::types as inspect_types;
 pub use resume::{ResumeConfig, ResumeContext};
 pub use search::{MemoryQuery, QueryDiagnostics, QueryResponse};
 pub use store::UpcasterRegistry;
-pub use traits::{EmbeddingProvider, Reranker};
+pub use traits::{DreamCycle, EmbeddingProvider, InsightStream, Reranker};
 pub use types::*;
+
+// Phase 5a cognitive pipeline re-exports
+pub use engine::cognitive::DreamContext;

@@ -184,6 +184,39 @@ impl<'a> FactStore<'a> {
         Ok(facts)
     }
 
+    /// List dormant facts: active, non-pinned, low importance, temporally valid.
+    ///
+    /// Used by `sample_dormant()` for resonance queries. Returns facts with
+    /// `importance_score < threshold` that pass temporal validity checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_dormant(&self, importance_threshold: f64) -> Result<Vec<Fact>> {
+        let now_str = Utc::now().to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, content_hash, embedding, fact_type,
+                    t_created, t_expired, t_valid, t_invalid,
+                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
+                    is_pinned, importance_score, surfaced_at
+             FROM facts
+             WHERE t_expired IS NULL
+               AND is_pinned = 0
+               AND importance_score < ?1
+               AND (t_valid IS NULL OR t_valid <= ?2)
+               AND (t_invalid IS NULL OR t_invalid > ?2)",
+        )?;
+        let dim = self.embed_dim;
+        let rows = stmt.query_map(params![importance_threshold, now_str], |row| {
+            row_to_fact(row, dim)
+        })?;
+        let mut facts = Vec::new();
+        for row in rows {
+            facts.push(row?);
+        }
+        Ok(facts)
+    }
+
     /// Expire a fact by setting `t_expired`.
     ///
     /// # Errors

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
@@ -350,9 +351,262 @@ pub struct NewSummary {
     pub scope_id: i64,
 }
 
+// --- Phase 5a: Cognitive pipeline types ---
+
+/// Semantic alias for fact identifiers.
+pub type FactId = i64;
+
+/// Semantic alias for lineage record identifiers.
+pub type LineageId = i64;
+
+/// A high-value observation captured by the intelligence layer.
+///
+/// Used as input to [`crate::traits::InsightStream::record`].
+/// The consumer creates `Insight` values during conversations to capture
+/// reasoning, decisions, and connections that only the model can make.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Insight {
+    /// The insight text to store as a fact.
+    pub content: String,
+    /// Categorization (typically `Semantic` for insights).
+    pub fact_type: FactType,
+    /// Optional importance hint in [0.0, 1.0]. Defaults to 0.7 if `None`.
+    pub importance: Option<f64>,
+    /// Arbitrary JSON metadata (e.g., `{"source": "pre_compaction_flush"}`).
+    pub metadata: Option<serde_json::Value>,
+    /// Scope path (e.g., `"project/memory-engine"`). `None` → root scope.
+    pub scope: Option<String>,
+}
+
+/// Report returned by [`crate::traits::DreamCycle::run`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleReport {
+    /// Total facts evaluated during this cycle.
+    pub facts_evaluated: usize,
+    /// Facts promoted to wisdom.
+    pub facts_promoted: usize,
+    /// Facts whose importance scores were adjusted.
+    pub facts_rescored: usize,
+    /// Facts expired (soft-deleted) during this cycle.
+    pub facts_expired: usize,
+    /// Provenance envelopes for each promotion.
+    pub promotions: Vec<PromotionProvenance>,
+}
+
+/// Per-`FactType` compression configuration for DreamCycle.
+///
+/// Controls what fraction of facts to retain per type and the percentile
+/// threshold for promotion candidates.
+#[derive(Debug, Clone)]
+pub struct DreamCycleConfig {
+    /// Fraction of facts to retain per `FactType` (0.0 = compress all, 1.0 = keep all).
+    ///
+    /// Defaults: Episodic=0.2, Semantic=0.8, Procedural=0.8
+    pub compression_ratios: HashMap<FactType, f64>,
+    /// Importance percentile threshold for promotion candidates.
+    /// Facts above this percentile (within their type) are candidates.
+    ///
+    /// Default: 0.75 (P75).
+    pub promotion_percentile: f64,
+}
+
+impl Default for DreamCycleConfig {
+    fn default() -> Self {
+        let mut ratios = HashMap::new();
+        ratios.insert(FactType::Episodic, 0.2);
+        ratios.insert(FactType::Semantic, 0.8);
+        ratios.insert(FactType::Procedural, 0.8);
+        Self {
+            compression_ratios: ratios,
+            promotion_percentile: 0.75,
+        }
+    }
+}
+
+impl DreamCycleConfig {
+    /// Validate configuration parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Conflict` if any ratio or percentile is out of [0, 1].
+    pub fn validate(&self) -> crate::error::Result<()> {
+        use crate::error::MemoryError;
+
+        for (ft, &ratio) in &self.compression_ratios {
+            if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+                return Err(MemoryError::Conflict(format!(
+                    "compression ratio for {ft:?} must be in [0.0, 1.0], got {ratio}"
+                )));
+            }
+        }
+        if !self.promotion_percentile.is_finite()
+            || !(0.0..=1.0).contains(&self.promotion_percentile)
+        {
+            return Err(MemoryError::Conflict(format!(
+                "promotion_percentile must be in [0.0, 1.0], got {}",
+                self.promotion_percentile
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Request to promote a fact to wisdom with provenance tracking.
+///
+/// Carries a precomputed embedding so the engine does not need an
+/// [`crate::traits::EmbeddingProvider`] at promotion time — the DreamCycle
+/// consumer owns its embedder and computes the embedding before calling
+/// [`DreamContext::promote`](crate::engine::cognitive::DreamContext::promote).
+#[derive(Debug, Clone)]
+pub struct PromoteRequest {
+    /// The promoted fact text.
+    pub content: String,
+    /// Fact type for the promoted wisdom (typically `Semantic`).
+    pub fact_type: FactType,
+    /// Precomputed embedding vector.
+    pub embedding: Vec<f32>,
+    /// Importance score for the promoted fact.
+    pub importance: f64,
+    /// Metadata JSON (will have `promotion_provenance` key injected).
+    pub metadata: serde_json::Value,
+    /// Scope path. `None` → root scope.
+    pub scope: Option<String>,
+    /// Source fact IDs for the lineage sidecar table.
+    pub source_fact_ids: Vec<FactId>,
+    /// Provenance envelope (serialized into metadata automatically).
+    pub provenance: PromotionProvenance,
+}
+
+/// Result of a successful promotion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotionResult {
+    /// Database ID of the newly created promoted fact.
+    pub fact_id: FactId,
+    /// Database ID of the lineage record in the sidecar table.
+    pub lineage_id: LineageId,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Phase 5a type tests ---
+
+    #[test]
+    fn dream_cycle_config_default_has_expected_ratios() {
+        let cfg = DreamCycleConfig::default();
+        assert!(
+            (cfg.compression_ratios[&FactType::Episodic] - 0.2).abs() < f64::EPSILON,
+            "Episodic should be 0.2"
+        );
+        assert!(
+            (cfg.compression_ratios[&FactType::Semantic] - 0.8).abs() < f64::EPSILON,
+            "Semantic should be 0.8"
+        );
+        assert!(
+            (cfg.compression_ratios[&FactType::Procedural] - 0.8).abs() < f64::EPSILON,
+            "Procedural should be 0.8"
+        );
+        assert!(
+            (cfg.promotion_percentile - 0.75).abs() < f64::EPSILON,
+            "promotion_percentile should be 0.75"
+        );
+    }
+
+    #[test]
+    fn dream_cycle_config_validate_ok() {
+        DreamCycleConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn dream_cycle_config_validate_rejects_ratio_above_one() {
+        let mut cfg = DreamCycleConfig::default();
+        cfg.compression_ratios.insert(FactType::Episodic, 1.5);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("Episodic"), "error: {err}");
+    }
+
+    #[test]
+    fn dream_cycle_config_validate_rejects_negative_ratio() {
+        let mut cfg = DreamCycleConfig::default();
+        cfg.compression_ratios.insert(FactType::Semantic, -0.1);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn dream_cycle_config_validate_rejects_nan_ratio() {
+        let mut cfg = DreamCycleConfig::default();
+        cfg.compression_ratios
+            .insert(FactType::Procedural, f64::NAN);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn dream_cycle_config_validate_rejects_bad_percentile() {
+        let mut cfg = DreamCycleConfig::default();
+        cfg.promotion_percentile = 1.5;
+        assert!(cfg.validate().is_err());
+
+        cfg.promotion_percentile = -0.1;
+        assert!(cfg.validate().is_err());
+
+        cfg.promotion_percentile = f64::NAN;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn dream_cycle_config_validate_accepts_boundaries() {
+        let mut cfg = DreamCycleConfig::default();
+        cfg.promotion_percentile = 0.0;
+        cfg.validate().unwrap();
+
+        cfg.promotion_percentile = 1.0;
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn insight_serde_round_trip() {
+        let insight = Insight {
+            content: "User prefers terse responses".into(),
+            fact_type: FactType::Semantic,
+            importance: Some(0.8),
+            metadata: Some(serde_json::json!({"source": "model_observation"})),
+            scope: Some("project/demo".into()),
+        };
+        let json = serde_json::to_string(&insight).unwrap();
+        let back: Insight = serde_json::from_str(&json).unwrap();
+        assert_eq!(insight, back);
+    }
+
+    #[test]
+    fn insight_serde_with_none_fields() {
+        let insight = Insight {
+            content: "test".into(),
+            fact_type: FactType::Episodic,
+            importance: None,
+            metadata: None,
+            scope: None,
+        };
+        let json = serde_json::to_string(&insight).unwrap();
+        let back: Insight = serde_json::from_str(&json).unwrap();
+        assert_eq!(insight, back);
+    }
+
+    #[test]
+    fn cycle_report_serde_round_trip() {
+        let report = CycleReport {
+            facts_evaluated: 100,
+            facts_promoted: 5,
+            facts_rescored: 20,
+            facts_expired: 10,
+            promotions: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: CycleReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(report, back);
+    }
+
+    // --- Existing tests ---
 
     #[test]
     fn event_round_trip_json() {
