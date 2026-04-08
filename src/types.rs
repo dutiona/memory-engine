@@ -12,6 +12,39 @@ pub enum EventType {
     ToolCall,
     MemoryOp,
     SystemEvent,
+    /// Outcome feedback signal for a fact (positive, negative, or neutral).
+    /// Payload carries `{"fact_id": i64, "outcome": "Positive"|"Negative"|"Neutral"}`.
+    OutcomeSignal,
+}
+
+/// Outcome of using a fact — consumer-supplied feedback signal.
+///
+/// Stored as an [`EventType::OutcomeSignal`] event in the append-only log.
+/// DreamCycle queries outcome history to adjust importance scores:
+/// consistently negative outcomes decrease importance, positive ones increase it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Outcome {
+    Positive,
+    Negative,
+    Neutral,
+}
+
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Positive => write!(f, "positive"),
+            Self::Negative => write!(f, "negative"),
+            Self::Neutral => write!(f, "neutral"),
+        }
+    }
+}
+
+/// Aggregated outcome counts for a single fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct OutcomeCounts {
+    pub positive: u32,
+    pub negative: u32,
+    pub neutral: u32,
 }
 
 /// Type of fact (`CoALA` mapping: Episodic, Semantic, Procedural).

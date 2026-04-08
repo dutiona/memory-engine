@@ -5,5 +5,7 @@ pub mod explain;
 pub mod export;
 pub mod import;
 pub mod inspect;
+pub mod outcome_counts;
 pub mod query;
+pub mod record_outcome;
 pub mod stats;

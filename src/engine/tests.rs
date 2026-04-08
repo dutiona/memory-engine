@@ -2975,6 +2975,129 @@ fn add_facts_batch_temporal_consistency() {
 // Snapshot integration tests
 // ---------------------------------------------------------------------------
 
+// --- Outcome tracking tests (#63) ---
+
+#[test]
+fn record_outcome_returns_event_id() {
+    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let fact = make_new_fact("outcome target", vec![0.5; DIM]);
+    let fact_id = insert_raw_fact(&engine, &fact);
+
+    let event_id = engine
+        .record_outcome(fact_id, crate::types::Outcome::Positive)
+        .unwrap();
+    assert!(event_id > 0);
+}
+
+#[test]
+fn record_outcome_nonexistent_fact_returns_not_found() {
+    let engine = MemoryEngine::open_memory(DIM).unwrap();
+
+    let result = engine.record_outcome(999, crate::types::Outcome::Negative);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        MemoryError::NotFound(msg) if msg.contains("999")
+    ));
+}
+
+#[test]
+fn record_outcome_read_only_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    // Create DB with a fact
+    let fact_id = {
+        let config = EngineConfig::new(db_path.clone(), DIM);
+        let engine = MemoryEngine::open(&config).unwrap();
+        let fact = make_new_fact("pinned for ro", vec![0.5; DIM]);
+        insert_raw_fact(&engine, &fact)
+    };
+
+    // Re-open read-only
+    let mut config = EngineConfig::new(db_path, DIM);
+    config.read_only = true;
+    let engine = MemoryEngine::open(&config).unwrap();
+
+    let result = engine.record_outcome(fact_id, crate::types::Outcome::Positive);
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), MemoryError::ReadOnly));
+}
+
+#[test]
+fn get_outcome_counts_no_outcomes_returns_zeros() {
+    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let fact = make_new_fact("no outcomes", vec![0.5; DIM]);
+    let fact_id = insert_raw_fact(&engine, &fact);
+
+    let counts = engine.get_outcome_counts(fact_id).unwrap();
+    assert_eq!(counts.positive, 0);
+    assert_eq!(counts.negative, 0);
+    assert_eq!(counts.neutral, 0);
+}
+
+#[test]
+fn get_outcome_counts_tallies_correctly() {
+    use crate::types::Outcome;
+
+    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let fact = make_new_fact("tallied fact", vec![0.5; DIM]);
+    let fact_id = insert_raw_fact(&engine, &fact);
+
+    // Record mixed outcomes
+    engine.record_outcome(fact_id, Outcome::Positive).unwrap();
+    engine.record_outcome(fact_id, Outcome::Positive).unwrap();
+    engine.record_outcome(fact_id, Outcome::Negative).unwrap();
+    engine.record_outcome(fact_id, Outcome::Neutral).unwrap();
+    engine.record_outcome(fact_id, Outcome::Positive).unwrap();
+
+    let counts = engine.get_outcome_counts(fact_id).unwrap();
+    assert_eq!(counts.positive, 3);
+    assert_eq!(counts.negative, 1);
+    assert_eq!(counts.neutral, 1);
+}
+
+#[test]
+fn get_outcome_counts_isolates_per_fact() {
+    use crate::types::Outcome;
+
+    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let f1 = insert_raw_fact(&engine, &make_new_fact("fact one", vec![0.5; DIM]));
+    let f2 = insert_raw_fact(&engine, &make_new_fact("fact two", vec![0.3; DIM]));
+
+    engine.record_outcome(f1, Outcome::Positive).unwrap();
+    engine.record_outcome(f1, Outcome::Positive).unwrap();
+    engine.record_outcome(f2, Outcome::Negative).unwrap();
+
+    let c1 = engine.get_outcome_counts(f1).unwrap();
+    assert_eq!(c1.positive, 2);
+    assert_eq!(c1.negative, 0);
+
+    let c2 = engine.get_outcome_counts(f2).unwrap();
+    assert_eq!(c2.positive, 0);
+    assert_eq!(c2.negative, 1);
+}
+
+#[test]
+fn outcome_serde_round_trip() {
+    use crate::types::Outcome;
+
+    for variant in [Outcome::Positive, Outcome::Negative, Outcome::Neutral] {
+        let json = serde_json::to_string(&variant).unwrap();
+        let back: Outcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(variant, back);
+    }
+}
+
+#[test]
+fn outcome_display() {
+    use crate::types::Outcome;
+
+    assert_eq!(Outcome::Positive.to_string(), "positive");
+    assert_eq!(Outcome::Negative.to_string(), "negative");
+    assert_eq!(Outcome::Neutral.to_string(), "neutral");
+}
+
 mod snapshot_integration {
     use super::*;
 
