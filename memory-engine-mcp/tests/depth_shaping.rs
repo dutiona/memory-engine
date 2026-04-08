@@ -112,6 +112,7 @@ fn get_fact_sparse() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("get_fact_sparse", body);
@@ -143,6 +144,7 @@ fn get_fact_standard() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("get_fact_standard", body);
@@ -174,6 +176,7 @@ fn get_fact_full() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("get_fact_full", body);
@@ -208,6 +211,7 @@ fn explain_fact_sparse() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("explain_fact_sparse", body);
@@ -238,6 +242,7 @@ fn explain_fact_standard() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("explain_fact_standard", body);
@@ -268,6 +273,7 @@ fn explain_fact_full() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("explain_fact_full", body);
@@ -302,6 +308,7 @@ fn query_result_sparse() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("query_result_sparse", body);
@@ -332,6 +339,7 @@ fn query_result_standard() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("query_result_standard", body);
@@ -362,6 +370,7 @@ fn query_result_full() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("query_result_full", body);
@@ -401,6 +410,7 @@ fn resume_context_sparse() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("resume_context_sparse", body);
@@ -436,6 +446,7 @@ fn resume_context_standard() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("resume_context_standard", body);
@@ -471,6 +482,7 @@ fn resume_context_full() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("resume_context_full", body);
@@ -490,6 +502,7 @@ fn list_due_sparse() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     redact(&mut body);
     insta::assert_yaml_snapshot!("list_due_sparse", body);
@@ -524,6 +537,7 @@ fn sparse_has_exactly_4_fields() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     assert_eq!(body.as_object().unwrap().len(), 4);
 }
@@ -553,6 +567,7 @@ fn standard_excludes_embedding_and_hash() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     let obj = body.as_object().unwrap();
     assert!(!obj.contains_key("embedding"));
@@ -585,6 +600,7 @@ fn full_includes_embedding_dim_and_hash() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     let obj = body.as_object().unwrap();
     assert!(obj.contains_key("content_hash"));
@@ -622,6 +638,7 @@ fn default_depth_is_standard() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     ));
     let obj = body.as_object().unwrap();
     // Standard has content + fact_type but no embedding_dim

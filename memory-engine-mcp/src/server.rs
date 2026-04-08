@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use memory_engine::ActivityFilterConfig;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::SummaryGenerator;
 use rmcp::RoleServer;
@@ -23,6 +24,7 @@ pub struct MemoryMcpServer {
     pub embedder: Option<Arc<HttpEmbeddingProvider>>,
     pub summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
     pub embed_dim: usize,
+    pub filter_config: Arc<ActivityFilterConfig>,
 }
 
 impl MemoryMcpServer {
@@ -37,6 +39,7 @@ impl MemoryMcpServer {
             embedder,
             summary_gen,
             embed_dim,
+            filter_config: Arc::new(crate::activity_policy::default_filter_config()),
         }
     }
 
@@ -90,6 +93,7 @@ impl ServerHandler for MemoryMcpServer {
         let embedder = self.embedder.clone();
         let summary_gen = self.summary_gen.clone();
         let embed_dim = self.embed_dim;
+        let filter_config = Arc::clone(&self.filter_config);
 
         // Dispatch to tool handlers on the blocking thread pool.
         // Engine operations are sync (SQLite) — must not run on the async runtime.
@@ -101,6 +105,7 @@ impl ServerHandler for MemoryMcpServer {
                 embedder.as_deref(),
                 summary_gen.as_deref(),
                 embed_dim,
+                &filter_config,
             )
         })
         .await

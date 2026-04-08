@@ -266,7 +266,7 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 
 | Issue                                                       | Priority | Description                                                                                                                                       |
 | ----------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [#224](https://github.com/dutiona/memory-engine/issues/224) | P0       | MCP: activity stream + session lifecycle (`record_activity`, `checkpoint_session`, `load_context`) + server-side filtering. Part of #221 umbrella |
+| ✅ [#224](https://github.com/dutiona/memory-engine/issues/224) | P0       | MCP: activity stream + session lifecycle (`record_activity`, `checkpoint_session`, `load_context`) + server-side filtering. Part of #221 umbrella. [PR #230](https://github.com/dutiona/memory-engine/pull/230) |
 
 See also: [#225](https://github.com/dutiona/memory-engine/issues/225) (cognitive endpoints, Phase 5a), [#226](https://github.com/dutiona/memory-engine/issues/226) (cross-layer linking, Phase 6).
 
@@ -351,9 +351,9 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5a **in progress** — trai
          ┌────────────────┼─────────────────┐
          │                │                 │
          ▼                ▼                 ▼
-      #224 ◀─ READY     super-qa          Phase 5a ◀── CRITICAL PATH
+      #224 ✅ DONE      super-qa          Phase 5a ◀── CRITICAL PATH
       activity stream    (25 issues)       (#48✅,#49✅,#55✅,#56✅,#63✅
-      + session lifecycle parallel track    remaining: #57,#132,#133,#158,#159,#160,#161)
+      PR #230             parallel track    remaining: #57,#132,#133,#158,#159,#160,#161)
       (part of #221)                            │
          │                                      ├──▶ #225 (cognitive MCP endpoints)
          │                                      │    (part of #221, #48✅ #49✅ done)
@@ -379,7 +379,7 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5a **in progress** — trai
 
 **Parallelizable right now (3 independent tracks):**
 
-1. **#224 — Activity stream + session lifecycle** (unblocked, part of #221 umbrella)
+1. ~~**#224 — Activity stream + session lifecycle**~~ ✅ Done ([PR #230](https://github.com/dutiona/memory-engine/pull/230))
 1. **Super-qa sweep** (25 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review; +#203 from #195 review) — incremental, any order
 1. **Phase 5a remaining** (#57, #132, #133, #158–#161, #206–#211, #225) — critical path continues
 

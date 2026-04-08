@@ -1,7 +1,7 @@
 use memory_engine::ResumeContext;
 use memory_engine::inspect_types::{FactExplanation, FactHistory};
 use memory_engine::search::hybrid::{QueryDiagnostics, SearchResult};
-use memory_engine::types::{Event, Fact};
+use memory_engine::types::{Activity, Event, Fact, ProjectContext, SessionCheckpoint};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -236,6 +236,89 @@ pub fn shape_fact_history(history: &FactHistory, depth: Depth) -> Value {
             })
         }
     }
+}
+
+/// Shape an [`Activity`] according to the requested depth.
+pub fn shape_activity(activity: &Activity, depth: Depth) -> Value {
+    match depth {
+        Depth::Sparse => json!({
+            "id": activity.id,
+            "tool_name": activity.tool_name,
+            "status": activity.status.to_string(),
+            "last_seen": activity.last_seen,
+        }),
+        Depth::Standard => json!({
+            "id": activity.id,
+            "session_id": activity.session_id,
+            "tool_name": activity.tool_name,
+            "result_summary": activity.result_summary,
+            "outcome_class": activity.outcome_class,
+            "status": activity.status.to_string(),
+            "occurrence_count": activity.occurrence_count,
+            "first_seen": activity.first_seen,
+            "last_seen": activity.last_seen,
+            "scope_id": activity.scope_id,
+        }),
+        Depth::Full => json!({
+            "id": activity.id,
+            "session_id": activity.session_id,
+            "tool_name": activity.tool_name,
+            "args_hash": activity.args_hash,
+            "args": activity.args,
+            "result_summary": activity.result_summary,
+            "outcome_class": activity.outcome_class,
+            "status": activity.status.to_string(),
+            "occurrence_count": activity.occurrence_count,
+            "first_seen": activity.first_seen,
+            "last_seen": activity.last_seen,
+            "scope_id": activity.scope_id,
+            "promoted_fact_id": activity.promoted_fact_id,
+        }),
+    }
+}
+
+/// Shape a [`SessionCheckpoint`] according to the requested depth.
+pub fn shape_checkpoint(checkpoint: &SessionCheckpoint, depth: Depth) -> Value {
+    match depth {
+        Depth::Sparse => json!({
+            "session_id": checkpoint.session_id,
+            "scope_path": checkpoint.scope_path,
+            "checkpoint_at": checkpoint.checkpoint_at,
+        }),
+        Depth::Standard | Depth::Full => json!({
+            "session_id": checkpoint.session_id,
+            "scope_path": checkpoint.scope_path,
+            "summary": checkpoint.summary,
+            "last_activity_id": checkpoint.last_activity_id,
+            "checkpoint_at": checkpoint.checkpoint_at,
+            "metadata": checkpoint.metadata,
+        }),
+    }
+}
+
+/// Shape a [`ProjectContext`] according to the requested depth.
+pub fn shape_project_context(ctx: &ProjectContext, depth: Depth) -> Value {
+    let activities: Vec<Value> = ctx
+        .recent_activities
+        .iter()
+        .map(|a| shape_activity(a, depth))
+        .collect();
+    let facts: Vec<Value> = ctx
+        .relevant_facts
+        .iter()
+        .map(|f| shape_fact(f, depth, None))
+        .collect();
+    let checkpoint = ctx
+        .last_checkpoint
+        .as_ref()
+        .map(|cp| shape_checkpoint(cp, depth));
+
+    json!({
+        "scope_path": ctx.scope_path,
+        "recent_activities": activities,
+        "last_checkpoint": checkpoint,
+        "relevant_facts": facts,
+    })
 }
 
 #[cfg(test)]

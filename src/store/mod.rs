@@ -2,8 +2,10 @@
 //!
 //! Uses WAL mode for concurrent reads during writes.
 
+pub mod activities;
 #[cfg(feature = "archive")]
 pub mod archive_manifest;
+pub mod checkpoints;
 pub mod edges;
 pub mod events;
 pub mod facts;

@@ -2,8 +2,23 @@
 source: src/store/schema.rs
 expression: schema
 ---
+-- index: idx_activities_dedup
+CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class);
+
+-- index: idx_activities_scope_recent
+CREATE INDEX idx_activities_scope_recent ON activities(scope_id, last_seen DESC);
+
+-- index: idx_activities_session
+CREATE INDEX idx_activities_session ON activities(session_id);
+
+-- index: idx_activities_status
+CREATE INDEX idx_activities_status ON activities(status);
+
 -- index: idx_archive_manifest_path
 CREATE UNIQUE INDEX idx_archive_manifest_path ON archive_manifest(pak_path);
+
+-- index: idx_checkpoints_scope
+CREATE INDEX idx_checkpoints_scope ON session_checkpoints(scope_path);
 
 -- index: idx_edges_expired
 CREATE INDEX idx_edges_expired ON edges(t_expired);
@@ -65,6 +80,9 @@ CREATE UNIQUE INDEX idx_scopes_parent_label ON scopes(parent_id, label);
 -- index: idx_summaries_scope
 CREATE INDEX idx_summaries_scope ON summaries(scope_id);
 
+-- table: activities
+CREATE TABLE activities ( id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, tool_name TEXT NOT NULL, args_hash TEXT NOT NULL, args TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(args)), result_summary TEXT, outcome_class TEXT NOT NULL DEFAULT 'success', status TEXT NOT NULL DEFAULT 'recorded' CHECK(status IN ('recorded', 'deduplicated', 'ignored', 'promoted')), occurrence_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), promoted_fact_id INTEGER REFERENCES facts(id) );
+
 -- table: archive_manifest
 CREATE TABLE archive_manifest ( id INTEGER PRIMARY KEY AUTOINCREMENT, pak_path TEXT NOT NULL, created_at TEXT NOT NULL, fact_count INTEGER NOT NULL, edge_count INTEGER NOT NULL, fact_id_min INTEGER NOT NULL, fact_id_max INTEGER NOT NULL, t_created_min TEXT NOT NULL, t_created_max TEXT NOT NULL, size_bytes INTEGER NOT NULL, blake3_hash TEXT NOT NULL );
 
@@ -100,6 +118,9 @@ CREATE TABLE lineage ( lineage_id INTEGER PRIMARY KEY AUTOINCREMENT, wisdom_fact
 
 -- table: scopes
 CREATE TABLE scopes ( id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER REFERENCES scopes(id), label TEXT NOT NULL, depth INTEGER NOT NULL DEFAULT 0 );
+
+-- table: session_checkpoints
+CREATE TABLE session_checkpoints ( session_id TEXT PRIMARY KEY, scope_path TEXT, summary TEXT, last_activity_id INTEGER REFERENCES activities(id) ON DELETE SET NULL, checkpoint_at TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)) );
 
 -- table: sqlite_sequence
 CREATE TABLE sqlite_sequence(name,seq);

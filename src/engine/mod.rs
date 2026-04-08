@@ -18,6 +18,8 @@ use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::Reranker;
 use crate::types::{ConsolidationLevel, Fact};
 
+mod activity;
+pub mod activity_filter;
 mod bootstrap;
 pub mod cognitive;
 mod conflict;

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -177,6 +177,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrate_v5_to_v6, false),
     (migrate_v6_to_v7, false),
     (migrate_v7_to_v8, false),
+    (migrate_v8_to_v9, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -661,6 +662,49 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS activities (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id       TEXT    NOT NULL,
+            tool_name        TEXT    NOT NULL,
+            args_hash        TEXT    NOT NULL,
+            args             TEXT    NOT NULL DEFAULT '{}' CHECK(json_valid(args)),
+            result_summary   TEXT,
+            outcome_class    TEXT    NOT NULL DEFAULT 'success',
+            status           TEXT    NOT NULL DEFAULT 'recorded'
+                             CHECK(status IN ('recorded', 'deduplicated', 'ignored', 'promoted')),
+            occurrence_count INTEGER NOT NULL DEFAULT 1,
+            first_seen       TEXT    NOT NULL,
+            last_seen        TEXT    NOT NULL,
+            scope_id         INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
+            promoted_fact_id INTEGER REFERENCES facts(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_activities_session
+            ON activities(session_id);
+        CREATE INDEX IF NOT EXISTS idx_activities_dedup
+            ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
+        CREATE INDEX IF NOT EXISTS idx_activities_scope_recent
+            ON activities(scope_id, last_seen DESC);
+        CREATE INDEX IF NOT EXISTS idx_activities_status
+            ON activities(status);
+
+        CREATE TABLE IF NOT EXISTS session_checkpoints (
+            session_id       TEXT PRIMARY KEY,
+            scope_path       TEXT,
+            summary          TEXT,
+            last_activity_id INTEGER REFERENCES activities(id) ON DELETE SET NULL,
+            checkpoint_at    TEXT NOT NULL,
+            metadata         TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_scope
+            ON session_checkpoints(scope_path);",
+    )?;
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -751,6 +795,44 @@ CREATE TABLE IF NOT EXISTS lineage (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_wisdom_fact_id
     ON lineage(wisdom_fact_id);
+
+CREATE TABLE IF NOT EXISTS activities (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       TEXT    NOT NULL,
+    tool_name        TEXT    NOT NULL,
+    args_hash        TEXT    NOT NULL,
+    args             TEXT    NOT NULL DEFAULT '{}' CHECK(json_valid(args)),
+    result_summary   TEXT,
+    outcome_class    TEXT    NOT NULL DEFAULT 'success',
+    status           TEXT    NOT NULL DEFAULT 'recorded'
+                     CHECK(status IN ('recorded', 'deduplicated', 'ignored', 'promoted')),
+    occurrence_count INTEGER NOT NULL DEFAULT 1,
+    first_seen       TEXT    NOT NULL,
+    last_seen        TEXT    NOT NULL,
+    scope_id         INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
+    promoted_fact_id INTEGER REFERENCES facts(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activities_session
+    ON activities(session_id);
+CREATE INDEX IF NOT EXISTS idx_activities_dedup
+    ON activities(session_id, tool_name, args_hash, outcome_class);
+CREATE INDEX IF NOT EXISTS idx_activities_scope_recent
+    ON activities(scope_id, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_activities_status
+    ON activities(status);
+
+CREATE TABLE IF NOT EXISTS session_checkpoints (
+    session_id       TEXT PRIMARY KEY,
+    scope_path       TEXT,
+    summary          TEXT,
+    last_activity_id INTEGER REFERENCES activities(id) ON DELETE SET NULL,
+    checkpoint_at    TEXT NOT NULL,
+    metadata         TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata))
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_scope
+    ON session_checkpoints(scope_path);
 ";
 
 const SCOPES_DDL: &str = "
@@ -1269,8 +1351,8 @@ CREATE TABLE IF NOT EXISTS config (
                 |r| r.get(0),
             )
             .unwrap();
-        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage
-        assert_eq!(count, 21);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints
+        assert_eq!(count, 26);
     }
 
     // --- Migration framework tests ---
@@ -1281,13 +1363,13 @@ CREATE TABLE IF NOT EXISTS config (
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
         // migrate is a no-op on fresh DB
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
     }
 
@@ -1302,7 +1384,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
     }
 
@@ -1314,7 +1396,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
     }
 
@@ -1348,7 +1430,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
 
         // Data survived both migrations
@@ -1438,7 +1520,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
 
         // After migration: orphan scope_id fails (FK enforced)
@@ -1566,7 +1648,7 @@ CREATE TABLE IF NOT EXISTS config (
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
     }
 
@@ -1576,7 +1658,7 @@ CREATE TABLE IF NOT EXISTS config (
         init_schema(&conn).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
         conn.execute(
             "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed, is_pinned, importance_score)
@@ -1738,7 +1820,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
     }
 
@@ -1760,7 +1842,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
 
         // Existing events get default revision = 1
@@ -1844,7 +1926,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
 
         // Event survived all migrations, got default revision
@@ -1877,7 +1959,7 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
 
         // Existing facts have surfaced_at = NULL
@@ -2160,7 +2242,7 @@ CREATE TABLE IF NOT EXISTS config (
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
 
         // archive_manifest must exist after migration
@@ -2206,7 +2288,7 @@ CREATE TABLE IF NOT EXISTS config (
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
     }
 
@@ -2238,7 +2320,7 @@ CREATE TABLE IF NOT EXISTS config (
 
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
-            Some("8".to_string())
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
 
         // lineage table must exist after migration
@@ -2286,5 +2368,124 @@ CREATE TABLE IF NOT EXISTS config (
             )
             .unwrap();
         assert!(count > 0, "fresh DB should have lineage table");
+    }
+
+    /// Create a v8 schema by initing v9 and removing activity/checkpoint artifacts.
+    fn init_schema_v8(conn: &Connection) -> Result<()> {
+        init_schema(conn)?;
+        conn.execute_batch("DROP TABLE IF EXISTS session_checkpoints;")?;
+        conn.execute_batch("DROP TABLE IF EXISTS activities;")?;
+        conn.execute_batch("DROP INDEX IF EXISTS idx_activities_session;")?;
+        conn.execute_batch("DROP INDEX IF EXISTS idx_activities_dedup;")?;
+        conn.execute_batch("DROP INDEX IF EXISTS idx_activities_scope_recent;")?;
+        conn.execute_batch("DROP INDEX IF EXISTS idx_activities_status;")?;
+        conn.execute_batch("DROP INDEX IF EXISTS idx_checkpoints_scope;")?;
+        set_config(conn, "schema_version", "8")?;
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v8_to_v9_adds_activities_and_checkpoints() {
+        let conn = open_memory().unwrap();
+        init_schema_v8(&conn).unwrap();
+
+        // Tables must NOT exist before migration
+        let tables_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('activities', 'session_checkpoints')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tables_before, 0,
+            "activities/session_checkpoints should not exist before migration"
+        );
+
+        migrate(&conn, None).unwrap();
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some(CURRENT_SCHEMA_VERSION.to_string())
+        );
+
+        // Both tables must exist after migration
+        let tables_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('activities', 'session_checkpoints')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tables_after, 2,
+            "activities and session_checkpoints should exist after migration"
+        );
+
+        // Verify activities columns
+        let act_cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('activities')
+                 WHERE name IN ('id', 'session_id', 'tool_name', 'args_hash', 'args',
+                                'result_summary', 'outcome_class', 'status',
+                                'occurrence_count', 'first_seen', 'last_seen',
+                                'scope_id', 'promoted_fact_id')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            act_cols, 13,
+            "activities table should have 13 expected columns"
+        );
+
+        // Verify session_checkpoints columns
+        let cp_cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('session_checkpoints')
+                 WHERE name IN ('session_id', 'scope_path', 'summary',
+                                'last_activity_id', 'checkpoint_at', 'metadata')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cp_cols, 6,
+            "session_checkpoints table should have 6 expected columns"
+        );
+
+        // Verify indexes (5 new)
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                 AND name IN ('idx_activities_session', 'idx_activities_dedup',
+                              'idx_activities_scope_recent', 'idx_activities_status',
+                              'idx_checkpoints_scope')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_count, 5,
+            "all 5 activity/checkpoint indexes should exist"
+        );
+    }
+
+    #[test]
+    fn fresh_db_has_activities_and_checkpoints() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('activities', 'session_checkpoints')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "fresh DB should have activities and session_checkpoints tables"
+        );
     }
 }

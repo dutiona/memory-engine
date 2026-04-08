@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use memory_engine::ResumeConfig;
 use memory_engine::bootstrap::{BootstrapConfig, KeywordExtractor};
 use memory_engine::engine::MemoryEngine;
 use memory_engine::inspect_types::{DumpFormat, FactExplanation, ReplayFilter, ReplayOrder};
@@ -15,12 +14,13 @@ use memory_engine::traits::{
 use memory_engine::types::{
     AddFactOptions, AddFactRequest, EventType, FactType, NewEvent, Outcome,
 };
+use memory_engine::ResumeConfig;
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::depth::{self, Depth};
 use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
-use crate::error::{ValidationError, to_mcp_error};
+use crate::error::{to_mcp_error, ValidationError};
 
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)
@@ -312,6 +312,52 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "required": ["fact_id"]
             }),
         ),
+        // Activity stream + session lifecycle (#224)
+        tool_def(
+            "memory_record_activity",
+            "Record a tool invocation activity. Server-side filtering deduplicates, ignores formatting, and can promote significant actions to facts.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tool": { "type": "string", "description": "Tool name that was invoked" },
+                    "args": { "description": "Tool arguments (arbitrary JSON)" },
+                    "result": { "type": "string", "description": "Tool result summary (truncated at 512 chars)" },
+                    "session_id": { "type": "string", "description": "Current session ID" },
+                    "timestamp": { "type": "string", "format": "date-time", "description": "ISO 8601 timestamp. Defaults to now." },
+                    "scope": { "type": "string", "description": "Scope path for the activity" },
+                    "outcome_class": { "type": "string", "description": "Outcome class (e.g. 'success', 'error', 'test_failure'). Default: 'success'" }
+                },
+                "required": ["tool", "session_id"]
+            }),
+        ),
+        tool_def(
+            "memory_checkpoint_session",
+            "Checkpoint the current session (last-write-wins). Called by Stop hook.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Session ID to checkpoint" },
+                    "scope": { "type": "string", "description": "Scope path (e.g. 'project:memory-engine')" },
+                    "summary": { "type": "string", "description": "Free-form session summary" },
+                    "metadata": { "description": "Arbitrary JSON metadata" }
+                },
+                "required": ["session_id"]
+            }),
+        ),
+        tool_def(
+            "memory_load_context",
+            "Load active project context for session start. Returns recent activities, last checkpoint, and relevant facts.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string", "description": "Scope path (e.g. 'project:memory-engine')" },
+                    "activity_limit": { "type": "integer", "default": 20, "description": "Max recent activities to return" },
+                    "fact_limit": { "type": "integer", "default": 10, "description": "Max relevant facts to return" },
+                    "depth": { "type": "string", "enum": ["sparse", "standard", "full"], "default": "standard" }
+                },
+                "required": ["scope"]
+            }),
+        ),
     ]
 }
 
@@ -335,6 +381,7 @@ pub fn dispatch(
     embedder: Option<&HttpEmbeddingProvider>,
     summary_gen: Option<&(dyn SummaryGenerator + Send + Sync)>,
     embed_dim: usize,
+    filter_config: &memory_engine::ActivityFilterConfig,
 ) -> Result<CallToolResult, ErrorData> {
     match name {
         "memory_ingest" => handle_ingest(args, engine),
@@ -360,6 +407,10 @@ pub fn dispatch(
         // Phase 5a: Outcome tracking
         "memory_record_outcome" => handle_record_outcome(args, engine),
         "memory_outcome_counts" => handle_outcome_counts(args, engine),
+        // Activity stream + session lifecycle (#224)
+        "memory_record_activity" => handle_record_activity(args, engine, embedder, filter_config),
+        "memory_checkpoint_session" => handle_checkpoint_session(args, engine),
+        "memory_load_context" => handle_load_context(args, engine),
         _ => Err(ErrorData::invalid_params(
             format!("unknown tool: {name}"),
             None,
@@ -1249,4 +1300,87 @@ fn handle_outcome_counts(
         "negative": counts.negative,
         "neutral": counts.neutral,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Activity stream + session lifecycle (#224)
+// ---------------------------------------------------------------------------
+
+fn handle_record_activity(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+    embedder: Option<&HttpEmbeddingProvider>,
+    filter_config: &memory_engine::ActivityFilterConfig,
+) -> Result<CallToolResult, ErrorData> {
+    let tool_name =
+        get_str(&args, "tool").ok_or_else(|| ErrorData::invalid_params("missing tool", None))?;
+    let session_id = get_str(&args, "session_id")
+        .ok_or_else(|| ErrorData::invalid_params("missing session_id", None))?;
+    let tool_args = args.get("args").cloned().unwrap_or(json!({}));
+    let result_summary = get_str(&args, "result");
+    let timestamp = get_datetime(&args, "timestamp")?.unwrap_or_else(Utc::now);
+    let scope = get_str(&args, "scope");
+    let outcome_class = get_str(&args, "outcome_class");
+
+    let req = memory_engine::RecordActivityRequest {
+        tool_name,
+        args: tool_args,
+        result: result_summary,
+        session_id,
+        timestamp,
+        scope_path: scope,
+        outcome_class,
+    };
+
+    let result = engine
+        .record_activity(
+            &req,
+            embedder.map(|e| e as &dyn EmbeddingProvider),
+            filter_config,
+        )
+        .map_err(to_mcp_error)?;
+
+    ok_json(json!({
+        "activity_id": result.activity_id,
+        "was_deduplicated": result.was_deduplicated,
+        "promoted_fact_id": result.promoted_fact_id,
+        "status": result.status.to_string(),
+    }))
+}
+
+fn handle_checkpoint_session(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let session_id = get_str(&args, "session_id")
+        .ok_or_else(|| ErrorData::invalid_params("missing session_id", None))?;
+    let scope = get_str(&args, "scope");
+    let summary = get_str(&args, "summary");
+    let metadata = args.get("metadata").cloned();
+
+    engine
+        .checkpoint_session(&session_id, scope.as_deref(), summary.as_deref(), metadata)
+        .map_err(to_mcp_error)?;
+
+    ok_json(json!({
+        "session_id": session_id,
+        "checkpointed": true,
+    }))
+}
+
+fn handle_load_context(
+    args: Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let scope =
+        get_str(&args, "scope").ok_or_else(|| ErrorData::invalid_params("missing scope", None))?;
+    let activity_limit = get_usize(&args, "activity_limit").unwrap_or(20);
+    let fact_limit = get_usize(&args, "fact_limit").unwrap_or(10);
+    let depth_level = get_depth(&args);
+
+    let ctx = engine
+        .load_context(&scope, activity_limit, fact_limit)
+        .map_err(to_mcp_error)?;
+
+    ok_json(depth::shape_project_context(&ctx, depth_level))
 }
