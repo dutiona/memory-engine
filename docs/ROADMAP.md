@@ -341,7 +341,7 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 
 ### Execution Order & Critical Path (as of 2026-04-08)
 
-Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5 is **unblocked on the critical path**. The super-qa sweep is a parallel track that does not gate Phase 5.
+Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5a **in progress** — trait contracts, provenance, outcome tracking, dormant resonance, and config shipped (PR #223, #228). Remaining: #57, #132, #133, #158–#161, #206–#211, #225.
 
 **#221 umbrella** (hook-based MCP endpoints) spans three phases — its critical path to closure runs through Phase 6:
 
@@ -352,11 +352,11 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5 is **unblocked on the cri
          │                │                 │
          ▼                ▼                 ▼
       #224 ◀─ READY     super-qa          Phase 5a ◀── CRITICAL PATH
-      activity stream    (25 issues)       (#48,#49,#55,#56,#57,#63,#132,#133
-      + session lifecycle parallel track    + #158,#159,#160,#161)
+      activity stream    (25 issues)       (#48✅,#49✅,#55✅,#56✅,#63✅
+      + session lifecycle parallel track    remaining: #57,#132,#133,#158,#159,#160,#161)
       (part of #221)                            │
          │                                      ├──▶ #225 (cognitive MCP endpoints)
-         │                                      │    (part of #221, needs #48,#49)
+         │                                      │    (part of #221, #48✅ #49✅ done)
          │                                      ▼
          │                                   Phase 5b
          │                                   (#64,#138, quarantine/suppress
@@ -381,14 +381,16 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5 is **unblocked on the cri
 
 1. **#224 — Activity stream + session lifecycle** (unblocked, part of #221 umbrella)
 1. **Super-qa sweep** (25 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review; +#203 from #195 review) — incremental, any order
-1. **Phase 5a design + implementation** — the critical path forward
+1. **Phase 5a remaining** (#57, #132, #133, #158–#161, #206–#211, #225) — critical path continues
 
 **Phase 5 internal dependencies:**
 
-- #55 (provenance) ✅ + #63 (outcome tracking) are prerequisites for #49 (DreamCycle)
-- #48 (InsightStream) is independent, can ship first
-- #132 (FactType::Prediction) and #133 (spreading activation) can be parallel with #49
-- #54 (sample_dormant) and #134 (vitality boosts) are independent of everything, any time
+- #55 (provenance) ✅ + #63 (outcome tracking) ✅ are prerequisites for #49 (DreamCycle) ✅ (trait contract)
+- #48 (InsightStream) ✅ — shipped in PR #228
+- #54 (sample_dormant) ✅ — shipped in PR #228
+- #56 (DreamCycleConfig) ✅ — shipped in PR #228
+- #132 (FactType::Prediction) and #133 (spreading activation) can be parallel — next up
+- #134 (vitality boosts) is independent, any time
 
 ---
 
@@ -434,7 +436,7 @@ Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5 is **unblocked on the cri
   - Evidence-basis enum on Fact (#159) — `EvidenceBasis { Observed, Inferred, Synthesized }`, prevents frequency-based strengthening of ungrounded claims, pairs with #55
   - Metacognitive rationale field on Fact ([#160](https://github.com/dutiona/memory-engine/issues/160)) — `importance_rationale: Option<String>`, WHY rated important, improves DreamCycle promotion quality
   - Adversarial self-review in DreamCycle promotion gate (#161) — "Wait a minute" pattern before promoting to Wisdom tier, references Cheng et al. sycophancy findings
-  - Cognitive pipeline MCP endpoints ([#225](https://github.com/dutiona/memory-engine/issues/225)) — `dream_cycle` + `get_recent_insights` MCP tools. Part of #221 umbrella. Blocked on #48, #49
+  - Cognitive pipeline MCP endpoints ([#225](https://github.com/dutiona/memory-engine/issues/225)) — `dream_cycle` + `get_recent_insights` MCP tools. Part of #221 umbrella. Unblocked (#48 ✅, #49 ✅)
   - High-water mark cursor on event log (#206) — idempotent reprocessing, cursor survives compaction. Pattern from Claude Code `extractMemories` (note 29)
   - Distributed lock for DreamCycle (#207) — mtime+PID lock, 1h staleness, rollback on failure. Pattern from Claude Code `autoDream` (note 29)
   - Circuit breaker for DreamCycle failures (#208) — 3× consecutive failures → stop. Prevents runaway API waste (note 29)
@@ -514,8 +516,8 @@ Consumer (AI agent, CLI tool, MCP server)
 │  resume_context · list_due · pin/unpin  │  ← Phase 3/3b ✅
 │  explain · replay · dump · statistics   │  ← Phase 4a ✅
 │  import · export · link_session_facts  │  ← Phase 4a ✅
-│  dream_cycle · sample_dormant           │  ← Phase 5
-│  record_outcome · dedup_semantic        │  ← Phase 5 (#63, #64)
+│  dream_cycle · sample_dormant           │  ← Phase 5 ✅ (PR #228)
+│  record_outcome · dedup_semantic        │  ← Phase 5 (#63 ✅, #64)
 ├──────────────────────────────────────────┤
 │  AsyncMemoryEngine (tokio wrapper)       │  ← Phase 3 ✅
 ├──────────────────────────────────────────┤
@@ -545,9 +547,9 @@ Consumer (AI agent, CLI tool, MCP server)
 ├──────────────────────────────────────────┤
 │  Resume (5-tier cognitive boot)          │  ← Phase 3b ✅
 ├──────────────────────────────────────────┤
-│  Cognitive Pipelines                     │  ← Phase 5
-│  ├─ InsightStream (fast-path capture)   │
-│  └─ DreamCycle (full cognitive pipeline) │
+│  Cognitive Pipelines                     │  ← Phase 5 ✅ (traits)
+│  ├─ InsightStream (fast-path capture)   │  ← PR #228
+│  └─ DreamCycle (full cognitive pipeline) │  ← PR #228 (trait only)
 ├──────────────────────────────────────────┤
 │  Knowledge Bridge                        │  ← Phase 6
 │  ├─ KnowledgeRef (URI on facts)         │
@@ -570,8 +572,8 @@ SummaryGenerator::embed(text) → Vec<f32>               ← Phase 2 ✅
 ConflictArbiter::arbitrate(old, new) → CrudDecision    ← Phase 2 ✅
 PersistenceClassifier::should_pin(fact) → bool         ← Phase 3b ✅
 Reranker::rerank(query, candidates) → Vec<ScoredFact>  ← Phase 4a ✅
-InsightStream::record(insight) → Result<()>             ← Phase 5
-DreamCycle::run(engine) → Result<CycleReport>           ← Phase 5
+InsightStream::record(insight) → Result<()>             ← Phase 5 ✅
+DreamCycle::run(engine) → Result<CycleReport>           ← Phase 5 ✅
 KnowledgeBaseConnector::resolve(uri) → KnowledgeChunk  ← Phase 6
 ```
 
