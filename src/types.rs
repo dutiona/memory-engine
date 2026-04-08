@@ -543,24 +543,37 @@ mod tests {
 
     #[test]
     fn dream_cycle_config_validate_rejects_bad_percentile() {
-        let mut cfg = DreamCycleConfig::default();
-        cfg.promotion_percentile = 1.5;
+        let cfg = DreamCycleConfig {
+            promotion_percentile: 1.5,
+            ..DreamCycleConfig::default()
+        };
         assert!(cfg.validate().is_err());
 
-        cfg.promotion_percentile = -0.1;
+        let cfg = DreamCycleConfig {
+            promotion_percentile: -0.1,
+            ..DreamCycleConfig::default()
+        };
         assert!(cfg.validate().is_err());
 
-        cfg.promotion_percentile = f64::NAN;
+        let cfg = DreamCycleConfig {
+            promotion_percentile: f64::NAN,
+            ..DreamCycleConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn dream_cycle_config_validate_accepts_boundaries() {
-        let mut cfg = DreamCycleConfig::default();
-        cfg.promotion_percentile = 0.0;
+        let cfg = DreamCycleConfig {
+            promotion_percentile: 0.0,
+            ..DreamCycleConfig::default()
+        };
         cfg.validate().unwrap();
 
-        cfg.promotion_percentile = 1.0;
+        let cfg = DreamCycleConfig {
+            promotion_percentile: 1.0,
+            ..DreamCycleConfig::default()
+        };
         cfg.validate().unwrap();
     }
 
