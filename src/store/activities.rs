@@ -64,7 +64,7 @@ impl<'a> ActivityStore<'a> {
                     "UPDATE activities
                      SET occurrence_count = ?1,
                          last_seen = ?2,
-                         status = 'deduplicated',
+                         status = CASE WHEN status = 'promoted' THEN 'promoted' ELSE 'deduplicated' END,
                          result_summary = COALESCE(?3, result_summary)
                      WHERE id = ?4",
                     params![count + 1, ts, activity.result_summary, existing_id],
