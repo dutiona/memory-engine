@@ -191,6 +191,42 @@ pub enum ScopeQuery {
     Inherited(String),
 }
 
+// --- Provenance (Phase 5a) ---
+
+/// Lightweight provenance envelope attached to promoted wisdom facts.
+///
+/// Carries summary statistics about the promotion (how many source facts,
+/// across how many sessions, confidence score). The full source chain lives
+/// in the sidecar `lineage` table, loaded on demand via `lineage_id`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromotionProvenance {
+    pub source_count: u32,
+    pub session_count: u32,
+    pub date_range_start: DateTime<Utc>,
+    pub date_range_end: DateTime<Utc>,
+    pub confidence: f64,
+    pub method_version: String,
+    /// 3-5 most representative source fact IDs (for quick human review).
+    pub representative_ids: Vec<i64>,
+    /// Foreign key to the `lineage` table for the full source chain.
+    pub lineage_id: i64,
+}
+
+/// A row in the `lineage` sidecar table (full source chain).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineageRecord {
+    pub lineage_id: i64,
+    pub wisdom_fact_id: i64,
+    pub source_fact_ids: Vec<i64>,
+}
+
+/// Insert descriptor for a new lineage record (DB assigns `lineage_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewLineageRecord {
+    pub wisdom_fact_id: i64,
+    pub source_fact_ids: Vec<i64>,
+}
+
 // --- Options ---
 
 /// Optional parameters for [`crate::engine::MemoryEngine::add_fact`].
@@ -401,5 +437,34 @@ mod tests {
             .surfaced_at
             .expect("surfaced_at should deserialize when present");
         assert_eq!(ts.to_rfc3339(), "2026-03-15T12:00:00+00:00");
+    }
+
+    #[test]
+    fn promotion_provenance_round_trip_json() {
+        let prov = PromotionProvenance {
+            source_count: 5,
+            session_count: 3,
+            date_range_start: Utc::now(),
+            date_range_end: Utc::now(),
+            confidence: 0.87,
+            method_version: "dreamcycle-v1".into(),
+            representative_ids: vec![10, 20, 30],
+            lineage_id: 42,
+        };
+        let json = serde_json::to_string(&prov).unwrap();
+        let back: PromotionProvenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(prov, back);
+    }
+
+    #[test]
+    fn lineage_record_round_trip_json() {
+        let rec = LineageRecord {
+            lineage_id: 1,
+            wisdom_fact_id: 42,
+            source_fact_ids: vec![10, 20, 30, 40, 50],
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: LineageRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(rec, back);
     }
 }
