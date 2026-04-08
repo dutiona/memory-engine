@@ -77,6 +77,7 @@ async fn openai_format_embedding() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         );
         unwrap_ok(result)
     })
@@ -120,6 +121,7 @@ async fn ollama_format_embedding() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         );
         unwrap_ok(result)
     })
@@ -163,6 +165,7 @@ async fn direct_format_embedding() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         );
         unwrap_ok(result)
     })
@@ -206,6 +209,7 @@ async fn wrong_dimension_from_server() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         )
         .is_err()
     })
@@ -246,6 +250,7 @@ async fn server_500_propagates_error() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         )
         .is_err()
     })
@@ -293,6 +298,7 @@ async fn bearer_auth_sent_when_configured() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         );
         unwrap_ok(result)
     })
@@ -345,6 +351,7 @@ async fn flush_insights_with_http_embedder() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         );
         unwrap_ok(result)
     })
@@ -392,6 +399,7 @@ async fn flush_insights_partial_failure() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         );
         unwrap_ok(result)
     })
@@ -442,6 +450,7 @@ async fn query_hybrid_with_http_embedder() {
             None,
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         )
         .unwrap();
 
@@ -453,6 +462,7 @@ async fn query_hybrid_with_http_embedder() {
             Some(&provider),
             None,
             DIM,
+            &memory_engine::ActivityFilterConfig::default(),
         );
         unwrap_ok(result)
     })

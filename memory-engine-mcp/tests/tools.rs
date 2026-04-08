@@ -72,6 +72,7 @@ fn test_pin_unpin_roundtrip() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
     let v = extract_json(&result);
@@ -90,6 +91,7 @@ fn test_pin_unpin_roundtrip() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
     let v = extract_json(&result);
@@ -110,6 +112,7 @@ fn test_pin_missing_fact() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -125,7 +128,16 @@ fn test_forget_defaults() {
     let (engine, _dir) = test_engine();
     add_test_fact(&engine, "old fact");
 
-    let result = tools::dispatch("memory_forget", Map::new(), &engine, None, None, 3).unwrap();
+    let result = tools::dispatch(
+        "memory_forget",
+        Map::new(),
+        &engine,
+        None,
+        None,
+        3,
+        &memory_engine::ActivityFilterConfig::default(),
+    )
+    .unwrap();
     let v = extract_json(&result);
     assert!(v["facts_evaluated"].is_number());
     assert!(v["facts_expired"].is_number());
@@ -142,6 +154,7 @@ fn test_forget_validation_error() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -158,6 +171,7 @@ fn test_forget_with_overrides() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
     let v = extract_json(&result);
@@ -172,7 +186,15 @@ fn test_forget_with_overrides() {
 fn test_consolidate_no_provider() {
     let (engine, _dir) = test_engine();
 
-    let result = tools::dispatch("memory_consolidate", Map::new(), &engine, None, None, 3);
+    let result = tools::dispatch(
+        "memory_consolidate",
+        Map::new(),
+        &engine,
+        None,
+        None,
+        3,
+        &memory_engine::ActivityFilterConfig::default(),
+    );
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
@@ -191,6 +213,7 @@ fn test_consolidate_validation() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 
@@ -202,6 +225,7 @@ fn test_consolidate_validation() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -222,6 +246,7 @@ fn test_dump_state_json() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
     let v = extract_json(&result);
@@ -249,6 +274,7 @@ fn test_dump_state_custom_path() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
     let v = extract_json(&result);
@@ -265,7 +291,16 @@ fn test_dump_state_default_path() {
     add_test_fact(&engine, "fact for default dump");
 
     // No format or path → defaults to json + temp dir
-    let result = tools::dispatch("memory_dump_state", Map::new(), &engine, None, None, 3).unwrap();
+    let result = tools::dispatch(
+        "memory_dump_state",
+        Map::new(),
+        &engine,
+        None,
+        None,
+        3,
+        &memory_engine::ActivityFilterConfig::default(),
+    )
+    .unwrap();
     let v = extract_json(&result);
     let path = v["path"].as_str().unwrap();
     assert!(path.contains("memory-dump-"));
@@ -292,6 +327,7 @@ fn test_record_outcome_and_counts() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
     let v1 = extract_json(&r1);
@@ -306,6 +342,7 @@ fn test_record_outcome_and_counts() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
 
@@ -316,6 +353,7 @@ fn test_record_outcome_and_counts() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
 
@@ -327,6 +365,7 @@ fn test_record_outcome_and_counts() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     )
     .unwrap();
     let v2 = extract_json(&r2);
@@ -347,6 +386,7 @@ fn test_record_outcome_nonexistent_fact() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -366,6 +406,7 @@ fn test_record_outcome_invalid_variant() {
         None,
         None,
         3,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }

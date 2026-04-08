@@ -92,6 +92,7 @@ fn ingest_minimal() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["event_id"].as_i64().unwrap() > 0);
@@ -114,6 +115,7 @@ fn ingest_with_all_optional_fields() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["event_id"].as_i64().unwrap() > 0);
@@ -133,6 +135,7 @@ fn ingest_invalid_event_type() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -151,6 +154,7 @@ fn ingest_missing_required_field() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -173,6 +177,7 @@ fn add_fact_with_precomputed_embedding() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["fact_id"].as_i64().unwrap() > 0);
@@ -199,6 +204,7 @@ fn add_fact_all_options() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["fact_id"].as_i64().unwrap() > 0);
@@ -218,6 +224,7 @@ fn add_fact_importance_out_of_range() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -237,6 +244,7 @@ fn add_fact_temporal_inconsistency() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -254,6 +262,7 @@ fn add_fact_wrong_embedding_dim() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -270,6 +279,7 @@ fn add_fact_no_embedder_no_embedding() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     // Should fail: no pre-computed embedding and no HttpEmbeddingProvider
     assert!(result.is_err());
@@ -322,6 +332,7 @@ fn query_fts_returns_results() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
@@ -359,6 +370,7 @@ fn query_with_precomputed_embedding() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
@@ -377,6 +389,7 @@ fn query_one_sided_period_rejected() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -394,6 +407,7 @@ fn query_empty_engine() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert_eq!(body["count"].as_u64().unwrap(), 0);
@@ -413,6 +427,7 @@ fn resume_context_empty_engine() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     // All tiers should be empty arrays
@@ -453,6 +468,7 @@ fn resume_context_with_pinned_fact() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(!body["pinned"].as_array().unwrap().is_empty());
@@ -465,7 +481,15 @@ fn resume_context_with_pinned_fact() {
 #[test]
 fn list_due_empty() {
     let engine = make_engine();
-    let result = tools::dispatch("memory_list_due", args(json!({})), &engine, None, None, DIM);
+    let result = tools::dispatch(
+        "memory_list_due",
+        args(json!({})),
+        &engine,
+        None,
+        None,
+        DIM,
+        &memory_engine::ActivityFilterConfig::default(),
+    );
     let body = unwrap_ok(result);
     assert_eq!(body["count"].as_u64().unwrap(), 0);
 }
@@ -484,6 +508,7 @@ fn next_due_time_empty() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body["next_due"].is_null());
@@ -519,6 +544,7 @@ fn explain_fact_existing() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert_eq!(body["fact_id"].as_i64().unwrap(), fact_id);
@@ -534,6 +560,7 @@ fn explain_fact_nonexistent() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -548,6 +575,7 @@ fn explain_fact_missing_id() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -582,6 +610,7 @@ fn get_fact_existing() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert_eq!(body["id"].as_i64().unwrap(), fact_id);
@@ -598,6 +627,7 @@ fn get_fact_nonexistent() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -616,6 +646,7 @@ fn statistics_empty_engine() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     // Should return stats even on empty engine
@@ -661,6 +692,7 @@ fn statistics_after_ingestion() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     let body = unwrap_ok(result);
     assert!(body.is_object());
@@ -684,6 +716,7 @@ fn flush_insights_no_embedder() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     // Requires embedder — should fail
     assert!(result.is_err());
@@ -699,6 +732,7 @@ fn flush_insights_missing_array() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -717,6 +751,7 @@ fn unknown_tool_returns_error() {
         None,
         None,
         DIM,
+        &memory_engine::ActivityFilterConfig::default(),
     );
     assert!(result.is_err());
 }
@@ -726,12 +761,12 @@ fn unknown_tool_returns_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_tool_definitions_returns_20() {
+fn all_tool_definitions_returns_23() {
     let defs = tools::all_tool_definitions();
     assert_eq!(
         defs.len(),
-        20,
-        "expected 10 P0 + 5 P1 + 3 P2 + 2 Phase 5a tools"
+        23,
+        "expected 10 P0 + 5 P1 + 3 P2 + 2 Phase 5a + 3 activity stream tools"
     );
 }
 
