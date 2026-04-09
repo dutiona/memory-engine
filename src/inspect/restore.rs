@@ -11,6 +11,7 @@ use rusqlite::Connection;
 
 use crate::error::{MemoryError, Result};
 use crate::store::events::event_type_to_str;
+use crate::store::lineage::LineageStore;
 use crate::store::schema::{CURRENT_SCHEMA_VERSION, STORAGE_EPOCH, set_config};
 use crate::store::serialize_embedding;
 
@@ -176,8 +177,9 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
     // scopes: root scope (id=1) is expected from init_schema
     let scope_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM scopes WHERE id > 1", [], |r| r.get(0))?;
+    let lineage_count: i64 = conn.query_row("SELECT COUNT(*) FROM lineage", [], |r| r.get(0))?;
 
-    let total = event_count + fact_count + edge_count + summary_count + scope_count;
+    let total = event_count + fact_count + edge_count + summary_count + scope_count + lineage_count;
     if total > 0 {
         return Err(MemoryError::Conflict(
             "target database is not empty; restore only works on a fresh engine".into(),
@@ -337,14 +339,22 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         }
     }
 
-    // 7. Import config keys (except managed ones).
+    // 7. Insert lineage records (Phase 5a provenance).
+    {
+        let lineage_store = LineageStore::new(&tx);
+        for entry in &snapshot.lineage {
+            lineage_store.insert_raw(entry)?;
+        }
+    }
+
+    // 8. Import config keys (except managed ones).
     for (key, value) in &snapshot.config {
         if !MANAGED_CONFIG_KEYS.contains(&key.as_str()) {
             set_config(&tx, key, value)?;
         }
     }
 
-    // 8. Reset autoincrement sequences so new inserts don't collide.
+    // 9. Reset autoincrement sequences so new inserts don't collide.
     reset_autoincrement(
         &tx,
         "scopes",
@@ -370,8 +380,17 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         "summaries",
         &snapshot.summaries.iter().map(|s| s.id).collect::<Vec<_>>(),
     )?;
+    reset_autoincrement(
+        &tx,
+        "lineage",
+        &snapshot
+            .lineage
+            .iter()
+            .map(|l| l.lineage_id)
+            .collect::<Vec<_>>(),
+    )?;
 
-    // 9. Commit.
+    // 10. Commit.
     tx.commit()?;
     Ok(())
 }
@@ -457,6 +476,7 @@ mod tests {
             summaries: vec![],
             scopes: vec![],
             events: vec![],
+            lineage: vec![],
             config: HashMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -474,6 +494,7 @@ mod tests {
             summaries: vec![],
             scopes: vec![],
             events: vec![],
+            lineage: vec![],
             config: HashMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -491,6 +512,7 @@ mod tests {
             summaries: vec![],
             scopes: vec![],
             events: vec![],
+            lineage: vec![],
             config: HashMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -514,6 +536,7 @@ mod tests {
                 depth: 1,
             }],
             events: vec![],
+            lineage: vec![],
             config: HashMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -531,6 +554,7 @@ mod tests {
             summaries: vec![],
             scopes: vec![],
             events: vec![],
+            lineage: vec![],
             config: HashMap::new(),
         };
         validate_snapshot(&snapshot).unwrap();

@@ -48,6 +48,9 @@ pub enum MemoryError {
     /// Attempted a write operation on a read-only engine.
     #[error("operation requires write access, but engine was opened read-only")]
     ReadOnly,
+
+    #[error("lineage error: {0}")]
+    Lineage(String),
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.
@@ -89,6 +92,15 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "operation requires write access, but engine was opened read-only"
+        );
+    }
+
+    #[test]
+    fn lineage_error_display() {
+        let err = MemoryError::Lineage("wisdom fact 42 has no lineage record".into());
+        assert_eq!(
+            err.to_string(),
+            "lineage error: wisdom fact 42 has no lineage record"
         );
     }
 

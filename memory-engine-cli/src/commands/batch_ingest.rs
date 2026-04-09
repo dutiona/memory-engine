@@ -10,7 +10,7 @@ use memory_engine_embed::HttpEmbeddingProvider;
 use serde::{Deserialize, Serialize};
 
 use crate::db::open_engine;
-use crate::output::{print_json, OutputFormat};
+use crate::output::{OutputFormat, print_json};
 
 // ---------------------------------------------------------------------------
 // CLI args

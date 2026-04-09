@@ -59,6 +59,8 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
             "engine opened in read-only mode — write operations are not available",
             None,
         ),
+
+        MemoryError::Lineage(msg) => ErrorData::resource_not_found(format!("lineage: {msg}"), None),
     }
 }
 
