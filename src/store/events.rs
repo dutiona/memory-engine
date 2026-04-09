@@ -31,6 +31,7 @@ pub(crate) const fn event_type_to_str(et: &EventType) -> &'static str {
         EventType::ToolCall => "ToolCall",
         EventType::MemoryOp => "MemoryOp",
         EventType::SystemEvent => "SystemEvent",
+        EventType::OutcomeSignal => "OutcomeSignal",
     }
 }
 
@@ -40,6 +41,7 @@ fn str_to_event_type(s: &str) -> Result<EventType> {
         "ToolCall" => Ok(EventType::ToolCall),
         "MemoryOp" => Ok(EventType::MemoryOp),
         "SystemEvent" => Ok(EventType::SystemEvent),
+        "OutcomeSignal" => Ok(EventType::OutcomeSignal),
         other => Err(MemoryError::NotFound(format!(
             "unknown event type: {other}"
         ))),
