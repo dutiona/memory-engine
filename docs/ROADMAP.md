@@ -262,6 +262,14 @@ Spawned during Phase 4a implementation reviews. All non-blocking for Phase 4b/4c
 | ✅ [#216](https://github.com/dutiona/memory-engine/issues/216) | P1       | CLI query: `--valid-at` temporal filtering + temporal columns in output. [PR #217](https://github.com/dutiona/memory-engine/pull/217)               |
 | ✅ [#215](https://github.com/dutiona/memory-engine/issues/215) | P1       | CLI `batch-ingest`: bulk JSONL fact loading via embedding API. Shared `memory-engine-embed` crate. [PR #219](https://github.com/dutiona/memory-engine/pull/219) |
 
+#### Phase 4b Follow-ups (Hook integration — #221 umbrella)
+
+| Issue                                                          | Priority | Description                                                                                                                                                |
+| -------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [#224](https://github.com/dutiona/memory-engine/issues/224)    | P0       | MCP: activity stream + session lifecycle (`record_activity`, `checkpoint_session`, `load_context`) + server-side filtering. Part of #221 umbrella          |
+
+See also: [#225](https://github.com/dutiona/memory-engine/issues/225) (cognitive endpoints, Phase 5a), [#226](https://github.com/dutiona/memory-engine/issues/226) (cross-layer linking, Phase 6).
+
 #### Phase 4c: Quality & Cold Storage
 
 | Feature                                                                             | Description                                                                                                                                                                                                                |
@@ -331,48 +339,47 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 
 ---
 
-### Execution Order & Critical Path (as of 2026-04-02)
+### Execution Order & Critical Path (as of 2026-04-08)
 
-Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical path**. The remaining Phase 4 follow-ups, Phase 4c, and the super-qa sweep are all parallel tracks that do not gate Phase 5.
+Phase 4a ✅, 4b ✅, and 4c ✅ are complete. Phase 5 is **unblocked on the critical path**. The super-qa sweep is a parallel track that does not gate Phase 5.
 
+**#221 umbrella** (hook-based MCP endpoints) spans three phases — its critical path to closure runs through Phase 6:
+
+```text
+                         NOW
+                          │
+         ┌────────────────┼─────────────────┐
+         │                │                 │
+         ▼                ▼                 ▼
+      #224 ◀─ READY     super-qa          Phase 5a ◀── CRITICAL PATH
+      activity stream    (25 issues)       (#48,#49,#55,#56,#57,#63,#132,#133
+      + session lifecycle parallel track    + #158,#159,#160,#161)
+      (part of #221)                            │
+         │                                      ├──▶ #225 (cognitive MCP endpoints)
+         │                                      │    (part of #221, needs #48,#49)
+         │                                      ▼
+         │                                   Phase 5b
+         │                                   (#64,#138, quarantine/suppress
+         │                                    + #162,#163)
+         │                                      │
+         │                                      ▼
+         │                                   Phase 6  (#50,#51,#52
+         │                                    + #164,#165,#166,#167,#168)
+         │                                      │
+         │                                      ├──▶ #226 (cross-layer linking MCP)
+         │                                      │    (part of #221, needs #50)
+         │                                      ▼
+         │                                   Phase 7  (#13)
+         │                                      │
+         └──────────────┬───────────────────────┘
+                        ▼
+                  #221 closes
+                  (when #224 + #225 + #226 all done)
 ```
-                    NOW
-                     │
-    ┌────────────────┼─────────────────┐
-    │                │                 │
-    ▼                ▼                 ▼
- Phase 4            Phase 4c ✅      super-qa
- follow-ups ✅      (#16,#46,#31)    (25 issues)
- (#95-#151)         all done         parallel track
- all done
-    │                │
-    │           ┌────┴────┐
-    │           │         │
-    │        eval #16 ✅ cold-start #31 ✅
-    │        (done)       (done, follow-ups: #199-#201,#204,#205)
-    │
-    ▼
- Phase 5a ◀── CRITICAL PATH
- (#48,#49,#55,#56,#57,#63,#132,#133
-  + #158,#159,#160,#161)
-    │
-    ▼
- Phase 5b
- (#64,#138, quarantine/suppress
-  + #162,#163)
-    │
-    ▼
- Phase 6  (#50,#51,#52
-  + #164,#165,#166,#167,#168)
-    │
-    ▼
- Phase 7  (#13)
-```
 
-**Parallelizable right now (4 independent tracks):**
+**Parallelizable right now (3 independent tracks):**
 
-1. **Phase 4 follow-ups** (all resolved: #95 ✅, #96 ✅, #150 ✅, #151 ✅, #152 ✅)
-1. **Phase 4c** (all resolved: #16 ✅, #46 ✅, #31 ✅) — #16 evaluation harness (52 tests, 2-tier conformance + quality, Criterion lifecycle benchmarks); #46 archival compression done ([PR #196](https://github.com/dutiona/memory-engine/pull/196)); #31 fast cold-start done ([PR #195](https://github.com/dutiona/memory-engine/pull/195)). Follow-ups: #199, #200, #201, #204, #205.
+1. **#224 — Activity stream + session lifecycle** (unblocked, part of #221 umbrella)
 1. **Super-qa sweep** (25 open issues; #108 ✅, #128 ✅, #187 ✅; +#191, +#192 from #186 review; +#203 from #195 review) — incremental, any order
 1. **Phase 5a design + implementation** — the critical path forward
 
@@ -427,6 +434,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
   - Evidence-basis enum on Fact (#159) — `EvidenceBasis { Observed, Inferred, Synthesized }`, prevents frequency-based strengthening of ungrounded claims, pairs with #55
   - Metacognitive rationale field on Fact ([#160](https://github.com/dutiona/memory-engine/issues/160)) — `importance_rationale: Option<String>`, WHY rated important, improves DreamCycle promotion quality
   - Adversarial self-review in DreamCycle promotion gate (#161) — "Wait a minute" pattern before promoting to Wisdom tier, references Cheng et al. sycophancy findings
+  - Cognitive pipeline MCP endpoints ([#225](https://github.com/dutiona/memory-engine/issues/225)) — `dream_cycle` + `get_recent_insights` MCP tools. Part of #221 umbrella. Blocked on #48, #49
   - High-water mark cursor on event log (#206) — idempotent reprocessing, cursor survives compaction. Pattern from Claude Code `extractMemories` (note 29)
   - Distributed lock for DreamCycle (#207) — mtime+PID lock, 1h staleness, rollback on failure. Pattern from Claude Code `autoDream` (note 29)
   - Circuit breaker for DreamCycle failures (#208) — 3× consecutive failures → stop. Prevents runaway API waste (note 29)
@@ -446,6 +454,7 @@ Phase 4a ✅ and 4b ✅ are complete. Phase 5 is **unblocked on the critical pat
 | Feature                                                                                                                            | Description                                                                                                                                                                                            |
 | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `KnowledgeBaseConnector` trait + `KnowledgeRef` + graceful degradation ([#50](https://github.com/dutiona/memory-engine/issues/50)) | Transport-agnostic trait, optional URI field on facts, "memory lapse" when KB unreachable. **Bidirectional linking** (NYX12: 10,577 bridge_links): `link(fact_id, knowledge_uri)` and `query_linked()` |
+| Cross-layer linking MCP endpoints ([#226](https://github.com/dutiona/memory-engine/issues/226))                                    | `link` + `query_linked` MCP tools. Part of #221 umbrella. Blocked on #50                                                                                                                               |
 | Knowledge change notification ([#51](https://github.com/dutiona/memory-engine/issues/51))                                          | When KB content is superseded/updated, notify memory to re-evaluate dependent facts. **Expand:** pub/sub emission for ME→agent direction (not just KB→ME)                                              |
 | research-index bridge ([#52](https://github.com/dutiona/memory-engine/issues/52))                                                  | `memory-kb-research-index` middleware crate implementing `KnowledgeBaseConnector`                                                                                                                      |
 | Cross-layer session propagation                                                                                                    | Propagate KB ingestion `session_id` (dutiona/knowledge-base#128) through bridge → #62 co-session edges                                                                                                 |
