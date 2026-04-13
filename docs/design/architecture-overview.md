@@ -163,6 +163,39 @@ Session bootstrapping uses 5-tier retrieval to populate the agent's context wind
 
 The five tiers are mutually exclusive (a fact appears in at most one tier). The consumer controls tier sizes and thresholds via `ResumeConfig`.
 
+## Prospective Memory
+
+The Memory layer supports two complementary sub-modes:
+
+- **Retrospective memory** — what happened. Bi-temporal facts with Ebbinghaus decay, the consolidation pipeline, and the conflict arbiter. This is the path most of the engine surface area exercises.
+- **Prospective memory** — what should happen _when_. Time-anchored intentions whose "due" status is a function of `t_valid` versus the current clock plus the active scope filter.
+
+This split is shipped, not aspirational. The cognitive-science basis is the prospective-memory literature (McDaniel & Einstein 2007, _Prospective Memory: An Overview and Synthesis of an Emerging Field_) and the framing is consistent with DeepMind's cognitive taxonomy §7.5.4 "Prospective memory" sub-faculty (Burnell et al. 2026).
+
+### API surface
+
+| Method | Source | Behavior |
+| --- | --- | --- |
+| `MemoryEngine::list_due(now, scope)` | [`src/engine/scheduling.rs:17`](../../src/engine/scheduling.rs) | Returns active facts where `t_valid IS NOT NULL ∧ t_valid <= now` and `(t_invalid IS NULL ∨ t_invalid > now)`, scoped via `ScopeQuery::Subtree` semantics on `scope`. |
+| `MemoryEngine::next_due_time(scope)` | [`src/engine/scheduling.rs:39`](../../src/engine/scheduling.rs) | Returns the earliest `t_valid` strictly in the future as a polling-interval hint. `None` if no future-dated facts in scope. |
+| `Fact::surfaced_at` | [`src/types.rs:141`](../../src/types.rs) | First-fire timestamp. `None` until the fact is returned by `list_due`; subsequent calls observe the persisted value. The DB-authoritative value always wins on read. |
+
+The store-level primitives live in [`src/store/facts.rs:397`](../../src/store/facts.rs) (`list_due`), [`src/store/facts.rs:432`](../../src/store/facts.rs) (`next_due_time`), and [`src/store/facts.rs:470`](../../src/store/facts.rs) (`stamp_surfaced`). Two unit tests guard the round-trip behavior: `list_due_surfaces_facts_with_past_t_valid` and `next_due_time_returns_earliest_future_t_valid`.
+
+### Firing models
+
+**Time-based firing (clock-triggered).** A fact is created with `t_valid` set to its scheduled fire time. The fact is invisible to retrospective queries until that moment because hybrid search filters on temporal validity. Once `now >= t_valid`, the fact becomes returnable from both `list_due` and from `resume_context()`'s "Due" tier (the table in [§ Resume Context](#resume-context)).
+
+**Scope-based firing (context-bound).** The `scope` argument to `list_due` filters by the active scope subtree, so a fact scheduled for `user:michael/project:demo` will not surface to a consumer querying `user:michael/project:research`. The combination of clock + scope acts as a context cue in the McDaniel & Einstein sense: the right intention surfaces only when the right context is active.
+
+**Lifecycle: scheduled → fired → re-read.** `surfaced_at` is `None` while the fact is scheduled but has not yet fired. The first `list_due` call that returns the fact stamps `surfaced_at` to the call's `now` argument, transitioning the fact to _fired_. Subsequent `list_due` calls return the same fact with the persisted `surfaced_at` (re-read state). This three-state lifecycle is what distinguishes prospective memory from a plain temporal filter — the consumer can tell a brand-new firing apart from a re-read without keeping its own bookkeeping.
+
+### Polling model and the LLM-free invariant
+
+The engine deliberately does not run its own event loop. `list_due` and `next_due_time` are pull primitives: the consumer schedules its own poll at `next_due_time` (or sooner if it has independent work) and the engine stays a passive store. This is the same trait-based discipline ADR-0004 establishes for embeddings and summaries — the engine exposes the primitives, the consumer owns the runtime. A push model would either (a) require an internal scheduler thread, or (b) require an LLM to interpret which intentions are now "active." Both would breach the LLM-free invariant. The polling model preserves it cleanly.
+
+The only known gap in the prospective-memory surface is a deterministic predicate language for **event-based firing** ("fire when a new fact matching predicate P is ingested") as opposed to clock-based firing. That gap is tracked separately (ME-P1-E, ADR-0013) and is addressable via Allen Interval Algebra (ADR-0011) plus `scope_id` / `entity_id` matching, with semantic predicates remaining a consumer concern by design.
+
 ## Scope Tree
 
 Scopes provide hierarchical isolation without separate databases. Each fact, edge, event, and summary carries a `scope_id`.
