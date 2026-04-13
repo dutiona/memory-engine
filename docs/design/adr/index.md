@@ -14,4 +14,6 @@ Key design decisions, documented as ADRs. Each records the context, decision, an
 0007-hierarchical-scoping
 0008-materialized-importance
 0009-session-bootstrap
+0010-wisdom-revision-gate-dsl
+0011-allen-interval-algebra
 ```
