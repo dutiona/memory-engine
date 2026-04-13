@@ -371,6 +371,35 @@ No phase gate depends on these. Can be done alongside 5a/5b or after.
 
 ---
 
+### April 2026 Landscape Gaps (notes 31–32)
+
+Sourced from `~/dev/autonomous-agent-project/raw/docs/summaries/04-results-and-roadmap.md` §11.1 (gap statements) and `02-system-design.md` §11.1–11.4 (design refinements). Issue numbers added once filed.
+
+**Verified non-gap (no work needed).** Prospective memory was incorrectly listed as a gap in an earlier pass. It is shipped — see [§ Prospective Memory in `architecture-overview.md`](design/architecture-overview.md#prospective-memory) and [`src/engine/scheduling.rs`](../src/engine/scheduling.rs). The §11.1 retraction in `02-system-design.md` documents the verification.
+
+**P0 (ADR-drafted, implementation pending review).**
+
+- 🔲 [#232](https://github.com/dutiona/memory-engine/issues/232) **ME-P0-A — Wisdom Revision Gate DSL.** Typed Rust DSL for declarative promotion predicates, borrowing Papr's schema-policy vocabulary. `Auto(prompt)` becomes a `ConsumerTraitCallback` so the LLM-free engine invariant is preserved. ADR: [`adr/0010-wisdom-revision-gate-dsl.md`](design/adr/0010-wisdom-revision-gate-dsl.md).
+- 🔲 [#233](https://github.com/dutiona/memory-engine/issues/233) **ME-P0-B — Allen Interval Algebra module.** New `src/temporal/allen.rs` exposing the 13 relations over bi-temporal intervals. Unlocks overlap, gap, and cycle detection. Deterministic, constant-time per pair. ADR: [`adr/0011-allen-interval-algebra.md`](design/adr/0011-allen-interval-algebra.md).
+- ✅ [#234](https://github.com/dutiona/memory-engine/issues/234) **ME-P0-C — Document prospective memory as a first-class capability.** Added §Prospective Memory to [`architecture-overview.md`](design/architecture-overview.md#prospective-memory) covering time-based and scope-based firing, the scheduled→fired→re-read lifecycle, the polling-model justification, and the McDaniel & Einstein 2007 + DeepMind §7.5.4 mapping. Docs-only — code already shipped.
+
+**P1 (issue-only — ADRs deferred until implementation phase).**
+
+- 🔲 [#235](https://github.com/dutiona/memory-engine/issues/235) **ME-P1-D — Ataraxy-Labs `sem` as a code-fact supersession backend.** Add a `code_fact` subtype tag and a new `CodeEntityResolver` consumer trait. Engine stays language-agnostic; `sem` is consumer-provided. Proposed ADR: `adr/0012-code-fact-supersession-backend.md` (future).
+- 🔲 [#236](https://github.com/dutiona/memory-engine/issues/236) **ME-P1-E — Event-based predicate DSL for prospective memory.** Extend prospective memory to fire on an ingest matching predicate P, not only on the clock. Builds on ADR-0011 (Allen) + `scope_id` / `entity_id` matching. Semantic predicates remain a consumer concern by design. Prereq: #233. Proposed ADR: `adr/0013-event-based-prospective-memory.md` (future).
+
+**P2 (tracked, no issue yet).**
+
+- **ME-P2-F — Cognitive-science citations.** Cite Tulving 1972, Cohen & Squire 1980, Bjork 1989, Nelson 1990, and McDaniel & Einstein 2007 in `docs/design/` narrative as the cognitive-science foundations for design decisions. Cited by Burnell et al. 2026.
+- **ME-P2-G — `Auto()` callout mechanism for consumer traits.** Narrow `WisdomAutoEvaluator` consumer trait that lets ADR-0010 policies invoke the consumer's LLM at constraint-firing time. Sequenced after the deterministic-only core of ADR-0010 ships.
+- **ME-P2-H — Community-voice phrasings in design docs.** Update `docs/design/` (or a new `philosophy.md`) to cite the u/JonnyJF epigraph and adopt "projections never silently become the truth they summarize" (r/Rag 1sgvvig OP, April 2026) as the Wisdom revision-gate invariant.
+
+**P3 (track only — competitive landscape).**
+
+- **ME-P3-I — Track Frona** (`github.com/fronalabs/frona`). First Rust-language peer for memory-engine's stack (Axum + embedded SurrealDB + RocksDB, two-tier user/agent facts). Lacks bi-temporal substrate and consolidation-to-wisdom, but validates the Rust choice. Track development and cite in paper #3 §Related Work.
+
+---
+
 ### Phase 6: Knowledge Integration 🔲
 
 **Design:** [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md)
