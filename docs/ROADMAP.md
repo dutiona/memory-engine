@@ -512,38 +512,40 @@ Discovered via automated super-qa audit ([PR #131](https://github.com/dutiona/me
 
 ### Issue counts by area
 
-| Area                     | Total   | Done   | Open   | On critical path |
-| ------------------------ | ------- | ------ | ------ | ---------------- |
-| Phase 1-3b               | 36      | 36     | 0      | —                |
-| Phase 4 (all sub-phases) | 42      | 39     | 3†     | —                |
-| Phase 5a                 | 18      | 7      | 11     | 5                |
-| Phase 5b                 | 5       | 0      | 5      | 0‡               |
-| Phase 5 independent      | 6       | 0      | 6      | 0                |
-| Phase 5 design           | 3       | 0      | 3      | 0                |
-| Phase 6                  | 10      | 0      | 10     | 5                |
-| Phase 7                  | 1       | 0      | 1      | 0                |
-| Deferred                 | 18      | 0      | 18     | 0                |
-| Code quality (super-qa)  | 31      | 6      | 25     | 0                |
-| Phase 4c follow-ups      | 5       | 0      | 5      | 0                |
-| **Total**                | **175** | **88** | **87** |                  |
+| Area                      | Total   | Done   | Open   | On critical path |
+| ------------------------- | ------- | ------ | ------ | ---------------- |
+| Phase 1-3b                | 36      | 36     | 0      | —                |
+| Phase 4 (all sub-phases)  | 42      | 39     | 3†     | —                |
+| Phase 5a                  | 18      | 7      | 11     | 5                |
+| Phase 5b                  | 5       | 0      | 5      | 0‡               |
+| Phase 5 independent       | 6       | 0      | 6      | 0                |
+| Phase 5 design            | 3       | 0      | 3      | 0                |
+| April 2026 landscape gaps | 5       | 1      | 4      | 0♦               |
+| Phase 6                   | 10      | 0      | 10     | 5                |
+| Phase 7                   | 1       | 0      | 1      | 0                |
+| Deferred                  | 18      | 0      | 18     | 0                |
+| Code quality (super-qa)   | 31      | 6      | 25     | 0                |
+| Phase 4c follow-ups       | 5       | 0      | 5      | 0                |
+| **Total**                 | **180** | **89** | **91** |                  |
 
 † Phase 4 open: #199, #200, #201, #204, #205 (snapshot follow-ups) + #225, #226 (part of #221 umbrella, tracked in Phase 5a/6).
 ‡ Phase 5b is not on the critical path to Phase 6 — it can run in parallel.
+♦ April 2026 landscape gaps run as a parallel Phase 5 track, not strict-order critical path. #232 (Wisdom DSL) feeds #49/#57 identity output; #233 (Allen) is a substrate for #232 and #236. #234 (prospective-memory docs) closed by `3d3252b`. Elevate any of #232/#233 onto the strict path at user discretion during review.
 
 ### Critical path diagram
 
 The **minimum chain** to unblock Phase 6 core, then complete it:
 
 ```text
-                     NOW (2026-04-09)
+                     NOW (2026-04-13)
                       │
-     ┌────────────────┼──────────────────────────────────────┐
-     │                │                                      │
-     ▼                ▼                                      ▼
-  Phase 5a         Phase 5            Code Quality Sweep
-  CRITICAL PATH    independent        (24 open, parallel)
-     │             (6 issues,
-     │              any order)
+     ┌────────────────┼──────────────────────┬───────────────┐
+     │                │                      │               │
+     ▼                ▼                      ▼               ▼
+  Phase 5a         Phase 5          April 2026 gaps    Code Quality Sweep
+  CRITICAL PATH    independent      (4 open, parallel)  (24 open, parallel)
+     │             (6 issues,       #232 #233 #235 #236
+     │              any order)      — user-review gated
      │
      ├─── #49 default impl ◄── NEXT (prereqs met: #55✅ #63✅)
      │         │
