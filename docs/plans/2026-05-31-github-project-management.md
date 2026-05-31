@@ -201,8 +201,10 @@ project_item_add(){ local pid="$1" cid="$2" after=null page found
   done
   gql 'mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' "$(jq -nc --arg p "$pid" --arg c "$cid" '{p:$p,c:$c}')" --jq '.data.addProjectV2ItemById.item.id'; }
 
-# Idempotent epic link: replaceParent:true (verified present on AddSubIssueInput via introspection this session).
-subissue_link(){ gql 'mutation($p:ID!,$c:ID!){addSubIssue(input:{issueId:$p,subIssueId:$c,replaceParent:true}){issue{number}}}' "$(jq -nc --arg p "$1" --arg c "$2" '{p:$p,c:$c}')" >/dev/null; }
+# Epic link, QUERY-FIRST (fixes Codex-connector P1 / INV-IDEMPOTENT). Reads the child's current parent so a
+# rerun is a true no-op and rollback records ONLY actual changes + the prior parent. Prints "skip" when already
+# linked to this parent, else "changed <priorParentId-or-empty>"; the caller records {child, prior} only on "changed".
+subissue_link(){ local cur; cur=$(gql 'query($c:ID!){node(id:$c){... on Issue{parent{id}}}}' "$(jq -nc --arg c "$2" '{c:$c}')" --jq '.data.node.parent.id // ""'); [ "$cur" = "$1" ] && { echo skip; return 0; }; gql 'mutation($p:ID!,$c:ID!){addSubIssue(input:{issueId:$p,subIssueId:$c,replaceParent:true}){issue{number}}}' "$(jq -nc --arg p "$1" --arg c "$2" '{p:$p,c:$c}')" >/dev/null; echo "changed $cur"; }
 ```
 
 - [ ] **Step 2:** `bash -n scripts/github-pm/lib.sh`. **Commit.**
@@ -259,7 +261,7 @@ done
 
 ```bash
 gh issue list -R dutiona/memory-engine --state open --limit 500 \
-  --json number,title,labels > scripts/github-pm/manifests/open-issues.json
+  --json id,number,title,labels > scripts/github-pm/manifests/open-issues.json
 jq 'length' scripts/github-pm/manifests/open-issues.json   # expect ≥ 97 (96 + plan-issue)
 ```
 
@@ -300,13 +302,17 @@ jq -r '.[] | [.number, .title, ([.labels[].name]|join(","))] | @tsv' "$F" | whil
   a=$(printf '%s' "$title" | sed -nE 's/^[a-z]+\(([a-z]+)\):.*/\1/p')   # area from title type(area): hint
   case "$a" in core|storage|retrieval|consolidation|forgetting|temporal|cognitive|knowledge|cli|mcp|docs|build|qa|viz) area="area:$a";; *) area="AMBIGUOUS";; esac
   phase=""; case ",$labels," in *,phase-5a,*) phase="Phase 5a";; *,phase-5b,*) phase="Phase 5b";; *,phase-5,*) phase="Phase 5 (indep)";; *,phase-6,*) phase="Phase 6";; *,deferred,*) phase="Deferred";; esac
-  printf '%s\t%s\t%s\t%s\t\t\t%s\n' "$n" "$t" "$area" "$phase" "$reason"
+  # Explicit ROADMAP placements not carried by a phase-* label (Codex-connector P2): snapshot follow-ups + #13.
+  [ -z "$phase" ] && case " $n " in " 199 "|" 200 "|" 201 "|" 203 "|" 204 "|" 205 ") phase="Phase 4";; " 13 ") phase="Phase 7";; esac
+  # priority: ROADMAP critical path -> P0 (the two immediate unblockers) / P1 (rest of the 11 + #221); else empty (reviewer fills at the gate).
+  prio=""; case " $n " in " 49 "|" 158 ") prio="P0 Critical";; " 57 "|" 225 "|" 50 "|" 51 "|" 52 "|" 164 "|" 165 "|" 166 "|" 226 "|" 221 ") prio="P1 High";; esac
+  printf '%s\t%s\t%s\t%s\t%s\t\t%s\n' "$n" "$t" "$area" "$phase" "$prio" "$reason"
 done
 ```
 
 Run it: `bash scripts/github-pm/gen-issue-map.sh > scripts/github-pm/manifests/issue-map.tsv`.
 
-- [ ] **Step 3 (HUMAN REVIEW GATE):** Resolve every `AMBIGUOUS` (type **and** area) using the rule tables + the 18-unlabeled pre-fill above; confirm the flagged cross-area picks. The migration refuses to run while any `AMBIGUOUS` remains.
+- [ ] **Step 3 (HUMAN REVIEW GATE):** Resolve every `AMBIGUOUS` (type **and** area) using the rule tables + the 18-unlabeled pre-fill above; confirm the flagged cross-area picks. Also **review the generated `phase`/`priority` columns** (Codex-connector P2): refine `phase-5`→`5a`/`5b`/`indep` per the ROADMAP, and fill `priority` for issues the generator left empty (it pre-fills only the critical path + explicit ROADMAP placements). The migration refuses to run while any `AMBIGUOUS` remains.
 - [ ] **Step 4:** `02-migrate-issues.sh` (B1 fix — strip `type:enhancement` whenever target ≠ `type:enhancement`; no-op when absent, so it also corrects former-enhancements mapped to refactor/research):
 
 ```bash
@@ -320,12 +326,14 @@ tail -n +2 "$MAP" | while IFS=$'\t' read -r n type area phase prio epic reason; 
   # the issue carries — including a rename-derived type that differs from the mapped one (the canonical
   # case: a Plan: issue renamed documentation->type:docs but mapped to type:plan). Not just type:enhancement.
   rm=()
-  for l in $(gh issue view "$n" -R "$SLUG" --json labels --jq '.labels[].name'); do
+  # Read current labels from the cached fixture (Gemini: avoids a `gh issue view` network call per issue) +
+  # `while read` (no word-splitting). open-issues.json is the post-Task-5 live snapshot from Task 6 Step 1.
+  while read -r l; do
     case "$l" in
       type:*) [ "$l" = "$type" ] || rm+=(--remove-label "$l");;
       area:*) { [ "$type" = "type:epic" ] || [ "$l" = "$area" ]; } || rm+=(--remove-label "$l");;
     esac
-  done
+  done < <(jq -r --argjson n "$n" '.[]|select(.number==$n)|.labels[].name' "$(dirname "$0")/manifests/open-issues.json")
   rm+=(--remove-label design --remove-label performance --remove-label quality)
   add=(--add-label "$type"); [ "$type" = "type:epic" ] || add+=(--add-label "$area")
   gh_ratecheck; gh_throttle
@@ -455,7 +463,7 @@ field_id(){ gql 'query($p:ID!){node(id:$p){... on ProjectV2{fields(first:50){nod
 # options WITHOUT echoing back existing ids recreates them and DROPS items' current Status assignments).
 desired_opts(){ local pid="$1" f="$2" ex
   ex=$(gql 'query($p:ID!){node(id:$p){... on ProjectV2{fields(first:50){nodes{... on ProjectV2SingleSelectField{name options{id name}}}}}}}' "$(jq -nc --arg p "$pid" '{p:$p}')" --jq "[.data.node.fields.nodes[]?|select(.name==\"$f\")|.options[]?]" 2>/dev/null)
-  jq -c --argjson ex "${ex:-[]}" --arg f "$f" '[ .options[$f][] as $o | ($ex|map(select(.name==$o[0]))[0]) as $m | {name:$o[0],color:$o[1],description:""} + (if $m then {id:$m.id} else {} end) ]' "$MD/projects.json"; }
+  jq -c --argjson ex "${ex:-[]}" --arg f "$f" '[ .options[$f][] as $o | ((if ($ex|type)=="array" then $ex else [] end)|map(select(.name==$o[0]))[0]) as $m | {name:$o[0],color:$o[1],description:""} + (if $m then {id:$m.id} else {} end) ]' "$MD/projects.json"; }
 set_status_opts(){ local fid; fid=$(field_id "$1" Status); gql 'mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){projectV2Field{... on ProjectV2SingleSelectField{id}}}}' "$(jq -nc --arg f "$fid" --argjson o "$(desired_opts "$1" Status)" '{f:$f,o:$o}')" >/dev/null; }
 create_select(){ local fid; fid=$(field_id "$1" "$2"); [ -n "$fid" ] && return 0; gql 'mutation($p:ID!,$n:String!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){createProjectV2Field(input:{projectId:$p,dataType:SINGLE_SELECT,name:$n,singleSelectOptions:$o}){projectV2Field{... on ProjectV2SingleSelectField{id}}}}' "$(jq -nc --arg p "$1" --arg n "$2" --argjson o "$(desired_opts "$1" "$2")" '{p:$p,n:$n,o:$o}')" >/dev/null; }
 read MN MI < <(create_or_get "Memory Engine — Main")
@@ -482,8 +490,8 @@ jq -n --slurpfile lk "$MD/projects.lock.json" --argjson m "$(fmap "$MI")" --argj
 
 - [ ] **Step 1 — add items + record item ids** (fixes Codex R2-2 — concrete map). `project_item_add` _returns_ the item id; capture it into an `issue⟶item_id` map TSV per project so Step 2 can look it up. E.g. for Main:
   ```bash
-  jq -r '.[].number' manifests/open-issues.json | while read -r n; do
-    iid=$(project_item_add "$MI" "$(issue_node "$n")"); printf '%s\t%s\n' "$n" "$iid"
+  jq -r '.[]|"\(.number)\t\(.id)"' manifests/open-issues.json | while IFS=$'\t' read -r n id; do
+    iid=$(project_item_add "$MI" "$id"); printf '%s\t%s\n' "$n" "$iid"   # id from cached fixture — no per-issue `gh issue view`
   done > manifests/main-items.tsv
   ```
   Targets: **all** open issues → Main; `type:bug`∨`type:security` → Triage; the **11 critical-path issues + #221 + the 9 epics** → Roadmap (each into its own `<project>-items.tsv`).
@@ -500,7 +508,7 @@ jq -n --slurpfile lk "$MD/projects.lock.json" --argjson m "$(fmap "$MI")" --argj
 **Files:** Create `manifests/epics.json`, `07-epics.sh`.
 
 - [ ] **Step 1 (H1 fix — deduplicated single-parent tree; reconciled to spec):** Author `epics.json`. Contested issues resolved to ONE parent with rationale: **#225→#221** (it's a #221 hook sub-issue), **#226→#221** (same), **#132→Temporal** (per spec — #132 is `FactType::Prediction`, a temporal capability; the earlier "→Cognitive" was a draft error). 9 epics; #221 reuses `existing_issue:221`; the other 8 are new `type:epic` issues.
-- [ ] **Step 2 (H2 fix — filter members through the open set):** `07-epics.sh` loads `manifests/open-issues.json` into a set; for each epic: resolve-or-create the umbrella (label `type:epic`+area, add to Main+Roadmap), then for each member **that is in the open set**, `subissue_link` (uses `replaceParent:true` — A2, idempotent). Members not open (e.g. #224, #128) are **skipped with a logged note** — INV-OPEN-ONLY preserved. Each successful `subissue_link` appends `{parent,child}` to `state.json.epic_links[]` so `restore.sh` can `removeSubIssue` them (C9 rollback path).
+- [ ] **Step 2 (H2 fix — filter members through the open set):** `07-epics.sh` loads `manifests/open-issues.json` into a set; for each epic: resolve-or-create the umbrella (label `type:epic`+area, add to Main+Roadmap), then for each member **that is in the open set**, `subissue_link` (uses `replaceParent:true` — A2, idempotent). Members not open (e.g. #224, #128) are **skipped with a logged note** — INV-OPEN-ONLY preserved. `subissue_link` is **query-first**: it prints `skip` when the child is already under that parent (rerun no-op) or `changed <priorParent>` on an actual mutation. Record a rollback entry `{child, priorParent}` to `state.json.epic_links[]` **only on `changed`** — so reruns don't duplicate entries and `restore.sh` re-attaches a child to its _original_ parent (correct under `replaceParent`; fixes Codex-connector P1 / INV-IDEMPOTENT).
 - [ ] **Step 3:** Single-parent guard: `jq -r '.epics[].members[]' manifests/epics.json | sort | uniq -d` → **empty**. Cross-ref: every member ∈ open set or logged-skipped.
 - [ ] **Step 4:** Run; verify each epic's sub-issue list. **Commit** `epics.json` + script.
 
@@ -521,7 +529,7 @@ SHA=$(gh api repos/actions/add-to-project/commits/v1 --jq '.sha')   # resolve ta
 ```yaml
 name: Auto-add to projects
 on:
-  issues: { types: [opened, reopened] }
+  issues: { types: [opened, reopened, labeled] } # 'labeled' so a later type:bug/type:security routes to Triage (Codex-connector P2)
   pull_request: { types: [opened, reopened] }
 jobs:
   add-to-main:
