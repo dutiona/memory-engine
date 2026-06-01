@@ -1,0 +1,98 @@
+issue	type	area	phase	priority	epic	reason
+239	type:plan	area:build				title-plan
+237	type:epic					title-umbrella
+236	type:feature	area:temporal				needs-human
+235	type:feature	area:knowledge				needs-human
+233	type:feature	area:temporal				needs-human
+232	type:feature	area:cognitive				needs-human
+231	type:test	area:qa				needs-human
+227	type:plan	area:docs				title-plan
+226	type:feature	area:mcp		P1 High		title-feat
+225	type:feature	area:mcp		P1 High		title-feat
+221	type:feature	area:mcp		P1 High		title-feat
+213	type:feature	area:retrieval	Phase 5 (indep)			title-feat
+212	type:research	area:core	Phase 5 (indep)			label-research/design
+211	type:research	area:core	Phase 5 (indep)			label-research/design
+210	type:feature	area:core	Phase 5 (indep)			title-feat
+209	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+208	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+207	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+206	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+205	type:feature	area:storage	Phase 4			title-feat
+204	type:enhancement	area:storage	Phase 4			keep-enhancement
+203	type:bug	area:qa	Phase 4			existing-type
+201	type:refactor	area:storage	Phase 4			title-refactor
+200	type:refactor	area:storage	Phase 4			title-refactor
+199	type:refactor	area:storage	Phase 4			title-refactor
+197	type:plan	area:docs				title-plan
+192	type:refactor	area:retrieval				existing-type
+191	type:bug	area:storage				existing-type
+184	type:plan	area:docs				title-plan
+183	type:plan	area:docs				title-plan
+182	type:plan	area:docs				title-plan
+172	type:test	area:mcp	Deferred			existing-type
+171	type:feature	area:retrieval	Deferred			title-feat
+170	type:research	area:cognitive	Deferred			existing-type
+169	type:enhancement	area:core	Deferred			keep-enhancement
+168	type:feature	area:knowledge	Phase 6			title-feat
+167	type:feature	area:knowledge	Phase 6			title-feat
+166	type:feature	area:mcp	Phase 6	P1 High		title-feat
+165	type:feature	area:knowledge	Phase 6	P1 High		title-feat
+164	type:feature	area:knowledge	Phase 6	P1 High		title-feat
+163	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+162	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+161	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+160	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+159	type:feature	area:cognitive	Phase 5 (indep)			title-feat
+158	type:feature	area:storage	Phase 5 (indep)	P0 Critical		title-feat
+157	type:research	area:retrieval				needs-human
+156	type:feature	area:retrieval				title-feat
+155	type:feature	area:retrieval				title-feat
+154	type:feature	area:forgetting				title-feat
+153	type:feature	area:retrieval				title-feat
+149	type:refactor	area:qa				title-refactor
+142	type:bug	area:consolidation				needs-human
+141	type:security	area:storage				needs-human
+140	type:enhancement	area:cognitive				keep-enhancement
+139	type:enhancement	area:forgetting				keep-enhancement
+138	type:feature	area:retrieval				title-feat
+137	type:enhancement	area:retrieval	Deferred			keep-enhancement
+136	type:feature	area:forgetting	Deferred			title-feat
+135	type:enhancement	area:forgetting	Deferred			keep-enhancement
+134	type:feature	area:forgetting				title-feat
+133	type:feature	area:retrieval	Phase 5a			title-feat
+132	type:feature	area:temporal	Phase 5a			title-feat
+130	type:test	area:qa				needs-human
+129	type:test	area:qa				needs-human
+127	type:docs	area:storage				needs-human
+126	type:refactor	area:core				needs-human
+125	type:chore	area:qa				needs-human
+124	type:chore	area:qa				needs-human
+123	type:refactor	area:qa				existing-type
+122	type:docs	area:core				needs-human
+121	type:test	area:qa				needs-human
+120	type:refactor	area:qa				existing-type
+119	type:bug	area:retrieval				needs-human
+118	type:refactor	area:qa				existing-type
+117	type:refactor	area:qa				existing-type
+116	type:refactor	area:qa				existing-type
+115	type:refactor	area:qa				existing-type
+114	type:refactor	area:qa				existing-type
+113	type:refactor	area:qa				existing-type
+112	type:security	area:storage				needs-human
+66	type:enhancement	area:retrieval	Deferred			keep-enhancement
+65	type:enhancement	area:cognitive	Deferred			keep-enhancement
+64	type:enhancement	area:cognitive	Phase 5b			keep-enhancement
+57	type:enhancement	area:cognitive		P1 High		keep-enhancement
+52	type:enhancement	area:knowledge		P1 High		keep-enhancement
+51	type:enhancement	area:knowledge		P1 High		keep-enhancement
+50	type:enhancement	area:knowledge		P1 High		keep-enhancement
+49	type:enhancement	area:cognitive		P0 Critical		keep-enhancement
+38	type:enhancement	area:storage				keep-enhancement
+37	type:enhancement	area:storage				keep-enhancement
+36	type:enhancement	area:storage				keep-enhancement
+19	type:research	area:core				needs-human
+17	type:feature	area:consolidation				needs-human
+15	type:feature	area:storage				needs-human
+14	type:feature	area:storage				needs-human
+13	type:feature	area:viz	Phase 7			needs-human
