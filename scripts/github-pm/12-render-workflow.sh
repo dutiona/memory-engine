@@ -7,8 +7,9 @@ LOCK="$MD/projects.lock.json"
 	exit 1
 }
 
-# Resolve the action tag v1 -> immutable commit SHA (Codex C7 / Gemini G5 — SHA-pin in the shipped workflow).
-SHA=$(gh api repos/actions/add-to-project/commits/v1 --jq '.sha')
+# Resolve the latest v1.x tag -> immutable commit SHA. actions/add-to-project has NO floating `v1` ref
+# (only v1.0.x and v2), so pin the newest v1.x commit (Codex C7 / Gemini G5 — supply-chain hardening).
+SHA=$(gh api repos/actions/add-to-project/git/matching-refs/tags/v1 --jq '.[-1].object.sha')
 [ -n "$SHA" ] || {
 	echo "ABORT: could not resolve actions/add-to-project v1 SHA"
 	exit 1
@@ -38,14 +39,14 @@ jobs:
   add-to-main:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/add-to-project@__SHA__ # pinned to the v1 commit SHA (supply-chain hardening)
+      - uses: actions/add-to-project@__SHA__ # pinned to the latest v1.x commit SHA (supply-chain hardening)
         with:
           project-url: https://github.com/users/dutiona/projects/__MAIN_NUM__
           github-token: ${{ secrets.MEMORY_ENGINE_PROJECT_TOKEN }}
   add-to-triage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/add-to-project@__SHA__ # pinned to the v1 commit SHA
+      - uses: actions/add-to-project@__SHA__ # pinned to the latest v1.x commit SHA
         with:
           project-url: https://github.com/users/dutiona/projects/__TRIAGE_NUM__
           github-token: ${{ secrets.MEMORY_ENGINE_PROJECT_TOKEN }}
