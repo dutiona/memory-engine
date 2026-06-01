@@ -89,7 +89,12 @@ apply() {
 }
 
 echo "== setting Priority/Phase fields =="
-tail -n +2 "$MAP" | while IFS=$'\t' read -r n type area phase prio epic reason; do
+tail -n +2 "$MAP" | while IFS= read -r line; do
+	# Parse TSV fields with `cut` (preserves EMPTY phase/prio): `IFS=$'\t' read` collapses consecutive
+	# tabs because tab is IFS-whitespace, which would shift `reason` into `phase` on rows with empty cols.
+	n=$(cut -f1 <<<"$line")
+	phase=$(cut -f4 <<<"$line")
+	prio=$(cut -f5 <<<"$line")
 	# Priority: Main always; Triage iff bug/security; Roadmap iff in roadmap set.
 	apply main "$MD/main-items.tsv" "$MI" "$n" Priority "$prio"
 	is_triage "$n" && apply triage "$MD/triage-items.tsv" "$TI" "$n" Priority "$prio"
@@ -97,5 +102,6 @@ tail -n +2 "$MAP" | while IFS=$'\t' read -r n type area phase prio epic reason; 
 	# Phase: Main always; Roadmap iff in roadmap set. (Triage has no Phase field.)
 	apply main "$MD/main-items.tsv" "$MI" "$n" Phase "$phase"
 	in_roadmap "$n" && apply roadmap "$MD/roadmap-items.tsv" "$RI" "$n" Phase "$phase"
+	: # keep loop-body exit 0 — a trailing `&&` can short-circuit to 1 on a non-roadmap row (pipefail would abort)
 done
 echo "done."
