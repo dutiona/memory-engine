@@ -1,0 +1,43 @@
+{
+  "projects": [
+    {
+      "key": "main",
+      "title": "Memory Engine — Main",
+      "fields": ["Status", "Priority", "Phase"]
+    },
+    {
+      "key": "triage",
+      "title": "Memory Engine — Bug & Security Triage",
+      "fields": ["Status", "Priority"]
+    },
+    {
+      "key": "roadmap",
+      "title": "Memory Engine — Roadmap",
+      "fields": ["Status", "Priority", "Phase"]
+    }
+  ],
+  "options": {
+    "Status": [
+      ["Todo", "GRAY"],
+      ["In Progress", "YELLOW"],
+      ["In Review", "BLUE"],
+      ["Done", "GREEN"]
+    ],
+    "Priority": [
+      ["P0 Critical", "RED"],
+      ["P1 High", "ORANGE"],
+      ["P2 Medium", "YELLOW"],
+      ["P3 Low", "GREEN"],
+      ["P4 Deferred", "GRAY"]
+    ],
+    "Phase": [
+      ["Phase 4", "GRAY"],
+      ["Phase 5a", "BLUE"],
+      ["Phase 5b", "BLUE"],
+      ["Phase 5 (indep)", "PURPLE"],
+      ["Phase 6", "GREEN"],
+      ["Phase 7", "PINK"],
+      ["Deferred", "GRAY"]
+    ]
+  }
+}

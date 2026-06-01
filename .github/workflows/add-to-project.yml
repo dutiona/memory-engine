@@ -1,0 +1,21 @@
+name: Auto-add to projects
+on:
+  issues: { types: [opened, reopened, labeled] } # 'labeled' so a later type:bug/type:security routes to Triage
+  pull_request: { types: [opened, reopened] }
+jobs:
+  add-to-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e # pinned to the latest v1.x commit SHA (supply-chain hardening)
+        with:
+          project-url: https://github.com/users/dutiona/projects/4
+          github-token: ${{ secrets.MEMORY_ENGINE_PROJECT_TOKEN }}
+  add-to-triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e # pinned to the latest v1.x commit SHA
+        with:
+          project-url: https://github.com/users/dutiona/projects/5
+          github-token: ${{ secrets.MEMORY_ENGINE_PROJECT_TOKEN }}
+          labeled: type:bug, type:security
+          label-operator: OR

@@ -1,5 +1,15 @@
 # memory-engine Roadmap
 
+> ## ⚠️ Deprecated as a status tracker (2026-06-01)
+>
+> **This file is no longer the source of truth for roadmap or phase status.** In practice it went stale after every PR — the exact failure the new system fixes. Live status now lives in **GitHub Projects-v2 + issue labels**:
+>
+> - **Roadmap board** — [`users/dutiona/projects/6`](https://github.com/users/dutiona/projects/6), grouped by the `Phase` field (the live phase view + critical path).
+> - **Main board** [`#4`](https://github.com/users/dutiona/projects/4) (every issue/PR) · **Bug & Security Triage** [`#5`](https://github.com/users/dutiona/projects/5).
+> - **Labels** — every issue carries exactly one `type:*` + one `area:*`; `Phase`/`Priority` are Projects fields. Operator guide: [`docs/reference/project-management.md`](reference/project-management.md). Rollout tracking: [#239](https://github.com/dutiona/memory-engine/issues/239).
+>
+> **Retained below (reference, not live status):** the research foundation (15 papers), the storage/design rationale, the architecture overview, and the historical phase record. Don't hand-edit this file to track open work — the issues + boards do that now.
+
 ## Research Foundation
 
 9 core papers + 6 context adaptation papers, 22+ cross-paper relationships, community synthesis (OpenClaw, Reddit), 3-round multi-AI debate + context adaptation survey (2026-03-19).

@@ -53,3 +53,10 @@ uv.lock
 # Added by cargo
 
 /target
+
+# super-plan ephemeral lens drafts
+docs/plans/*-drafts/
+# github-pm tooling runtime (created during plan execution)
+scripts/github-pm/state.json
+scripts/github-pm/backups/
+scripts/github-pm/manifests/open-issues.json
