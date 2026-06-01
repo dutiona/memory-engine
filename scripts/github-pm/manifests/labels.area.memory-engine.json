@@ -1,0 +1,72 @@
+[
+  {
+    "name": "area:core",
+    "color": "7B68EE",
+    "description": "Engine facade, config, and cross-cutting core types"
+  },
+  {
+    "name": "area:storage",
+    "color": "006B75",
+    "description": "Persistence, SQLite store, snapshots, cold storage"
+  },
+  {
+    "name": "area:retrieval",
+    "color": "1D76DB",
+    "description": "Hybrid search: FTS5 + vector + graph, RRF merge"
+  },
+  {
+    "name": "area:consolidation",
+    "color": "5319E7",
+    "description": "Consolidation pipeline: dedup, cluster, global passes"
+  },
+  {
+    "name": "area:forgetting",
+    "color": "E36209",
+    "description": "Ebbinghaus decay and multi-signal importance"
+  },
+  {
+    "name": "area:temporal",
+    "color": "0052CC",
+    "description": "Bi-temporal semantics, conflict resolution, prediction"
+  },
+  {
+    "name": "area:cognitive",
+    "color": "8250DF",
+    "description": "Phase 5 cognitive pipelines: DreamCycle, provenance"
+  },
+  {
+    "name": "area:knowledge",
+    "color": "1A7F37",
+    "description": "Knowledge-layer integration (knowledge-base)"
+  },
+  {
+    "name": "area:cli",
+    "color": "B60205",
+    "description": "CLI inspector binary (memory-engine-cli)"
+  },
+  {
+    "name": "area:mcp",
+    "color": "FBCA04",
+    "description": "MCP server binary (memory-engine-mcp)"
+  },
+  {
+    "name": "area:docs",
+    "color": "0075CA",
+    "description": "Documentation and narrative docs"
+  },
+  {
+    "name": "area:build",
+    "color": "CFD3D7",
+    "description": "Build system, CI, tooling, dependencies"
+  },
+  {
+    "name": "area:qa",
+    "color": "BFD4F2",
+    "description": "Quality assurance, testing infrastructure, super-qa sweeps"
+  },
+  {
+    "name": "area:viz",
+    "color": "D876E3",
+    "description": "Phase-7 web UI / visualization (#13)"
+  }
+]

@@ -1,0 +1,70 @@
+{
+  "epics": [
+    {
+      "title": "Cognitive Pipeline / DreamCycle",
+      "area": "area:cognitive",
+      "state": "in progress (5a critical path)",
+      "existing_issue": null,
+      "members": [49, 57, 161, 163, 206, 207, 208, 209, 159, 160, 64]
+    },
+    {
+      "title": "Code-Quality Sweep (super-qa)",
+      "area": "area:qa",
+      "state": "in progress (parallel)",
+      "existing_issue": null,
+      "members": [
+        112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125,
+        126, 127, 129, 130, 141, 142, 149, 191, 192, 203, 231
+      ]
+    },
+    {
+      "title": "#221 Hook Integration",
+      "area": "area:mcp",
+      "state": "in progress (existing umbrella)",
+      "existing_issue": 221,
+      "members": [225, 226]
+    },
+    {
+      "title": "Knowledge Integration (Phase 6)",
+      "area": "area:knowledge",
+      "state": "upcoming",
+      "existing_issue": null,
+      "members": [50, 51, 52, 164, 165, 167, 168, 235]
+    },
+    {
+      "title": "Multi-Agent Identity & Access",
+      "area": "area:storage",
+      "state": "upcoming",
+      "existing_issue": null,
+      "members": [158, 166, 14, 36, 38]
+    },
+    {
+      "title": "Retrieval Quality",
+      "area": "area:retrieval",
+      "state": "upcoming",
+      "existing_issue": null,
+      "members": [133, 138, 153, 155, 156, 157, 134, 66, 137]
+    },
+    {
+      "title": "Temporal Reasoning & Prediction",
+      "area": "area:temporal",
+      "state": "upcoming",
+      "existing_issue": null,
+      "members": [132, 233, 236, 19]
+    },
+    {
+      "title": "Snapshot & Cold-Start Hardening",
+      "area": "area:storage",
+      "state": "upcoming",
+      "existing_issue": null,
+      "members": [199, 200, 201, 204, 205]
+    },
+    {
+      "title": "Context-Management Integration",
+      "area": "area:core",
+      "state": "upcoming",
+      "existing_issue": null,
+      "members": [210, 211, 212]
+    }
+  ]
+}

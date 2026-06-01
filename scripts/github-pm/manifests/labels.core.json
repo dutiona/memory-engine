@@ -1,0 +1,123 @@
+[
+  { "name": "type:bug", "color": "d73a4a", "description": "Something broken" },
+  {
+    "name": "type:feature",
+    "color": "0e8a16",
+    "description": "New capability"
+  },
+  {
+    "name": "type:enhancement",
+    "color": "a2eeef",
+    "description": "Improve existing functionality"
+  },
+  {
+    "name": "type:refactor",
+    "color": "c5def5",
+    "description": "Restructure, no behavior change (incl. perf)"
+  },
+  {
+    "name": "type:test",
+    "color": "bfd4f2",
+    "description": "Test coverage or infrastructure"
+  },
+  {
+    "name": "type:chore",
+    "color": "e4e669",
+    "description": "Deps, config, cleanup"
+  },
+  {
+    "name": "type:docs",
+    "color": "0075ca",
+    "description": "Documentation only"
+  },
+  {
+    "name": "type:plan",
+    "color": "d4c5f9",
+    "description": "Implementation plan (links to PR)"
+  },
+  {
+    "name": "type:epic",
+    "color": "3e4b9e",
+    "description": "Umbrella tracking issue with sub-issues"
+  },
+  {
+    "name": "type:research",
+    "color": "fbca04",
+    "description": "Investigation, design-spec, spike, PoC"
+  },
+  {
+    "name": "type:security",
+    "color": "e11d48",
+    "description": "Security finding or hardening"
+  },
+  {
+    "name": "severity:critical",
+    "color": "b60205",
+    "description": "super-qa severity: critical"
+  },
+  {
+    "name": "severity:high",
+    "color": "d93f0b",
+    "description": "super-qa severity: high"
+  },
+  {
+    "name": "severity:medium",
+    "color": "fbca04",
+    "description": "super-qa severity: medium"
+  },
+  {
+    "name": "severity:low",
+    "color": "0e8a16",
+    "description": "super-qa severity: low"
+  },
+  {
+    "name": "severity:info",
+    "color": "c5def5",
+    "description": "super-qa severity: info"
+  },
+  {
+    "name": "status:blocked",
+    "color": "e4e669",
+    "description": "Blocked by upstream/external dependency"
+  },
+  {
+    "name": "status:parked",
+    "color": "d4c5f9",
+    "description": "Valid idea, no immediate timeline"
+  },
+  {
+    "name": "status:needs-design",
+    "color": "fbca04",
+    "description": "Requires design before implementation"
+  },
+  {
+    "name": "priority:critical",
+    "color": "b60205",
+    "description": "Convenience label (full P0–P4 in field)"
+  },
+  {
+    "name": "priority:high",
+    "color": "d93f0b",
+    "description": "Convenience label"
+  },
+  {
+    "name": "super-qa",
+    "color": "9B59B6",
+    "description": "Finding from /super-qa audit"
+  },
+  {
+    "name": "super-qa:auto-fix",
+    "color": "27AE60",
+    "description": "Mechanically auto-fixable"
+  },
+  {
+    "name": "super-qa:debated",
+    "color": "0e8a16",
+    "description": "Severity verified by multi-model debate"
+  },
+  {
+    "name": "super-qa:security-fallback",
+    "color": "5319e7",
+    "description": "Security finding from tier-2 pass"
+  }
+]
