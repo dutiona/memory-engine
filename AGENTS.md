@@ -76,7 +76,7 @@ For deeper context, read these files (only when working on the relevant area):
 - `docs/reference/crate-layout.md` — module map
 - `docs/design/architecture-overview.md` — threading model, data flow diagrams
 - `docs/design/design-choices.md` — rationale for key decisions
-- `docs/ROADMAP.md` — phase status, open issues, dependency graph
+- `docs/ROADMAP.md` — frozen historical reference (phase record + research→design narrative); live status, open issues, and dependency graph → [GitHub Projects #6](https://github.com/users/dutiona/projects/6)
 - `docs/design/adr/` — 9 Architecture Decision Records
 
 <!-- pm-contract:start -->

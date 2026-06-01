@@ -56,22 +56,22 @@ Consumer traits — engine delegates all LLM/network ops:
 
 Read these docs when working on the relevant area:
 
-| Area                                                                       | Doc                                      |
-| -------------------------------------------------------------------------- | ---------------------------------------- |
-| Module map                                                                 | `docs/reference/crate-layout.md`         |
-| Architecture + threading model                                             | `docs/design/architecture-overview.md`   |
-| Design rationale + trade-offs                                              | `docs/design/design-choices.md`          |
-| Research basis (15 papers)                                                 | `docs/design/research-basis.md`          |
-| ADRs (9 decisions)                                                         | `docs/design/adr/`                       |
-| Phase history + research→design narrative (⚠️ status → GitHub Projects #6) | `docs/ROADMAP.md`                        |
-| Phase 5 design (cognitive)                                                 | `docs/design/plans/`                     |
-| Bi-temporal semantics                                                      | `docs/advanced/bi-temporal-semantics.md` |
-| Consolidation pipeline                                                     | `docs/advanced/consolidation.md`         |
-| Hybrid search tuning                                                       | `docs/advanced/hybrid-search.md`         |
-| Schema evolution policy                                                    | `docs/design/schema-evolution-policy.md` |
-| CLI inspector usage                                                        | `docs/reference/cli-inspector.md`        |
-| MCP server usage                                                           | `docs/reference/mcp-server.md`           |
-| Project management (labels/PM)                                             | `docs/reference/project-management.md`   |
+| Area                                                                                     | Doc                                      |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Module map                                                                               | `docs/reference/crate-layout.md`         |
+| Architecture + threading model                                                           | `docs/design/architecture-overview.md`   |
+| Design rationale + trade-offs                                                            | `docs/design/design-choices.md`          |
+| Research basis (15 papers)                                                               | `docs/design/research-basis.md`          |
+| ADRs (9 decisions)                                                                       | `docs/design/adr/`                       |
+| Phase history + research→design narrative (⚠️ frozen — live status → GitHub Projects #6) | `docs/ROADMAP.md`                        |
+| Phase 5 design (cognitive)                                                               | `docs/design/plans/`                     |
+| Bi-temporal semantics                                                                    | `docs/advanced/bi-temporal-semantics.md` |
+| Consolidation pipeline                                                                   | `docs/advanced/consolidation.md`         |
+| Hybrid search tuning                                                                     | `docs/advanced/hybrid-search.md`         |
+| Schema evolution policy                                                                  | `docs/design/schema-evolution-policy.md` |
+| CLI inspector usage                                                                      | `docs/reference/cli-inspector.md`        |
+| MCP server usage                                                                         | `docs/reference/mcp-server.md`           |
+| Project management (labels/PM)                                                           | `docs/reference/project-management.md`   |
 
 ## Key Design Decisions
 
@@ -84,7 +84,7 @@ Read these docs when working on the relevant area:
 
 ## Status
 
-Phase 4a ✅ (inspection APIs, import/export, bootstrap, reranker). Phase 4b in progress: CLI inspector ✅ (`memory-engine-cli`), MCP server ✅ (`memory-engine-mcp`, 10 P0 tools + tiered depth). P1 tools (#95) and P2 tools (#96) pending. Then Phase 5 (cognitive pipelines — DreamCycle, outcome tracking, provenance). See `docs/ROADMAP.md` for open issues and dependency graph.
+Phase 4a ✅ (inspection APIs, import/export, bootstrap, reranker). Phase 4b in progress: CLI inspector ✅ (`memory-engine-cli`), MCP server ✅ (`memory-engine-mcp`, 10 P0 tools + tiered depth). P1 tools (#95) and P2 tools (#96) pending. Then Phase 5 (cognitive pipelines — DreamCycle, outcome tracking, provenance). See **GitHub Projects** ([Roadmap board #6](https://github.com/users/dutiona/projects/6)) for open issues and the dependency graph; `docs/ROADMAP.md` is a frozen historical reference.
 
 <!-- pm-contract:start -->
 

@@ -69,18 +69,18 @@ Tests in `tests/` (6 integration tests), benchmarks in `benches/`, examples in `
 
 Read only when working on the relevant area:
 
-| Topic                         | File                                     |
-| ----------------------------- | ---------------------------------------- |
-| Module map                    | `docs/reference/crate-layout.md`         |
-| Architecture + threading      | `docs/design/architecture-overview.md`   |
-| Design rationale + trade-offs | `docs/design/design-choices.md`          |
-| Research basis (15 papers)    | `docs/design/research-basis.md`          |
-| ADRs (9 decisions)            | `docs/design/adr/`                       |
-| Roadmap + phase status        | `docs/ROADMAP.md`                        |
-| Phase 5 design (cognitive)    | `docs/design/plans/`                     |
-| Bi-temporal semantics         | `docs/advanced/bi-temporal-semantics.md` |
-| Consolidation pipeline        | `docs/advanced/consolidation.md`         |
-| Hybrid search tuning          | `docs/advanced/hybrid-search.md`         |
+| Topic                                             | File                                     |
+| ------------------------------------------------- | ---------------------------------------- |
+| Module map                                        | `docs/reference/crate-layout.md`         |
+| Architecture + threading                          | `docs/design/architecture-overview.md`   |
+| Design rationale + trade-offs                     | `docs/design/design-choices.md`          |
+| Research basis (15 papers)                        | `docs/design/research-basis.md`          |
+| ADRs (9 decisions)                                | `docs/design/adr/`                       |
+| Phase history (frozen; live status → Projects #6) | `docs/ROADMAP.md`                        |
+| Phase 5 design (cognitive)                        | `docs/design/plans/`                     |
+| Bi-temporal semantics                             | `docs/advanced/bi-temporal-semantics.md` |
+| Consolidation pipeline                            | `docs/advanced/consolidation.md`         |
+| Hybrid search tuning                              | `docs/advanced/hybrid-search.md`         |
 
 <!-- pm-contract:start -->
 
