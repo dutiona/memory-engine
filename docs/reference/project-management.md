@@ -83,27 +83,43 @@ In each project's **Workflows** settings, enable:
 - **Item added → set `Status` = `Todo`**
 - **Issue/PR closed → set `Status` = `Done`**
 
+> **Projects-v2 view model:** you **group** by a _field_ (`Status`/`Priority`/`Phase`/`Parent issue`) and **filter** by labels or fields. Labels can't be a grouping axis (so per-`area:*` views are _filtered_ tables, not grouped), there is **no label wildcard**, and "critical path" isn't a label (the `Priority` field is its proxy).
+
 ### Memory Engine — Main (#4) views
 
-- **Daily Kanban** — Board, grouped by `Status`.
-- **14 area tables** — one Table view per `area:*` label (one each for `core`, `storage`, `retrieval`, `consolidation`, `forgetting`, `temporal`, `cognitive`, `knowledge`, `cli`, `mcp`, `docs`, `build`, `qa`, `viz`).
-- **Epics** — filter `label:type:epic`.
-- **Orphans** — filter for items missing a `type:*` **or** missing an `area:*` (hygiene check; should stay empty).
-- **Super QA** — filter `label:super-qa`.
+| View                  | Layout | Group by         | Filter                                 |
+| --------------------- | ------ | ---------------- | -------------------------------------- |
+| **Daily Kanban**      | Board  | `Status`         | `-status:Done`                         |
+| **Roadmap by Phase**  | Board  | `Phase`          | `is:open`                              |
+| **Priority triage**   | Table  | `Priority`       | `is:open`                              |
+| **Epics**             | Table  | `Parent issue` † | `label:"type:epic"`                    |
+| **Super QA**          | Table  | `Status`         | `label:"super-qa"`                     |
+| **Orphans** (hygiene) | Table  | —                | `no:label` ‡                           |
+| **Area tables ×14**   | Table  | `Status`         | `label:"area:<x>"` — one view per area |
+
+Area filters (one Table each): `area:core` · `area:storage` · `area:retrieval` · `area:consolidation` · `area:forgetting` · `area:temporal` · `area:cognitive` · `area:knowledge` · `area:cli` · `area:mcp` · `area:docs` · `area:build` · `area:qa` · `area:viz`.
 
 ### Bug & Security Triage (#5) views
 
-- **Bug & Security** — Board.
-- **Bugs** — filter `label:type:bug`.
-- **Security** — filter `label:type:security`.
-- **Triage – no type** — items missing a `type:*` label.
-- **Triage – no area** — items missing an `area:*` label.
+| View                         | Layout | Group by   | Filter                                      |
+| ---------------------------- | ------ | ---------- | ------------------------------------------- |
+| **Bug & Security**           | Board  | `Status`   | `is:open`                                   |
+| **Bugs**                     | Table  | `Priority` | `label:"type:bug"`                          |
+| **Security**                 | Table  | `Priority` | `label:"type:security"`                     |
+| **Hot**                      | Table  | `Priority` | `label:"severity:critical","severity:high"` |
+| **Needs priority** (hygiene) | Table  | —          | `no:priority`                               |
 
 ### Roadmap (#6) views
 
-- **Roadmap** — Board, grouped by `Phase`.
-- **Critical Path** — the 11 critical-path issues + `#221`: `#49`, `#158`, `#57`, `#225`, `#50`, `#51`, `#52`, `#164`, `#165`, `#166`, `#226`, and the `#221` umbrella.
-- **Blockers** — filter `label:status:blocked`.
+| View              | Layout | Group by         | Filter                                                         |
+| ----------------- | ------ | ---------------- | -------------------------------------------------------------- |
+| **Roadmap**       | Board  | `Phase`          | `is:open`                                                      |
+| **Critical Path** | Table  | `Status`         | `priority:"P0 Critical","P1 High"` _(proxy for the 11 + #221)_ |
+| **By Epic**       | Table  | `Parent issue` † | `is:open`                                                      |
+| **Blockers**      | Table  | —                | `label:"status:blocked"`                                       |
+
+**†** `Parent issue` grouping clusters items under their epic umbrella (GitHub's sub-issue grouping); if your account doesn't expose it, group by `Phase` and rely on the native sub-issue progress bars.
+**‡** No label wildcard exists, so `Orphans` can only catch _zero-label_ items (`no:label`) — an issue with an `area:*` but no `type:*` won't surface. The real type/area enforcement is the agent contract + `03-verify.sh`, not this view.
 
 ## Verifying
 
