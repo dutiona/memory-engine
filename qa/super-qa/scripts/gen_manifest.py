@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Generate the super-qa GitHub issue manifest from the consolidated findings.
+
+Emits runs/<TS>/issue_manifest.json (issue specs) + a dedupe report. No GitHub
+writes — pure planning artifact.
+
+AS-RUN SNAPSHOT (2026-06-01). Two parts are run-specific and must be re-derived
+each round: (1) the `dupe_of` curated map below (overlap with a prior round's
+issues), and (2) `existing` — this round read it from /tmp/superqa_existing_issues.txt
+(a dump of the prior round's open super-qa issues), no longer present. For a new
+round, regenerate both. stats.py / diff.py are the reusable tools; this is reference.
+"""
+
+import json, re, collections, sys, subprocess, os
+
+TS = "2026-06-01"
+ROOT = subprocess.check_output(
+    ["git", "rev-parse", "--show-toplevel"], text=True
+).strip()
+RUN = f"{ROOT}/qa/super-qa/runs/{TS}"
+ded = json.load(open(f"{RUN}/consolidated.json"))
+SEV = ["blocker", "critical", "high", "medium", "low", "info"]
+
+# ---- existing issues (from prior 3-month-old run) ----
+existing = []  # (num, title_clean, tokens, area)
+STOP = set(
+    "the a an of to in for and or is are be with no not its on at by via "
+    "super qa medium low info high critical blocker finding findings fix ".split()
+)
+
+
+def toks(s):
+    return {w for w in re.findall(r"[a-z_:]{3,}", s.lower()) if w not in STOP}
+
+
+# prior-round issue dump (number\tlabels\ttitle). Absent in archive -> empty (no dupes).
+_existing_dump = os.environ.get(
+    "EXISTING_ISSUES_TSV", "/tmp/superqa_existing_issues.txt"
+)
+for ln in open(_existing_dump) if os.path.exists(_existing_dump) else []:
+    parts = ln.rstrip("\n").split("\t")
+    if len(parts) < 3:
+        continue
+    num = parts[0].lstrip("#")
+    labels = parts[1]
+    title = parts[2]
+    tclean = re.sub(
+        r"^\[super-qa\]\s*(blocker|critical|high|medium|low|info)?:?\s*",
+        "",
+        title,
+        flags=re.I,
+    )
+    am = re.search(r"area:(\w+)", labels)
+    existing.append((num, tclean, toks(tclean), am.group(1) if am else None))
+
+
+def sev(f):
+    s = str(f.get("severity", "info")).lower()
+    return s if s in SEV else "info"
+
+
+def modu(f):
+    i = str(f.get("id", "") or "")
+    return i.split("/")[0] if "/" in i else "workspace"
+
+
+AREA = {
+    "engine": "core",
+    "core-root": "core",
+    "pool": "core",
+    "resume": "core",
+    "embed": "core",
+    "scope": "core",
+    "bootstrap": "core",
+    "store": "storage",
+    "archive": "storage",
+    "inspect": "storage",
+    "search": "retrieval",
+    "graph": "retrieval",
+    "consolidation": "consolidation",
+    "forgetting": "forgetting",
+    "conflict": "temporal",
+    "cli": "cli",
+    "mcp": "mcp",
+    "workspace": "build",
+    "sc": "build",
+}
+
+
+def area(f):
+    if (
+        "cognitive" in str(f.get("location", "")).lower()
+        or "dream" in str(f.get("title", "")).lower()
+    ):
+        return "cognitive"
+    return AREA.get(modu(f), "core")
+
+
+def typ(f):
+    c = str(f.get("category_norm", f.get("category", ""))).lower()
+    if c in ("correctness", "soundness"):
+        return "bug"
+    if c == "security":
+        return "security"
+    if c == "testing":
+        return "test"
+    if c == "documentation":
+        return "docs"
+    if c == "build":
+        return "bug"  # compile/build breakage is a bug
+    if c in ("process", "portability", "supply-chain", "build-system"):
+        return "chore"
+    return "refactor"
+
+
+# ---- dedupe vs existing: CURATED map (manual review of candidate evidence) ----
+# Each duped finding is NOT refiled; instead the existing issue is linked into
+# the matching area-epic at exec time (see 'links' in the manifest).
+dupe_of = {
+    "graph/design-stringly-typed-relation-type": "114",
+    "store/design-stringly-typed-relation-type": "114",
+    "engine/refactoring-classifier-temp-fact-duplication": "118",
+    "store/mock-infra-open-memory-helper": "120",
+    "core-root/documentation-stale-phase2-placeholder-label": "122",
+    "bootstrap/design-too-many-args-no-context-struct": "123",
+    "core-root/design-glob-reexport-error": "126",
+    "core-root/design-glob-reexport-types": "126",
+    "inspect/dos-decompression-bomb": "141",
+    "consolidation/correctness-sentinel-in-return-type": "142",
+    "engine/integration-dormant-no-test": "231",
+    "engine/integration-dream-cycle-no-test": "231",
+}
+# keep only ids that actually exist in the consolidated set (guard against drift)
+_ids = {f.get("id") for f in ded}
+dupe_of = {k: v for k, v in dupe_of.items() if k in _ids}
+
+for f in ded:
+    f["_area"] = area(f)
+    f["_type"] = typ(f)
+    f["_sev"] = sev(f)
+
+
+# ---- build manifest ----
+def caveat(f):
+    if f.get("_verified"):
+        return f"> ✅ **Verified against primary source.** {f['_verified']}\n"
+    fb = (
+        " (security lens ran via octo tier-2 fallback, xhigh not effort:max)"
+        if f.get("fallback_used")
+        else ""
+    )
+    return (
+        f"> ⚠️ Generated by `/super-qa` {TS}. Severity & details from agent analysis{fb}; "
+        f"**not independently source-verified**. Review before action.\n"
+    )
+
+
+def labels_for(f):
+    L = [
+        "super-qa",
+        f"severity:{f['_sev']}",
+        f"area:{f['_area']}",
+        f"type:{f['_type']}",
+    ]
+    if f.get("auto_fixable"):
+        L.append("super-qa:auto-fix")
+    if f.get("fallback_used"):
+        L.append("super-qa:security-fallback")
+    return L
+
+
+def body_for(f):
+    refs = f.get("references") or []
+    return (
+        caveat(f) + f"\n**{f.get('title', '')}**\n\n"
+        f"- **ID:** `{f.get('id')}`\n- **Severity:** {f['_sev']}\n"
+        f"- **Area:** {f['_area']} · **Type:** {f['_type']}\n"
+        f"- **Location:** `{f.get('location', '')}`\n- **Auto-fixable:** no\n\n"
+        f"## Description\n{f.get('description', '(none)')}\n\n"
+        f"## Suggested approach\n{f.get('suggested_fix') or '—'}\n\n"
+        f"## References\n{', '.join(refs) if refs else '—'}\n\n"
+        f"<!-- super-qa-key: {f.get('id')} -->\n"
+    )
+
+
+manifest = []
+areas = sorted({f["_area"] for f in ded})
+# master + autofix epics
+manifest.append(
+    {
+        "key": "epic:master",
+        "kind": "master",
+        "title": f"[super-qa] Master: Code-Quality Sweep {TS}",
+        "labels": ["super-qa", "type:epic", "area:qa"],
+        "body": f"Master umbrella for the `/super-qa` {TS} sweep (582 findings across 17 modules). "
+        f"Children: per-area epics, the auto-fix epic, and the prior-run epic #241. "
+        f"Per-severity index issues list every non-autofixable finding.\n\n<!-- super-qa-key: epic:master -->",
+        "children": [],
+    }
+)
+manifest.append(
+    {
+        "key": "epic:autofix",
+        "kind": "autofix-epic",
+        "title": "[super-qa] Epic: Auto-fixable findings",
+        "labels": ["super-qa", "type:epic", "super-qa:auto-fix", "area:qa"],
+        "body": "Umbrella for all mechanically auto-fixable findings, one sub-issue per severity.\n\n<!-- super-qa-key: epic:autofix -->",
+        "parent": "epic:master",
+        "children": [],
+    }
+)
+# area epics
+for a in areas:
+    manifest.append(
+        {
+            "key": f"epic:area:{a}",
+            "kind": "area-epic",
+            "title": f"[super-qa] Area: {a} — code-quality findings",
+            "labels": ["super-qa", "type:epic", f"area:{a}"],
+            "body": f"All `/super-qa` {TS} findings in **area:{a}**. Non-autofixable blocker/critical/high/medium "
+            f"are individual sub-issues; low/info are grouped in one sub-issue.\n\n<!-- super-qa-key: epic:area:{a} -->",
+            "parent": "epic:master",
+            "children": [],
+        }
+    )
+# individual non-autofixable BCHM (skip dupes -> link existing)
+for f in ded:
+    if f["_sev"] in ("blocker", "critical", "high", "medium") and not f.get(
+        "auto_fixable"
+    ):
+        if f["id"] in dupe_of:
+            continue  # existing issue linked into area epic at exec time
+        manifest.append(
+            {
+                "key": f"find:{f['id']}",
+                "kind": "finding",
+                "title": f"[super-qa] {f['_sev']}: {f.get('title', '')[:110]}",
+                "labels": labels_for(f),
+                "body": body_for(f),
+                "parent": f"epic:area:{f['_area']}",
+                "severity": f["_sev"],
+            }
+        )
+# LI grouping per area
+for a in areas:
+    li = [
+        f
+        for f in ded
+        if f["_area"] == a
+        and f["_sev"] in ("low", "info")
+        and not f.get("auto_fixable")
+    ]
+    if not li:
+        continue
+    rows = "\n".join(
+        f"- **{x['_sev']}** `{x.get('location', '')}` — {x.get('title', '')} (`{x.get('id')}`)"
+        for x in li
+    )
+    manifest.append(
+        {
+            "key": f"group:li:{a}",
+            "kind": "li-group",
+            "title": f"[super-qa] {a}: low/info findings ({len(li)})",
+            "labels": ["super-qa", f"area:{a}", "type:chore", "severity:low"],
+            "body": f"> ⚠️ Agent analysis; not source-verified. Grouped low/info for **area:{a}**.\n\nGrouped low/info "
+            f"findings for area **{a}** ({len(li)}):\n\n{rows}\n\n<!-- super-qa-key: group:li:{a} -->",
+            "parent": f"epic:area:{a}",
+        }
+    )
+# autofix per severity
+for s in SEV:
+    af = [f for f in ded if f["_sev"] == s and f.get("auto_fixable")]
+    if not af:
+        continue
+    rows = "\n".join(
+        f"| `{x.get('id')}` | `{x.get('location', '')}` | {x.get('title', '')[:70]} | {(x.get('suggested_fix') or '')[:50].replace(chr(10), ' ')} |"
+        for x in af
+    )
+    manifest.append(
+        {
+            "key": f"autofix:{s}",
+            "kind": "autofix",
+            "title": f"[super-qa] Auto-fix: {s} ({len(af)})",
+            "labels": [
+                "super-qa",
+                "super-qa:auto-fix",
+                f"severity:{s}",
+                "type:chore",
+                "area:qa",
+            ],
+            "body": f"> Mechanically auto-fixable {s} findings ({len(af)}). Apply via `/super-qa` Phase 3.\n\n"
+            f"| ID | Location | Title | Suggested fix |\n| --- | --- | --- | --- |\n{rows}\n\n<!-- super-qa-key: autofix:{s} -->",
+            "parent": "epic:autofix",
+        }
+    )
+# observers (one per non-autofix severity) -> bodies patched with #s at exec time
+for s in SEV:
+    items = [f for f in ded if f["_sev"] == s and not f.get("auto_fixable")]
+    if not items:
+        continue
+    manifest.append(
+        {
+            "key": f"observer:{s}",
+            "kind": "observer",
+            "title": f"[super-qa] Index: {s} findings (non-autofixable, {len(items)})",
+            "labels": ["super-qa", f"severity:{s}", "type:chore", "area:qa"],
+            "body": f"> Index/listing of all non-autofixable **{s}** findings ({len(items)}). Populated with issue #refs at creation.\n\n<!-- super-qa-key: observer:{s} -->",
+            "parent": "epic:master",
+            "severity": s,
+        }
+    )
+
+# links: existing dupe issue # -> area-epic key (link existing issue into the area epic, once)
+_byid = {f["id"]: f for f in ded}
+links = {}
+for fid, num in dupe_of.items():
+    a = _byid[fid]["_area"]
+    links[num] = f"epic:area:{a}"
+
+json.dump(
+    {"manifest": manifest, "dupe_of": dupe_of, "links_existing": links},
+    open(f"{RUN}/issue_manifest.json", "w"),
+    indent=1,
+)
+
+# ---- report ----
+kinds = collections.Counter(m["kind"] for m in manifest)
+print("=== MANIFEST SUMMARY ===")
+for k in [
+    "master",
+    "autofix-epic",
+    "area-epic",
+    "finding",
+    "li-group",
+    "autofix",
+    "observer",
+]:
+    print(f"  {k:14s} {kinds.get(k, 0)}")
+print(f"  TOTAL issues to create: {len(manifest)}")
+print(f"  dupes skipped (linked to existing instead): {len(dupe_of)}")
+print(f"\n=== DUPE MAP (finding -> existing #) ===")
+for fid, num in sorted(dupe_of.items(), key=lambda x: x[1]):
+    print(f"  #{num}  <- {fid}")
+print(f"\n=== SAMPLE finding body (first individual) ===")
+for m in manifest:
+    if m["kind"] == "finding":
+        print(f"TITLE: {m['title']}\nLABELS: {m['labels']}\n---\n{m['body'][:700]}")
+        break
