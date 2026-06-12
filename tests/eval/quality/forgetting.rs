@@ -14,11 +14,11 @@ use crate::helpers::{add_fact_with_opts, days_ago, eval_engine};
 fn ebbinghaus_decay_ordering_old_before_young() {
     let engine = eval_engine();
 
-    // 120-day-old fact with 0 access
+    // 120-day-old fact with 0 access (Episodic: the decaying type)
     let old_id = add_fact_with_opts(
         &engine,
         "Old fact that should decay first due to age",
-        FactType::Semantic,
+        FactType::Episodic,
         None,
         AddFactOptions {
             importance: Some(0.3),
@@ -32,7 +32,7 @@ fn ebbinghaus_decay_ordering_old_before_young() {
     let young_id = add_fact_with_opts(
         &engine,
         "Young fact that should survive longer than old one",
-        FactType::Semantic,
+        FactType::Episodic,
         None,
         AddFactOptions {
             importance: Some(0.3),
@@ -88,7 +88,8 @@ fn half_life_override_episodic_decays_faster() {
         },
     );
 
-    // Semantic fact, also 45 days old (uses default 69-day half-life)
+    // Semantic fact, also 45 days old (decay-exempt by default: recency
+    // stays 1.0, so it survives regardless of age)
     let semantic_id = add_fact_with_opts(
         &engine,
         "Semantic fact from 45 days ago about architecture",
@@ -104,7 +105,7 @@ fn half_life_override_episodic_decays_faster() {
 
     // Computed importance scores:
     // Episodic (45d, 30d HL): 0.3*2^(-45/30) + 0 + 0 + 0.2*0.3 = 0.106 + 0.06 = ~0.166
-    // Semantic (45d, 69d HL): 0.3*2^(-45/69) + 0 + 0 + 0.2*0.3 = 0.191 + 0.06 = ~0.251
+    // Semantic (decay-exempt): 0.3*1.0 + 0 + 0 + 0.2*0.3 = 0.3 + 0.06 = ~0.36
     // Threshold between them: 0.20
     let policy = ForgetPolicy {
         half_life_overrides: overrides,
@@ -134,11 +135,11 @@ fn half_life_override_episodic_decays_faster() {
 fn importance_scoring_monotonicity() {
     let engine = eval_engine();
 
-    // High-importance fact, 60 days old
+    // High-importance fact, 60 days old (Episodic: the decaying type)
     let high_id = add_fact_with_opts(
         &engine,
         "High importance fact about critical architecture decision",
-        FactType::Semantic,
+        FactType::Episodic,
         None,
         AddFactOptions {
             importance: Some(0.9),
@@ -152,7 +153,7 @@ fn importance_scoring_monotonicity() {
     let low_id = add_fact_with_opts(
         &engine,
         "Low importance fact about minor configuration change",
-        FactType::Semantic,
+        FactType::Episodic,
         None,
         AddFactOptions {
             importance: Some(0.1),
@@ -193,10 +194,11 @@ fn pin_immunity_survives_aggressive_forget() {
     let engine = eval_engine();
 
     // Pinned fact, very old, low importance — should still survive
+    // (Episodic so that decay, not type exemption, is the survival test)
     let pinned_id = add_fact_with_opts(
         &engine,
         "Pinned fact that must never be forgotten despite age and low importance",
-        FactType::Semantic,
+        FactType::Episodic,
         None,
         AddFactOptions {
             importance: Some(0.05),
@@ -211,7 +213,7 @@ fn pin_immunity_survives_aggressive_forget() {
     let unpinned_id = add_fact_with_opts(
         &engine,
         "Unpinned fact with same low importance and old age should be forgotten",
-        FactType::Semantic,
+        FactType::Episodic,
         None,
         AddFactOptions {
             importance: Some(0.05),
