@@ -6,7 +6,7 @@
 
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
-use crate::helpers::{PinByType, TestEmbedder, add_fact, aggressive_forget_policy, eval_engine};
+use crate::helpers::{add_fact, aggressive_forget_policy, eval_engine, PinByType, TestEmbedder};
 
 #[test]
 fn all_pinned_survive_aggressive_forget() {
@@ -86,12 +86,13 @@ fn persistence_classifier_auto_pins_by_type() {
         )
         .expect("add procedural fact");
 
-    // Add a Semantic fact — classifier should NOT pin it.
-    let sem_id = engine
+    // Add an Episodic fact — classifier should NOT pin it, and as a
+    // decaying type it stays forgettable (Semantic would be decay-exempt).
+    let epi_id = engine
         .add_fact(
             &AddFactRequest {
-                content: "general knowledge about servers".to_string(),
-                fact_type: FactType::Semantic,
+                content: "routine log entry about servers".to_string(),
+                fact_type: FactType::Episodic,
                 source_event_id: None,
                 scope: None,
                 opts: None,
@@ -99,18 +100,18 @@ fn persistence_classifier_auto_pins_by_type() {
             &embedder,
             Some(&classifier),
         )
-        .expect("add semantic fact");
+        .expect("add episodic fact");
 
     let proc_fact = engine.get_fact(proc_id).expect("get procedural fact");
-    let sem_fact = engine.get_fact(sem_id).expect("get semantic fact");
+    let epi_fact = engine.get_fact(epi_id).expect("get episodic fact");
 
     assert!(
         proc_fact.is_pinned,
         "Procedural fact should be auto-pinned by classifier"
     );
     assert!(
-        !sem_fact.is_pinned,
-        "Semantic fact should NOT be auto-pinned"
+        !epi_fact.is_pinned,
+        "Episodic fact should NOT be auto-pinned"
     );
 
     // Verify the pinned fact survives forget.
@@ -120,15 +121,15 @@ fn persistence_classifier_auto_pins_by_type() {
     let proc_after = engine
         .get_fact(proc_id)
         .expect("get procedural after forget");
-    let sem_after = engine.get_fact(sem_id).expect("get semantic after forget");
+    let epi_after = engine.get_fact(epi_id).expect("get episodic after forget");
 
     assert!(
         proc_after.t_expired.is_none(),
         "auto-pinned Procedural fact should survive forget"
     );
     assert!(
-        sem_after.t_expired.is_some(),
-        "unpinned Semantic fact should be expired"
+        epi_after.t_expired.is_some(),
+        "unpinned Episodic fact should be expired"
     );
 }
 
@@ -164,8 +165,14 @@ fn explicit_pinned_false_overrides_classifier() {
         "explicit pinned=false should override PersistenceClassifier"
     );
 
-    // Verify it gets expired by aggressive forget.
-    let policy = aggressive_forget_policy();
+    // Verify it gets expired by aggressive forget. Procedural is decay-exempt
+    // by default, so re-enable its decay via an explicit half-life override
+    // (an explicit override wins over the exemption) — the property under
+    // test is the pinned=false override, not persistence semantics.
+    let mut policy = aggressive_forget_policy();
+    policy
+        .half_life_overrides
+        .insert(FactType::Procedural, 69.0);
     engine.forget(&policy).expect("forget failed");
 
     let fact_after = engine.get_fact(id).expect("get fact after forget");
@@ -179,7 +186,7 @@ fn explicit_pinned_false_overrides_classifier() {
 fn unpin_allows_forgetting() {
     let engine = eval_engine();
 
-    let id = add_fact(&engine, "once pinned, now unpinned", FactType::Semantic);
+    let id = add_fact(&engine, "once pinned, now unpinned", FactType::Episodic);
     engine.pin_fact(id).expect("pin_fact");
 
     // Verify pinned.

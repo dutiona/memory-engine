@@ -222,7 +222,20 @@ pub struct ForgetPolicy {
     /// Base Ebbinghaus half-life in days (default: 69.0).
     pub half_life_days: f64,
     /// Per-`FactType` half-life overrides. E.g., Episodic=30, Procedural=365.
+    /// An explicit entry here wins over `decay_exempt_types`.
     pub half_life_overrides: std::collections::HashMap<crate::types::FactType, f64>,
+    /// Fact types exempt from decay-driven forgetting altogether.
+    ///
+    /// Content predicate: a type belongs here iff its facts' truth is
+    /// independent of time-since-encoding — declarative assertions
+    /// (`Semantic`) and validated procedures (`Procedural`). Such
+    /// knowledge-shaped facts are governed by supersession and conflict
+    /// resolution, never by Ebbinghaus decay; applying decay to them is the
+    /// category error the four-layer model exists to prevent. Episodic facts
+    /// are time-indexed experience records and decay by design.
+    ///
+    /// Default: `{Semantic, Procedural}`.
+    pub decay_exempt_types: std::collections::HashSet<crate::types::FactType>,
     /// Threshold below which facts are expired (default: 0.1).
     pub min_importance: f64,
     /// Weight for recency signal (Ebbinghaus decay). Default: 0.3.
@@ -240,6 +253,12 @@ impl Default for ForgetPolicy {
         Self {
             half_life_days: 69.0,
             half_life_overrides: std::collections::HashMap::new(),
+            decay_exempt_types: [
+                crate::types::FactType::Semantic,
+                crate::types::FactType::Procedural,
+            ]
+            .into_iter()
+            .collect(),
             min_importance: 0.1,
             recency_weight: 0.3,
             frequency_weight: 0.2,
@@ -250,6 +269,17 @@ impl Default for ForgetPolicy {
 }
 
 impl ForgetPolicy {
+    /// Whether `fact_type` is exempt from decay-driven forgetting.
+    ///
+    /// True iff the type is in `decay_exempt_types` and has no explicit
+    /// `half_life_overrides` entry — an explicit override wins, re-enabling
+    /// finite-half-life decay for that type.
+    #[must_use]
+    pub fn is_decay_exempt(&self, fact_type: &crate::types::FactType) -> bool {
+        self.decay_exempt_types.contains(fact_type)
+            && !self.half_life_overrides.contains_key(fact_type)
+    }
+
     /// Validate policy parameters.
     ///
     /// # Errors

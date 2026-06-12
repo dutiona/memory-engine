@@ -39,15 +39,21 @@ pub fn compute_importance(
     now: DateTime<Utc>,
     policy: &ForgetPolicy,
 ) -> f64 {
-    let half_life = policy
-        .half_life_overrides
-        .get(&fact.fact_type)
-        .copied()
-        .unwrap_or(policy.half_life_days);
+    // Knowledge-shaped types don't lose validity with age: recency stays 1.0.
+    // An explicit half-life override wins and re-enables decay.
+    let recency = if policy.is_decay_exempt(&fact.fact_type) {
+        1.0
+    } else {
+        let half_life = policy
+            .half_life_overrides
+            .get(&fact.fact_type)
+            .copied()
+            .unwrap_or(policy.half_life_days);
 
-    #[allow(clippy::cast_precision_loss)]
-    let age_days = (now - fact.last_accessed).num_seconds() as f64 / 86400.0;
-    let recency = ebbinghaus_decay(age_days.max(0.0), half_life);
+        #[allow(clippy::cast_precision_loss)]
+        let age_days = (now - fact.last_accessed).num_seconds() as f64 / 86400.0;
+        ebbinghaus_decay(age_days.max(0.0), half_life)
+    };
 
     // Normalization: log_base(count+1), capped at 1.0.
     // Using ln_1p for numerical accuracy near zero.
@@ -93,11 +99,13 @@ pub fn prune(
     let facts_evaluated = active_facts.len();
 
     // Score all facts before mutating, so degree values are consistent.
-    // Pinned facts are unforgettable — they bypass the decay filter entirely.
+    // Pinned facts and decay-exempt fact types are unforgettable — they
+    // bypass the expiry filter entirely (but still get scores materialized
+    // and count in `facts_evaluated`).
     let to_expire: Vec<i64> = active_facts
         .iter()
         .filter(|fact| {
-            if fact.is_pinned {
+            if fact.is_pinned || policy.is_decay_exempt(&fact.fact_type) {
                 return false;
             }
             let degree = graph.degree(fact.id);
@@ -506,5 +514,155 @@ mod tests {
         overrides.insert(FactType::Episodic, -10.0);
         policy.half_life_overrides = overrides;
         assert!(policy.validate().is_err());
+    }
+
+    /// Ancient, neglected, isolated, unpinned fact — guaranteed below any
+    /// reasonable importance threshold once its recency signal has decayed.
+    fn neglected_fact(
+        fact_type: FactType,
+        hash: &str,
+        now: DateTime<Utc>,
+    ) -> crate::types::NewFact {
+        let old_time = now - Duration::days(200);
+        crate::types::NewFact {
+            content: format!("neglected {fact_type}"),
+            content_hash: hash.into(),
+            embedding: vec![0.1; 4],
+            fact_type,
+            t_created: old_time,
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            scope_id: 1,
+            importance: 0.01,
+            access_count: 0,
+            last_accessed: old_time,
+            metadata: serde_json::json!({}),
+            is_pinned: false,
+        }
+    }
+
+    #[test]
+    fn prune_exempts_knowledge_shaped_types_by_default() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let now = Utc::now();
+        let embed_dim = 4;
+        let fact_store = FactStore::new(&conn, embed_dim);
+
+        // Identical neglect across the three types; only Episodic may decay away.
+        fact_store
+            .insert(&neglected_fact(FactType::Semantic, "ks", now))
+            .unwrap();
+        fact_store
+            .insert(&neglected_fact(FactType::Procedural, "kp", now))
+            .unwrap();
+        fact_store
+            .insert(&neglected_fact(FactType::Episodic, "ke", now))
+            .unwrap();
+
+        let mut graph = MemoryGraph::new();
+        let policy = ForgetPolicy {
+            min_importance: 0.3,
+            ..ForgetPolicy::default()
+        };
+        let (stats, expired) = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+
+        assert_eq!(stats.facts_evaluated, 3);
+        assert_eq!(
+            stats.facts_expired, 1,
+            "only the episodic fact may expire, expired ids: {expired:?}"
+        );
+        let active = fact_store.list_active(None).unwrap();
+        let types: Vec<FactType> = active.iter().map(|f| f.fact_type.clone()).collect();
+        assert!(
+            types.contains(&FactType::Semantic),
+            "semantic must survive neglect (supersession governs it, not decay)"
+        );
+        assert!(
+            types.contains(&FactType::Procedural),
+            "procedural must survive neglect (revision governs it, not decay)"
+        );
+    }
+
+    #[test]
+    fn exempt_type_recency_does_not_decay() {
+        let now = Utc::now();
+        let policy = ForgetPolicy::default();
+
+        let ancient = Fact {
+            id: 1,
+            content: "knowledge".into(),
+            content_hash: "h".into(),
+            embedding: vec![0.1; 4],
+            fact_type: FactType::Semantic,
+            t_created: now - Duration::days(500),
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            scope_id: 1,
+            importance: 0.5,
+            access_count: 5,
+            last_accessed: now - Duration::days(500),
+            metadata: serde_json::json!({}),
+            is_pinned: false,
+            importance_score: 0.5,
+            surfaced_at: None,
+        };
+        let mut fresh = ancient.clone();
+        fresh.last_accessed = now;
+
+        let ancient_importance = compute_importance(&ancient, 0, now, &policy);
+        let fresh_importance = compute_importance(&fresh, 0, now, &policy);
+        assert!(
+            (ancient_importance - fresh_importance).abs() < 1e-9,
+            "age must not change an exempt fact's importance: ancient={ancient_importance}, fresh={fresh_importance}"
+        );
+    }
+
+    #[test]
+    fn explicit_half_life_override_wins_over_exemption() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let now = Utc::now();
+        let embed_dim = 4;
+        let fact_store = FactStore::new(&conn, embed_dim);
+        fact_store
+            .insert(&neglected_fact(FactType::Semantic, "ks", now))
+            .unwrap();
+
+        let mut overrides = HashMap::new();
+        overrides.insert(FactType::Semantic, 30.0);
+        let policy = ForgetPolicy {
+            half_life_overrides: overrides,
+            min_importance: 0.3,
+            ..ForgetPolicy::default()
+        };
+
+        let mut graph = MemoryGraph::new();
+        let (stats, _) = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+        assert_eq!(
+            stats.facts_expired, 1,
+            "an explicit half-life override re-enables decay for an exempt type"
+        );
+    }
+
+    #[test]
+    fn default_exemption_set_and_override_interaction() {
+        let policy = ForgetPolicy::default();
+        assert!(policy.is_decay_exempt(&FactType::Semantic));
+        assert!(policy.is_decay_exempt(&FactType::Procedural));
+        assert!(!policy.is_decay_exempt(&FactType::Episodic));
+
+        let mut overridden = ForgetPolicy::default();
+        overridden
+            .half_life_overrides
+            .insert(FactType::Semantic, 30.0);
+        assert!(
+            !overridden.is_decay_exempt(&FactType::Semantic),
+            "explicit override must win over the default exemption"
+        );
     }
 }
