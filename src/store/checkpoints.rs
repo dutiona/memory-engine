@@ -17,7 +17,7 @@ impl<'a> CheckpointStore<'a> {
         Self { conn }
     }
 
-    /// Upsert a session checkpoint (last-write-wins per session_id).
+    /// Upsert a session checkpoint (last-write-wins per `session_id`).
     pub fn upsert(&self, checkpoint: &SessionCheckpoint) -> Result<()> {
         self.conn
             .execute(
@@ -43,7 +43,11 @@ impl<'a> CheckpointStore<'a> {
         Ok(())
     }
 
-    /// Get a checkpoint by session_id.
+    /// Get a checkpoint by `session_id`.
+    ///
+    /// Currently exercised only by unit tests; gated to keep the lib target
+    /// `dead_code`-clean until wired into the engine/MCP (see #95/#96).
+    #[cfg(test)]
     pub fn get(&self, session_id: &str) -> Result<Option<SessionCheckpoint>> {
         self.conn
             .query_row(
@@ -74,6 +78,10 @@ impl<'a> CheckpointStore<'a> {
     }
 
     /// List recent checkpoints, most recent first.
+    ///
+    /// Currently exercised only by unit tests; gated to keep the lib target
+    /// `dead_code`-clean until wired into the engine/MCP (see #95/#96).
+    #[cfg(test)]
     pub fn list_recent(&self, limit: usize) -> Result<Vec<SessionCheckpoint>> {
         let mut stmt = self
             .conn
@@ -85,7 +93,10 @@ impl<'a> CheckpointStore<'a> {
             )
             .map_err(MemoryError::Database)?;
         let rows = stmt
-            .query_map(params![limit as i64], row_to_checkpoint)
+            .query_map(
+                params![i64::try_from(limit).unwrap_or(i64::MAX)],
+                row_to_checkpoint,
+            )
             .map_err(MemoryError::Database)?;
         rows.collect::<std::result::Result<_, _>>()
             .map_err(MemoryError::Database)
@@ -155,7 +166,7 @@ mod tests {
 
         let cp2 = SessionCheckpoint {
             summary: Some("second".into()),
-            ..cp1.clone()
+            ..cp1
         };
         store.upsert(&cp2).unwrap();
 

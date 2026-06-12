@@ -39,12 +39,20 @@ impl MemoryEngine {
     }
 
     /// Pin a fact (make it unforgettable).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` if the update fails.
     pub fn pin_fact(&self, id: i64) -> Result<()> {
         let conn = self.write_conn()?;
         FactStore::new(&conn, self.embed_dim).set_pinned(id, true)
     }
 
     /// Unpin a fact (allow forgetting).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` if the update fails.
     pub fn unpin_fact(&self, id: i64) -> Result<()> {
         let conn = self.write_conn()?;
         FactStore::new(&conn, self.embed_dim).set_pinned(id, false)

@@ -72,7 +72,7 @@ impl VectorSearchStrategy for BruteForce {
         )
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "brute_force"
     }
 }

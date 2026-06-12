@@ -37,7 +37,7 @@ impl<'a> ScopeStore<'a> {
             })
     }
 
-    /// Find a scope by parent_id + label.
+    /// Find a scope by `parent_id` + label.
     pub fn find_by_label(&self, parent_id: i64, label: &str) -> Result<Option<ScopeNode>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, parent_id, label, depth FROM scopes WHERE parent_id = ?1 AND label = ?2",
@@ -98,7 +98,7 @@ impl<'a> ScopeStore<'a> {
         Ok(())
     }
 
-    /// Resolve a path string to a scope_id, creating missing nodes.
+    /// Resolve a path string to a `scope_id`, creating missing nodes.
     ///
     /// Path format: `"user:michael/machine:desktop/project:memory-engine"`
     ///
@@ -111,9 +111,8 @@ impl<'a> ScopeStore<'a> {
         }
 
         let mut parent_id: i64 = 1; // root
-        let mut depth: i64 = 1;
 
-        for segment in &segments {
+        for (depth, segment) in (1_i64..).zip(&segments) {
             Self::validate_label(segment)?;
 
             // INSERT OR IGNORE: if the scope already exists, this is a no-op.
@@ -130,7 +129,6 @@ impl<'a> ScopeStore<'a> {
             )?;
 
             parent_id = id;
-            depth += 1;
         }
 
         Ok(parent_id) // parent_id is now the leaf scope_id

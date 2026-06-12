@@ -1,4 +1,4 @@
-//! Restore engine state from a snapshot (JSON or SQLite backup).
+//! Restore engine state from a snapshot (JSON or `SQLite` backup).
 //!
 //! Complements the export side in [`super::dump`]. Import always targets a fresh
 //! (empty) database — no merge/additive semantics.
@@ -188,6 +188,103 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Insert all snapshot events, preserving explicit IDs. Helper for
+/// [`restore_snapshot_into`].
+fn restore_events(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO events (id, timestamp, event_type, payload, source, session_id, \
+         scope_id, origin_node_id, sequence_id, created_at, event_revision) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?;
+    for event in &snapshot.events {
+        let ts = event.timestamp.to_rfc3339();
+        let et = event_type_to_str(&event.event_type);
+        let payload = event.payload.to_string();
+        let created = event.created_at.map(|dt| dt.to_rfc3339());
+        stmt.execute(rusqlite::params![
+            event.id,
+            ts,
+            et,
+            payload,
+            event.source,
+            event.session_id,
+            event.scope_id,
+            event.origin_node_id,
+            event.sequence_id,
+            created,
+            event.event_revision,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Insert all snapshot facts, preserving explicit IDs. Helper for
+/// [`restore_snapshot_into`].
+fn restore_facts(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, \
+         t_expired, t_valid, t_invalid, source_event_id, importance, access_count, \
+         last_accessed, metadata, scope_id, is_pinned, importance_score, surfaced_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+    )?;
+    for fact in &snapshot.facts {
+        let embedding_blob = serialize_embedding(&fact.embedding);
+        let ft = format!("{:?}", fact.fact_type).to_lowercase();
+        let t_created = fact.t_created.to_rfc3339();
+        let t_expired = fact.t_expired.map(|dt| dt.to_rfc3339());
+        let t_valid = fact.t_valid.map(|dt| dt.to_rfc3339());
+        let t_invalid = fact.t_invalid.map(|dt| dt.to_rfc3339());
+        let last_accessed = fact.last_accessed.to_rfc3339();
+        let metadata = fact.metadata.to_string();
+        stmt.execute(rusqlite::params![
+            fact.id,
+            fact.content,
+            fact.content_hash,
+            embedding_blob,
+            ft,
+            t_created,
+            t_expired,
+            t_valid,
+            t_invalid,
+            fact.source_event_id,
+            fact.importance,
+            fact.access_count,
+            last_accessed,
+            metadata,
+            fact.scope_id,
+            fact.is_pinned,
+            fact.importance_score,
+            fact.surfaced_at.map(|dt| dt.to_rfc3339()),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Insert all snapshot edges, preserving explicit IDs. Helper for
+/// [`restore_snapshot_into`].
+fn restore_edges(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO edges (id, source_fact_id, target_fact_id, relation_type, weight, \
+         t_created, t_expired, scope_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
+    for edge in &snapshot.edges {
+        let t_created = edge.t_created.to_rfc3339();
+        let t_expired = edge.t_expired.map(|dt| dt.to_rfc3339());
+        stmt.execute(rusqlite::params![
+            edge.id,
+            edge.source_fact_id,
+            edge.target_fact_id,
+            edge.relation_type,
+            edge.weight,
+            t_created,
+            t_expired,
+            edge.scope_id,
+        ])?;
+    }
+    Ok(())
+}
+
 /// Write all snapshot data into a connection within a single transaction.
 ///
 /// Uses explicit IDs to preserve foreign key relationships. The connection
@@ -224,96 +321,10 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         }
     }
 
-    // 3. Insert events.
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO events (id, timestamp, event_type, payload, source, session_id, \
-             scope_id, origin_node_id, sequence_id, created_at, event_revision) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        )?;
-        for event in &snapshot.events {
-            let ts = event.timestamp.to_rfc3339();
-            let et = event_type_to_str(&event.event_type);
-            let payload = event.payload.to_string();
-            let created = event.created_at.map(|dt| dt.to_rfc3339());
-            stmt.execute(rusqlite::params![
-                event.id,
-                ts,
-                et,
-                payload,
-                event.source,
-                event.session_id,
-                event.scope_id,
-                event.origin_node_id,
-                event.sequence_id,
-                created,
-                event.event_revision,
-            ])?;
-        }
-    }
-
-    // 4. Insert facts.
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, \
-             t_expired, t_valid, t_invalid, source_event_id, importance, access_count, \
-             last_accessed, metadata, scope_id, is_pinned, importance_score, surfaced_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-        )?;
-        for fact in &snapshot.facts {
-            let embedding_blob = serialize_embedding(&fact.embedding);
-            let ft = format!("{:?}", fact.fact_type).to_lowercase();
-            let t_created = fact.t_created.to_rfc3339();
-            let t_expired = fact.t_expired.map(|dt| dt.to_rfc3339());
-            let t_valid = fact.t_valid.map(|dt| dt.to_rfc3339());
-            let t_invalid = fact.t_invalid.map(|dt| dt.to_rfc3339());
-            let last_accessed = fact.last_accessed.to_rfc3339();
-            let metadata = fact.metadata.to_string();
-            stmt.execute(rusqlite::params![
-                fact.id,
-                fact.content,
-                fact.content_hash,
-                embedding_blob,
-                ft,
-                t_created,
-                t_expired,
-                t_valid,
-                t_invalid,
-                fact.source_event_id,
-                fact.importance,
-                fact.access_count,
-                last_accessed,
-                metadata,
-                fact.scope_id,
-                fact.is_pinned,
-                fact.importance_score,
-                fact.surfaced_at.map(|dt| dt.to_rfc3339()),
-            ])?;
-        }
-    }
-
-    // 5. Insert edges.
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO edges (id, source_fact_id, target_fact_id, relation_type, weight, \
-             t_created, t_expired, scope_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        )?;
-        for edge in &snapshot.edges {
-            let t_created = edge.t_created.to_rfc3339();
-            let t_expired = edge.t_expired.map(|dt| dt.to_rfc3339());
-            stmt.execute(rusqlite::params![
-                edge.id,
-                edge.source_fact_id,
-                edge.target_fact_id,
-                edge.relation_type,
-                edge.weight,
-                t_created,
-                t_expired,
-                edge.scope_id,
-            ])?;
-        }
-    }
+    // 3-5. Insert events, facts, and edges (FK order: events -> facts -> edges).
+    restore_events(&tx, snapshot)?;
+    restore_facts(&tx, snapshot)?;
+    restore_edges(&tx, snapshot)?;
 
     // 6. Insert summaries.
     {
@@ -397,7 +408,7 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
 
 /// Reset the `sqlite_sequence` entry for a table to the maximum imported ID.
 ///
-/// `sqlite_sequence` is auto-created by SQLite for AUTOINCREMENT tables but
+/// `sqlite_sequence` is auto-created by `SQLite` for AUTOINCREMENT tables but
 /// has no unique constraint on `name`, so we use DELETE + INSERT.
 fn reset_autoincrement(conn: &Connection, table: &str, ids: &[i64]) -> Result<()> {
     let max_id = ids.iter().copied().max().unwrap_or(0);

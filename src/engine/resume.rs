@@ -11,8 +11,8 @@ impl MemoryEngine {
     ///
     /// Returns five tiers of facts (mutually exclusive):
     /// 1. **Pinned** — all pinned facts (cross-scope)
-    /// 2. **High-importance** — top-N by materialized importance_score
-    /// 3. **Due** — facts with t_valid <= now
+    /// 2. **High-importance** — top-N by materialized `importance_score`
+    /// 3. **Due** — facts with `t_valid` <= now
     /// 4. **Recent** — most recent, from scope ancestors
     /// 5. **KB stubs** — placeholder for Phase 5
     ///
@@ -23,7 +23,7 @@ impl MemoryEngine {
         // Step 1: Resolve scope IDs from cache (short-lived read lock)
         let scope_ids = {
             let tree = self.scope_tree.read();
-            let root = tree.root_id();
+            let root = crate::scope::ScopeTree::root_id();
             match config.scope_path.as_ref() {
                 Some(path) => {
                     let id = tree

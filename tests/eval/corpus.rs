@@ -42,7 +42,7 @@ pub struct CorpusQuery {
     pub relevance: &'static [(usize, u32)],
     /// Optional scope filter for the query.
     pub scope: Option<&'static str>,
-    /// Whether this query should assert hybrid participation (vector_candidates > 0).
+    /// Whether this query should assert hybrid participation (`vector_candidates` > 0).
     pub assert_hybrid: bool,
     /// Human-readable description of what this query tests.
     pub description: &'static str,
@@ -778,7 +778,7 @@ pub fn golden_corpus() -> CorpusDefinition {
     CorpusDefinition { facts, queries }
 }
 
-fn default_opts() -> FactOpts {
+const fn default_opts() -> FactOpts {
     FactOpts {
         importance: None,
         pinned: None,

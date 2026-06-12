@@ -2,6 +2,9 @@
 //!
 //! All functions operate on fact IDs (not `SearchResult`), keeping the
 //! metrics module decoupled from engine types.
+// IR-metric ratios/indices over small counts; precision loss and i64 wrap are
+// impossible, and the lossless `try_from` forms would obscure the formulas.
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
 
 use std::collections::{HashMap, HashSet};
 

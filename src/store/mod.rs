@@ -1,4 +1,4 @@
-//! SQLite persistence layer: events, facts, edges, summaries, scopes, and schema.
+//! `SQLite` persistence layer: events, facts, edges, summaries, scopes, and schema.
 //!
 //! Uses WAL mode for concurrent reads during writes.
 
@@ -60,7 +60,7 @@ pub fn deserialize_embedding(blob: &[u8], dim: usize) -> Result<Vec<f32>> {
 }
 
 /// Parse an optional ISO 8601 timestamp from a nullable TEXT column.
-pub(crate) fn parse_optional_timestamp(s: Option<&str>) -> rusqlite::Result<Option<DateTime<Utc>>> {
+pub fn parse_optional_timestamp(s: Option<&str>) -> rusqlite::Result<Option<DateTime<Utc>>> {
     s.map_or(Ok(None), |ts| {
         DateTime::parse_from_rfc3339(ts)
             .map(|dt| Some(dt.with_timezone(&Utc)))
@@ -75,7 +75,7 @@ pub(crate) fn parse_optional_timestamp(s: Option<&str>) -> rusqlite::Result<Opti
 }
 
 /// Parse a required ISO 8601 timestamp from a TEXT column.
-pub(crate) fn parse_timestamp(s: &str) -> rusqlite::Result<DateTime<Utc>> {
+pub fn parse_timestamp(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {

@@ -34,6 +34,8 @@ impl EmbeddingProvider for TestEmbedder {
 }
 
 #[test]
+// End-to-end scenario kept as one linear test for readability.
+#[allow(clippy::too_many_lines)]
 fn full_roundtrip() {
     let dim = 8;
     let engine = MemoryEngine::open_memory(dim).unwrap();

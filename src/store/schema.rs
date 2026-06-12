@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -13,7 +13,7 @@ pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 9;
 /// the migration chain. Bumping the epoch signals a breaking architectural
 /// change (e.g., dropping old migration support). Libraries reject DBs
 /// from future epochs with [`MemoryError::UnsupportedEpoch`].
-pub(crate) const STORAGE_EPOCH: u16 = 1;
+pub const STORAGE_EPOCH: u16 = 1;
 
 /// Open a `SQLite` connection to a file, with pragmas set.
 ///
@@ -236,7 +236,7 @@ pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
     }
 
     for (i, (migration, disable_fk)) in MIGRATIONS.iter().enumerate() {
-        let target = (i as u32) + 2; // migrations are 1→2, 2→3, etc.
+        let target = u32::try_from(i + 2).unwrap_or(u32::MAX); // migrations are 1→2, 2→3, etc.
         if version < target {
             if *disable_fk {
                 set_foreign_keys(conn, false)?;
@@ -441,9 +441,36 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Recreate the FTS5 virtual table and its sync triggers for the v3 schema
+/// (inlined frozen snapshot), repopulating from the rebuilt facts table.
+fn recreate_facts_fts_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+            content,
+            content='facts',
+            content_rowid='id',
+            tokenize='porter unicode61'
+        );
+        INSERT INTO facts_fts(rowid, content) SELECT id, content FROM facts;",
+    )?;
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN
+            INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN
+            INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN
+            INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
+            INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
+        END;",
+    )?;
+    Ok(())
+}
+
 /// Rebuild tables to add `REFERENCES scopes(id)` on `scope_id` columns.
 ///
-/// `ALTER TABLE` cannot add FK constraints in SQLite, so this migration
+/// `ALTER TABLE` cannot add FK constraints in `SQLite`, so this migration
 /// recreates each table with the full column definition. Requires
 /// `PRAGMA foreign_keys = OFF` (handled by the migration framework).
 ///
@@ -542,30 +569,8 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
         ALTER TABLE summaries_new RENAME TO summaries;",
     )?;
 
-    // 6. Recreate FTS5 and repopulate from rebuilt facts table
-    conn.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
-            content,
-            content='facts',
-            content_rowid='id',
-            tokenize='porter unicode61'
-        );
-        INSERT INTO facts_fts(rowid, content) SELECT id, content FROM facts;",
-    )?;
-
-    // 7. Recreate triggers (inlined for v3 — frozen snapshot)
-    conn.execute_batch(
-        "CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN
-            INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
-        END;
-        CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN
-            INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
-        END;
-        CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN
-            INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
-            INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
-        END;",
-    )?;
+    // 6+7. Recreate the FTS5 virtual table and its sync triggers.
+    recreate_facts_fts_v3(conn)?;
 
     // 8. Recreate indexes (inlined for v3 — frozen snapshot)
     conn.execute_batch(
@@ -899,7 +904,7 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
 mod tests {
     use super::*;
 
-    /// Test helper: creates v1 schema (Phase 1 tables only, no scopes, no scope_id).
+    /// Test helper: creates v1 schema (Phase 1 tables only, no scopes, no `scope_id`).
     fn init_schema_v1(conn: &Connection) -> Result<()> {
         conn.execute_batch(TABLES_V1_DDL)?;
         conn.execute_batch(FTS5_DDL)?;
@@ -909,7 +914,7 @@ mod tests {
         Ok(())
     }
 
-    /// V1 tables DDL (no scope_id columns, no FK to scopes).
+    /// V1 tables DDL (no `scope_id` columns, no FK to scopes).
     const TABLES_V1_DDL: &str = "
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -962,7 +967,7 @@ CREATE TABLE IF NOT EXISTS config (
 );
 ";
 
-    /// V1 indexes DDL (no scope_id indexes).
+    /// V1 indexes DDL (no `scope_id` indexes).
     const INDEXES_V1_DDL: &str = "
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -975,7 +980,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_fact_id);
 CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
 ";
 
-    /// Test helper: creates v2 schema (v1 + scopes + scope_id columns, no v3 columns).
+    /// Test helper: creates v2 schema (v1 + scopes + `scope_id` columns, no v3 columns).
     fn init_schema_v2(conn: &Connection) -> Result<()> {
         conn.execute_batch(TABLES_V2_DDL)?;
         conn.execute_batch(SCOPES_DDL)?;
@@ -986,7 +991,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
         Ok(())
     }
 
-    /// V2 tables DDL (has scope_id columns but no v3 columns).
+    /// V2 tables DDL (has `scope_id` columns but no v3 columns).
     const TABLES_V2_DDL: &str = "
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1043,7 +1048,7 @@ CREATE TABLE IF NOT EXISTS config (
 );
 ";
 
-    /// V2 indexes DDL (has scope_id indexes but no v3 indexes).
+    /// V2 indexes DDL (has `scope_id` indexes but no v3 indexes).
     const INDEXES_V2_DDL: &str = "
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -1064,7 +1069,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
     // Complete standalone DDL for v4 schema. Depends on NO live DDL constants
     // to prevent fixture drift when tables evolve in future versions.
 
-    /// Test helper: creates v4 schema (v3 + is_pinned, importance_score, event envelope).
+    /// Test helper: creates v4 schema (v3 + `is_pinned`, `importance_score`, event envelope).
     fn init_schema_v4(conn: &Connection) -> Result<()> {
         conn.execute_batch(TABLES_V4_DDL)?;
         conn.execute_batch(SCOPES_DDL_V4)?;
@@ -1482,7 +1487,7 @@ CREATE TABLE IF NOT EXISTS config (
         }
     }
 
-    /// Creates a v2-migrated schema: v1 tables + ALTER TABLE scope_id (no FK).
+    /// Creates a v2-migrated schema: v1 tables + ALTER TABLE `scope_id` (no FK).
     fn init_schema_v2_migrated(conn: &Connection) -> Result<()> {
         init_schema_v1(conn)?;
         conn.execute_batch(SCOPES_DDL)?;
@@ -2033,7 +2038,7 @@ CREATE TABLE IF NOT EXISTS config (
     // --- Schema snapshot test (insta) ---
 
     /// Deterministic projection of the schema: sorted by (type, name), SQL normalized.
-    /// This avoids SQLite formatting variance across versions.
+    /// This avoids `SQLite` formatting variance across versions.
     fn deterministic_schema_dump(conn: &Connection) -> String {
         let mut stmt = conn
             .prepare(
@@ -2084,14 +2089,14 @@ CREATE TABLE IF NOT EXISTS config (
             let count_before: i64 = conn
                 .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(count_before, n_events as i64);
+            assert_eq!(count_before, i64::try_from(n_events).unwrap());
 
             migrate(&conn, None).unwrap();
 
             let count_after: i64 = conn
                 .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(count_after, n_events as i64);
+            assert_eq!(count_after, i64::try_from(n_events).unwrap());
         }
 
         #[test]
@@ -2208,7 +2213,7 @@ CREATE TABLE IF NOT EXISTS config (
 
     // --- v6→v7 migration tests ---
 
-    /// Frozen v6 schema: v5 tables + surfaced_at on facts, no archive_manifest.
+    /// Frozen v6 schema: v5 tables + `surfaced_at` on facts, no `archive_manifest`.
     fn init_schema_v6(conn: &Connection) -> Result<()> {
         conn.execute_batch(TABLES_V5_DDL)?;
         conn.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")?;

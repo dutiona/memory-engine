@@ -21,7 +21,7 @@ pub enum EventType {
 /// Outcome of using a fact — consumer-supplied feedback signal.
 ///
 /// Stored as an [`EventType::OutcomeSignal`] event in the append-only log.
-/// DreamCycle queries outcome history to adjust importance scores:
+/// `DreamCycle` queries outcome history to adjust importance scores:
 /// consistently negative outcomes decrease importance, positive ones increase it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Outcome {
@@ -393,7 +393,7 @@ pub struct CycleReport {
     pub promotions: Vec<PromotionProvenance>,
 }
 
-/// Per-`FactType` compression configuration for DreamCycle.
+/// Per-`FactType` compression configuration for `DreamCycle`.
 ///
 /// Controls what fraction of facts to retain per type and the percentile
 /// threshold for promotion candidates.
@@ -476,7 +476,7 @@ impl DreamCycleConfig {
 /// Request to promote a fact to wisdom with provenance tracking.
 ///
 /// Carries a precomputed embedding so the engine does not need an
-/// [`crate::traits::EmbeddingProvider`] at promotion time — the DreamCycle
+/// [`crate::traits::EmbeddingProvider`] at promotion time — the `DreamCycle`
 /// consumer owns its embedder and computes the embedding before calling
 /// [`DreamContext::promote`](crate::engine::cognitive::DreamContext::promote).
 #[derive(Debug, Clone)]
@@ -523,7 +523,7 @@ impl std::str::FromStr for ActivityStatus {
 }
 
 /// An activity record from a tool invocation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activity {
     pub id: i64,
     pub session_id: String,
@@ -553,8 +553,8 @@ pub struct NewActivity {
     pub scope_id: i64,
 }
 
-/// A session checkpoint (last-write-wins per session_id).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A session checkpoint (last-write-wins per `session_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCheckpoint {
     pub session_id: String,
     pub scope_path: Option<String>,
@@ -573,7 +573,7 @@ pub struct RecordActivityRequest {
     pub session_id: String,
     pub timestamp: DateTime<Utc>,
     pub scope_path: Option<String>,
-    /// Outcome class (e.g. "success", "error", "test_failure"). Defaults to "success".
+    /// Outcome class (e.g. "success", "error", "`test_failure`"). Defaults to "success".
     pub outcome_class: Option<String>,
 }
 

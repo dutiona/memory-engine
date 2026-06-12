@@ -1,16 +1,28 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::error::{MemoryError, Result};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
-use crate::types::{AddFactRequest, Fact, NewEvent, NewFact};
+use crate::types::{AddFactOptions, AddFactRequest, Fact, NewEvent, NewFact};
 
 #[cfg(feature = "ann")]
 use crate::search::strategy::VectorSearchStrategy;
 
 use super::MemoryEngine;
+
+/// Prepared batch entry: a borrowed request plus the insert fields computed
+/// outside the write lock by [`MemoryEngine::prepare_batch_entries`]
+/// (aliased to keep `add_facts_batch` free of `clippy::type_complexity`).
+type PreparedBatchEntry<'a> = (
+    &'a AddFactRequest,
+    Vec<f32>,
+    AddFactOptions,
+    bool,
+    DateTime<Utc>,
+    DateTime<Utc>,
+);
 
 impl MemoryEngine {
     // --- Public API: Ingest ---
@@ -34,6 +46,10 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns errors from embedding computation, dimension validation, or DB insert.
+    // `conn` (write lock) is reused by `FactStore::new(&conn).insert(..)` at the
+    // block's return expression; clippy's nursery suggestion to drop it after
+    // scope resolution misses that transitive borrow and would not compile.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn add_fact(
         &self,
         req: &AddFactRequest,
@@ -50,9 +66,8 @@ impl MemoryEngine {
 
         // Classify OUTSIDE the write lock (potentially slow — LLM, I/O, etc.)
         // Uses scope_id=0 placeholder; classifiers should rely on content/type/importance/metadata.
-        let is_pinned = match opts.pinned {
-            Some(p) => p,
-            None => classifier.is_some_and(|c| {
+        let is_pinned = opts.pinned.unwrap_or_else(|| {
+            classifier.is_some_and(|c| {
                 let temp = Fact {
                     id: 0,
                     content: req.content.clone(),
@@ -77,8 +92,8 @@ impl MemoryEngine {
                     surfaced_at: None,
                 };
                 c.should_pin(&temp)
-            }),
-        };
+            })
+        });
 
         // Resolve scope + insert fact in a single write lock, then release
         #[cfg(feature = "ann")]
@@ -120,48 +135,16 @@ impl MemoryEngine {
         Ok(fact_id)
     }
 
-    /// Add multiple facts atomically: batch-embed all texts in a single call,
-    /// classify outside the lock, then insert all facts in one transaction.
-    ///
-    /// Returns all assigned fact IDs on success. On any insert failure the
-    /// entire batch is rolled back (all-or-nothing).
-    ///
-    /// # Performance
-    ///
-    /// - 1 embedding call (batch) instead of N
-    /// - 1 SQLite transaction (savepoint) instead of N
-    /// - Scope resolution inside savepoint for atomicity; `scope_tree`
-    ///   cache deferred to after `RELEASE` (two-phase commit).
-    ///
-    /// # Errors
-    ///
-    /// Returns errors from batch embedding, dimension validation, or DB insert.
-    pub fn add_facts_batch(
-        &self,
-        entries: &[AddFactRequest],
-        embedder: &dyn EmbeddingProvider,
+    /// Classify and prepare each entry (importance, timestamps, auto-pin
+    /// decision) outside the write lock — the Phase-2 helper for
+    /// [`add_facts_batch`](Self::add_facts_batch).
+    fn prepare_batch_entries<'a>(
+        entries: &'a [AddFactRequest],
+        embeddings: Vec<Vec<f32>>,
         classifier: Option<&dyn PersistenceClassifier>,
-    ) -> Result<Vec<i64>> {
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // --- Phase 1: Batch embed OUTSIDE the write lock ---
-        let texts: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
-        let embeddings = embedder.embed_batch(&texts)?;
-
-        if embeddings.len() != entries.len() {
-            return Err(MemoryError::Internal(format!(
-                "embed_batch returned {} embeddings for {} entries",
-                embeddings.len(),
-                entries.len()
-            )));
-        }
-
-        // --- Phase 2: Classify + prepare OUTSIDE the write lock ---
-        let now = Utc::now();
-
-        let prepared: Vec<_> = entries
+        now: DateTime<Utc>,
+    ) -> Vec<PreparedBatchEntry<'a>> {
+        entries
             .iter()
             .zip(embeddings)
             .map(|(entry, embedding)| {
@@ -170,9 +153,8 @@ impl MemoryEngine {
                 let effective_created = opts.t_created.unwrap_or(now);
                 let effective_last_accessed = opts.last_accessed.unwrap_or(now);
 
-                let is_pinned = match opts.pinned {
-                    Some(p) => p,
-                    None => classifier.is_some_and(|c| {
+                let is_pinned = opts.pinned.unwrap_or_else(|| {
+                    classifier.is_some_and(|c| {
                         let temp = Fact {
                             id: 0,
                             content: entry.content.clone(),
@@ -197,8 +179,8 @@ impl MemoryEngine {
                             surfaced_at: None,
                         };
                         c.should_pin(&temp)
-                    }),
-                };
+                    })
+                });
 
                 (
                     entry,
@@ -209,7 +191,81 @@ impl MemoryEngine {
                     effective_last_accessed,
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    /// Resolve (and dedupe) the scope id for each prepared entry inside the
+    /// savepoint. Returns the per-entry scope ids and the unique set to cache.
+    fn resolve_batch_scopes(
+        scope_store: &ScopeStore,
+        prepared: &[PreparedBatchEntry<'_>],
+    ) -> Result<(Vec<i64>, Vec<i64>)> {
+        let mut scope_cache: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut scope_ids = Vec::with_capacity(prepared.len());
+        for (entry, ..) in prepared {
+            let scope_id = match &entry.scope {
+                Some(path) => {
+                    if let Some(&cached) = scope_cache.get(path) {
+                        cached
+                    } else {
+                        let id = scope_store.ensure_path(path)?;
+                        scope_cache.insert(path.clone(), id);
+                        id
+                    }
+                }
+                None => 1, // root scope
+            };
+            scope_ids.push(scope_id);
+        }
+        let unique_scope_ids = scope_cache.into_values().collect();
+        Ok((scope_ids, unique_scope_ids))
+    }
+
+    /// Add multiple facts atomically: batch-embed all texts in a single call,
+    /// classify outside the lock, then insert all facts in one transaction.
+    ///
+    /// Returns all assigned fact IDs on success. On any insert failure the
+    /// entire batch is rolled back (all-or-nothing).
+    ///
+    /// # Performance
+    ///
+    /// - 1 embedding call (batch) instead of N
+    /// - 1 `SQLite` transaction (savepoint) instead of N
+    /// - Scope resolution inside savepoint for atomicity; `scope_tree`
+    ///   cache deferred to after `RELEASE` (two-phase commit).
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from batch embedding, dimension validation, or DB insert.
+    // `conn` (write lock) spans the whole savepoint transaction via FactStore/
+    // ScopeStore wrappers that borrow it; clippy misses the transitive borrow.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn add_facts_batch(
+        &self,
+        entries: &[AddFactRequest],
+        embedder: &dyn EmbeddingProvider,
+        classifier: Option<&dyn PersistenceClassifier>,
+    ) -> Result<Vec<i64>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // --- Phase 1: Batch embed OUTSIDE the write lock ---
+        let texts: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
+        let embeddings = embedder.embed_batch(&texts)?;
+
+        if embeddings.len() != entries.len() {
+            return Err(MemoryError::Internal(format!(
+                "embed_batch returned {} embeddings for {} entries",
+                embeddings.len(),
+                entries.len()
+            )));
+        }
+
+        // --- Phase 2: Classify + prepare OUTSIDE the write lock ---
+        let now = Utc::now();
+        let prepared = Self::prepare_batch_entries(entries, embeddings, classifier, now);
 
         // --- Phase 3: DB operations INSIDE the write lock ---
         #[cfg(feature = "ann")]
@@ -223,27 +279,9 @@ impl MemoryEngine {
                 let scope_store = ScopeStore::new(&conn);
                 let store = FactStore::new(&conn, self.embed_dim);
 
-                // Resolve scopes INSIDE the savepoint so they roll back on
-                // error. Deduplicate paths to avoid redundant DB lookups.
-                let mut scope_cache: std::collections::HashMap<String, i64> =
-                    std::collections::HashMap::new();
-                let mut scope_ids = Vec::with_capacity(prepared.len());
-
-                for (entry, ..) in &prepared {
-                    let scope_id = match &entry.scope {
-                        Some(path) => {
-                            if let Some(&cached) = scope_cache.get(path) {
-                                cached
-                            } else {
-                                let id = scope_store.ensure_path(path)?;
-                                scope_cache.insert(path.clone(), id);
-                                id
-                            }
-                        }
-                        None => 1, // root scope
-                    };
-                    scope_ids.push(scope_id);
-                }
+                // Resolve scopes INSIDE the savepoint so they roll back on error.
+                let (scope_ids, scope_ids_to_cache) =
+                    Self::resolve_batch_scopes(&scope_store, &prepared)?;
 
                 let mut ids = Vec::with_capacity(prepared.len());
 
@@ -281,10 +319,7 @@ impl MemoryEngine {
                     ids.push(fact_id);
                 }
 
-                // Collect unique scope_ids for deferred cache update
-                let unique_scope_ids: Vec<i64> = scope_cache.into_values().collect();
-
-                Ok((ids, unique_scope_ids))
+                Ok((ids, scope_ids_to_cache))
             })();
 
             match result {

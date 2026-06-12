@@ -13,7 +13,7 @@ pub struct FactStore<'a> {
     embed_dim: usize,
 }
 
-pub(crate) const fn fact_type_to_str(ft: &FactType) -> &'static str {
+pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
     match ft {
         FactType::Episodic => "episodic",
         FactType::Semantic => "semantic",
@@ -129,22 +129,12 @@ impl<'a> FactStore<'a> {
     ///
     /// Returns `MemoryError::Database` on query failure.
     pub fn list_active(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
-        let sql = if let Some(n) = limit {
-            format!(
-                "SELECT id, content, content_hash, embedding, fact_type,
-                        t_created, t_expired, t_valid, t_invalid,
-                        source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                        is_pinned, importance_score, surfaced_at
-                 FROM facts WHERE t_expired IS NULL LIMIT {n}"
-            )
-        } else {
-            "SELECT id, content, content_hash, embedding, fact_type,
+        let base = "SELECT id, content, content_hash, embedding, fact_type,
                     t_created, t_expired, t_valid, t_invalid,
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
                     is_pinned, importance_score, surfaced_at
-             FROM facts WHERE t_expired IS NULL"
-                .to_owned()
-        };
+             FROM facts WHERE t_expired IS NULL";
+        let sql = limit.map_or_else(|| base.to_owned(), |n| format!("{base} LIMIT {n}"));
         let mut stmt = self.conn.prepare(&sql)?;
         let dim = self.embed_dim;
         let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
@@ -240,7 +230,7 @@ impl<'a> FactStore<'a> {
             vec![Box::new(importance_threshold), Box::new(now_str)];
         all_params.extend(scope_params);
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            all_params.iter().map(|p| p.as_ref()).collect();
+            all_params.iter().map(std::convert::AsRef::as_ref).collect();
 
         let rows = stmt.query_map(param_refs.as_slice(), |row| row_to_fact(row, dim))?;
         let mut facts = Vec::new();
@@ -503,7 +493,7 @@ impl<'a> FactStore<'a> {
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
         let rows = self.conn.execute(
             "UPDATE facts SET is_pinned = ?1 WHERE id = ?2",
-            rusqlite::params![pinned as i64, id],
+            rusqlite::params![i64::from(pinned), id],
         )?;
         if rows == 0 {
             return Err(crate::error::MemoryError::NotFound(format!("fact {id}")));
@@ -569,7 +559,7 @@ impl<'a> FactStore<'a> {
         Ok(())
     }
 
-    /// List active facts ordered by materialized importance_score, excluding IDs in `exclude`.
+    /// List active facts ordered by materialized `importance_score`, excluding IDs in `exclude`.
     /// Pass empty `scope_ids` to query across all scopes.
     pub fn list_by_importance_score(
         &self,
@@ -733,14 +723,14 @@ impl<'a> FactStore<'a> {
 
         let mut param_idx = 3u32;
         let scope_json;
-        if !scope_ids.is_empty() {
+        if scope_ids.is_empty() {
+            scope_json = String::new();
+        } else {
             scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
             conditions.push(format!(
                 "scope_id IN (SELECT value FROM json_each(?{param_idx}))"
             ));
             param_idx += 1;
-        } else {
-            scope_json = String::new();
         }
 
         let ft_str;

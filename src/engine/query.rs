@@ -17,6 +17,11 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if internal candidate de-duplication yields an inconsistent
+    /// index — an invariant that should never be violated in practice.
     pub fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
         // Resolve scope IDs from cache (short-lived read lock).
         // When a scope query is provided but the path doesn't exist,
@@ -86,7 +91,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` on query failure.
     pub fn execute_query(&self, query: &MemoryQuery) -> Result<QueryResponse> {
         // --- Validation ---
-        self.validate_memory_query(query)?;
+        Self::validate_memory_query(query)?;
 
         // --- Resolve scope ---
         let scope_ids: Option<Vec<i64>> = match &query.scope {
@@ -126,7 +131,7 @@ impl MemoryEngine {
     }
 
     /// Validate a `MemoryQuery` for conflicting or incomplete options.
-    fn validate_memory_query(&self, query: &MemoryQuery) -> Result<()> {
+    fn validate_memory_query(query: &MemoryQuery) -> Result<()> {
         // Period: both start and end must be set, or neither
         if query.period_start.is_some() != query.period_end.is_some() {
             return Err(MemoryError::Conflict(
@@ -179,7 +184,7 @@ impl MemoryEngine {
         }
     }
 
-    /// Search path: delegate to hybrid_search, then post-filter.
+    /// Search path: delegate to `hybrid_search`, then post-filter.
     ///
     /// When post-filters are active (period, importance, pinned), we pass the
     /// raw `limit` (not inflated) because `hybrid_search` already does its own
@@ -290,7 +295,7 @@ impl MemoryEngine {
         })
     }
 
-    /// Store path: no text/vector search, use FactStore directly.
+    /// Store path: no text/vector search, use `FactStore` directly.
     ///
     /// Strategy: fetch a broad candidate set from the most selective SQL query,
     /// then apply ALL remaining filters as post-filters to guarantee AND semantics.

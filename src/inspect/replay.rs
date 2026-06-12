@@ -43,6 +43,9 @@ mod tests {
     }
 
     #[test]
+    // `conn` (write lock) lives through the insert loop via the `store` wrapper
+    // that borrows it; clippy misses the transitive borrow (false positive).
+    #[allow(clippy::significant_drop_tightening)]
     fn replay_by_id_range() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         // Insert events via raw store access
@@ -65,6 +68,9 @@ mod tests {
     }
 
     #[test]
+    // `conn` (write lock) lives through the insert loop via the `store` wrapper
+    // that borrows it; clippy misses the transitive borrow (false positive).
+    #[allow(clippy::significant_drop_tightening)]
     fn replay_default_order_is_insertion() {
         let engine = MemoryEngine::open_memory(DIM).unwrap();
         {

@@ -390,7 +390,7 @@ fn add_fact_with_custom_importance() {
                 fact_type: FactType::Semantic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts.clone()),
+                opts: Some(opts),
             },
             &embedder,
             None,
@@ -417,7 +417,7 @@ fn add_fact_with_temporal_bounds() {
                 fact_type: FactType::Episodic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts.clone()),
+                opts: Some(opts),
             },
             &embedder,
             None,
@@ -615,7 +615,7 @@ fn resume_with_facts() {
                 fact_type: FactType::Semantic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts_pinned.clone()),
+                opts: Some(opts_pinned),
             },
             &embedder,
             None,
@@ -634,7 +634,7 @@ fn resume_with_facts() {
                 fact_type: FactType::Episodic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts_low.clone()),
+                opts: Some(opts_low),
             },
             &embedder,
             None,
@@ -1000,7 +1000,7 @@ fn add_fact_with_explicit_pin() {
                 fact_type: FactType::Semantic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts.clone()),
+                opts: Some(opts),
             },
             &embedder,
             None,
@@ -1078,7 +1078,7 @@ fn explicit_pin_overrides_classifier() {
                 fact_type: FactType::Semantic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts.clone()),
+                opts: Some(opts),
             },
             &embedder,
             Some(&classifier),
@@ -1275,7 +1275,7 @@ fn execute_query_importance_threshold() {
                 fact_type: FactType::Episodic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts_low.clone()),
+                opts: Some(opts_low),
             },
             &embedder,
             None,
@@ -1288,7 +1288,7 @@ fn execute_query_importance_threshold() {
                 fact_type: FactType::Episodic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts_high.clone()),
+                opts: Some(opts_high),
             },
             &embedder,
             None,
@@ -1378,7 +1378,7 @@ fn execute_query_future_dated_excluded() {
                 fact_type: FactType::Episodic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(future_opts.clone()),
+                opts: Some(future_opts),
             },
             &embedder,
             None,
@@ -1471,7 +1471,7 @@ fn execute_query_period_filter() {
                 fact_type: FactType::Episodic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(past_opts.clone()),
+                opts: Some(past_opts),
             },
             &embedder,
             None,
@@ -1541,7 +1541,7 @@ fn execute_query_composed_filters() {
                 fact_type: FactType::Semantic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts_low.clone()),
+                opts: Some(opts_low),
             },
             &embedder,
             None,
@@ -1554,7 +1554,7 @@ fn execute_query_composed_filters() {
                 fact_type: FactType::Episodic,
                 source_event_id: None,
                 scope: None,
-                opts: Some(opts_high.clone()),
+                opts: Some(opts_high),
             },
             &embedder,
             None,
@@ -1615,7 +1615,7 @@ impl Reranker for ReverseReranker {
         let n = candidates.len();
         Ok((0..n).rev().map(|i| (i, candidates[i].score)).collect())
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "reverse"
     }
 }
@@ -1625,7 +1625,7 @@ impl Reranker for FailingReranker {
     fn rerank(&self, _query: &str, _candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
         Err(MemoryError::Reranker("cross-encoder timeout".into()))
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "failing"
     }
 }
@@ -1652,7 +1652,7 @@ impl Reranker for SpyReranker {
             .map(|i| (i, candidates[i].score))
             .collect())
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "spy"
     }
 }
@@ -2008,7 +2008,7 @@ impl Reranker for SpyRerankerWrapper {
     fn rerank(&self, query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
         self.0.rerank(query, candidates)
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "spy_wrapper"
     }
 }
@@ -2153,8 +2153,7 @@ fn link_session_facts_creates_bidirectional_edges() {
 
     // Verify edges in DB
     let co_edges = {
-        let conn = engine.pool.read();
-        let edges = crate::store::edges::EdgeStore::new(&conn)
+        let edges = crate::store::edges::EdgeStore::new(&engine.pool.read())
             .list_active()
             .unwrap();
         edges
@@ -2372,7 +2371,7 @@ impl Reranker for OutOfBoundsReranker {
     fn rerank(&self, _query: &str, _candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
         Ok(vec![(999_999, 1.0)])
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "out_of_bounds"
     }
 }
@@ -2389,7 +2388,7 @@ impl Reranker for DuplicatingReranker {
                 .collect())
         }
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "duplicating"
     }
 }
@@ -2555,7 +2554,7 @@ fn reranker_allows_filtering_subset() {
                 Ok(vec![(0, candidates[0].score)])
             }
         }
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "filtering"
         }
     }
@@ -2620,7 +2619,7 @@ fn reranker_rejects_non_finite_score() {
                 Ok(vec![(0, f64::NAN)])
             }
         }
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "nan_score"
         }
     }
@@ -2856,7 +2855,7 @@ fn add_facts_batch_rejects_embedding_count_mismatch() {
 #[test]
 fn add_facts_batch_rollback_on_insert_failure() {
     /// Embedder that returns wrong dimension for the last embedding,
-    /// causing FactStore::insert to fail mid-transaction.
+    /// causing `FactStore::insert` to fail mid-transaction.
     struct BadDimBatchEmbedder;
     impl EmbeddingProvider for BadDimBatchEmbedder {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {

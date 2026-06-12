@@ -139,7 +139,7 @@ impl MemoryEngine {
         self.graph.read().neighbors(fact_id)
     }
 
-    /// Graph statistics: (node_count, edge_count).
+    /// Graph statistics: (`node_count`, `edge_count`).
     #[must_use]
     pub fn graph_stats(&self) -> (usize, usize) {
         let g = self.graph.read();

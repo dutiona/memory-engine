@@ -14,6 +14,11 @@ impl MemoryEngine {
     /// On first return, stamps `surfaced_at` for facts that have not yet been
     /// surfaced. Subsequent calls return the original timestamp. The returned
     /// facts always carry the DB-authoritative `surfaced_at` value.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` if scope resolution, the query, or
+    /// surfaced-at stamping fails.
     pub fn list_due(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>> {
         let scope_ids = self.resolve_scope_ids(scope)?;
         let mut facts =
@@ -36,6 +41,10 @@ impl MemoryEngine {
 
     /// Scheduling hint: when should the consumer next call `list_due()`?
     /// Returns the earliest `t_valid` among active future-dated facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` if scope resolution or the query fails.
     pub fn next_due_time(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>> {
         let scope_ids = self.resolve_scope_ids(scope)?;
         self.with_read(|conn| {

@@ -18,7 +18,7 @@ pub struct ResumeConfig {
     pub pinned_cap: usize,
     /// Max high-importance facts (by materialized score). Default: 20.
     pub high_importance_cap: usize,
-    /// Minimum importance_score for high-importance tier. Default: 0.7.
+    /// Minimum `importance_score` for high-importance tier. Default: 0.7.
     pub high_importance_min: f64,
     /// Max due facts (future memory now surfacing). Default: 10.
     pub due_cap: usize,
@@ -47,7 +47,7 @@ pub struct ResumeContext {
     pub pinned: Vec<Fact>,
     /// High-importance facts by materialized score.
     pub high_importance: Vec<Fact>,
-    /// Future-memory facts whose t_valid has arrived.
+    /// Future-memory facts whose `t_valid` has arrived.
     pub due: Vec<Fact>,
     /// Most recent facts from active scope.
     pub recent: Vec<Fact>,

@@ -142,7 +142,7 @@ pub enum DumpFormat {
     JsonGzip(PathBuf),
     /// Zstandard-compressed JSON. Requires the `compress-zstd` feature.
     JsonZstd(PathBuf),
-    /// Atomic SQLite backup via `VACUUM INTO` (file-backed engines only).
+    /// Atomic `SQLite` backup via `VACUUM INTO` (file-backed engines only).
     Sqlite(PathBuf),
 }
 

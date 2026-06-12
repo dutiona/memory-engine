@@ -9,7 +9,7 @@ pub struct BootstrapConfig {
     pub scope: Option<String>,
     /// Maximum turns to process per session. `0` = no limit.
     pub max_turns: usize,
-    /// Skip sessions already bootstrapped (idempotency via session_id check).
+    /// Skip sessions already bootstrapped (idempotency via `session_id` check).
     pub skip_existing: bool,
 }
 
@@ -62,10 +62,16 @@ impl BootstrapReport {
         let total_new = other.prewarm_metrics.total_count();
         let total = total_old + total_new;
         if total > 0 {
-            self.prewarm_metrics.avg_importance = (self.prewarm_metrics.avg_importance
-                * total_old as f64
-                + other.prewarm_metrics.avg_importance * total_new as f64)
-                / total as f64;
+            // Counts are small (episode tallies); convert losslessly via u32 so
+            // clippy's cast_precision_loss does not fire (f64::from is lossless).
+            let w_new = f64::from(u32::try_from(total_new).unwrap_or(u32::MAX));
+            let w_old = f64::from(u32::try_from(total_old).unwrap_or(u32::MAX));
+            let denom = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
+            self.prewarm_metrics.avg_importance = other
+                .prewarm_metrics
+                .avg_importance
+                .mul_add(w_new, self.prewarm_metrics.avg_importance * w_old)
+                / denom;
         }
         self.prewarm_metrics.episodic_count += other.prewarm_metrics.episodic_count;
         self.prewarm_metrics.semantic_count += other.prewarm_metrics.semantic_count;

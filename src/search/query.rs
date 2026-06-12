@@ -83,13 +83,13 @@ impl MemoryQuery {
 
     /// Whether this query involves text/vector search (vs. store-only path).
     #[must_use]
-    pub fn has_search(&self) -> bool {
+    pub const fn has_search(&self) -> bool {
         self.text.is_some() || self.embedding.is_some()
     }
 
     /// Whether a temporal period filter is set.
     #[must_use]
-    pub fn has_period(&self) -> bool {
+    pub const fn has_period(&self) -> bool {
         self.period_start.is_some() || self.period_end.is_some()
     }
 
@@ -128,7 +128,7 @@ impl MemoryQuery {
     /// Point-in-time filter (existing `SearchQuery` semantics).
     /// Mutually exclusive with [`period`](Self::period).
     #[must_use]
-    pub fn valid_at(mut self, at: DateTime<Utc>) -> Self {
+    pub const fn valid_at(mut self, at: DateTime<Utc>) -> Self {
         self.valid_at = Some(at);
         self
     }
@@ -136,7 +136,7 @@ impl MemoryQuery {
     /// Period overlap filter: facts whose `[t_valid, t_invalid)` overlaps `[start, end)`.
     /// Mutually exclusive with [`valid_at`](Self::valid_at).
     #[must_use]
-    pub fn period(mut self, start: DateTime<Utc>, end: DateTime<Utc>) -> Self {
+    pub const fn period(mut self, start: DateTime<Utc>, end: DateTime<Utc>) -> Self {
         self.period_start = Some(start);
         self.period_end = Some(end);
         self
@@ -161,7 +161,7 @@ impl MemoryQuery {
     /// Override the inferred search mode.
     /// Returns `MemoryError::Conflict` at execution time if incompatible with `text`/`embedding`.
     #[must_use]
-    pub fn search_mode(mut self, mode: SearchMode) -> Self {
+    pub const fn search_mode(mut self, mode: SearchMode) -> Self {
         self.search_mode = Some(mode);
         self
     }
@@ -170,21 +170,21 @@ impl MemoryQuery {
 
     /// Filter by fact type.
     #[must_use]
-    pub fn fact_type(mut self, ft: FactType) -> Self {
+    pub const fn fact_type(mut self, ft: FactType) -> Self {
         self.fact_type = Some(ft);
         self
     }
 
     /// Filter by minimum materialized importance score (not the base importance hint).
     #[must_use]
-    pub fn min_importance_score(mut self, threshold: f64) -> Self {
+    pub const fn min_importance_score(mut self, threshold: f64) -> Self {
         self.min_importance_score = Some(threshold);
         self
     }
 
     /// Return only pinned (unforgettable) facts.
     #[must_use]
-    pub fn pinned_only(mut self) -> Self {
+    pub const fn pinned_only(mut self) -> Self {
         self.pinned_only = true;
         self
     }
@@ -220,7 +220,7 @@ impl MemoryQuery {
 
     /// Set the maximum number of results. Default: 50.
     #[must_use]
-    pub fn limit(mut self, n: usize) -> Self {
+    pub const fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
         self
     }

@@ -3,7 +3,7 @@
 //! Serializes `MemoryGraph`, `ScopeTree`, and (optionally) HNSW state into a
 //! `.snapshot` file next to the database. On startup, if the snapshot validates
 //! against the current DB fingerprint, the engine loads from it instead of
-//! doing a full SQLite scan. Any failure falls back to full rebuild (current behavior).
+//! doing a full `SQLite` scan. Any failure falls back to full rebuild (current behavior).
 //!
 //! ## File format
 //!
@@ -12,7 +12,7 @@
 //! ```
 //!
 //! The blake3 checksum covers the payload bytes only. Header is checked first
-//! (cheap) so format_version/embed_dim mismatches reject without hashing.
+//! (cheap) so `format_version/embed_dim` mismatches reject without hashing.
 
 use std::fs;
 use std::io::Write;
@@ -26,7 +26,7 @@ use crate::types::ScopeNode;
 
 /// Current snapshot format version. Bump on breaking changes to the snapshot
 /// layout or type definitions.
-pub(crate) const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 1;
 
 /// Size of the blake3 checksum appended to the file.
 const BLAKE3_LEN: usize = 32;
@@ -36,7 +36,7 @@ const BLAKE3_LEN: usize = 32;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct SnapshotHeader {
+pub struct SnapshotHeader {
     pub format_version: u32,
     pub fingerprint: DbFingerprint,
     pub embed_dim: usize,
@@ -50,7 +50,7 @@ pub(crate) struct SnapshotHeader {
 /// (`add_fact`, `forget`, `consolidate`, `link_session_facts`) modify
 /// `facts`/`edges`/`scopes` without appending an event.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct DbFingerprint {
+pub struct DbFingerprint {
     pub max_fact_id: i64,
     pub active_fact_count: i64,
     pub max_edge_id: i64,
@@ -60,12 +60,12 @@ pub(crate) struct DbFingerprint {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct SnapshotPayload {
+pub struct SnapshotPayload {
     pub graph: GraphSnapshot,
     pub scope_tree: ScopeTreeSnapshot,
     /// Present when built with `ann` feature AND HNSW was active.
     /// `#[serde(default)]` allows non-ann snapshots to be loaded by ann builds
-    /// and vice versa (named MessagePack handles missing fields).
+    /// and vice versa (named `MessagePack` handles missing fields).
     #[serde(default)]
     pub hnsw: Option<HnswSnapshot>,
 }
@@ -73,12 +73,12 @@ pub(crate) struct SnapshotPayload {
 /// Edge list — decoupled from petgraph `DiGraph` internals.
 /// No isolated nodes: matches `MemoryGraph::load_from_db` semantics (edges only).
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct GraphSnapshot {
+pub struct GraphSnapshot {
     pub edges: Vec<GraphEdgeSnapshot>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct GraphEdgeSnapshot {
+pub struct GraphEdgeSnapshot {
     pub edge_id: i64,
     pub source: i64,
     pub target: i64,
@@ -88,19 +88,19 @@ pub(crate) struct GraphEdgeSnapshot {
 
 /// Flat list of scope nodes — `ScopeNode` is already serde.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ScopeTreeSnapshot {
+pub struct ScopeTreeSnapshot {
     pub nodes: Vec<ScopeNode>,
 }
 
 /// Compact HNSW rebuild data: active fact embeddings only, no tombstones.
 /// On load, rebuilds a fresh compact HNSW index (same as `build_from_db`).
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct HnswSnapshot {
+pub struct HnswSnapshot {
     pub entries: Vec<HnswEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct HnswEntry {
+pub struct HnswEntry {
     pub fact_id: i64,
     pub embedding: Vec<f32>,
 }
@@ -110,7 +110,7 @@ pub(crate) struct HnswEntry {
 // ---------------------------------------------------------------------------
 
 /// Derive the snapshot sidecar path from the database path.
-pub(crate) fn snapshot_path(db_path: &Path) -> PathBuf {
+pub fn snapshot_path(db_path: &Path) -> PathBuf {
     let mut p = db_path.as_os_str().to_owned();
     p.push(".snapshot");
     PathBuf::from(p)
@@ -122,9 +122,9 @@ pub(crate) fn snapshot_path(db_path: &Path) -> PathBuf {
 
 /// Read a composite fingerprint from the three source-of-truth tables.
 ///
-/// Uses a single query with subselects for atomicity within the SQLite
+/// Uses a single query with subselects for atomicity within the `SQLite`
 /// read transaction.
-pub(crate) fn read_fingerprint(conn: &Connection) -> Result<DbFingerprint> {
+pub fn read_fingerprint(conn: &Connection) -> Result<DbFingerprint> {
     conn.query_row(
         "SELECT \
             COALESCE((SELECT MAX(id) FROM facts), 0), \
@@ -155,14 +155,14 @@ pub(crate) fn read_fingerprint(conn: &Connection) -> Result<DbFingerprint> {
 /// Write a snapshot to disk atomically.
 ///
 /// 1. Serialize header and payload with `rmp_serde::to_vec_named` (named
-///    MessagePack for forward/backward compatibility).
+///    `MessagePack` for forward/backward compatibility).
 /// 2. Compute blake3 hash over the payload bytes.
 /// 3. Write to a temp file in the same directory (`NamedTempFile` uses
 ///    `O_CREAT | O_EXCL` — no symlink follow).
 /// 4. `fsync` the file.
 /// 5. Atomic rename via `persist()`.
 /// 6. `fsync` the parent directory for rename durability.
-pub(crate) fn write_to_file(
+pub fn write_to_file(
     header: &SnapshotHeader,
     payload: &SnapshotPayload,
     path: &Path,
@@ -201,12 +201,9 @@ pub(crate) fn write_to_file(
 /// Load and validate a snapshot from disk.
 ///
 /// Returns `None` on any failure (missing file, corrupt data, version
-/// mismatch, checksum failure, embed_dim mismatch). Never errors — all
+/// mismatch, checksum failure, `embed_dim` mismatch). Never errors — all
 /// failures are logged and treated as "snapshot unavailable".
-pub(crate) fn load_from_file(
-    path: &Path,
-    embed_dim: usize,
-) -> Option<(SnapshotHeader, SnapshotPayload)> {
+pub fn load_from_file(path: &Path, embed_dim: usize) -> Option<(SnapshotHeader, SnapshotPayload)> {
     let data = match fs::read(path) {
         Ok(d) => d,
         Err(e) => {
@@ -355,7 +352,7 @@ mod tests {
 
         let header_bytes = rmp_serde::to_vec_named(&header).unwrap();
         let payload_bytes = rmp_serde::to_vec_named(&payload).unwrap();
-        let header_len = (header_bytes.len() as u32).to_le_bytes();
+        let header_len = u32::try_from(header_bytes.len()).unwrap().to_le_bytes();
 
         // Write with wrong checksum
         let mut data = Vec::new();
@@ -396,7 +393,7 @@ mod tests {
         let header_bytes = rmp_serde::to_vec_named(&header).unwrap();
         let payload_bytes = rmp_serde::to_vec_named(&payload).unwrap();
         let checksum = blake3::hash(&payload_bytes);
-        let header_len = (header_bytes.len() as u32).to_le_bytes();
+        let header_len = u32::try_from(header_bytes.len()).unwrap().to_le_bytes();
 
         let mut data = Vec::new();
         data.extend_from_slice(&header_len);
@@ -435,7 +432,7 @@ mod tests {
         let header_bytes = rmp_serde::to_vec_named(&header).unwrap();
         let payload_bytes = rmp_serde::to_vec_named(&payload).unwrap();
         let checksum = blake3::hash(&payload_bytes);
-        let header_len = (header_bytes.len() as u32).to_le_bytes();
+        let header_len = u32::try_from(header_bytes.len()).unwrap().to_le_bytes();
 
         let mut data = Vec::new();
         data.extend_from_slice(&header_len);

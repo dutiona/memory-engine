@@ -69,9 +69,8 @@ impl SessionExtractor for KeywordExtractor {
             (EpisodeCategory::Bug, SessionOutcome::Success) => (FactType::Procedural, 0.7),
             (EpisodeCategory::Bug, SessionOutcome::Failure) => (FactType::Episodic, 0.4),
             (EpisodeCategory::Bug, SessionOutcome::Indeterminate) => (FactType::Episodic, 0.5),
-            (EpisodeCategory::Decision, _) => (FactType::Semantic, 0.6),
+            (EpisodeCategory::Decision | EpisodeCategory::Learning, _) => (FactType::Semantic, 0.6),
             (EpisodeCategory::Convention, _) => (FactType::Procedural, 0.8),
-            (EpisodeCategory::Learning, _) => (FactType::Semantic, 0.6),
         };
 
         let mut metadata = serde_json::json!({

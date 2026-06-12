@@ -1,4 +1,4 @@
-//! Integration test: record_activity → checkpoint_session → load_context cycle.
+//! Integration test: `record_activity` → `checkpoint_session` → `load_context` cycle.
 
 use chrono::Utc;
 use memory_engine::{ActivityFilterConfig, ActivityStatus, MemoryEngine, RecordActivityRequest};

@@ -1,4 +1,4 @@
-//! Phase 5 skeleton tests — ignored until DreamCycle and outcome tracking land.
+//! Phase 5 skeleton tests — ignored until `DreamCycle` and outcome tracking land.
 //!
 //! These tests document the acceptance criteria for R4 (context collapse detection)
 //! and R5 (outcome-based retrieval quality) so that CI tracks them as `#[ignore]`
@@ -6,15 +6,15 @@
 
 /// R4 (P0): Context Collapse Detection
 ///
-/// DreamCycle must not reduce fact count or content length by >20% in a
+/// `DreamCycle` must not reduce fact count or content length by >20% in a
 /// single cycle. Alert threshold: >20% reduction → test failure.
 ///
-/// ## When DreamCycle lands, implement:
+/// ## When `DreamCycle` lands, implement:
 /// 1. Populate engine with N facts
 /// 2. `let pre_count = engine.statistics()?.facts.active;`
 /// 3. Compute `pre_content_len` by iterating active facts (`statistics()`
 ///    doesn't expose content bytes)
-/// 4. Run one DreamCycle: `engine.dream_cycle(&config, &provider)?;`
+/// 4. Run one `DreamCycle`: `engine.dream_cycle(&config, &provider)?;`
 /// 5. `let post_count = engine.statistics()?.facts.active;`
 /// 6. Compute `post_content_len` same way
 /// 7. `assert!(post_count as f64 / pre_count as f64 > 0.80);`
@@ -49,7 +49,7 @@ fn dream_cycle_does_not_collapse_context() {
 /// 1. Record a negative outcome for the same query context
 /// 2. Assert that negatively-signaled facts drop in rank or are excluded
 ///
-/// Research basis: ACE (Zhang ICLR 2026), Reflexion (Shinn NeurIPS 2023)
+/// Research basis: ACE (Zhang ICLR 2026), Reflexion (Shinn `NeurIPS` 2023)
 #[test]
 #[ignore = "Phase 5: outcome tracking not yet implemented"]
 fn positive_outcome_boosts_retrieval_rank() {
@@ -62,7 +62,7 @@ fn positive_outcome_boosts_retrieval_rank() {
 /// negative outcome signal and asserts that the affected facts drop in
 /// rank on the subsequent query.
 ///
-/// Research basis: ACE (Zhang ICLR 2026), Reflexion (Shinn NeurIPS 2023)
+/// Research basis: ACE (Zhang ICLR 2026), Reflexion (Shinn `NeurIPS` 2023)
 #[test]
 #[ignore = "Phase 5: outcome tracking not yet implemented"]
 fn negative_outcome_attenuates_retrieval_rank() {

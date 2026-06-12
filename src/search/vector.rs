@@ -53,7 +53,7 @@ pub fn vector_search(
     }
 
     let ft_str: Option<&str> = fact_type.map(fact_type_to_str);
-    let scope_json: Option<String> = scope_ids.map(|ids| serde_json::to_string(ids).unwrap());
+    let scope_json: Option<String> = scope_ids.map(serde_json::to_string).transpose()?;
 
     let mut stmt = conn.prepare(
         "SELECT id, embedding FROM facts

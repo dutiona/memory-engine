@@ -109,7 +109,7 @@ fn golden_corpus_retrieval_quality_gates() {
     );
 
     // Mean quality gates across all 25 queries
-    let n = all_metrics.len() as f64;
+    let n = f64::from(u32::try_from(all_metrics.len()).unwrap());
     let mean_p5 = all_metrics.iter().map(|m| m.precision_5).sum::<f64>() / n;
     let mean_r10 = all_metrics.iter().map(|m| m.recall_10).sum::<f64>() / n;
     let mean_mrr = all_metrics.iter().map(|m| m.mrr_val).sum::<f64>() / n;

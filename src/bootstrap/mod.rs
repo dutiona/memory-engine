@@ -115,6 +115,30 @@ pub(crate) fn bootstrap_session_inner(
     }
 }
 
+/// Ingest the bootstrap marker event (idempotency anchor) and return its id.
+fn ingest_bootstrap_marker(
+    conn: &Connection,
+    upcaster_registry: &UpcasterRegistry,
+    session_id: &str,
+    scope_id: i64,
+) -> Result<i64> {
+    let marker_event = NewEvent {
+        timestamp: Utc::now(),
+        event_type: EventType::SystemEvent,
+        payload: serde_json::json!({
+            "action": "bootstrap_session",
+            "session_id": session_id,
+        }),
+        source: "bootstrap".into(),
+        session_id: Some(session_id.into()),
+        scope_id,
+        origin_node_id: "bootstrap".into(),
+        sequence_id: 0,
+        created_at: None,
+    };
+    EventStore::new(conn, upcaster_registry).insert(&marker_event)
+}
+
 /// Inner pipeline logic running within a savepoint.
 #[allow(clippy::too_many_arguments)]
 fn bootstrap_within_savepoint(
@@ -131,21 +155,7 @@ fn bootstrap_within_savepoint(
     report: &mut BootstrapReport,
 ) -> Result<()> {
     // --- Ingest marker event (idempotency anchor) ---
-    let marker_event = NewEvent {
-        timestamp: Utc::now(),
-        event_type: EventType::SystemEvent,
-        payload: serde_json::json!({
-            "action": "bootstrap_session",
-            "session_id": session_id,
-        }),
-        source: "bootstrap".into(),
-        session_id: Some(session_id.into()),
-        scope_id,
-        origin_node_id: "bootstrap".into(),
-        sequence_id: 0,
-        created_at: None,
-    };
-    let marker_event_id = EventStore::new(conn, upcaster_registry).insert(&marker_event)?;
+    let marker_event_id = ingest_bootstrap_marker(conn, upcaster_registry, session_id, scope_id)?;
     report.events_ingested = 1;
 
     // --- Reconstruct turns ---
@@ -260,7 +270,8 @@ fn bootstrap_within_savepoint(
 
     let total = report.prewarm_metrics.total_count();
     if total > 0 {
-        report.prewarm_metrics.avg_importance = importance_sum / total as f64;
+        report.prewarm_metrics.avg_importance =
+            importance_sum / f64::from(u32::try_from(total).unwrap_or(u32::MAX));
     }
 
     Ok(())
