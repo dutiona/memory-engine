@@ -221,6 +221,7 @@ impl MemoryEngine {
         // Notify HNSW if enabled
         #[cfg(feature = "ann")]
         if let Some(ref hnsw) = self.hnsw_strategy {
+            use crate::search::strategy::VectorSearchStrategy;
             hnsw.notify_insert(fact_id, &emb_copy);
         }
 
