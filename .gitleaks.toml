@@ -1,0 +1,11 @@
+# Gitleaks configuration — extends the default ruleset with allowlists for
+# known false positives, so history scans stay green in CI and pre-flight.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "traits.rs doc prose 'consolidation/forget' trips the generic-api-key rule"
+paths = ['''src/traits\.rs''']
+regexTarget = "match"
+regexes = ['''consolidation/forget''']
