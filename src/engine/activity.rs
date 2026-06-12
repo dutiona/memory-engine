@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 
-use crate::engine::activity_filter::{apply_filter, ActivityFilterConfig, ActivityFilterDecision};
+use crate::engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, apply_filter};
 use crate::error::{MemoryError, Result};
 use crate::store::activities::ActivityStore;
 use crate::store::checkpoints::CheckpointStore;

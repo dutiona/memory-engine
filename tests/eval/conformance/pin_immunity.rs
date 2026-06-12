@@ -6,7 +6,7 @@
 
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
-use crate::helpers::{add_fact, aggressive_forget_policy, eval_engine, PinByType, TestEmbedder};
+use crate::helpers::{PinByType, TestEmbedder, add_fact, aggressive_forget_policy, eval_engine};
 
 #[test]
 fn all_pinned_survive_aggressive_forget() {
