@@ -268,7 +268,7 @@ mod tests {
                     fact_type: FactType::Semantic,
                     source_event_id: None,
                     scope: None,
-                    opts: Some(pin_opts.clone()),
+                    opts: Some(pin_opts),
                 },
                 &FakeEmbed,
                 None,

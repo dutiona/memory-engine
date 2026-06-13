@@ -1,4 +1,4 @@
-//! In-memory knowledge graph backed by `petgraph`, loaded from SQLite edge table.
+//! In-memory knowledge graph backed by `petgraph`, loaded from `SQLite` edge table.
 
 mod memory_graph;
 

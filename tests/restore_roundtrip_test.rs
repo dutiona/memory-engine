@@ -99,7 +99,7 @@ fn json_restore_to_memory_engine() {
 fn sqlite_restore_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.db");
-    let source_config = EngineConfig::new(source_path.clone(), DIM);
+    let source_config = EngineConfig::new(source_path, DIM);
     let engine = MemoryEngine::open(&source_config).unwrap();
     engine
         .add_fact(

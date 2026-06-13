@@ -48,9 +48,6 @@ struct SnapshotData {
 #[cfg(feature = "archive")]
 mod archive;
 
-#[cfg(feature = "archive")]
-mod archive;
-
 #[cfg(test)]
 mod tests;
 
@@ -123,7 +120,7 @@ impl std::fmt::Debug for MemoryEngine {
 }
 
 impl MemoryEngine {
-    /// Open or create a memory engine backed by a SQLite file.
+    /// Open or create a memory engine backed by a `SQLite` file.
     ///
     /// On first open, writes `embed_dim` to the config table.
     /// On subsequent opens, validates the stored `embed_dim` matches.
@@ -230,11 +227,11 @@ impl MemoryEngine {
         )
     }
 
-    /// Shared constructor logic: validate embed_dim, load graph and scope tree.
+    /// Shared constructor logic: validate `embed_dim`, load graph and scope tree.
     ///
     /// Tries the snapshot fast path first (file-backed engines only). If the
     /// sidecar validates against the current DB fingerprint, loads from it.
-    /// Otherwise falls back to full SQLite scan.
+    /// Otherwise falls back to full `SQLite` scan.
     fn init_from_pool(
         pool: ConnectionPool,
         embed_dim: usize,
@@ -252,7 +249,7 @@ impl MemoryEngine {
         }
 
         // 2. Try snapshot fast path (file-backed engines only).
-        if let Some(loaded) = Self::try_load_snapshot(&pool, embed_dim, &search_config)? {
+        if let Some(loaded) = Self::try_load_snapshot(&pool, embed_dim, search_config.as_ref())? {
             tracing::info!("loaded from snapshot (fingerprint match)");
             return Ok(Self {
                 pool,
@@ -273,6 +270,7 @@ impl MemoryEngine {
             let conn = pool.read();
             let graph = MemoryGraph::load_from_db(&conn)?;
             let scope_tree = ScopeTree::load(&conn)?;
+            drop(conn);
             (graph, scope_tree)
         };
 
@@ -313,8 +311,8 @@ impl MemoryEngine {
     fn try_load_snapshot(
         pool: &ConnectionPool,
         embed_dim: usize,
-        #[cfg_attr(not(feature = "ann"), allow(unused_variables))] search_config: &Option<
-            SearchConfig,
+        #[cfg_attr(not(feature = "ann"), allow(unused_variables))] search_config: Option<
+            &SearchConfig,
         >,
     ) -> Result<Option<SnapshotData>> {
         let Some(db_path) = pool.path() else {
@@ -370,6 +368,11 @@ impl MemoryEngine {
 
     /// Name of the strategy that would be used for a query right now.
     #[must_use]
+    // Not `const`: with the `ann` feature, `should_use_hnsw` is a non-const
+    // method (it inspects runtime HNSW state), so this cannot be const across
+    // the whole feature matrix even though clippy sees it as const-able under
+    // default features.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn active_strategy_name(&self) -> &str {
         if self.should_use_hnsw() {
             "hnsw"
@@ -391,6 +394,10 @@ impl MemoryEngine {
 
     #[cfg(not(feature = "ann"))]
     const fn should_use_hnsw(&self) -> bool {
+        // `self` is unused without the `ann` feature; the ann-enabled twin
+        // inspects `self.hnsw_strategy`, so both variants must share a
+        // `&self` signature for the call sites to compile in either config.
+        let _ = self;
         false
     }
 
@@ -410,7 +417,7 @@ impl MemoryEngine {
         Ok(())
     }
 
-    /// Validate stored embed_dim matches requested — read-only, never writes.
+    /// Validate stored `embed_dim` matches requested — read-only, never writes.
     fn validate_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
         if let Some(stored) = get_config(conn, "embed_dim")? {
             let stored_dim: usize = stored.parse().map_err(|_| {
@@ -431,7 +438,7 @@ impl MemoryEngine {
 
     /// Whether this engine was opened in read-only mode.
     #[must_use]
-    pub fn is_read_only(&self) -> bool {
+    pub const fn is_read_only(&self) -> bool {
         self.pool.is_read_only()
     }
 
@@ -445,6 +452,11 @@ impl MemoryEngine {
     /// Assumes single-writer semantics: only one `MemoryEngine` instance per
     /// database file. If multiple instances share the same file, the snapshot
     /// may reflect stale in-memory state while the fingerprint matches the DB.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` or `MemoryError::Io` if reading the DB
+    /// fingerprint or writing the snapshot file fails.
     ///
     /// # No-panic contract
     ///
@@ -461,17 +473,18 @@ impl MemoryEngine {
         let conn = self.pool.read();
         let fingerprint = snapshot::read_fingerprint(&conn)?;
 
-        let graph_snap = self.graph.read().to_snapshot();
-        let scope_snap = self.scope_tree.read().to_snapshot();
-
         #[cfg(feature = "ann")]
         let hnsw_snap = self
             .hnsw_strategy
             .as_ref()
             .map(|h| h.to_snapshot(&conn, self.embed_dim))
             .transpose()?;
+        drop(conn);
         #[cfg(not(feature = "ann"))]
         let hnsw_snap: Option<snapshot::HnswSnapshot> = None;
+
+        let graph_snap = self.graph.read().to_snapshot();
+        let scope_snap = self.scope_tree.read().to_snapshot();
 
         let header = snapshot::SnapshotHeader {
             format_version: snapshot::FORMAT_VERSION,
@@ -518,6 +531,7 @@ impl MemoryEngine {
     ) -> Result<std::collections::HashMap<i64, DateTime<Utc>>> {
         let conn = self.write_conn()?;
         let stamped = FactStore::new(&conn, self.embed_dim).stamp_surfaced(fact_ids, now)?;
+        drop(conn);
         Ok(stamped.into_iter().collect())
     }
 
@@ -562,7 +576,7 @@ impl MemoryEngine {
 
     /// Whether this engine is file-backed (vs in-memory).
     #[must_use]
-    pub fn is_file_backed(&self) -> bool {
+    pub const fn is_file_backed(&self) -> bool {
         self.pool.is_file_backed()
     }
 
@@ -657,7 +671,7 @@ impl MemoryEngine {
     }
 
     /// Resolve scope IDs from an optional scope path.
-    /// Returns [root_id] when scope is None, or ancestor IDs when scope exists.
+    /// Returns [`root_id`] when scope is None, or ancestor IDs when scope exists.
     fn resolve_scope_ids(&self, scope: Option<&str>) -> Result<Vec<i64>> {
         let tree = self.scope_tree.read();
         match scope {
@@ -667,7 +681,7 @@ impl MemoryEngine {
                     .ok_or_else(|| MemoryError::NotFound(format!("scope path: {path}")))?;
                 Ok(tree.ancestors(id))
             }
-            None => Ok(vec![tree.root_id()]),
+            None => Ok(vec![ScopeTree::root_id()]),
         }
     }
 }
@@ -708,7 +722,7 @@ fn fact_overlaps_period(fact: &Fact, start: DateTime<Utc>, end: DateTime<Utc>) -
 }
 
 /// Wrap a `Fact` into a `SearchResult` with `MatchType::ImportanceRank`.
-fn fact_to_search_result(fact: Fact) -> SearchResult {
+const fn fact_to_search_result(fact: Fact) -> SearchResult {
     SearchResult {
         score: fact.importance_score,
         match_type: MatchType::ImportanceRank,

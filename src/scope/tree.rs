@@ -35,11 +35,11 @@ impl ScopeTree {
     }
 
     /// Root scope id (always 1).
-    pub fn root_id(&self) -> i64 {
+    pub const fn root_id() -> i64 {
         1
     }
 
-    /// Resolve a path string to a scope_id (read-only, no creation).
+    /// Resolve a path string to a `scope_id` (read-only, no creation).
     /// Returns `None` if any segment is missing.
     pub fn resolve_path(&self, path: &str) -> Option<i64> {
         let mut current = 1i64; // start at root
@@ -57,7 +57,7 @@ impl ScopeTree {
         Some(current)
     }
 
-    /// Get ancestor scope_ids from leaf to root (inclusive).
+    /// Get ancestor `scope_ids` from leaf to root (inclusive).
     pub fn ancestors(&self, scope_id: i64) -> Vec<i64> {
         let mut result = Vec::new();
         let mut current = Some(scope_id);
@@ -68,7 +68,7 @@ impl ScopeTree {
         result
     }
 
-    /// Get all descendant scope_ids (BFS, inclusive of start node).
+    /// Get all descendant `scope_ids` (BFS, inclusive of start node).
     pub fn subtree(&self, scope_id: i64) -> Vec<i64> {
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
@@ -100,7 +100,7 @@ impl ScopeTree {
         result
     }
 
-    /// Resolve a [`ScopeQuery`] to a set of scope_ids.
+    /// Resolve a [`ScopeQuery`] to a set of `scope_ids`.
     pub fn resolve_query(&self, query: &ScopeQuery) -> Option<Vec<i64>> {
         match query {
             ScopeQuery::Exact(path) => self.resolve_path(path).map(|id| vec![id]),
@@ -148,7 +148,7 @@ impl ScopeTree {
         if !self.nodes.contains_key(&scope_id) {
             return None;
         }
-        if scope_id == self.root_id() {
+        if scope_id == Self::root_id() {
             return Some("/".to_string());
         }
 
@@ -156,7 +156,7 @@ impl ScopeTree {
         let mut segments = Vec::new();
         let mut current = Some(scope_id);
         while let Some(id) = current {
-            if id == self.root_id() {
+            if id == Self::root_id() {
                 break;
             }
             let node = self.nodes.get(&id)?;
@@ -355,7 +355,7 @@ mod tests {
                 let ancestors = tree.ancestors(id);
 
                 prop_assert!(!ancestors.is_empty());
-                prop_assert_eq!(*ancestors.last().unwrap(), tree.root_id(),
+                prop_assert_eq!(*ancestors.last().unwrap(), ScopeTree::root_id(),
                     "ancestor chain should end at root");
                 prop_assert_eq!(ancestors[0], id,
                     "ancestor chain should start at the node itself");

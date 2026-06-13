@@ -11,7 +11,7 @@ impl MemoryEngine {
     ///
     /// Parses the session log, extracts noteworthy episodes via keyword
     /// pre-filter, classifies session outcome, and ingests extracted facts.
-    /// The entire session import is wrapped in a SQLite savepoint for
+    /// The entire session import is wrapped in a `SQLite` savepoint for
     /// crash safety (all-or-nothing per session).
     ///
     /// For LLM-powered extraction, provide a custom [`SessionExtractor`].
@@ -20,6 +20,11 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns errors from embedding, DB insertion, or scope resolution.
+    // `conn` (write lock) legitimately spans scope resolution and the inner
+    // bootstrap call (the function's return expression), so it cannot be
+    // tightened without splitting the atomic import across two lock
+    // acquisitions. clippy's nursery suggestion would not compile here.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn bootstrap_session(
         &self,
         reader: impl std::io::BufRead,
@@ -60,6 +65,11 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Io` for directory traversal failures.
+    // `conn` (write lock) legitimately spans scope resolution and the inner
+    // bootstrap call (the function's return expression), so it cannot be
+    // tightened without splitting the atomic import across two lock
+    // acquisitions. clippy's nursery suggestion would not compile here.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn bootstrap_directory(
         &self,
         dir: &std::path::Path,

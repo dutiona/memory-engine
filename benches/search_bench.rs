@@ -17,7 +17,7 @@
 //!
 //! - Data generation is deterministic (blake3 hash → embedding).
 //! - Criterion's `b.iter()` excludes setup from measurement.
-//! - SQLite WAL mode + OS page cache → warm-cache after first iteration.
+//! - `SQLite` WAL mode + OS page cache → warm-cache after first iteration.
 //!   This is realistic for interactive use where the DB is already open.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};

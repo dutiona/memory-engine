@@ -1,6 +1,6 @@
 //! Store operations for activity records.
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::types::{Activity, ActivityStatus, NewActivity};
@@ -98,6 +98,10 @@ impl<'a> ActivityStore<'a> {
     }
 
     /// Get an activity by id.
+    ///
+    /// Currently exercised only by unit tests; gated to keep the lib target
+    /// `dead_code`-clean until wired into the engine/MCP (see #95/#96).
+    #[cfg(test)]
     pub fn get(&self, id: i64) -> Result<Activity> {
         self.conn
             .query_row(
@@ -117,25 +121,18 @@ impl<'a> ActivityStore<'a> {
     }
 
     /// List activities for a session, most recent first.
+    ///
+    /// Currently exercised only by unit tests; gated to keep the lib target
+    /// `dead_code`-clean until wired into the engine/MCP (see #95/#96).
+    #[cfg(test)]
     pub fn list_by_session(&self, session_id: &str, limit: Option<usize>) -> Result<Vec<Activity>> {
-        let sql = match limit {
-            Some(n) => format!(
-                "SELECT id, session_id, tool_name, args_hash, args, result_summary,
+        let base = "SELECT id, session_id, tool_name, args_hash, args, result_summary,
                         outcome_class, status, occurrence_count, first_seen, last_seen,
                         scope_id, promoted_fact_id
                  FROM activities
                  WHERE session_id = ?1
-                 ORDER BY last_seen DESC
-                 LIMIT {n}"
-            ),
-            None => "SELECT id, session_id, tool_name, args_hash, args, result_summary,
-                            outcome_class, status, occurrence_count, first_seen, last_seen,
-                            scope_id, promoted_fact_id
-                     FROM activities
-                     WHERE session_id = ?1
-                     ORDER BY last_seen DESC"
-                .to_string(),
-        };
+                 ORDER BY last_seen DESC";
+        let sql = limit.map_or_else(|| base.to_string(), |n| format!("{base} LIMIT {n}"));
         let mut stmt = self.conn.prepare(&sql).map_err(MemoryError::Database)?;
         let rows = stmt
             .query_map(params![session_id], row_to_activity)
@@ -194,6 +191,10 @@ impl<'a> ActivityStore<'a> {
     }
 
     /// Count activities in a session.
+    ///
+    /// Currently exercised only by unit tests; gated to keep the lib target
+    /// `dead_code`-clean until wired into the engine/MCP (see #95/#96).
+    #[cfg(test)]
     pub fn count_by_session(&self, session_id: &str) -> Result<i64> {
         self.conn
             .query_row(

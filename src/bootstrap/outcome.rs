@@ -22,12 +22,28 @@ pub enum SessionOutcome {
 #[derive(Debug, Clone, Default)]
 pub struct OutcomeSignals {
     pub has_commit: bool,
-    pub tests_passed: bool,
+    pub tests_passed: TestOutcome,
     pub has_error_loops: bool,
     /// True when the last tool call in the session was interrupted, as reported
     /// by `ToolUseResult::interrupted` propagated through `filter.rs`.
     pub was_interrupted: bool,
     pub final_user_sentiment: Option<Sentiment>,
+}
+
+/// Whether a session's tests were observed passing.
+///
+/// An enum (not a `bool`) keeps [`OutcomeSignals`] within clippy's bool budget
+/// and names the negative case honestly: the heuristic only detects a *passing*
+/// signal, so its absence is `NotObserved`, not a definite failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TestOutcome {
+    /// A passing-test signal (`test result: ok` / `passed`) was detected.
+    Passed,
+    /// No passing-test signal observed — the session may have failed its tests
+    /// or never run any. Mirrors the original boolean's `false`, which likewise
+    /// did not distinguish the two.
+    #[default]
+    NotObserved,
 }
 
 /// Coarse user-sentiment bucket derived from keyword matching.
@@ -59,6 +75,7 @@ pub enum Sentiment {
 /// - **Success**: `(has_commit && !has_error_loops) || (tests_passed && !was_interrupted)`
 /// - **Failure**: `has_error_loops || was_interrupted || (negative sentiment && !has_commit)`
 /// - **Indeterminate**: everything else
+#[must_use]
 pub fn classify_outcome(
     turns: &[super::filter::ConversationTurn],
 ) -> (SessionOutcome, OutcomeSignals) {
@@ -70,7 +87,11 @@ pub fn classify_outcome(
 
     let signals = OutcomeSignals {
         has_commit,
-        tests_passed,
+        tests_passed: if tests_passed {
+            TestOutcome::Passed
+        } else {
+            TestOutcome::NotObserved
+        },
         has_error_loops,
         was_interrupted,
         final_user_sentiment: Some(final_user_sentiment),
@@ -209,10 +230,6 @@ fn detect_interrupted(turns: &[super::filter::ConversationTurn]) -> bool {
 
 /// Keyword-based sentiment of the final user message.
 fn detect_sentiment(turns: &[super::filter::ConversationTurn]) -> Sentiment {
-    let Some(last_user_text) = turns.last().map(|t| t.user_text.to_lowercase()) else {
-        return Sentiment::Neutral;
-    };
-
     const POSITIVE: &[&str] = &[
         "thanks", "great", "perfect", "works", "awesome", "good", "nice",
     ];
@@ -224,6 +241,10 @@ fn detect_sentiment(turns: &[super::filter::ConversationTurn]) -> Sentiment {
         "doesn't work",
         "failed",
     ];
+
+    let Some(last_user_text) = turns.last().map(|t| t.user_text.to_lowercase()) else {
+        return Sentiment::Neutral;
+    };
 
     if POSITIVE.iter().any(|kw| last_user_text.contains(kw)) {
         return Sentiment::Positive;
@@ -302,7 +323,7 @@ mod tests {
         )];
         let (outcome, signals) = classify_outcome(&turns);
         assert_eq!(outcome, SessionOutcome::Success);
-        assert!(signals.tests_passed);
+        assert_eq!(signals.tests_passed, TestOutcome::Passed);
     }
 
     #[test]
@@ -379,7 +400,7 @@ mod tests {
         let (outcome, signals) = classify_outcome(&turns);
         assert_eq!(outcome, SessionOutcome::Indeterminate);
         assert!(!signals.has_commit);
-        assert!(!signals.tests_passed);
+        assert_eq!(signals.tests_passed, TestOutcome::NotObserved);
         assert!(!signals.has_error_loops);
         assert!(!signals.was_interrupted);
     }

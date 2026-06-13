@@ -1,6 +1,6 @@
 //! Integration test: HNSW recall vs brute-force oracle.
 //!
-//! Verifies that HnswStrategy returns results with >= 90% average overlap
+//! Verifies that `HnswStrategy` returns results with >= 90% average overlap
 //! with the brute-force ground truth across multiple diverse queries.
 
 #![cfg(feature = "ann")]

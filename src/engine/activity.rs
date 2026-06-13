@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 
-use crate::engine::activity_filter::{apply_filter, ActivityFilterConfig, ActivityFilterDecision};
+use crate::engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, apply_filter};
 use crate::error::{MemoryError, Result};
 use crate::store::activities::ActivityStore;
 use crate::store::checkpoints::CheckpointStore;
@@ -120,12 +120,12 @@ impl MemoryEngine {
                         promoted_fact_id = Some(fact_id);
                         // Update activity status to promoted.
                         let conn = self.write_conn()?;
-                        let store = ActivityStore::new(&conn);
-                        store.update_status(
+                        ActivityStore::new(&conn).update_status(
                             activity_id,
                             ActivityStatus::Promoted,
                             Some(fact_id),
                         )?;
+                        drop(conn);
                         ActivityStatus::Promoted
                     }
                     Err(_) => {
@@ -158,6 +158,11 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on write failure.
+    // `conn` (write lock) is used by both the `last_activity_id` query and the
+    // final `upsert` (the return expression), so it cannot be dropped earlier
+    // without splitting the atomic read+write across two lock acquisitions.
+    // clippy's nursery suggestion would not compile here.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn checkpoint_session(
         &self,
         session_id: &str,
@@ -183,7 +188,7 @@ impl MemoryEngine {
             summary: summary.map(String::from),
             last_activity_id,
             checkpoint_at: Utc::now(),
-            metadata: metadata.unwrap_or(serde_json::json!({})),
+            metadata: metadata.unwrap_or_else(|| serde_json::json!({})),
         };
         CheckpointStore::new(&conn).upsert(&checkpoint)
     }

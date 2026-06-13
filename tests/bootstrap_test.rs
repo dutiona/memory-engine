@@ -19,11 +19,11 @@ fn engine() -> MemoryEngine {
     MemoryEngine::open_memory(4).unwrap()
 }
 
-fn success_fixture() -> &'static str {
+const fn success_fixture() -> &'static str {
     include_str!("fixtures/success_session.jsonl")
 }
 
-fn failed_fixture() -> &'static str {
+const fn failed_fixture() -> &'static str {
     include_str!("fixtures/failed_session.jsonl")
 }
 

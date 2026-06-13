@@ -1,6 +1,8 @@
-//! Implementing all three consumer traits: EmbeddingProvider, SummaryGenerator, ConflictArbiter.
+//! Implementing all three consumer traits: `EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`.
 //!
 //! Run with: `cargo run --example custom_traits`
+// Toy embedder: char codes (< 2^21) convert to f32 without precision loss.
+#![allow(clippy::cast_precision_loss)]
 
 use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
@@ -24,7 +26,9 @@ impl EmbeddingProvider for SimpleEmbedder {
         }
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 0.0 {
-            v.iter_mut().for_each(|x| *x /= norm);
+            for x in &mut v {
+                *x /= norm;
+            }
         }
         Ok(v)
     }
@@ -66,6 +70,8 @@ impl ConflictArbiter for RecencyArbiter {
     }
 }
 
+// Example walkthrough kept linear for readability rather than split into helpers.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), MemoryError> {
     let engine = MemoryEngine::open_memory(4)?;
     let embedder = SimpleEmbedder;

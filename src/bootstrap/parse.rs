@@ -176,6 +176,7 @@ fn parse_single_block(obj: &serde_json::Value) -> ContentBlock {
 /// Parse a timestamp string to `DateTime<Utc>`, returning `None` on failure.
 ///
 /// Tries RFC 3339 first, then falls back to `%Y-%m-%dT%H:%M:%S` (no timezone).
+#[must_use]
 pub fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
     // Try RFC 3339 / ISO 8601 with timezone
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
@@ -200,7 +201,7 @@ mod tests {
 
     #[test]
     fn parse_empty_file() {
-        let reader = BufReader::new("".as_bytes());
+        let reader = BufReader::new(b"" as &[u8]);
         let (entries, _malformed) = parse_session_file(reader);
         assert!(entries.is_empty());
     }

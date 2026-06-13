@@ -1,6 +1,6 @@
 //! Three-pass consolidation pipeline: dedup, cluster fusion, global integration.
 //!
-//! All passes run atomically in a single SQLite transaction.
+//! All passes run atomically in a single `SQLite` transaction.
 
 mod cluster;
 mod dedup;

@@ -150,7 +150,7 @@ fn inspection_lifecycle() {
     assert!(sqlite_path.exists());
 }
 
-/// Test explain_fact for a not-found ID returns proper error.
+/// Test `explain_fact` for a not-found ID returns proper error.
 #[test]
 fn explain_fact_not_found() {
     let engine = MemoryEngine::open_memory(DIM).unwrap();
@@ -158,7 +158,7 @@ fn explain_fact_not_found() {
     assert!(err.is_err());
 }
 
-/// Test fact_history for a not-found ID returns proper error.
+/// Test `fact_history` for a not-found ID returns proper error.
 #[test]
 fn fact_history_not_found() {
     let engine = MemoryEngine::open_memory(DIM).unwrap();

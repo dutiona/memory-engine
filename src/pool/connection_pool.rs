@@ -11,7 +11,7 @@ use crate::store::schema::{
 
 /// A connection pool with N read connections and 1 write connection.
 ///
-/// SQLite WAL supports concurrent readers with a single writer.
+/// `SQLite` WAL supports concurrent readers with a single writer.
 /// The pool is bounded — `read()` blocks if all connections are checked out.
 ///
 /// In-memory databases use the write connection for reads (serialized).
@@ -232,7 +232,7 @@ impl ConnectionPool {
 
     /// Whether this pool is file-backed (vs in-memory).
     #[must_use]
-    pub fn is_file_backed(&self) -> bool {
+    pub const fn is_file_backed(&self) -> bool {
         self.path.is_some()
     }
 
@@ -253,6 +253,7 @@ mod tests {
         let pool = ConnectionPool::open_memory(4).unwrap();
         let conn = pool.write();
         let v = get_config(&conn, "schema_version").unwrap();
+        drop(conn);
         assert!(v.is_some());
     }
 
@@ -261,6 +262,7 @@ mod tests {
         let pool = ConnectionPool::open_memory(4).unwrap();
         let r = pool.read();
         let v = get_config(&r, "schema_version").unwrap();
+        drop(r);
         assert!(v.is_some());
     }
 
@@ -276,11 +278,14 @@ mod tests {
             crate::store::schema::set_config(&w, "test_key", "test_value").unwrap();
         }
 
-        // Two concurrent reads
+        // Two concurrent reads: both guards are acquired before either is
+        // released, proving the pool grants 2 simultaneous read checkouts.
         let r1 = pool.read();
         let r2 = pool.read();
         let v1 = get_config(&r1, "test_key").unwrap();
+        drop(r1);
         let v2 = get_config(&r2, "test_key").unwrap();
+        drop(r2);
         assert_eq!(v1, Some("test_value".into()));
         assert_eq!(v2, Some("test_value".into()));
     }
@@ -323,8 +328,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         // First create a valid DB
-        let _pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
-        drop(_pool);
+        let pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
+        drop(pool);
 
         // Now open read-only
         let pool = ConnectionPool::open_read_only(&db_path, 4, 2).unwrap();
@@ -334,6 +339,7 @@ mod tests {
         // Read should work
         let r = pool.read();
         let v = get_config(&r, "schema_version").unwrap();
+        drop(r);
         assert!(v.is_some());
     }
 
@@ -341,8 +347,8 @@ mod tests {
     fn pool_read_only_write_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let _pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
-        drop(_pool);
+        let pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
+        drop(pool);
 
         let pool = ConnectionPool::open_read_only(&db_path, 4, 2).unwrap();
         let err = pool.try_write().unwrap_err();

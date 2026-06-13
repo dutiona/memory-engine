@@ -19,7 +19,7 @@ pub trait EmbeddingProvider {
     /// Compute embedding vectors for multiple texts in a single call.
     ///
     /// The default implementation loops `embed()` sequentially.
-    /// Providers with native batch APIs (e.g., OpenAI `/v1/embeddings`)
+    /// Providers with native batch APIs (e.g., `OpenAI` `/v1/embeddings`)
     /// should override this for a single HTTP round-trip.
     ///
     /// # Contract
@@ -644,7 +644,7 @@ mod tests {
             ) -> crate::error::Result<Vec<(usize, f64)>> {
                 Ok(vec![])
             }
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "dummy"
             }
         }

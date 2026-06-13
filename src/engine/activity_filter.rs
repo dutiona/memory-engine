@@ -61,6 +61,7 @@ pub struct PromoteAction {
 /// `ActivityStore::insert_or_dedup`.
 ///
 /// Evaluation order: ignore first (short-circuit), then promote, else record.
+#[must_use]
 pub fn apply_filter(
     tool_name: &str,
     _args: &serde_json::Value,
@@ -95,8 +96,14 @@ fn format_promote_content(tool_name: &str, result: Option<&str>) -> String {
     match result {
         Some(r) if !r.is_empty() => {
             let truncated = if r.len() > 200 {
-                // Find the last char boundary at or before 200 bytes
-                let end = r.floor_char_boundary(200);
+                // Find the last char boundary at or before 200 bytes.
+                // `str::floor_char_boundary` is unstable until Rust 1.91; the
+                // crate MSRV is 1.85, so walk back manually via the
+                // long-stable `is_char_boundary`.
+                let mut end = 200;
+                while !r.is_char_boundary(end) {
+                    end -= 1;
+                }
                 &r[..end]
             } else {
                 r

@@ -1,6 +1,8 @@
 //! Basic round-trip: open engine, ingest event, add fact, query.
 //!
 //! Run with: `cargo run --example basic_roundtrip`
+// Example var names (fact1/fact2, event/edge) are intentionally short.
+#![allow(clippy::similar_names)]
 
 use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;

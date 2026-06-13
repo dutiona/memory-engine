@@ -9,7 +9,7 @@ pub struct BootstrapConfig {
     pub scope: Option<String>,
     /// Maximum turns to process per session. `0` = no limit.
     pub max_turns: usize,
-    /// Skip sessions already bootstrapped (idempotency via session_id check).
+    /// Skip sessions already bootstrapped (idempotency via `session_id` check).
     pub skip_existing: bool,
 }
 
@@ -62,10 +62,16 @@ impl BootstrapReport {
         let total_new = other.prewarm_metrics.total_count();
         let total = total_old + total_new;
         if total > 0 {
-            self.prewarm_metrics.avg_importance = (self.prewarm_metrics.avg_importance
-                * total_old as f64
-                + other.prewarm_metrics.avg_importance * total_new as f64)
-                / total as f64;
+            // Episode tallies are tiny (<< 2^52), so these usize -> f64 casts
+            // cannot lose precision; the lint is a non-issue and a saturating
+            // `try_from` would be less honest than the direct cast here.
+            #[allow(clippy::cast_precision_loss)]
+            {
+                self.prewarm_metrics.avg_importance = other.prewarm_metrics.avg_importance.mul_add(
+                    total_new as f64,
+                    self.prewarm_metrics.avg_importance * total_old as f64,
+                ) / total as f64;
+            }
         }
         self.prewarm_metrics.episodic_count += other.prewarm_metrics.episodic_count;
         self.prewarm_metrics.semantic_count += other.prewarm_metrics.semantic_count;

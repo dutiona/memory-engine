@@ -45,7 +45,7 @@ impl MemoryEngine {
         }
 
         // Query dormant facts from the store, filtered by scope
-        let scope_ids_owned = scope_ids.map(|s| s.to_vec());
+        let scope_ids_owned = scope_ids.map(<[i64]>::to_vec);
         let candidates = self.with_read(|conn| {
             FactStore::new(conn, self.embed_dim)
                 .list_dormant(DORMANT_THRESHOLD, scope_ids_owned.as_deref())

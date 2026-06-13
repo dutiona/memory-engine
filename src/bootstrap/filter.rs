@@ -1,4 +1,4 @@
-//! Conversation turn reconstruction and NeuroStack keyword pre-filter.
+//! Conversation turn reconstruction and `NeuroStack` keyword pre-filter.
 //!
 //! Transforms raw [`SessionEntry`] sequences into structured [`ConversationTurn`]s,
 //! then applies rule-based keyword matching to surface [`CandidateEpisode`]s worth
@@ -58,7 +58,7 @@ pub struct CandidateEpisode {
 // Keyword tables
 // ---------------------------------------------------------------------------
 
-/// Keywords that trigger on user_text + assistant_text + tool stderr (but NOT
+/// Keywords that trigger on `user_text` + `assistant_text` + tool stderr (but NOT
 /// tool stdout, to avoid false positives like "0 errors").
 const BUG_KEYWORDS: &[&str] = &["root cause", "fix", "traceback", "exception"];
 
@@ -80,6 +80,7 @@ const LEARNING_KEYWORDS: &[&str] = &["discovered", "til", "turns out", "reason i
 /// Progress, queue-operation, file-history-snapshot, last-prompt, and unknown
 /// entries are filtered out. User + assistant entries are paired first by
 /// UUID/parent-UUID linkage, then by sequential fallback.
+#[must_use]
 pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
     // Keep only user/assistant entries.
     let relevant: Vec<&SessionEntry> = entries
@@ -180,7 +181,7 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
 /// Build a single [`ConversationTurn`] from a user entry and its assistant reply.
 ///
 /// `tool_result_entries` are user entries that carry `tool_use_result` for the
-/// assistant's tool_use blocks (collected by the caller from subsequent entries).
+/// assistant's `tool_use` blocks (collected by the caller from subsequent entries).
 fn build_turn(
     user: &SessionEntry,
     assistant: &SessionEntry,
@@ -213,7 +214,7 @@ fn build_turn(
 
 /// Collect user entries that carry `tool_use_result` and whose `parent_uuid`
 /// points to the given assistant entry. These are the tool-result rows that
-/// follow an assistant's tool_use blocks in Claude Code JSONL.
+/// follow an assistant's `tool_use` blocks in Claude Code JSONL.
 fn collect_tool_result_entries<'a>(
     all: &[&'a SessionEntry],
     assistant: &SessionEntry,
@@ -310,11 +311,12 @@ fn extract_tool_calls(
 // Keyword pre-filter
 // ---------------------------------------------------------------------------
 
-/// Apply NeuroStack keyword patterns to identify [`CandidateEpisode`]s.
+/// Apply `NeuroStack` keyword patterns to identify [`CandidateEpisode`]s.
 ///
 /// Each turn is checked against keyword tables for every category. A turn can
 /// match multiple categories, producing one `CandidateEpisode` per category per
 /// matching turn.
+#[must_use]
 pub fn keyword_prefilter(turns: &[ConversationTurn], session_id: &str) -> Vec<CandidateEpisode> {
     let mut episodes: Vec<CandidateEpisode> = Vec::new();
 
