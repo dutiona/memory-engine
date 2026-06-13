@@ -114,7 +114,8 @@ pub fn fts_count_expired(
         rusqlite::params![query, fact_type_str, scope_ids_json],
         |row| row.get::<_, i64>(0),
     ) {
-        Ok(n) => Ok(usize::try_from(n).unwrap_or(0)),
+        Ok(n) => usize::try_from(n)
+            .map_err(|e| crate::error::MemoryError::Internal(format!("invalid FTS count: {e}"))),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
         Err(e) => {
             // FTS5 syntax errors are caught here, same as fts_search.
