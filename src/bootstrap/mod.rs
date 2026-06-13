@@ -270,8 +270,12 @@ fn bootstrap_within_savepoint(
 
     let total = report.prewarm_metrics.total_count();
     if total > 0 {
-        report.prewarm_metrics.avg_importance =
-            importance_sum / f64::from(u32::try_from(total).unwrap_or(u32::MAX));
+        // Episode tally is tiny (<< 2^52); the usize -> f64 cast cannot lose
+        // precision, so the lint is a non-issue and the direct cast is clearest.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            report.prewarm_metrics.avg_importance = importance_sum / total as f64;
+        }
     }
 
     Ok(())

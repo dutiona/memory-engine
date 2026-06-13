@@ -32,15 +32,18 @@ pub struct OutcomeSignals {
 
 /// Whether a session's tests were observed passing.
 ///
-/// An enum (not a `bool`) so "no passing-test signal" is not conflated with a
-/// definite failure — and to keep [`OutcomeSignals`] within clippy's bool budget.
+/// An enum (not a `bool`) keeps [`OutcomeSignals`] within clippy's bool budget
+/// and names the negative case honestly: the heuristic only detects a *passing*
+/// signal, so its absence is `NotObserved`, not a definite failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TestOutcome {
     /// A passing-test signal (`test result: ok` / `passed`) was detected.
     Passed,
-    /// No passing-test signal detected (tests failed or did not run).
+    /// No passing-test signal observed — the session may have failed its tests
+    /// or never run any. Mirrors the original boolean's `false`, which likewise
+    /// did not distinguish the two.
     #[default]
-    Failed,
+    NotObserved,
 }
 
 /// Coarse user-sentiment bucket derived from keyword matching.
@@ -87,7 +90,7 @@ pub fn classify_outcome(
         tests_passed: if tests_passed {
             TestOutcome::Passed
         } else {
-            TestOutcome::Failed
+            TestOutcome::NotObserved
         },
         has_error_loops,
         was_interrupted,
@@ -397,7 +400,7 @@ mod tests {
         let (outcome, signals) = classify_outcome(&turns);
         assert_eq!(outcome, SessionOutcome::Indeterminate);
         assert!(!signals.has_commit);
-        assert_eq!(signals.tests_passed, TestOutcome::Failed);
+        assert_eq!(signals.tests_passed, TestOutcome::NotObserved);
         assert!(!signals.has_error_loops);
         assert!(!signals.was_interrupted);
     }

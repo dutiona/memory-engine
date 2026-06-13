@@ -62,16 +62,16 @@ impl BootstrapReport {
         let total_new = other.prewarm_metrics.total_count();
         let total = total_old + total_new;
         if total > 0 {
-            // Counts are small (episode tallies); convert losslessly via u32 so
-            // clippy's cast_precision_loss does not fire (f64::from is lossless).
-            let w_new = f64::from(u32::try_from(total_new).unwrap_or(u32::MAX));
-            let w_old = f64::from(u32::try_from(total_old).unwrap_or(u32::MAX));
-            let denom = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
-            self.prewarm_metrics.avg_importance = other
-                .prewarm_metrics
-                .avg_importance
-                .mul_add(w_new, self.prewarm_metrics.avg_importance * w_old)
-                / denom;
+            // Episode tallies are tiny (<< 2^52), so these usize -> f64 casts
+            // cannot lose precision; the lint is a non-issue and a saturating
+            // `try_from` would be less honest than the direct cast here.
+            #[allow(clippy::cast_precision_loss)]
+            {
+                self.prewarm_metrics.avg_importance = other.prewarm_metrics.avg_importance.mul_add(
+                    total_new as f64,
+                    self.prewarm_metrics.avg_importance * total_old as f64,
+                ) / total as f64;
+            }
         }
         self.prewarm_metrics.episodic_count += other.prewarm_metrics.episodic_count;
         self.prewarm_metrics.semantic_count += other.prewarm_metrics.semantic_count;
