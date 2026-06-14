@@ -25,12 +25,27 @@ const SECRET_PREFIXES: &[(&str, &str)] = &[
     ("slack-token", "xoxb-"),
     ("slack-token", "xoxp-"),
     ("private-key-header", "-----BEGIN"),
+    ("jwt", "eyJ"), // base64url of `{"` — catches JWTs whose internal `.` breaks entropy
 ];
 
 /// A token is a high-entropy secret candidate only if at least this long.
 const HIGH_ENTROPY_MIN_LEN: usize = 20;
 /// Shannon entropy threshold (bits/char) above which a token-shaped string is redacted.
-const HIGH_ENTROPY_BITS: f64 = 4.0;
+/// 4.3 sits above uniform hex (log2 16 = 4.0, so git SHAs are not unstably redacted) and
+/// well below base64/alnum secrets (~6.0 / ~5.95).
+const HIGH_ENTROPY_BITS: f64 = 4.3;
+
+/// Non-whitespace delimiters that also split tokens, so secrets embedded in JSON /
+/// `key=value` / `key: value` / quoted strings are isolated and classified — not hidden
+/// inside `"token":"ghp_..."`. `.`/`@`/`/`/`-`/`_`/`+` are NOT delimiters (they appear
+/// inside emails, JWTs, base64 and provider tokens).
+const PUNCT_DELIMITERS: &[char] = &[
+    '"', '\'', '`', '{', '}', '[', ']', '(', ')', ':', ',', ';', '=',
+];
+
+fn is_delimiter(ch: char) -> bool {
+    ch.is_whitespace() || PUNCT_DELIMITERS.contains(&ch)
+}
 
 /// One redaction: the rule that fired and the (now-removed) token.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,10 +110,12 @@ pub fn shannon_entropy(s: &str) -> f64 {
 
 /// True iff `token` looks like an email address (PII).
 fn is_email(token: &str) -> bool {
-    let Some(at) = token.find('@') else {
+    if token.matches('@').count() != 1 {
+        return false; // exactly one '@' (rejects `a@b@c` and non-emails)
+    }
+    let Some((local, domain)) = token.split_once('@') else {
         return false;
     };
-    let (local, domain) = (&token[..at], &token[at + 1..]);
     !local.is_empty()
         && domain.contains('.')
         && !domain.starts_with('.')
@@ -156,8 +173,10 @@ fn flush_token(token: &mut String, out: &mut String, findings: &mut Vec<Finding>
     }
 }
 
-/// Redact secrets/PII from `text`, preserving all non-secret characters + whitespace.
+/// Redact secrets/PII from `text`, preserving all non-secret characters + delimiters.
 ///
+/// Tokens are split on whitespace AND JSON/assignment punctuation (see [`is_delimiter`]),
+/// so a secret embedded in `"token":"ghp_..."` or `key=secret` is isolated and classified.
 /// Returns the redacted text and the findings (secret tokens removed).
 #[must_use]
 pub fn redact_text(text: &str) -> (String, Vec<Finding>) {
@@ -165,7 +184,7 @@ pub fn redact_text(text: &str) -> (String, Vec<Finding>) {
     let mut findings: Vec<Finding> = Vec::new();
     let mut token = String::new();
     for ch in text.chars() {
-        if ch.is_whitespace() {
+        if is_delimiter(ch) {
             flush_token(&mut token, &mut out, &mut findings);
             out.push(ch);
         } else {
@@ -285,5 +304,66 @@ mod tests {
             findings2.is_empty(),
             "[REDACTED:*] placeholders must not be re-redacted"
         );
+    }
+
+    #[test]
+    fn redacts_secrets_embedded_in_json() {
+        let line = r#"{"token":"ghp_0123456789abcdefghij0123456789abcdef","email":"a@b.com"}"#;
+        let (out, findings) = redact_text(line);
+        assert!(
+            !out.contains("ghp_0123456789abcdefghij0123456789abcdef"),
+            "json token leaked: {out}"
+        );
+        assert!(!out.contains("a@b.com"), "json email leaked: {out}");
+        let rules: Vec<&str> = findings.iter().map(|f| f.rule.as_str()).collect();
+        assert!(
+            rules.contains(&"github-pat") && rules.contains(&"email"),
+            "rules: {rules:?}"
+        );
+        assert!(
+            out.contains("\"token\":") && out.contains("\"email\":"),
+            "json structure lost"
+        );
+    }
+
+    #[test]
+    fn redacts_assignment_value_keeping_key() {
+        let (out, findings) = redact_text("api_key=Xk9Lp2Rt5Yv8Bn1Cx4Df6Qw7Zz0Aa");
+        assert!(
+            out.starts_with("api_key="),
+            "key name should survive: {out}"
+        );
+        assert!(out.contains("[REDACTED:high-entropy]"), "got: {out}");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn redacts_jwt_via_prefix() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
+        let (out, findings) = redact_text(&format!("Authorization: Bearer {jwt}"));
+        assert!(out.contains("[REDACTED:jwt]"), "got: {out}");
+        assert!(!out.contains(jwt));
+        assert_eq!(findings.iter().filter(|f| f.rule == "jwt").count(), 1);
+    }
+
+    #[test]
+    fn empty_input() {
+        let (out, findings) = redact_text("");
+        assert_eq!(out, "");
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn multibyte_tokens_no_panic() {
+        // Non-ASCII tokens around an email must not panic and must survive.
+        let (out, _) = redact_text("café résumé señor@example.com déjà");
+        assert!(out.contains("[REDACTED:email]"), "got: {out}");
+        assert!(out.contains("café") && out.contains("déjà"));
+    }
+
+    #[test]
+    fn multiple_findings_one_line() {
+        let (_out, findings) = redact_text("aws AKIAIOSFODNN7EXAMPLE and email a@b.com");
+        assert_eq!(findings.len(), 2);
     }
 }
