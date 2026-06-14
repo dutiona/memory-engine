@@ -14,7 +14,6 @@
 //! no GPU contention (S0 is build-only). See `docs/audits/S0.3-bootstrap-audit.md`.
 
 use std::cell::RefCell;
-use std::io::Cursor;
 
 use chrono::{DateTime, Datelike, Utc};
 use memory_engine::bootstrap::extract::KeywordExtractor;
@@ -54,7 +53,7 @@ fn session(sid: &str, base: &str, turns: &[(&str, &str)]) -> String {
     let mut out = String::new();
     for (i, (role, text)) in turns.iter().enumerate() {
         let offset_secs = i64::try_from(i).unwrap() * 30;
-        let ts = (base_dt + chrono::Duration::seconds(offset_secs)).to_rfc3339();
+        let ts = (base_dt + chrono::Duration::try_seconds(offset_secs).unwrap()).to_rfc3339();
         let parent = if i == 0 {
             serde_json::Value::Null
         } else {
@@ -136,10 +135,21 @@ fn specs() -> Vec<SessionSpec> {
             "sess-conv-2025-01",
             "2025-01-12T10:00:00Z",
             vec![
-                ("user", "Remind me of the commit rule and fix the panic."),
+                // Convention turn — byte-identical (user + assistant) to session 3, so the
+                // extracted fact content matches VERBATIM across two distinct sessions: the
+                // real cross-session dedup probe. A content-hash dedup-on-insert would collapse
+                // the two identical facts, dropping the stored count below 2 and FAILING the
+                // no-dedup assertions below (which a mere substring match would not catch).
+                ("user", "Any formatting rule for commits?"),
                 (
                     "assistant",
-                    "Rule: always use rustfmt before every commit. Also fixed the panic; the root cause was an unwrap.",
+                    "Team convention: always use rustfmt before every commit.",
+                ),
+                // Separate bug turn — keeps session 5 dual-fact, preserving the 6-fact yield.
+                ("user", "Also, fix the panic in the worker."),
+                (
+                    "assistant",
+                    "Fixed the panic; the root cause was an unwrap on an empty queue.",
                 ),
             ],
         ),
@@ -170,7 +180,7 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
     for (i, jsonl) in sessions.iter().enumerate() {
         let report = engine
             .bootstrap_session(
-                Cursor::new(jsonl.as_bytes()),
+                jsonl.as_bytes(),
                 &TestEmbedder,
                 &extractor,
                 &config,
@@ -202,11 +212,12 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         let snippet: String = content.chars().take(90).collect();
         println!("  fact t_created={t} content={snippet:?}");
     }
-    // Deterministic yield: 4 single-category sessions + session 5's dual-category
-    // turn (Convention + Bug) => 6 facts. Pins expected yield against extractor drift.
+    // Deterministic yield: sessions 1–4 → 1 fact each (4); session 5 → 2 facts (a
+    // convention turn identical to session 3's + a separate bug turn) => 6. Pins expected
+    // yield against extractor drift.
     assert_eq!(
         total_facts, 6,
-        "expected 6 facts (4 single-category + session-5 dual-category), got {total_facts}"
+        "expected 6 facts (sessions 1–4 single + session-5 convention + bug), got {total_facts}"
     );
 
     // --- Idempotency: re-run all five, expect skips + zero new facts ---
@@ -214,7 +225,7 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
     for jsonl in &sessions {
         let report = engine
             .bootstrap_session(
-                Cursor::new(jsonl.as_bytes()),
+                jsonl.as_bytes(),
                 &TestEmbedder,
                 &extractor,
                 &config,
