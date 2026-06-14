@@ -8,6 +8,7 @@ pub mod filter;
 pub mod metrics;
 pub mod outcome;
 pub mod parse;
+pub mod redact;
 
 use std::io::BufRead;
 use std::path::Path;
@@ -26,6 +27,7 @@ pub use extract::{ExtractedFact, KeywordExtractor, SessionExtractor};
 pub use filter::{CandidateEpisode, ConversationTurn, EpisodeCategory, ToolCallRecord};
 pub use metrics::{BootstrapConfig, BootstrapReport, PrewarmMetrics};
 pub use outcome::{OutcomeSignals, SessionOutcome};
+pub use redact::{Finding, RedactionReport, redact_entries, redact_text, shannon_entropy};
 
 /// Bootstrap one session from a JSONL reader into the memory engine.
 ///
