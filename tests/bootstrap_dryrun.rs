@@ -271,4 +271,25 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         "duplicate copies must originate in distinct backdated sessions (cross-session), got {}",
         shared_sessions.len()
     );
+
+    // Drop the borrow so we can call engine methods below.
+    drop(seen);
+
+    // --- Store-level no-dedup: query the persisted rows directly.
+    //     This is the authoritative check: both identical-content facts must
+    //     actually be present in the store, not merely have reached the
+    //     classifier.  The assertion stays true even if bootstrap is later
+    //     changed to skip classifier calls for duplicates (as long as it
+    //     still stores them), and it would catch a dedup-on-insert regression
+    //     that the recorder-only check cannot. ---
+    let stored_facts = engine.list_active_facts(None).unwrap();
+    let stored_shared_count = stored_facts
+        .iter()
+        .filter(|f| f.content.contains(SHARED))
+        .count();
+    assert!(
+        stored_shared_count >= 2,
+        "store must contain ≥2 rows with the shared convention text (no dedup-on-insert), \
+         got {stored_shared_count}"
+    );
 }
