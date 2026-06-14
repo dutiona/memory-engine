@@ -146,6 +146,12 @@ fn specs() -> Vec<SessionSpec> {
     ]
 }
 
+/// The convention sentence repeated verbatim in sessions 3 and 5 (dedup probe).
+const SHARED: &str = "always use rustfmt before every commit";
+
+// A cohesive four-phase characterization run (yield → idempotency → backdating →
+// no-dedup) sharing one engine + recorder; kept as a single test on purpose.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn dryrun_yield_backdate_idempotency_no_dedup() {
     let engine = MemoryEngine::open_memory(4).unwrap();
@@ -164,7 +170,7 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
     for (i, jsonl) in sessions.iter().enumerate() {
         let report = engine
             .bootstrap_session(
-                Cursor::new(jsonl.clone()),
+                Cursor::new(jsonl.as_bytes()),
                 &TestEmbedder,
                 &extractor,
                 &config,
@@ -196,14 +202,19 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         let snippet: String = content.chars().take(90).collect();
         println!("  fact t_created={t} content={snippet:?}");
     }
-    assert!(total_facts > 0, "synthetic sessions should yield facts");
+    // Deterministic yield: 4 single-category sessions + session 5's dual-category
+    // turn (Convention + Bug) => 6 facts. Pins expected yield against extractor drift.
+    assert_eq!(
+        total_facts, 6,
+        "expected 6 facts (4 single-category + session-5 dual-category), got {total_facts}"
+    );
 
     // --- Idempotency: re-run all five, expect skips + zero new facts ---
     let facts_before_rerun = recorder.seen.borrow().len();
     for jsonl in &sessions {
         let report = engine
             .bootstrap_session(
-                Cursor::new(jsonl.clone()),
+                Cursor::new(jsonl.as_bytes()),
                 &TestEmbedder,
                 &extractor,
                 &config,
@@ -213,6 +224,10 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         assert_eq!(report.sessions_processed, 0, "re-run must skip");
         assert_eq!(report.sessions_skipped, 1);
         assert_eq!(report.facts_created, 0);
+        assert_eq!(
+            report.events_ingested, 0,
+            "skipped session ingests no marker"
+        );
     }
     assert_eq!(
         recorder.seen.borrow().len(),
@@ -227,30 +242,33 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
     let now = Utc::now();
     for (content, t) in seen.iter() {
         assert!(
-            t.year() == 2024 || t.year() == 2025,
-            "t_created not backdated ({t}) for {content:?}"
+            t.year() < now.year(),
+            "t_created not backdated (year >= current) ({t}) for {content:?}"
         );
         assert!(t < &now, "t_created must be historical, got {t}");
     }
 
-    // --- No cross-session dedup: the shared 'rustfmt' convention (sessions 3 & 5)
-    //     is stored from BOTH sessions. We key on distinct t_created values so the
-    //     check proves a CROSS-session duplicate, not merely an intra-session one
-    //     (session 5's single turn matches two categories and alone yields two
-    //     rustfmt-bearing facts). ---
-    let rustfmt_session_times: std::collections::BTreeSet<i64> = seen
+    // --- No cross-session dedup: the IDENTICAL convention sentence appears verbatim
+    //     in sessions 3 and 5. Assert (a) it is stored more than once (no dedup) AND
+    //     (b) the copies originate in distinct backdated sessions (cross-session, not
+    //     merely session 5's intra-session dual-category fan-out). ---
+    let shared_copies = seen.iter().filter(|(c, _)| c.contains(SHARED)).count();
+    let shared_sessions: std::collections::BTreeSet<i64> = seen
         .iter()
-        .filter(|(c, _)| c.contains("rustfmt"))
+        .filter(|(c, _)| c.contains(SHARED))
         .map(|(_, t)| t.timestamp())
         .collect();
     println!(
-        "rustfmt convention stored from {} distinct session timestamps",
-        rustfmt_session_times.len()
+        "shared convention: {shared_copies} stored copies across {} distinct sessions",
+        shared_sessions.len()
     );
     assert!(
-        rustfmt_session_times.len() >= 2,
-        "the same fact in two sessions must NOT be cross-session deduped \
-         (distinct session timestamps with the fact: {})",
-        rustfmt_session_times.len()
+        shared_copies >= 2,
+        "identical fact must be stored more than once (no dedup), got {shared_copies}"
+    );
+    assert!(
+        shared_sessions.len() >= 2,
+        "duplicate copies must originate in distinct backdated sessions (cross-session), got {}",
+        shared_sessions.len()
     );
 }
