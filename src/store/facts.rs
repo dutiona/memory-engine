@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{
