@@ -124,6 +124,11 @@ fn default_root_scope_id() -> i64 {
 }
 
 /// A bi-temporal fact derived from events.
+///
+/// Two independent time axes: **transaction-time** (`t_created`/`t_expired`) records when
+/// the row existed in the store; **valid-time** (`t_valid`/`t_invalid`) records when the
+/// fact was true in the world. A `None` valid-time bound means "unbounded/unknown" — see
+/// the per-field docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fact {
     pub id: i64,
@@ -131,9 +136,18 @@ pub struct Fact {
     pub content_hash: String,
     pub embedding: Vec<f32>,
     pub fact_type: FactType,
+    /// Transaction-time start: when the row was first written. Bootstrap backdates this
+    /// to the historical turn timestamp so recency reflects the original session.
     pub t_created: DateTime<Utc>,
+    /// Transaction-time end: when the row was soft-deleted; `None` = still present.
     pub t_expired: Option<DateTime<Utc>>,
+    /// Valid-time start: when the fact became true in the world. `None` = "valid since
+    /// creation" (unbounded/unknown). Active-at queries treat `None` as valid from the
+    /// beginning, but the due/scheduling query requires a concrete `t_valid`. Bootstrap
+    /// intentionally leaves this `None`: valid-time is not externally asserted for
+    /// retro-observed session facts (see issue #521).
     pub t_valid: Option<DateTime<Utc>>,
+    /// Valid-time end: when the fact stopped being true; `None` = still valid.
     pub t_invalid: Option<DateTime<Utc>>,
     pub source_event_id: Option<i64>,
     pub importance: f64,
