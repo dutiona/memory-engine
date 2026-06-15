@@ -356,6 +356,79 @@ mod tests {
     }
 
     #[test]
+    fn parse_openai_batch_missing_index() {
+        // Item lacks the "index" field -> the `ok_or_else` on line 60-62 fires.
+        let data = vec![
+            serde_json::json!({"index": 0, "embedding": [0.1]}),
+            serde_json::json!({"embedding": [0.2]}), // no "index"
+        ];
+        let result = HttpEmbeddingProvider::parse_openai_batch(&data, 2);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing 'index' in data item")
+        );
+    }
+
+    #[test]
+    fn parse_openai_batch_index_wrong_type() {
+        // "index" present but not a u64 -> as_u64() returns None -> error.
+        let data = vec![serde_json::json!({"index": "zero", "embedding": [0.1]})];
+        let result = HttpEmbeddingProvider::parse_openai_batch(&data, 1);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing 'index' in data item")
+        );
+    }
+
+    #[test]
+    fn parse_openai_batch_missing_embedding() {
+        // Item lacks "embedding" -> the `ok_or_else` on line 67-71 fires,
+        // reporting the index from the item.
+        let data = vec![serde_json::json!({"index": 0})];
+        let result = HttpEmbeddingProvider::parse_openai_batch(&data, 1);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot parse embedding at index 0")
+        );
+    }
+
+    #[test]
+    fn parse_openai_batch_unparseable_embedding() {
+        // "embedding" present but not an array of numbers -> from_value fails.
+        let data = vec![serde_json::json!({"index": 0, "embedding": "not-a-vec"})];
+        let result = HttpEmbeddingProvider::parse_openai_batch(&data, 1);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot parse embedding at index 0")
+        );
+    }
+
+    #[test]
+    fn parse_openai_batch_duplicate_index() {
+        // Two items share index 0, none is index 1 -> continuity check on
+        // line 78-84 fires with the "gap or duplicate" message.
+        let data = vec![
+            serde_json::json!({"index": 0, "embedding": [0.1]}),
+            serde_json::json!({"index": 0, "embedding": [0.2]}),
+        ];
+        let result = HttpEmbeddingProvider::parse_openai_batch(&data, 2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("gap or duplicate"));
+    }
+
+    #[test]
     fn parse_ollama_batch_valid() {
         let data = vec![serde_json::json!([0.1, 0.2]), serde_json::json!([0.3, 0.4])];
         let result = HttpEmbeddingProvider::parse_ollama_batch(&data, 2).unwrap();

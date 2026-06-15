@@ -625,6 +625,60 @@ mod tests {
         assert_eq!(ActivityStatus::Promoted.to_string(), "promoted");
     }
 
+    // --- ActivityStatus::from_str round-trip + error path ---
+
+    #[test]
+    fn activity_status_from_str_all_known_variants() {
+        use std::str::FromStr;
+
+        assert_eq!(
+            ActivityStatus::from_str("recorded").unwrap(),
+            ActivityStatus::Recorded
+        );
+        assert_eq!(
+            ActivityStatus::from_str("deduplicated").unwrap(),
+            ActivityStatus::Deduplicated
+        );
+        assert_eq!(
+            ActivityStatus::from_str("ignored").unwrap(),
+            ActivityStatus::Ignored
+        );
+        assert_eq!(
+            ActivityStatus::from_str("promoted").unwrap(),
+            ActivityStatus::Promoted
+        );
+    }
+
+    #[test]
+    fn activity_status_from_str_round_trips_with_display() {
+        use std::str::FromStr;
+
+        for status in [
+            ActivityStatus::Recorded,
+            ActivityStatus::Deduplicated,
+            ActivityStatus::Ignored,
+            ActivityStatus::Promoted,
+        ] {
+            let rendered = status.to_string();
+            assert_eq!(
+                ActivityStatus::from_str(&rendered).unwrap(),
+                status,
+                "Display->from_str round-trip failed for {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_status_from_str_unknown_is_error() {
+        use std::str::FromStr;
+
+        let err = ActivityStatus::from_str("bogus").unwrap_err();
+        assert_eq!(err, "unknown activity status: bogus");
+        // Case-sensitivity: the matcher expects lowercase variants.
+        assert!(ActivityStatus::from_str("Recorded").is_err());
+        assert!(ActivityStatus::from_str("").is_err());
+    }
+
     // --- Phase 5a type tests ---
 
     #[test]

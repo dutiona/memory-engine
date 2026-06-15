@@ -264,6 +264,31 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 
+    #[test]
+    fn vector_search_empty_scope_slice_matches_nothing() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store
+            .insert(&make_fact_with_embedding(
+                "fact one",
+                vec![1.0, 0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+
+        let query = [1.0_f32, 0.0, 0.0, 0.0];
+        // Some(&[]) serializes to "[]"; the json_each subquery is empty so the
+        // `scope_id IN (...)` predicate excludes every fact (vector.rs:61-63),
+        // unlike None which disables the filter.
+        let scoped = vector_search(&conn, &query, DIM, 10, None, Some(&[])).unwrap();
+        assert!(
+            scoped.is_empty(),
+            "empty scope slice must exclude all facts"
+        );
+        // Sanity: with no scope filter the fact is found.
+        let unscoped = vector_search(&conn, &query, DIM, 10, None, None).unwrap();
+        assert_eq!(unscoped.len(), 1);
+    }
+
     mod proptest_cosine {
         use super::*;
         use proptest::prelude::*;

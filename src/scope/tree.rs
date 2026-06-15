@@ -296,6 +296,73 @@ mod tests {
     }
 
     #[test]
+    fn path_for_id_root_returns_slash() {
+        let tree = setup_tree();
+        // Root scope is the display-only "/" path (tree.rs:151-153).
+        assert_eq!(
+            tree.path_for_id(ScopeTree::root_id()),
+            Some("/".to_string())
+        );
+    }
+
+    #[test]
+    fn path_for_id_unknown_returns_none() {
+        let tree = setup_tree();
+        // ID absent from the tree short-circuits to None (tree.rs:148-150).
+        assert_eq!(tree.path_for_id(424_242), None);
+    }
+
+    #[test]
+    fn path_for_id_non_root_joins_labels() {
+        let tree = setup_tree();
+        let demo_id = tree.resolve_path("user:michael/project:demo").unwrap();
+        // Root is excluded; remaining labels are joined leaf-last.
+        assert_eq!(
+            tree.path_for_id(demo_id),
+            Some("user:michael/project:demo".to_string())
+        );
+    }
+
+    #[test]
+    fn inherited_non_leaf_dedups_self_once() {
+        let tree = setup_tree();
+        // user:michael is a NON-leaf: its subtree has 3 nodes (itself + 2
+        // projects). inherited() must add user:michael exactly once (via
+        // ancestors) and append only the descendants, exercising the
+        // `if id != scope_id` dedup branch (tree.rs:95-99).
+        let user_id = tree.resolve_path("user:michael").unwrap();
+        let inh = tree.inherited(user_id);
+        // ancestors(user) = [user, root] (2); subtree(user) = [user, demo, other]
+        // dedup user -> append demo, other => [user, root, demo, other] = 4.
+        assert_eq!(inh.len(), 4);
+        // user:michael appears exactly once despite being in both sets.
+        assert_eq!(inh.iter().filter(|&&id| id == user_id).count(), 1);
+        // All four ids are unique (no duplicate from the overlap).
+        let mut sorted = inh;
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "inherited() must not emit duplicates");
+    }
+
+    #[test]
+    fn ancestors_unknown_id_returns_singleton() {
+        let tree = setup_tree();
+        // Unknown id: the while-loop pushes the id, then nodes.get fails so
+        // parent_id resolves to None and the loop ends (tree.rs:61-68).
+        let anc = tree.ancestors(999_999);
+        assert_eq!(anc, vec![999_999]);
+    }
+
+    #[test]
+    fn subtree_unknown_id_returns_singleton() {
+        let tree = setup_tree();
+        // Unknown id has no children entry, so the BFS yields just the seed
+        // (tree.rs:72-84).
+        let sub = tree.subtree(999_999);
+        assert_eq!(sub, vec![999_999]);
+    }
+
+    #[test]
     fn insert_new_node() {
         let mut tree = setup_tree();
         let node_count_before = tree.nodes.len();
