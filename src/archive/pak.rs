@@ -3,8 +3,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
-use crate::archive::types::ArchivePak;
+use crate::archive::types::{ArchivePak, CURRENT_PAK_VERSION};
 use crate::error::{MemoryError, Result};
+use crate::store::schema::CURRENT_SCHEMA_VERSION;
 
 /// Maximum decompressed `.pak` size (4 GiB) — prevents decompression bombs.
 const MAX_PAK_DECOMPRESSED_SIZE: u64 = 4 * 1024 * 1024 * 1024;
@@ -60,6 +61,25 @@ pub fn read_pak(path: &Path) -> Result<ArchivePak> {
         .map_err(|e| MemoryError::Archive(format!("failed to create zstd decoder: {e}")))?;
     let limited = std::io::Read::take(decoder, MAX_PAK_DECOMPRESSED_SIZE);
     let pak: ArchivePak = serde_json::from_reader(limited)?;
+
+    // Validate versions after deserialize, mirroring `validate_schema_version`
+    // (store/schema.rs): reject archives written by a *newer* library, but
+    // accept older ones (forward-only incompatibility, backward-compatible read).
+    if pak.pak_version > CURRENT_PAK_VERSION {
+        return Err(MemoryError::Archive(format!(
+            "pak_version {} is newer than supported {CURRENT_PAK_VERSION}; \
+             consider upgrading the memory-engine crate",
+            pak.pak_version
+        )));
+    }
+    if pak.engine_schema_version > CURRENT_SCHEMA_VERSION {
+        return Err(MemoryError::Archive(format!(
+            "engine_schema_version {} is newer than supported {CURRENT_SCHEMA_VERSION}; \
+             consider upgrading the memory-engine crate",
+            pak.engine_schema_version
+        )));
+    }
+
     Ok(pak)
 }
 
@@ -162,5 +182,86 @@ mod tests {
         write_pak(&empty_pak(), &pak_path).unwrap();
         assert!(!tmp_path.exists());
         assert!(pak_path.exists());
+    }
+
+    #[test]
+    fn read_pak_rejects_future_pak_version() {
+        use crate::store::schema::CURRENT_SCHEMA_VERSION;
+        let dir = tempfile::tempdir().unwrap();
+        let pak_path = dir.path().join("future_pak.pak");
+        let mut pak = empty_pak();
+        pak.pak_version = CURRENT_PAK_VERSION + 1;
+        pak.engine_schema_version = CURRENT_SCHEMA_VERSION;
+        write_pak(&pak, &pak_path).unwrap();
+
+        let err = read_pak(&pak_path).unwrap_err();
+        match err {
+            MemoryError::Archive(msg) => {
+                assert!(
+                    msg.contains("newer than supported"),
+                    "expected 'newer than supported' in {msg:?}"
+                );
+                assert!(
+                    msg.contains("pak_version"),
+                    "expected 'pak_version' in {msg:?}"
+                );
+            }
+            other => panic!("expected MemoryError::Archive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_pak_rejects_future_schema_version() {
+        use crate::store::schema::CURRENT_SCHEMA_VERSION;
+        let dir = tempfile::tempdir().unwrap();
+        let pak_path = dir.path().join("future_schema.pak");
+        let mut pak = empty_pak();
+        pak.engine_schema_version = CURRENT_SCHEMA_VERSION + 1;
+        write_pak(&pak, &pak_path).unwrap();
+
+        let err = read_pak(&pak_path).unwrap_err();
+        match err {
+            MemoryError::Archive(msg) => {
+                assert!(
+                    msg.contains("newer than supported"),
+                    "expected 'newer than supported' in {msg:?}"
+                );
+                assert!(
+                    msg.contains("engine_schema_version"),
+                    "expected 'engine_schema_version' in {msg:?}"
+                );
+            }
+            other => panic!("expected MemoryError::Archive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_pak_accepts_current_and_older_versions() {
+        use crate::store::schema::CURRENT_SCHEMA_VERSION;
+        let dir = tempfile::tempdir().unwrap();
+
+        // Current versions read OK.
+        let current_path = dir.path().join("current.pak");
+        let mut current = empty_pak();
+        current.engine_schema_version = CURRENT_SCHEMA_VERSION;
+        write_pak(&current, &current_path).unwrap();
+        assert!(
+            read_pak(&current_path).is_ok(),
+            "current versions must read"
+        );
+
+        // Older schema version reads OK (backward-compat). empty_pak() already
+        // stamps engine_schema_version = 7 (< CURRENT_SCHEMA_VERSION = 9).
+        let older_path = dir.path().join("older.pak");
+        let older = empty_pak();
+        assert!(
+            older.engine_schema_version < CURRENT_SCHEMA_VERSION,
+            "fixture must use an older schema version to exercise backward-compat"
+        );
+        write_pak(&older, &older_path).unwrap();
+        assert!(
+            read_pak(&older_path).is_ok(),
+            "older versions must still read (backward-compat)"
+        );
     }
 }
