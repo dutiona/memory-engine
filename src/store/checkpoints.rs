@@ -13,7 +13,7 @@ pub struct CheckpointStore<'a> {
 }
 
 impl<'a> CheckpointStore<'a> {
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 

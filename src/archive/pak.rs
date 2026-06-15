@@ -100,6 +100,7 @@ impl<W: Write> Write for HashingWriter<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::types::CURRENT_PAK_VERSION;
     use chrono::Utc;
 
     /// Write an `ArchivePak` as zstd-compressed JSON (test convenience wrapper).
@@ -112,7 +113,7 @@ mod tests {
 
     fn empty_pak() -> ArchivePak {
         ArchivePak {
-            pak_version: 1,
+            pak_version: CURRENT_PAK_VERSION,
             engine_schema_version: 7,
             embed_dim: 3,
             created_at: Utc::now(),
@@ -128,7 +129,7 @@ mod tests {
         write_pak(&empty_pak(), &pak_path).unwrap();
         assert!(pak_path.exists());
         let restored = read_pak(&pak_path).unwrap();
-        assert_eq!(restored.pak_version, 1);
+        assert_eq!(restored.pak_version, CURRENT_PAK_VERSION);
         assert_eq!(restored.embed_dim, 3);
         assert!(restored.facts.is_empty());
     }

@@ -6,11 +6,23 @@ use tabled::{Table, Tabled};
 use crate::db::open_engine;
 use crate::output::{self, OutputFormat, truncate_str};
 
+/// What to dump from the database.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum DumpTarget {
+    /// Active facts only (default).
+    #[default]
+    Facts,
+    /// Event log only.
+    Events,
+    /// Both facts and events.
+    All,
+}
+
 #[derive(clap::Args)]
 pub struct DumpArgs {
     /// What to dump
-    #[arg(value_parser = ["facts", "events", "all"], default_value = "facts")]
-    target: String,
+    #[arg(value_enum, default_value_t = DumpTarget::Facts)]
+    target: DumpTarget,
 
     /// Maximum items
     #[arg(long, default_value = "100")]
@@ -50,11 +62,10 @@ struct EventRow {
 pub fn run(db: &Path, args: &DumpArgs, format: OutputFormat) -> anyhow::Result<()> {
     let engine = open_engine(db)?;
 
-    match args.target.as_str() {
-        "facts" => dump_facts(&engine, args.limit, format),
-        "events" => dump_events(&engine, args.limit, format),
-        "all" => dump_all(&engine, args.limit, format),
-        _ => unreachable!(),
+    match args.target {
+        DumpTarget::Facts => dump_facts(&engine, args.limit, format),
+        DumpTarget::Events => dump_events(&engine, args.limit, format),
+        DumpTarget::All => dump_all(&engine, args.limit, format),
     }
 }
 

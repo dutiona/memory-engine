@@ -1,5 +1,9 @@
 /// Errors returned by the memory engine.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
+/// downstream `match` expressions must include a wildcard (`_`) arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MemoryError {
     #[error("not found: {0}")]
     NotFound(String),

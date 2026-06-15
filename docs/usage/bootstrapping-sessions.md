@@ -72,10 +72,9 @@ The default `KeywordExtractor` maps episode categories and outcomes to fact type
 ```rust
 # use memory_engine::error::Result;
 # use memory_engine::types::FactType;
-# use memory_engine::bootstrap::extract::{
-#     SessionExtractor, ExtractedFact, CandidateEpisode, EpisodeCategory,
+# use memory_engine::bootstrap::{
+#     SessionExtractor, ExtractedFact, CandidateEpisode, EpisodeCategory, SessionOutcome,
 # };
-# use memory_engine::bootstrap::outcome::SessionOutcome;
 #
 struct LlmExtractor {
     client: reqwest::blocking::Client,

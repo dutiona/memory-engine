@@ -2,9 +2,9 @@
 
 use std::io::Cursor;
 
-use memory_engine::bootstrap::extract::KeywordExtractor;
-use memory_engine::bootstrap::metrics::BootstrapConfig;
-use memory_engine::{EmbeddingProvider, MemoryEngine, MemoryError};
+use memory_engine::{
+    BootstrapConfig, EmbeddingProvider, KeywordExtractor, MemoryEngine, MemoryError,
+};
 
 /// Dummy embedder for testing — returns a fixed-length zero vector.
 struct TestEmbedder;

@@ -12,7 +12,7 @@ pub struct LineageStore<'a> {
 impl<'a> LineageStore<'a> {
     /// Create a new `LineageStore` borrowing the given connection.
     #[must_use]
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 

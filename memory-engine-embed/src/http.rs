@@ -40,11 +40,11 @@ impl HttpEmbeddingProvider {
         api_key: Option<String>,
         expected_dim: usize,
         timeout_secs: u64,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, MemoryError> {
         let client = reqwest::blocking::ClientBuilder::new()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
-            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+            .map_err(|e| MemoryError::Internal(format!("failed to build HTTP client: {e}")))?;
         Ok(Self {
             client,
             endpoint,

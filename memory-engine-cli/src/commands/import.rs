@@ -22,7 +22,7 @@ pub fn run(db: &Path, args: &ImportArgs) -> anyhow::Result<()> {
 
     let embed_dim = match args.embed_dim {
         Some(dim) => dim,
-        None => peek_embed_dim(&args.snapshot).map_err(|e| {
+        None => peek_embed_dim_from_snapshot(&args.snapshot).map_err(|e| {
             anyhow::anyhow!("{e}\n\nHint: for compressed snapshots, pass --embed-dim explicitly")
         })?,
     };
@@ -39,8 +39,13 @@ pub fn run(db: &Path, args: &ImportArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Peek at a JSON snapshot file to extract `embed_dim` without loading everything.
-fn peek_embed_dim(path: &Path) -> anyhow::Result<usize> {
+/// Peek at a JSON snapshot file's header to extract `embed_dim` without
+/// loading the whole snapshot.
+///
+/// Reads only the leading `embed_dim` field of the JSON document. Distinct
+/// from the `SQLite`-`config`-table reader (`peek_embed_dim_from_db` in
+/// `crate::db`).
+fn peek_embed_dim_from_snapshot(path: &Path) -> anyhow::Result<usize> {
     #[derive(serde::Deserialize)]
     struct SnapshotHeader {
         embed_dim: usize,

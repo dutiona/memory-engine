@@ -20,11 +20,11 @@ use crate::tools;
 /// All tool calls are dispatched to `tokio::task::spawn_blocking` via the engine's
 /// internal connection pool. The server holds an `Arc<MemoryEngine>` for thread-safe sharing.
 pub struct MemoryMcpServer {
-    pub engine: Arc<MemoryEngine>,
-    pub embedder: Option<Arc<HttpEmbeddingProvider>>,
-    pub summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
-    pub embed_dim: usize,
-    pub filter_config: Arc<ActivityFilterConfig>,
+    pub(crate) engine: Arc<MemoryEngine>,
+    pub(crate) embedder: Option<Arc<HttpEmbeddingProvider>>,
+    pub(crate) summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
+    pub(crate) embed_dim: usize,
+    pub(crate) filter_config: Arc<ActivityFilterConfig>,
 }
 
 impl MemoryMcpServer {

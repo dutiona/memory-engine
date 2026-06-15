@@ -16,21 +16,36 @@ pub struct ScopeTree {
 }
 
 impl ScopeTree {
-    /// Build tree from all scopes in the database.
-    pub fn load(conn: &Connection) -> Result<Self> {
-        let store = ScopeStore::new(conn);
-        let all = store.list_all()?;
+    /// Build the `(nodes, children)` index maps from a node iterator.
+    ///
+    /// Shared by [`ScopeTree::load`] (from the DB) and
+    /// [`ScopeTree::from_snapshot`] (from a serialized snapshot): both insert
+    /// each node into `nodes` by id and register it under its parent's
+    /// `children` list.
+    fn build_index<I>(node_iter: I) -> (HashMap<i64, ScopeNode>, HashMap<i64, Vec<i64>>)
+    where
+        I: IntoIterator<Item = ScopeNode>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let iter = node_iter.into_iter();
+        let mut nodes = HashMap::with_capacity(iter.len());
+        let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
 
-        let mut nodes = HashMap::with_capacity(all.len());
-        let mut children: HashMap<i64, Vec<i64>> = HashMap::with_capacity(all.len());
-
-        for node in all {
+        for node in iter {
             if let Some(pid) = node.parent_id {
                 children.entry(pid).or_default().push(node.id);
             }
             nodes.insert(node.id, node);
         }
 
+        (nodes, children)
+    }
+
+    /// Build tree from all scopes in the database.
+    pub fn load(conn: &Connection) -> Result<Self> {
+        let store = ScopeStore::new(conn);
+        let all = store.list_all()?;
+        let (nodes, children) = Self::build_index(all);
         Ok(Self { nodes, children })
     }
 
@@ -180,16 +195,7 @@ impl ScopeTree {
 
     /// Rebuild tree from a snapshot (same logic as `load` but from snapshot data).
     pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::ScopeTreeSnapshot) -> Self {
-        let mut nodes = HashMap::with_capacity(snap.nodes.len());
-        let mut children: HashMap<i64, Vec<i64>> = HashMap::with_capacity(snap.nodes.len());
-
-        for node in &snap.nodes {
-            if let Some(pid) = node.parent_id {
-                children.entry(pid).or_default().push(node.id);
-            }
-            nodes.insert(node.id, node.clone());
-        }
-
+        let (nodes, children) = Self::build_index(snap.nodes.iter().cloned());
         Self { nodes, children }
     }
 }

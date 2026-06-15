@@ -35,7 +35,7 @@ pub struct SummaryStore<'a> {
 impl<'a> SummaryStore<'a> {
     /// Create a new `SummaryStore` borrowing the given connection.
     #[must_use]
-    pub const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
+    pub(crate) const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
         Self { conn, embed_dim }
     }
 

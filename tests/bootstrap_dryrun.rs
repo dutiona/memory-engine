@@ -13,13 +13,13 @@
 //! Hermetic: in-memory engine + zero-vector embedder. No network, no Ollama,
 //! no GPU contention (S0 is build-only). See `docs/audits/S0.3-bootstrap-audit.md`.
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use chrono::{DateTime, Datelike, Utc};
-use memory_engine::bootstrap::extract::KeywordExtractor;
-use memory_engine::bootstrap::metrics::BootstrapConfig;
 use memory_engine::traits::PersistenceClassifier;
-use memory_engine::{EmbeddingProvider, Fact, MemoryEngine, MemoryError};
+use memory_engine::{
+    BootstrapConfig, EmbeddingProvider, Fact, KeywordExtractor, MemoryEngine, MemoryError,
+};
 
 /// Zero-vector embedder (dim 4) — retrieval is irrelevant to this audit.
 struct TestEmbedder;
@@ -33,12 +33,13 @@ impl EmbeddingProvider for TestEmbedder {
 /// i.e. every bootstrapped fact — with its (backdated) `t_created` intact.
 #[derive(Default)]
 struct RecordingClassifier {
-    seen: RefCell<Vec<(String, DateTime<Utc>)>>,
+    seen: Mutex<Vec<(String, DateTime<Utc>)>>,
 }
 impl PersistenceClassifier for RecordingClassifier {
     fn should_pin(&self, fact: &Fact) -> bool {
         self.seen
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push((fact.content.clone(), fact.t_created));
         false
     }
@@ -208,7 +209,7 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         total_facts += report.facts_created;
     }
     println!("TOTAL facts (first pass) = {total_facts}");
-    for (content, t) in recorder.seen.borrow().iter() {
+    for (content, t) in recorder.seen.lock().unwrap().iter() {
         let snippet: String = content.chars().take(90).collect();
         println!("  fact t_created={t} content={snippet:?}");
     }
@@ -221,7 +222,7 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
     );
 
     // --- Idempotency: re-run all five, expect skips + zero new facts ---
-    let facts_before_rerun = recorder.seen.borrow().len();
+    let facts_before_rerun = recorder.seen.lock().unwrap().len();
     for jsonl in &sessions {
         let report = engine
             .bootstrap_session(
@@ -241,14 +242,14 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         );
     }
     assert_eq!(
-        recorder.seen.borrow().len(),
+        recorder.seen.lock().unwrap().len(),
         facts_before_rerun,
         "skipped sessions must create no facts"
     );
 
     // --- Backdating: every t_created is the historical session time (2024/2025),
     //     never Utc::now() (2026+). ---
-    let seen = recorder.seen.borrow();
+    let seen = recorder.seen.lock().unwrap();
     assert!(!seen.is_empty(), "recorder should have captured facts");
     let now = Utc::now();
     for (content, t) in seen.iter() {

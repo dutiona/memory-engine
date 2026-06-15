@@ -4,6 +4,12 @@ use std::path::PathBuf;
 
 use crate::types::{Edge, Fact};
 
+/// Current on-disk format version written into every new `.pak` file.
+///
+/// Bump this when the `.pak` payload layout changes in a way that requires
+/// version-gated reading. The value is stamped into [`ArchivePak::pak_version`].
+pub const CURRENT_PAK_VERSION: u32 = 1;
+
 /// Contents of a `.pak` archive file — zstd-compressed JSON.
 ///
 /// Contains only facts and edges; events stay in the live DB
@@ -85,7 +91,7 @@ mod tests {
     #[test]
     fn archive_pak_roundtrip_serde() {
         let pak = ArchivePak {
-            pak_version: 1,
+            pak_version: CURRENT_PAK_VERSION,
             engine_schema_version: 7,
             embed_dim: 3,
             created_at: Utc::now(),
@@ -94,7 +100,7 @@ mod tests {
         };
         let json = serde_json::to_string(&pak).unwrap();
         let restored: ArchivePak = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.pak_version, 1);
+        assert_eq!(restored.pak_version, CURRENT_PAK_VERSION);
         assert_eq!(restored.embed_dim, 3);
     }
 }

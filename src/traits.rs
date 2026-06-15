@@ -8,7 +8,10 @@ use crate::types::Fact;
 ///
 /// Consumers implement this to integrate their embedding model (local or API).
 /// The engine calls `embed` during `add_fact` to compute the embedding vector.
-pub trait EmbeddingProvider {
+///
+/// Requires `Send + Sync`: providers are shared across the engine's worker
+/// threads (`spawn_blocking` connection pool, async facade).
+pub trait EmbeddingProvider: Send + Sync {
     /// Compute an embedding vector for the given text.
     ///
     /// # Errors
@@ -40,7 +43,10 @@ pub trait EmbeddingProvider {
 /// Trait for generating summaries from fact clusters (Phase 2).
 ///
 /// Used by consolidation to merge related facts into higher-level summaries.
-pub trait SummaryGenerator {
+///
+/// Requires `Send + Sync`: summary generators are shared across the engine's
+/// worker threads alongside the other consumer providers.
+pub trait SummaryGenerator: Send + Sync {
     /// Generate a textual summary from a slice of facts.
     ///
     /// # Errors
@@ -57,7 +63,10 @@ pub trait SummaryGenerator {
 }
 
 /// Trait for arbitrating conflicts between contradicting facts (Phase 2).
-pub trait ConflictArbiter {
+///
+/// Requires `Send + Sync`: arbiters are shared across the engine's worker
+/// threads alongside the other consumer providers.
+pub trait ConflictArbiter: Send + Sync {
     /// Decide how to resolve a conflict between an existing and a new fact.
     ///
     /// # Warning: `importance_score` on `new_fact` is a placeholder
@@ -100,7 +109,10 @@ pub enum CrudDecision {
 /// Classifiers should only rely on `content`, `fact_type`, `importance`
 /// (caller hint), and `metadata` — not on `id`, `scope_id`,
 /// `importance_score`, or `access_count`.
-pub trait PersistenceClassifier {
+///
+/// Requires `Send + Sync`: classifiers are shared across the engine's worker
+/// threads alongside the other consumer providers.
+pub trait PersistenceClassifier: Send + Sync {
     /// Decide if a fact should be pinned (never forgotten).
     fn should_pin(&self, fact: &Fact) -> bool {
         let _ = fact;

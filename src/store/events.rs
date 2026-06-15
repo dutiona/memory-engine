@@ -109,7 +109,7 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
 impl<'a> EventStore<'a> {
     /// Create a new `EventStore` borrowing the given connection and upcaster registry.
     #[must_use]
-    pub const fn new(conn: &'a Connection, registry: &'a UpcasterRegistry) -> Self {
+    pub(crate) const fn new(conn: &'a Connection, registry: &'a UpcasterRegistry) -> Self {
         Self { conn, registry }
     }
 

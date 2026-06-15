@@ -12,7 +12,7 @@ pub struct ArchiveManifestStore<'a> {
 impl<'a> ArchiveManifestStore<'a> {
     /// Create a new `ArchiveManifestStore` borrowing the given connection.
     #[must_use]
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 

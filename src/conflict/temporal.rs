@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
 use crate::graph::{EdgeData, MemoryGraph};
@@ -8,10 +8,29 @@ use crate::store::facts::FactStore;
 use crate::traits::{ConflictArbiter, ConflictResolution, CrudDecision};
 use crate::types::{NewEdge, NewFact};
 
-/// Relation type for edges created when facts supplement each other.
-const RELATION_SUPPLEMENTS: &str = "supplements";
-/// Relation type for edges created when facts contradict each other.
-const RELATION_CONTRADICTS: &str = "contradicts";
+/// Edge relation kinds emitted by conflict resolution.
+///
+/// Closed set replacing the previous stringly-typed constants. Each variant
+/// maps to a fixed on-wire / DB string via [`EdgeRelation::as_str`]; those
+/// string values are the stable persisted representation and must not change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeRelation {
+    /// Facts coexist and supplement each other (`CrudDecision::Add`).
+    Supplements,
+    /// New fact contradicts and supersedes the old one (`CrudDecision::Update`).
+    Contradicts,
+}
+
+impl EdgeRelation {
+    /// On-wire / DB string for this relation. Stable — do not change.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supplements => "supplements",
+            Self::Contradicts => "contradicts",
+        }
+    }
+}
+
 /// Default weight for conflict resolution edges.
 const DEFAULT_EDGE_WEIGHT: f64 = 1.0;
 
@@ -83,12 +102,11 @@ pub fn resolve_conflict(
             let new_id = FactStore::new(&tx, embed_dim).insert(new_fact)?;
 
             // Create "supplements" edge: new → old
-            let relation = RELATION_SUPPLEMENTS.to_string();
             let edge_store = EdgeStore::new(&tx);
             let edge_id = edge_store.insert(&NewEdge {
                 source_fact_id: new_id,
                 target_fact_id: old_fact_id,
-                relation_type: relation.clone(),
+                relation_type: EdgeRelation::Supplements.as_str().to_string(),
                 weight: DEFAULT_EDGE_WEIGHT,
                 scope_id: new_fact.scope_id,
                 t_created: now,
@@ -103,7 +121,7 @@ pub fn resolve_conflict(
                 old_fact_id,
                 EdgeData {
                     edge_id,
-                    relation_type: relation,
+                    relation_type: EdgeRelation::Supplements.as_str().to_string(),
                     weight: DEFAULT_EDGE_WEIGHT,
                 },
             );
@@ -131,11 +149,10 @@ pub fn resolve_conflict(
             let new_id = FactStore::new(&tx, embed_dim).insert(new_fact)?;
 
             // Create "contradicts" edge: new → old
-            let relation = RELATION_CONTRADICTS.to_string();
             let edge_id = edge_store.insert(&NewEdge {
                 source_fact_id: new_id,
                 target_fact_id: old_fact_id,
-                relation_type: relation.clone(),
+                relation_type: EdgeRelation::Contradicts.as_str().to_string(),
                 weight: DEFAULT_EDGE_WEIGHT,
                 scope_id: new_fact.scope_id,
                 t_created: now,
@@ -151,7 +168,7 @@ pub fn resolve_conflict(
                 old_fact_id,
                 EdgeData {
                     edge_id,
-                    relation_type: relation,
+                    relation_type: EdgeRelation::Contradicts.as_str().to_string(),
                     weight: DEFAULT_EDGE_WEIGHT,
                 },
             );

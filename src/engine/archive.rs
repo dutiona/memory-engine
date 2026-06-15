@@ -12,6 +12,7 @@ use chrono::Utc;
 use crate::archive::pak::{hash_file, verify_pak, write_pak_and_hash};
 use crate::archive::types::{
     ArchiveManifestEntry, ArchivePak, ArchivePolicy, ArchiveStats, ArchiveVerifyResult,
+    CURRENT_PAK_VERSION,
 };
 use crate::error::{MemoryError, Result};
 use crate::store::archive_manifest::ArchiveManifestStore;
@@ -176,7 +177,7 @@ impl MemoryEngine {
     /// Build the `.pak` payload.
     fn build_pak(&self, facts: &[Fact], edges: &[Edge]) -> ArchivePak {
         ArchivePak {
-            pak_version: 1,
+            pak_version: CURRENT_PAK_VERSION,
             engine_schema_version: CURRENT_SCHEMA_VERSION,
             embed_dim: self.embed_dim,
             created_at: Utc::now(),

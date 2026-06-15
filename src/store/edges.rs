@@ -30,7 +30,7 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
 impl<'a> EdgeStore<'a> {
     /// Create a new `EdgeStore` borrowing the given connection.
     #[must_use]
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 
