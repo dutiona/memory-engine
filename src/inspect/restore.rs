@@ -438,7 +438,7 @@ mod tests {
     use crate::store::schema::{get_config, init_schema, migrate, open_memory};
     use crate::traits::EmbeddingProvider;
     use crate::types::{AddFactRequest, FactType};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     const DIM: usize = 4;
 
@@ -495,7 +495,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
-            config: HashMap::new(),
+            config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
         assert!(err.to_string().contains("newer than supported"));
@@ -513,7 +513,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
-            config: HashMap::new(),
+            config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
         assert!(matches!(err, MemoryError::UnsupportedEpoch { .. }));
@@ -531,7 +531,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
-            config: HashMap::new(),
+            config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
         assert!(err.to_string().contains("embed_dim is 0"));
@@ -555,7 +555,7 @@ mod tests {
             }],
             events: vec![],
             lineage: vec![],
-            config: HashMap::new(),
+            config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
         assert!(err.to_string().contains("root node"));
@@ -573,7 +573,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
-            config: HashMap::new(),
+            config: BTreeMap::new(),
         };
         validate_snapshot(&snapshot).unwrap();
     }

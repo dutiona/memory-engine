@@ -76,10 +76,8 @@ fn dump_all(
 ) -> anyhow::Result<()> {
     if format == OutputFormat::Json {
         let facts = engine.list_active_facts(Some(limit))?;
-        let filter = ReplayFilter {
-            limit: Some(limit),
-            ..ReplayFilter::default()
-        };
+        let mut filter = ReplayFilter::default();
+        filter.limit = Some(limit);
         let events = engine.replay_events(&filter)?;
         let combined = serde_json::json!({
             "facts": facts,
@@ -132,10 +130,8 @@ fn dump_events(
     limit: usize,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
-    let filter = ReplayFilter {
-        limit: Some(limit),
-        ..ReplayFilter::default()
-    };
+    let mut filter = ReplayFilter::default();
+    filter.limit = Some(limit);
     let events = engine.replay_events(&filter)?;
 
     match format {

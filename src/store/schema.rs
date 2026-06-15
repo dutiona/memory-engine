@@ -133,15 +133,15 @@ pub fn get_config(conn: &Connection, key: &str) -> Result<Option<String>> {
 /// # Errors
 ///
 /// Returns `MemoryError::Database` on query failure.
-pub fn list_config(conn: &Connection) -> Result<std::collections::HashMap<String, String>> {
-    use std::collections::HashMap;
+pub fn list_config(conn: &Connection) -> Result<std::collections::BTreeMap<String, String>> {
+    use std::collections::BTreeMap;
     let mut stmt = conn.prepare("SELECT key, value FROM config")?;
     let rows = stmt.query_map([], |row| {
         let key: String = row.get(0)?;
         let value: String = row.get(1)?;
         Ok((key, value))
     })?;
-    let mut map = HashMap::new();
+    let mut map = BTreeMap::new();
     for row in rows {
         let (key, value) = row?;
         map.insert(key, value);

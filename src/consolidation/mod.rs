@@ -6,9 +6,9 @@ mod cluster;
 mod dedup;
 mod global;
 
-pub use cluster::cluster_fusion;
-pub use dedup::local_dedup;
-pub use global::global_integration;
+pub(crate) use cluster::cluster_fusion;
+pub(crate) use dedup::local_dedup;
+pub(crate) use global::global_integration;
 
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;

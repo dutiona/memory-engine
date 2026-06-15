@@ -19,9 +19,9 @@ use crate::traits::Reranker;
 use crate::types::{ConsolidationLevel, Fact};
 
 mod activity;
-pub mod activity_filter;
+pub(crate) mod activity_filter;
 mod bootstrap;
-pub mod cognitive;
+pub(crate) mod cognitive;
 mod conflict;
 mod consolidation;
 mod dormant;
