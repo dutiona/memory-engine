@@ -9,7 +9,7 @@ use memory_engine::{EngineConfig, MemoryEngine};
 use memory_engine_embed::HttpEmbeddingProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::db::open_engine;
+use crate::db::open_engine_writable;
 use crate::output::{OutputFormat, print_json};
 
 // ---------------------------------------------------------------------------
@@ -302,7 +302,7 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
         let config = EngineConfig::new(db.to_path_buf(), embed_dim);
         MemoryEngine::open(&config)?
     } else {
-        open_engine(db)?
+        open_engine_writable(db)?
     };
 
     // Build embedding provider
