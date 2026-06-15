@@ -72,6 +72,7 @@ struct HnswInner {
 const OVERFETCH_FACTOR: usize = 3;
 const DEFAULT_EF_SEARCH: usize = 100;
 const MAX_WIDEN_ATTEMPTS: usize = 3;
+const HNSW_SEED: u64 = 42;
 
 impl HnswStrategy {
     /// Number of active (non-tombstoned) items in the index.
@@ -94,7 +95,6 @@ impl HnswStrategy {
     pub fn build_from_db(conn: &Connection, embed_dim: usize) -> Result<Self> {
         use rand::SeedableRng;
 
-        const HNSW_SEED: u64 = 42;
         let mut index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32> = Hnsw::new_params_and_prng(
             CosineMetric,
             hnsw::Params::new().ef_construction(200),
@@ -177,7 +177,6 @@ impl HnswStrategy {
     ) -> Result<Self> {
         use rand::SeedableRng;
 
-        const HNSW_SEED: u64 = 42;
         let mut index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32> = Hnsw::new_params_and_prng(
             CosineMetric,
             hnsw::Params::new().ef_construction(200),
@@ -235,7 +234,7 @@ impl VectorSearchStrategy for HnswStrategy {
         }
 
         let mut ef = DEFAULT_EF_SEARCH;
-        let mut overfetch = limit * OVERFETCH_FACTOR;
+        let mut overfetch = limit.saturating_mul(OVERFETCH_FACTOR);
         let mut results = Vec::new();
         let query_vec = query_embedding.to_vec();
 
@@ -291,8 +290,8 @@ impl VectorSearchStrategy for HnswStrategy {
             }
             // Widen both search accuracy and candidate count so aggressive
             // filters don't exhaust the same small candidate set each retry.
-            ef *= 2;
-            overfetch *= 2;
+            ef = ef.saturating_mul(2);
+            overfetch = overfetch.saturating_mul(2);
         }
 
         // If HNSW widening couldn't satisfy, fall back to brute-force.
@@ -357,8 +356,10 @@ fn check_fact_filters(
     fact_type: Option<&FactType>,
     scope_ids: Option<&[i64]>,
 ) -> Result<bool> {
+    use crate::search::serialize_scope_ids;
     use crate::store::facts::fact_type_to_str;
 
+    let scope_json = serialize_scope_ids(scope_ids)?;
     let exists: bool = conn.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM facts
@@ -367,11 +368,7 @@ fn check_fact_filters(
             AND (?2 IS NULL OR fact_type = ?2)
             AND (?3 IS NULL OR scope_id IN (SELECT value FROM json_each(?3)))
         )",
-        rusqlite::params![
-            fact_id,
-            fact_type.map(fact_type_to_str),
-            scope_ids.map(|ids| serde_json::to_string(ids).expect("scope_ids serialization")),
-        ],
+        rusqlite::params![fact_id, fact_type.map(fact_type_to_str), scope_json,],
         |row| row.get(0),
     )?;
 

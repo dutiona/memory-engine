@@ -106,7 +106,7 @@ impl MemoryEngine {
                 match self.add_fact(
                     &AddFactRequest {
                         content: action.fact_content.clone(),
-                        fact_type: action.fact_type.clone(),
+                        fact_type: action.fact_type,
                         source_event_id: None,
                         scope: req.scope_path.clone(),
                         opts: Some(AddFactOptions {

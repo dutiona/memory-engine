@@ -60,6 +60,16 @@ pub trait SummaryGenerator {
 pub trait ConflictArbiter {
     /// Decide how to resolve a conflict between an existing and a new fact.
     ///
+    /// # Warning: `importance_score` on `new_fact` is a placeholder
+    ///
+    /// When called from [`resolve_conflict`](crate::conflict::resolve_conflict),
+    /// `new_fact` is a temporary [`Fact`] constructed from a [`NewFact`](crate::types::NewFact)
+    /// before it has been persisted or scored. Its `importance_score` field is hardcoded
+    /// to `0.5` and does **not** reflect the fact's actual computed importance.
+    /// Implementations that branch on `new_fact.importance_score` will always see `0.5`.
+    /// Use `new_fact.importance` (the caller-supplied raw importance) instead if you need
+    /// a signal for the incoming fact's weight.
+    ///
     /// # Errors
     ///
     /// Returns an error if arbitration fails.

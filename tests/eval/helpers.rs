@@ -126,7 +126,7 @@ impl CorpusBuilder {
             let id = engine.add_fact(
                 &AddFactRequest {
                     content: fact.content.to_string(),
-                    fact_type: fact.fact_type.clone(),
+                    fact_type: fact.fact_type,
                     source_event_id: None,
                     scope: fact.scope.map(String::from),
                     opts,

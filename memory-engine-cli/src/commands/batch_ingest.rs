@@ -119,7 +119,7 @@ fn validate_jsonl_fact(fact: &JsonlFact) -> Result<(), String> {
     Ok(())
 }
 
-fn jsonl_to_request(fact: JsonlFact, default_scope: &Option<String>) -> AddFactRequest {
+fn jsonl_to_request(fact: JsonlFact, default_scope: Option<&str>) -> AddFactRequest {
     let opts = AddFactOptions {
         importance: fact.importance,
         metadata: fact.metadata,
@@ -133,7 +133,7 @@ fn jsonl_to_request(fact: JsonlFact, default_scope: &Option<String>) -> AddFactR
         content: fact.content,
         fact_type: fact.fact_type.into(),
         source_event_id: fact.source_event_id,
-        scope: fact.scope.or_else(|| default_scope.clone()),
+        scope: fact.scope.or_else(|| default_scope.map(str::to_owned)),
         opts: Some(opts),
     }
 }
@@ -182,7 +182,7 @@ pub fn ingest_from_reader(
     reader: impl Read,
     embedder: &dyn EmbeddingProvider,
     batch_size: usize,
-    default_scope: &Option<String>,
+    default_scope: Option<&str>,
     format: OutputFormat,
 ) -> anyhow::Result<IngestSummary> {
     let start = Instant::now();
@@ -288,7 +288,17 @@ fn eprint_progress(ingested: usize, skipped: usize, start: &Instant, format: Out
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Maximum accepted `--batch-size`. Values above this would allocate an unbounded
+/// `Vec` from operator-supplied input, enabling a trivial OOM denial-of-service.
+const MAX_BATCH_SIZE: usize = 10_000;
+
 pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.batch_size > 0 && args.batch_size <= MAX_BATCH_SIZE,
+        "--batch-size must be between 1 and {MAX_BATCH_SIZE}, got {}",
+        args.batch_size,
+    );
+
     // Open or create engine
     let engine = if args.create {
         let embed_dim = args
@@ -331,7 +341,7 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
         reader,
         &embedder,
         args.batch_size,
-        &args.scope,
+        args.scope.as_deref(),
         format,
     )?;
 
@@ -411,7 +421,7 @@ mod tests {
     fn jsonl_fact_to_request_mapping() {
         let line = r#"{"content":"test","fact_type":"semantic","importance":0.8,"t_valid":"2026-01-01T00:00:00Z"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        let req = jsonl_to_request(fact, &None);
+        let req = jsonl_to_request(fact, None);
         assert_eq!(req.content, "test");
         assert_eq!(req.fact_type, FactType::Semantic);
         let opts = req.opts.unwrap();
@@ -479,8 +489,7 @@ mod tests {
     fn default_scope_applied() {
         let line = r#"{"content":"test","fact_type":"semantic"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        let scope = Some("project/beam".to_string());
-        let req = jsonl_to_request(fact, &scope);
+        let req = jsonl_to_request(fact, Some("project/beam"));
         assert_eq!(req.scope, Some("project/beam".into()));
     }
 
@@ -488,8 +497,7 @@ mod tests {
     fn explicit_scope_overrides_default() {
         let line = r#"{"content":"test","fact_type":"semantic","scope":"custom"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        let scope = Some("project/beam".to_string());
-        let req = jsonl_to_request(fact, &scope);
+        let req = jsonl_to_request(fact, Some("project/beam"));
         assert_eq!(req.scope, Some("custom".into()));
     }
 
@@ -511,7 +519,7 @@ mod tests {
             input.as_bytes(),
             &FakeEmbed,
             100,
-            &None,
+            None,
             OutputFormat::Json,
         )
         .unwrap();
@@ -539,7 +547,7 @@ not valid json
             input.as_bytes(),
             &FakeEmbed,
             100,
-            &None,
+            None,
             OutputFormat::Json,
         )
         .unwrap();
@@ -565,7 +573,7 @@ not valid json
             input.as_bytes(),
             &FakeEmbed,
             100,
-            &None,
+            None,
             OutputFormat::Json,
         )
         .unwrap();
@@ -588,7 +596,7 @@ not valid json
             "".as_bytes(),
             &FakeEmbed,
             100,
-            &None,
+            None,
             OutputFormat::Json,
         );
         // Empty input = 0 ingested, 0 skipped → returns Ok (not an error)

@@ -63,6 +63,7 @@ impl MemoryEngine {
         }
 
         let now = Utc::now();
+        let relation = Self::CO_SESSION_RELATION.to_string();
         let mut new_edges: Vec<(i64, i64, i64)> = Vec::new(); // (edge_id, src, tgt)
 
         {
@@ -84,7 +85,7 @@ impl MemoryEngine {
                             let edge_id = edge_store.insert(&NewEdge {
                                 source_fact_id: src,
                                 target_fact_id: tgt,
-                                relation_type: Self::CO_SESSION_RELATION.to_string(),
+                                relation_type: relation.clone(),
                                 weight: Self::CO_SESSION_WEIGHT,
                                 scope_id: Self::CO_SESSION_SCOPE_ID,
                                 t_created: now,
@@ -109,7 +110,7 @@ impl MemoryEngine {
                     tgt,
                     EdgeData {
                         edge_id,
-                        relation_type: Self::CO_SESSION_RELATION.to_string(),
+                        relation_type: relation.clone(),
                         weight: Self::CO_SESSION_WEIGHT,
                     },
                 );

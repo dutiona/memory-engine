@@ -106,7 +106,13 @@ impl<'a> CheckpointStore<'a> {
 fn row_to_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionCheckpoint> {
     let checkpoint_at_str: String = row.get(4)?;
     let metadata_str: String = row.get(5)?;
-    let metadata: serde_json::Value = serde_json::from_str(&metadata_str).unwrap_or_default();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
 
     Ok(SessionCheckpoint {
         session_id: row.get(0)?,

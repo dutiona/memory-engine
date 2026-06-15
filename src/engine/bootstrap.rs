@@ -1,10 +1,29 @@
+use rusqlite::Connection;
+
 use crate::error::Result;
-use crate::store::scopes::ScopeStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 
 use super::MemoryEngine;
 
 impl MemoryEngine {
+    // --- Internal helpers ---
+
+    /// Resolve (or create) the scope for a bootstrap config, returning its ID.
+    ///
+    /// When `config.scope` is `Some(path)`, ensures the path exists in the DB
+    /// and inserts the node into the in-memory scope tree cache.
+    /// When `None`, returns 1 (root scope).
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from `ScopeStore::ensure_path` or `ScopeStore::get`.
+    fn ensure_bootstrap_scope(&self, conn: &Connection, scope: Option<&str>) -> Result<i64> {
+        match scope {
+            Some(path) => self.ensure_scope_with_conn(conn, path),
+            None => Ok(1),
+        }
+    }
+
     // --- Public API: Bootstrap ---
 
     /// Bootstrap a single JSONL session log into historical memory.
@@ -34,16 +53,7 @@ impl MemoryEngine {
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
         let conn = self.write_conn()?;
-        let scope_id = match &config.scope {
-            Some(path) => {
-                let scope_store = ScopeStore::new(&conn);
-                let id = scope_store.ensure_path(path)?;
-                let node = scope_store.get(id)?;
-                self.scope_tree.write().insert(node);
-                id
-            }
-            None => 1,
-        };
+        let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
         crate::bootstrap::bootstrap_session_inner(
             &conn,
             self.embed_dim,
@@ -79,16 +89,7 @@ impl MemoryEngine {
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
         let conn = self.write_conn()?;
-        let scope_id = match &config.scope {
-            Some(path) => {
-                let scope_store = ScopeStore::new(&conn);
-                let id = scope_store.ensure_path(path)?;
-                let node = scope_store.get(id)?;
-                self.scope_tree.write().insert(node);
-                id
-            }
-            None => 1,
-        };
+        let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
         crate::bootstrap::bootstrap_directory_inner(
             &conn,
             self.embed_dim,

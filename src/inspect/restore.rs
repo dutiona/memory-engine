@@ -67,7 +67,8 @@ const MAX_SNAPSHOT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 /// - [`MemoryError::Io`] on file access failure.
 /// - [`MemoryError::Serialization`] on malformed JSON.
 /// - [`MemoryError::NotImplemented`] if compression detected but feature disabled.
-/// - [`MemoryError::Internal`] if the file exceeds 4 GiB.
+/// - [`MemoryError::Internal`] if the file exceeds 4 GiB or if zstd decoder
+///   initialization fails.
 pub fn read_snapshot(path: &Path) -> Result<EngineSnapshot> {
     // Open the file once and perform all checks on the handle to avoid TOCTOU.
     let mut file = File::open(path)?;
@@ -307,11 +308,11 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         tx.execute("DELETE FROM scopes", [])?;
 
         // 2. Insert scopes (sorted by depth then id to satisfy parent FK).
-        let mut scopes = snapshot.scopes.clone();
-        scopes.sort_by_key(|s| (s.depth, s.id));
+        let mut scope_idx: Vec<usize> = (0..snapshot.scopes.len()).collect();
+        scope_idx.sort_by_key(|&i| (snapshot.scopes[i].depth, snapshot.scopes[i].id));
         let mut stmt =
             tx.prepare("INSERT INTO scopes (id, parent_id, label, depth) VALUES (?1, ?2, ?3, ?4)")?;
-        for scope in &scopes {
+        for scope in scope_idx.into_iter().map(|i| &snapshot.scopes[i]) {
             stmt.execute(rusqlite::params![
                 scope.id,
                 scope.parent_id,
@@ -369,36 +370,37 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
     reset_autoincrement(
         &tx,
         "scopes",
-        &snapshot.scopes.iter().map(|s| s.id).collect::<Vec<_>>(),
+        snapshot.scopes.iter().map(|s| s.id).max().unwrap_or(0),
     )?;
     reset_autoincrement(
         &tx,
         "events",
-        &snapshot.events.iter().map(|e| e.id).collect::<Vec<_>>(),
+        snapshot.events.iter().map(|e| e.id).max().unwrap_or(0),
     )?;
     reset_autoincrement(
         &tx,
         "facts",
-        &snapshot.facts.iter().map(|f| f.id).collect::<Vec<_>>(),
+        snapshot.facts.iter().map(|f| f.id).max().unwrap_or(0),
     )?;
     reset_autoincrement(
         &tx,
         "edges",
-        &snapshot.edges.iter().map(|e| e.id).collect::<Vec<_>>(),
+        snapshot.edges.iter().map(|e| e.id).max().unwrap_or(0),
     )?;
     reset_autoincrement(
         &tx,
         "summaries",
-        &snapshot.summaries.iter().map(|s| s.id).collect::<Vec<_>>(),
+        snapshot.summaries.iter().map(|s| s.id).max().unwrap_or(0),
     )?;
     reset_autoincrement(
         &tx,
         "lineage",
-        &snapshot
+        snapshot
             .lineage
             .iter()
             .map(|l| l.lineage_id)
-            .collect::<Vec<_>>(),
+            .max()
+            .unwrap_or(0),
     )?;
 
     // 10. Commit.
@@ -410,8 +412,7 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
 ///
 /// `sqlite_sequence` is auto-created by `SQLite` for AUTOINCREMENT tables but
 /// has no unique constraint on `name`, so we use DELETE + INSERT.
-fn reset_autoincrement(conn: &Connection, table: &str, ids: &[i64]) -> Result<()> {
-    let max_id = ids.iter().copied().max().unwrap_or(0);
+fn reset_autoincrement(conn: &Connection, table: &str, max_id: i64) -> Result<()> {
     conn.execute(
         "DELETE FROM sqlite_sequence WHERE name = ?1",
         rusqlite::params![table],

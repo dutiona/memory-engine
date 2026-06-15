@@ -73,7 +73,7 @@ impl MemoryEngine {
                     content: req.content.clone(),
                     content_hash: String::new(),
                     embedding: embedding.clone(),
-                    fact_type: req.fact_type.clone(),
+                    fact_type: req.fact_type,
                     t_created: effective_created,
                     t_expired: None,
                     t_valid: opts.t_valid,
@@ -110,7 +110,7 @@ impl MemoryEngine {
                 content: req.content.clone(),
                 content_hash: String::new(), // FactStore::insert computes this via blake3
                 embedding,
-                fact_type: req.fact_type.clone(),
+                fact_type: req.fact_type,
                 t_created: effective_created,
                 t_expired: None,
                 t_valid: opts.t_valid,
@@ -160,7 +160,7 @@ impl MemoryEngine {
                             content: entry.content.clone(),
                             content_hash: String::new(),
                             embedding: embedding.clone(),
-                            fact_type: entry.fact_type.clone(),
+                            fact_type: entry.fact_type,
                             t_created: effective_created,
                             t_expired: None,
                             t_valid: opts.t_valid,
@@ -238,6 +238,8 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns errors from batch embedding, dimension validation, or DB insert.
+    /// Returns `MemoryError::Internal` if the embedder returns a different
+    /// number of embeddings than input entries.
     // `conn` (write lock) spans the whole savepoint transaction via FactStore/
     // ScopeStore wrappers that borrow it; clippy misses the transitive borrow.
     #[allow(clippy::significant_drop_tightening)]
@@ -294,7 +296,7 @@ impl MemoryEngine {
                         content: entry.content.clone(),
                         content_hash: String::new(), // FactStore::insert computes via blake3
                         embedding: embedding.clone(),
-                        fact_type: entry.fact_type.clone(),
+                        fact_type: entry.fact_type,
                         t_created: *effective_created,
                         t_expired: None,
                         t_valid: opts.t_valid,

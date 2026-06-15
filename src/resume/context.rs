@@ -49,7 +49,7 @@ pub struct ResumeContext {
     pub high_importance: Vec<Fact>,
     /// Future-memory facts whose `t_valid` has arrived.
     pub due: Vec<Fact>,
-    /// Most recent facts from active scope.
+    /// Most recent facts from active scopes.
     pub recent: Vec<Fact>,
     /// Placeholder: KB reference URIs for Phase 5.
     pub kb_stubs: Vec<String>,
@@ -57,15 +57,35 @@ pub struct ResumeContext {
 
 /// Retrieve tiered context for resuming a session.
 ///
-/// Five tiers, mutually exclusive (no fact appears in multiple tiers):
+/// Four fact tiers, mutually exclusive (no fact appears in multiple tiers):
 ///
 /// 1. **Pinned** — all pinned facts (always present, cross-scope)
 /// 2. **High-importance** — top-N by materialized `importance_score`
 /// 3. **Due** — active facts with `t_valid <= now` (future memory surfacing)
-/// 4. **Scope-filtered recent** — newest by `t_created` from active scope
-/// 5. **KB stubs** — placeholder `Vec<String>` for Phase 5
+/// 4. **Scope-filtered recent** — newest by `t_created` from active scopes
+///
+/// Plus `kb_stubs` — placeholder `Vec<String>` for Phase 5 (not a fact tier).
 ///
 /// Takes pre-resolved scope IDs to avoid holding cache locks across DB access.
+///
+/// # Errors
+///
+/// Returns [`crate::error::MemoryError`] if any underlying store query fails.
+///
+/// # Examples
+///
+/// This is a crate-internal helper; callers use the public
+/// [`MemoryEngine::resume_context`](crate::MemoryEngine::resume_context).
+/// The example is illustrative (`ignore`d) because `resume` is a `pub(crate)`
+/// module — a compiled doctest cannot reach it from outside the crate.
+///
+/// ```ignore
+/// use crate::resume::{ResumeConfig, resume_context};
+/// use rusqlite::Connection;
+/// let conn = Connection::open_in_memory().unwrap();
+/// let config = ResumeConfig::default();
+/// let ctx = resume_context(&conn, &[1], 384, &config).unwrap();
+/// ```
 pub fn resume_context(
     conn: &Connection,
     scope_ids: &[i64],
@@ -149,6 +169,46 @@ mod tests {
             metadata: serde_json::json!({}),
             is_pinned: false,
         }
+    }
+
+    #[test]
+    fn resume_config_serde_roundtrip() {
+        let config = ResumeConfig {
+            scope_path: Some("agents/assistant".into()),
+            now: Utc::now(),
+            pinned_cap: 25,
+            high_importance_cap: 15,
+            high_importance_min: 0.6,
+            due_cap: 5,
+            recent_cap: 8,
+        };
+        let json = serde_json::to_string(&config).expect("serialize ResumeConfig");
+        let restored: ResumeConfig = serde_json::from_str(&json).expect("deserialize ResumeConfig");
+        assert_eq!(config.scope_path, restored.scope_path);
+        assert_eq!(config.pinned_cap, restored.pinned_cap);
+        assert_eq!(config.high_importance_cap, restored.high_importance_cap);
+        assert_eq!(config.due_cap, restored.due_cap);
+        assert_eq!(config.recent_cap, restored.recent_cap);
+        assert!((config.high_importance_min - restored.high_importance_min).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn resume_context_serde_roundtrip() {
+        let ctx = ResumeContext {
+            pinned: vec![],
+            high_importance: vec![],
+            due: vec![],
+            recent: vec![],
+            kb_stubs: vec!["kb://some/stub".into()],
+        };
+        let json = serde_json::to_string(&ctx).expect("serialize ResumeContext");
+        let restored: ResumeContext =
+            serde_json::from_str(&json).expect("deserialize ResumeContext");
+        assert_eq!(ctx.kb_stubs, restored.kb_stubs);
+        assert!(restored.pinned.is_empty());
+        assert!(restored.high_importance.is_empty());
+        assert!(restored.due.is_empty());
+        assert!(restored.recent.is_empty());
     }
 
     #[test]

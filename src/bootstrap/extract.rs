@@ -89,7 +89,7 @@ impl SessionExtractor for KeywordExtractor {
             content,
             fact_type,
             importance,
-            category: episode.category.clone(),
+            category: episode.category,
             metadata,
         }])
     }
@@ -219,8 +219,9 @@ mod tests {
 
         // "User: " prefix is 6 chars, so total > 2000
         assert!(facts[0].content.ends_with("..."));
-        // The truncated content (minus the "..." suffix) must be <= 2000 chars.
-        assert!(facts[0].content.len() <= 2003 + 3);
+        // The implementation truncates to MAX_LEN=2000 chars then appends "...",
+        // so the total length must be exactly MAX_LEN + 3 = 2003 at most.
+        assert!(facts[0].content.len() <= 2003);
     }
 
     #[test]

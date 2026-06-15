@@ -26,7 +26,7 @@ use crate::error::{ValidationError, to_mcp_error};
 // Tool definitions (JSON schemas)
 // ---------------------------------------------------------------------------
 
-/// Returns all tool definitions (P0 + P1) with JSON schemas.
+/// Returns all tool definitions (P0, P1, P2, Phase 5) with JSON schemas.
 pub fn all_tool_definitions() -> Vec<Tool> {
     vec![
         tool_def(
@@ -452,15 +452,12 @@ fn get_datetime(args: &Map<String, Value>, key: &str) -> Result<Option<DateTime<
     }
 }
 
-fn get_depth(args: &Map<String, Value>) -> Depth {
-    get_str(args, "depth")
-        .and_then(|s| match s.as_str() {
-            "sparse" => Some(Depth::Sparse),
-            "standard" => Some(Depth::Standard),
-            "full" => Some(Depth::Full),
-            _ => None,
-        })
-        .unwrap_or_default()
+fn get_depth(args: &Map<String, Value>) -> Result<Depth, ErrorData> {
+    match args.get("depth") {
+        None | Some(Value::Null) => Ok(Depth::default()),
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|e| ErrorData::invalid_params(format!("invalid depth: {e}"), None)),
+    }
 }
 
 /// Parse an embedding from a JSON value, returning an error if present but malformed.
@@ -638,7 +635,7 @@ fn handle_query(
     engine: &MemoryEngine,
     embedder: Option<&HttpEmbeddingProvider>,
 ) -> Result<CallToolResult, ErrorData> {
-    let depth_level = get_depth(&args);
+    let depth_level = get_depth(&args)?;
 
     let mut query = memory_engine::MemoryQuery::new();
 
@@ -748,7 +745,7 @@ fn handle_resume_context(
     args: Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let depth_level = get_depth(&args);
+    let depth_level = get_depth(&args)?;
 
     let config = ResumeConfig {
         scope_path: get_str(&args, "scope"),
@@ -770,7 +767,7 @@ fn handle_list_due(
     args: Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let depth_level = get_depth(&args);
+    let depth_level = get_depth(&args)?;
     let scope = get_str(&args, "scope");
 
     let facts = engine
@@ -803,7 +800,7 @@ fn handle_explain_fact(
 ) -> Result<CallToolResult, ErrorData> {
     let fact_id = get_i64(&args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
-    let depth_level = get_depth(&args);
+    let depth_level = get_depth(&args)?;
 
     let explanation: FactExplanation = engine.explain_fact(fact_id).map_err(to_mcp_error)?;
     let shaped = depth::shape_explanation(&explanation, depth_level);
@@ -817,7 +814,7 @@ fn handle_get_fact(
 ) -> Result<CallToolResult, ErrorData> {
     let fact_id = get_i64(&args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
-    let depth_level = get_depth(&args);
+    let depth_level = get_depth(&args)?;
 
     let fact = engine.get_fact(fact_id).map_err(to_mcp_error)?;
     let shaped = depth::shape_fact(&fact, depth_level, None);
@@ -1132,12 +1129,13 @@ fn handle_replay_events(
     args: Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let depth_level = get_depth(&args);
+    let depth_level = get_depth(&args)?;
 
     let since = get_datetime(&args, "since")?;
     let until = get_datetime(&args, "until")?;
 
-    // Both-or-neither validation (like period_start/period_end in handle_query)
+    // Ordering validation: when both bounds are provided, since must not exceed until.
+    // Either bound may be omitted independently (open-ended range).
     if let (Some(s), Some(u)) = (since, until) {
         if s > u {
             return Err(ErrorData::invalid_params("since must be <= until", None));
@@ -1209,7 +1207,7 @@ fn handle_fact_history(
 ) -> Result<CallToolResult, ErrorData> {
     let fact_id = get_i64(&args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
-    let depth_level = get_depth(&args);
+    let depth_level = get_depth(&args)?;
 
     let history = engine.fact_history(fact_id).map_err(to_mcp_error)?;
     let shaped = depth::shape_fact_history(&history, depth_level);
@@ -1376,7 +1374,7 @@ fn handle_load_context(
         get_str(&args, "scope").ok_or_else(|| ErrorData::invalid_params("missing scope", None))?;
     let activity_limit = get_usize(&args, "activity_limit").unwrap_or(20);
     let fact_limit = get_usize(&args, "fact_limit").unwrap_or(10);
-    let depth_level = get_depth(&args);
+    let depth_level = get_depth(&args)?;
 
     let ctx = engine
         .load_context(&scope, activity_limit, fact_limit)

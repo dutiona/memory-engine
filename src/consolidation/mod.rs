@@ -32,6 +32,7 @@ use crate::traits::{ConsolidationConfig, ConsolidationStats, SummaryGenerator};
 /// # Errors
 ///
 /// Propagates errors from any pass or the `SummaryGenerator`.
+/// Returns `MemoryError::Migration` if `last_consolidated_at` in config cannot be parsed.
 pub fn consolidate(
     conn: &Connection,
     generator: &dyn SummaryGenerator,

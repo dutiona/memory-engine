@@ -6,11 +6,11 @@ use memory_engine::search::hybrid::MatchType;
 use tabled::{Table, Tabled};
 
 use crate::db::open_engine;
-use crate::output::{self, OutputFormat, truncate_str};
+use crate::output::{self, OutputFormat, parse_datetime, truncate_str};
 
 #[derive(clap::Args)]
 pub struct QueryArgs {
-    /// Search text (FTS5 full-text search)
+    /// Search text (hybrid FTS5 + vector search)
     text: String,
 
     /// Maximum results
@@ -38,12 +38,6 @@ pub struct QueryArgs {
     /// t_valid <= dt AND (t_invalid IS NULL OR t_invalid > dt).
     #[arg(long, value_parser = parse_datetime)]
     valid_at: Option<DateTime<Utc>>,
-}
-
-fn parse_datetime(s: &str) -> Result<DateTime<Utc>, String> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| format!("invalid RFC 3339 datetime: {e}"))
 }
 
 #[derive(Tabled)]
@@ -126,6 +120,7 @@ pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<
                         MatchType::Vector => "VEC".into(),
                         MatchType::Both => "BOTH".into(),
                         MatchType::ImportanceRank => "RANK".into(),
+                        MatchType::Archive => "ARCHIVE".into(),
                         _ => "?".into(),
                     },
                     fact_type: format!("{:?}", r.fact.fact_type),

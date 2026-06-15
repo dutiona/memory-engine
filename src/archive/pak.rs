@@ -1,4 +1,5 @@
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
@@ -8,27 +9,23 @@ use crate::error::{MemoryError, Result};
 /// Maximum decompressed `.pak` size (4 GiB) — prevents decompression bombs.
 const MAX_PAK_DECOMPRESSED_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Write an `ArchivePak` as zstd-compressed JSON (convenience wrapper).
-///
-/// Thin wrapper over [`write_pak_and_hash`] for callers that don't need the hash.
-// Used in unit tests below; restore tooling will also use this.
-#[allow(dead_code)]
-pub fn write_pak(pak: &ArchivePak, path: &Path) -> Result<()> {
-    write_pak_and_hash(pak, path)?;
-    Ok(())
-}
-
 /// Write a `.pak` file and return its blake3 hash.
 /// Hash is computed during write (no TOCTOU). Atomic write via tmp+rename.
 pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
     let tmp_path = path.with_extension("pak.tmp");
 
-    let file = fs::File::create(&tmp_path).map_err(|e| {
-        MemoryError::Archive(format!(
-            "failed to create temp pak file {}: {e}",
-            tmp_path.display()
-        ))
-    })?;
+    // O_EXCL: atomic creation — fails if the tmp file already exists, preventing
+    // symlink/TOCTOU attacks on the predictable temp path.
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .map_err(|e| {
+            MemoryError::Archive(format!(
+                "failed to create temp pak file {}: {e}",
+                tmp_path.display()
+            ))
+        })?;
 
     let mut hasher = blake3::Hasher::new();
     let hashing_writer = HashingWriter {
@@ -104,6 +101,14 @@ impl<W: Write> Write for HashingWriter<'_, W> {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    /// Write an `ArchivePak` as zstd-compressed JSON (test convenience wrapper).
+    ///
+    /// Thin wrapper over [`write_pak_and_hash`] for callers that don't need the hash.
+    fn write_pak(pak: &ArchivePak, path: &std::path::Path) -> crate::error::Result<()> {
+        write_pak_and_hash(pak, path)?;
+        Ok(())
+    }
 
     fn empty_pak() -> ArchivePak {
         ArchivePak {

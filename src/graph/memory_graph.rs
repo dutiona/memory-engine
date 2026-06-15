@@ -61,16 +61,19 @@ impl MemoryGraph {
         self.graph.add_edge(s, t, data);
     }
 
-    /// Remove all edges associated with the given `SQLite` edge id.
+    /// Remove the edge with the given `SQLite` edge id.
+    ///
+    /// Edge ids are unique (one `SQLite` row → one petgraph edge), so this
+    /// scans O(E) and removes at most one edge. Short-circuits after the
+    /// first match.
     ///
     /// Used after expiring an edge in `SQLite` to keep the graph in sync.
     pub fn remove_edge_by_id(&mut self, edge_id: i64) {
-        let to_remove: Vec<_> = self
+        if let Some(ei) = self
             .graph
             .edge_indices()
-            .filter(|&ei| self.graph[ei].edge_id == edge_id)
-            .collect();
-        for ei in to_remove {
+            .find(|&ei| self.graph[ei].edge_id == edge_id)
+        {
             self.graph.remove_edge(ei);
         }
     }
@@ -193,14 +196,12 @@ impl MemoryGraph {
 
         let mut graph = Self::new();
         for edge in &active_edges {
-            graph.add_edge(
+            graph.add_edges_from_iter(
                 edge.source_fact_id,
                 edge.target_fact_id,
-                EdgeData {
-                    edge_id: edge.id,
-                    relation_type: edge.relation_type.clone(),
-                    weight: edge.weight,
-                },
+                edge.id,
+                &edge.relation_type,
+                edge.weight,
             );
         }
 
@@ -235,17 +236,35 @@ impl MemoryGraph {
     pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::GraphSnapshot) -> Self {
         let mut graph = Self::new();
         for edge in &snap.edges {
-            graph.add_edge(
+            graph.add_edges_from_iter(
                 edge.source,
                 edge.target,
-                EdgeData {
-                    edge_id: edge.edge_id,
-                    relation_type: edge.relation_type.clone(),
-                    weight: edge.weight,
-                },
+                edge.edge_id,
+                &edge.relation_type,
+                edge.weight,
             );
         }
         graph
+    }
+
+    /// Shared edge-insertion kernel used by `load_from_db` and `from_snapshot`.
+    fn add_edges_from_iter(
+        &mut self,
+        source: i64,
+        target: i64,
+        edge_id: i64,
+        relation_type: &str,
+        weight: f64,
+    ) {
+        self.add_edge(
+            source,
+            target,
+            EdgeData {
+                edge_id,
+                relation_type: relation_type.to_owned(),
+                weight,
+            },
+        );
     }
 }
 

@@ -85,19 +85,24 @@ impl ConnectionPool {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` if any connection or schema setup fails.
+    /// Returns `MemoryError::Migration` if the schema version cannot be determined
+    /// or the stored version is newer than the compiled-in maximum.
+    /// Returns `MemoryError::UnsupportedEpoch` if the database was written by a
+    /// future version of the engine.
     pub fn open(
         path: &Path,
         embed_dim: usize,
         read_pool_size: usize,
         backup_dir: Option<&Path>,
     ) -> Result<Self> {
-        let write_conn = open_connection(&path.to_string_lossy())?;
+        let path_str = path.to_string_lossy();
+        let write_conn = open_connection(&path_str)?;
         init_schema(&write_conn)?;
         migrate(&write_conn, backup_dir)?;
 
         let mut read_conns = Vec::with_capacity(read_pool_size);
         for _ in 0..read_pool_size {
-            let conn = open_connection(&path.to_string_lossy())?;
+            let conn = open_connection(&path_str)?;
             conn.execute_batch("PRAGMA query_only = ON")
                 .map_err(MemoryError::Database)?;
             read_conns.push(conn);
@@ -140,11 +145,12 @@ impl ConnectionPool {
     /// read-write open. This constructor validates schema compatibility without
     /// running `init_schema()` or `migrate()`.
     ///
-    /// All connections have `PRAGMA query_only = ON`, including the internal slot
-    /// used for cache loading during initialization.
+    /// All connections are opened with `SQLITE_OPEN_READ_ONLY`, which enforces
+    /// read-only access at the OS level. No `PRAGMA query_only` is set.
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::Database` if any connection or pragma setup fails.
     /// Returns `MemoryError::Migration` if the file does not exist, the schema
     /// is uninitialized, or the schema needs migration.
     /// Returns `MemoryError::UnsupportedEpoch` if the DB epoch is from the future.
@@ -160,12 +166,13 @@ impl ConnectionPool {
         }
 
         // Open with SQLITE_OPEN_READ_ONLY — no file creation, no WAL mutation
-        let conn = open_connection_read_only(&path.to_string_lossy())?;
+        let path_str = path.to_string_lossy();
+        let conn = open_connection_read_only(&path_str)?;
         validate_schema_version(&conn)?;
 
         let mut read_conns = Vec::with_capacity(read_pool_size);
         for _ in 0..read_pool_size {
-            let c = open_connection_read_only(&path.to_string_lossy())?;
+            let c = open_connection_read_only(&path_str)?;
             read_conns.push(c);
         }
 
@@ -367,5 +374,36 @@ mod tests {
     fn pool_not_read_only_by_default() {
         let pool = ConnectionPool::open_memory(4).unwrap();
         assert!(!pool.is_read_only());
+    }
+
+    #[test]
+    fn pool_path_accessor() {
+        // In-memory: path() returns None
+        let mem_pool = ConnectionPool::open_memory(4).unwrap();
+        assert!(mem_pool.path().is_none());
+
+        // File-backed: path() returns the path used to open the pool
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
+        assert_eq!(pool.path(), Some(db_path.as_path()));
+    }
+
+    #[test]
+    fn pool_open_with_backup_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let backup_dir = dir.path().join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        // Opening with a backup_dir must succeed and produce a usable pool
+        let pool = ConnectionPool::open(&db_path, 4, 1, Some(&backup_dir)).unwrap();
+        assert!(pool.is_file_backed());
+        assert!(!pool.is_read_only());
+
+        let r = pool.read();
+        let v = get_config(&r, "schema_version").unwrap();
+        drop(r);
+        assert!(v.is_some());
     }
 }

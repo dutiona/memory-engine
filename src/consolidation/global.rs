@@ -16,6 +16,9 @@ use crate::types::{ConsolidationLevel, Fact, NewSummary};
 ///
 /// Returns `MemoryError::Database` on SQL failure, or propagates errors from
 /// the `SummaryGenerator`.
+/// Returns `MemoryError::EmbeddingDimension` if the generator returns an embedding
+/// whose length does not match `embed_dim`.
+/// Returns `MemoryError::Serialization` on JSON serialization failure.
 pub fn global_integration(
     conn: &Connection,
     generator: &dyn SummaryGenerator,
@@ -58,12 +61,23 @@ pub fn global_integration(
 
     let global_text = generator.summarize(&pseudo_facts)?;
     let global_embedding = generator.embed(&global_text)?;
+    if global_embedding.len() != embed_dim {
+        return Err(crate::error::MemoryError::EmbeddingDimension {
+            expected: embed_dim,
+            actual: global_embedding.len(),
+        });
+    }
 
-    // Collect all source fact ids from all cluster summaries
-    let all_source_ids: Vec<i64> = cluster_summaries
+    // Collect all source fact ids from all cluster summaries.
+    // Pre-size to avoid repeated reallocations: flat_map has no upper-bound hint.
+    let total_source_ids: usize = cluster_summaries
         .iter()
-        .flat_map(|s| s.source_fact_ids.iter().copied())
-        .collect();
+        .map(|s| s.source_fact_ids.len())
+        .sum();
+    let mut all_source_ids: Vec<i64> = Vec::with_capacity(total_source_ids);
+    for s in &cluster_summaries {
+        all_source_ids.extend_from_slice(&s.source_fact_ids);
+    }
 
     // Global summaries are intentionally root-scoped (scope_id=1).
     // They aggregate across all cluster-level summaries regardless of
@@ -134,7 +148,10 @@ mod tests {
         assert_eq!(global.len(), 1);
         assert!(global[0].content.contains("cluster 0"));
         assert!(global[0].content.contains("cluster 2"));
-        assert_eq!(global[0].source_fact_ids, vec![0, 1, 2]);
+        // Order-independent: global summary must contain all three source IDs.
+        let mut got = global[0].source_fact_ids.clone();
+        got.sort_unstable();
+        assert_eq!(got, vec![0, 1, 2]);
     }
 
     #[test]

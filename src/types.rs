@@ -49,7 +49,7 @@ pub struct OutcomeCounts {
 }
 
 /// Type of fact (`CoALA` mapping: Episodic, Semantic, Procedural).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FactType {
     Episodic,
     Semantic,
@@ -598,6 +598,32 @@ pub struct ProjectContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Display impl tests ---
+
+    #[test]
+    fn display_impls_all_variants() {
+        // Outcome
+        assert_eq!(Outcome::Positive.to_string(), "positive");
+        assert_eq!(Outcome::Negative.to_string(), "negative");
+        assert_eq!(Outcome::Neutral.to_string(), "neutral");
+
+        // FactType
+        assert_eq!(FactType::Episodic.to_string(), "episodic");
+        assert_eq!(FactType::Semantic.to_string(), "semantic");
+        assert_eq!(FactType::Procedural.to_string(), "procedural");
+
+        // ConsolidationLevel
+        assert_eq!(ConsolidationLevel::Local.to_string(), "local");
+        assert_eq!(ConsolidationLevel::Cluster.to_string(), "cluster");
+        assert_eq!(ConsolidationLevel::Global.to_string(), "global");
+
+        // ActivityStatus
+        assert_eq!(ActivityStatus::Recorded.to_string(), "recorded");
+        assert_eq!(ActivityStatus::Deduplicated.to_string(), "deduplicated");
+        assert_eq!(ActivityStatus::Ignored.to_string(), "ignored");
+        assert_eq!(ActivityStatus::Promoted.to_string(), "promoted");
+    }
 
     // --- Phase 5a type tests ---
 

@@ -55,6 +55,12 @@ pub fn explain_fact(
 /// snapshot if a concurrent writer commits between the graph traversal and the
 /// DB read. This is acceptable for an informational/debugging API — the
 /// explanation is best-effort, not transactionally consistent.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::NotFound`] if the fact (or its source event) does not exist.
+/// Returns [`MemoryError::Migration`] if the source event cannot be upcasted.
+/// Returns [`MemoryError::Database`] on SQL failure.
 pub(crate) fn explain_fact_with_graph_context(
     conn: &Connection,
     scope_tree: &ScopeTree,
@@ -98,7 +104,8 @@ fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
         return FactState::Pinned;
     }
     if let Some(t_valid) = fact.t_valid {
-        if t_valid <= now && (fact.t_invalid.is_none() || fact.t_invalid.unwrap() > now) {
+        let not_yet_invalid = fact.t_invalid.is_none_or(|t_inv| t_inv > now);
+        if t_valid <= now && not_yet_invalid {
             return FactState::Due {
                 t_valid,
                 surfaced_at: fact.surfaced_at,
@@ -135,14 +142,15 @@ pub(crate) fn build_graph_context(graph: &crate::graph::MemoryGraph, fact_id: i6
     let degree = graph.degree(fact_id);
     // Use connected_component to get ALL neighbors (in + out), consistent with degree.
     // `neighbors()` only returns outgoing, which would be inconsistent with degree.
-    let mut neighbor_ids: Vec<i64> = if graph.has_node(fact_id) {
+    let has_node = graph.has_node(fact_id);
+    let mut neighbor_ids: Vec<i64> = if has_node {
         let component = graph.connected_component(fact_id);
         component.into_iter().filter(|&id| id != fact_id).collect()
     } else {
         Vec::new()
     };
     neighbor_ids.sort_unstable();
-    let component_size = neighbor_ids.len() + usize::from(graph.has_node(fact_id));
+    let component_size = neighbor_ids.len() + usize::from(has_node);
     GraphContext {
         degree,
         neighbor_ids,

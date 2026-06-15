@@ -134,10 +134,11 @@ impl<'a> FactStore<'a> {
                     source_event_id, importance, access_count, last_accessed, metadata, scope_id,
                     is_pinned, importance_score, surfaced_at
              FROM facts WHERE t_expired IS NULL";
-        let sql = limit.map_or_else(|| base.to_owned(), |n| format!("{base} LIMIT {n}"));
+        let limit_i64: i64 = limit.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
+        let sql = format!("{base} LIMIT ?1");
         let mut stmt = self.conn.prepare(&sql)?;
         let dim = self.embed_dim;
-        let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
+        let rows = stmt.query_map(params![limit_i64], |row| row_to_fact(row, dim))?;
         let mut facts = Vec::new();
         for row in rows {
             facts.push(row?);

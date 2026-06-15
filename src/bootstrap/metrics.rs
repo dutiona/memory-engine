@@ -6,6 +6,7 @@ use serde::Serialize;
 #[derive(Debug, Clone)]
 pub struct BootstrapConfig {
     /// Scope path to ingest facts into (e.g., `"project:memory-engine"`).
+    /// `None` falls back to the root scope.
     pub scope: Option<String>,
     /// Maximum turns to process per session. `0` = no limit.
     pub max_turns: usize,

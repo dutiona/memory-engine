@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::search::vector::cosine_similarity;
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
+use crate::types::Fact;
 
 /// Local deduplication pass.
 ///
@@ -18,6 +19,7 @@ use crate::store::facts::FactStore;
 /// # Errors
 ///
 /// Returns `MemoryError::Database` on SQL failure.
+/// Returns `MemoryError::NotFound` if a fact to expire or update no longer exists.
 pub fn local_dedup(
     conn: &Connection,
     embed_dim: usize,
@@ -95,12 +97,7 @@ pub fn local_dedup(
                 } else {
                     (new_fact, &candidate)
                 };
-                if loser.importance > survivor.importance {
-                    fact_store.update_importance(survivor.id, loser.importance)?;
-                }
-                if loser.importance_score > survivor.importance_score {
-                    fact_store.update_importance_score(survivor.id, loser.importance_score)?;
-                }
+                inherit_max_importance(&fact_store, survivor, loser)?;
 
                 // If the new_fact itself was expired, stop comparing it
                 if expire_id == new_fact.id {
@@ -112,6 +109,20 @@ pub fn local_dedup(
 
     let expired_vec: Vec<i64> = expired_ids.into_iter().collect();
     Ok((duplicates_removed, expired_vec))
+}
+
+/// Inherit the higher importance values from `loser` into `survivor`.
+///
+/// Called after a dedup merge to ensure the surviving fact retains the
+/// maximum base importance and `importance_score` across the merged pair.
+fn inherit_max_importance(fact_store: &FactStore<'_>, survivor: &Fact, loser: &Fact) -> Result<()> {
+    if loser.importance > survivor.importance {
+        fact_store.update_importance(survivor.id, loser.importance)?;
+    }
+    if loser.importance_score > survivor.importance_score {
+        fact_store.update_importance_score(survivor.id, loser.importance_score)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -386,5 +397,17 @@ mod tests {
             "expected importance_score 0.8, got {}",
             active[0].importance_score
         );
+    }
+
+    #[test]
+    fn empty_db_dedup_is_noop() {
+        let (conn, dim) = setup();
+        // No facts in the DB — dedup must return (0, []) without error.
+        let (removed, expired) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        assert_eq!(removed, 0);
+        assert!(expired.is_empty());
+
+        let store = FactStore::new(&conn, dim);
+        assert!(store.list_active(None).unwrap().is_empty());
     }
 }

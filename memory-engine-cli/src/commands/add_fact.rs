@@ -6,7 +6,7 @@ use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
 use crate::db::open_engine_writable;
 use crate::embedding::PassthroughEmbedder;
-use crate::output::{self, OutputFormat};
+use crate::output::{self, OutputFormat, parse_datetime};
 
 /// Fact type for CLI argument parsing.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -69,12 +69,6 @@ pub struct AddFactArgs {
     source_event_id: Option<i64>,
 }
 
-fn parse_datetime(s: &str) -> Result<DateTime<Utc>, String> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| format!("invalid RFC 3339 datetime: {e}"))
-}
-
 pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Result<()> {
     // Parse embedding
     let embedding: Vec<f32> = serde_json::from_str(&args.embedding)
@@ -124,7 +118,7 @@ pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Resul
 
     let req = AddFactRequest {
         content: args.content.clone(),
-        fact_type: fact_type.clone(),
+        fact_type,
         source_event_id: args.source_event_id,
         scope: args.scope.clone(),
         opts: Some(AddFactOptions {

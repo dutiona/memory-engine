@@ -32,7 +32,9 @@ impl MemoryEngine {
     ///
     /// # Panics
     ///
-    /// Cannot panic in practice — the `.pak` path is always constructed with a filename.
+    /// Panics if the constructed `.pak` path has no filename component.
+    /// This cannot happen in practice because the path is always built as
+    /// `archive_dir.join("archive-<timestamp>.pak")`.
     ///
     /// # Errors
     ///

@@ -48,7 +48,7 @@ enum Commands {
         /// Fact ID
         id: i64,
     },
-    /// Search facts by text (FTS5 full-text search)
+    /// Search facts by text (hybrid FTS5 + vector search)
     Query(commands::query::QueryArgs),
     /// Export engine state to file (JSON, `SQLite`, compressed)
     Export(commands::export::ExportArgs),

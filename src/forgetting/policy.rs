@@ -8,12 +8,12 @@ use crate::store::facts::FactStore;
 use crate::traits::{ForgetPolicy, PruneStats};
 use crate::types::Fact;
 
-/// Normalization ceiling for access frequency: ln(100+1).
-/// 100 accesses = full score.
-const FREQUENCY_NORMALIZATION_CEILING: f64 = 101.0;
-/// Normalization ceiling for graph connectivity: ln(50+1).
-/// 50 connections = full score.
-const CONNECTIVITY_NORMALIZATION_CEILING: f64 = 51.0;
+/// Argument to `ln()` for access-frequency normalization: 100 + 1.
+/// Gives `ln(101)` as the divisor so that 100 accesses produce a full score of 1.0.
+const FREQUENCY_NORMALIZATION_ARG: f64 = 101.0;
+/// Argument to `ln()` for graph-connectivity normalization: 50 + 1.
+/// Gives `ln(51)` as the divisor so that 50 connections produce a full score of 1.0.
+const CONNECTIVITY_NORMALIZATION_ARG: f64 = 51.0;
 
 /// Ebbinghaus forgetting curve: retention = 2^(-age/half_life).
 ///
@@ -59,10 +59,10 @@ pub fn compute_importance(
     // Using ln_1p for numerical accuracy near zero.
     #[allow(clippy::cast_precision_loss)]
     let frequency =
-        (f64::ln_1p(fact.access_count as f64) / FREQUENCY_NORMALIZATION_CEILING.ln()).min(1.0);
+        (f64::ln_1p(fact.access_count as f64) / FREQUENCY_NORMALIZATION_ARG.ln()).min(1.0);
     #[allow(clippy::cast_precision_loss)]
     let connectivity =
-        (f64::ln_1p(graph_degree as f64) / CONNECTIVITY_NORMALIZATION_CEILING.ln()).min(1.0);
+        (f64::ln_1p(graph_degree as f64) / CONNECTIVITY_NORMALIZATION_ARG.ln()).min(1.0);
 
     policy
         .recency_weight
@@ -80,6 +80,12 @@ pub fn compute_importance(
 /// and removes edges from the in-memory graph to keep it consistent.
 ///
 /// All mutations happen in a single transaction.
+///
+/// # Returns
+///
+/// A tuple of `(PruneStats, Vec<i64>)` where:
+/// - `PruneStats` contains aggregate counts (`facts_evaluated`, `facts_expired`).
+/// - `Vec<i64>` is the list of fact IDs that were soft-deleted during this run.
 ///
 /// # Errors
 ///
@@ -575,7 +581,7 @@ mod tests {
             "only the episodic fact may expire, expired ids: {expired:?}"
         );
         let active = fact_store.list_active(None).unwrap();
-        let types: Vec<FactType> = active.iter().map(|f| f.fact_type.clone()).collect();
+        let types: Vec<FactType> = active.iter().map(|f| f.fact_type).collect();
         assert!(
             types.contains(&FactType::Semantic),
             "semantic must survive neglect (supersession governs it, not decay)"
