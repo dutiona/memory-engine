@@ -26,7 +26,7 @@ retention = 2^(-age_days / half_life)
 Returns 1.0 at age=0, 0.5 at age=half_life, 0.25 at age=2\*half_life. Age is measured from `last_accessed`, not `t_created`.
 
 ```rust
-pub fn ebbinghaus_decay(age_days: f64, half_life: f64) -> f64 {
+fn ebbinghaus_decay(age_days: f64, half_life: f64) -> f64 {
     f64::exp2(-age_days / half_life)
 }
 ```

@@ -147,21 +147,18 @@ forgetting, or conflict resolution.
 ```rust
 use memory_engine::inspect::types::{ReplayFilter, ReplayOrder};
 
-// Replay events 10–50 with raw payloads (no upcasting)
-let filter = ReplayFilter {
-    id_range: Some((10, 50)),
-    ..Default::default()
-};
+// Replay events 10–50 with raw payloads (no upcasting).
+// `ReplayFilter` is `#[non_exhaustive]`, so construct via `default()` + fields.
+let mut filter = ReplayFilter::default();
+filter.id_range = Some((10, 50));
 let events = engine.replay_events(&filter)?;
 
 // Replay by time window with upcasted payloads
-let filter = ReplayFilter {
-    since: Some(start),
-    until: Some(end),
-    upcast: true,
-    order: ReplayOrder::TimestampOrder,
-    ..Default::default()
-};
+let mut filter = ReplayFilter::default();
+filter.since = Some(start);
+filter.until = Some(end);
+filter.upcast = true;
+filter.order = ReplayOrder::TimestampOrder;
 ```
 
 ### Filter options
