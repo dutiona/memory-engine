@@ -105,12 +105,13 @@ impl<'a> ScopeStore<'a> {
     /// All top-level segments are children of root (id=1). Uses
     /// `INSERT OR IGNORE` + `SELECT` for race-safe creation.
     pub fn ensure_path(&self, path: &str) -> Result<i64> {
-        let segments: Vec<&str> = path.split('/').collect();
-        if segments.is_empty() {
+        if path.is_empty() {
             return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
                 "scope path must not be empty".into(),
             )));
         }
+
+        let segments: Vec<&str> = path.split('/').collect();
 
         let mut parent_id: i64 = 1; // root
 
