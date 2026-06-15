@@ -67,7 +67,7 @@ impl fmt::Display for FactType {
 }
 
 /// Consolidation level for summaries.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ConsolidationLevel {
     Local,
     Cluster,
@@ -521,8 +521,13 @@ pub struct PromotionResult {
     pub lineage_id: LineageId,
 }
 
+/// Error returned when [`ActivityStatus`] cannot be parsed from a string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown activity status: {0}")]
+pub struct ParseActivityStatusError(pub String);
+
 impl std::str::FromStr for ActivityStatus {
-    type Err = String;
+    type Err = ParseActivityStatusError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
@@ -530,7 +535,7 @@ impl std::str::FromStr for ActivityStatus {
             "deduplicated" => Ok(Self::Deduplicated),
             "ignored" => Ok(Self::Ignored),
             "promoted" => Ok(Self::Promoted),
-            other => Err(format!("unknown activity status: {other}")),
+            other => Err(ParseActivityStatusError(other.to_string())),
         }
     }
 }
@@ -686,7 +691,7 @@ mod tests {
         use std::str::FromStr;
 
         let err = ActivityStatus::from_str("bogus").unwrap_err();
-        assert_eq!(err, "unknown activity status: bogus");
+        assert_eq!(err.to_string(), "unknown activity status: bogus");
         // Case-sensitivity: the matcher expects lowercase variants.
         assert!(ActivityStatus::from_str("Recorded").is_err());
         assert!(ActivityStatus::from_str("").is_err());

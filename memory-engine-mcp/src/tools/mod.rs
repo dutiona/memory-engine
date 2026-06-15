@@ -1036,6 +1036,10 @@ fn handle_forget(
     }))
 }
 
+/// Monotonic counter making default dump paths unique within a process, so
+/// concurrent dumps (e.g. parallel tests) never collide on the timestamp.
+static NEXT_DUMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn handle_dump_state(
     args: Map<String, Value>,
     engine: &MemoryEngine,
@@ -1070,8 +1074,12 @@ fn handle_dump_state(
             p
         }
         None => {
+            // Process id + monotonic counter so concurrent dumps (notably
+            // parallel tests) never collide on the millisecond timestamp.
+            let seq = NEXT_DUMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let timestamp = Utc::now().format("%Y%m%dT%H%M%S%3f");
-            std::env::temp_dir().join(format!("memory-dump-{timestamp}.{ext}"))
+            let pid = std::process::id();
+            std::env::temp_dir().join(format!("memory-dump-{timestamp}-{pid}-{seq}.{ext}"))
         }
     };
 
@@ -1180,16 +1188,15 @@ fn handle_replay_events(
         None => ReplayOrder::InsertionOrder,
     };
 
-    let filter = ReplayFilter {
-        since,
-        until,
-        id_range,
-        session_id,
-        event_type,
-        limit,
-        upcast,
-        order,
-    };
+    let mut filter = ReplayFilter::default();
+    filter.since = since;
+    filter.until = until;
+    filter.id_range = id_range;
+    filter.session_id = session_id;
+    filter.event_type = event_type;
+    filter.limit = limit;
+    filter.upcast = upcast;
+    filter.order = order;
 
     let events = engine.replay_events(&filter).map_err(to_mcp_error)?;
 

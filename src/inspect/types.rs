@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -109,6 +109,7 @@ pub enum HistoryEventKind {
 
 /// Filter criteria for event replay.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReplayFilter {
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
@@ -161,7 +162,7 @@ pub struct EngineSnapshot {
     /// Absent in pre-v8 snapshots — defaults to empty.
     #[serde(default)]
     pub lineage: Vec<LineageSnapshotEntry>,
-    pub config: HashMap<String, String>,
+    pub config: BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +202,7 @@ pub struct EdgeStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryStats {
     pub total: i64,
-    pub by_level: HashMap<ConsolidationLevel, i64>,
+    pub by_level: BTreeMap<ConsolidationLevel, i64>,
 }
 
 /// Scope tree statistics.

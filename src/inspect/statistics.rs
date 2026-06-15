@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::Utc;
@@ -58,7 +58,7 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
 
     // Summary counts by level
     let summary_total: i64 = conn.query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))?;
-    let mut by_level = HashMap::new();
+    let mut by_level = BTreeMap::new();
     {
         let mut stmt = conn.prepare("SELECT level, COUNT(*) FROM summaries GROUP BY level")?;
         let rows = stmt.query_map([], |row| {

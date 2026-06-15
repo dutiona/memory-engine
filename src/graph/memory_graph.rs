@@ -39,7 +39,7 @@ impl MemoryGraph {
     }
 
     /// Ensure a node exists for the given fact id, returning its index.
-    pub fn ensure_node(&mut self, fact_id: i64) -> NodeIndex {
+    pub(crate) fn ensure_node(&mut self, fact_id: i64) -> NodeIndex {
         *self
             .node_map
             .entry(fact_id)
