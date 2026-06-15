@@ -377,6 +377,17 @@ pub fn backup_before_migration(
         .to_string_lossy();
     let backup_path = backup_dir.join(format!("{db_name}.v{current_version}.bak"));
 
+    // Defense-in-depth: reject a null byte in the backup path before ANY use —
+    // the filesystem ops below and the SQL interpolation further down. A NUL
+    // would truncate the C string the OS / SQLite receives, silently changing
+    // the target path. Validate-before-use / fail-fast. Mirrors the guard in
+    // `inspect::dump::dump_sqlite`.
+    if backup_path.to_string_lossy().contains('\0') {
+        return Err(MemoryError::Migration(
+            "backup path contains null byte".to_string(),
+        ));
+    }
+
     // Remove existing backup to avoid VACUUM INTO failure on re-run
     if backup_path.exists() {
         std::fs::remove_file(&backup_path).map_err(|e| {
@@ -390,16 +401,8 @@ pub fn backup_before_migration(
     // VACUUM INTO creates a standalone, defragmented copy — WAL-safe.
     // SQLite VACUUM INTO does not support parameterized paths, so we escape
     // single quotes manually (SQLite string literal escaping: ' → '').
+    // (The path was already null-byte-validated above, before any use.)
     let escaped = backup_path.to_string_lossy().replace('\'', "''");
-    // Defense-in-depth: reject a null byte before interpolating into SQL. A NUL
-    // would truncate the C string SQLite receives, silently changing the target
-    // path the escaping was meant to pin down. Mirrors the guard in
-    // `inspect::dump::dump_sqlite`.
-    if escaped.contains('\0') {
-        return Err(MemoryError::Migration(
-            "backup path contains null byte".to_string(),
-        ));
-    }
     let sql = format!("VACUUM INTO '{escaped}'");
     conn.execute_batch(&sql)
         .map_err(|e| MemoryError::Migration(format!("backup failed: {e}")))?;
