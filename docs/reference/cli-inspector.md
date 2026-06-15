@@ -127,21 +127,22 @@ Bulk-ingests facts from a JSONL file (or stdin with `--file -`). Each line is a 
 
 **Flags:**
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--file` | required | JSONL input path (`-` for stdin) |
-| `--embed-url` | required / env `MEMORY_ENGINE_EMBED_URL` | OpenAI-compatible embedding endpoint |
-| `--embed-model` | required / env `MEMORY_ENGINE_EMBED_MODEL` | Embedding model name |
-| `--embed-api-key` | env `MEMORY_ENGINE_EMBED_API_KEY` | Bearer API key |
-| `--batch-size` | 100 | Facts per transaction batch |
-| `--embed-timeout` | 30 | HTTP timeout (seconds) |
-| `--create` | false | Create new database |
-| `--embed-dim` | — | Required with `--create` |
-| `--scope` | — | Default scope for all facts |
+| Flag              | Default                                    | Description                          |
+| ----------------- | ------------------------------------------ | ------------------------------------ |
+| `--file`          | required                                   | JSONL input path (`-` for stdin)     |
+| `--embed-url`     | required / env `MEMORY_ENGINE_EMBED_URL`   | OpenAI-compatible embedding endpoint |
+| `--embed-model`   | required / env `MEMORY_ENGINE_EMBED_MODEL` | Embedding model name                 |
+| `--embed-api-key` | env `MEMORY_ENGINE_EMBED_API_KEY`          | Bearer API key                       |
+| `--batch-size`    | 100                                        | Facts per transaction batch          |
+| `--embed-timeout` | 30                                         | HTTP timeout (seconds)               |
+| `--create`        | false                                      | Create new database                  |
+| `--embed-dim`     | —                                          | Required with `--create`             |
+| `--scope`         | —                                          | Default scope for all facts          |
 
 **Error handling:** Malformed lines are skipped with a warning on stderr. Failed batches (embedding/DB errors) are skipped. Progress is reported on stderr. Exit code is non-zero only if zero facts were ingested.
 
 **Output formats:**
+
 - `--format json`: `{"total_ingested": N, "total_skipped": N, "failed_batches": N, "elapsed_secs": X}`
 - `--format table`: Human-readable summary
 - `--format plain`: `ingested=N skipped=N failed_batches=N elapsed_secs=X`
@@ -172,7 +173,7 @@ The CLI is a workspace member crate (`memory-engine-cli/`) with no LLM dependenc
 2. Calls the library's inspection API
 3. Formats output according to `--format`
 
-The `open_engine()` function sets `backup_dir` adjacent to the database as a safety measure — `MemoryEngine::open()` may run schema migrations. A true read-only open path is tracked in #103.
+The `open_engine()` function sets `backup_dir` adjacent to the database as a safety measure — building a file-backed `MemoryEngine` may run schema migrations. A true read-only open path is tracked in #103.
 
 ### Known Limitations
 

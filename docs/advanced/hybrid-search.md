@@ -173,7 +173,7 @@ When `rerank_depth` is `None`, falls back to `limit` (no over-fetch beyond tempo
 
 The reranker fires when **both** conditions are met:
 
-1. A `Reranker` is configured on the engine (via `open_with_reranker()` or `open_memory_with()`).
+1. A `Reranker` is configured on the engine (via `MemoryEngine::builder(dim).reranker(...)`).
 2. The query has `text` set (cross-encoders need query text).
 
 This means reranking applies to FTS, Hybrid, and Vector+text queries. Pure vector queries without text skip the reranker.
@@ -228,15 +228,16 @@ memory-engine = { git = "https://github.com/dutiona/memory-engine", features = [
 ```
 
 ```rust
-use memory_engine::engine::EngineConfig;
+use memory_engine::MemoryEngine;
 use memory_engine::search::SearchConfig;
 
-let mut config = EngineConfig::new("memory.db", 384);
-config.search_config = Some(SearchConfig {
-    ann_threshold: 10_000,  // use HNSW when >= 10K active facts
-    ..Default::default()
-});
-let engine = MemoryEngine::open(&config)?;
+let engine = MemoryEngine::builder(384)
+    .path("memory.db")
+    .search_config(SearchConfig {
+        ann_threshold: 10_000,  // use HNSW when >= 10K active facts
+        ..Default::default()
+    })
+    .build()?;
 ```
 
 ### Strategy Dispatch

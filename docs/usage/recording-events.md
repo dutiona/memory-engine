@@ -45,7 +45,7 @@ Call `engine.ingest(&event)` to append an event. It returns the database-assigne
 use chrono::Utc;
 use memory_engine::{MemoryEngine, NewEvent, EventType};
 
-let engine = MemoryEngine::open_memory(384)?;
+let engine = MemoryEngine::builder(384).build()?;
 
 let event = NewEvent {
     timestamp: Utc::now(),

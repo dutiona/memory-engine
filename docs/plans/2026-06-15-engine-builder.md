@@ -377,5 +377,46 @@ cargo insta test                                  # NO pending .snap.new (equiva
 
 ## 8. Post-Implementation Audit
 
-(To be appended after implementation per address-issue Feature-Researched step 5 — per-item
-Implemented/Modified/Dropped/Added status.)
+**Overall: all 8 tasks Implemented.** Behavior preservation proven by the golden equivalence harness
+(snapshots frozen vs the old constructors, re-pointed at the builder, byte-identical). Final state:
+`--workspace --all-features` green (943 default / 971 all-features tests), clippy EXIT 0, fmt clean,
+`cargo doc` clean of new broken links.
+
+| Plan item                                                  | Status       | Note                                                                                                                                                                                                                                                                           |
+| ---------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Task 0 census + plan-as-issue                              | Implemented  | Census in this plan; plan-as-issue filed at PR time                                                                                                                                                                                                                            |
+| Task 1 golden harness                                      | **Modified** | In-crate `#[cfg(test)] mod equivalence` instead of `tests/` — reads private engine/pool state without adding test-only public inspectors. `backup_dir` dropped from the snapshot tuple (consumed at open, not retained) and covered by a behavioral builder unit test instead. |
+| Task 2 typestate builder + `open_from_config`              | Implemented  | `src/engine/builder.rs`, split-state payload                                                                                                                                                                                                                                   |
+| Task 3 EngineConfig `#[non_exhaustive]` + `with_*` + shims | Implemented  | Staged sealing per the cross-model BLOCKER fix                                                                                                                                                                                                                                 |
+| Task 4 migrate core                                        | Implemented  | Receiver-anchored; ~198 sites total across Tasks 4–5                                                                                                                                                                                                                           |
+| Task 5 migrate siblings + async + restore + re-point       | Implemented  | async surface kept + rerouted (D8); restore `inspect_err` preserved (D6)                                                                                                                                                                                                       |
+| Task 6 seal + delete                                       | Implemented  | Compiler confirmed zero missed sites                                                                                                                                                                                                                                           |
+| Task 7 clippy/doc                                          | Implemented  | New code warning-clean; async rustdoc links fixed                                                                                                                                                                                                                              |
+| Task 8 feature matrix                                      | Implemented  | default/all-features/ann/async; ann-disabled+search_config test added                                                                                                                                                                                                          |
+| Docs: ADR, migration note, narrative sweep                 | **Added**    | ADR 0013, `docs/advanced/migration-builder.md`, 10 narrative files                                                                                                                                                                                                             |
+
+### Major divergence — mid-implementation collision with #543 (Added scope)
+
+While Tasks 0–8 were complete and green, **PR #543 merged to `main`**, closing #113 and #149 with a
+_different_ builder design: a flat **facade** `MemoryEngineBuilder` (inline in `mod.rs`) that delegates
+to the **kept** constructors, with `#[non_exhaustive]` but **unsealed** `EngineConfig`, and a _runtime_
+rejection of in-memory `read_only`. That design did **not** satisfy #541 (it kept the constructors).
+Two further commits also landed: **#544** (removed `SummaryGenerator::embed`, added an `embedder` arg
+to `consolidate`) and **#545** (bootstrap denylist), later **#550** (restore serializers).
+
+**Resolution (user-approved): supersede.** Rebased onto the new `main`; resolved the two conflicting
+files (`mod.rs`, `lib.rs`) in favour of the typestate design (dropping #543's inline facade builder).
+git auto-merged the #544 changes into the migrated files. Removed #543's now-obsolete
+`builder_rejects_in_memory_read_only` runtime test (the typestate makes it a compile error, covered by
+a `compile_fail` doctest); kept #543's other builder unit tests (they pass under the typestate API,
+including the `upcaster_registry` regression test). Branch collapsed to 2 commits (docs + impl) for a
+clean single-pass rebase.
+
+**Issue/PR impact:** #113 and #149 are now **closed by #543** — this PR closes **#541 only** and
+**supersedes #543's builder API** (the public builder shape changes: typestate, constructors removed,
+fields sealed). Flagged prominently in the PR body.
+
+### Deferred (filed as follow-ups, not folded in — D8/D9)
+
+- `enhancement(core): MemoryEngineBuilder::build_async + async-side reranker` (D8).
+- `refactor(storage): fold the restore family into MemoryEngineBuilder` (D9).

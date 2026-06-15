@@ -17,7 +17,7 @@ The bootstrap pipeline parses Claude Code JSONL session logs and imports notewor
 #     }
 # }
 #
-let engine = MemoryEngine::open_memory(384)?;
+let engine = MemoryEngine::builder(384).build()?;
 let extractor = KeywordExtractor;
 let config = BootstrapConfig::default();
 
@@ -51,7 +51,7 @@ To bootstrap an entire directory of session logs at once:
 #     }
 # }
 #
-# let engine = MemoryEngine::open_memory(384)?;
+# let engine = MemoryEngine::builder(384).build()?;
 # let extractor = KeywordExtractor;
 # let config = BootstrapConfig::default();
 let report = engine.bootstrap_directory(
@@ -111,40 +111,40 @@ let config = BootstrapConfig {
 };
 ```
 
-| Field           | Type              | Default | Description                                                                                                  |
-| --------------- | ----------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
-| `scope`         | `Option<String>`  | `None`  | Scope path for ingested facts (e.g., `"project:my-app"`). `None` uses the root scope.                       |
-| `max_turns`     | `usize`           | `0`     | Maximum turns to process per session. `0` means no limit.                                                    |
-| `skip_existing` | `bool`            | `true`  | Skip sessions that have already been bootstrapped (idempotency). Set to `false` to allow duplicate imports. |
+| Field           | Type             | Default | Description                                                                                                 |
+| --------------- | ---------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `scope`         | `Option<String>` | `None`  | Scope path for ingested facts (e.g., `"project:my-app"`). `None` uses the root scope.                       |
+| `max_turns`     | `usize`          | `0`     | Maximum turns to process per session. `0` means no limit.                                                   |
+| `skip_existing` | `bool`           | `true`  | Skip sessions that have already been bootstrapped (idempotency). Set to `false` to allow duplicate imports. |
 
 ## Reading reports
 
 `bootstrap_session` and `bootstrap_directory` return a `BootstrapReport`:
 
-| Field                  | Type              | Description                                           |
-| ---------------------- | ----------------- | ----------------------------------------------------- |
-| `sessions_processed`   | `usize`           | Sessions successfully bootstrapped.                   |
-| `sessions_skipped`     | `usize`           | Sessions skipped due to idempotency check.            |
-| `entries_parsed`       | `usize`           | Raw JSONL entries parsed.                             |
-| `entries_malformed`    | `usize`           | Entries that could not be parsed (skipped with warn). |
-| `turns_reconstructed`  | `usize`           | User-assistant turn pairs reconstructed.              |
-| `candidates_found`     | `usize`           | Episodes that matched keyword pre-filter.             |
-| `facts_created`        | `usize`           | Facts inserted into the engine.                       |
-| `events_ingested`      | `usize`           | Marker events inserted (one per session).             |
-| `outcome_counts`       | `OutcomeCounts`   | Breakdown by session outcome (success/failure/indeterminate). |
-| `category_counts`      | `CategoryCounts`  | Breakdown by episode category (bug/decision/convention/learning). |
-| `prewarm_metrics`      | `PrewarmMetrics`  | Cold-start quality metrics.                           |
+| Field                 | Type             | Description                                                       |
+| --------------------- | ---------------- | ----------------------------------------------------------------- |
+| `sessions_processed`  | `usize`          | Sessions successfully bootstrapped.                               |
+| `sessions_skipped`    | `usize`          | Sessions skipped due to idempotency check.                        |
+| `entries_parsed`      | `usize`          | Raw JSONL entries parsed.                                         |
+| `entries_malformed`   | `usize`          | Entries that could not be parsed (skipped with warn).             |
+| `turns_reconstructed` | `usize`          | User-assistant turn pairs reconstructed.                          |
+| `candidates_found`    | `usize`          | Episodes that matched keyword pre-filter.                         |
+| `facts_created`       | `usize`          | Facts inserted into the engine.                                   |
+| `events_ingested`     | `usize`          | Marker events inserted (one per session).                         |
+| `outcome_counts`      | `OutcomeCounts`  | Breakdown by session outcome (success/failure/indeterminate).     |
+| `category_counts`     | `CategoryCounts` | Breakdown by episode category (bug/decision/convention/learning). |
+| `prewarm_metrics`     | `PrewarmMetrics` | Cold-start quality metrics.                                       |
 
 ### `PrewarmMetrics`
 
 Tracks the composition and quality of bootstrapped facts for cold-start analysis:
 
-| Field              | Type    | Description                                    |
-| ------------------ | ------- | ---------------------------------------------- |
-| `episodic_count`   | `usize` | Number of episodic facts created.              |
-| `semantic_count`   | `usize` | Number of semantic facts created.              |
-| `procedural_count` | `usize` | Number of procedural facts created.            |
-| `avg_importance`   | `f64`   | Weighted average importance across all facts.  |
+| Field              | Type    | Description                                   |
+| ------------------ | ------- | --------------------------------------------- |
+| `episodic_count`   | `usize` | Number of episodic facts created.             |
+| `semantic_count`   | `usize` | Number of semantic facts created.             |
+| `procedural_count` | `usize` | Number of procedural facts created.           |
+| `avg_importance`   | `f64`   | Weighted average importance across all facts. |
 
 Use `total_count()` to get the sum of all three fact-type counts.
 

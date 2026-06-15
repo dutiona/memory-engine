@@ -216,10 +216,15 @@ The reranker is optional. When no reranker is configured (or the query has no te
 
 ```rust
 // File-backed engine with reranker
-let engine = MemoryEngine::open_with_reranker(&config, Some(Box::new(my_reranker)))?;
+let engine = MemoryEngine::builder(dim)
+    .path(&db_path)
+    .reranker(Box::new(my_reranker))
+    .build()?;
 
 // In-memory engine with reranker (for testing)
-let engine = MemoryEngine::open_memory_with(dim, None, Some(Box::new(my_reranker)))?;
+let engine = MemoryEngine::builder(dim)
+    .reranker(Box::new(my_reranker))
+    .build()?;
 
 // Check active reranker
 assert_eq!(engine.reranker_name(), Some("cross_encoder"));
@@ -295,7 +300,7 @@ pub struct SearchConfig {
 }
 ```
 
-Controls when the engine switches from brute-force to HNSW. Passed via `EngineConfig::search_config`. Without `SearchConfig` (or without the `ann` feature), brute-force is always used.
+Controls when the engine switches from brute-force to HNSW. Passed via `MemoryEngine::builder(dim).search_config(...)` (or `EngineConfig::new(path, dim).with_search_config(...)`). Without `SearchConfig` (or without the `ann` feature), brute-force is always used.
 
 ## ForgetPolicy: Configuration, Not a Trait
 
@@ -318,14 +323,14 @@ This is a policy (parameter set), not a strategy (pluggable algorithm). See [For
 
 ## Summary of Extension Points
 
-| Extension point         | Type           | When called           | Provided by                         |
-| ----------------------- | -------------- | --------------------- | ----------------------------------- |
-| `EmbeddingProvider`     | consumer trait | `add_fact()`          | Text-to-vector model                |
+| Extension point         | Type           | When called           | Provided by                                       |
+| ----------------------- | -------------- | --------------------- | ------------------------------------------------- |
+| `EmbeddingProvider`     | consumer trait | `add_fact()`          | Text-to-vector model                              |
 | `SummaryGenerator`      | consumer trait | `consolidate()`       | Summarization (embedding via `EmbeddingProvider`) |
-| `ConflictArbiter`       | consumer trait | `resolve_conflict()`  | Resolution logic                    |
-| `PersistenceClassifier` | consumer trait | `add_fact()`          | Auto-pinning logic                  |
-| `Reranker`              | consumer trait | `query()`             | Cross-encoder reranking (Phase 4a)  |
-| `SessionExtractor`      | consumer trait | `bootstrap_session()` | Episode-to-fact extraction          |
-| `ForgetPolicy`          | struct         | `forget()`            | Decay parameters                    |
-| `VectorSearchStrategy`  | internal trait | `query()`             | Engine (BruteForce or HnswStrategy) |
-| `SearchConfig`          | struct         | `open()`              | ANN dispatch threshold              |
+| `ConflictArbiter`       | consumer trait | `resolve_conflict()`  | Resolution logic                                  |
+| `PersistenceClassifier` | consumer trait | `add_fact()`          | Auto-pinning logic                                |
+| `Reranker`              | consumer trait | `query()`             | Cross-encoder reranking (Phase 4a)                |
+| `SessionExtractor`      | consumer trait | `bootstrap_session()` | Episode-to-fact extraction                        |
+| `ForgetPolicy`          | struct         | `forget()`            | Decay parameters                                  |
+| `VectorSearchStrategy`  | internal trait | `query()`             | Engine (BruteForce or HnswStrategy)               |
+| `SearchConfig`          | struct         | `builder()`           | ANN dispatch threshold                            |
