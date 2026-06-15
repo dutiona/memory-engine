@@ -6,7 +6,9 @@
 use memory_engine::traits::ConsolidationConfig;
 use memory_engine::types::FactType;
 
-use crate::helpers::{MockSummaryGenerator, add_fact, aggressive_forget_policy, eval_engine};
+use crate::helpers::{
+    MockSummaryGenerator, TestEmbedder, add_fact, aggressive_forget_policy, eval_engine,
+};
 
 #[test]
 fn same_content_produces_identical_content_hash() {
@@ -66,7 +68,7 @@ fn dedup_consolidation_expires_one_duplicate() {
     };
 
     let stats = engine
-        .consolidate(&generator, &config)
+        .consolidate(&generator, &TestEmbedder, &config)
         .expect("consolidate failed");
     assert!(
         stats.duplicates_removed > 0,

@@ -37,7 +37,7 @@ memory_engine (lib.rs)
 : Consumer-implemented traits that the engine delegates to for domain-specific behavior:
 
 - `EmbeddingProvider` -- compute text embeddings (local model or API).
-- `SummaryGenerator` -- generate summaries from fact clusters, plus embed the result.
+- `SummaryGenerator` -- generate summary text from fact clusters (embedding is done by the `EmbeddingProvider` injected into `consolidate()`).
 - `ConflictArbiter` -- decide how to resolve contradicting facts (returns `CrudDecision`).
 - `PersistenceClassifier` -- decide whether a new fact should be pinned (unforgettable). Optional, default returns `false`.
   Also defines `ForgetPolicy` (Ebbinghaus parameters and signal weights), `ConsolidationConfig`, `ConsolidationStats`, `PruneStats`, `ConflictResolution`, and `CrudDecision`.
@@ -68,7 +68,7 @@ memory_engine (lib.rs)
 1. **Local dedup** -- expire near-duplicate facts (cosine similarity above threshold).
 2. **Cluster fusion** -- group related facts and generate cluster-level summaries.
 3. **Global integration** -- produce cross-cluster summaries.
-   Accepts a `SummaryGenerator` trait object and `ConsolidationConfig`.
+   Accepts a `SummaryGenerator` trait object, an `EmbeddingProvider` trait object (to embed the generated summaries), and `ConsolidationConfig`.
 
 `forgetting`
 : Ebbinghaus-based decay with multi-signal importance scoring. Computes a weighted combination of recency (exponential decay), access frequency, graph connectivity, and base importance. Facts scoring below `ForgetPolicy::min_importance` are soft-deleted (their `t_expired` is set). Returns `PruneStats`.

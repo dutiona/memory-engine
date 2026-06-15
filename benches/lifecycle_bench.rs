@@ -57,11 +57,10 @@ impl EmbeddingProvider for ConstEmbedder {
     }
 }
 
-/// Trivial summary generator: concatenates fact content, embeds the result.
-/// Produces deterministic output without any LLM dependency.
-struct ConcatSummaryGenerator {
-    embedder: ConstEmbedder,
-}
+/// Trivial summary generator: concatenates fact content.
+/// Produces deterministic text without any LLM dependency. Summary embedding is
+/// performed by the [`ConstEmbedder`] injected into consolidation (issue #116).
+struct ConcatSummaryGenerator;
 
 impl SummaryGenerator for ConcatSummaryGenerator {
     fn summarize(&self, facts: &[Fact]) -> memory_engine::error::Result<String> {
@@ -71,10 +70,6 @@ impl SummaryGenerator for ConcatSummaryGenerator {
             .collect::<Vec<_>>()
             .join("; ");
         Ok(summary)
-    }
-
-    fn embed(&self, text: &str) -> memory_engine::error::Result<Vec<f32>> {
-        self.embedder.embed(text)
     }
 }
 
@@ -192,14 +187,13 @@ fn bench_consolidation(c: &mut Criterion) {
             b.iter_with_setup(
                 || setup_engine(n),
                 |(engine, _dir)| {
-                    let generator = ConcatSummaryGenerator {
-                        embedder: ConstEmbedder { dim: DIM },
-                    };
+                    let generator = ConcatSummaryGenerator;
+                    let embedder = ConstEmbedder { dim: DIM };
                     let config = ConsolidationConfig {
                         dedup_threshold: 0.95,
                         min_cluster_size: 3,
                     };
-                    engine.consolidate(&generator, &config).unwrap();
+                    engine.consolidate(&generator, &embedder, &config).unwrap();
                 },
             );
         });

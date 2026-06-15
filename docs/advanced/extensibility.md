@@ -52,16 +52,15 @@ The returned vector's dimension must match the `embed_dim` configured on the eng
 
 ### SummaryGenerator
 
-Called during consolidation (cluster fusion and global integration) to produce textual summaries and their embeddings:
+Called during consolidation (cluster fusion and global integration) to produce textual summaries:
 
 ```rust
 pub trait SummaryGenerator {
     fn summarize(&self, facts: &[Fact]) -> Result<String>;
-    fn embed(&self, text: &str) -> Result<Vec<f32>>;
 }
 ```
 
-The `summarize` method receives a slice of related facts (a cluster or the set of cluster summaries) and returns a textual summary. The `embed` method computes an embedding for that summary text.
+The `summarize` method receives a slice of related facts (a cluster or the set of cluster summaries) and returns a textual summary. Embedding of that summary is **not** the generator's job: the `EmbeddingProvider` passed alongside the generator into `consolidate()` embeds it, so summaries share the fact vector space. (A redundant `SummaryGenerator::embed` was removed; it merely duplicated `EmbeddingProvider::embed`.)
 
 Implementation example:
 
@@ -69,7 +68,6 @@ Implementation example:
 struct LlmSummarizer {
     client: reqwest::blocking::Client,
     api_key: String,
-    embedder: Arc<dyn EmbeddingProvider>,
 }
 
 impl SummaryGenerator for LlmSummarizer {
@@ -81,14 +79,10 @@ impl SummaryGenerator for LlmSummarizer {
         // Call LLM API...
         Ok(summary)
     }
-
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        self.embedder.embed(text)
-    }
 }
 ```
 
-Errors from the `SummaryGenerator` roll back the entire consolidation transaction.
+Errors from the `SummaryGenerator` (or the `EmbeddingProvider`) roll back the entire consolidation transaction.
 
 ### ConflictArbiter
 
@@ -327,7 +321,7 @@ This is a policy (parameter set), not a strategy (pluggable algorithm). See [For
 | Extension point         | Type           | When called           | Provided by                         |
 | ----------------------- | -------------- | --------------------- | ----------------------------------- |
 | `EmbeddingProvider`     | consumer trait | `add_fact()`          | Text-to-vector model                |
-| `SummaryGenerator`      | consumer trait | `consolidate()`       | Summarization + embedding           |
+| `SummaryGenerator`      | consumer trait | `consolidate()`       | Summarization (embedding via `EmbeddingProvider`) |
 | `ConflictArbiter`       | consumer trait | `resolve_conflict()`  | Resolution logic                    |
 | `PersistenceClassifier` | consumer trait | `add_fact()`          | Auto-pinning logic                  |
 | `Reranker`              | consumer trait | `query()`             | Cross-encoder reranking (Phase 4a)  |

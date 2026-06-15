@@ -88,7 +88,7 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 | Method        | Signature                                                                                               | Description                                                                                                               |
 | ------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `consolidate` | `(&self, generator: &dyn SummaryGenerator, config: &ConsolidationConfig) -> Result<ConsolidationStats>` | Run three-pass consolidation: local dedup, cluster fusion, global integration. Rebuilds graph if duplicates were removed. |
+| `consolidate` | `(&self, generator: &dyn SummaryGenerator, embedder: &dyn EmbeddingProvider, config: &ConsolidationConfig) -> Result<ConsolidationStats>` | Run three-pass consolidation: local dedup, cluster fusion, global integration. The generator produces summary text; the embedder projects it into the fact vector space. Rebuilds graph if duplicates were removed. |
 
 `ConsolidationConfig` fields:
 

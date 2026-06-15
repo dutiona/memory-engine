@@ -15,7 +15,34 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::store::schema::{get_config, set_config};
-use crate::traits::{ConsolidationConfig, ConsolidationStats, SummaryGenerator};
+use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
+use crate::types::Fact;
+
+/// Summarize a slice of facts and embed the resulting summary text, validating
+/// the embedding dimension. Shared by cluster fusion and global integration so
+/// the summarize → embed → dimension-check sequence cannot diverge (issue #116:
+/// embedding now flows through the injected `EmbeddingProvider`).
+///
+/// # Errors
+///
+/// Propagates `SummaryGenerator` / `EmbeddingProvider` errors; returns
+/// `MemoryError::EmbeddingDimension` when the embedding length != `embed_dim`.
+pub(crate) fn summarize_and_embed(
+    generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
+    facts: &[Fact],
+    embed_dim: usize,
+) -> Result<(String, Vec<f32>)> {
+    let text = generator.summarize(facts)?;
+    let embedding = embedder.embed(&text)?;
+    if embedding.len() != embed_dim {
+        return Err(crate::error::MemoryError::EmbeddingDimension {
+            expected: embed_dim,
+            actual: embedding.len(),
+        });
+    }
+    Ok((text, embedding))
+}
 
 /// Orchestrate all 3 consolidation passes atomically.
 ///
@@ -24,18 +51,25 @@ use crate::traits::{ConsolidationConfig, ConsolidationStats, SummaryGenerator};
 /// 3. Global integration — summarize all clusters into one global summary
 ///
 /// All passes run within a single transaction. On any failure (including
-/// `SummaryGenerator` errors), the entire consolidation is rolled back.
+/// `SummaryGenerator` or `EmbeddingProvider` errors), the entire consolidation
+/// is rolled back.
 ///
 /// Reads `last_consolidated_at` from config to scope dedup.
 /// Updates `last_consolidated_at` after successful completion.
 ///
+/// `generator` produces the summary text; `embedder` projects that text into
+/// the fact vector space (issue #116 — embedding is no longer duplicated on the
+/// generator trait).
+///
 /// # Errors
 ///
-/// Propagates errors from any pass or the `SummaryGenerator`.
+/// Propagates errors from any pass, the `SummaryGenerator`, or the
+/// `EmbeddingProvider`.
 /// Returns `MemoryError::Migration` if `last_consolidated_at` in config cannot be parsed.
 pub fn consolidate(
     conn: &Connection,
     generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
     embed_dim: usize,
     config: &ConsolidationConfig,
 ) -> Result<(ConsolidationStats, Vec<i64>)> {
@@ -57,8 +91,9 @@ pub fn consolidate(
     let dedup_skipped = duplicates_removed == usize::MAX;
     let duplicates_removed = if dedup_skipped { 0 } else { duplicates_removed };
 
-    let clusters_created = cluster_fusion(&tx, generator, embed_dim, config.min_cluster_size)?;
-    let global_summaries = global_integration(&tx, generator, embed_dim)?;
+    let clusters_created =
+        cluster_fusion(&tx, generator, embedder, embed_dim, config.min_cluster_size)?;
+    let global_summaries = global_integration(&tx, generator, embedder, embed_dim)?;
 
     // Only advance the watermark if dedup actually ran. When skipped, facts
     // ingested during the over-cap period must be retried on the next run.

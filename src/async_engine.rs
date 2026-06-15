@@ -159,15 +159,21 @@ impl AsyncMemoryEngine {
     }
 
     /// Run three-pass consolidation.
+    ///
+    /// `generator` produces the summary text; `embedder` projects it into the
+    /// fact vector space (issue #116 — embedding is no longer on the generator).
     pub async fn consolidate(
         &self,
         generator: Arc<dyn SummaryGenerator + Send + Sync>,
+        embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
         config: ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
         let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.consolidate(generator.as_ref(), &config))
-            .await
-            .map_err(join_err)?
+        tokio::task::spawn_blocking(move || {
+            engine.consolidate(generator.as_ref(), embedder.as_ref(), &config)
+        })
+        .await
+        .map_err(join_err)?
     }
 
     /// Prune stale facts.

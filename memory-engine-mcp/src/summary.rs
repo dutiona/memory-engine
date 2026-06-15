@@ -1,10 +1,6 @@
-use std::sync::Arc;
-
 use memory_engine::error::MemoryError;
 use memory_engine::traits::SummaryGenerator;
 use memory_engine::types::Fact;
-
-use crate::embedding::HttpEmbeddingProvider;
 
 /// Default system prompt for memory consolidation summarization.
 ///
@@ -21,14 +17,15 @@ Output only the summary text, no preamble or explanation.";
 /// Uses `reqwest::blocking::Client` because the engine's `SummaryGenerator` trait is sync.
 /// This runs inside `tokio::task::spawn_blocking` via the server's dispatch layer.
 ///
-/// Delegates `embed()` to the configured [`HttpEmbeddingProvider`] to ensure
-/// dimensional consistency between summaries and facts in the vector space.
+/// Produces summary text only. Embedding is performed by the
+/// [`HttpEmbeddingProvider`](crate::embedding::HttpEmbeddingProvider) injected
+/// separately into consolidation (issue #116 — embedding is no longer duplicated
+/// on the `SummaryGenerator` trait), so summaries share the fact vector space.
 pub struct HttpSummaryGenerator {
     client: reqwest::blocking::Client,
     endpoint: String,
     model: String,
     api_key: Option<String>,
-    embedder: Arc<HttpEmbeddingProvider>,
 }
 
 impl HttpSummaryGenerator {
@@ -39,7 +36,6 @@ impl HttpSummaryGenerator {
         endpoint: String,
         model: String,
         api_key: Option<String>,
-        embedder: Arc<HttpEmbeddingProvider>,
         timeout_secs: u64,
     ) -> Result<Self, String> {
         let client = reqwest::blocking::ClientBuilder::new()
@@ -51,7 +47,6 @@ impl HttpSummaryGenerator {
             endpoint,
             model,
             api_key,
-            embedder,
         })
     }
 }
@@ -126,11 +121,6 @@ impl SummaryGenerator for HttpSummaryGenerator {
                 serde_json::to_string(&body).unwrap_or_default()
             ))
         })
-    }
-
-    fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
-        use memory_engine::traits::EmbeddingProvider;
-        self.embedder.embed(text)
     }
 }
 

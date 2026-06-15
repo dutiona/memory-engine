@@ -48,10 +48,8 @@ impl SummaryGenerator for ConcatSummarizer {
             .join("; ");
         Ok(format!("Summary: {summary}"))
     }
-
-    fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
-        SimpleEmbedder.embed(text)
-    }
+    // No `embed`: summaries are embedded by the EmbeddingProvider passed into
+    // `consolidate`, sharing the fact vector space (issue #116).
 }
 
 // --- ConflictArbiter: consumers define how to resolve contradictions ---
@@ -125,10 +123,11 @@ fn main() -> Result<(), MemoryError> {
     println!("Added 4 facts (1 duplicate)");
     println!("Active facts: {}", engine.list_active_facts(None)?.len());
 
-    // --- Consolidation: uses SummaryGenerator ---
+    // --- Consolidation: uses SummaryGenerator (text) + EmbeddingProvider (vectors) ---
     let summarizer = ConcatSummarizer;
     let stats = engine.consolidate(
         &summarizer,
+        &embedder,
         &ConsolidationConfig {
             dedup_threshold: 0.99, // high threshold to catch near-exact duplicates
             min_cluster_size: 2,

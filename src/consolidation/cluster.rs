@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::search::vector::cosine_similarity;
 use crate::store::facts::FactStore;
 use crate::store::summaries::SummaryStore;
-use crate::traits::SummaryGenerator;
+use crate::traits::{EmbeddingProvider, SummaryGenerator};
 use crate::types::{ConsolidationLevel, Fact, NewSummary};
 
 /// Cluster threshold for grouping related facts (lower than dedup threshold).
@@ -14,7 +14,8 @@ const CLUSTER_SIMILARITY_THRESHOLD: f32 = 0.85;
 ///
 /// Clears prior cluster-level summaries before creating new ones (idempotent).
 /// Groups active facts by similarity (greedy single-linkage clustering).
-/// For each cluster >= `min_cluster_size`, calls `SummaryGenerator` to create a summary.
+/// For each cluster >= `min_cluster_size`, calls `SummaryGenerator` to create a
+/// summary, then `EmbeddingProvider` to embed it into the fact vector space.
 /// Stores summaries via `SummaryStore` with `level=Cluster`.
 ///
 /// Returns number of clusters created.
@@ -22,13 +23,14 @@ const CLUSTER_SIMILARITY_THRESHOLD: f32 = 0.85;
 /// # Errors
 ///
 /// Returns `MemoryError::Database` on SQL failure, or propagates errors from
-/// the `SummaryGenerator`.
-/// Returns `MemoryError::EmbeddingDimension` if the generator returns an embedding
+/// the `SummaryGenerator` or `EmbeddingProvider`.
+/// Returns `MemoryError::EmbeddingDimension` if the embedder returns an embedding
 /// whose length does not match `embed_dim`.
 /// Returns `MemoryError::Serialization` on JSON serialization failure.
 pub fn cluster_fusion(
     conn: &Connection,
     generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
     embed_dim: usize,
     min_cluster_size: usize,
 ) -> Result<usize> {
@@ -70,14 +72,8 @@ pub fn cluster_fusion(
             .collect();
         let source_ids: Vec<i64> = cluster_facts.iter().map(|f| f.id).collect();
 
-        let summary_text = generator.summarize(&cluster_facts)?;
-        let summary_embedding = generator.embed(&summary_text)?;
-        if summary_embedding.len() != embed_dim {
-            return Err(crate::error::MemoryError::EmbeddingDimension {
-                expected: embed_dim,
-                actual: summary_embedding.len(),
-            });
-        }
+        let (summary_text, summary_embedding) =
+            super::summarize_and_embed(generator, embedder, &cluster_facts, embed_dim)?;
 
         // Determine scope_id from majority vote of source facts.
         // Deterministic tie-break: lowest scope_id wins on equal counts.
@@ -156,10 +152,8 @@ mod tests {
     use crate::store::schema::{init_schema, open_memory};
     use crate::types::{FactType, NewFact};
 
-    /// Mock generator that concatenates fact contents and returns a fixed embedding.
-    struct MockGenerator {
-        embed_dim: usize,
-    }
+    /// Mock generator that concatenates fact contents.
+    struct MockGenerator;
 
     impl SummaryGenerator for MockGenerator {
         fn summarize(&self, facts: &[Fact]) -> Result<String> {
@@ -169,7 +163,14 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" + "))
         }
+    }
 
+    /// Mock embedder returning a fixed-dimension constant vector.
+    struct MockEmbedder {
+        embed_dim: usize,
+    }
+
+    impl EmbeddingProvider for MockEmbedder {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![0.5; self.embed_dim])
         }
@@ -214,8 +215,9 @@ mod tests {
         insert_fact(&conn, dim, "c2b", vec![0.02, 0.98, 0.0, 0.0]);
         insert_fact(&conn, dim, "c2c", vec![0.03, 0.97, 0.0, 0.0]);
 
-        let mock_gen = MockGenerator { embed_dim: dim };
-        let clusters = cluster_fusion(&conn, &mock_gen, dim, 3).unwrap();
+        let mock_gen = MockGenerator;
+        let mock_embed = MockEmbedder { embed_dim: dim };
+        let clusters = cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 3).unwrap();
         assert_eq!(clusters, 2);
 
         let summaries = SummaryStore::new(&conn, dim)
@@ -234,8 +236,9 @@ mod tests {
         insert_fact(&conn, dim, "a", vec![1.0, 0.0, 0.0, 0.0]);
         insert_fact(&conn, dim, "b", vec![0.99, 0.01, 0.0, 0.0]);
 
-        let mock_gen = MockGenerator { embed_dim: dim };
-        let clusters = cluster_fusion(&conn, &mock_gen, dim, 3).unwrap();
+        let mock_gen = MockGenerator;
+        let mock_embed = MockEmbedder { embed_dim: dim };
+        let clusters = cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 3).unwrap();
         assert_eq!(clusters, 0);
     }
 
@@ -249,8 +252,9 @@ mod tests {
         insert_fact(&conn, dim, "beta", vec![0.99, 0.01, 0.0, 0.0]);
         insert_fact(&conn, dim, "gamma", vec![0.98, 0.02, 0.0, 0.0]);
 
-        let mock_gen = MockGenerator { embed_dim: dim };
-        cluster_fusion(&conn, &mock_gen, dim, 2).unwrap();
+        let mock_gen = MockGenerator;
+        let mock_embed = MockEmbedder { embed_dim: dim };
+        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2).unwrap();
 
         let summaries = SummaryStore::new(&conn, dim)
             .list_by_level(&ConsolidationLevel::Cluster)
@@ -270,11 +274,12 @@ mod tests {
         insert_fact(&conn, dim, "y", vec![0.99, 0.01, 0.0, 0.0]);
         insert_fact(&conn, dim, "z", vec![0.98, 0.02, 0.0, 0.0]);
 
-        let mock_gen = MockGenerator { embed_dim: dim };
+        let mock_gen = MockGenerator;
+        let mock_embed = MockEmbedder { embed_dim: dim };
 
         // Run twice — should have exactly the same result
-        cluster_fusion(&conn, &mock_gen, dim, 2).unwrap();
-        cluster_fusion(&conn, &mock_gen, dim, 2).unwrap();
+        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2).unwrap();
+        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2).unwrap();
 
         let summaries = SummaryStore::new(&conn, dim)
             .list_by_level(&ConsolidationLevel::Cluster)

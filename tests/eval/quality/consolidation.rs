@@ -10,7 +10,7 @@
 use memory_engine::traits::ConsolidationConfig;
 use memory_engine::types::FactType;
 
-use crate::helpers::{MockSummaryGenerator, add_fact, add_scoped_fact, eval_engine};
+use crate::helpers::{MockSummaryGenerator, TestEmbedder, add_fact, add_scoped_fact, eval_engine};
 
 /// Insert 5 pairs of exact-duplicate facts. Identical text produces identical
 /// blake3 embeddings, giving cosine similarity = 1.0.
@@ -47,7 +47,7 @@ fn dedup_removes_exact_duplicates() {
     };
 
     let stats = engine
-        .consolidate(&generator, &config)
+        .consolidate(&generator, &TestEmbedder, &config)
         .expect("consolidate failed");
 
     assert!(
@@ -92,7 +92,7 @@ fn cluster_fusion_creates_clusters() {
     };
 
     let stats = engine
-        .consolidate(&generator, &config)
+        .consolidate(&generator, &TestEmbedder, &config)
         .expect("consolidate failed");
 
     assert!(
@@ -115,7 +115,7 @@ fn consolidation_is_idempotent() {
 
     // First pass
     let stats1 = engine
-        .consolidate(&generator, &config)
+        .consolidate(&generator, &TestEmbedder, &config)
         .expect("first consolidate failed");
     assert!(
         stats1.duplicates_removed > 0,
@@ -124,7 +124,7 @@ fn consolidation_is_idempotent() {
 
     // Second pass: no additional dedup expected
     let stats2 = engine
-        .consolidate(&generator, &config)
+        .consolidate(&generator, &TestEmbedder, &config)
         .expect("second consolidate failed");
     assert_eq!(
         stats2.duplicates_removed, 0,
@@ -151,7 +151,7 @@ fn cluster_and_global_summary_scoping() {
     };
 
     let stats = engine
-        .consolidate(&generator, &config)
+        .consolidate(&generator, &TestEmbedder, &config)
         .expect("consolidate failed");
 
     // With identical embeddings, a cluster should form
