@@ -47,7 +47,7 @@ mod tests {
     // that borrows it; clippy misses the transitive borrow (false positive).
     #[allow(clippy::significant_drop_tightening)]
     fn replay_by_id_range() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         // Insert events via raw store access
         {
             let conn = engine.pool.write();
@@ -72,7 +72,7 @@ mod tests {
     // that borrows it; clippy misses the transitive borrow (false positive).
     #[allow(clippy::significant_drop_tightening)]
     fn replay_default_order_is_insertion() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         {
             let conn = engine.pool.write();
             let registry = UpcasterRegistry::new();

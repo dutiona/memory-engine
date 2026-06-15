@@ -9,8 +9,10 @@ fn create_test_db() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
-    let config = memory_engine::EngineConfig::new(db_path.clone(), 4);
-    let engine = memory_engine::MemoryEngine::open(&config).unwrap();
+    let engine = memory_engine::MemoryEngine::builder(4)
+        .path(db_path.clone())
+        .build()
+        .unwrap();
 
     struct FakeEmbed;
     impl memory_engine::EmbeddingProvider for FakeEmbed {
@@ -179,8 +181,10 @@ fn create_temporal_db() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("temporal.db");
 
-    let config = memory_engine::EngineConfig::new(db_path.clone(), 4);
-    let engine = memory_engine::MemoryEngine::open(&config).unwrap();
+    let engine = memory_engine::MemoryEngine::builder(4)
+        .path(db_path.clone())
+        .build()
+        .unwrap();
 
     struct FakeEmbed;
     impl memory_engine::EmbeddingProvider for FakeEmbed {

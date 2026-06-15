@@ -21,6 +21,7 @@ use crate::types::{ConsolidationLevel, Fact};
 mod activity;
 pub(crate) mod activity_filter;
 mod bootstrap;
+pub mod builder;
 pub(crate) mod cognitive;
 mod conflict;
 mod consolidation;
@@ -51,39 +52,45 @@ mod archive;
 #[cfg(test)]
 mod tests;
 
-/// Configuration for opening a [`MemoryEngine`] backed by a file.
+/// Construction-equivalence golden harness for the builder migration (#541).
+#[cfg(test)]
+mod equivalence;
+
+/// Configuration for opening a file-backed [`MemoryEngine`].
 ///
-/// Marked `#[non_exhaustive]`: fields may be added in minor releases, so this
-/// struct cannot be constructed with a struct literal from outside the crate.
-/// Build one with the stable constructor [`EngineConfig::new`] and mutate the
-/// public fields you need:
+/// `EngineConfig` is the plain-data transport the restore family and the async
+/// wrapper consume; the ergonomic front door for constructing an engine is
+/// [`MemoryEngine::builder`], which assembles one of these internally for the
+/// file path. Build a config with [`EngineConfig::new`] and the chained
+/// `with_*` setters:
 ///
 /// ```
 /// use memory_engine::EngineConfig;
-/// let mut config = EngineConfig::new("data.db".into(), 768);
-/// config.read_only = true;
+/// let config = EngineConfig::new("agent.db".into(), 384)
+///     .with_read_only(true)
+///     .with_read_pool_size(2);
 /// ```
 ///
-/// For ergonomic engine construction, prefer [`MemoryEngine::builder`], which
-/// builds the engine directly without touching `EngineConfig` for the common
-/// file-backed path.
+/// `#[non_exhaustive]`: fields may be added in minor releases, so the struct
+/// cannot be built by struct literal from outside this crate — use `new` +
+/// `with_*`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EngineConfig {
-    pub path: PathBuf,
-    pub embed_dim: usize,
+    pub(crate) path: PathBuf,
+    pub(crate) embed_dim: usize,
     /// Number of read connections in the pool (default: 4).
-    pub read_pool_size: usize,
+    pub(crate) read_pool_size: usize,
     /// Optional search configuration for ANN strategy dispatch.
-    pub search_config: Option<SearchConfig>,
+    pub(crate) search_config: Option<SearchConfig>,
     /// Optional directory for WAL-safe pre-migration backups.
     /// When set, `VACUUM INTO` creates a backup before running migrations.
-    pub backup_dir: Option<PathBuf>,
+    pub(crate) backup_dir: Option<PathBuf>,
     /// Upcaster registry for event payload versioning.
     /// Defaults to empty (all event types at revision 1).
-    pub upcaster_registry: UpcasterRegistry,
+    pub(crate) upcaster_registry: UpcasterRegistry,
     /// Open in read-only mode: skip init/migration, reject writes.
-    pub read_only: bool,
+    pub(crate) read_only: bool,
 }
 
 impl EngineConfig {
@@ -100,185 +107,40 @@ impl EngineConfig {
             read_only: false,
         }
     }
-}
 
-/// Fluent builder for [`MemoryEngine`].
-///
-/// Created with [`MemoryEngine::builder`]. Supersedes the family of
-/// `open*` constructors with a single, extensible entry point:
-///
-/// ```
-/// use memory_engine::MemoryEngine;
-/// // In-memory engine (no path):
-/// let engine = MemoryEngine::builder(768).build().unwrap();
-/// ```
-///
-/// ```no_run
-/// use memory_engine::MemoryEngine;
-/// use memory_engine::search::SearchConfig;
-/// // File-backed engine with a search config:
-/// let engine = MemoryEngine::builder(768)
-///     .path("data.db")
-///     .search_config(SearchConfig { ann_threshold: 0 })
-///     .build()
-///     .unwrap();
-/// ```
-///
-/// When [`path`](MemoryEngineBuilder::path) is set the builder opens a
-/// file-backed engine (delegating to the same code path as
-/// [`MemoryEngine::open_with_reranker`]); otherwise it opens an in-memory engine
-/// (delegating to [`MemoryEngine::open_memory_with`]). Behavior is identical to
-/// the underlying constructors — the builder is purely an ergonomic facade.
-#[must_use = "a builder does nothing until `.build()` is called"]
-pub struct MemoryEngineBuilder {
-    embed_dim: usize,
-    path: Option<PathBuf>,
-    read_pool_size: usize,
-    search_config: Option<SearchConfig>,
-    backup_dir: Option<PathBuf>,
-    upcaster_registry: UpcasterRegistry,
-    read_only: bool,
-    reranker: Option<Box<dyn Reranker>>,
-}
-
-impl std::fmt::Debug for MemoryEngineBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MemoryEngineBuilder")
-            .field("embed_dim", &self.embed_dim)
-            .field("path", &self.path)
-            .field("read_pool_size", &self.read_pool_size)
-            .field("search_config", &self.search_config)
-            .field("backup_dir", &self.backup_dir)
-            .field("read_only", &self.read_only)
-            .field("reranker", &self.reranker.as_ref().map(|r| r.name()))
-            .finish_non_exhaustive()
-    }
-}
-
-impl MemoryEngineBuilder {
-    /// Start a builder for an engine with the given embedding dimension.
-    ///
-    /// Defaults match the legacy constructors: in-memory (no `path`), a read
-    /// pool of 4, no search config, no reranker, read-write.
-    fn new(embed_dim: usize) -> Self {
-        Self {
-            embed_dim,
-            path: None,
-            read_pool_size: 4,
-            search_config: None,
-            backup_dir: None,
-            upcaster_registry: UpcasterRegistry::new(),
-            read_only: false,
-            reranker: None,
-        }
-    }
-
-    /// Back the engine with a `SQLite` file at `path`.
-    ///
-    /// When unset, the engine is in-memory (ephemeral, for tests/scratch).
-    pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.path = Some(path.into());
-        self
-    }
-
-    /// Number of read connections in the pool (default: 4). File-backed only.
-    pub const fn read_pool_size(mut self, size: usize) -> Self {
+    /// Set the read connection pool size (default 4).
+    #[must_use]
+    pub const fn with_read_pool_size(mut self, size: usize) -> Self {
         self.read_pool_size = size;
         self
     }
 
-    /// Search configuration for ANN strategy dispatch.
-    pub const fn search_config(mut self, config: SearchConfig) -> Self {
+    /// Set the search configuration for ANN strategy dispatch.
+    #[must_use]
+    pub const fn with_search_config(mut self, config: SearchConfig) -> Self {
         self.search_config = Some(config);
         self
     }
 
-    /// Directory for WAL-safe pre-migration backups. File-backed only.
-    pub fn backup_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+    /// Set the directory for WAL-safe pre-migration backups.
+    #[must_use]
+    pub fn with_backup_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.backup_dir = Some(dir.into());
         self
     }
 
-    /// Upcaster registry for event payload versioning.
-    pub fn upcaster_registry(mut self, registry: UpcasterRegistry) -> Self {
+    /// Set the upcaster registry for event-payload versioning.
+    #[must_use]
+    pub fn with_upcaster_registry(mut self, registry: UpcasterRegistry) -> Self {
         self.upcaster_registry = registry;
         self
     }
 
-    /// Open in read-only mode: skip init/migration, reject writes. File-backed
-    /// only — an in-memory engine has nothing to open read-only.
-    pub const fn read_only(mut self, read_only: bool) -> Self {
+    /// Open in read-only mode: skip init/migration, reject writes.
+    #[must_use]
+    pub const fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
-    }
-
-    /// Cross-encoder reranker applied to top-K candidates.
-    pub fn reranker(mut self, reranker: Box<dyn Reranker>) -> Self {
-        self.reranker = Some(reranker);
-        self
-    }
-
-    /// Build the engine, opening or creating the backing store.
-    ///
-    /// Delegates to the existing open path: file-backed when [`path`] is set
-    /// (via [`MemoryEngine::open_with_reranker`]), in-memory otherwise (via
-    /// [`MemoryEngine::open_memory_with`]). Behavior is identical to those
-    /// constructors.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Migration` if a stored `embed_dim` doesn't match,
-    /// or `MemoryError::Database` on connection/schema failure.
-    ///
-    /// [`path`]: MemoryEngineBuilder::path
-    pub fn build(self) -> Result<MemoryEngine> {
-        // An in-memory engine has no file to open read-only; the combination is
-        // a logical contradiction. Reject it rather than silently ignoring the
-        // read_only flag on the no-path branch.
-        if self.read_only && self.path.is_none() {
-            return Err(MemoryError::Migration(
-                "in-memory engine cannot be opened read-only".to_string(),
-            ));
-        }
-        if let Some(path) = self.path {
-            // Validate the path is a regular file up-front for a clear error: a
-            // directory (or, in read-only mode, a missing file) otherwise fails
-            // later with an opaque OS-level error.
-            if self.read_only && !path.is_file() {
-                return Err(MemoryError::NotFound(format!(
-                    "database file not found or is not a regular file: {}",
-                    path.display()
-                )));
-            }
-            if path.exists() && !path.is_file() {
-                return Err(MemoryError::NotFound(format!(
-                    "database path exists but is not a regular file: {}",
-                    path.display()
-                )));
-            }
-            let config = EngineConfig {
-                path,
-                embed_dim: self.embed_dim,
-                read_pool_size: self.read_pool_size,
-                search_config: self.search_config,
-                backup_dir: self.backup_dir,
-                upcaster_registry: self.upcaster_registry,
-                read_only: self.read_only,
-            };
-            MemoryEngine::open_with_reranker(&config, self.reranker)
-        } else {
-            // In-memory: thread `self.upcaster_registry` through `init_from_pool`
-            // directly. `open_memory_with` hardcodes an empty registry, which
-            // would silently drop a custom registry set via `.upcaster_registry()`.
-            let pool = ConnectionPool::open_memory(self.embed_dim)?;
-            MemoryEngine::init_from_pool(
-                pool,
-                self.embed_dim,
-                self.search_config,
-                self.upcaster_registry,
-                self.reranker,
-            )
-        }
     }
 }
 
@@ -316,88 +178,17 @@ impl std::fmt::Debug for MemoryEngine {
 }
 
 impl MemoryEngine {
-    /// Start a [`MemoryEngineBuilder`] for an engine with the given embedding
-    /// dimension.
-    ///
-    /// The builder is the recommended entry point — it subsumes the family of
-    /// `open*` constructors behind a single fluent API:
-    ///
-    /// ```
-    /// use memory_engine::MemoryEngine;
-    /// let engine = MemoryEngine::builder(768).build().unwrap();
-    /// ```
-    pub fn builder(embed_dim: usize) -> MemoryEngineBuilder {
-        MemoryEngineBuilder::new(embed_dim)
-    }
-
-    /// Open or create a memory engine backed by a `SQLite` file.
-    ///
-    /// On first open, writes `embed_dim` to the config table.
-    /// On subsequent opens, validates the stored `embed_dim` matches.
+    /// Shared file-backed open path: select the pool per `read_only`, then
+    /// initialize. This is the single `EngineConfig -> pool -> init_from_pool`
+    /// seam used by [`MemoryEngineBuilder`](builder::MemoryEngineBuilder)'s file
+    /// state, the restore family, and the async wrapper. It carries the optional
+    /// reranker explicitly because `EngineConfig` does not (and cannot — the
+    /// reranker is not `Clone`) hold one.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
-    pub fn open(config: &EngineConfig) -> Result<Self> {
-        let pool = if config.read_only {
-            ConnectionPool::open_read_only(&config.path, config.embed_dim, config.read_pool_size)?
-        } else {
-            ConnectionPool::open(
-                &config.path,
-                config.embed_dim,
-                config.read_pool_size,
-                config.backup_dir.as_deref(),
-            )?
-        };
-        Self::init_from_pool(
-            pool,
-            config.embed_dim,
-            config.search_config.clone(),
-            config.upcaster_registry.clone(),
-            None,
-        )
-    }
-
-    /// Open an in-memory engine for testing.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Database` if the connection or schema setup fails.
-    pub fn open_memory(embed_dim: usize) -> Result<Self> {
-        let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(pool, embed_dim, None, UpcasterRegistry::new(), None)
-    }
-
-    /// Open an in-memory engine with optional search config for testing.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Database` if the connection or schema setup fails.
-    #[deprecated(
-        since = "0.5.0",
-        note = "use `MemoryEngine::builder(embed_dim).search_config(cfg).build()`; \
-                this is a strict subset of `open_memory_with`"
-    )]
-    pub fn open_memory_with_config(
-        embed_dim: usize,
-        search_config: Option<SearchConfig>,
-    ) -> Result<Self> {
-        let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(
-            pool,
-            embed_dim,
-            search_config,
-            UpcasterRegistry::new(),
-            None,
-        )
-    }
-
-    /// Open a file-backed engine with an optional reranker.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
-    pub fn open_with_reranker(
+    pub(crate) fn open_from_config(
         config: &EngineConfig,
         reranker: Option<Box<dyn Reranker>>,
     ) -> Result<Self> {
@@ -416,30 +207,6 @@ impl MemoryEngine {
             config.embed_dim,
             config.search_config.clone(),
             config.upcaster_registry.clone(),
-            reranker,
-        )
-    }
-
-    /// Open an in-memory engine with optional search config and reranker.
-    ///
-    /// Accepts both a search config and a reranker in one call. Uses an empty
-    /// [`UpcasterRegistry`]; to supply a custom registry in-memory, use
-    /// [`MemoryEngine::builder`] with [`MemoryEngineBuilder::upcaster_registry`].
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Database` if the connection or schema setup fails.
-    pub fn open_memory_with(
-        embed_dim: usize,
-        search_config: Option<SearchConfig>,
-        reranker: Option<Box<dyn Reranker>>,
-    ) -> Result<Self> {
-        let pool = ConnectionPool::open_memory(embed_dim)?;
-        Self::init_from_pool(
-            pool,
-            embed_dim,
-            search_config,
-            UpcasterRegistry::new(),
             reranker,
         )
     }

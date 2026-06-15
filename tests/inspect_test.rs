@@ -22,7 +22,7 @@ impl EmbeddingProvider for TestEmbed {
 /// Full lifecycle: add facts with various states, then exercise all inspection APIs.
 #[test]
 fn inspection_lifecycle() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     // --- Setup: create facts in different states ---
 
@@ -153,7 +153,7 @@ fn inspection_lifecycle() {
 /// Test `explain_fact` for a not-found ID returns proper error.
 #[test]
 fn explain_fact_not_found() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let err = engine.explain_fact(999);
     assert!(err.is_err());
 }
@@ -161,7 +161,7 @@ fn explain_fact_not_found() {
 /// Test `fact_history` for a not-found ID returns proper error.
 #[test]
 fn fact_history_not_found() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let err = engine.fact_history(999);
     assert!(err.is_err());
 }
@@ -170,7 +170,7 @@ fn fact_history_not_found() {
 /// preserve the original timestamp (idempotent stamping).
 #[test]
 fn stamp_surfaced_on_list_due() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let now = Utc::now();
 
     // Add a fact with t_valid in the past so it is immediately due.

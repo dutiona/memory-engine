@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use memory_engine::engine::{EngineConfig, MemoryEngine};
+use memory_engine::engine::MemoryEngine;
 use memory_engine::search::SearchConfig;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
@@ -36,14 +36,18 @@ impl EmbeddingProvider for Blake3Embedder {
 fn hnsw_recall_at_k_exceeds_threshold() {
     // Build brute-force engine
     let dir_bf = tempfile::tempdir().unwrap();
-    let config_bf = EngineConfig::new(dir_bf.path().join("bf.db"), DIM);
-    let engine_bf = MemoryEngine::open(&config_bf).unwrap();
+    let engine_bf = MemoryEngine::builder(DIM)
+        .path(dir_bf.path().join("bf.db"))
+        .build()
+        .unwrap();
 
     // Build HNSW engine (threshold=0 -> always use HNSW)
     let dir_ann = tempfile::tempdir().unwrap();
-    let mut config_ann = EngineConfig::new(dir_ann.path().join("ann.db"), DIM);
-    config_ann.search_config = Some(SearchConfig { ann_threshold: 0 });
-    let engine_ann = MemoryEngine::open(&config_ann).unwrap();
+    let engine_ann = MemoryEngine::builder(DIM)
+        .path(dir_ann.path().join("ann.db"))
+        .search_config(SearchConfig { ann_threshold: 0 })
+        .build()
+        .unwrap();
 
     let embedder = Blake3Embedder;
     for i in 0..N {

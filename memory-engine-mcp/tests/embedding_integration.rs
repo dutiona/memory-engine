@@ -9,7 +9,7 @@
 //! be created AND dropped on the blocking thread pool. After async wiremock
 //! setup, all provider work runs inside a single `spawn_blocking` block.
 
-use memory_engine::engine::MemoryEngine;
+use memory_engine::MemoryEngine;
 use memory_engine_mcp::embedding::HttpEmbeddingProvider;
 use memory_engine_mcp::tools;
 use serde_json::{Map, Value, json};
@@ -69,7 +69,7 @@ async fn openai_format_embedding() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let result = tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "OpenAI format test" })),
@@ -113,7 +113,7 @@ async fn ollama_format_embedding() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let result = tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "Ollama format test" })),
@@ -157,7 +157,7 @@ async fn direct_format_embedding() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let result = tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "Direct format test" })),
@@ -201,7 +201,7 @@ async fn wrong_dimension_from_server() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "Dim mismatch test" })),
@@ -242,7 +242,7 @@ async fn server_500_propagates_error() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "Server error test" })),
@@ -290,7 +290,7 @@ async fn bearer_auth_sent_when_configured() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let result = tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "Auth test" })),
@@ -338,7 +338,7 @@ async fn flush_insights_with_http_embedder() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let result = tools::dispatch(
             "memory_flush_insights",
             args(json!({
@@ -385,7 +385,7 @@ async fn flush_insights_partial_failure() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let result = tools::dispatch(
             "memory_flush_insights",
             args(json!({
@@ -437,7 +437,7 @@ async fn query_hybrid_with_http_embedder() {
             5,
         )
         .unwrap();
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
 
         // Add a fact with pre-computed embedding (no provider needed)
         tools::dispatch(

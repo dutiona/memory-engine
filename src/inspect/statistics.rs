@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn empty_engine_statistics() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let stats = engine.statistics().unwrap();
         assert_eq!(stats.facts.total, 0);
         assert_eq!(stats.facts.active, 0);
@@ -167,7 +167,7 @@ mod tests {
     fn statistics_with_facts() {
         use crate::types::AddFactOptions;
 
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn snapshot_empty_engine_statistics() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let stats = engine.statistics().unwrap();
         insta::assert_yaml_snapshot!(stats, {
             ".storage.page_count" => "[page_count]",
@@ -235,7 +235,7 @@ mod tests {
     fn snapshot_populated_statistics() {
         use crate::types::AddFactOptions;
 
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {

@@ -1,4 +1,4 @@
-use memory_engine::{AddFactRequest, EmbeddingProvider, EngineConfig, FactType, MemoryEngine};
+use memory_engine::{AddFactRequest, EmbeddingProvider, FactType, MemoryEngine};
 
 struct FakeEmbed;
 impl EmbeddingProvider for FakeEmbed {
@@ -12,8 +12,7 @@ fn main() {
     if path.exists() {
         std::fs::remove_file(&path).unwrap();
     }
-    let config = EngineConfig::new(path, 4);
-    let engine = MemoryEngine::open(&config).unwrap();
+    let engine = MemoryEngine::builder(4).path(path).build().unwrap();
     let e = FakeEmbed;
 
     engine

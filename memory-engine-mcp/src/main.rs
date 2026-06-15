@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use memory_engine::engine::{EngineConfig, MemoryEngine};
+use memory_engine::MemoryEngine;
 use memory_engine_mcp::{config, embedding, server, summary};
 use rmcp::ServiceExt;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -66,9 +66,10 @@ async fn main() -> Result<(), BoxError> {
     };
 
     // 3. Open MemoryEngine
-    let engine_config = EngineConfig::new(mcp_config.engine.db_path.clone(), embed_dim);
-    let engine =
-        MemoryEngine::open(&engine_config).map_err(|e| format!("failed to open engine: {e}"))?;
+    let engine = MemoryEngine::builder(embed_dim)
+        .path(mcp_config.engine.db_path.clone())
+        .build()
+        .map_err(|e| format!("failed to open engine: {e}"))?;
     let engine = Arc::new(engine);
 
     // 4. Initialize embedding provider (optional)

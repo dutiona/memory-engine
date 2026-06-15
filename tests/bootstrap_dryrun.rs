@@ -165,7 +165,7 @@ const SHARED: &str = "always use rustfmt before every commit";
 #[allow(clippy::too_many_lines)]
 #[test]
 fn dryrun_yield_backdate_idempotency_no_dedup() {
-    let engine = MemoryEngine::open_memory(4).unwrap();
+    let engine = MemoryEngine::builder(4).build().unwrap();
     let extractor = KeywordExtractor;
     let recorder = RecordingClassifier::default();
     let config = BootstrapConfig::default(); // skip_existing = true

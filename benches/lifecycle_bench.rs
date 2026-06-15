@@ -25,7 +25,7 @@
 
 use chrono::{Duration, Utc};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use memory_engine::engine::{EngineConfig, MemoryEngine};
+use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
 };
@@ -95,8 +95,10 @@ const TOPICS: [&str; 10] = [
 fn setup_engine(n: usize) -> (MemoryEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench.db");
-    let config = EngineConfig::new(db_path, DIM);
-    let engine = MemoryEngine::open(&config).expect("open engine");
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .build()
+        .expect("open engine");
     let embedder = ConstEmbedder { dim: DIM };
 
     for i in 0..n {
@@ -126,8 +128,10 @@ fn setup_engine(n: usize) -> (MemoryEngine, tempfile::TempDir) {
 fn setup_forgettable_engine(n: usize) -> (MemoryEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench.db");
-    let config = EngineConfig::new(db_path, DIM);
-    let engine = MemoryEngine::open(&config).expect("open engine");
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .build()
+        .expect("open engine");
     let embedder = ConstEmbedder { dim: DIM };
 
     let old = Utc::now() - Duration::days(120);
@@ -290,8 +294,10 @@ fn bench_add_facts_batch(c: &mut Criterion) {
                     || {
                         let dir = tempfile::tempdir().expect("tempdir");
                         let db_path = dir.path().join("bench_batch.db");
-                        let config = EngineConfig::new(db_path, DIM);
-                        let engine = MemoryEngine::open(&config).expect("open engine");
+                        let engine = MemoryEngine::builder(DIM)
+                            .path(db_path)
+                            .build()
+                            .expect("open engine");
                         (engine, dir)
                     },
                     |(engine, _dir)| {

@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use memory_engine::ArchivePolicy;
 use memory_engine::MemoryQuery;
-use memory_engine::engine::{EngineConfig, MemoryEngine};
+use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::traits::{EmbeddingProvider, ForgetPolicy};
 use memory_engine::types::{AddFactRequest, FactType};
@@ -35,8 +35,7 @@ impl EmbeddingProvider for TestEmbedder {
 /// Open a file-backed engine in a temp directory.
 fn open_file_engine(dir: &std::path::Path) -> MemoryEngine {
     let db_path = dir.join("test.db");
-    let config = EngineConfig::new(db_path, DIM);
-    MemoryEngine::open(&config).unwrap()
+    MemoryEngine::builder(DIM).path(db_path).build().unwrap()
 }
 
 /// Add `n` facts with unique content.

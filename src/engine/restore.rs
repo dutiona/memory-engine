@@ -154,7 +154,7 @@ impl MemoryEngine {
             });
         }
 
-        Self::open(config).inspect_err(|_| {
+        Self::open_from_config(config, None).inspect_err(|_| {
             let _ = std::fs::remove_file(&config.path);
         })
     }

@@ -46,6 +46,15 @@ impl UpcasterRegistry {
         }
     }
 
+    /// Number of registered upcaster functions. Used by the construction
+    /// equivalence harness to prove the builder preserves the registry verbatim
+    /// (deterministic, unlike the `Debug` impl's `HashMap` ordering).
+    #[must_use]
+    #[allow(dead_code)] // observed only by the equivalence test harness
+    pub(crate) fn registered_count(&self) -> usize {
+        self.upcasters.len()
+    }
+
     /// Register an upcaster that transforms `event_type` payloads from
     /// `from_revision` to `from_revision + 1`.
     ///

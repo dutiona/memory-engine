@@ -243,6 +243,14 @@ impl ConnectionPool {
         self.path.is_some()
     }
 
+    /// Number of read connections in the pool. Used by the construction
+    /// equivalence harness to prove the builder preserves the old default of 4.
+    #[must_use]
+    #[allow(dead_code)] // observed only by the equivalence test harness
+    pub(crate) const fn read_pool_size(&self) -> usize {
+        self.read_pool_size
+    }
+
     /// Database file path, if file-backed. `None` for in-memory.
     #[must_use]
     pub fn path(&self) -> Option<&std::path::Path> {

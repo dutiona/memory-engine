@@ -7,7 +7,7 @@
 //! - `embed_dim` probing from DB fallback
 //! - `deny_unknown_fields` rejects extra config
 
-use memory_engine::engine::{EngineConfig, MemoryEngine};
+use memory_engine::MemoryEngine;
 use memory_engine_mcp::config::{EmbeddingSection, McpConfig};
 use std::io::Write;
 use tempfile::TempDir;
@@ -191,8 +191,10 @@ fn probe_embed_dim_from_existing_db() {
     let db_path = dir.path().join("test.db");
 
     // Create a real database with known embed_dim
-    let config = EngineConfig::new(db_path.clone(), 384);
-    let engine = MemoryEngine::open(&config).unwrap();
+    let engine = MemoryEngine::builder(384)
+        .path(db_path.clone())
+        .build()
+        .unwrap();
     drop(engine);
 
     let probed = memory_engine_mcp::config::probe_embed_dim(&db_path).unwrap();
@@ -211,8 +213,10 @@ fn probe_embed_dim_different_dimensions() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
-    let config = EngineConfig::new(db_path.clone(), 768);
-    let engine = MemoryEngine::open(&config).unwrap();
+    let engine = MemoryEngine::builder(768)
+        .path(db_path.clone())
+        .build()
+        .unwrap();
     drop(engine);
 
     let probed = memory_engine_mcp::config::probe_embed_dim(&db_path).unwrap();

@@ -94,7 +94,7 @@ mod tests {
     }
 
     fn engine_with_facts() -> MemoryEngine {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let embedder = FixedEmbedder;
 
         // Insert wisdom fact (id=1)

@@ -73,13 +73,13 @@ fn insert_raw_fact(engine: &MemoryEngine, fact: &NewFact) -> i64 {
 
 #[test]
 fn open_memory_succeeds() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     assert_eq!(engine.embed_dim(), DIM);
 }
 
 #[test]
 fn ingest_returns_event_id() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let event = NewEvent {
         timestamp: Utc::now(),
         event_type: EventType::Interaction,
@@ -97,7 +97,7 @@ fn ingest_returns_event_id() {
 
 #[test]
 fn add_fact_returns_fact_id() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let id = engine
         .add_fact(
@@ -117,7 +117,7 @@ fn add_fact_returns_fact_id() {
 
 #[test]
 fn query_returns_results_after_adding_facts() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -153,23 +153,26 @@ fn embed_dim_validation_rejects_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.db");
 
-    let config_768 = EngineConfig::new(db_path.clone(), 768);
-    let config_384 = EngineConfig::new(db_path, 384);
-
     // First open with dim=768
     {
-        let _engine = MemoryEngine::open(&config_768).unwrap();
+        let _engine = MemoryEngine::builder(768)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
     }
 
     // Second open with dim=384 should fail
-    let err = MemoryEngine::open(&config_384).unwrap_err();
+    let err = MemoryEngine::builder(384)
+        .path(db_path)
+        .build()
+        .unwrap_err();
     assert!(matches!(err, MemoryError::Migration(_)));
     assert!(err.to_string().contains("mismatch"));
 }
 
 #[test]
 fn get_set_config() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     assert!(engine.get_config("custom_key").unwrap().is_none());
     engine.set_config("custom_key", "custom_value").unwrap();
     assert_eq!(
@@ -182,13 +185,13 @@ fn get_set_config() {
 
 #[test]
 fn graph_starts_empty() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     assert_eq!(engine.graph_stats(), (0, 0));
 }
 
 #[test]
 fn consolidate_deduplicates_similar_facts() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     // Two near-identical embeddings
     insert_raw_fact(
         &engine,
@@ -214,7 +217,7 @@ fn consolidate_deduplicates_similar_facts() {
 
 #[test]
 fn consolidate_is_idempotent() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     insert_raw_fact(
         &engine,
         &make_new_fact("unique A", vec![1.0, 0.0, 0.0, 0.0]),
@@ -244,7 +247,7 @@ fn consolidate_is_idempotent() {
 
 #[test]
 fn forget_prunes_stale_facts() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     // Insert a fact with very low importance
     let now = Utc::now();
@@ -281,7 +284,7 @@ fn forget_prunes_stale_facts() {
 
 #[test]
 fn forget_rejects_invalid_policy() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let policy = ForgetPolicy {
         half_life_days: 0.0, // invalid
         ..ForgetPolicy::default()
@@ -291,7 +294,7 @@ fn forget_rejects_invalid_policy() {
 
 #[test]
 fn resolve_conflict_update_creates_edge() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let old_id = insert_raw_fact(&engine, &make_new_fact("outdated", vec![0.5; DIM]));
 
     let arbiter = FixedArbiter {
@@ -316,7 +319,7 @@ fn resolve_conflict_update_creates_edge() {
 
 #[test]
 fn resolve_conflict_noop_no_changes() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let old_id = insert_raw_fact(&engine, &make_new_fact("existing", vec![0.5; DIM]));
 
     let arbiter = FixedArbiter {
@@ -347,7 +350,7 @@ fn graph_loads_on_reopen() {
 
     // First session: add facts and create an edge via conflict resolution
     {
-        let engine = MemoryEngine::open(&config).unwrap();
+        let engine = MemoryEngine::open_from_config(&config, None).unwrap();
         let old_id = insert_raw_fact(&engine, &make_new_fact("original", vec![0.5; DIM]));
         let arbiter = FixedArbiter {
             decision: CrudDecision::Update,
@@ -364,14 +367,14 @@ fn graph_loads_on_reopen() {
 
     // Second session: graph should be restored from DB
     {
-        let engine = MemoryEngine::open(&config).unwrap();
+        let engine = MemoryEngine::open_from_config(&config, None).unwrap();
         assert_eq!(engine.graph_stats().1, 1);
     }
 }
 
 #[test]
 fn list_summaries_empty() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let summaries = engine.list_summaries(&ConsolidationLevel::Global).unwrap();
     assert!(summaries.is_empty());
 }
@@ -380,7 +383,7 @@ fn list_summaries_empty() {
 
 #[test]
 fn add_fact_with_custom_importance() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let opts = AddFactOptions {
         importance: Some(0.9),
@@ -405,7 +408,7 @@ fn add_fact_with_custom_importance() {
 
 #[test]
 fn add_fact_with_temporal_bounds() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let now = Utc::now();
     let opts = AddFactOptions {
@@ -433,7 +436,7 @@ fn add_fact_with_temporal_bounds() {
 
 #[test]
 fn add_fact_with_scope_path() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let id = engine
         .add_fact(
@@ -454,7 +457,7 @@ fn add_fact_with_scope_path() {
 
 #[test]
 fn add_fact_none_opts_uses_defaults() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let id = engine
         .add_fact(
@@ -486,9 +489,8 @@ fn engine_is_send_sync() {
 fn engine_concurrent_reads() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("concurrent.db");
-    let config = EngineConfig::new(db_path, DIM);
 
-    let engine = std::sync::Arc::new(MemoryEngine::open(&config).unwrap());
+    let engine = std::sync::Arc::new(MemoryEngine::builder(DIM).path(db_path).build().unwrap());
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -546,9 +548,8 @@ fn engine_concurrent_reads() {
 fn engine_write_then_read_across_threads() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("write_read.db");
-    let config = EngineConfig::new(db_path, DIM);
 
-    let engine = std::sync::Arc::new(MemoryEngine::open(&config).unwrap());
+    let engine = std::sync::Arc::new(MemoryEngine::builder(DIM).path(db_path).build().unwrap());
 
     // Thread 1: write
     let e1 = engine.clone();
@@ -592,7 +593,7 @@ fn engine_write_then_read_across_threads() {
 
 #[test]
 fn resume_empty_engine() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let ctx = engine.resume_context(&ResumeConfig::default()).unwrap();
     assert!(ctx.pinned.is_empty());
     assert!(ctx.high_importance.is_empty());
@@ -602,7 +603,7 @@ fn resume_empty_engine() {
 
 #[test]
 fn resume_with_facts() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     // Add a pinned fact (appears in tier 1)
@@ -656,7 +657,7 @@ fn resume_with_facts() {
 
 #[test]
 fn resume_nonexistent_scope_returns_not_found() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let config = ResumeConfig {
         scope_path: Some("nonexistent/path".into()),
         ..ResumeConfig::default()
@@ -669,7 +670,7 @@ fn resume_nonexistent_scope_returns_not_found() {
 
 #[test]
 fn resume_stamps_surfaced_at_on_pinned_due_fact() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let now = Utc::now();
     let past = now - chrono::Duration::hours(1);
@@ -715,7 +716,7 @@ fn resume_stamps_surfaced_at_on_pinned_due_fact() {
 
 #[test]
 fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let now = Utc::now();
     let past = now - chrono::Duration::hours(1);
@@ -761,7 +762,7 @@ fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
 
 #[test]
 fn resume_does_not_stamp_invalidated_pinned_due_fact() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let now = Utc::now();
     let past = now - chrono::Duration::hours(2);
@@ -825,7 +826,7 @@ fn engine_config_with_search_config() {
 fn query_nonexistent_scope_returns_empty() {
     use crate::types::ScopeQuery;
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     // Add a fact at root scope so there's something to find if search were unscoped
@@ -866,7 +867,7 @@ fn query_nonexistent_scope_returns_empty() {
 
 #[test]
 fn list_due_returns_scheduled_facts() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let past = Utc::now() - chrono::Duration::hours(1);
     let future = Utc::now() + chrono::Duration::hours(1);
@@ -965,7 +966,7 @@ fn list_due_returns_scheduled_facts() {
 
 #[test]
 fn pin_unpin_fact() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let id = engine
         .add_fact(
@@ -990,7 +991,7 @@ fn pin_unpin_fact() {
 
 #[test]
 fn add_fact_with_explicit_pin() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let opts = AddFactOptions {
         pinned: Some(true),
@@ -1021,7 +1022,7 @@ fn add_fact_with_classifier() {
         }
     }
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let classifier = PinSemantic;
 
@@ -1065,7 +1066,7 @@ fn explicit_pin_overrides_classifier() {
         }
     }
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let classifier = AlwaysPin;
 
@@ -1094,7 +1095,7 @@ fn explicit_pin_overrides_classifier() {
 
 #[test]
 fn execute_query_empty_returns_active_facts() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1134,7 +1135,7 @@ fn execute_query_empty_returns_active_facts() {
 
 #[test]
 fn execute_query_text_search() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1174,7 +1175,7 @@ fn execute_query_text_search() {
 
 #[test]
 fn execute_query_scope_only() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     // Add fact to "project:demo" scope (auto-created by add_fact)
@@ -1216,7 +1217,7 @@ fn execute_query_scope_only() {
 
 #[test]
 fn execute_query_fact_type_filter() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1260,7 +1261,7 @@ fn execute_query_fact_type_filter() {
 
 #[test]
 fn execute_query_importance_threshold() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     let opts_low = AddFactOptions {
@@ -1308,7 +1309,7 @@ fn execute_query_importance_threshold() {
 
 #[test]
 fn execute_query_pinned_only() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     let id = engine
@@ -1351,7 +1352,7 @@ fn execute_query_pinned_only() {
 
 #[test]
 fn execute_query_future_dated_excluded() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     // Regular fact
@@ -1404,7 +1405,7 @@ fn execute_query_future_dated_excluded() {
 
 #[test]
 fn execute_query_period_mutual_exclusion() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let now = Utc::now();
 
     let result = engine.execute_query(
@@ -1417,7 +1418,7 @@ fn execute_query_period_mutual_exclusion() {
 
 #[test]
 fn execute_query_search_mode_conflict() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     // Hybrid requires both text and embedding
     let result = engine.execute_query(
@@ -1430,7 +1431,7 @@ fn execute_query_search_mode_conflict() {
 
 #[test]
 fn execute_query_search_mode_inference() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1457,7 +1458,7 @@ fn execute_query_search_mode_inference() {
 
 #[test]
 fn execute_query_period_filter() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let now = Utc::now();
 
@@ -1512,7 +1513,7 @@ fn execute_query_period_filter() {
 
 #[test]
 fn execute_query_composed_filters() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     let opts_high = AddFactOptions {
@@ -1575,7 +1576,7 @@ fn execute_query_composed_filters() {
 
 #[test]
 fn execute_query_empty_results() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     let results = engine
         .execute_query(&MemoryQuery::new().text("nonexistent"))
@@ -1586,7 +1587,7 @@ fn execute_query_empty_results() {
 
 #[test]
 fn execute_query_default_limit() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     // Add 60 facts (over the default limit of 50)
@@ -1662,7 +1663,7 @@ impl Reranker for SpyReranker {
 
 #[test]
 fn reranker_none_results_unchanged() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1709,8 +1710,10 @@ fn reranker_none_results_unchanged() {
 
 #[test]
 fn reranker_reverses_order() {
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1740,7 +1743,7 @@ fn reranker_reverses_order() {
         .unwrap();
 
     // Get baseline order (no reranker)
-    let baseline_engine = MemoryEngine::open_memory(DIM).unwrap();
+    let baseline_engine = MemoryEngine::builder(DIM).build().unwrap();
     baseline_engine
         .add_fact(
             &AddFactRequest {
@@ -1803,8 +1806,10 @@ fn reranker_reverses_order() {
 
 #[test]
 fn reranker_skipped_for_vector_only_no_text() {
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1853,8 +1858,10 @@ fn reranker_skipped_for_vector_only_no_text() {
 
 #[test]
 fn reranker_applies_to_fts_only_mode() {
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1903,8 +1910,10 @@ fn reranker_applies_to_fts_only_mode() {
 
 #[test]
 fn reranker_applies_to_vector_mode_with_text() {
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -1955,9 +1964,10 @@ fn reranker_applies_to_vector_mode_with_text() {
 fn rerank_depth_overfetches_then_truncates() {
     let spy = std::sync::Arc::new(SpyReranker::new());
     // Clone Arc into Box<dyn Reranker> — SpyReranker is Send+Sync
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(SpyRerankerWrapper(spy.clone()))))
-            .unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(SpyRerankerWrapper(spy.clone())))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     // Insert 10 facts
@@ -2018,8 +2028,10 @@ impl Reranker for SpyRerankerWrapper {
 
 #[test]
 fn reranker_error_propagates() {
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(FailingReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(FailingReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -2052,18 +2064,22 @@ fn reranker_error_propagates() {
 
 #[test]
 fn reranker_name_accessor() {
-    let engine_none = MemoryEngine::open_memory(DIM).unwrap();
+    let engine_none = MemoryEngine::builder(DIM).build().unwrap();
     assert_eq!(engine_none.reranker_name(), None);
 
-    let engine_some =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+    let engine_some = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
     assert_eq!(engine_some.reranker_name(), Some("reverse"));
 }
 
 #[test]
 fn debug_output_includes_reranker() {
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
     let debug = format!("{engine:?}");
     assert!(
         debug.contains("reverse"),
@@ -2073,7 +2089,7 @@ fn debug_output_includes_reranker() {
 
 #[test]
 fn rerank_depth_none_falls_back_to_limit() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     for i in 0..10 {
@@ -2147,7 +2163,7 @@ fn add_session_fact(engine: &MemoryEngine, content: &str, session_id: &str) -> (
 
 #[test]
 fn link_session_facts_creates_bidirectional_edges() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let (_, f1) = add_session_fact(&engine, "fact a", "s1");
     let (_, f2) = add_session_fact(&engine, "fact b", "s1");
 
@@ -2186,7 +2202,7 @@ fn link_session_facts_creates_bidirectional_edges() {
 
 #[test]
 fn link_session_facts_three_facts_six_edges() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     add_session_fact(&engine, "a", "s1");
     add_session_fact(&engine, "b", "s1");
     add_session_fact(&engine, "c", "s1");
@@ -2197,7 +2213,7 @@ fn link_session_facts_three_facts_six_edges() {
 
 #[test]
 fn link_session_facts_single_fact_noop() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     add_session_fact(&engine, "lonely", "s1");
 
     let created = engine.link_session_facts("s1", None).unwrap();
@@ -2206,14 +2222,14 @@ fn link_session_facts_single_fact_noop() {
 
 #[test]
 fn link_session_facts_empty_session_noop() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let created = engine.link_session_facts("nonexistent", None).unwrap();
     assert_eq!(created, 0);
 }
 
 #[test]
 fn link_session_facts_idempotent() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     add_session_fact(&engine, "a", "s1");
     add_session_fact(&engine, "b", "s1");
 
@@ -2230,7 +2246,7 @@ fn link_session_facts_idempotent() {
 
 #[test]
 fn link_session_facts_graph_degree() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let (_, f1) = add_session_fact(&engine, "a", "s1");
     let (_, f2) = add_session_fact(&engine, "b", "s1");
     let (_, f3) = add_session_fact(&engine, "c", "s1");
@@ -2248,7 +2264,7 @@ fn link_session_facts_graph_degree() {
 
 #[test]
 fn link_session_facts_ignores_expired() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let (_, f1) = add_session_fact(&engine, "active1", "s1");
     add_session_fact(&engine, "active2", "s1");
     let (_, f3) = add_session_fact(&engine, "will_expire", "s1");
@@ -2307,7 +2323,7 @@ fn add_scoped_session_fact(
 
 #[test]
 fn link_session_facts_scope_filters_cross_scope() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     // Two facts in user:alice, one in user:bob — same session_id
     let (_, f1) = add_scoped_session_fact(&engine, "alice a", "s1", "user:alice");
@@ -2325,7 +2341,7 @@ fn link_session_facts_scope_filters_cross_scope() {
 
 #[test]
 fn link_session_facts_scope_none_links_all() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     add_scoped_session_fact(&engine, "alice a", "s1", "user:alice");
     add_scoped_session_fact(&engine, "bob b", "s1", "user:bob");
@@ -2338,7 +2354,7 @@ fn link_session_facts_scope_none_links_all() {
 
 #[test]
 fn link_session_facts_scope_subtree() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     // Create facts at different depths under user:alice
     let (_, f1) = add_scoped_session_fact(&engine, "top", "s1", "user:alice");
@@ -2355,7 +2371,7 @@ fn link_session_facts_scope_subtree() {
 
 #[test]
 fn link_session_facts_scope_not_found() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     add_session_fact(&engine, "a", "s1");
 
     let result = engine.link_session_facts("s1", Some("user:nonexistent"));
@@ -2398,8 +2414,10 @@ impl Reranker for DuplicatingReranker {
 
 #[test]
 fn reranker_rejects_out_of_bounds_index() {
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(OutOfBoundsReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(OutOfBoundsReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -2440,8 +2458,10 @@ fn reranker_rejects_out_of_bounds_index() {
 
 #[test]
 fn reranker_rejects_duplicates() {
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(DuplicatingReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(DuplicatingReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -2496,8 +2516,10 @@ fn reranker_rejects_duplicates() {
 #[test]
 fn reranker_allows_valid_subset() {
     // A well-behaved reranker (ReverseReranker) should still work fine
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(ReverseReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -2562,8 +2584,10 @@ fn reranker_allows_filtering_subset() {
         }
     }
 
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(FilteringReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(FilteringReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -2627,8 +2651,10 @@ fn reranker_rejects_non_finite_score() {
         }
     }
 
-    let engine =
-        MemoryEngine::open_memory_with(DIM, None, Some(Box::new(NanScoreReranker))).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(NanScoreReranker))
+        .build()
+        .unwrap();
     let embedder = MockEmbedder { dim: DIM };
     engine
         .add_fact(
@@ -2709,7 +2735,7 @@ fn embed_batch_empty_returns_empty() {
 
 #[test]
 fn add_facts_batch_inserts_all_facts() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     let entries: Vec<AddFactRequest> = (0..5)
@@ -2739,7 +2765,7 @@ fn add_facts_batch_inserts_all_facts() {
 
 #[test]
 fn add_facts_batch_empty_returns_empty() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     let ids = engine.add_facts_batch(&[], &embedder, None).unwrap();
@@ -2748,7 +2774,7 @@ fn add_facts_batch_empty_returns_empty() {
 
 #[test]
 fn add_facts_batch_with_scopes() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     let entries = vec![
@@ -2795,7 +2821,7 @@ fn add_facts_batch_with_classifier() {
         }
     }
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
     let classifier = AlwaysPin;
 
@@ -2828,7 +2854,7 @@ fn add_facts_batch_rejects_embedding_count_mismatch() {
         }
     }
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let entries = vec![
         AddFactRequest {
             content: "a".into(),
@@ -2874,7 +2900,7 @@ fn add_facts_batch_rollback_on_insert_failure() {
         }
     }
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     // Use scoped entries to verify scopes also roll back
     let entries = vec![
@@ -2946,7 +2972,7 @@ fn add_facts_batch_rollback_on_insert_failure() {
 
 #[test]
 fn add_facts_batch_temporal_consistency() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
     let entries: Vec<AddFactRequest> = (0..3)
@@ -2981,7 +3007,7 @@ fn add_facts_batch_temporal_consistency() {
 
 #[test]
 fn record_outcome_returns_event_id() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let fact = make_new_fact("outcome target", vec![0.5; DIM]);
     let fact_id = insert_raw_fact(&engine, &fact);
 
@@ -2993,7 +3019,7 @@ fn record_outcome_returns_event_id() {
 
 #[test]
 fn record_outcome_nonexistent_fact_returns_not_found() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     let result = engine.record_outcome(999, crate::types::Outcome::Negative);
     assert!(result.is_err());
@@ -3007,16 +3033,20 @@ fn record_outcome_read_only_returns_error() {
 
     // Create DB with a fact
     let fact_id = {
-        let config = EngineConfig::new(db_path.clone(), DIM);
-        let engine = MemoryEngine::open(&config).unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
         let fact = make_new_fact("pinned for ro", vec![0.5; DIM]);
         insert_raw_fact(&engine, &fact)
     };
 
     // Re-open read-only
-    let mut config = EngineConfig::new(db_path, DIM);
-    config.read_only = true;
-    let engine = MemoryEngine::open(&config).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .read_only(true)
+        .build()
+        .unwrap();
 
     let result = engine.record_outcome(fact_id, crate::types::Outcome::Positive);
     assert!(result.is_err());
@@ -3025,7 +3055,7 @@ fn record_outcome_read_only_returns_error() {
 
 #[test]
 fn get_outcome_counts_nonexistent_fact_returns_not_found() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     let result = engine.get_outcome_counts(999);
     assert!(result.is_err());
@@ -3034,7 +3064,7 @@ fn get_outcome_counts_nonexistent_fact_returns_not_found() {
 
 #[test]
 fn get_outcome_counts_no_outcomes_returns_zeros() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let fact = make_new_fact("no outcomes", vec![0.5; DIM]);
     let fact_id = insert_raw_fact(&engine, &fact);
 
@@ -3048,7 +3078,7 @@ fn get_outcome_counts_no_outcomes_returns_zeros() {
 fn get_outcome_counts_tallies_correctly() {
     use crate::types::Outcome;
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let fact = make_new_fact("tallied fact", vec![0.5; DIM]);
     let fact_id = insert_raw_fact(&engine, &fact);
 
@@ -3069,7 +3099,7 @@ fn get_outcome_counts_tallies_correctly() {
 fn get_outcome_counts_isolates_per_fact() {
     use crate::types::Outcome;
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let f1 = insert_raw_fact(&engine, &make_new_fact("fact one", vec![0.5; DIM]));
     let f2 = insert_raw_fact(&engine, &make_new_fact("fact two", vec![0.3; DIM]));
 
@@ -3118,17 +3148,11 @@ fn builder_in_memory_matches_open_memory() {
     assert!(engine.pool.path().is_none());
 }
 
-#[test]
-fn builder_rejects_in_memory_read_only() {
-    // #543: read-only on an in-memory engine is a logical contradiction (there
-    // is no file to open read-only). build() must reject it up-front rather than
-    // silently ignoring the read_only flag on the no-path branch.
-    let err = MemoryEngine::builder(DIM)
-        .read_only(true)
-        .build()
-        .unwrap_err();
-    assert!(matches!(err, MemoryError::Migration(_)));
-}
+// NOTE (#541): #543's `builder_rejects_in_memory_read_only` (a RUNTIME check
+// that `read_only` on an in-memory builder returns `Err`) was removed. The
+// typestate builder makes that combination unrepresentable at COMPILE time —
+// `read_only` exists only on `MemoryEngineBuilder<File>`. The guarantee is
+// enforced by a `compile_fail` doctest in `engine::builder`.
 
 #[test]
 fn builder_file_backed_matches_open() {
@@ -3273,8 +3297,10 @@ mod snapshot_integration {
     use super::*;
 
     fn open_file_engine(dir: &std::path::Path) -> MemoryEngine {
-        let config = EngineConfig::new(dir.join("test.db"), DIM);
-        MemoryEngine::open(&config).unwrap()
+        MemoryEngine::builder(DIM)
+            .path(dir.join("test.db"))
+            .build()
+            .unwrap()
     }
 
     fn add_test_fact(engine: &MemoryEngine, content: &str) -> i64 {
@@ -3323,8 +3349,10 @@ mod snapshot_integration {
 
         // Create engine, add data, do NOT write snapshot
         {
-            let config = EngineConfig::new(dir.path().join("test.db"), DIM);
-            let engine = MemoryEngine::open(&config).unwrap();
+            let engine = MemoryEngine::builder(DIM)
+                .path(dir.path().join("test.db"))
+                .build()
+                .unwrap();
             add_test_fact(&engine, "fact one");
             // Remove snapshot if Drop wrote one
             let snap_path = super::snapshot::snapshot_path(&dir.path().join("test.db"));
@@ -3372,7 +3400,7 @@ mod snapshot_integration {
 
     #[test]
     fn snapshot_skipped_for_memory_engine() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let result = engine.write_snapshot().unwrap();
         assert!(!result, "in-memory engine should skip snapshot");
     }
@@ -3387,9 +3415,11 @@ mod snapshot_integration {
         }
 
         // Open read-only
-        let mut config = EngineConfig::new(dir.path().join("test.db"), DIM);
-        config.read_only = true;
-        let engine = MemoryEngine::open(&config).unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.path().join("test.db"))
+            .read_only(true)
+            .build()
+            .unwrap();
         let result = engine.write_snapshot().unwrap();
         assert!(!result, "read-only engine should skip snapshot");
     }

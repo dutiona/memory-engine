@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn record_insight_delegates_to_stream() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let stream = RecordingStream::new();
         let insight = Insight {
             content: "test insight".into(),
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn run_dream_cycle_creates_context_and_delegates() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let cycle = NoopCycle;
 
         let report = engine.run_dream_cycle(&cycle).unwrap();
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn promote_with_lineage_rejects_wrong_dimension() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let req = PromoteRequest {
             content: "promoted wisdom".into(),
             fact_type: FactType::Semantic,
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn promote_with_lineage_atomic_insert() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let source_ids = add_source_facts(&engine, &[1, 2, 3]);
 
         let req = PromoteRequest {
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn promote_with_lineage_preserves_existing_metadata() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let source_ids = add_source_facts(&engine, &[1, 2]);
 
         let req = PromoteRequest {
