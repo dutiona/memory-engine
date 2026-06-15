@@ -2567,11 +2567,9 @@ CREATE TABLE IF NOT EXISTS config (
     /// Return the ordered indexed-column names of an index via `pragma_index_info`.
     fn index_columns(conn: &Connection, index_name: &str) -> Vec<String> {
         let mut stmt = conn
-            .prepare(&format!(
-                "SELECT name FROM pragma_index_info('{index_name}') ORDER BY seqno"
-            ))
+            .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
             .unwrap();
-        stmt.query_map([], |r| r.get(0))
+        stmt.query_map([index_name], |r| r.get(0))
             .unwrap()
             .collect::<std::result::Result<_, _>>()
             .unwrap()
