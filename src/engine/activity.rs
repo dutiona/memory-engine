@@ -128,8 +128,14 @@ impl MemoryEngine {
                         drop(conn);
                         ActivityStatus::Promoted
                     }
-                    Err(_) => {
-                        // Promotion failed (e.g., embedding error). Record as normal.
+                    Err(e) => {
+                        // Promotion failed (e.g., embedding error). Record as
+                        // normal, but surface the failure so it is not silent.
+                        tracing::warn!(
+                            activity_id,
+                            error = %e,
+                            "activity promotion to fact failed; recording without promotion"
+                        );
                         ActivityStatus::Recorded
                     }
                 }

@@ -213,14 +213,35 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         // Auto-detect response format and extract all embeddings:
         // OpenAI: { "data": [{ "index": 0, "embedding": [...] }, ...] }
         // Ollama: { "embeddings": [[...], [...]] }
+        // Single: { "embedding": [...] } (only when one text was requested)
         let embeddings = if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
             Self::parse_openai_batch(data, texts.len())?
         } else if let Some(arr) = body.get("embeddings").and_then(|e| e.as_array()) {
             Self::parse_ollama_batch(arr, texts.len())?
+        } else if let Some(embedding) = body.get("embedding") {
+            // Single embedding format (e.g. Ollama's legacy `/api/embeddings`, which
+            // accepts only one prompt). Only valid when exactly one text was requested.
+            if texts.len() != 1 {
+                return Err(MemoryError::Internal(format!(
+                    "batch embedding: server returned a single 'embedding' but {} texts were requested",
+                    texts.len()
+                )));
+            }
+            let emb = serde_json::from_value::<Vec<f32>>(embedding.clone()).map_err(|_| {
+                MemoryError::Internal("batch embedding: cannot parse single 'embedding'".into())
+            })?;
+            vec![emb]
         } else {
             let body_str = serde_json::to_string(&body).unwrap_or_default();
+            // Slice on a char boundary: `body_str` may contain multibyte UTF-8 (serde_json
+            // passes non-ASCII through unescaped), so a raw byte index could split a codepoint
+            // and panic. Walk down to the nearest boundary at or below 1000.
             let truncated = if body_str.len() > 1000 {
-                format!("{}... (truncated)", &body_str[..1000])
+                let mut end = 1000;
+                while !body_str.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}... (truncated)", &body_str[..end])
             } else {
                 body_str
             };

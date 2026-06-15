@@ -246,6 +246,7 @@ pub fn hybrid_search(
 
     let diagnostics = QueryDiagnostics {
         candidates_before_filter: ranked_count,
+        results_returned: results.len(),
         fts_candidates: fts_candidate_count,
         vector_candidates: vec_candidate_count,
         ..QueryDiagnostics::default()
