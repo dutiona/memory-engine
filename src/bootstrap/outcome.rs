@@ -173,7 +173,10 @@ fn detect_tests_passed(turns: &[super::filter::ConversationTurn]) -> bool {
                 if lower.contains("passed") && (lower.contains("test") || lower.contains("tests")) {
                     return true;
                 }
-                if lower.contains("pytest") && (lower.contains("passed") || lower.contains(" ok")) {
+                // A `pytest` + `passed` line is already caught by the generic
+                // `passed && test` branch above (`pytest` contains `test`), so this
+                // branch only adds the pytest-specific ` ok` summary form.
+                if lower.contains("pytest") && lower.contains(" ok") {
                     return true;
                 }
             }
@@ -491,11 +494,13 @@ mod tests {
 
     #[test]
     fn detect_tests_passed_pytest_branch() {
-        // Exercises the `pytest` + `passed` heuristic path in detect_tests_passed.
+        // Isolates the pytest-specific branch (`pytest` + ` ok`): the stdout
+        // deliberately omits "passed" so the earlier `passed && test` branch
+        // cannot fire first (note "pytest" itself contains "test").
         let tc = ToolCallRecord {
             tool_name: "Bash".into(),
             input: serde_json::json!({"command": "pytest"}),
-            stdout: Some("pytest collected 5 items\n5 passed in 0.12s".into()),
+            stdout: Some("pytest collected 5 items\n5 ok in 0.12s".into()),
             stderr: None,
             is_error: false,
             interrupted: false,
@@ -508,11 +513,13 @@ mod tests {
 
     #[test]
     fn detect_commit_via_master_branch_in_stdout() {
-        // Exercises the `[master` pattern in detect_commit.
+        // Isolates the `[master` stdout pattern: the input command is NOT
+        // `git commit` (so the command branch is skipped) and the SHA is <7 hex
+        // (so `has_short_sha` cannot fire) — only `[master` can satisfy it here.
         let tc = ToolCallRecord {
             tool_name: "Bash".into(),
-            input: serde_json::json!({"command": "git commit -m 'fix: something'"}),
-            stdout: Some("[master abc1234] fix: something\n 1 file changed".into()),
+            input: serde_json::json!({"command": "make release"}),
+            stdout: Some("[master ab12] release: cut version\n 1 file changed".into()),
             stderr: None,
             is_error: false,
             interrupted: false,
