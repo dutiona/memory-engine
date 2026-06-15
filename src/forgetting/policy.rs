@@ -104,30 +104,37 @@ pub fn prune(
     let active_facts = fact_store.list_active(None)?;
     let facts_evaluated = active_facts.len();
 
-    // Score all facts before mutating, so degree values are consistent.
-    // Pinned facts and decay-exempt fact types are unforgettable — they
-    // bypass the expiry filter entirely (but still get scores materialized
-    // and count in `facts_evaluated`).
+    // Score all facts once before mutating, so degree values are consistent
+    // and importance is computed a single time per fact. Pinned facts and
+    // decay-exempt fact types are unforgettable — they bypass the expiry
+    // filter entirely (but still get scores materialized and count in
+    // `facts_evaluated`).
+    let scored: Vec<f64> = active_facts
+        .iter()
+        .map(|fact| {
+            let degree = graph.degree(fact.id);
+            compute_importance(fact, degree, now, policy)
+        })
+        .collect();
+
     let to_expire: Vec<i64> = active_facts
         .iter()
-        .filter(|fact| {
+        .zip(&scored)
+        .filter_map(|(fact, &score)| {
             if fact.is_pinned || policy.is_decay_exempt(&fact.fact_type) {
-                return false;
+                return None;
             }
-            let degree = graph.degree(fact.id);
-            compute_importance(fact, degree, now, policy) < policy.min_importance
+            (score < policy.min_importance).then_some(fact.id)
         })
-        .map(|f| f.id)
         .collect();
 
     let tx = conn.unchecked_transaction()?;
     let fact_store = FactStore::new(&tx, embed_dim);
     let edge_store = EdgeStore::new(&tx);
 
-    // Materialize importance scores for all active facts
-    for fact in &active_facts {
-        let degree = graph.degree(fact.id);
-        let score = compute_importance(fact, degree, now, policy);
+    // Materialize importance scores for all active facts (reusing the
+    // scores computed above).
+    for (fact, &score) in active_facts.iter().zip(&scored) {
         fact_store.update_importance_score(fact.id, score)?;
     }
 

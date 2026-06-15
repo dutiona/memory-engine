@@ -41,6 +41,9 @@ pub fn search_archives(
     let mut all_results: Vec<SearchResult> = Vec::new();
     let mut paks_scanned = 0usize;
 
+    // Pre-compute the lowercased query once; it is invariant across all facts.
+    let query_text_lower = query.text.as_ref().map(|text| text.to_lowercase());
+
     for entry in manifest_entries {
         let pak_path = archive_dir.join(&entry.pak_path);
         // Path traversal guard: ensure resolved path stays inside archive_dir
@@ -66,8 +69,8 @@ pub fn search_archives(
             let mut matched = false;
 
             // Text matching — simple case-insensitive substring
-            if let Some(ref text) = query.text {
-                if fact.content.to_lowercase().contains(&text.to_lowercase()) {
+            if let Some(ref text_lower) = query_text_lower {
+                if fact.content.to_lowercase().contains(text_lower) {
                     score += 1.0;
                     matched = true;
                 }
