@@ -37,13 +37,12 @@ impl<'a> LineageStore<'a> {
         if !record.source_fact_ids.is_empty() {
             let unique_ids: std::collections::BTreeSet<i64> =
                 record.source_fact_ids.iter().copied().collect();
-            let placeholders: String = unique_ids
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            let query = format!("SELECT COUNT(*) FROM facts WHERE id IN ({placeholders})");
-            let count: i64 = self.conn.query_row(&query, [], |r| r.get(0))?;
+            let ids_json = serde_json::to_string(&unique_ids)?;
+            let count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM facts WHERE id IN (SELECT value FROM json_each(?1))",
+                params![ids_json],
+                |r| r.get(0),
+            )?;
             let expected = i64::try_from(unique_ids.len())
                 .map_err(|e| MemoryError::Internal(e.to_string()))?;
             if count != expected {

@@ -39,7 +39,7 @@ struct FixedArbiter {
 }
 impl ConflictArbiter for FixedArbiter {
     fn arbitrate(&self, _: &Fact, _: &Fact) -> Result<CrudDecision> {
-        Ok(self.decision.clone())
+        Ok(self.decision)
     }
 }
 

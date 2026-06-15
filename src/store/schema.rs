@@ -2063,11 +2063,11 @@ CREATE TABLE IF NOT EXISTS config (
     }
 
     #[test]
-    fn schema_v7_snapshot() {
+    fn schema_v9_snapshot() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         let schema = deterministic_schema_dump(&conn);
-        insta::assert_snapshot!("schema_v7", schema);
+        insta::assert_snapshot!("schema_v9", schema);
     }
 
     // --- Property-based migration tests (proptest) ---

@@ -12,14 +12,14 @@ impl MemoryEngine {
     // --- Public API: Co-session edge creation ---
 
     /// Relation type for edges linking facts that co-occur in the same session.
-    pub(super) const CO_SESSION_RELATION: &str = "co_session";
+    const CO_SESSION_RELATION: &str = "co_session";
     /// Default weight for co-session edges — weaker than explicit semantic
     /// relationships by design intent. Note: the current forgetting system uses
     /// raw `graph.degree()` (unweighted), so the weight does not yet reduce
     /// connectivity impact. It will matter once weighted traversal ships (Phase 5).
     pub(super) const CO_SESSION_WEIGHT: f64 = 0.5;
     /// Scope ID for co-session edges — root scope, since co-session is cross-scope.
-    pub(super) const CO_SESSION_SCOPE_ID: i64 = 1;
+    const CO_SESSION_SCOPE_ID: i64 = 1;
 
     /// Create `co_session` edges between all active facts sharing a session.
     ///

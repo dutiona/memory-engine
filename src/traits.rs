@@ -67,7 +67,7 @@ pub trait ConflictArbiter {
 }
 
 /// Decision for conflict resolution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CrudDecision {
     Add,
     Update,

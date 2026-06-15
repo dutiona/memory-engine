@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
+use rusqlite::OptionalExtension;
 
 use crate::engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, apply_filter};
 use crate::error::{MemoryError, Result};
@@ -254,5 +255,3 @@ fn truncate(s: &str, max_len: usize) -> &str {
     }
     &s[..end]
 }
-
-use rusqlite::OptionalExtension;
