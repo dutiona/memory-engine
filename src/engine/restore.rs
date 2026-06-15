@@ -106,7 +106,8 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Conflict` if the target path already exists.
-    /// Returns `MemoryError::NotFound` if the backup file doesn't exist.
+    /// Returns `MemoryError::NotFound` if the backup path is not an existing
+    /// regular file (missing, or a directory / other non-file).
     /// Returns `MemoryError::EmbeddingDimension` on dimension mismatch.
     pub fn restore_sqlite(backup_path: &Path, config: &EngineConfig) -> Result<Self> {
         if config.path.exists() {
@@ -114,9 +115,13 @@ impl MemoryEngine {
                 "target database path already exists".into(),
             ));
         }
-        if !backup_path.exists() {
+        // Use `is_file()` (not `exists()`): a directory passed as the backup
+        // source would pass an `exists()` guard and then fail deep inside
+        // `std::fs::copy` with a confusing OS-level error. `is_file()` rejects
+        // directories and other non-regular files up front with a clear message.
+        if !backup_path.is_file() {
             return Err(MemoryError::NotFound(format!(
-                "backup file: {}",
+                "backup file is not a regular file: {}",
                 backup_path.display()
             )));
         }

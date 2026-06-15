@@ -191,6 +191,46 @@ fn restore_sqlite_fails_if_backup_missing() {
     assert!(err.to_string().contains("backup file"));
 }
 
+/// Regression for #191: a directory passed as the backup source must be
+/// rejected by the `is_file()` guard with a precise `NotFound` ("not a regular
+/// file") error, *before* `std::fs::copy` runs. With the old `exists()` guard
+/// the directory passed the check and `copy` later failed with a confusing
+/// OS-level I/O error.
+#[test]
+fn restore_sqlite_fails_if_backup_is_directory() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // The backup "source" is a directory, not a file.
+    let backup_dir = dir.path().join("a_directory");
+    std::fs::create_dir(&backup_dir).unwrap();
+
+    let target_path = dir.path().join("target.db");
+    let config = EngineConfig::new(target_path.clone(), DIM);
+
+    let err = MemoryEngine::restore_sqlite(&backup_dir, &config).unwrap_err();
+
+    // Must be the precise pre-copy guard error, not a copy/I/O error.
+    assert!(
+        matches!(err, memory_engine::error::MemoryError::NotFound(_)),
+        "expected NotFound, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("backup file") && msg.contains("not a regular file"),
+        "expected a 'not a regular file' message, got: {msg}"
+    );
+    assert!(
+        !msg.contains("I/O error"),
+        "must not surface a raw copy/I/O error, got: {msg}"
+    );
+
+    // The guard fired before any copy, so no orphan target file was created.
+    assert!(
+        !target_path.exists(),
+        "target file should not have been created when the guard rejects the source"
+    );
+}
+
 #[cfg(feature = "compress-gzip")]
 #[test]
 fn gzip_json_restore_roundtrip() {
