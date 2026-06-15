@@ -338,7 +338,7 @@ mod tests {
         // user:michael appears exactly once despite being in both sets.
         assert_eq!(inh.iter().filter(|&&id| id == user_id).count(), 1);
         // All four ids are unique (no duplicate from the overlap).
-        let mut sorted = inh.clone();
+        let mut sorted = inh;
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 4, "inherited() must not emit duplicates");
