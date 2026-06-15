@@ -430,7 +430,7 @@ impl<'a> FactStore<'a> {
         let result: Option<String> =
             stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?;
         match result {
-            Some(s) => Ok(Some(crate::store::parse_timestamp(&s)?)),
+            Some(s) => Ok(Some(parse_timestamp(&s)?)),
             None => Ok(None),
         }
     }
@@ -1018,7 +1018,8 @@ mod tests {
         fs.insert(&past).unwrap();
 
         let mut future = make_fact("future reminder", vec![0.2; DIM]);
-        future.t_valid = Some(now + chrono::Duration::hours(1));
+        const VALID_DURATION_HOURS: i64 = 1;
+        future.t_valid = Some(now + TimeDelta::hours(VALID_DURATION_HOURS));
         fs.insert(&future).unwrap();
 
         fs.insert(&make_fact("regular fact", vec![0.3; DIM]))
