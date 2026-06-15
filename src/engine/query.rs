@@ -22,6 +22,47 @@ impl MemoryEngine {
         &*self.vector_strategy
     }
 
+    /// Resolve a query's optional scope into concrete scope IDs and pair it with
+    /// the active vector search strategy.
+    ///
+    /// Returns:
+    /// - `Some((scope_ids, strategy))` — scope resolved (or absent, giving
+    ///   `scope_ids == None` for an unscoped search).
+    /// - `None` — a scope query was provided but the path does not exist.
+    ///   Callers MUST surface this as empty results rather than falling through
+    ///   to an unscoped search.
+    ///
+    /// This consolidates the scope-resolution + strategy-dispatch logic shared
+    /// by [`query`](Self::query) and [`execute_query`](Self::execute_query) (#117).
+    ///
+    /// Distinct from [`resolve_scope_ids`](Self::resolve_scope_ids), which
+    /// operates on a string path with ancestor-walk + fallback-to-root
+    /// semantics; this resolves a [`ScopeQuery`](crate::types::ScopeQuery) with
+    /// empty-on-miss semantics.
+    fn resolve_scope_and_strategy(
+        &self,
+        scope: Option<&crate::types::ScopeQuery>,
+    ) -> Option<(Option<Vec<i64>>, &dyn VectorSearchStrategy)> {
+        // Resolve scope IDs from cache (short-lived read lock).
+        // When a scope query is provided but the path doesn't exist, signal
+        // "no results" (None) instead of silently falling through to an
+        // unscoped search.
+        let scope_ids: Option<Vec<i64>> = match scope {
+            Some(sq) => {
+                // Bind the resolution before matching so the read guard is
+                // dropped promptly (short-lived read lock).
+                let resolved = self.scope_tree.read().resolve_query(sq);
+                match resolved {
+                    Some(ids) => Some(ids),
+                    None => return None, // scope doesn't exist → no results
+                }
+            }
+            None => None,
+        };
+
+        Some((scope_ids, self.active_vector_strategy()))
+    }
+
     /// Query facts using hybrid search (FTS5 + vector + RRF).
     ///
     /// # Errors
@@ -35,21 +76,12 @@ impl MemoryEngine {
     /// Panics if internal candidate de-duplication yields an inconsistent
     /// index — an invariant that should never be violated in practice.
     pub fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        // Resolve scope IDs from cache (short-lived read lock).
-        // When a scope query is provided but the path doesn't exist,
-        // return empty results instead of silently falling through to unscoped search.
-        let scope_ids: Option<Vec<i64>> = match &query.scope {
-            Some(sq) => {
-                let resolved = self.scope_tree.read().resolve_query(sq);
-                match resolved {
-                    Some(ids) => Some(ids),
-                    None => return Ok(vec![]), // scope doesn't exist → no results
-                }
-            }
-            None => None,
+        // Resolve scope + active vector strategy. A provided-but-missing scope
+        // yields no results rather than an unscoped search (#117).
+        let Some((scope_ids, strategy)) = self.resolve_scope_and_strategy(query.scope.as_ref())
+        else {
+            return Ok(vec![]); // scope doesn't exist → no results
         };
-
-        let strategy = self.active_vector_strategy();
 
         let (mut results, _diagnostics) = self.with_read(|conn| {
             hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
@@ -98,21 +130,15 @@ impl MemoryEngine {
         // --- Validation ---
         Self::validate_memory_query(query)?;
 
-        // --- Resolve scope ---
-        let scope_ids: Option<Vec<i64>> = match &query.scope {
-            Some(sq) => {
-                let resolved = self.scope_tree.read().resolve_query(sq);
-                match resolved {
-                    Some(ids) => Some(ids),
-                    None => {
-                        return Ok(QueryResponse {
-                            results: vec![],
-                            diagnostics: QueryDiagnostics::default(),
-                        });
-                    }
-                }
-            }
-            None => None,
+        // --- Resolve scope + active vector strategy ---
+        // A provided-but-missing scope yields no results rather than an
+        // unscoped search (#117).
+        let Some((scope_ids, strategy)) = self.resolve_scope_and_strategy(query.scope.as_ref())
+        else {
+            return Ok(QueryResponse {
+                results: vec![],
+                diagnostics: QueryDiagnostics::default(),
+            });
         };
 
         // --- Compute effective temporal cutoff ---
@@ -129,7 +155,13 @@ impl MemoryEngine {
         let limit = query.effective_limit();
 
         if query.has_search() {
-            self.execute_search_path(query, scope_ids.as_deref(), effective_cutoff, limit)
+            self.execute_search_path(
+                query,
+                scope_ids.as_deref(),
+                strategy,
+                effective_cutoff,
+                limit,
+            )
         } else {
             self.execute_store_path(query, scope_ids.as_deref(), effective_cutoff, limit)
         }
@@ -185,7 +217,14 @@ impl MemoryEngine {
             (true, true) => SearchMode::Hybrid,
             (true, false) => SearchMode::Fts,
             (false, true) => SearchMode::Vector,
-            (false, false) => unreachable!("has_search() should be false"),
+            // Invariant: callers gate on `has_search()`, so this arm is
+            // unreachable in correct usage. Assert it in debug/test builds to
+            // catch invariant violations, but fall back to the natural
+            // empty-query default in release rather than panicking (#119).
+            (false, false) => {
+                debug_assert!(false, "infer_search_mode called without has_search()");
+                SearchMode::Fts
+            }
         }
     }
 
@@ -198,6 +237,7 @@ impl MemoryEngine {
         &self,
         query: &MemoryQuery,
         scope_ids: Option<&[i64]>,
+        strategy: &dyn VectorSearchStrategy,
         effective_cutoff: Option<DateTime<Utc>>,
         limit: usize,
     ) -> Result<QueryResponse> {
@@ -227,8 +267,6 @@ impl MemoryEngine {
             fact_type: query.fact_type,
             scope: query.scope.clone(),
         };
-
-        let strategy = self.active_vector_strategy();
 
         let (mut results, mut diagnostics) = self.with_read(|conn| {
             hybrid_search(conn, &search_query, self.embed_dim, scope_ids, strategy)
