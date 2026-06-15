@@ -17,6 +17,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::NotFound` if the old fact doesn't exist.
     /// Propagates errors from the arbiter or database operations.
     pub fn resolve_conflict(

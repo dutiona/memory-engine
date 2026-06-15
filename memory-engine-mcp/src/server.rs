@@ -68,7 +68,9 @@ impl ServerHandler for MemoryMcpServer {
              memory_get_fact, memory_statistics, memory_flush_insights, \
              memory_consolidate, memory_forget, memory_dump_state, \
              memory_pin_fact, memory_unpin_fact, \
-             memory_replay_events, memory_fact_history, memory_bootstrap_session. \
+             memory_replay_events, memory_fact_history, memory_bootstrap_session, \
+             memory_record_outcome, memory_outcome_counts, memory_record_activity, \
+             memory_checkpoint_session, memory_load_context. \
              Use depth=sparse|standard|full on query tools to control response verbosity.",
             )
     }

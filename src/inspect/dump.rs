@@ -183,8 +183,10 @@ pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Io`] on filesystem failures or
-/// [`MemoryError::Internal`] if `VACUUM INTO` fails.
+/// Returns [`MemoryError::Conflict`] if `path` resolves to the live database
+/// file (refusing to overwrite the source), [`MemoryError::Io`] on filesystem
+/// failures, or [`MemoryError::Internal`] if the database path cannot be read,
+/// `path` contains a null byte, or `VACUUM INTO` fails.
 pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
     // Detect whether this is a file-backed database.
     let db_path: String = conn

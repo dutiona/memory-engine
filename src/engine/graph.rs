@@ -37,6 +37,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on SQL failure.
     /// Returns `MemoryError::NotFound` if `scope` is `Some` but the path
     /// does not exist.

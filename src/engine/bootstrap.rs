@@ -19,6 +19,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns errors from embedding, DB insertion, or scope resolution.
     // `conn` (write lock) legitimately spans scope resolution and the inner
     // bootstrap call (the function's return expression), so it cannot be
@@ -64,6 +65,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Io` for directory traversal failures.
     // `conn` (write lock) legitimately spans scope resolution and the inner
     // bootstrap call (the function's return expression), so it cannot be

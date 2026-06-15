@@ -562,6 +562,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on write failure.
     pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
         let conn = self.write_conn()?;
@@ -590,6 +591,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on insert failure.
     pub fn ensure_scope_path(&self, path: &str) -> Result<i64> {
         let conn = self.write_conn()?;

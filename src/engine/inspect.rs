@@ -118,8 +118,12 @@ impl MemoryEngine {
     /// Returns [`MemoryError::Io`] on filesystem failure.
     /// Returns [`MemoryError::Conflict`] if the target path resolves to the live database.
     /// Returns [`MemoryError::Database`] on SQL failure.
+    /// Returns [`MemoryError::Serialization`] for the JSON formats if snapshot
+    /// serialization fails.
     /// Returns [`MemoryError::NotImplemented`] if a compression format is used
     /// without the corresponding feature enabled.
+    /// Returns [`MemoryError::ReadOnly`] for the `Sqlite` format if the engine
+    /// was opened read-only (the `VACUUM INTO` backup acquires the write lock).
     #[allow(unreachable_patterns)] // wildcard needed for #[non_exhaustive] forward compat
     pub fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
         match format {
