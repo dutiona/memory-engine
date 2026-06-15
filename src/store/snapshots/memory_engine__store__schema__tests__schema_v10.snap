@@ -3,7 +3,7 @@ source: src/store/schema.rs
 expression: schema
 ---
 -- index: idx_activities_dedup
-CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class);
+CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
 
 -- index: idx_activities_scope_recent
 CREATE INDEX idx_activities_scope_recent ON activities(scope_id, last_seen DESC);

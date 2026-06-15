@@ -132,7 +132,7 @@ Upcasting must produce **semantically equivalent** results — the upcasted payl
 
 ### Schema Snapshot (insta)
 
-The `schema_v6_snapshot` test captures the complete DDL of a fresh database via a deterministic projection (sorted by type+name, whitespace-normalized). This snapshot:
+The `schema_v10_snapshot` test captures the complete DDL of a fresh database via a deterministic projection (sorted by type+name, whitespace-normalized). This snapshot:
 
 - Breaks when any DDL constant changes (catches unintentional schema drift).
 - Is version-controlled alongside the code.

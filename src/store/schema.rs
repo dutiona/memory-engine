@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -178,6 +178,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrate_v6_to_v7, false),
     (migrate_v7_to_v8, false),
     (migrate_v8_to_v9, false),
+    (migrate_v9_to_v10, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -731,6 +732,26 @@ fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Converge the `idx_activities_dedup` index to its 5-column form.
+///
+/// The original v9 schema shipped with a mismatch: the fresh-DB DDL created
+/// `idx_activities_dedup` with 4 columns (`session_id, tool_name, args_hash,
+/// outcome_class`), while `migrate_v8_to_v9` created it with 5 (appending
+/// `scope_id`). The dedup query filters all 5 columns, so fresh-v9 databases
+/// got a less-selective index than migrated ones.
+///
+/// This corrective migration unconditionally drops and recreates the index in
+/// the canonical 5-column form. `DROP INDEX IF EXISTS` makes it idempotent and
+/// safe regardless of which 4- or 5-column variant a v9 database already has.
+fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_activities_dedup;
+         CREATE INDEX idx_activities_dedup
+             ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);",
+    )?;
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -842,7 +863,7 @@ CREATE TABLE IF NOT EXISTS activities (
 CREATE INDEX IF NOT EXISTS idx_activities_session
     ON activities(session_id);
 CREATE INDEX IF NOT EXISTS idx_activities_dedup
-    ON activities(session_id, tool_name, args_hash, outcome_class);
+    ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
 CREATE INDEX IF NOT EXISTS idx_activities_scope_recent
     ON activities(scope_id, last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_activities_status
@@ -2110,11 +2131,11 @@ CREATE TABLE IF NOT EXISTS config (
     }
 
     #[test]
-    fn schema_v9_snapshot() {
+    fn schema_v10_snapshot() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         let schema = deterministic_schema_dump(&conn);
-        insta::assert_snapshot!("schema_v9", schema);
+        insta::assert_snapshot!("schema_v10", schema);
     }
 
     // --- Property-based migration tests (proptest) ---
@@ -2539,5 +2560,128 @@ CREATE TABLE IF NOT EXISTS config (
             count, 2,
             "fresh DB should have activities and session_checkpoints tables"
         );
+    }
+
+    // --- v9→v10 migration tests (idx_activities_dedup convergence) ---
+
+    /// Return the ordered indexed-column names of an index via `pragma_index_info`.
+    fn index_columns(conn: &Connection, index_name: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT name FROM pragma_index_info('{index_name}') ORDER BY seqno"
+            ))
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Create a v9 schema as it was *originally shipped* — with the buggy 4-column
+    /// `idx_activities_dedup` index (missing `scope_id`) produced by the fresh-DB
+    /// path before the v9→v10 corrective migration. Used to exercise convergence.
+    fn init_schema_v9_buggy_dedup_index(conn: &Connection) -> Result<()> {
+        init_schema(conn)?;
+        // Replace the (now-fixed 5-col) index with the original buggy 4-col form
+        // to simulate a fresh-v9 database created before the corrective migration.
+        conn.execute_batch("DROP INDEX IF EXISTS idx_activities_dedup;")?;
+        conn.execute_batch(
+            "CREATE INDEX idx_activities_dedup
+                ON activities(session_id, tool_name, args_hash, outcome_class);",
+        )?;
+        set_config(conn, "schema_version", "9")?;
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_and_migrated_dedup_index_have_identical_columns() {
+        // Fresh DB at latest version.
+        let fresh = open_memory().unwrap();
+        init_schema(&fresh).unwrap();
+        let fresh_cols = index_columns(&fresh, "idx_activities_dedup");
+
+        // v8 → v9 → v10 migrated DB.
+        let migrated = open_memory().unwrap();
+        init_schema_v8(&migrated).unwrap();
+        migrate(&migrated, None).unwrap();
+        let migrated_cols = index_columns(&migrated, "idx_activities_dedup");
+
+        // Both must include scope_id and be identical (5 columns).
+        let expected = vec![
+            "session_id".to_string(),
+            "tool_name".to_string(),
+            "args_hash".to_string(),
+            "outcome_class".to_string(),
+            "scope_id".to_string(),
+        ];
+        assert_eq!(
+            fresh_cols, expected,
+            "fresh-DB idx_activities_dedup must include scope_id (5 cols)"
+        );
+        assert_eq!(
+            migrated_cols, expected,
+            "migrated idx_activities_dedup must include scope_id (5 cols)"
+        );
+        assert_eq!(
+            fresh_cols, migrated_cols,
+            "fresh and migrated idx_activities_dedup must be identical"
+        );
+    }
+
+    #[test]
+    fn migrate_v9_to_v10_converges_buggy_dedup_index() {
+        let conn = open_memory().unwrap();
+        init_schema_v9_buggy_dedup_index(&conn).unwrap();
+
+        // Before migration: the index is the buggy 4-column form (no scope_id).
+        let before = index_columns(&conn, "idx_activities_dedup");
+        assert_eq!(
+            before,
+            vec![
+                "session_id".to_string(),
+                "tool_name".to_string(),
+                "args_hash".to_string(),
+                "outcome_class".to_string(),
+            ],
+            "precondition: fresh-v9 DB has buggy 4-column dedup index"
+        );
+
+        migrate(&conn, None).unwrap();
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some(CURRENT_SCHEMA_VERSION.to_string())
+        );
+
+        // After migration: the index converged to the 5-column form (incl scope_id).
+        let after = index_columns(&conn, "idx_activities_dedup");
+        assert_eq!(
+            after,
+            vec![
+                "session_id".to_string(),
+                "tool_name".to_string(),
+                "args_hash".to_string(),
+                "outcome_class".to_string(),
+                "scope_id".to_string(),
+            ],
+            "v9→v10 migration must rebuild idx_activities_dedup with scope_id"
+        );
+    }
+
+    #[test]
+    fn reopening_v10_db_leaves_dedup_index_unchanged() {
+        // A fresh DB is already at v10 with the correct index; re-running the
+        // migration chain on reopen (a no-op, since version == CURRENT) must not
+        // change or drop the index.
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let before = index_columns(&conn, "idx_activities_dedup");
+        migrate(&conn, None).unwrap();
+        let after = index_columns(&conn, "idx_activities_dedup");
+        assert_eq!(
+            before, after,
+            "re-running migrations on a fresh v10 DB must leave the dedup index unchanged"
+        );
+        assert_eq!(after.len(), 5, "dedup index must have 5 columns");
     }
 }

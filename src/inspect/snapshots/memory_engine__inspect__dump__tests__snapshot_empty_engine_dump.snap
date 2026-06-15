@@ -2,7 +2,7 @@
 source: src/inspect/dump.rs
 expression: snapshot
 ---
-schema_version: 9
+schema_version: 10
 storage_epoch: 1
 embed_dim: 4
 facts: []
@@ -16,5 +16,5 @@ scopes:
 events: []
 lineage: []
 config:
-  schema_version: "9"
+  schema_version: "10"
   storage_epoch: "1"
