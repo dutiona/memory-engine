@@ -718,7 +718,20 @@ pub fn load_secret_denylist() -> std::io::Result<Vec<String>> {
     let Some(path) = std::env::var_os(DENYLIST_ENV_VAR) else {
         return Ok(Vec::new());
     };
-    Ok(parse_denylist(&std::fs::read_to_string(path)?))
+    // Read directly and add path context on failure rather than pre-checking
+    // `is_file()`: the read already errors on a missing path or directory, and a
+    // check-then-read pre-flight is a TOCTOU race for no gain. The preserved
+    // `e.kind()` still distinguishes NotFound vs IsADirectory for callers.
+    let contents = std::fs::read_to_string(&path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "reading denylist file {:?} (from {DENYLIST_ENV_VAR}): {e}",
+                std::path::Path::new(&path)
+            ),
+        )
+    })?;
+    Ok(parse_denylist(&contents))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
