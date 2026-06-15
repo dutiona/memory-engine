@@ -60,3 +60,9 @@ docs/plans/*-drafts/
 scripts/github-pm/state.json
 scripts/github-pm/backups/
 scripts/github-pm/manifests/open-issues.json
+
+# redaction denylist — real secret literals for the #51/#53 backfill gate.
+# NEVER commit. Default path that ME_REDACT_DENYLIST_FILE may point at; the
+# loader (bootstrap::load_secret_denylist) accepts any path, so a denylist kept
+# elsewhere is the caller's responsibility to keep ignored.
+.secrets-denylist

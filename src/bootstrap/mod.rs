@@ -27,7 +27,10 @@ pub use extract::{ExtractedFact, KeywordExtractor, SessionExtractor};
 pub use filter::{CandidateEpisode, ConversationTurn, EpisodeCategory, ToolCallRecord};
 pub use metrics::{BootstrapConfig, BootstrapReport, PrewarmMetrics};
 pub use outcome::{OutcomeSignals, SessionOutcome};
-pub use redact::{Finding, RedactionReport, redact_entries, redact_text, shannon_entropy};
+pub use redact::{
+    DENYLIST_ENV_VAR, Finding, RedactionReport, load_secret_denylist, redact_entries,
+    redact_entries_with_denylist, redact_text, redact_text_with_denylist, shannon_entropy,
+};
 
 /// Bootstrap one session from a JSONL reader into the memory engine.
 ///
