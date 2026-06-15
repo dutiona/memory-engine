@@ -3150,6 +3150,65 @@ fn builder_wires_search_config() {
 }
 
 #[test]
+#[allow(clippy::significant_drop_tightening)]
+fn builder_threads_upcaster_registry_in_memory() {
+    // Regression for #543: `.upcaster_registry(custom).build()` with NO `.path()`
+    // must HONOR the custom registry. Before the fix, `build()`'s in-memory branch
+    // routed through `open_memory_with`, which hardcodes an empty registry, so a
+    // custom registry set via the builder was silently dropped.
+    //
+    // Observable: an event inserted at revision 1 (via a raw store with an empty
+    // registry) is upcast on replay *only if* the engine's threaded registry has
+    // the matching 1->2 upcaster. With an empty registry, `list_upcasted` is a
+    // no-op and the payload field is absent.
+    let mut registry = crate::store::upcaster::UpcasterRegistry::new();
+    registry.register("Interaction", 1, |mut v| {
+        v["upcasted"] = serde_json::json!(true);
+        Ok(v)
+    });
+
+    let engine = MemoryEngine::builder(DIM)
+        .upcaster_registry(registry)
+        .build()
+        .unwrap();
+
+    // Insert an event stamped at revision 1 using an *empty* registry, bypassing
+    // the engine's ingest (which would stamp at the engine registry's latest).
+    {
+        let conn = engine.pool.write();
+        let empty = crate::store::upcaster::UpcasterRegistry::new();
+        let store = crate::store::events::EventStore::new(&conn, &empty);
+        let event = NewEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: EventType::Interaction,
+            payload: serde_json::json!({"msg": "hello"}),
+            source: "test".into(),
+            session_id: Some("s1".into()),
+            scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        store.insert(&event).unwrap();
+    }
+
+    let filter = crate::inspect::ReplayFilter {
+        upcast: true,
+        ..Default::default()
+    };
+    let events = engine.replay_events(&filter).unwrap();
+    assert_eq!(events.len(), 1);
+    // The threaded registry's 1->2 upcaster ran on replay. Without the fix the
+    // engine holds an empty registry and `upcasted` would be absent.
+    assert_eq!(
+        events[0].payload.get("upcasted"),
+        Some(&serde_json::json!(true)),
+        "custom upcaster_registry must be honored in-memory and applied on replay"
+    );
+    assert_eq!(events[0].event_revision, 2, "payload upcast to revision 2");
+}
+
+#[test]
 fn builder_read_only_rejects_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("absent.db");

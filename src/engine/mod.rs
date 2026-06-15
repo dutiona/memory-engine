@@ -244,7 +244,17 @@ impl MemoryEngineBuilder {
             };
             MemoryEngine::open_with_reranker(&config, self.reranker)
         } else {
-            MemoryEngine::open_memory_with(self.embed_dim, self.search_config, self.reranker)
+            // In-memory: thread `self.upcaster_registry` through `init_from_pool`
+            // directly. `open_memory_with` hardcodes an empty registry, which
+            // would silently drop a custom registry set via `.upcaster_registry()`.
+            let pool = ConnectionPool::open_memory(self.embed_dim)?;
+            MemoryEngine::init_from_pool(
+                pool,
+                self.embed_dim,
+                self.search_config,
+                self.upcaster_registry,
+                self.reranker,
+            )
         }
     }
 }
@@ -389,7 +399,9 @@ impl MemoryEngine {
 
     /// Open an in-memory engine with optional search config and reranker.
     ///
-    /// Subsumes `open_memory_with_config()` — allows combining both.
+    /// Accepts both a search config and a reranker in one call. Uses an empty
+    /// [`UpcasterRegistry`]; to supply a custom registry in-memory, use
+    /// [`MemoryEngine::builder`] with [`MemoryEngineBuilder::upcaster_registry`].
     ///
     /// # Errors
     ///
