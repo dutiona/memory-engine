@@ -219,11 +219,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             Self::parse_ollama_batch(arr, texts.len())?
         } else {
             let body_str = serde_json::to_string(&body).unwrap_or_default();
-            let truncated = if body_str.len() > 1000 {
-                format!("{}... (truncated)", &body_str[..1000])
-            } else {
-                body_str
-            };
+            let truncated = truncate_on_char_boundary(&body_str, 1000);
             return Err(MemoryError::Internal(format!(
                 "cannot extract embeddings from batch response: {truncated}"
             )));
@@ -248,9 +244,47 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     }
 }
 
+/// Truncate `s` to at most `max` bytes for an error message, snapping the cut
+/// down to the nearest UTF-8 char boundary.
+///
+/// `serde_json::to_string` emits non-ASCII as raw UTF-8, so a serialized
+/// response body can contain multibyte codepoints. Slicing at a raw byte index
+/// that lands inside one panics; this walks the index down to a boundary first.
+/// Byte 0 is always a boundary, so the loop terminates.
+fn truncate_on_char_boundary(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... (truncated)", &s[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_snaps_down_to_char_boundary() {
+        // A 4-byte emoji at bytes 998..1002 straddles the byte-1000 cut.
+        // A raw `&s[..1000]` slice would panic; the helper must snap to 998.
+        let mut s = "a".repeat(998);
+        s.push('\u{1F600}'); // emoji, 4 bytes: indices 998, 999, 1000, 1001
+        s.push_str(&"b".repeat(50));
+        assert!(s.len() > 1000);
+        let out = truncate_on_char_boundary(&s, 1000);
+        assert!(out.ends_with("... (truncated)"));
+        assert!(out.starts_with(&"a".repeat(998)));
+        // Emoji dropped (boundary snapped below it); no panic, valid UTF-8 out.
+        assert!(!out.contains('\u{1F600}'));
+    }
+
+    #[test]
+    fn truncate_leaves_short_strings_unchanged() {
+        assert_eq!(truncate_on_char_boundary("short body", 1000), "short body");
+    }
 
     #[test]
     fn parse_openai_batch_valid() {
