@@ -74,8 +74,9 @@ pub trait ConflictArbiter: Send + Sync {
     /// When called from [`resolve_conflict`](crate::conflict::resolve_conflict),
     /// `new_fact` is a temporary [`Fact`] constructed from a [`NewFact`](crate::types::NewFact)
     /// before it has been persisted or scored. Its `importance_score` field is hardcoded
-    /// to `0.5` and does **not** reflect the fact's actual computed importance.
-    /// Implementations that branch on `new_fact.importance_score` will always see `0.5`.
+    /// to [`Fact::UNSCORED_IMPORTANCE`](crate::types::Fact::UNSCORED_IMPORTANCE) and does
+    /// **not** reflect the fact's actual computed importance. Implementations that branch on
+    /// `new_fact.importance_score` will always see that sentinel.
     /// Use `new_fact.importance` (the caller-supplied raw importance) instead if you need
     /// a signal for the incoming fact's weight.
     ///

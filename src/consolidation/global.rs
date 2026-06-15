@@ -54,7 +54,7 @@ pub fn global_integration(
             last_accessed: s.created_at,
             metadata: serde_json::json!({}),
             is_pinned: false,
-            importance_score: 0.5,
+            importance_score: Fact::UNSCORED_IMPORTANCE,
             surfaced_at: None,
         })
         .collect();

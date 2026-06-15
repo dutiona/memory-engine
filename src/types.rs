@@ -141,6 +141,19 @@ pub struct Fact {
     pub surfaced_at: Option<DateTime<Utc>>,
 }
 
+impl Fact {
+    /// `importance_score` assigned to a transient [`Fact`] that has never been
+    /// scored — e.g. a synthetic candidate built for the
+    /// [`ConflictArbiter`](crate::traits::ConflictArbiter), or a pseudo-fact
+    /// derived during global consolidation. A neutral midpoint, deliberately
+    /// not a real computed score.
+    ///
+    /// Single source of truth: reference this constant instead of re-typing the
+    /// `0.5` literal. Arbiter implementations may compare against it to detect an
+    /// unscored candidate.
+    pub const UNSCORED_IMPORTANCE: f64 = 0.5;
+}
+
 /// A graph edge between two facts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
@@ -828,6 +841,15 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn unscored_importance_sentinel_is_half() {
+        // Locks the canonical value of the unscored-fact placeholder. The two
+        // production construction sites (conflict::resolve_conflict and
+        // consolidation::global_integration) reference this constant; this is the
+        // single, deliberate place to change it.
+        assert_eq!(Fact::UNSCORED_IMPORTANCE, 0.5);
     }
 
     #[test]
