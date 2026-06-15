@@ -14,7 +14,12 @@ use crate::types::Fact;
 /// fact. Deterministic tie-break: on equal importance, the newer fact (higher id) is
 /// expired.
 ///
-/// Returns count of duplicates removed.
+/// Returns `(count, expired_ids)`: the number of duplicates removed and the
+/// ids of the facts that were expired (so the caller can update vector
+/// indexes). As a sentinel, when the active corpus exceeds the internal
+/// `MAX_DEDUP_FACTS` cap the pass is skipped and the count is `usize::MAX`
+/// with an empty id list, signaling the orchestrator NOT to advance the
+/// consolidation watermark.
 ///
 /// # Errors
 ///

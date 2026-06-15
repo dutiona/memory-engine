@@ -295,6 +295,12 @@ fn restore_edges(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
 ///
 /// Returns [`MemoryError::Database`] on any SQL failure (transaction rolls back).
 /// Returns [`MemoryError::Conflict`] if the database is not empty.
+/// Propagates the validation errors from [`validate_snapshot`]:
+/// [`MemoryError::Migration`] if the snapshot's `schema_version` is newer than
+/// supported, [`MemoryError::UnsupportedEpoch`] on a future storage epoch, and
+/// [`MemoryError::Internal`] if `embed_dim` is zero or the root scope is missing.
+/// Returns [`MemoryError::Serialization`] if a summary's `source_fact_ids`
+/// cannot be serialized to JSON.
 pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
     validate_snapshot(snapshot)?;
     assert_empty_db(conn)?;

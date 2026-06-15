@@ -12,6 +12,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Propagates errors from any consolidation pass or the `SummaryGenerator`.
     pub fn consolidate(
         &self,

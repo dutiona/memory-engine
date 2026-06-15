@@ -31,6 +31,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on insert failure.
     pub fn ingest(&self, event: &NewEvent) -> Result<i64> {
         let conn = self.write_conn()?;
@@ -45,6 +46,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns errors from embedding computation, dimension validation, or DB insert.
     // `conn` (write lock) is reused by `FactStore::new(&conn).insert(..)` at the
     // block's return expression; clippy's nursery suggestion to drop it after
@@ -237,6 +239,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns errors from batch embedding, dimension validation, or DB insert.
     /// Returns `MemoryError::Internal` if the embedder returns a different
     /// number of embeddings than input entries.

@@ -321,11 +321,7 @@ fn query_table_output_shows_temporal_columns() {
 
 // --- export + import roundtrip ---
 
-// NOTE: Skipped due to pre-existing library bug — restore.rs has
-// CURRENT_SCHEMA_VERSION=5 but running schema is v6 after #78/#92.
-// Re-enable once the library's restore tests are fixed.
 #[test]
-#[ignore]
 fn export_import_roundtrip() {
     let (dir, db_path) = create_test_db();
 

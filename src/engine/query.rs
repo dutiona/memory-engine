@@ -27,6 +27,8 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Reranker` if a configured [`Reranker`](crate::traits::Reranker)
+    /// fails or returns an invalid permutation.
     ///
     /// # Panics
     ///

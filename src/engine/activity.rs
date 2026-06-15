@@ -164,6 +164,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on write failure.
     // `conn` (write lock) is used by both the `last_activity_id` query and the
     // final `upsert` (the return expression), so it cannot be dropped earlier

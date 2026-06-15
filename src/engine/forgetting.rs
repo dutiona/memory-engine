@@ -18,6 +18,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
@@ -42,6 +43,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` if the update fails.
     pub fn pin_fact(&self, id: i64) -> Result<()> {
         let conn = self.write_conn()?;
@@ -52,6 +54,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` if the update fails.
     pub fn unpin_fact(&self, id: i64) -> Result<()> {
         let conn = self.write_conn()?;
