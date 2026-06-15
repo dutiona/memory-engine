@@ -1,11 +1,13 @@
 //! Construction-equivalence golden harness (issue #541).
 //!
-//! This is the behavior-preservation proof for replacing the telescoping
-//! `MemoryEngine::open*` constructors with [`MemoryEngineBuilder`]. It snapshots
-//! the *observable configuration* of an engine built by each of the five legacy
-//! constructors, freezes those snapshots, and — once the call sites are migrated
-//! — re-points the same assertions at the builder. If the builder produces a
-//! different observable configuration, the frozen `insta` snapshot fails.
+//! These `insta` snapshots were **originally frozen against the five legacy
+//! `MemoryEngine::open*` constructors** (see the PR history / the plan in
+//! `docs/plans/2026-06-15-engine-builder.md`), then re-pointed at
+//! [`MemoryEngineBuilder`] — the snapshots did not change, which is what proved
+//! the builder reproduces each constructor's observable configuration. Now that
+//! the legacy constructors are deleted, the committed harness exercises only the
+//! builder, so it serves as a **regression lock** on that frozen behavior: any
+//! future change to the builder's observable construction state fails a snapshot.
 //!
 //! The harness lives in-crate (not under `tests/`) deliberately: it reads
 //! private engine/pool state (`search_config`, `upcaster_registry`,
@@ -93,6 +95,23 @@ fn equiv_in_memory_all_caps() {
         .build()
         .unwrap();
     insta::assert_snapshot!("in_memory_all_caps", observe(&engine));
+}
+
+#[test]
+fn equiv_in_memory_with_upcaster_registry() {
+    // Exercises the `upcaster_count` column (otherwise always 0): a populated
+    // registry must survive the builder's in-memory path (the #543 bug class).
+    let mut registry = crate::store::upcaster::UpcasterRegistry::new();
+    registry.register("Interaction", 1, |mut v| {
+        v["upcasted"] = serde_json::json!(true);
+        Ok(v)
+    });
+    let engine = MemoryEngine::builder(DIM)
+        .upcaster_registry(registry)
+        .build()
+        .unwrap();
+    assert_eq!(engine.upcaster_registry.registered_count(), 1);
+    insta::assert_snapshot!("in_memory_with_upcaster", observe(&engine));
 }
 
 // ---------------------------------------------------------------------------
