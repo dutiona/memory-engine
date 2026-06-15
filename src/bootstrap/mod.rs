@@ -3,12 +3,12 @@
 //! Pipeline: JSONL → parse → reconstruct turns → classify outcome → keyword pre-filter
 //! → extract facts → ingest marker event + add facts.
 
-pub mod extract;
-pub mod filter;
-pub mod metrics;
-pub mod outcome;
-pub mod parse;
-pub mod redact;
+pub(crate) mod extract;
+pub(crate) mod filter;
+pub(crate) mod metrics;
+pub(crate) mod outcome;
+pub(crate) mod parse;
+pub(crate) mod redact;
 
 use std::io::BufRead;
 use std::path::Path;

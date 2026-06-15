@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{
@@ -12,6 +12,17 @@ pub struct FactStore<'a> {
     conn: &'a Connection,
     embed_dim: usize,
 }
+
+/// The full ordered column list selected by every fact-reading query.
+///
+/// Centralized so the projection stays in lockstep with [`row_to_fact`], which
+/// reads columns by name. The column set and order are identical to the
+/// previous per-query literals (only inter-column whitespace is normalized;
+/// `SQLite` ignores it, so the queries are behaviorally unchanged).
+const FACT_COLUMNS: &str = "id, content, content_hash, embedding, fact_type, \
+     t_created, t_expired, t_valid, t_invalid, \
+     source_event_id, importance, access_count, last_accessed, metadata, scope_id, \
+     is_pinned, importance_score, surfaced_at";
 
 pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
     match ft {
@@ -40,7 +51,7 @@ fn content_hash(content: &str) -> String {
 impl<'a> FactStore<'a> {
     /// Create a new `FactStore` borrowing the given connection.
     #[must_use]
-    pub const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
+    pub(crate) const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
         Self { conn, embed_dim }
     }
 
@@ -104,13 +115,9 @@ impl<'a> FactStore<'a> {
     ///
     /// Returns `MemoryError::NotFound` if the id doesn't exist.
     pub fn get(&self, id: i64) -> Result<Fact> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts WHERE id = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts WHERE id = ?1"))?;
         let dim = self.embed_dim;
         let mut rows = stmt.query_map(params![id], |row| row_to_fact(row, dim))?;
         match rows.next() {
@@ -129,11 +136,7 @@ impl<'a> FactStore<'a> {
     ///
     /// Returns `MemoryError::Database` on query failure.
     pub fn list_active(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
-        let base = "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts WHERE t_expired IS NULL";
+        let base = format!("SELECT {FACT_COLUMNS} FROM facts WHERE t_expired IS NULL");
         let limit_i64: i64 = limit.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
         let sql = format!("{base} LIMIT ?1");
         let mut stmt = self.conn.prepare(&sql)?;
@@ -156,16 +159,12 @@ impl<'a> FactStore<'a> {
     /// Returns `MemoryError::Database` on query failure.
     pub fn list_active_at(&self, valid_at: DateTime<Utc>) -> Result<Vec<Fact>> {
         let valid_at_str = valid_at.to_rfc3339();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL
                AND (t_valid IS NULL OR t_valid <= ?1)
-               AND (t_invalid IS NULL OR t_invalid > ?1)",
-        )?;
+               AND (t_invalid IS NULL OR t_invalid > ?1)"
+        ))?;
         let dim = self.embed_dim;
         let rows = stmt.query_map(params![valid_at_str], |row| row_to_fact(row, dim))?;
         let mut facts = Vec::new();
@@ -211,11 +210,7 @@ impl<'a> FactStore<'a> {
         };
 
         let sql = format!(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts
+            "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL
                AND is_pinned = 0
                AND importance_score < ?1
@@ -301,16 +296,12 @@ impl<'a> FactStore<'a> {
     pub fn list_by_scope_importance(&self, scope_id: i64, limit: usize) -> Result<Vec<Fact>> {
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let dim = self.embed_dim;
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL AND scope_id = ?1
              ORDER BY importance DESC
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
         let rows = stmt.query_map(params![scope_id, limit_i64], |row| row_to_fact(row, dim))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(MemoryError::Database)
@@ -334,19 +325,15 @@ impl<'a> FactStore<'a> {
         let exclude_json = serde_json::to_string(&exclude_ids.iter().copied().collect::<Vec<_>>())
             .expect("serialize exclude_ids");
         let dim = self.embed_dim;
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
                AND importance >= ?2
                AND id NOT IN (SELECT value FROM json_each(?3))
              ORDER BY importance DESC
-             LIMIT ?4",
-        )?;
+             LIMIT ?4"
+        ))?;
         let rows = stmt.query_map(
             params![scope_json, min_importance, exclude_json, limit_i64],
             |row| row_to_fact(row, dim),
@@ -358,11 +345,8 @@ impl<'a> FactStore<'a> {
     /// List active pinned (unforgettable) facts, optionally filtered by scope.
     /// Pass empty slice to get all pinned facts across all scopes.
     pub fn list_pinned(&self, scope_ids: &[i64]) -> Result<Vec<Fact>> {
-        let base = "SELECT id, content, content_hash, embedding, fact_type,
-                        t_created, t_expired, t_valid, t_invalid,
-                        source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                        is_pinned, importance_score, surfaced_at
-                 FROM facts WHERE t_expired IS NULL AND is_pinned = 1";
+        let base =
+            format!("SELECT {FACT_COLUMNS} FROM facts WHERE t_expired IS NULL AND is_pinned = 1");
         let dim = self.embed_dim;
         if scope_ids.is_empty() {
             let sql = format!("{base} ORDER BY importance_score DESC");
@@ -387,13 +371,11 @@ impl<'a> FactStore<'a> {
     /// Excludes facts where `t_invalid <= now` (bi-temporally invalidated).
     pub fn list_due(&self, now: DateTime<Utc>, scope_ids: &[i64]) -> Result<Vec<Fact>> {
         let now_str = now.to_rfc3339();
-        let base = "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts
+        let base = format!(
+            "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL AND t_valid IS NOT NULL AND t_valid <= ?1
-             AND (t_invalid IS NULL OR t_invalid > ?1)";
+             AND (t_invalid IS NULL OR t_invalid > ?1)"
+        );
         let sql = if scope_ids.is_empty() {
             format!("{base} ORDER BY t_valid ASC")
         } else {
@@ -508,13 +490,9 @@ impl<'a> FactStore<'a> {
     ///
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_all(&self) -> Result<Vec<Fact>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts ORDER BY id ASC",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts ORDER BY id ASC"))?;
         let dim = self.embed_dim;
         let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -535,13 +513,9 @@ impl<'a> FactStore<'a> {
     where
         F: FnMut(Fact) -> Result<()>,
     {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts ORDER BY id ASC",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts ORDER BY id ASC"))?;
         let dim = self.embed_dim;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -574,13 +548,11 @@ impl<'a> FactStore<'a> {
             .expect("serialize exclude_ids");
         let dim = self.embed_dim;
 
-        let base = "SELECT id, content, content_hash, embedding, fact_type,
-                        t_created, t_expired, t_valid, t_invalid,
-                        source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                        is_pinned, importance_score, surfaced_at
-                 FROM facts
+        let base = format!(
+            "SELECT {FACT_COLUMNS} FROM facts
                  WHERE t_expired IS NULL AND importance_score >= ?1
-                   AND id NOT IN (SELECT value FROM json_each(?2))";
+                   AND id NOT IN (SELECT value FROM json_each(?2))"
+        );
 
         if scope_ids.is_empty() {
             let sql = format!("{base} ORDER BY importance_score DESC LIMIT ?3");
@@ -676,18 +648,14 @@ impl<'a> FactStore<'a> {
         let exclude_json = serde_json::to_string(&exclude_ids.iter().copied().collect::<Vec<_>>())
             .expect("serialize exclude_ids");
         let dim = self.embed_dim;
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
                AND id NOT IN (SELECT value FROM json_each(?2))
              ORDER BY t_created DESC
-             LIMIT ?3",
-        )?;
+             LIMIT ?3"
+        ))?;
         let rows = stmt.query_map(params![scope_json, exclude_json, limit_i64], |row| {
             row_to_fact(row, dim)
         })?;
@@ -744,11 +712,7 @@ impl<'a> FactStore<'a> {
 
         let where_clause = conditions.join(" AND ");
         let sql = format!(
-            "SELECT id, content, content_hash, embedding, fact_type,
-                    t_created, t_expired, t_valid, t_invalid,
-                    source_event_id, importance, access_count, last_accessed, metadata, scope_id,
-                    is_pinned, importance_score, surfaced_at
-             FROM facts
+            "SELECT {FACT_COLUMNS} FROM facts
              WHERE {where_clause}
              ORDER BY importance_score DESC"
         );

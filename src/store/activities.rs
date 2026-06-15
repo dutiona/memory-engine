@@ -13,7 +13,7 @@ pub struct ActivityStore<'a> {
 }
 
 impl<'a> ActivityStore<'a> {
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 

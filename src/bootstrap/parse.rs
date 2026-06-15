@@ -25,6 +25,12 @@ pub enum EntryType {
 }
 
 /// A single line from a Claude Code JSONL session file.
+///
+/// Several fields (`cwd`, `git_branch`, `data`) mirror the on-disk JSONL schema
+/// for round-trip fidelity but are not consumed by the current pipeline; they
+/// are retained as deserialization targets and documentation of the wire
+/// format. The `#[allow(dead_code)]` is scoped to those fields and surfaced
+/// only because the module is `pub(crate)`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -34,19 +40,23 @@ pub struct SessionEntry {
     pub timestamp: Option<String>,
     pub uuid: Option<String>,
     pub parent_uuid: Option<String>,
+    #[allow(dead_code)] // schema field, parsed but not yet consumed
     pub cwd: Option<String>,
+    #[allow(dead_code)] // schema field, parsed but not yet consumed
     pub git_branch: Option<String>,
     #[serde(default)]
     pub message: Option<MessagePayload>,
     #[serde(default)]
     pub tool_use_result: Option<ToolUseResult>,
     #[serde(default)]
+    #[allow(dead_code)] // schema field, parsed but not yet consumed
     pub data: Option<serde_json::Value>,
 }
 
 /// Message payload attached to user/assistant entries.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessagePayload {
+    #[allow(dead_code)] // schema field; role is inferred from `EntryType` instead
     pub role: Option<String>,
     pub content: Option<serde_json::Value>,
 }
@@ -70,7 +80,11 @@ pub enum ContentBlock {
         input: serde_json::Value,
     },
     ToolResult {
+        // Captured from the wire but not yet inspected by the filter, which
+        // only needs to know a tool-result block is present.
+        #[allow(dead_code)]
         content: String,
+        #[allow(dead_code)]
         is_error: bool,
     },
     Thinking(String),

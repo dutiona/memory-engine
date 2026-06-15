@@ -143,11 +143,11 @@ fn jsonl_to_request(fact: JsonlFact, default_scope: Option<&str>) -> AddFactRequ
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
-pub struct IngestSummary {
-    pub total_ingested: usize,
-    pub total_skipped: usize,
-    pub failed_batches: usize,
-    pub elapsed_secs: f64,
+pub(crate) struct IngestSummary {
+    pub(crate) total_ingested: usize,
+    pub(crate) total_skipped: usize,
+    pub(crate) failed_batches: usize,
+    pub(crate) elapsed_secs: f64,
 }
 
 fn print_summary(summary: &IngestSummary, format: OutputFormat) -> anyhow::Result<()> {
@@ -177,7 +177,7 @@ fn print_summary(summary: &IngestSummary, format: OutputFormat) -> anyhow::Resul
 // Core ingestion logic (testable — accepts reader + embedder)
 // ---------------------------------------------------------------------------
 
-pub fn ingest_from_reader(
+pub(crate) fn ingest_from_reader(
     engine: &MemoryEngine,
     reader: impl Read,
     embedder: &dyn EmbeddingProvider,

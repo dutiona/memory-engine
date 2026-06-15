@@ -2,8 +2,12 @@ use std::path::Path;
 
 use memory_engine::{EngineConfig, MemoryEngine};
 
-/// Peek `embed_dim` from an existing database's config table.
-fn peek_embed_dim(path: &Path) -> anyhow::Result<usize> {
+/// Peek `embed_dim` from an existing `SQLite` database's `config` table.
+///
+/// Opens a transient read-only connection and reads the `embed_dim` key.
+/// Distinct from the import path's snapshot-header reader (see
+/// `peek_embed_dim_from_snapshot` in `commands::import`).
+fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
     anyhow::ensure!(
         path.is_file(),
         "database not found (or is a directory): {}",
@@ -34,7 +38,7 @@ fn peek_embed_dim(path: &Path) -> anyhow::Result<usize> {
 /// Uses the library's `read_only` config flag so the connection pool
 /// never acquires a write lock and never runs migrations.
 pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
-    let embed_dim = peek_embed_dim(path)?;
+    let embed_dim = peek_embed_dim_from_db(path)?;
     let mut config = EngineConfig::new(path.to_path_buf(), embed_dim);
     config.read_only = true;
     let engine = MemoryEngine::open(&config)?;
@@ -47,7 +51,7 @@ pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
 /// with SQLite format). Sets `backup_dir` next to the database so any
 /// schema migration creates a WAL-safe backup first.
 pub fn open_engine_writable(path: &Path) -> anyhow::Result<MemoryEngine> {
-    let embed_dim = peek_embed_dim(path)?;
+    let embed_dim = peek_embed_dim_from_db(path)?;
     let backup_dir = path.parent().map(Path::to_path_buf);
     let mut config = EngineConfig::new(path.to_path_buf(), embed_dim);
     config.backup_dir = backup_dir;

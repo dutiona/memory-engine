@@ -61,6 +61,10 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
         ),
 
         MemoryError::Lineage(msg) => ErrorData::resource_not_found(format!("lineage: {msg}"), None),
+
+        // `MemoryError` is `#[non_exhaustive]`: future variants map to a
+        // generic internal error until handled explicitly above.
+        other => ErrorData::internal_error(other.to_string(), None),
     }
 }
 
