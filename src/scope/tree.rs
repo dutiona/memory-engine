@@ -84,10 +84,12 @@ impl ScopeTree {
     /// parent-walk — no id ever repeats, so the guard never fires.
     pub fn ancestors(&self, scope_id: i64) -> Vec<i64> {
         let mut result = Vec::new();
-        let mut seen = HashSet::new();
         let mut current = Some(scope_id);
         while let Some(id) = current {
-            if !seen.insert(id) {
+            // Cycle guard: the ancestor chain is shallow (bounded by tree depth),
+            // so a linear scan of `result` is cheaper than a `HashSet` and needs
+            // no allocation.
+            if result.contains(&id) {
                 break; // cycle detected — id already visited
             }
             result.push(id);
