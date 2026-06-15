@@ -49,7 +49,7 @@ pub(crate) mod store;
 pub use archive::{ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVerifyResult};
 pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
 pub use engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, PromoteAction};
-pub use engine::{EngineConfig, MemoryEngine};
+pub use engine::{EngineConfig, MemoryEngine, MemoryEngineBuilder};
 pub use error::*;
 pub use inspect::types as inspect_types;
 pub use resume::{ResumeConfig, ResumeContext};

@@ -20,7 +20,7 @@ impl EmbeddingProvider for DummyEmbedder {
 }
 
 fn main() -> Result<(), MemoryError> {
-    let engine = MemoryEngine::open_memory(4)?;
+    let engine = MemoryEngine::builder(4).build()?;
     let embedder = DummyEmbedder;
     let now = Utc::now();
 

@@ -3106,6 +3106,169 @@ fn outcome_display() {
     assert_eq!(Outcome::Neutral.to_string(), "neutral");
 }
 
+// --- MemoryEngineBuilder (#113) ---
+
+#[test]
+fn builder_in_memory_matches_open_memory() {
+    // No `.path()` => in-memory engine, identical to `open_memory`.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    assert_eq!(engine.embed_dim, DIM);
+    assert!(engine.reranker_name().is_none());
+    // In-memory pool has no backing file.
+    assert!(engine.pool.path().is_none());
+}
+
+#[test]
+fn builder_rejects_in_memory_read_only() {
+    // #543: read-only on an in-memory engine is a logical contradiction (there
+    // is no file to open read-only). build() must reject it up-front rather than
+    // silently ignoring the read_only flag on the no-path branch.
+    let err = MemoryEngine::builder(DIM)
+        .read_only(true)
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, MemoryError::Migration(_)));
+}
+
+#[test]
+fn builder_file_backed_matches_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("builder.db");
+    let engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    assert_eq!(engine.embed_dim, DIM);
+    assert!(engine.pool.path().is_some());
+    // The file was created on disk.
+    assert!(path.exists());
+}
+
+#[test]
+fn builder_wires_reranker() {
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
+    assert_eq!(engine.reranker_name(), Some("reverse"));
+}
+
+#[test]
+fn builder_wires_search_config() {
+    let engine = MemoryEngine::builder(DIM)
+        .search_config(SearchConfig { ann_threshold: 0 })
+        .build()
+        .unwrap();
+    // Search config flows through to the engine.
+    assert_eq!(
+        engine.search_config.as_ref().map(|c| c.ann_threshold),
+        Some(0),
+        "search_config should be threaded through build()"
+    );
+}
+
+#[test]
+#[allow(clippy::significant_drop_tightening)]
+fn builder_threads_upcaster_registry_in_memory() {
+    // Regression for #543: `.upcaster_registry(custom).build()` with NO `.path()`
+    // must HONOR the custom registry. Before the fix, `build()`'s in-memory branch
+    // routed through `open_memory_with`, which hardcodes an empty registry, so a
+    // custom registry set via the builder was silently dropped.
+    //
+    // Observable: an event inserted at revision 1 (via a raw store with an empty
+    // registry) is upcast on replay *only if* the engine's threaded registry has
+    // the matching 1->2 upcaster. With an empty registry, `list_upcasted` is a
+    // no-op and the payload field is absent.
+    let mut registry = crate::store::upcaster::UpcasterRegistry::new();
+    registry.register("Interaction", 1, |mut v| {
+        v["upcasted"] = serde_json::json!(true);
+        Ok(v)
+    });
+
+    let engine = MemoryEngine::builder(DIM)
+        .upcaster_registry(registry)
+        .build()
+        .unwrap();
+
+    // Insert an event stamped at revision 1 using an *empty* registry, bypassing
+    // the engine's ingest (which would stamp at the engine registry's latest).
+    {
+        let conn = engine.pool.write();
+        let empty = crate::store::upcaster::UpcasterRegistry::new();
+        let store = crate::store::events::EventStore::new(&conn, &empty);
+        let event = NewEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: EventType::Interaction,
+            payload: serde_json::json!({"msg": "hello"}),
+            source: "test".into(),
+            session_id: Some("s1".into()),
+            scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        store.insert(&event).unwrap();
+    }
+
+    let filter = crate::inspect::ReplayFilter {
+        upcast: true,
+        ..Default::default()
+    };
+    let events = engine.replay_events(&filter).unwrap();
+    assert_eq!(events.len(), 1);
+    // The threaded registry's 1->2 upcaster ran on replay. Without the fix the
+    // engine holds an empty registry and `upcasted` would be absent.
+    assert_eq!(
+        events[0].payload.get("upcasted"),
+        Some(&serde_json::json!(true)),
+        "custom upcaster_registry must be honored in-memory and applied on replay"
+    );
+    assert_eq!(events[0].event_revision, 2, "payload upcast to revision 2");
+}
+
+#[test]
+fn builder_read_only_rejects_missing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("absent.db");
+    // read_only on a non-existent file fails, exactly like `open` with a
+    // read-only `EngineConfig`.
+    let result = MemoryEngine::builder(DIM)
+        .path(&path)
+        .read_only(true)
+        .build();
+    assert!(result.is_err());
+}
+
+#[test]
+fn builder_read_only_opens_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ro.db");
+    // First create it read-write.
+    {
+        let _engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    }
+    // Then re-open read-only.
+    let engine = MemoryEngine::builder(DIM)
+        .path(&path)
+        .read_only(true)
+        .build()
+        .unwrap();
+    assert_eq!(engine.embed_dim, DIM);
+    assert!(engine.pool.is_read_only());
+}
+
+#[test]
+fn builder_embed_dim_mismatch_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dim.db");
+    {
+        let _engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    }
+    // Re-opening with a different embed_dim must fail (parity with `open`).
+    let err = MemoryEngine::builder(DIM + 1)
+        .path(&path)
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, MemoryError::Migration(_)));
+}
+
 mod snapshot_integration {
     use super::*;
 
