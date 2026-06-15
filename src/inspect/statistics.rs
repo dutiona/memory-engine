@@ -91,6 +91,11 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
     // Storage stats
     let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
     let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    let main_db_bytes = page_count.checked_mul(page_size).ok_or_else(|| {
+        crate::error::MemoryError::Internal(format!(
+            "storage size overflow: page_count {page_count} * page_size {page_size}"
+        ))
+    })?;
 
     Ok(EngineStatistics {
         facts: FactStats {
@@ -117,7 +122,7 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
         storage: StorageStats {
             page_count,
             page_size,
-            main_db_bytes: page_count * page_size,
+            main_db_bytes,
             file_path: db_path.map(|p| p.to_string_lossy().into_owned()),
         },
     })

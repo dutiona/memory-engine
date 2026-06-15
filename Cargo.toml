@@ -34,7 +34,6 @@ zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1", features = ["yaml", "redactions"] }
 proptest = "1"
@@ -62,3 +61,8 @@ unsafe_code = "forbid"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

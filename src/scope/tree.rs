@@ -35,6 +35,7 @@ impl ScopeTree {
     }
 
     /// Root scope id (always 1).
+    #[must_use]
     pub const fn root_id() -> i64 {
         1
     }
@@ -311,7 +312,7 @@ mod tests {
         use proptest::prelude::*;
 
         fn scope_segment() -> impl Strategy<Value = String> {
-            "[a-z]{1,8}:[a-z]{1,8}".prop_map(|s| s)
+            "[a-z]{1,8}:[a-z]{1,8}"
         }
 
         fn scope_path(max_depth: usize) -> impl Strategy<Value = String> {

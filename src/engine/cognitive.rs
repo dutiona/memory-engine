@@ -1,11 +1,17 @@
+use chrono::Utc;
+
 use crate::engine::MemoryEngine;
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::store::facts::FactStore;
+use crate::store::lineage::LineageStore;
 use crate::traits::{
     ConsolidationConfig, ConsolidationStats, ForgetPolicy, PruneStats, SummaryGenerator,
 };
-use crate::types::{CycleReport, Fact, PromoteRequest, PromotionResult};
+use crate::types::{CycleReport, Fact, NewFact, NewLineageRecord, PromoteRequest, PromotionResult};
+
+#[cfg(feature = "ann")]
+use crate::search::strategy::VectorSearchStrategy;
 
 // Re-import trait types used in public API signatures
 pub use crate::traits::{DreamCycle, InsightStream};
@@ -141,11 +147,6 @@ impl MemoryEngine {
     /// `add_fact` and `add_facts_batch`) to avoid a divergent insert pipeline.
     /// Wraps fact insert + lineage insert in a single savepoint for atomicity.
     pub(crate) fn promote_with_lineage(&self, req: &PromoteRequest) -> Result<PromotionResult> {
-        use crate::error::MemoryError;
-        use crate::store::lineage::LineageStore;
-        use crate::types::{NewFact, NewLineageRecord};
-        use chrono::Utc;
-
         // Validate embedding dimension
         if req.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
@@ -221,7 +222,6 @@ impl MemoryEngine {
         // Notify HNSW if enabled
         #[cfg(feature = "ann")]
         if let Some(ref hnsw) = self.hnsw_strategy {
-            use crate::search::strategy::VectorSearchStrategy;
             hnsw.notify_insert(fact_id, &emb_copy);
         }
 

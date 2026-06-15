@@ -221,7 +221,7 @@ mod tests {
 
     impl ConflictArbiter for FixedArbiter {
         fn arbitrate(&self, _old: &Fact, _new: &Fact) -> Result<CrudDecision> {
-            Ok(self.decision.clone())
+            Ok(self.decision)
         }
     }
 

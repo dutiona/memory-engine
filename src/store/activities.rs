@@ -1,6 +1,6 @@
 //! Store operations for activity records.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{MemoryError, Result};
 use crate::types::{Activity, ActivityStatus, NewActivity};
@@ -236,9 +236,6 @@ fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
         promoted_fact_id: row.get(12)?,
     })
 }
-
-/// Re-export for use by `rusqlite::Connection::query_row`.
-use rusqlite::OptionalExtension;
 
 #[cfg(test)]
 mod tests {
