@@ -50,7 +50,7 @@ pub fn resolve_conflict(
         content: new_fact.content.clone(),
         content_hash: new_fact.content_hash.clone(),
         embedding: new_fact.embedding.clone(),
-        fact_type: new_fact.fact_type.clone(),
+        fact_type: new_fact.fact_type,
         t_created: new_fact.t_created,
         t_expired: new_fact.t_expired,
         t_valid: new_fact.t_valid,
@@ -62,7 +62,7 @@ pub fn resolve_conflict(
         last_accessed: new_fact.last_accessed,
         metadata: new_fact.metadata.clone(),
         is_pinned: new_fact.is_pinned,
-        importance_score: 0.5,
+        importance_score: 0.5, // placeholder — fact not yet scored; see ConflictArbiter doc
         surfaced_at: None,
     };
 
@@ -76,16 +76,19 @@ pub fn resolve_conflict(
         }),
 
         CrudDecision::Add => {
+            // unchecked_transaction: no outer transaction exists; we own the connection
+            // exclusively at this call site, so there is no risk of nesting.
             let tx = conn.unchecked_transaction()?;
 
             let new_id = FactStore::new(&tx, embed_dim).insert(new_fact)?;
 
             // Create "supplements" edge: new → old
+            let relation = RELATION_SUPPLEMENTS.to_string();
             let edge_store = EdgeStore::new(&tx);
             let edge_id = edge_store.insert(&NewEdge {
                 source_fact_id: new_id,
                 target_fact_id: old_fact_id,
-                relation_type: RELATION_SUPPLEMENTS.to_string(),
+                relation_type: relation.clone(),
                 weight: DEFAULT_EDGE_WEIGHT,
                 scope_id: new_fact.scope_id,
                 t_created: now,
@@ -100,7 +103,7 @@ pub fn resolve_conflict(
                 old_fact_id,
                 EdgeData {
                     edge_id,
-                    relation_type: RELATION_SUPPLEMENTS.to_string(),
+                    relation_type: relation,
                     weight: DEFAULT_EDGE_WEIGHT,
                 },
             );
@@ -113,6 +116,8 @@ pub fn resolve_conflict(
         }
 
         CrudDecision::Update => {
+            // unchecked_transaction: no outer transaction exists; we own the connection
+            // exclusively at this call site, so there is no risk of nesting.
             let tx = conn.unchecked_transaction()?;
 
             // Expire + invalidate old fact (bi-temporal)
@@ -126,10 +131,11 @@ pub fn resolve_conflict(
             let new_id = FactStore::new(&tx, embed_dim).insert(new_fact)?;
 
             // Create "contradicts" edge: new → old
+            let relation = RELATION_CONTRADICTS.to_string();
             let edge_id = edge_store.insert(&NewEdge {
                 source_fact_id: new_id,
                 target_fact_id: old_fact_id,
-                relation_type: RELATION_CONTRADICTS.to_string(),
+                relation_type: relation.clone(),
                 weight: DEFAULT_EDGE_WEIGHT,
                 scope_id: new_fact.scope_id,
                 t_created: now,
@@ -139,7 +145,16 @@ pub fn resolve_conflict(
             tx.commit()?;
 
             // Update in-memory graph: remove expired edges, add new one
-            rebuild_graph_for_fact(graph, old_fact_id, new_id, edge_id);
+            graph.remove_edges_by_fact(old_fact_id);
+            graph.add_edge(
+                new_id,
+                old_fact_id,
+                EdgeData {
+                    edge_id,
+                    relation_type: relation,
+                    weight: DEFAULT_EDGE_WEIGHT,
+                },
+            );
 
             Ok(ConflictResolution {
                 decision: CrudDecision::Update,
@@ -149,6 +164,8 @@ pub fn resolve_conflict(
         }
 
         CrudDecision::Delete => {
+            // unchecked_transaction: no outer transaction exists; we own the connection
+            // exclusively at this call site, so there is no risk of nesting.
             let tx = conn.unchecked_transaction()?;
 
             // Expire + invalidate old fact
@@ -161,7 +178,7 @@ pub fn resolve_conflict(
             tx.commit()?;
 
             // Remove edges from in-memory graph
-            remove_edges_for_fact(graph, old_fact_id);
+            graph.remove_edges_by_fact(old_fact_id);
 
             Ok(ConflictResolution {
                 decision: CrudDecision::Delete,
@@ -183,27 +200,6 @@ fn expire_and_invalidate(conn: &Connection, fact_id: i64, now: DateTime<Utc>) ->
         return Err(MemoryError::NotFound(format!("fact {fact_id}")));
     }
     Ok(())
-}
-
-/// Rebuild the in-memory graph after an Update conflict resolution.
-///
-/// Removes all edges involving the old fact, then adds the new "contradicts" edge.
-fn rebuild_graph_for_fact(graph: &mut MemoryGraph, old_fact_id: i64, new_id: i64, edge_id: i64) {
-    remove_edges_for_fact(graph, old_fact_id);
-    graph.add_edge(
-        new_id,
-        old_fact_id,
-        EdgeData {
-            edge_id,
-            relation_type: RELATION_CONTRADICTS.to_string(),
-            weight: DEFAULT_EDGE_WEIGHT,
-        },
-    );
-}
-
-/// Remove all edges from the in-memory graph that involve a given fact id.
-fn remove_edges_for_fact(graph: &mut MemoryGraph, fact_id: i64) {
-    graph.remove_edges_by_fact(fact_id);
 }
 
 #[cfg(test)]

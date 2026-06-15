@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 
 use crate::error::Result;
+use crate::search::serialize_scope_ids;
 use crate::store::facts::fact_type_to_str;
 use crate::types::FactType;
 
@@ -47,7 +48,7 @@ pub fn fts_search(
 
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
     let fact_type_str: Option<&str> = fact_type.map(fact_type_to_str);
-    let scope_ids_json: Option<String> = scope_ids.map(serde_json::to_string).transpose()?;
+    let scope_ids_json = serialize_scope_ids(scope_ids)?;
 
     // FTS5 syntax errors surface at query_map execution time, not at prepare time.
     // They are indistinguishable from other rusqlite::Error variants at the type level,
@@ -108,7 +109,7 @@ pub fn fts_count_expired(
     )?;
 
     let fact_type_str: Option<&str> = fact_type.map(fact_type_to_str);
-    let scope_ids_json: Option<String> = scope_ids.map(serde_json::to_string).transpose()?;
+    let scope_ids_json = serialize_scope_ids(scope_ids)?;
 
     match stmt.query_row(
         rusqlite::params![query, fact_type_str, scope_ids_json],

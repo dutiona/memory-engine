@@ -23,6 +23,9 @@ const CLUSTER_SIMILARITY_THRESHOLD: f32 = 0.85;
 ///
 /// Returns `MemoryError::Database` on SQL failure, or propagates errors from
 /// the `SummaryGenerator`.
+/// Returns `MemoryError::EmbeddingDimension` if the generator returns an embedding
+/// whose length does not match `embed_dim`.
+/// Returns `MemoryError::Serialization` on JSON serialization failure.
 pub fn cluster_fusion(
     conn: &Connection,
     generator: &dyn SummaryGenerator,
@@ -69,6 +72,12 @@ pub fn cluster_fusion(
 
         let summary_text = generator.summarize(&cluster_facts)?;
         let summary_embedding = generator.embed(&summary_text)?;
+        if summary_embedding.len() != embed_dim {
+            return Err(crate::error::MemoryError::EmbeddingDimension {
+                expected: embed_dim,
+                actual: summary_embedding.len(),
+            });
+        }
 
         // Determine scope_id from majority vote of source facts.
         // Deterministic tie-break: lowest scope_id wins on equal counts.

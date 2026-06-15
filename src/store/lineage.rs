@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::{MemoryError, Result};
 use crate::types::{LineageRecord, LineageSnapshotEntry, NewLineageRecord, PromotionProvenance};

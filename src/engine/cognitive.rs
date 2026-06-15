@@ -60,7 +60,7 @@ impl<'a> DreamContext<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::NotFound` if no active fact with this ID exists.
+    /// Returns `MemoryError::NotFound` if no fact with this ID exists.
     pub fn get_fact(&self, id: i64) -> Result<Fact> {
         self.engine
             .with_read(|conn| FactStore::new(conn, self.engine.embed_dim).get(id))
@@ -191,7 +191,7 @@ impl MemoryEngine {
             content: req.content.clone(),
             content_hash: String::new(), // FactStore::insert computes this via blake3
             embedding: req.embedding.clone(),
-            fact_type: req.fact_type.clone(),
+            fact_type: req.fact_type,
             t_created: now,
             t_expired: None,
             t_valid: None,

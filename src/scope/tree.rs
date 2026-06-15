@@ -22,7 +22,7 @@ impl ScopeTree {
         let all = store.list_all()?;
 
         let mut nodes = HashMap::with_capacity(all.len());
-        let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut children: HashMap<i64, Vec<i64>> = HashMap::with_capacity(all.len());
 
         for node in all {
             if let Some(pid) = node.parent_id {
@@ -34,16 +34,19 @@ impl ScopeTree {
         Ok(Self { nodes, children })
     }
 
+    /// Root scope id (database-assigned, always 1).
+    pub(crate) const ROOT_ID: i64 = 1;
+
     /// Root scope id (always 1).
     #[must_use]
     pub const fn root_id() -> i64 {
-        1
+        Self::ROOT_ID
     }
 
     /// Resolve a path string to a `scope_id` (read-only, no creation).
     /// Returns `None` if any segment is missing.
     pub fn resolve_path(&self, path: &str) -> Option<i64> {
-        let mut current = 1i64; // start at root
+        let mut current = Self::ROOT_ID; // start at root
         for segment in path.split('/') {
             let segment = segment.trim();
             if segment.is_empty() {
@@ -178,7 +181,7 @@ impl ScopeTree {
     /// Rebuild tree from a snapshot (same logic as `load` but from snapshot data).
     pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::ScopeTreeSnapshot) -> Self {
         let mut nodes = HashMap::with_capacity(snap.nodes.len());
-        let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut children: HashMap<i64, Vec<i64>> = HashMap::with_capacity(snap.nodes.len());
 
         for node in &snap.nodes {
             if let Some(pid) = node.parent_id {
@@ -305,6 +308,38 @@ mod tests {
         tree.insert(new_node);
         assert_eq!(tree.nodes.len(), node_count_before + 1);
         assert!(tree.children.get(&1).unwrap().contains(&999));
+    }
+
+    #[test]
+    fn node_count_matches_inserted_nodes() {
+        let tree = setup_tree();
+        // root + user:michael + project:demo + project:other = 4
+        assert_eq!(tree.node_count(), 4);
+    }
+
+    #[test]
+    fn node_count_empty_tree() {
+        let tree = ScopeTree {
+            nodes: HashMap::new(),
+            children: HashMap::new(),
+        };
+        assert_eq!(tree.node_count(), 0);
+    }
+
+    #[test]
+    fn max_depth_returns_deepest_node() {
+        let tree = setup_tree();
+        // root=depth 0, user:michael=depth 1, project:demo/other=depth 2
+        assert_eq!(tree.max_depth(), 2);
+    }
+
+    #[test]
+    fn max_depth_empty_tree() {
+        let tree = ScopeTree {
+            nodes: HashMap::new(),
+            children: HashMap::new(),
+        };
+        assert_eq!(tree.max_depth(), 0);
     }
 
     mod proptest_scope {

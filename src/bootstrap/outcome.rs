@@ -488,4 +488,37 @@ mod tests {
         assert!(!has_short_sha("abc12")); // only 5 hex chars
         assert!(!has_short_sha("xyz"));
     }
+
+    #[test]
+    fn detect_tests_passed_pytest_branch() {
+        // Exercises the `pytest` + `passed` heuristic path in detect_tests_passed.
+        let tc = ToolCallRecord {
+            tool_name: "Bash".into(),
+            input: serde_json::json!({"command": "pytest"}),
+            stdout: Some("pytest collected 5 items\n5 passed in 0.12s".into()),
+            stderr: None,
+            is_error: false,
+            interrupted: false,
+        };
+        let turns = vec![make_turn("run tests", "running pytest", vec![tc])];
+        let (outcome, signals) = classify_outcome(&turns);
+        assert_eq!(signals.tests_passed, TestOutcome::Passed);
+        assert_eq!(outcome, SessionOutcome::Success);
+    }
+
+    #[test]
+    fn detect_commit_via_master_branch_in_stdout() {
+        // Exercises the `[master` pattern in detect_commit.
+        let tc = ToolCallRecord {
+            tool_name: "Bash".into(),
+            input: serde_json::json!({"command": "git commit -m 'fix: something'"}),
+            stdout: Some("[master abc1234] fix: something\n 1 file changed".into()),
+            stderr: None,
+            is_error: false,
+            interrupted: false,
+        };
+        let turns = vec![make_turn("commit", "ok", vec![tc])];
+        let (_, signals) = classify_outcome(&turns);
+        assert!(signals.has_commit);
+    }
 }

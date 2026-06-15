@@ -132,10 +132,11 @@ impl<'a> ActivityStore<'a> {
                  FROM activities
                  WHERE session_id = ?1
                  ORDER BY last_seen DESC";
-        let sql = limit.map_or_else(|| base.to_string(), |n| format!("{base} LIMIT {n}"));
+        let limit_i64: i64 = limit.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
+        let sql = format!("{base} LIMIT ?2");
         let mut stmt = self.conn.prepare(&sql).map_err(MemoryError::Database)?;
         let rows = stmt
-            .query_map(params![session_id], row_to_activity)
+            .query_map(params![session_id, limit_i64], row_to_activity)
             .map_err(MemoryError::Database)?;
         rows.collect::<std::result::Result<_, _>>()
             .map_err(MemoryError::Database)
@@ -207,7 +208,7 @@ impl<'a> ActivityStore<'a> {
 }
 
 fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
-    let status_str: String = row.get(7)?;
+    let status_str: String = row.get("status")?;
     let status = status_str.parse::<ActivityStatus>().map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
             7,
@@ -215,25 +216,31 @@ fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
             Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
         )
     })?;
-    let args_str: String = row.get(4)?;
-    let args: serde_json::Value = serde_json::from_str(&args_str).unwrap_or_default();
-    let first_seen_str: String = row.get(9)?;
-    let last_seen_str: String = row.get(10)?;
+    let args_str: String = row.get("args")?;
+    let args: serde_json::Value = serde_json::from_str(&args_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
+    let first_seen_str: String = row.get("first_seen")?;
+    let last_seen_str: String = row.get("last_seen")?;
 
     Ok(Activity {
-        id: row.get(0)?,
-        session_id: row.get(1)?,
-        tool_name: row.get(2)?,
-        args_hash: row.get(3)?,
+        id: row.get("id")?,
+        session_id: row.get("session_id")?,
+        tool_name: row.get("tool_name")?,
+        args_hash: row.get("args_hash")?,
         args,
-        result_summary: row.get(5)?,
-        outcome_class: row.get(6)?,
+        result_summary: row.get("result_summary")?,
+        outcome_class: row.get("outcome_class")?,
         status,
-        occurrence_count: row.get(8)?,
+        occurrence_count: row.get("occurrence_count")?,
         first_seen: parse_timestamp(&first_seen_str)?,
         last_seen: parse_timestamp(&last_seen_str)?,
-        scope_id: row.get(11)?,
-        promoted_fact_id: row.get(12)?,
+        scope_id: row.get("scope_id")?,
+        promoted_fact_id: row.get("promoted_fact_id")?,
     })
 }
 

@@ -2,14 +2,13 @@ use memory_engine::ResumeContext;
 use memory_engine::inspect_types::{FactExplanation, FactHistory};
 use memory_engine::search::hybrid::{QueryDiagnostics, SearchResult};
 use memory_engine::types::{Activity, Event, Fact, ProjectContext, SessionCheckpoint};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Tiered retrieval depth for MCP responses.
 ///
 /// Controls how much detail is included in tool results to manage token budget.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Depth {
     /// ~15 tokens/fact: id, truncated content, importance_score, scope_path.
@@ -130,6 +129,10 @@ pub fn shape_explanation(explanation: &FactExplanation, depth: Depth) -> Value {
         }),
         Depth::Full => {
             // Full: serialize the entire explanation including source_event.
+            // On the rare serialization failure (e.g. non-finite float in a
+            // nested field), we log the error and return JSON null rather than
+            // propagating — the MCP call still succeeds with a degraded result,
+            // which is preferable to an unrecoverable tool error for the caller.
             serde_json::to_value(explanation).unwrap_or_else(|e| {
                 tracing::error!("failed to serialize FactExplanation: {e}");
                 json!(null)

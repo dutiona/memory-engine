@@ -17,9 +17,11 @@ Companion repos:
 cargo build                           # debug build (root crate only)
 cargo build -p memory-engine-cli      # CLI inspector binary
 cargo build -p memory-engine-mcp      # MCP server binary
+cargo build -p memory-engine-embed    # HTTP embedding provider crate
 cargo test                            # all tests (root crate only)
 cargo test -p memory-engine-cli       # CLI integration tests
 cargo test -p memory-engine-mcp       # MCP server tests
+cargo test -p memory-engine-embed     # embed crate tests
 cargo test --all-features             # with async + HNSW + compression
 cargo clippy --all-targets            # lint (pedantic + nursery)
 cargo fmt --check                     # format check
@@ -38,7 +40,7 @@ cargo test --workspace                # ALL crates' tests pass
 cargo clippy --workspace --all-targets # ALL crates lint-clean
 ```
 
-The workspace contains 3 crates: `memory-engine` (core), `memory-engine-cli`, `memory-engine-mcp`. The CLI and MCP crates consume the core's public API — changes to error variants, type definitions, or trait signatures can break them silently if only the root crate is checked.
+The workspace contains 4 crates: `memory-engine` (core), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. The CLI, MCP, and embed crates consume the core's public API — changes to error variants, type definitions, or trait signatures can break them silently if only the root crate is checked.
 
 ## Architecture
 

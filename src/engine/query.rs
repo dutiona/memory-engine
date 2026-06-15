@@ -12,6 +12,16 @@ use crate::types::Fact;
 use super::{MemoryEngine, fact_overlaps_period, fact_to_search_result, passes_temporal_cutoff};
 
 impl MemoryEngine {
+    /// Return the active vector search strategy: HNSW when available and
+    /// populated, brute-force cosine otherwise.
+    fn active_vector_strategy(&self) -> &dyn VectorSearchStrategy {
+        #[cfg(feature = "ann")]
+        if self.should_use_hnsw() {
+            return self.hnsw_strategy.as_ref().unwrap() as &dyn VectorSearchStrategy;
+        }
+        &*self.vector_strategy
+    }
+
     /// Query facts using hybrid search (FTS5 + vector + RRF).
     ///
     /// # Errors
@@ -37,14 +47,7 @@ impl MemoryEngine {
             None => None,
         };
 
-        #[cfg(feature = "ann")]
-        let strategy: &dyn VectorSearchStrategy = if self.should_use_hnsw() {
-            self.hnsw_strategy.as_ref().unwrap()
-        } else {
-            &*self.vector_strategy
-        };
-        #[cfg(not(feature = "ann"))]
-        let strategy: &dyn VectorSearchStrategy = &*self.vector_strategy;
+        let strategy = self.active_vector_strategy();
 
         let (mut results, _diagnostics) = self.with_read(|conn| {
             hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
@@ -174,7 +177,7 @@ impl MemoryEngine {
     /// Infer search mode from available inputs (D7).
     fn infer_search_mode(query: &MemoryQuery) -> SearchMode {
         if let Some(ref mode) = query.search_mode {
-            return mode.clone();
+            return *mode;
         }
         match (query.text.is_some(), query.embedding.is_some()) {
             (true, true) => SearchMode::Hybrid,
@@ -219,18 +222,11 @@ impl MemoryEngine {
             limit,
             rerank_depth: None,
             valid_at: search_cutoff,
-            fact_type: query.fact_type.clone(),
+            fact_type: query.fact_type,
             scope: query.scope.clone(),
         };
 
-        #[cfg(feature = "ann")]
-        let strategy: &dyn VectorSearchStrategy = if self.should_use_hnsw() {
-            self.hnsw_strategy.as_ref().unwrap()
-        } else {
-            &*self.vector_strategy
-        };
-        #[cfg(not(feature = "ann"))]
-        let strategy: &dyn VectorSearchStrategy = &*self.vector_strategy;
+        let strategy = self.active_vector_strategy();
 
         let (mut results, mut diagnostics) = self.with_read(|conn| {
             hybrid_search(conn, &search_query, self.embed_dim, scope_ids, strategy)

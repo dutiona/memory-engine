@@ -78,7 +78,7 @@ mod tests {
         let policy = ArchivePolicy::default();
         let now = Utc::now();
         let diff = now - policy.expired_before;
-        assert!(diff.num_days() == 30 || diff.num_days() == 29);
+        assert_eq!(diff.num_days(), 30);
         assert_eq!(policy.min_facts, 100);
     }
 

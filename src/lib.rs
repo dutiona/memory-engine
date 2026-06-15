@@ -13,6 +13,7 @@
 //!
 //! - `SQLite` WAL for event log, facts, and FTS5
 //! - Pure Rust brute-force vector similarity (cosine)
+//! - Optional HNSW approximate nearest-neighbour index (`ann` feature)
 //!
 //! ## Threading
 //!
@@ -54,8 +55,43 @@ pub use inspect::types as inspect_types;
 pub use resume::{ResumeConfig, ResumeContext};
 pub use search::{MemoryQuery, QueryDiagnostics, QueryResponse};
 pub use store::UpcasterRegistry;
-pub use traits::{DreamCycle, EmbeddingProvider, InsightStream, Reranker};
+pub use traits::{
+    ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
+    DreamCycle, EmbeddingProvider, ForgetPolicy, InsightStream, PersistenceClassifier, PruneStats,
+    Reranker, SummaryGenerator,
+};
 pub use types::*;
 
 // Phase 5a cognitive pipeline re-exports
 pub use engine::cognitive::DreamContext;
+
+#[cfg(test)]
+mod tests {
+    /// Smoke-test: verify that re-exported types are reachable from the crate root.
+    /// If any re-export is removed or renamed, this test will fail to compile.
+    #[test]
+    fn reexports_are_accessible() {
+        // traits
+        fn _accepts_embedding_provider(_: &dyn crate::EmbeddingProvider) {}
+        fn _accepts_summary_generator(_: &dyn crate::SummaryGenerator) {}
+        fn _accepts_conflict_arbiter(_: &dyn crate::ConflictArbiter) {}
+        fn _accepts_persistence_classifier(_: &dyn crate::PersistenceClassifier) {}
+        fn _accepts_reranker(_: &dyn crate::Reranker) {}
+        fn _accepts_insight_stream(_: &dyn crate::InsightStream) {}
+        fn _accepts_dream_cycle(_: &dyn crate::DreamCycle) {}
+
+        // trait types
+        let _ = std::mem::size_of::<crate::CrudDecision>();
+        let _ = std::mem::size_of::<crate::ConsolidationConfig>();
+        let _ = std::mem::size_of::<crate::ConsolidationStats>();
+        let _ = std::mem::size_of::<crate::PruneStats>();
+        let _ = std::mem::size_of::<crate::ConflictResolution>();
+        let _ = std::mem::size_of::<crate::ForgetPolicy>();
+
+        // core types
+        let _ = std::mem::size_of::<crate::FactType>();
+        let _ = std::mem::size_of::<crate::Fact>();
+        let _ = std::mem::size_of::<crate::EngineConfig>();
+        let _ = std::mem::size_of::<crate::MemoryEngine>();
+    }
+}

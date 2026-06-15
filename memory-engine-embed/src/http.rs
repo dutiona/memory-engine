@@ -7,6 +7,21 @@ use memory_engine::traits::EmbeddingProvider;
 /// or direct (`embedding`). Supports both single and batch embedding calls.
 ///
 /// Uses `reqwest::blocking::Client` because the engine's `EmbeddingProvider` trait is sync.
+///
+/// # Examples
+///
+/// ```no_run
+/// use memory_engine_embed::HttpEmbeddingProvider;
+///
+/// let provider = HttpEmbeddingProvider::new(
+///     "http://localhost:11434/v1/embeddings".to_string(),
+///     "nomic-embed-text".to_string(),
+///     None,
+///     768,
+///     30,
+/// )
+/// .expect("failed to build HTTP client");
+/// ```
 pub struct HttpEmbeddingProvider {
     client: reqwest::blocking::Client,
     endpoint: String,
@@ -38,9 +53,7 @@ impl HttpEmbeddingProvider {
             expected_dim,
         })
     }
-}
 
-impl HttpEmbeddingProvider {
     /// Parse OpenAI batch response: `data` array with `index` + `embedding` fields.
     /// Sorts by `index` to handle out-of-order responses.
     fn parse_openai_batch(
@@ -57,9 +70,17 @@ impl HttpEmbeddingProvider {
         // Extract (index, embedding) pairs
         let mut pairs: Vec<(usize, Vec<f32>)> = Vec::with_capacity(expected_count);
         for item in data {
-            let idx = item.get("index").and_then(|v| v.as_u64()).ok_or_else(|| {
-                MemoryError::Internal("batch embedding: missing 'index' in data item".into())
-            })? as usize;
+            let idx = item
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| {
+                    MemoryError::Internal("batch embedding: missing 'index' in data item".into())
+                })
+                .and_then(|n| {
+                    usize::try_from(n).map_err(|_| {
+                        MemoryError::Internal(format!("batch embedding: index {n} overflows usize"))
+                    })
+                })?;
 
             let embedding = item
                 .get("embedding")
@@ -110,6 +131,26 @@ impl HttpEmbeddingProvider {
             })
             .collect()
     }
+
+    /// Validate that an embedding has the expected dimension and contains no NaN/Inf values.
+    ///
+    /// `idx` is included in the error message when validating a batch element; pass `None`
+    /// for single-embedding validation.
+    fn validate_embedding(&self, emb: &[f32], idx: Option<usize>) -> Result<(), MemoryError> {
+        if emb.len() != self.expected_dim {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: self.expected_dim,
+                actual: emb.len(),
+            });
+        }
+        if emb.iter().any(|v| v.is_nan() || v.is_infinite()) {
+            return Err(MemoryError::Internal(match idx {
+                Some(i) => format!("embedding at index {i} contains NaN or Inf"),
+                None => "embedding contains NaN or Inf".into(),
+            }));
+        }
+        Ok(())
+    }
 }
 
 impl EmbeddingProvider for HttpEmbeddingProvider {
@@ -142,13 +183,13 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         // Auto-detect response format:
         // OpenAI: { "data": [{ "embedding": [...] }] }
         // Ollama: { "embeddings": [[...]] }
-        let embedding = if let Some(data) = body.get("data") {
-            data.get(0)
+        let embedding = if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+            data.first()
                 .and_then(|d| d.get("embedding"))
                 .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok())
-        } else if let Some(embeddings) = body.get("embeddings") {
+        } else if let Some(embeddings) = body.get("embeddings").and_then(|e| e.as_array()) {
             embeddings
-                .get(0)
+                .first()
                 .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok())
         } else if let Some(embedding) = body.get("embedding") {
             // Single embedding format
@@ -164,18 +205,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             ))
         })?;
 
-        if embedding.len() != self.expected_dim {
-            return Err(MemoryError::EmbeddingDimension {
-                expected: self.expected_dim,
-                actual: embedding.len(),
-            });
-        }
-
-        if embedding.iter().any(|v| v.is_nan() || v.is_infinite()) {
-            return Err(MemoryError::Internal(
-                "embedding contains NaN or Inf".into(),
-            ));
-        }
+        self.validate_embedding(&embedding, None)?;
 
         Ok(embedding)
     }
@@ -239,19 +269,9 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             )));
         };
 
-        // Validate all dimensions
+        // Validate all dimensions and NaN/Inf
         for (i, emb) in embeddings.iter().enumerate() {
-            if emb.len() != self.expected_dim {
-                return Err(MemoryError::EmbeddingDimension {
-                    expected: self.expected_dim,
-                    actual: emb.len(),
-                });
-            }
-            if emb.iter().any(|v| v.is_nan() || v.is_infinite()) {
-                return Err(MemoryError::Internal(format!(
-                    "embedding at index {i} contains NaN or Inf"
-                )));
-            }
+            self.validate_embedding(emb, Some(i))?;
         }
 
         Ok(embeddings)
@@ -354,5 +374,78 @@ mod tests {
                 .to_string()
                 .contains("expected 3 results, got 1")
         );
+    }
+
+    #[test]
+    fn embed_batch_empty_input_returns_empty_vec() {
+        // embed_batch short-circuits on empty input without making any HTTP call.
+        let provider = HttpEmbeddingProvider::new(
+            "http://127.0.0.1:0/v1/embeddings".to_string(),
+            "test-model".to_string(),
+            None,
+            768,
+            5,
+        )
+        .expect("client build should not fail");
+
+        let result = provider
+            .embed_batch(&[])
+            .expect("empty batch should succeed");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn validate_embedding_dimension_mismatch() {
+        let provider = HttpEmbeddingProvider::new(
+            "http://127.0.0.1:0/v1/embeddings".to_string(),
+            "test-model".to_string(),
+            None,
+            3,
+            5,
+        )
+        .expect("client build should not fail");
+
+        let err = provider.validate_embedding(&[0.1, 0.2], None).unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::EmbeddingDimension {
+                expected: 3,
+                actual: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_embedding_nan_rejected() {
+        let provider = HttpEmbeddingProvider::new(
+            "http://127.0.0.1:0/v1/embeddings".to_string(),
+            "test-model".to_string(),
+            None,
+            2,
+            5,
+        )
+        .expect("client build should not fail");
+
+        let err = provider
+            .validate_embedding(&[0.1, f32::NAN], None)
+            .unwrap_err();
+        assert!(err.to_string().contains("NaN"));
+    }
+
+    #[test]
+    fn validate_embedding_inf_rejected() {
+        let provider = HttpEmbeddingProvider::new(
+            "http://127.0.0.1:0/v1/embeddings".to_string(),
+            "test-model".to_string(),
+            None,
+            2,
+            5,
+        )
+        .expect("client build should not fail");
+
+        let err = provider
+            .validate_embedding(&[0.1, f32::INFINITY], None)
+            .unwrap_err();
+        assert!(err.to_string().contains("Inf"));
     }
 }

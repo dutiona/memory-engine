@@ -36,8 +36,8 @@ pub use redact::{Finding, RedactionReport, redact_entries, redact_text, shannon_
 ///
 /// # Errors
 ///
-/// Returns errors from the engine (DB, embedding, scope resolution) or
-/// extraction failures. Malformed JSONL lines are skipped with `tracing::warn`.
+/// Returns errors from the engine (DB, embedding) or extraction failures.
+/// Malformed JSONL lines are skipped with `tracing::warn`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn bootstrap_session_inner(
     conn: &Connection,
@@ -110,8 +110,12 @@ pub(crate) fn bootstrap_session_inner(
             // ROLLBACK TO restores the savepoint but keeps it open —
             // we must RELEASE to close it and avoid leaving the writer
             // in an open transaction.
-            let _ = conn.execute_batch("ROLLBACK TO bootstrap");
-            let _ = conn.execute_batch("RELEASE bootstrap");
+            if let Err(rb_err) = conn.execute_batch("ROLLBACK TO bootstrap") {
+                tracing::warn!(error = %rb_err, "savepoint ROLLBACK TO bootstrap failed");
+            }
+            if let Err(rel_err) = conn.execute_batch("RELEASE bootstrap") {
+                tracing::warn!(error = %rel_err, "savepoint RELEASE bootstrap (after rollback) failed");
+            }
             Err(e)
         }
     }
@@ -182,8 +186,7 @@ fn bootstrap_within_savepoint(
         SessionOutcome::Indeterminate => report.outcome_counts.indeterminate += 1,
     }
 
-    // Update marker event payload with outcome
-    // (We don't update the already-inserted event; outcome is in fact metadata)
+    // Outcome is stored in fact metadata rather than updating the marker event.
 
     // --- Keyword pre-filter ---
     let candidates = filter::keyword_prefilter(&turns, session_id);
@@ -221,7 +224,7 @@ fn bootstrap_within_savepoint(
                     content: fact.content.clone(),
                     content_hash: String::new(),
                     embedding: embedding.clone(),
-                    fact_type: fact.fact_type.clone(),
+                    fact_type: fact.fact_type,
                     t_created: effective_created,
                     t_expired: None,
                     t_valid: None,
@@ -243,7 +246,7 @@ fn bootstrap_within_savepoint(
                 content: fact.content.clone(),
                 content_hash: String::new(),
                 embedding,
-                fact_type: fact.fact_type.clone(),
+                fact_type: fact.fact_type,
                 t_created: effective_created,
                 t_expired: None,
                 t_valid: None,
@@ -344,4 +347,57 @@ pub(crate) fn bootstrap_directory_inner(
     }
 
     Ok(aggregate)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+    use crate::store::schema::{init_schema, open_memory};
+    use crate::store::upcaster::UpcasterRegistry;
+
+    /// A no-op embedder used when we know embedding will never be called.
+    struct NeverCalledEmbedder;
+    impl crate::traits::EmbeddingProvider for NeverCalledEmbedder {
+        fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
+            panic!("embed() must not be called in this test");
+        }
+    }
+
+    /// JSONL with two valid entries but neither carries a `sessionId`.
+    #[test]
+    fn bootstrap_valid_jsonl_no_session_id_returns_empty_report() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let registry = UpcasterRegistry::new();
+
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}
+"#;
+        let reader = Cursor::new(jsonl);
+        let config = BootstrapConfig::default();
+        let extractor = extract::KeywordExtractor;
+
+        let report = bootstrap_session_inner(
+            &conn,
+            4,
+            &registry,
+            reader,
+            &NeverCalledEmbedder,
+            &extractor,
+            &config,
+            None,
+            1, // root scope id
+        )
+        .expect("bootstrap_session_inner should succeed");
+
+        // Early-exit path: entries parsed but nothing processed.
+        assert!(report.entries_parsed > 0, "expected entries to be parsed");
+        assert_eq!(
+            report.sessions_processed, 0,
+            "no session should be processed"
+        );
+        assert_eq!(report.facts_created, 0);
+    }
 }

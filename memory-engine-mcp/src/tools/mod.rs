@@ -26,7 +26,7 @@ use crate::error::{ValidationError, to_mcp_error};
 // Tool definitions (JSON schemas)
 // ---------------------------------------------------------------------------
 
-/// Returns all tool definitions (P0 + P1) with JSON schemas.
+/// Returns all tool definitions (P0, P1, P2, Phase 5) with JSON schemas.
 pub fn all_tool_definitions() -> Vec<Tool> {
     vec![
         tool_def(
@@ -453,13 +453,8 @@ fn get_datetime(args: &Map<String, Value>, key: &str) -> Result<Option<DateTime<
 }
 
 fn get_depth(args: &Map<String, Value>) -> Depth {
-    get_str(args, "depth")
-        .and_then(|s| match s.as_str() {
-            "sparse" => Some(Depth::Sparse),
-            "standard" => Some(Depth::Standard),
-            "full" => Some(Depth::Full),
-            _ => None,
-        })
+    args.get("depth")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default()
 }
 
@@ -1137,7 +1132,8 @@ fn handle_replay_events(
     let since = get_datetime(&args, "since")?;
     let until = get_datetime(&args, "until")?;
 
-    // Both-or-neither validation (like period_start/period_end in handle_query)
+    // Ordering validation: when both bounds are provided, since must not exceed until.
+    // Either bound may be omitted independently (open-ended range).
     if let (Some(s), Some(u)) = (since, until) {
         if s > u {
             return Err(ErrorData::invalid_params("since must be <= until", None));

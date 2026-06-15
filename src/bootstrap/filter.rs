@@ -36,7 +36,7 @@ pub struct ToolCallRecord {
 }
 
 /// Category of a noteworthy episode detected by keyword pre-filter.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EpisodeCategory {
     Bug,
     Decision,

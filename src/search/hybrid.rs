@@ -10,7 +10,7 @@ use crate::store::facts::FactStore;
 use crate::types::{Fact, FactType};
 
 /// How to combine search sources.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
     Fts,
     Vector,
@@ -19,7 +19,7 @@ pub enum SearchMode {
 
 /// Which source(s) contributed to a result.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MatchType {
     Fts,
     Vector,
@@ -101,6 +101,12 @@ pub struct QueryResponse {
     pub results: Vec<SearchResult>,
     pub diagnostics: QueryDiagnostics,
 }
+
+/// Default RRF smoothing constant (Cormack & Clarke, 2009).
+///
+/// k=60 is the value recommended in the original RRF paper and widely adopted
+/// in practice. It controls rank-score attenuation: larger k = slower decay.
+pub const RRF_K: u32 = 60;
 
 /// Reciprocal Rank Fusion merge of two ranked result lists.
 ///
@@ -192,7 +198,7 @@ pub fn hybrid_search(
                 fts_results.iter().map(|r| (r.fact_id, r.score)).collect();
             let vec_pairs: Vec<(i64, f32)> =
                 vec_results.iter().map(|r| (r.fact_id, r.score)).collect();
-            rrf_merge(&fts_pairs, &vec_pairs, 60)
+            rrf_merge(&fts_pairs, &vec_pairs, RRF_K)
         }
     };
 

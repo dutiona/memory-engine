@@ -52,7 +52,7 @@ impl UpcasterRegistry {
     /// The latest revision for this event type is automatically tracked as
     /// `max(current_latest, from_revision + 1)`.
     pub fn register(&mut self, event_type: &str, from_revision: u16, func: UpcasterFn) {
-        let target = from_revision + 1;
+        let target = from_revision.saturating_add(1);
         self.upcasters
             .insert((event_type.to_string(), from_revision), func);
         let current = self.latest.entry(event_type.to_string()).or_insert(1);

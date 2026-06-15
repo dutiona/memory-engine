@@ -1,6 +1,7 @@
 use rusqlite::{Connection, params};
 
 use crate::error::Result;
+use crate::search::serialize_scope_ids;
 use crate::store::deserialize_embedding;
 use crate::store::facts::fact_type_to_str;
 use crate::types::FactType;
@@ -53,7 +54,7 @@ pub fn vector_search(
     }
 
     let ft_str: Option<&str> = fact_type.map(fact_type_to_str);
-    let scope_json: Option<String> = scope_ids.map(serde_json::to_string).transpose()?;
+    let scope_json = serialize_scope_ids(scope_ids)?;
 
     let mut stmt = conn.prepare(
         "SELECT id, embedding FROM facts
@@ -309,6 +310,15 @@ mod tests {
                 let sim = cosine_similarity(&a[..len], &b[..len]);
                 prop_assert!((-1.0 - 1e-5..=1.0 + 1e-5).contains(&sim),
                     "cosine similarity {sim} out of [-1, 1] bounds");
+            }
+
+            /// Anti-parallel vectors (v and -v) must yield cosine similarity of -1.0.
+            #[test]
+            fn antiparallel_vectors_equal_minus_one(v in nonzero_vec(64)) {
+                let neg: Vec<f32> = v.iter().map(|&x| -x).collect();
+                let sim = cosine_similarity(&v, &neg);
+                prop_assert!((sim - (-1.0)).abs() < 1e-5,
+                    "anti-parallel vectors should give -1.0, got {sim}");
             }
         }
     }
