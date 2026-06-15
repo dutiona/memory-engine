@@ -1,4 +1,4 @@
-use memory_engine::{EngineConfig, MemoryEngine, MemoryError};
+use memory_engine::{MemoryEngine, MemoryError};
 use tempfile::tempdir;
 
 const DIM: usize = 4;
@@ -10,14 +10,18 @@ fn open_read_only_on_initialized_db() {
 
     // First, create and initialize the DB normally
     {
-        let config = EngineConfig::new(db_path.clone(), DIM);
-        let _engine = MemoryEngine::open(&config).unwrap();
+        let _engine = MemoryEngine::builder(DIM)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
     }
 
     // Now open read-only
-    let mut config = EngineConfig::new(db_path, DIM);
-    config.read_only = true;
-    let engine = MemoryEngine::open(&config).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .read_only(true)
+        .build()
+        .unwrap();
     assert!(engine.is_read_only());
 
     // Read operations should work
@@ -30,10 +34,11 @@ fn open_read_only_on_nonexistent_db_fails() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("nonexistent.db");
 
-    let mut config = EngineConfig::new(db_path, DIM);
-    config.read_only = true;
     // File doesn't exist — rejected before SQLite can create empty file
-    let result = MemoryEngine::open(&config);
+    let result = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .read_only(true)
+        .build();
     assert!(matches!(result, Err(MemoryError::Migration(_))));
 }
 
@@ -44,14 +49,18 @@ fn read_only_engine_rejects_writes() {
 
     // Initialize
     {
-        let config = EngineConfig::new(db_path.clone(), DIM);
-        let _engine = MemoryEngine::open(&config).unwrap();
+        let _engine = MemoryEngine::builder(DIM)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
     }
 
     // Open read-only
-    let mut config = EngineConfig::new(db_path, DIM);
-    config.read_only = true;
-    let engine = MemoryEngine::open(&config).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .read_only(true)
+        .build()
+        .unwrap();
 
     // set_config is the simplest write method — no mock providers needed
     let err = engine.set_config("test_key", "test_value").unwrap_err();
@@ -60,7 +69,7 @@ fn read_only_engine_rejects_writes() {
 
 #[test]
 fn engine_not_read_only_by_default() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     assert!(!engine.is_read_only());
 }
 
@@ -71,15 +80,19 @@ fn read_only_engine_query_works() {
 
     // Initialize and add a fact
     {
-        let config = EngineConfig::new(db_path.clone(), DIM);
-        let engine = MemoryEngine::open(&config).unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
         engine.set_config("test_key", "test_value").unwrap();
     }
 
     // Open read-only and verify read access
-    let mut config = EngineConfig::new(db_path, DIM);
-    config.read_only = true;
-    let engine = MemoryEngine::open(&config).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .read_only(true)
+        .build()
+        .unwrap();
 
     let val = engine.get_config("test_key").unwrap();
     assert_eq!(val, Some("test_value".to_string()));
@@ -91,12 +104,16 @@ fn open_read_only_with_reranker() {
     let db_path = dir.path().join("test.db");
 
     {
-        let config = EngineConfig::new(db_path.clone(), DIM);
-        let _engine = MemoryEngine::open(&config).unwrap();
+        let _engine = MemoryEngine::builder(DIM)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
     }
 
-    let mut config = EngineConfig::new(db_path, DIM);
-    config.read_only = true;
-    let engine = MemoryEngine::open_with_reranker(&config, None).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .read_only(true)
+        .build()
+        .unwrap();
     assert!(engine.is_read_only());
 }

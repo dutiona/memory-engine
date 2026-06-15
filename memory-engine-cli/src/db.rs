@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use memory_engine::{EngineConfig, MemoryEngine};
+use memory_engine::MemoryEngine;
 
 /// Peek `embed_dim` from an existing `SQLite` database's `config` table.
 ///
@@ -39,9 +39,10 @@ fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
 /// never acquires a write lock and never runs migrations.
 pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
     let embed_dim = peek_embed_dim_from_db(path)?;
-    let mut config = EngineConfig::new(path.to_path_buf(), embed_dim);
-    config.read_only = true;
-    let engine = MemoryEngine::open(&config)?;
+    let engine = MemoryEngine::builder(embed_dim)
+        .path(path.to_path_buf())
+        .read_only(true)
+        .build()?;
     Ok(engine)
 }
 
@@ -53,8 +54,10 @@ pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
 pub fn open_engine_writable(path: &Path) -> anyhow::Result<MemoryEngine> {
     let embed_dim = peek_embed_dim_from_db(path)?;
     let backup_dir = path.parent().map(Path::to_path_buf);
-    let mut config = EngineConfig::new(path.to_path_buf(), embed_dim);
-    config.backup_dir = backup_dir;
-    let engine = MemoryEngine::open(&config)?;
+    let mut builder = MemoryEngine::builder(embed_dim).path(path.to_path_buf());
+    if let Some(dir) = backup_dir {
+        builder = builder.backup_dir(dir);
+    }
+    let engine = builder.build()?;
     Ok(engine)
 }

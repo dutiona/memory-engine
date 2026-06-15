@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn json_dump_roundtrip() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn sqlite_dump_from_in_memory() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {
@@ -414,7 +414,7 @@ mod tests {
     #[cfg(feature = "compress-gzip")]
     #[test]
     fn gzip_dump_has_correct_magic_bytes() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {
@@ -444,7 +444,7 @@ mod tests {
     #[cfg(feature = "compress-zstd")]
     #[test]
     fn zstd_dump_has_correct_magic_bytes() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {
@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn snapshot_populated_engine_dump() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {

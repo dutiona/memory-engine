@@ -63,7 +63,7 @@ Tests in `tests/` (6 integration tests), benchmarks in `benches/`, examples in `
 - **Event-sourced** — append-only event log is source of truth; facts are consumer-derived
 - **Trait boundary** — no LLM/network deps in core; all intelligence via consumer traits
 - **Commits** — Conventional Commits (`feat:`, `fix:`, `refactor:`), imperative mood, atomic changes
-- **Testing** — TDD approach; integration tests use in-memory SQLite via `MemoryEngine::open_memory(embed_dim)`
+- **Testing** — TDD approach; integration tests use in-memory SQLite via `MemoryEngine::builder(embed_dim).build()`
 
 ## Deep-Dive Docs
 

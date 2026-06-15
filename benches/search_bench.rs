@@ -21,7 +21,7 @@
 //!   This is realistic for interactive use where the DB is already open.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use memory_engine::engine::{EngineConfig, MemoryEngine};
+use memory_engine::engine::MemoryEngine;
 use memory_engine::search::cosine_similarity;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
@@ -64,8 +64,10 @@ const TOPICS: [&str; 10] = [
 fn setup_engine_with_dim(n: usize, dim: usize) -> MemoryEngine {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench.db");
-    let config = EngineConfig::new(db_path, dim);
-    let engine = MemoryEngine::open(&config).expect("open engine");
+    let engine = MemoryEngine::builder(dim)
+        .path(db_path)
+        .build()
+        .expect("open engine");
     let embedder = ConstEmbedder { dim };
 
     for i in 0..n {
@@ -100,8 +102,10 @@ fn setup_engine(n: usize) -> MemoryEngine {
 fn setup_scoped_engine(n: usize) -> MemoryEngine {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench_scoped.db");
-    let config = EngineConfig::new(db_path, DIM);
-    let engine = MemoryEngine::open(&config).expect("open engine");
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .build()
+        .expect("open engine");
     let embedder = ConstEmbedder { dim: DIM };
 
     let scopes = [
@@ -373,9 +377,11 @@ fn setup_hnsw_engine(n: usize) -> MemoryEngine {
     use memory_engine::search::SearchConfig;
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench_hnsw.db");
-    let mut config = EngineConfig::new(db_path, DIM);
-    config.search_config = Some(SearchConfig { ann_threshold: 0 });
-    let engine = MemoryEngine::open(&config).expect("open engine");
+    let engine = MemoryEngine::builder(DIM)
+        .path(db_path)
+        .search_config(SearchConfig { ann_threshold: 0 })
+        .build()
+        .expect("open engine");
     let embedder = ConstEmbedder { dim: DIM };
     for i in 0..n {
         let topic = TOPICS[i % TOPICS.len()];

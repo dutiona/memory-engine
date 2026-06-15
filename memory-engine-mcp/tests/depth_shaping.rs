@@ -4,7 +4,7 @@
 //! the documented contract: sparse ~4 fields, standard ~15, full includes
 //! `embedding_dim` and `content_hash`.
 
-use memory_engine::engine::MemoryEngine;
+use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::AddFactRequest;
 use memory_engine_mcp::tools;
@@ -36,7 +36,9 @@ impl EmbeddingProvider for TestEmbedder {
 }
 
 fn make_engine() -> MemoryEngine {
-    MemoryEngine::open_memory(DIM).expect("in-memory engine")
+    MemoryEngine::builder(DIM)
+        .build()
+        .expect("in-memory engine")
 }
 
 fn args(pairs: Value) -> Map<String, Value> {

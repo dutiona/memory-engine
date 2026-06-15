@@ -1,4 +1,4 @@
-use memory_engine::engine::{EngineConfig, MemoryEngine};
+use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, FactType};
 use memory_engine_mcp::tools;
@@ -18,8 +18,10 @@ impl EmbeddingProvider for FakeEmbed {
 
 fn test_engine() -> (MemoryEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let config = EngineConfig::new(dir.path().join("test.db"), 3);
-    let engine = MemoryEngine::open(&config).unwrap();
+    let engine = MemoryEngine::builder(3)
+        .path(dir.path().join("test.db"))
+        .build()
+        .unwrap();
     (engine, dir)
 }
 

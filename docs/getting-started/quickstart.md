@@ -19,7 +19,7 @@ impl EmbeddingProvider for DummyEmbedder {
 }
 ```
 
-The dimension (384 here) must match what you pass to `open_memory()`.
+The dimension (384 here) must match what you pass to `MemoryEngine::builder()`.
 
 ## 2. Open an Engine
 
@@ -27,14 +27,14 @@ The dimension (384 here) must match what you pass to `open_memory()`.
 use memory_engine::MemoryEngine;
 
 // In-memory (for testing)
-let engine = MemoryEngine::open_memory(384)?;
+let engine = MemoryEngine::builder(384).build()?;
 
 // File-backed (for production)
-use memory_engine::EngineConfig;
 use std::path::PathBuf;
 
-let config = EngineConfig::new(PathBuf::from("my_agent.db"), 384);
-let engine = MemoryEngine::open(&config)?;
+let engine = MemoryEngine::builder(384)
+    .path(PathBuf::from("my_agent.db"))
+    .build()?;
 ```
 
 `MemoryEngine` is `Send + Sync` — wrap in `Arc` to share across threads.

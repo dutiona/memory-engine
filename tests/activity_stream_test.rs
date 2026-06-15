@@ -15,7 +15,7 @@ impl memory_engine::EmbeddingProvider for ZeroEmbedder {
 const DIM: usize = 4;
 
 fn engine() -> MemoryEngine {
-    MemoryEngine::open_memory(DIM).unwrap()
+    MemoryEngine::builder(DIM).build().unwrap()
 }
 
 #[test]

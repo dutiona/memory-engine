@@ -32,7 +32,7 @@ impl EmbeddingProvider for TestEmbedder {
 
 #[test]
 fn full_lifecycle_pinned_and_future_memory() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = TestEmbedder;
     let now = Utc::now();
 
@@ -157,7 +157,7 @@ fn classifier_auto_pins_semantic_facts() {
         }
     }
 
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = TestEmbedder;
     let classifier = PinSemantic;
 
@@ -216,7 +216,7 @@ fn classifier_auto_pins_semantic_facts() {
 
 #[test]
 fn resume_context_5_tier_integration() {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = TestEmbedder;
     let now = Utc::now();
 

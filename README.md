@@ -23,7 +23,7 @@ Part of a [four-layer cognitive architecture](https://github.com/dutiona/autonom
 ## Quick Example
 
 ```rust
-use memory_engine::{EngineConfig, MemoryEngine, FactType, AddFactRequest, EmbeddingProvider, MemoryError};
+use memory_engine::{MemoryEngine, FactType, AddFactRequest, EmbeddingProvider, MemoryError};
 
 // Consumers implement EmbeddingProvider with their model of choice
 struct DummyEmbedder;
@@ -34,7 +34,7 @@ impl EmbeddingProvider for DummyEmbedder {
 }
 
 fn main() -> Result<(), MemoryError> {
-    let engine = MemoryEngine::open_memory(384)?;
+    let engine = MemoryEngine::builder(384).build()?;
     let embedder = DummyEmbedder;
 
     // Add a fact (embedding computed automatically)

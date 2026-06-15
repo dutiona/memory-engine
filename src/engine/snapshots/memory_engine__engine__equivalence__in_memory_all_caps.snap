@@ -1,0 +1,11 @@
+---
+source: src/engine/equivalence.rs
+expression: observe(&engine)
+---
+embed_dim=384
+file_backed=false
+read_only=false
+read_pool_size=0
+search_config=Some(SearchConfig { ann_threshold: 7 })
+upcaster_count=0
+reranker=Some("named-test-reranker")

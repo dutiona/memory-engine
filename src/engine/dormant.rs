@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn sample_dormant_empty_store() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let results = engine
             .sample_dormant(10, &[0.1, 0.2, 0.3, 0.4], None)
             .unwrap();
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn sample_dormant_wrong_dimension() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let err = engine.sample_dormant(10, &[0.1, 0.2], None).unwrap_err();
         assert!(matches!(
             err,
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn sample_dormant_returns_low_importance_only() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
 
         // Low importance — should be returned
         add_fact_with_importance(&engine, "low importance", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn sample_dormant_excludes_expired() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
 
         let id = add_fact_with_importance(&engine, "to expire", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
         // Expire the fact via the store
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn sample_dormant_excludes_pinned() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
 
         // Add a pinned low-importance fact
         let embedder = FixedEmbedder(vec![1.0, 0.0, 0.0, 0.0]);
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn sample_dormant_respects_n_limit() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
 
         for i in 0..5 {
             #[allow(clippy::cast_precision_loss)] // test data, precision irrelevant
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn sample_dormant_sorts_by_similarity() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
 
         // Less similar
         add_fact_with_importance(&engine, "less similar", 0.1, vec![0.0, 1.0, 0.0, 0.0]);
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn sample_dormant_zero_n() {
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         add_fact_with_importance(&engine, "fact", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
         let results = engine
             .sample_dormant(0, &[1.0, 0.0, 0.0, 0.0], None)

@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn json_dump_restore_roundtrip() {
         // Create engine and add data.
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn restore_rejects_non_empty_db() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {
@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn autoincrement_reset_after_restore() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
                 &AddFactRequest {

@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn explain_active_fact() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let id = engine
             .add_fact(
                 &AddFactRequest {
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn explain_pinned_fact() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let opts = AddFactOptions {
             pinned: Some(true),
             ..Default::default()
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn explain_due_fact() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let opts = AddFactOptions {
             t_valid: Some(Utc::now() - Duration::hours(1)),
             ..Default::default()
@@ -289,14 +289,14 @@ mod tests {
 
     #[test]
     fn explain_not_found() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let err = engine.explain_fact(999).unwrap_err();
         assert!(matches!(err, crate::error::MemoryError::NotFound(_)));
     }
 
     #[test]
     fn fact_history_all_timestamps() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let opts = AddFactOptions {
             t_valid: Some(Utc::now() - Duration::hours(2)),
             t_invalid: Some(Utc::now() + Duration::hours(1)),
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn fact_history_minimal() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let id = engine
             .add_fact(
                 &AddFactRequest {
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn explain_fact_with_source_event() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
 
         // Ingest an event to get an event_id
         let event = NewEvent {
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn explain_fact_without_source_event() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let fact_id = engine
             .add_fact(
                 &AddFactRequest {
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn snapshot_active_fact_explanation() {
-        let engine = MemoryEngine::open_memory(DIM).unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
         let id = engine
             .add_fact(
                 &AddFactRequest {

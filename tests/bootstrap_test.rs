@@ -16,7 +16,7 @@ impl EmbeddingProvider for TestEmbedder {
 }
 
 fn engine() -> MemoryEngine {
-    MemoryEngine::open_memory(4).unwrap()
+    MemoryEngine::builder(4).build().unwrap()
 }
 
 const fn success_fixture() -> &'static str {

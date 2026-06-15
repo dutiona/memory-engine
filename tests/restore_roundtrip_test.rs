@@ -16,7 +16,7 @@ impl EmbeddingProvider for FakeEmbed {
 
 /// Create a populated engine for testing.
 fn make_engine() -> MemoryEngine {
-    let engine = MemoryEngine::open_memory(DIM).unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
     engine
         .add_fact(
             &AddFactRequest {
@@ -99,8 +99,10 @@ fn json_restore_to_memory_engine() {
 fn sqlite_restore_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.db");
-    let source_config = EngineConfig::new(source_path, DIM);
-    let engine = MemoryEngine::open(&source_config).unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(source_path)
+        .build()
+        .unwrap();
     engine
         .add_fact(
             &AddFactRequest {

@@ -138,9 +138,9 @@ A `KnowledgeBaseConnector` trait that lets the engine reference external knowled
 
 ## Read-Only Open Path **{Implemented}**
 
-`MemoryEngine::open()` with `EngineConfig::read_only = true` opens a database without write capability — no `init_schema()`, no `migrate()`, no writable connection pool.
+`MemoryEngine::builder(dim).path(p).read_only(true).build()` opens a database without write capability — no `init_schema()`, no `migrate()`, no writable connection pool.
 
-**What:** A `read_only: bool` flag on `EngineConfig` that, when set:
+**What:** A `read_only` flag (set via the file-backed builder's `.read_only(true)` setter, or `EngineConfig::new(p, dim).with_read_only(true)`) that, when set:
 
 1. Validates schema version and epoch compatibility without writing
 2. Opens all connections with `PRAGMA query_only = ON` (including the internal slot used for cache loading)

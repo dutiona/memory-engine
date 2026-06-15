@@ -11,8 +11,10 @@ const EMBEDDING_JSON: &str = "[0.1, 0.2, 0.3, 0.4]";
 fn create_empty_db() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let config = memory_engine::EngineConfig::new(db_path.clone(), EMBED_DIM);
-    let _engine = memory_engine::MemoryEngine::open(&config).unwrap();
+    let _engine = memory_engine::MemoryEngine::builder(EMBED_DIM)
+        .path(db_path.clone())
+        .build()
+        .unwrap();
     (dir, db_path)
 }
 
@@ -20,8 +22,10 @@ fn create_empty_db() -> (TempDir, PathBuf) {
 fn create_db_with_event() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
-    let config = memory_engine::EngineConfig::new(db_path.clone(), EMBED_DIM);
-    let engine = memory_engine::MemoryEngine::open(&config).unwrap();
+    let engine = memory_engine::MemoryEngine::builder(EMBED_DIM)
+        .path(db_path.clone())
+        .build()
+        .unwrap();
 
     engine
         .ingest(&memory_engine::NewEvent {

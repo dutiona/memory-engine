@@ -92,7 +92,7 @@ impl EmbeddingProvider for ZeroEmbedder {
 }
 
 let dim = 384;
-let engine = MemoryEngine::open_memory(dim)?;
+let engine = MemoryEngine::builder(dim).build()?;
 let embedder = ZeroEmbedder { dim };
 
 let fact_id = engine.add_fact(

@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
-use memory_engine::{EngineConfig, MemoryEngine};
 use memory_engine_embed::HttpEmbeddingProvider;
 use serde::{Deserialize, Serialize};
 
@@ -309,8 +309,9 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
             "database {} already exists — remove it first or omit --create",
             db.display()
         );
-        let config = EngineConfig::new(db.to_path_buf(), embed_dim);
-        MemoryEngine::open(&config)?
+        MemoryEngine::builder(embed_dim)
+            .path(db.to_path_buf())
+            .build()?
     } else {
         open_engine_writable(db)?
     };
@@ -510,7 +511,7 @@ mod tests {
             }
         }
 
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let input = r#"{"content":"fact one","fact_type":"semantic"}
 {"content":"fact two","fact_type":"episodic","importance":0.8}
 "#;
@@ -537,7 +538,7 @@ mod tests {
             }
         }
 
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let input = r#"{"content":"good","fact_type":"semantic"}
 not valid json
 {"content":"also good","fact_type":"procedural"}
@@ -564,7 +565,7 @@ not valid json
             }
         }
 
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let input = r#"{"content":"good","fact_type":"semantic","importance":0.5}
 {"content":"bad","fact_type":"semantic","importance":2.0}
 "#;
@@ -590,7 +591,7 @@ not valid json
             }
         }
 
-        let engine = MemoryEngine::open_memory(4).unwrap();
+        let engine = MemoryEngine::builder(4).build().unwrap();
         let summary = ingest_from_reader(
             &engine,
             "".as_bytes(),

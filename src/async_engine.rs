@@ -26,7 +26,7 @@ use crate::types::{AddFactRequest, ConsolidationLevel, Fact, NewEvent, NewFact, 
 /// Async methods take **owned** values (not references) for `'static` lifetime.
 ///
 /// ```rust,ignore
-/// let engine = MemoryEngine::open_memory(768)?;
+/// let engine = MemoryEngine::builder(768).build()?;
 /// let async_engine = AsyncMemoryEngine::new(engine);
 /// let req = AddFactRequest { content: "hello".into(), fact_type: FactType::Semantic,
 ///     source_event_id: None, scope: None, opts: None };
@@ -57,15 +57,19 @@ impl AsyncMemoryEngine {
         Self { inner: engine }
     }
 
-    /// Open a file-backed async engine.
+    /// Open a file-backed async engine from an [`EngineConfig`].
+    ///
+    /// For the synchronous ergonomic front door, see
+    /// [`MemoryEngine::builder`].
     ///
     /// # Errors
     ///
-    /// Returns errors from [`MemoryEngine::open`].
+    /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub async fn open(config: EngineConfig) -> Result<Self> {
-        let engine = tokio::task::spawn_blocking(move || MemoryEngine::open(&config))
-            .await
-            .map_err(join_err)??;
+        let engine =
+            tokio::task::spawn_blocking(move || MemoryEngine::open_from_config(&config, None))
+                .await
+                .map_err(join_err)??;
         Ok(Self::new(engine))
     }
 
@@ -77,11 +81,14 @@ impl AsyncMemoryEngine {
 
     /// Open an in-memory async engine.
     ///
+    /// For the synchronous ergonomic front door, see
+    /// [`MemoryEngine::builder`].
+    ///
     /// # Errors
     ///
-    /// Returns errors from [`MemoryEngine::open_memory`].
+    /// Returns `MemoryError::Database` if the connection or schema setup fails.
     pub async fn open_memory(embed_dim: usize) -> Result<Self> {
-        let engine = tokio::task::spawn_blocking(move || MemoryEngine::open_memory(embed_dim))
+        let engine = tokio::task::spawn_blocking(move || MemoryEngine::builder(embed_dim).build())
             .await
             .map_err(join_err)??;
         Ok(Self::new(engine))

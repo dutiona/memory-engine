@@ -38,7 +38,7 @@ impl EmbeddingProvider for TestEmbedder {
 #[allow(clippy::too_many_lines)]
 fn full_roundtrip() {
     let dim = 8;
-    let engine = MemoryEngine::open_memory(dim).unwrap();
+    let engine = MemoryEngine::builder(dim).build().unwrap();
     let embedder = TestEmbedder { dim };
 
     // 1. Ingest an event

@@ -143,7 +143,9 @@ impl CorpusBuilder {
 
 /// Create an in-memory engine with the standard eval dimension.
 pub fn eval_engine() -> MemoryEngine {
-    MemoryEngine::open_memory(DIM).expect("failed to create in-memory engine")
+    MemoryEngine::builder(DIM)
+        .build()
+        .expect("failed to create in-memory engine")
 }
 
 /// Shorthand to add a single fact with minimal options.
