@@ -285,6 +285,37 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    #[test]
+    fn fts_search_empty_query_returns_empty() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("Rust language")).unwrap();
+
+        // An empty MATCH string is an FTS5 syntax error -> caught and mapped
+        // to an empty result vec (fts.rs:30-83), never an Err.
+        let results = fts_search(&conn, "", 10, None, None).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn fts_search_empty_scope_slice_matches_nothing() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("Rust language")).unwrap();
+
+        // Some(&[]) serializes to "[]"; the `scope_id IN (SELECT ... json_each)`
+        // subquery is empty, so no row can match (fts.rs:43-45) — distinct
+        // from None, which disables the filter entirely.
+        let scoped = fts_search(&conn, "Rust", 10, None, Some(&[])).unwrap();
+        assert!(
+            scoped.is_empty(),
+            "empty scope slice must exclude all facts"
+        );
+        // Sanity: the same query with no scope filter does find the fact.
+        let unscoped = fts_search(&conn, "Rust", 10, None, None).unwrap();
+        assert_eq!(unscoped.len(), 1);
+    }
+
     // --- fts_count_expired tests ---
 
     #[test]

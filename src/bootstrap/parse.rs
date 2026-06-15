@@ -194,7 +194,7 @@ pub fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Datelike;
+    use chrono::{Datelike, Timelike};
 
     use super::*;
     use std::io::BufReader;
@@ -311,5 +311,75 @@ mod tests {
     #[test]
     fn parse_timestamp_invalid() {
         assert!(parse_timestamp("not-a-date").is_none());
+    }
+
+    #[test]
+    fn parse_timestamp_naive_no_timezone_fallback() {
+        // No timezone suffix: RFC 3339 parse fails, the naive fallback
+        // (parse.rs:185-188) takes over and interprets it as UTC.
+        let dt = parse_timestamp("2026-03-19T10:30:45").unwrap();
+        assert_eq!(dt.year(), 2026);
+        assert_eq!(dt.month(), 3);
+        assert_eq!(dt.day(), 19);
+        assert_eq!(dt.hour(), 10);
+        assert_eq!(dt.minute(), 30);
+        assert_eq!(dt.second(), 45);
+        // The naive timestamp must be promoted to the UTC zone.
+        assert_eq!(dt, parse_timestamp("2026-03-19T10:30:45Z").unwrap());
+    }
+
+    #[test]
+    fn parse_content_blocks_tool_result_string_content() {
+        // String content + is_error=true exercises the `v.is_string()` arm
+        // and the explicit is_error read (parse.rs:152-163).
+        let content = serde_json::json!([{
+            "type": "tool_result",
+            "content": "command output",
+            "is_error": true
+        }]);
+        let blocks = parse_content_blocks(&content);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolResult { content, is_error } => {
+                assert_eq!(content, "command output");
+                assert!(*is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_content_blocks_tool_result_non_string_content_defaults_no_error() {
+        // Non-string content takes the `Some(v) => v.to_string()` arm, and
+        // a missing `is_error` defaults to false.
+        let content = serde_json::json!([{
+            "type": "tool_result",
+            "content": [{"type": "text", "text": "nested"}]
+        }]);
+        let blocks = parse_content_blocks(&content);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolResult { content, is_error } => {
+                // Serialized JSON of the non-string content.
+                assert!(content.contains("nested"));
+                assert!(!*is_error, "missing is_error must default to false");
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_content_blocks_tool_result_missing_content_empty_string() {
+        // Absent `content` takes the `None => String::new()` arm.
+        let content = serde_json::json!([{"type": "tool_result"}]);
+        let blocks = parse_content_blocks(&content);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolResult { content, is_error } => {
+                assert_eq!(content, "");
+                assert!(!*is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 }

@@ -567,6 +567,42 @@ mod tests {
         }
 
         #[test]
+        fn hnsw_strategy_empty_index_returns_empty() {
+            // DB with no facts -> index_to_fact is empty, so search() hits the
+            // `n_items == 0` early return (ann.rs:248-253) before any nearest()
+            // call, returning an empty vec.
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+            assert_eq!(strategy.active_count(), 0);
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy.search(&conn, &query, DIM, 5, None, None).unwrap();
+            assert!(results.is_empty(), "empty index must yield no results");
+        }
+
+        #[test]
+        fn hnsw_strategy_dim_mismatch_errors() {
+            let (conn, _ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            // Query length != strategy.embed_dim -> EmbeddingDimension error
+            // before any index access (ann.rs:230-235). The `_embed_dim`
+            // parameter is intentionally ignored; the strategy's own dim wins.
+            let wrong = [1.0_f32, 0.0]; // len 2, DIM is 4
+            let err = strategy
+                .search(&conn, &wrong, DIM, 5, None, None)
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                crate::error::MemoryError::EmbeddingDimension {
+                    expected: 4,
+                    actual: 2
+                }
+            ));
+        }
+
+        #[test]
         fn hnsw_strategy_notify_expire_excludes_from_results() {
             let (conn, ids) = setup_with_facts();
             let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
