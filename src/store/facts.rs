@@ -430,12 +430,7 @@ impl<'a> FactStore<'a> {
         let result: Option<String> =
             stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?;
         match result {
-            Some(s) => {
-                let dt = DateTime::parse_from_rfc3339(&s)
-                    .map_err(|e| crate::error::MemoryError::Migration(format!("bad t_valid: {e}")))?
-                    .with_timezone(&Utc);
-                Ok(Some(dt))
-            }
+            Some(s) => Ok(Some(parse_timestamp(&s)?)),
             None => Ok(None),
         }
     }
@@ -1023,7 +1018,8 @@ mod tests {
         fs.insert(&past).unwrap();
 
         let mut future = make_fact("future reminder", vec![0.2; DIM]);
-        future.t_valid = Some(now + chrono::Duration::hours(1));
+        const VALID_DURATION_HOURS: i64 = 1;
+        future.t_valid = Some(now + TimeDelta::hours(VALID_DURATION_HOURS));
         fs.insert(&future).unwrap();
 
         fs.insert(&make_fact("regular fact", vec![0.3; DIM]))
@@ -1052,6 +1048,36 @@ mod tests {
 
         let next = fs.next_due_time(now, &[]).unwrap().unwrap();
         assert!(next < now + chrono::Duration::hours(2));
+    }
+
+    #[test]
+    fn next_due_time_corrupt_t_valid_is_database_error_not_migration() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        let mut future = make_fact("reminder", vec![0.1; DIM]);
+        future.t_valid = Some(now + chrono::Duration::hours(1));
+        let id = fs.insert(&future).unwrap();
+
+        // Corrupt the stored t_valid to a non-RFC3339 string.
+        conn.execute(
+            "UPDATE facts SET t_valid = 'not-a-timestamp' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+
+        let err = fs.next_due_time(now, &[]).unwrap_err();
+        // A row TEXT->timestamp conversion failure is a Database error, NOT a
+        // schema migration failure.
+        assert!(
+            !matches!(err, MemoryError::Migration(_)),
+            "expected non-Migration error, got: {err:?}"
+        );
+        assert!(
+            matches!(err, MemoryError::Database(_)),
+            "expected Database error, got: {err:?}"
+        );
     }
 
     #[test]

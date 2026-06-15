@@ -689,10 +689,16 @@ fn handle_query(
     if let Some(scope) = get_str(&args, "scope") {
         let scope_mode = get_str(&args, "scope_mode").unwrap_or_else(|| "subtree".to_owned());
         query = match scope_mode.as_str() {
+            "subtree" => query.scope_subtree(scope),
             "exact" => query.scope_exact(scope),
             "ancestors" => query.scope_ancestors(scope),
             "inherited" => query.scope_inherited(scope),
-            _ => query.scope_subtree(scope),
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown scope_mode: {other}"),
+                    None,
+                ));
+            }
         };
     }
 

@@ -79,11 +79,12 @@ impl SessionExtractor for KeywordExtractor {
             "matched_keywords": episode.matched_keywords,
         });
 
-        match outcome {
-            SessionOutcome::Failure => metadata["session_outcome"] = "failure".into(),
-            SessionOutcome::Success => metadata["session_outcome"] = "success".into(),
-            SessionOutcome::Indeterminate => {}
-        }
+        let outcome_str = match outcome {
+            SessionOutcome::Failure => "failure",
+            SessionOutcome::Success => "success",
+            SessionOutcome::Indeterminate => "indeterminate",
+        };
+        metadata["session_outcome"] = outcome_str.into();
 
         Ok(vec![ExtractedFact {
             content,
@@ -178,6 +179,16 @@ mod tests {
         assert_eq!(facts[0].fact_type, FactType::Episodic);
         assert!((facts[0].importance - 0.4).abs() < f64::EPSILON);
         assert_eq!(facts[0].metadata["session_outcome"], "failure");
+    }
+
+    #[test]
+    fn keyword_extractor_indeterminate_sets_outcome_key() {
+        let ep = make_episode(EpisodeCategory::Bug, "investigate", "unclear");
+        let ext = KeywordExtractor;
+        let facts = ext.extract(&ep, &SessionOutcome::Indeterminate).unwrap();
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].metadata["session_outcome"], "indeterminate");
     }
 
     #[test]

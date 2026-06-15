@@ -101,8 +101,10 @@ pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
             println!("edges.active={}", stats.edges.active);
             println!("events.total={}", stats.events.total);
             println!("scopes.total={}", stats.scopes.total);
+            println!("scopes.max_depth={}", stats.scopes.max_depth);
             println!("summaries.total={}", stats.summaries.total);
             println!("storage.size_bytes={}", stats.storage.main_db_bytes);
+            println!("storage.page_count={}", stats.storage.page_count);
         }
     }
 

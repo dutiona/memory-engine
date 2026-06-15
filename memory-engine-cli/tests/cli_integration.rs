@@ -112,6 +112,61 @@ fn stats_plain_output() {
         .stdout(predicate::str::contains("facts.active=3"));
 }
 
+#[test]
+fn stats_plain_includes_max_depth_and_page_count() {
+    // Seed a fact under a nested scope so max_depth > 0 is observable.
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    let config = memory_engine::EngineConfig::new(db_path.clone(), 4);
+    let engine = memory_engine::MemoryEngine::open(&config).unwrap();
+
+    struct FakeEmbed;
+    impl memory_engine::EmbeddingProvider for FakeEmbed {
+        fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
+            Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
+    }
+
+    engine
+        .add_fact(
+            &memory_engine::AddFactRequest {
+                content: "scoped fact".into(),
+                fact_type: memory_engine::FactType::Semantic,
+                source_event_id: None,
+                scope: Some("project/sub".into()),
+                opts: None,
+            },
+            &FakeEmbed,
+            None,
+        )
+        .unwrap();
+
+    // Ground the expected max_depth via the JSON projection.
+    let expected_max_depth = engine.statistics().unwrap().scopes.max_depth;
+    assert!(
+        expected_max_depth > 0,
+        "nested scope should produce max_depth > 0"
+    );
+    drop(engine);
+
+    // Plain output must include both scopes.max_depth and storage.page_count.
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "plain",
+            "stats",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "scopes.max_depth={expected_max_depth}"
+        )))
+        .stdout(predicate::str::contains("storage.page_count="));
+}
+
 // --- inspect ---
 
 #[test]
