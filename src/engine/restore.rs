@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::error::{MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::pool::ConnectionPool;
 use crate::store::schema::get_config;
 use crate::store::upcaster::UpcasterRegistry;
@@ -21,9 +21,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Io` / `MemoryError::Serialization` on read failure.
     pub fn restore_json(snapshot_path: &Path, config: &EngineConfig) -> Result<Self> {
         if config.path.exists() {
-            return Err(MemoryError::Conflict(
-                "target database path already exists".into(),
-            ));
+            return Err(MemoryError::Conflict(ConflictError::TargetExists));
         }
 
         let snapshot = crate::inspect::restore::read_snapshot(snapshot_path)?;
@@ -111,9 +109,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::EmbeddingDimension` on dimension mismatch.
     pub fn restore_sqlite(backup_path: &Path, config: &EngineConfig) -> Result<Self> {
         if config.path.exists() {
-            return Err(MemoryError::Conflict(
-                "target database path already exists".into(),
-            ));
+            return Err(MemoryError::Conflict(ConflictError::TargetExists));
         }
         // Use `is_file()` (not `exists()`): a directory passed as the backup
         // source would pass an `exists()` guard and then fail deep inside

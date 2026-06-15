@@ -6,7 +6,7 @@ use std::path::Path;
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::error::{MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
@@ -201,7 +201,7 @@ pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
         if let Ok(target) = std::fs::canonicalize(path) {
             if target == source {
                 return Err(MemoryError::Conflict(
-                    "dump target resolves to the live database file".to_string(),
+                    ConflictError::DumpTargetIsLiveDatabase,
                 ));
             }
         }

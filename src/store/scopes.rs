@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::types::ScopeNode;
 
 /// CRUD operations for the `scopes` table.
@@ -76,24 +76,24 @@ impl<'a> ScopeStore<'a> {
     fn validate_label(label: &str) -> Result<()> {
         let trimmed = label.trim();
         if trimmed.is_empty() {
-            return Err(MemoryError::Conflict(
+            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
                 "scope label must not be empty".into(),
-            ));
+            )));
         }
         if trimmed.contains('/') {
-            return Err(MemoryError::Conflict(
+            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
                 "scope label must not contain '/'".into(),
-            ));
+            )));
         }
         if trimmed.len() > 256 {
-            return Err(MemoryError::Conflict(
+            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
                 "scope label must be at most 256 bytes".into(),
-            ));
+            )));
         }
         if trimmed != label {
-            return Err(MemoryError::Conflict(
+            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
                 "scope label must not have leading/trailing whitespace".into(),
-            ));
+            )));
         }
         Ok(())
     }
@@ -107,7 +107,9 @@ impl<'a> ScopeStore<'a> {
     pub fn ensure_path(&self, path: &str) -> Result<i64> {
         let segments: Vec<&str> = path.split('/').collect();
         if segments.is_empty() {
-            return Err(MemoryError::Conflict("scope path must not be empty".into()));
+            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
+                "scope path must not be empty".into(),
+            )));
         }
 
         let mut parent_id: i64 = 1; // root

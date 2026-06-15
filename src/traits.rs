@@ -308,22 +308,24 @@ impl ForgetPolicy {
     ///
     /// Returns `MemoryError::Conflict` if any parameter is out of range.
     pub fn validate(&self) -> Result<()> {
-        use crate::error::MemoryError;
+        use crate::error::{ConflictError, MemoryError};
 
         if !self.half_life_days.is_finite() || self.half_life_days <= 0.0 {
-            return Err(MemoryError::Conflict("half_life_days must be > 0".into()));
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                "half_life_days must be > 0".into(),
+            )));
         }
         for (ft, &hl) in &self.half_life_overrides {
             if !hl.is_finite() || hl <= 0.0 {
-                return Err(MemoryError::Conflict(format!(
-                    "half_life for {ft:?} must be > 0"
+                return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                    format!("half_life for {ft:?} must be > 0"),
                 )));
             }
         }
         if !(0.0..=1.0).contains(&self.min_importance) {
-            return Err(MemoryError::Conflict(
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
                 "min_importance must be in [0, 1]".into(),
-            ));
+            )));
         }
         if !self.recency_weight.is_finite()
             || !self.frequency_weight.is_finite()
@@ -334,7 +336,9 @@ impl ForgetPolicy {
             || self.graph_degree_weight < 0.0
             || self.base_importance_weight < 0.0
         {
-            return Err(MemoryError::Conflict("weights must be >= 0".into()));
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                "weights must be >= 0".into(),
+            )));
         }
         // Note: weights intentionally do NOT need to sum to 1.0 (ADR-0006).
         // Each signal is independently normalized to [0,1] via ln_1p + ceilings,
@@ -707,7 +711,9 @@ mod tests {
         struct Failing;
         impl EmbeddingProvider for Failing {
             fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
-                Err(crate::error::MemoryError::Conflict("boom".into()))
+                Err(crate::error::MemoryError::Conflict(
+                    crate::error::ConflictError::Arbitration("boom".into()),
+                ))
             }
         }
         assert!(Failing.embed_batch(&["a"]).is_err());
