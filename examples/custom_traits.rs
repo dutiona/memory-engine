@@ -73,7 +73,7 @@ impl ConflictArbiter for RecencyArbiter {
 // Example walkthrough kept linear for readability rather than split into helpers.
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), MemoryError> {
-    let engine = MemoryEngine::open_memory(4)?;
+    let engine = MemoryEngine::builder(4).build()?;
     let embedder = SimpleEmbedder;
 
     // Add some facts

@@ -3103,6 +3103,98 @@ fn outcome_display() {
     assert_eq!(Outcome::Neutral.to_string(), "neutral");
 }
 
+// --- MemoryEngineBuilder (#113) ---
+
+#[test]
+fn builder_in_memory_matches_open_memory() {
+    // No `.path()` => in-memory engine, identical to `open_memory`.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    assert_eq!(engine.embed_dim, DIM);
+    assert!(engine.reranker_name().is_none());
+    // In-memory pool has no backing file.
+    assert!(engine.pool.path().is_none());
+}
+
+#[test]
+fn builder_file_backed_matches_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("builder.db");
+    let engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    assert_eq!(engine.embed_dim, DIM);
+    assert!(engine.pool.path().is_some());
+    // The file was created on disk.
+    assert!(path.exists());
+}
+
+#[test]
+fn builder_wires_reranker() {
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(ReverseReranker))
+        .build()
+        .unwrap();
+    assert_eq!(engine.reranker_name(), Some("reverse"));
+}
+
+#[test]
+fn builder_wires_search_config() {
+    let engine = MemoryEngine::builder(DIM)
+        .search_config(SearchConfig { ann_threshold: 0 })
+        .build()
+        .unwrap();
+    // Search config flows through to the engine.
+    assert_eq!(
+        engine.search_config.as_ref().map(|c| c.ann_threshold),
+        Some(0),
+        "search_config should be threaded through build()"
+    );
+}
+
+#[test]
+fn builder_read_only_rejects_missing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("absent.db");
+    // read_only on a non-existent file fails, exactly like `open` with a
+    // read-only `EngineConfig`.
+    let result = MemoryEngine::builder(DIM)
+        .path(&path)
+        .read_only(true)
+        .build();
+    assert!(result.is_err());
+}
+
+#[test]
+fn builder_read_only_opens_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ro.db");
+    // First create it read-write.
+    {
+        let _engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    }
+    // Then re-open read-only.
+    let engine = MemoryEngine::builder(DIM)
+        .path(&path)
+        .read_only(true)
+        .build()
+        .unwrap();
+    assert_eq!(engine.embed_dim, DIM);
+    assert!(engine.pool.is_read_only());
+}
+
+#[test]
+fn builder_embed_dim_mismatch_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dim.db");
+    {
+        let _engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    }
+    // Re-opening with a different embed_dim must fail (parity with `open`).
+    let err = MemoryEngine::builder(DIM + 1)
+        .path(&path)
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, MemoryError::Migration(_)));
+}
+
 mod snapshot_integration {
     use super::*;
 
