@@ -230,7 +230,7 @@ fn restore_facts(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
     )?;
     for fact in &snapshot.facts {
         let embedding_blob = serialize_embedding(&fact.embedding);
-        let ft = format!("{:?}", fact.fact_type).to_lowercase();
+        let ft = crate::store::facts::fact_type_to_str(&fact.fact_type);
         let t_created = fact.t_created.to_rfc3339();
         let t_expired = fact.t_expired.map(|dt| dt.to_rfc3339());
         let t_valid = fact.t_valid.map(|dt| dt.to_rfc3339());
@@ -342,7 +342,7 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         )?;
         for summary in &snapshot.summaries {
             let embedding_blob = serialize_embedding(&summary.embedding);
-            let level = format!("{:?}", summary.level).to_lowercase();
+            let level = crate::store::summaries::level_to_str(&summary.level);
             let source_ids = serde_json::to_string(&summary.source_fact_ids)?;
             let created = summary.created_at.to_rfc3339();
             stmt.execute(rusqlite::params![
@@ -438,7 +438,7 @@ mod tests {
     use crate::store::schema::{get_config, init_schema, migrate, open_memory};
     use crate::traits::EmbeddingProvider;
     use crate::types::{AddFactRequest, FactType};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     const DIM: usize = 4;
 
@@ -750,6 +750,190 @@ mod tests {
         std::fs::write(&path, "not valid json{{{").unwrap();
         let err = read_snapshot(&path).unwrap_err();
         assert!(matches!(err, MemoryError::Serialization(_)));
+    }
+
+    // --- Persisted-format serialization tests (super-qa #505) ---
+
+    /// Equivalence guard: documents that the canonical serializers and the
+    /// historical `Debug + to_lowercase` shape coincide on every current
+    /// variant. This intentionally encodes the coincidence so the test fails
+    /// the day a multi-word or renamed variant breaks it — the latent footgun
+    /// the restore path used to rely on.
+    #[test]
+    fn canonical_serializers_match_debug_lowercase() {
+        use crate::store::facts::fact_type_to_str;
+        use crate::store::summaries::level_to_str;
+        use crate::types::{ConsolidationLevel, FactType};
+
+        for ft in [FactType::Episodic, FactType::Semantic, FactType::Procedural] {
+            assert_eq!(
+                fact_type_to_str(&ft),
+                format!("{ft:?}").to_lowercase(),
+                "fact_type_to_str diverged from Debug+to_lowercase for {ft:?}"
+            );
+        }
+
+        for level in [
+            ConsolidationLevel::Local,
+            ConsolidationLevel::Cluster,
+            ConsolidationLevel::Global,
+        ] {
+            assert_eq!(
+                level_to_str(&level),
+                format!("{level:?}").to_lowercase(),
+                "level_to_str diverged from Debug+to_lowercase for {level:?}"
+            );
+        }
+    }
+
+    /// On-disk cross-path compatibility: a fact written via `FactStore::insert`
+    /// and the same `FactType` written via `restore_facts` must produce the
+    /// identical `fact_type` column string. Likewise for a summary's `level`
+    /// column. Guards against the restore path drifting from the canonical
+    /// write path (the read-side `str_to_*` parsers only accept the canonical
+    /// strings).
+    #[test]
+    fn restore_writes_canonical_column_strings() {
+        use crate::store::facts::FactStore;
+        use crate::types::{ConsolidationLevel, FactType, NewFact};
+        use chrono::Utc;
+
+        // 1. Write one fact per FactType through the canonical insert path and
+        //    record the raw on-disk fact_type column string.
+        let canon = open_memory().unwrap();
+        init_schema(&canon).unwrap();
+        migrate(&canon, None).unwrap();
+        let store = FactStore::new(&canon, DIM);
+        let now = Utc::now();
+        let mut canonical_ft: HashMap<FactType, String> = HashMap::new();
+        for ft in [FactType::Episodic, FactType::Semantic, FactType::Procedural] {
+            let id = store
+                .insert(&NewFact {
+                    content: format!("fact {ft:?}"),
+                    content_hash: format!("ch{ft:?}"),
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                    fact_type: ft,
+                    t_created: now,
+                    t_expired: None,
+                    t_valid: None,
+                    t_invalid: None,
+                    source_event_id: None,
+                    importance: 0.0,
+                    access_count: 0,
+                    last_accessed: now,
+                    metadata: serde_json::json!({}),
+                    scope_id: 1,
+                    is_pinned: false,
+                })
+                .unwrap();
+            let col: String = canon
+                .query_row("SELECT fact_type FROM facts WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            canonical_ft.insert(ft, col);
+        }
+
+        // 2. Build a snapshot whose facts cover every FactType and whose
+        //    summaries cover every ConsolidationLevel, then restore it into a
+        //    fresh DB.
+        let make_fact = |id: i64, ft: FactType| crate::types::Fact {
+            id,
+            content: format!("snap {ft:?}"),
+            content_hash: format!("h{id}"),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            fact_type: ft,
+            t_created: now,
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            importance: 0.0,
+            access_count: 0,
+            last_accessed: now,
+            metadata: serde_json::json!({}),
+            scope_id: 1,
+            is_pinned: false,
+            importance_score: 0.0,
+            surfaced_at: None,
+        };
+        let make_summary = |id: i64, level: ConsolidationLevel| crate::types::Summary {
+            id,
+            content: format!("summary {level:?}"),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            level,
+            source_fact_ids: vec![],
+            created_at: now,
+            scope_id: 1,
+        };
+        let snapshot = EngineSnapshot {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            storage_epoch: STORAGE_EPOCH,
+            embed_dim: DIM,
+            facts: vec![
+                make_fact(1, FactType::Episodic),
+                make_fact(2, FactType::Semantic),
+                make_fact(3, FactType::Procedural),
+            ],
+            edges: vec![],
+            summaries: vec![
+                make_summary(1, ConsolidationLevel::Local),
+                make_summary(2, ConsolidationLevel::Cluster),
+                make_summary(3, ConsolidationLevel::Global),
+            ],
+            scopes: vec![],
+            events: vec![],
+            lineage: vec![],
+            config: BTreeMap::new(),
+        };
+
+        let restored = open_memory().unwrap();
+        init_schema(&restored).unwrap();
+        migrate(&restored, None).unwrap();
+        restore_snapshot_into(&restored, &snapshot).unwrap();
+
+        // 3a. Raw fact_type column strings must be the canonical lowercase
+        //     names AND must match the canonical insert path byte-for-byte.
+        for (ft, expected_literal) in [
+            (FactType::Episodic, "episodic"),
+            (FactType::Semantic, "semantic"),
+            (FactType::Procedural, "procedural"),
+        ] {
+            let col: String = restored
+                .query_row(
+                    "SELECT fact_type FROM facts WHERE content = ?1",
+                    [format!("snap {ft:?}")],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                col, expected_literal,
+                "restore wrote wrong fact_type for {ft:?}"
+            );
+            assert_eq!(
+                col, canonical_ft[&ft],
+                "restore vs FactStore::insert disagree on fact_type column for {ft:?}"
+            );
+        }
+
+        // 3b. Raw level column strings must be the canonical lowercase names.
+        for (level, expected_literal) in [
+            (ConsolidationLevel::Local, "local"),
+            (ConsolidationLevel::Cluster, "cluster"),
+            (ConsolidationLevel::Global, "global"),
+        ] {
+            let col: String = restored
+                .query_row(
+                    "SELECT level FROM summaries WHERE content = ?1",
+                    [format!("summary {level:?}")],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                col, expected_literal,
+                "restore wrote wrong level for {level:?}"
+            );
+        }
     }
 
     // --- Serde backward-compat test ---
