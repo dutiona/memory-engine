@@ -103,18 +103,18 @@ pub fn prune(
     // decay-exempt fact types are unforgettable — they bypass the expiry
     // filter entirely (but still get scores materialized and count in
     // `facts_evaluated`).
-    let scored: Vec<(i64, f64)> = active_facts
+    let scored: Vec<f64> = active_facts
         .iter()
         .map(|fact| {
             let degree = graph.degree(fact.id);
-            (fact.id, compute_importance(fact, degree, now, policy))
+            compute_importance(fact, degree, now, policy)
         })
         .collect();
 
     let to_expire: Vec<i64> = active_facts
         .iter()
         .zip(&scored)
-        .filter_map(|(fact, &(_, score))| {
+        .filter_map(|(fact, &score)| {
             if fact.is_pinned || policy.is_decay_exempt(&fact.fact_type) {
                 return None;
             }
@@ -128,8 +128,8 @@ pub fn prune(
 
     // Materialize importance scores for all active facts (reusing the
     // scores computed above).
-    for &(fact_id, score) in &scored {
-        fact_store.update_importance_score(fact_id, score)?;
+    for (fact, &score) in active_facts.iter().zip(&scored) {
+        fact_store.update_importance_score(fact.id, score)?;
     }
 
     // Expire low-importance unpinned facts
