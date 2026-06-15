@@ -81,7 +81,7 @@ pub fn resolve_conflict(
         last_accessed: new_fact.last_accessed,
         metadata: new_fact.metadata.clone(),
         is_pinned: new_fact.is_pinned,
-        importance_score: 0.5, // placeholder — fact not yet scored; see ConflictArbiter doc
+        importance_score: crate::types::Fact::UNSCORED_IMPORTANCE,
         surfaced_at: None,
     };
 
