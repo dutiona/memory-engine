@@ -183,29 +183,94 @@ fn overlaps(spans: &[Span], a_start: usize, a_end: usize) -> bool {
 /// *enumerated* and matched literally with near-zero false positives.
 ///
 /// Runs first so an author-known value wins priority over any signature rule.
-/// Literals shorter than [`DENYLIST_MIN_LEN`] are skipped (over-redaction guard).
-/// The denylist values themselves are supplied at runtime from a gitignored
-/// source and are never compiled into this crate.
+/// Literals shorter than [`DENYLIST_MIN_LEN`] **bytes** are skipped (over-redaction
+/// guard; byte length so a short-char/multibyte secret the author listed is honored).
+/// The denylist values themselves are supplied at runtime from a gitignored source
+/// and are never compiled into this crate.
+///
+/// Matching is authoritative *within* this detector: every occurrence of every
+/// literal is collected and overlapping/extending ranges are **merged** into maximal
+/// spans before emission, so an author who enumerates overlapping secrets (a token and
+/// a longer line containing it; two secrets sharing an interior region) gets full
+/// coverage regardless of iteration order — no partial-overlap tail leak. Matches that
+/// fall inside an existing `[REDACTED:...]` placeholder are skipped so re-running on
+/// already-redacted text is idempotent even when a literal collides with placeholder text.
 fn detect_denylist(text: &str, denylist: &[String], spans: &mut Vec<Span>) {
+    let placeholders = placeholder_spans(text);
+
+    // 1. Collect every match range for every literal (≥ DENYLIST_MIN_LEN bytes),
+    //    skipping any match inside an existing placeholder.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
     for literal in denylist {
-        if literal.chars().count() < DENYLIST_MIN_LEN {
+        if literal.len() < DENYLIST_MIN_LEN {
             continue;
         }
         let mut search_start = 0;
         while let Some(rel) = text[search_start..].find(literal.as_str()) {
             let start = search_start + rel;
             let end = start + literal.len();
-            if !overlaps(spans, start, end) {
-                spans.push(Span {
-                    start,
-                    end,
-                    rule: "denylist",
-                });
+            if !range_overlaps(&placeholders, start, end) {
+                ranges.push((start, end));
             }
             // Advance past this match; guard against a zero-width step.
             search_start = end.max(start + 1);
         }
     }
+    if ranges.is_empty() {
+        return;
+    }
+
+    // 2. Merge truly-overlapping ranges into maximal spans (sorted by start; merge
+    //    when the next range starts strictly before the current end — adjacent,
+    //    non-overlapping ranges stay distinct).
+    ranges.sort_unstable();
+    let mut cur = ranges[0];
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for &(s, e) in &ranges[1..] {
+        if s < cur.1 {
+            cur.1 = cur.1.max(e);
+        } else {
+            merged.push(cur);
+            cur = (s, e);
+        }
+    }
+    merged.push(cur);
+
+    // 3. Emit merged spans (denylist runs first, so `spans` is normally empty here;
+    //    the overlap guard keeps the non-overlap invariant if ordering ever changes).
+    for (start, end) in merged {
+        if !overlaps(spans, start, end) {
+            spans.push(Span {
+                start,
+                end,
+                rule: "denylist",
+            });
+        }
+    }
+}
+
+/// Byte ranges of existing `[REDACTED:<rule>]` placeholders, so the denylist detector
+/// never re-redacts inside a prior pass's output (idempotency). The other detectors are
+/// naturally placeholder-safe; only literal denylist matching can collide with one.
+fn placeholder_spans(text: &str) -> Vec<(usize, usize)> {
+    const OPEN: &str = "[REDACTED:";
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(OPEN) {
+        let start = from + rel;
+        let Some(close_rel) = text[start..].find(']') else {
+            break;
+        };
+        let end = start + close_rel + 1;
+        out.push((start, end));
+        from = end;
+    }
+    out
+}
+
+/// Returns true if `[start, end)` overlaps any `(s, e)` range in `ranges`.
+fn range_overlaps(ranges: &[(usize, usize)], start: usize, end: usize) -> bool {
+    ranges.iter().any(|&(s, e)| start < e && end > s)
 }
 
 // ── Detector 1: provider-prefix ──────────────────────────────────────────────
@@ -616,11 +681,12 @@ pub fn redact_entries_with_denylist(
 
 // ── Author-seeded denylist loading (#51) ──────────────────────────────────────
 
-/// Environment variable naming the **gitignored** file of author-known secret literals.
+/// Environment variable naming a file of author-known secret literals, one per line.
 ///
-/// One secret per line. The recommended source: the *path* is in the environment, but
-/// the secret values live only in the gitignored file — never in the repo, never in the
-/// process table.
+/// Only the *path* enters the environment; the secret values never do — they live in
+/// the file alone. That file MUST be kept out of version control (caller's
+/// responsibility, as the path may point anywhere); `.secrets-denylist` at the repo root
+/// is pre-listed in `.gitignore` as a safe default.
 pub const DENYLIST_ENV_VAR: &str = "ME_REDACT_DENYLIST_FILE";
 
 /// Parse denylist file contents into literals: one secret per line, trimmed,
@@ -635,12 +701,16 @@ fn parse_denylist(contents: &str) -> Vec<String> {
         .collect()
 }
 
-/// Load the author-seeded secret denylist from the gitignored file named by
-/// [`DENYLIST_ENV_VAR`].
+/// Load the author-seeded secret denylist from the file named by [`DENYLIST_ENV_VAR`].
 ///
-/// Returns an empty list (→ signatures-only mode) when the variable is unset.
-/// The referenced file is the ONLY place real secrets live; it MUST be gitignored
-/// and never committed. Feed the result to [`redact_entries_with_denylist`].
+/// Returns an empty list (→ signatures-only mode) when the variable is unset. The
+/// referenced file is the only place real secrets live and must be kept out of version
+/// control (caller's responsibility; `.secrets-denylist` is a pre-`.gitignore`d default).
+/// Feed the result to [`redact_entries_with_denylist`].
+///
+/// Note: an unset variable degrading to signatures-only is silent by design here (the
+/// gate is not yet wired); the #53 backfill caller should log how many literals loaded
+/// so "denylist active" vs "silently empty" is never inferred from a missing var.
 ///
 /// # Errors
 /// Returns an error only when the variable is set but its file cannot be read.
@@ -1257,5 +1327,85 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         assert!(!redacted[0].contains(secret));
         assert_eq!(report.entries_scanned, 2);
         assert_eq!(report.by_rule.get("denylist"), Some(&1));
+    }
+
+    // ── Regression tests (adversarial review of #545) ─────────────────────────
+
+    #[test]
+    fn denylist_overlapping_literals_no_tail_leak() {
+        // Finding 1: two enumerated secrets where one extends the other. The longer
+        // secret's tail must NOT leak (was: first-writer-wins + binary overlap reject
+        // dropped the longer match whole, leaving its tail bytes in the output).
+        let dl = vec![
+            "AKIASECRETONE".to_owned(),
+            "AKIASECRETONEXTRATAILBYTES".to_owned(),
+        ];
+        let (out, _) = redact_text_with_denylist("key=AKIASECRETONEXTRATAILBYTES end", &dl);
+        assert!(
+            !out.contains("XTRATAILBYTES"),
+            "longer secret tail leaked: {out}"
+        );
+        assert_eq!(out, "key=[REDACTED:denylist] end");
+    }
+
+    #[test]
+    fn denylist_interior_overlap_no_leak() {
+        // Finding 1 (distinct-secret variant): two secrets sharing an interior region,
+        // neither a substring of the other. Merged coverage must redact the whole span.
+        let dl = vec!["ABCDEFGHSECRET".to_owned(), "SECRETWXYZ1234".to_owned()];
+        let (out, _) = redact_text_with_denylist("ABCDEFGHSECRETWXYZ1234", &dl);
+        assert!(
+            !out.contains("WXYZ1234"),
+            "interior-overlap tail leaked: {out}"
+        );
+        assert_eq!(out, "[REDACTED:denylist]");
+    }
+
+    #[test]
+    fn denylist_does_not_reredact_inside_placeholder() {
+        // Finding 3: a denylist literal that collides with placeholder vocabulary must
+        // not re-redact an existing [REDACTED:...] placeholder (idempotency contract).
+        let already = "x [REDACTED:denylist] y";
+        let (out, findings) = redact_text_with_denylist(already, &["denylist".to_owned()]);
+        assert_eq!(out, already, "re-redacted inside placeholder: {out}");
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn denylist_redaction_is_idempotent() {
+        // Re-running redaction on already-redacted output with the same denylist is stable.
+        let secret = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let dl = vec![secret.to_owned()];
+        let (once, _) = redact_text_with_denylist(&format!("bare {secret} here"), &dl);
+        let (twice, findings2) = redact_text_with_denylist(&once, &dl);
+        assert_eq!(once, twice, "second pass changed output");
+        assert!(
+            findings2.is_empty(),
+            "second pass produced findings: {findings2:?}"
+        );
+    }
+
+    #[test]
+    fn denylist_honors_short_char_multibyte_secret() {
+        // Finding 2: 3 chars but 9 bytes — the byte-length guard must honor it
+        // (the old chars().count() guard wrongly skipped short-char/long-byte secrets).
+        let secret = "€€€";
+        assert_eq!(secret.chars().count(), 3);
+        assert!(secret.len() >= DENYLIST_MIN_LEN);
+        let (out, findings) =
+            redact_text_with_denylist(&format!("pw={secret}"), &[secret.to_owned()]);
+        assert!(!out.contains(secret), "multibyte secret survived: {out}");
+        assert!(findings.iter().any(|f| f.rule == "denylist"));
+    }
+
+    #[test]
+    fn denylist_min_len_boundary() {
+        // Byte-length guard boundary: 3 bytes skipped, 4 bytes honored.
+        let (out3, f3) = redact_text_with_denylist("abc xyz", &["abc".to_owned()]);
+        assert_eq!(out3, "abc xyz");
+        assert!(f3.is_empty());
+        let (out4, f4) = redact_text_with_denylist("abcd xyz", &["abcd".to_owned()]);
+        assert!(!out4.contains("abcd"));
+        assert!(f4.iter().any(|f| f.rule == "denylist"));
     }
 }
