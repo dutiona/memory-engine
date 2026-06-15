@@ -74,6 +74,11 @@ const HEX_CONTEXT_KEYS: &[&str] = &[
 /// Minimum hex run length to be considered a secret (when context-gated).
 const HEX_SECRET_MIN_LEN: usize = 32;
 
+/// Minimum length of an author-supplied denylist literal to be honored. Guards
+/// against a stray short/blank line in the (gitignored) denylist source matching
+/// everywhere and nuking the corpus. The author's real secrets are far longer.
+const DENYLIST_MIN_LEN: usize = 4;
+
 /// Minimum length of a prefix-detected token (prefix + body). Rejects bare/short matches
 /// that fire on ordinary words (e.g. `SG.`, `eyJournal`); real provider tokens are long
 /// (AWS `AKIA` + 16 = 20 is the shortest).
@@ -164,6 +169,43 @@ struct Span {
 /// Returns true if `[a_start, a_end)` overlaps with any span in `spans`.
 fn overlaps(spans: &[Span], a_start: usize, a_end: usize) -> bool {
     spans.iter().any(|s| a_start < s.end && a_end > s.start)
+}
+
+// ── Detector 0: author-seeded denylist (highest priority) ─────────────────────
+
+/// Redact every occurrence of each author-supplied known-secret literal.
+///
+/// This closes the residual gaps of the heuristic detectors for a **controlled
+/// single-author corpus**: bare hex (information-theoretically indistinguishable
+/// from a SHA/checksum) and arbitrary low-entropy tokens carry no prefix, context
+/// key, or entropy signal, so no signature can catch them without over-redacting
+/// non-secret data. But when the secret-holder is *known*, their secrets can be
+/// *enumerated* and matched literally with near-zero false positives.
+///
+/// Runs first so an author-known value wins priority over any signature rule.
+/// Literals shorter than [`DENYLIST_MIN_LEN`] are skipped (over-redaction guard).
+/// The denylist values themselves are supplied at runtime from a gitignored
+/// source and are never compiled into this crate.
+fn detect_denylist(text: &str, denylist: &[String], spans: &mut Vec<Span>) {
+    for literal in denylist {
+        if literal.chars().count() < DENYLIST_MIN_LEN {
+            continue;
+        }
+        let mut search_start = 0;
+        while let Some(rel) = text[search_start..].find(literal.as_str()) {
+            let start = search_start + rel;
+            let end = start + literal.len();
+            if !overlaps(spans, start, end) {
+                spans.push(Span {
+                    start,
+                    end,
+                    rule: "denylist",
+                });
+            }
+            // Advance past this match; guard against a zero-width step.
+            search_start = end.max(start + 1);
+        }
+    }
 }
 
 // ── Detector 1: provider-prefix ──────────────────────────────────────────────
@@ -468,8 +510,13 @@ fn detect_high_entropy(text: &str, spans: &mut Vec<Span>) {
 // ── Span collection + string reconstruction ───────────────────────────────────
 
 /// Run all detectors in priority order; collect non-overlapping spans.
-fn collect_spans(text: &str) -> Vec<Span> {
+///
+/// `denylist` holds author-supplied known-secret literals (empty for the
+/// signature-only path). Detector 0 (denylist) runs first so author-known
+/// values win priority over the heuristic rules.
+fn collect_spans(text: &str, denylist: &[String]) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
+    detect_denylist(text, denylist, &mut spans);
     detect_provider_prefix(text, &mut spans);
     detect_url_credential(text, &mut spans);
     detect_email(text, &mut spans);
@@ -515,11 +562,25 @@ fn rebuild(text: &str, spans: &[Span]) -> (String, Vec<Finding>) {
 /// re-redacted.
 #[must_use]
 pub fn redact_text(text: &str) -> (String, Vec<Finding>) {
+    redact_text_with_denylist(text, &[])
+}
+
+/// Redact secrets/PII from `text`, additionally redacting every author-supplied
+/// known-secret literal in `denylist` (priority over the signature rules).
+///
+/// Use this on a controlled corpus where the secret-holder can enumerate their
+/// own secrets: it closes the bare-hex / arbitrary-low-entropy gaps the
+/// signature detectors cannot (see [`detect_denylist`]). The `denylist` values
+/// are supplied at runtime from a gitignored source — never committed.
+///
+/// `redact_text(text)` == `redact_text_with_denylist(text, &[])`.
+#[must_use]
+pub fn redact_text_with_denylist(text: &str, denylist: &[String]) -> (String, Vec<Finding>) {
     // Idempotency: text that only contains placeholders is a no-op.
     // The detectors naturally avoid re-redacting because:
     //  - `[REDACTED:...]` does not match any prefix, email, hex, or entropy rule.
     // No special guard needed; the invariant holds by construction.
-    let spans = collect_spans(text);
+    let spans = collect_spans(text, denylist);
     rebuild(text, &spans)
 }
 
@@ -527,10 +588,23 @@ pub fn redact_text(text: &str) -> (String, Vec<Finding>) {
 /// returning the redacted entries and an auditable coverage report.
 #[must_use]
 pub fn redact_entries(entries: &[String]) -> (Vec<String>, RedactionReport) {
+    redact_entries_with_denylist(entries, &[])
+}
+
+/// Redact session entries, also redacting each author-supplied denylist literal.
+///
+/// This is the wired backfill path: callers load `denylist` from a gitignored
+/// source and pass it here in front of any bulk import (see `bootstrap`).
+/// `redact_entries(entries)` == `redact_entries_with_denylist(entries, &[])`.
+#[must_use]
+pub fn redact_entries_with_denylist(
+    entries: &[String],
+    denylist: &[String],
+) -> (Vec<String>, RedactionReport) {
     let mut report = RedactionReport::default();
     let mut redacted = Vec::with_capacity(entries.len());
     for entry in entries {
-        let (clean, findings) = redact_text(entry);
+        let (clean, findings) = redact_text_with_denylist(entry, denylist);
         report.entries_scanned += 1;
         for finding in &findings {
             report.record(&finding.rule);
@@ -538,6 +612,43 @@ pub fn redact_entries(entries: &[String]) -> (Vec<String>, RedactionReport) {
         redacted.push(clean);
     }
     (redacted, report)
+}
+
+// ── Author-seeded denylist loading (#51) ──────────────────────────────────────
+
+/// Environment variable naming the **gitignored** file of author-known secret literals.
+///
+/// One secret per line. The recommended source: the *path* is in the environment, but
+/// the secret values live only in the gitignored file — never in the repo, never in the
+/// process table.
+pub const DENYLIST_ENV_VAR: &str = "ME_REDACT_DENYLIST_FILE";
+
+/// Parse denylist file contents into literals: one secret per line, trimmed,
+/// skipping blank lines and `#`-comments. Pure (no I/O) so it is unit-tested
+/// without a temp file.
+fn parse_denylist(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Load the author-seeded secret denylist from the gitignored file named by
+/// [`DENYLIST_ENV_VAR`].
+///
+/// Returns an empty list (→ signatures-only mode) when the variable is unset.
+/// The referenced file is the ONLY place real secrets live; it MUST be gitignored
+/// and never committed. Feed the result to [`redact_entries_with_denylist`].
+///
+/// # Errors
+/// Returns an error only when the variable is set but its file cannot be read.
+pub fn load_secret_denylist() -> std::io::Result<Vec<String>> {
+    let Some(path) = std::env::var_os(DENYLIST_ENV_VAR) else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_denylist(&std::fs::read_to_string(path)?))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1022,5 +1133,129 @@ mod tests {
                 "context-gated hex missed in {line:?}: {out}"
             );
         }
+    }
+
+    // ── Author-seeded denylist (#51) ──────────────────────────────────────────
+    //
+    // For a controlled single-author corpus the signature gaps (bare hex ≡ checksum,
+    // arbitrary low-entropy tokens) are closed by matching the author's *enumerated*
+    // secrets literally — even with no prefix/context/entropy signal.
+
+    #[test]
+    fn denylist_catches_bare_hex_that_signatures_miss() {
+        // Same shape as `bare_sha256_not_redacted`: a 64-char bare hex with no key
+        // context. Signatures provably leave it alone — but if the author KNOWS this
+        // value is a real secret (e.g. a bare API key that happens to be hex), the
+        // denylist catches it.
+        let secret = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let text = format!("checksum: {secret}");
+
+        // Precondition: the existing pipeline does NOT catch it.
+        let (baseline, _) = redact_text(&text);
+        assert_eq!(
+            baseline, text,
+            "precondition: bare hex must be a signature gap"
+        );
+
+        // With the author's denylist, it IS redacted.
+        let denylist = vec![secret.to_owned()];
+        let (out, findings) = redact_text_with_denylist(&text, &denylist);
+        assert!(
+            !out.contains(secret),
+            "denylist failed to redact bare hex: {out}"
+        );
+        assert!(
+            findings.iter().any(|f| f.rule == "denylist"),
+            "no denylist finding; findings: {findings:?}"
+        );
+        assert_eq!(out, "checksum: [REDACTED:denylist]");
+    }
+
+    #[test]
+    fn denylist_catches_arbitrary_low_entropy_token() {
+        // A short, low-entropy, no-prefix token: invisible to every signature detector.
+        let secret = "hunter2-dev-pw";
+        let text = format!("db password is {secret} ok");
+        let (baseline, _) = redact_text(&text);
+        assert_eq!(
+            baseline, text,
+            "precondition: low-entropy token must be a gap"
+        );
+
+        let (out, findings) = redact_text_with_denylist(&text, &[secret.to_owned()]);
+        assert!(
+            !out.contains(secret),
+            "denylist missed low-entropy token: {out}"
+        );
+        assert!(findings.iter().any(|f| f.rule == "denylist"));
+    }
+
+    #[test]
+    fn empty_denylist_is_backward_compatible() {
+        // redact_text_with_denylist(text, &[]) must equal redact_text(text).
+        let text = "api_key=a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6 and craig@example.com";
+        assert_eq!(redact_text_with_denylist(text, &[]), redact_text(text));
+    }
+
+    #[test]
+    fn denylist_skips_short_entries_to_avoid_over_redaction() {
+        // A stray short/blank line in the (gitignored) denylist source must NOT nuke
+        // the corpus. Entries below DENYLIST_MIN_LEN are ignored.
+        let text = "the cat sat on the mat".to_owned();
+        let denylist = vec![String::new(), "a".to_owned(), "at".to_owned()];
+        let (out, findings) = redact_text_with_denylist(&text, &denylist);
+        assert_eq!(out, text, "short denylist entries over-redacted: {out}");
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn denylist_redacts_all_occurrences() {
+        let secret = "s3cr3t-token-value";
+        let text = format!("{secret} appears twice: {secret}");
+        let (out, findings) = redact_text_with_denylist(&text, &[secret.to_owned()]);
+        assert!(!out.contains(secret), "not all occurrences redacted: {out}");
+        assert_eq!(findings.iter().filter(|f| f.rule == "denylist").count(), 2);
+    }
+
+    #[test]
+    fn denylist_wins_priority_over_signature_rules() {
+        // A denylisted value that also matches a signature rule is tagged `denylist`
+        // (priority-0), not the signature rule — author knowledge is the strongest signal.
+        let secret = "ghp_0123456789abcdefghij0123456789abcdef";
+        let (_out, findings) = redact_text_with_denylist(secret, &[secret.to_owned()]);
+        assert!(findings.iter().any(|f| f.rule == "denylist"));
+        assert!(
+            !findings.iter().any(|f| f.rule == "github-pat"),
+            "signature rule won over denylist: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn parse_denylist_skips_blanks_and_comments() {
+        let contents = "\
+# my known secrets — gitignored, never committed
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+  hunter2-dev-pw
+# trailing comment
+";
+        let parsed = parse_denylist(contents);
+        assert_eq!(
+            parsed,
+            vec![
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+                "hunter2-dev-pw".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn redact_entries_with_denylist_tallies_denylist_rule() {
+        let secret = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let entries = vec![format!("bare: {secret}"), "clean line".to_owned()];
+        let (redacted, report) = redact_entries_with_denylist(&entries, &[secret.to_owned()]);
+        assert!(!redacted[0].contains(secret));
+        assert_eq!(report.entries_scanned, 2);
+        assert_eq!(report.by_rule.get("denylist"), Some(&1));
     }
 }
