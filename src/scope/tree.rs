@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use rusqlite::Connection;
 
@@ -77,10 +77,21 @@ impl ScopeTree {
     }
 
     /// Get ancestor `scope_ids` from leaf to root (inclusive).
+    ///
+    /// Cycle-safe: a malformed `parent_id` graph (e.g. a snapshot with a parent
+    /// cycle) would otherwise loop forever. We stop the walk the first time an
+    /// id repeats. For a valid (acyclic) tree this is byte-identical to a plain
+    /// parent-walk — no id ever repeats, so the guard never fires.
     pub fn ancestors(&self, scope_id: i64) -> Vec<i64> {
         let mut result = Vec::new();
         let mut current = Some(scope_id);
         while let Some(id) = current {
+            // Cycle guard: the ancestor chain is shallow (bounded by tree depth),
+            // so a linear scan of `result` is cheaper than a `HashSet` and needs
+            // no allocation.
+            if result.contains(&id) {
+                break; // cycle detected — id already visited
+            }
             result.push(id);
             current = self.nodes.get(&id).and_then(|n| n.parent_id);
         }
@@ -88,11 +99,20 @@ impl ScopeTree {
     }
 
     /// Get all descendant `scope_ids` (BFS, inclusive of start node).
+    ///
+    /// Cycle-safe: a malformed `children` graph with a cycle would otherwise
+    /// enqueue ids forever. We skip any id already visited. For a valid
+    /// (acyclic) tree this is byte-identical to a plain BFS — each node is
+    /// reachable on exactly one path, so the guard never skips a real node.
     pub fn subtree(&self, scope_id: i64) -> Vec<i64> {
         let mut result = Vec::new();
+        let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
         queue.push_back(scope_id);
         while let Some(id) = queue.pop_front() {
+            if !visited.insert(id) {
+                continue; // already visited — cycle protection
+            }
             result.push(id);
             if let Some(child_ids) = self.children.get(&id) {
                 for &cid in child_ids {
@@ -171,12 +191,18 @@ impl ScopeTree {
             return Some("/".to_string());
         }
 
-        // Walk ancestors (excluding root) and collect labels in reverse
+        // Walk ancestors (excluding root) and collect labels in reverse.
+        // Cycle-safe: stop if an id repeats so a malformed parent cycle cannot
+        // loop forever. For a valid tree no id repeats, so behavior is identical.
         let mut segments = Vec::new();
+        let mut seen = HashSet::new();
         let mut current = Some(scope_id);
         while let Some(id) = current {
             if id == Self::root_id() {
                 break;
+            }
+            if !seen.insert(id) {
+                break; // cycle detected — id already visited
             }
             let node = self.nodes.get(&id)?;
             segments.push(node.label.clone());
@@ -413,6 +439,71 @@ mod tests {
             children: HashMap::new(),
         };
         assert_eq!(tree.max_depth(), 0);
+    }
+
+    /// Hand-build a tiny tree with a `parent_id` cycle: 10 -> 11 -> 10.
+    /// A malformed/hostile snapshot or DB could yield such a graph; the
+    /// traversals must terminate rather than spin forever.
+    fn cyclic_tree() -> ScopeTree {
+        let mut nodes = HashMap::new();
+        let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
+        // 10's parent is 11, 11's parent is 10 — a 2-cycle.
+        nodes.insert(
+            10,
+            ScopeNode {
+                id: 10,
+                parent_id: Some(11),
+                label: "a:a".into(),
+                depth: 0,
+            },
+        );
+        nodes.insert(
+            11,
+            ScopeNode {
+                id: 11,
+                parent_id: Some(10),
+                label: "b:b".into(),
+                depth: 1,
+            },
+        );
+        children.entry(11).or_default().push(10);
+        children.entry(10).or_default().push(11);
+        ScopeTree { nodes, children }
+    }
+
+    #[test]
+    fn ancestors_terminates_on_cycle() {
+        let tree = cyclic_tree();
+        let anc = tree.ancestors(10);
+        // Must terminate and be bounded by the number of distinct nodes.
+        assert!(anc.len() <= tree.nodes.len(), "ancestors must be bounded");
+        // No id repeats — the cycle is broken on revisit.
+        let mut sorted = anc.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), anc.len(), "ancestors must not repeat ids");
+        assert!(anc.contains(&10));
+    }
+
+    #[test]
+    fn subtree_terminates_on_cycle() {
+        let tree = cyclic_tree();
+        let sub = tree.subtree(10);
+        assert!(sub.len() <= tree.nodes.len(), "subtree must be bounded");
+        let mut sorted = sub.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), sub.len(), "subtree must not repeat ids");
+        assert!(sub.contains(&10) && sub.contains(&11));
+    }
+
+    #[test]
+    fn path_for_id_terminates_on_cycle() {
+        let tree = cyclic_tree();
+        // The id is present, none of the cycle nodes is root, so the label
+        // walk would loop forever without cycle protection. It must return
+        // *something* finite (Some or None) and not hang.
+        let _ = tree.path_for_id(10);
     }
 
     mod proptest_scope {

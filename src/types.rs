@@ -117,6 +117,12 @@ fn default_origin_node_id() -> String {
     "local".to_string()
 }
 
+/// Default `scope_id` for a `Fact` deserialized from an archive that predates
+/// the scope column — the root scope (id 1). Keeps old `.pak` archives readable.
+fn default_root_scope_id() -> i64 {
+    1
+}
+
 /// A bi-temporal fact derived from events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fact {
@@ -134,8 +140,11 @@ pub struct Fact {
     pub access_count: i64,
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
+    #[serde(default = "default_root_scope_id")]
     pub scope_id: i64,
+    #[serde(default)]
     pub is_pinned: bool,
+    #[serde(default)]
     pub importance_score: f64,
     #[serde(default)]
     pub surfaced_at: Option<DateTime<Utc>>,
@@ -937,6 +946,36 @@ mod tests {
             .surfaced_at
             .expect("surfaced_at should deserialize when present");
         assert_eq!(ts.to_rfc3339(), "2026-03-15T12:00:00+00:00");
+    }
+
+    #[test]
+    fn serde_fact_legacy_archive_applies_field_defaults() {
+        // A Fact from a .pak archive predating scope_id/is_pinned/importance_score
+        // omits those fields; they must deserialize to defaults so old archives
+        // remain readable (super-qa #505 / read_pak backward-compat).
+        let json = r#"{
+            "id": 7,
+            "content": "legacy",
+            "content_hash": "h",
+            "embedding": [0.1],
+            "fact_type": "Semantic",
+            "t_created": "2024-01-01T00:00:00Z",
+            "t_expired": null,
+            "t_valid": null,
+            "t_invalid": null,
+            "source_event_id": null,
+            "importance": 0.9,
+            "access_count": 0,
+            "last_accessed": "2024-01-01T00:00:00Z",
+            "metadata": {}
+        }"#;
+        let fact: Fact = serde_json::from_str(json).unwrap();
+        assert_eq!(fact.scope_id, 1, "missing scope_id defaults to root (1)");
+        assert!(!fact.is_pinned, "missing is_pinned defaults to false");
+        assert_eq!(
+            fact.importance_score, 0.0,
+            "missing importance_score defaults to 0.0"
+        );
     }
 
     #[test]
