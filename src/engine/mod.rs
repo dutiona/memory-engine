@@ -232,7 +232,30 @@ impl MemoryEngineBuilder {
     ///
     /// [`path`]: MemoryEngineBuilder::path
     pub fn build(self) -> Result<MemoryEngine> {
+        // An in-memory engine has no file to open read-only; the combination is
+        // a logical contradiction. Reject it rather than silently ignoring the
+        // read_only flag on the no-path branch.
+        if self.read_only && self.path.is_none() {
+            return Err(MemoryError::Migration(
+                "in-memory engine cannot be opened read-only".to_string(),
+            ));
+        }
         if let Some(path) = self.path {
+            // Validate the path is a regular file up-front for a clear error: a
+            // directory (or, in read-only mode, a missing file) otherwise fails
+            // later with an opaque OS-level error.
+            if self.read_only && !path.is_file() {
+                return Err(MemoryError::NotFound(format!(
+                    "database file not found or is not a regular file: {}",
+                    path.display()
+                )));
+            }
+            if path.exists() && !path.is_file() {
+                return Err(MemoryError::NotFound(format!(
+                    "database path exists but is not a regular file: {}",
+                    path.display()
+                )));
+            }
             let config = EngineConfig {
                 path,
                 embed_dim: self.embed_dim,

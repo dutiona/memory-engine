@@ -3116,6 +3116,18 @@ fn builder_in_memory_matches_open_memory() {
 }
 
 #[test]
+fn builder_rejects_in_memory_read_only() {
+    // #543: read-only on an in-memory engine is a logical contradiction (there
+    // is no file to open read-only). build() must reject it up-front rather than
+    // silently ignoring the read_only flag on the no-path branch.
+    let err = MemoryEngine::builder(DIM)
+        .read_only(true)
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, MemoryError::Migration(_)));
+}
+
+#[test]
 fn builder_file_backed_matches_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("builder.db");
