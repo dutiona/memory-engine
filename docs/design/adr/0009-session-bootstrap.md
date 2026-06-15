@@ -54,6 +54,8 @@ Session outcome and session ID are stored in fact `metadata` JSON fields (`sessi
 
 **Trade-off:** Querying "all facts from failed sessions" requires JSON extraction in SQL (`json_extract(metadata, '$.session_outcome')`), which is slower than a column index. Acceptable for the current scale; a materialized column can be added later if needed.
 
+**Forward-compatibility note (super-qa #505):** Until this fix, `session_outcome` was written only for `Success`/`Failure` sessions and **omitted** for `Indeterminate` ones, so `json_extract(metadata, '$.session_outcome')` returned SQL `NULL` for indeterminate facts. It is now written as `"indeterminate"`. Pre-fix rows retain the absent key — SQL consumers must treat a _missing_ `$.session_outcome` as "unknown/legacy", not as a specific outcome.
+
 ## Consequences
 
 **Positive:**

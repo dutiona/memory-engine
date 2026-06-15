@@ -320,6 +320,49 @@ fn query_with_scope_parameters_accepted() {
     }
 }
 
+#[test]
+fn query_with_invalid_scope_mode_returns_error() {
+    let engine = make_engine();
+    let embedder = TestEmbedder { dim: DIM };
+
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Rust borrow checker ensures safety".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: Some("lang/rust".into()),
+                opts: None,
+            },
+            &embedder,
+            None,
+        )
+        .unwrap();
+
+    // An explicit but unknown scope_mode must error rather than silently
+    // falling back to subtree.
+    let result = tools::dispatch(
+        "memory_query",
+        args(json!({
+            "text": "Rust",
+            "mode": "fts",
+            "scope": "lang/rust",
+            "scope_mode": "bogus",
+        })),
+        &engine,
+        None,
+        None,
+        DIM,
+        &memory_engine::ActivityFilterConfig::default(),
+    );
+    let err = result.expect_err("invalid scope_mode should error");
+    assert!(
+        err.message.contains("scope_mode"),
+        "error message should mention scope_mode, got: {}",
+        err.message
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fact type filter with mode
 // ---------------------------------------------------------------------------
