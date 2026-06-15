@@ -52,7 +52,8 @@ impl EmbeddingProvider for TestEmbedder {
 // MockSummaryGenerator — deterministic summarization
 // ---------------------------------------------------------------------------
 
-/// Mock summarizer: joins fact content with "; " and embeds via blake3.
+/// Mock summarizer: joins fact content with "; ". Summary embedding is performed
+/// by the [`TestEmbedder`] injected separately into consolidation (issue #116).
 pub struct MockSummaryGenerator;
 
 impl SummaryGenerator for MockSummaryGenerator {
@@ -62,10 +63,6 @@ impl SummaryGenerator for MockSummaryGenerator {
             .map(|f| f.content.as_str())
             .collect::<Vec<_>>()
             .join("; "))
-    }
-
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        TestEmbedder.embed(text)
     }
 }
 

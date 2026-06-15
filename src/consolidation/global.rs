@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::store::summaries::SummaryStore;
-use crate::traits::SummaryGenerator;
+use crate::traits::{EmbeddingProvider, SummaryGenerator};
 use crate::types::{ConsolidationLevel, Fact, NewSummary};
 
 /// Global integration pass.
@@ -15,13 +15,14 @@ use crate::types::{ConsolidationLevel, Fact, NewSummary};
 /// # Errors
 ///
 /// Returns `MemoryError::Database` on SQL failure, or propagates errors from
-/// the `SummaryGenerator`.
-/// Returns `MemoryError::EmbeddingDimension` if the generator returns an embedding
+/// the `SummaryGenerator` or `EmbeddingProvider`.
+/// Returns `MemoryError::EmbeddingDimension` if the embedder returns an embedding
 /// whose length does not match `embed_dim`.
 /// Returns `MemoryError::Serialization` on JSON serialization failure.
 pub fn global_integration(
     conn: &Connection,
     generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
     embed_dim: usize,
 ) -> Result<usize> {
     let summary_store = SummaryStore::new(conn, embed_dim);
@@ -60,7 +61,7 @@ pub fn global_integration(
         .collect();
 
     let global_text = generator.summarize(&pseudo_facts)?;
-    let global_embedding = generator.embed(&global_text)?;
+    let global_embedding = embedder.embed(&global_text)?;
     if global_embedding.len() != embed_dim {
         return Err(crate::error::MemoryError::EmbeddingDimension {
             expected: embed_dim,
@@ -101,9 +102,8 @@ mod tests {
 
     use crate::store::schema::{init_schema, open_memory};
 
-    struct MockGenerator {
-        embed_dim: usize,
-    }
+    /// Mock generator that concatenates cluster-summary contents.
+    struct MockGenerator;
 
     impl SummaryGenerator for MockGenerator {
         fn summarize(&self, facts: &[Fact]) -> Result<String> {
@@ -113,7 +113,14 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" | "))
         }
+    }
 
+    /// Mock embedder returning a fixed-dimension constant vector.
+    struct MockEmbedder {
+        embed_dim: usize,
+    }
+
+    impl EmbeddingProvider for MockEmbedder {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![0.5; self.embed_dim])
         }
@@ -140,8 +147,9 @@ mod tests {
                 .unwrap();
         }
 
-        let mock_gen = MockGenerator { embed_dim: dim };
-        let count = global_integration(&conn, &mock_gen, dim).unwrap();
+        let mock_gen = MockGenerator;
+        let mock_embed = MockEmbedder { embed_dim: dim };
+        let count = global_integration(&conn, &mock_gen, &mock_embed, dim).unwrap();
         assert_eq!(count, 1);
 
         let global = store.list_by_level(&ConsolidationLevel::Global).unwrap();
@@ -160,8 +168,9 @@ mod tests {
         init_schema(&conn).unwrap();
         let dim = 4;
 
-        let mock_gen = MockGenerator { embed_dim: dim };
-        let count = global_integration(&conn, &mock_gen, dim).unwrap();
+        let mock_gen = MockGenerator;
+        let mock_embed = MockEmbedder { embed_dim: dim };
+        let count = global_integration(&conn, &mock_gen, &mock_embed, dim).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -183,11 +192,12 @@ mod tests {
             })
             .unwrap();
 
-        let mock_gen = MockGenerator { embed_dim: dim };
+        let mock_gen = MockGenerator;
+        let mock_embed = MockEmbedder { embed_dim: dim };
 
         // Run twice
-        global_integration(&conn, &mock_gen, dim).unwrap();
-        global_integration(&conn, &mock_gen, dim).unwrap();
+        global_integration(&conn, &mock_gen, &mock_embed, dim).unwrap();
+        global_integration(&conn, &mock_gen, &mock_embed, dim).unwrap();
 
         let global = store.list_by_level(&ConsolidationLevel::Global).unwrap();
         assert_eq!(global.len(), 1); // Not 2

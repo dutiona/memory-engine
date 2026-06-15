@@ -6,7 +6,8 @@ use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::store::facts::FactStore;
 use crate::store::lineage::LineageStore;
 use crate::traits::{
-    ConsolidationConfig, ConsolidationStats, ForgetPolicy, PruneStats, SummaryGenerator,
+    ConsolidationConfig, ConsolidationStats, EmbeddingProvider, ForgetPolicy, PruneStats,
+    SummaryGenerator,
 };
 use crate::types::{CycleReport, Fact, NewFact, NewLineageRecord, PromoteRequest, PromotionResult};
 
@@ -69,6 +70,8 @@ impl<'a> DreamContext<'a> {
     /// Run engine-internal consolidation (dedup → cluster → global summaries).
     ///
     /// Delegates to `MemoryEngine::consolidate()`, which manages its own locks.
+    /// `generator` produces the summary text; `embedder` projects it into the
+    /// fact vector space (issue #116).
     ///
     /// # Errors
     ///
@@ -76,9 +79,10 @@ impl<'a> DreamContext<'a> {
     pub fn consolidate(
         &self,
         generator: &dyn SummaryGenerator,
+        embedder: &dyn EmbeddingProvider,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        self.engine.consolidate(generator, config)
+        self.engine.consolidate(generator, embedder, config)
     }
 
     /// Run Ebbinghaus decay + pruning on stale facts.

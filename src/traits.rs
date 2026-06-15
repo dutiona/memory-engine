@@ -44,6 +44,12 @@ pub trait EmbeddingProvider: Send + Sync {
 ///
 /// Used by consolidation to merge related facts into higher-level summaries.
 ///
+/// Summaries are embedded by the [`EmbeddingProvider`] passed alongside the
+/// generator into [`consolidate`](crate::engine::MemoryEngine::consolidate), so
+/// summary text shares the same vector space as the facts it summarizes. The
+/// generator only produces text — it never embeds (issue #116: embedding lived
+/// here as a duplicate of [`EmbeddingProvider::embed`]).
+///
 /// Requires `Send + Sync`: summary generators are shared across the engine's
 /// worker threads alongside the other consumer providers.
 pub trait SummaryGenerator: Send + Sync {
@@ -53,13 +59,6 @@ pub trait SummaryGenerator: Send + Sync {
     ///
     /// Returns an error if summarization fails.
     fn summarize(&self, facts: &[Fact]) -> Result<String>;
-
-    /// Compute an embedding for the given text.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if embedding computation fails.
-    fn embed(&self, text: &str) -> Result<Vec<f32>>;
 }
 
 /// Trait for arbitrating conflicts between contradicting facts (Phase 2).
@@ -627,9 +626,6 @@ mod tests {
         impl SummaryGenerator for Dummy {
             fn summarize(&self, _facts: &[Fact]) -> crate::error::Result<String> {
                 Ok(String::new())
-            }
-            fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
-                Ok(vec![0.0])
             }
         }
         let _: &dyn SummaryGenerator = &Dummy;

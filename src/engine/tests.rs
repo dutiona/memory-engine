@@ -29,9 +29,6 @@ impl SummaryGenerator for MockGen {
             .collect::<Vec<_>>()
             .join("; "))
     }
-    fn embed(&self, _: &str) -> Result<Vec<f32>> {
-        Ok(vec![0.1; DIM])
-    }
 }
 
 struct FixedArbiter {
@@ -206,7 +203,9 @@ fn consolidate_deduplicates_similar_facts() {
         dedup_threshold: 0.90,
         min_cluster_size: 10, // high threshold so no clusters form
     };
-    let stats = engine.consolidate(&MockGen, &config).unwrap();
+    let stats = engine
+        .consolidate(&MockGen, &MockEmbedder { dim: DIM }, &config)
+        .unwrap();
     assert_eq!(stats.duplicates_removed, 1);
 
     let active = engine.list_active_facts(None).unwrap();
@@ -230,8 +229,12 @@ fn consolidate_is_idempotent() {
         min_cluster_size: 10,
     };
 
-    let _stats1 = engine.consolidate(&MockGen, &config).unwrap();
-    let stats2 = engine.consolidate(&MockGen, &config).unwrap();
+    let _stats1 = engine
+        .consolidate(&MockGen, &MockEmbedder { dim: DIM }, &config)
+        .unwrap();
+    let stats2 = engine
+        .consolidate(&MockGen, &MockEmbedder { dim: DIM }, &config)
+        .unwrap();
 
     // Second run should find 0 new duplicates
     assert_eq!(stats2.duplicates_removed, 0);

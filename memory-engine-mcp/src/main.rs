@@ -75,8 +75,9 @@ async fn main() -> Result<(), BoxError> {
     // Use the resolved embed_dim (from DB probe or config), not the TOML value.
     let embedder = build_embedder(&cli, &mcp_config, embed_dim)?;
 
-    // 5. Initialize summary generator (optional — requires embedder)
-    let summary_gen = build_summary_generator(&cli, &mcp_config, embedder.as_ref())?
+    // 5. Initialize summary generator (optional — text only; embedding is done
+    //    by the embedder, injected separately into consolidation per #116)
+    let summary_gen = build_summary_generator(&cli, &mcp_config)?
         .map(|sg| sg as Arc<dyn memory_engine::traits::SummaryGenerator + Send + Sync>);
 
     // 6. Construct and serve
@@ -165,12 +166,13 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
 
 /// Build the summary generator from config + CLI.
 ///
-/// Requires an existing embedder — summaries must be embedded into the same
-/// vector space as facts, so the summary generator delegates `embed()` to it.
+/// The generator produces summary text only; embedding of those summaries is
+/// performed by the separately-configured embedder at consolidation time
+/// (issue #116). The `memory_consolidate` tool therefore needs *both* a summary
+/// generator and an embedder — that requirement is enforced in the tool handler.
 fn build_summary_generator(
     cli: &Cli,
     mcp_config: &config::McpConfig,
-    embedder: Option<&Arc<embedding::HttpEmbeddingProvider>>,
 ) -> Result<Option<Arc<summary::HttpSummaryGenerator>>, BoxError> {
     let base = mcp_config.summary.as_ref();
 
@@ -189,19 +191,10 @@ fn build_summary_generator(
     let timeout = base.map_or(120, |b| b.timeout_secs);
 
     match (endpoint, model) {
-        (Some(url), Some(mdl)) => {
-            let Some(emb) = embedder.cloned() else {
-                tracing::warn!(
-                    "summary generator requires embedding provider — \
-                     consolidation tool will be unavailable"
-                );
-                return Ok(None);
-            };
-            Ok(Some(Arc::new(
-                summary::HttpSummaryGenerator::new(url, mdl, api_key, emb, timeout)
-                    .map_err(|e| format!("failed to create summary generator: {e}"))?,
-            )))
-        }
+        (Some(url), Some(mdl)) => Ok(Some(Arc::new(
+            summary::HttpSummaryGenerator::new(url, mdl, api_key, timeout)
+                .map_err(|e| format!("failed to create summary generator: {e}"))?,
+        ))),
         _ => Ok(None),
     }
 }

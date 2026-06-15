@@ -395,7 +395,7 @@ pub fn dispatch(
         "memory_statistics" => handle_statistics(engine),
         "memory_flush_insights" => handle_flush_insights(args, engine, embedder),
         // P1 tools
-        "memory_consolidate" => handle_consolidate(args, engine, summary_gen),
+        "memory_consolidate" => handle_consolidate(args, engine, embedder, summary_gen),
         "memory_forget" => handle_forget(args, engine),
         "memory_dump_state" => handle_dump_state(args, engine),
         "memory_pin_fact" => handle_pin_fact(args, engine),
@@ -939,9 +939,13 @@ fn handle_flush_insights(
 fn handle_consolidate(
     args: Map<String, Value>,
     engine: &MemoryEngine,
+    embedder: Option<&HttpEmbeddingProvider>,
     summary_gen: Option<&(dyn SummaryGenerator + Send + Sync)>,
 ) -> Result<CallToolResult, ErrorData> {
     let generator = summary_gen.ok_or(ValidationError::NoSummaryProvider)?;
+    // Issue #116: summaries are embedded via the EmbeddingProvider, not the
+    // SummaryGenerator, so consolidation now requires an embedder too.
+    let embedder = embedder.ok_or(ValidationError::NoEmbeddingProvider)?;
 
     let dedup_threshold = get_f64(&args, "dedup_threshold").unwrap_or(0.92) as f32;
     if !(0.0..=1.0).contains(&dedup_threshold) {
@@ -965,7 +969,7 @@ fn handle_consolidate(
     };
 
     let stats = engine
-        .consolidate(generator, &config)
+        .consolidate(generator, embedder, &config)
         .map_err(to_mcp_error)?;
 
     ok_json(json!({

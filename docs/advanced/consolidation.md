@@ -46,7 +46,7 @@ Expired facts have their edges cascade-expired as well, keeping the graph consis
 
 ### Pass 2: Cluster Fusion
 
-Groups active facts using greedy single-linkage clustering at a similarity threshold of 0.85 (hardcoded, lower than the dedup threshold). For each cluster meeting `min_cluster_size`, the `SummaryGenerator` produces a textual summary and embedding. These are stored as `Cluster`-level summaries.
+Groups active facts using greedy single-linkage clustering at a similarity threshold of 0.85 (hardcoded, lower than the dedup threshold). For each cluster meeting `min_cluster_size`, the `SummaryGenerator` produces a textual summary, which the `EmbeddingProvider` then embeds into the fact vector space. These are stored as `Cluster`-level summaries.
 
 Prior cluster summaries are deleted before new ones are created, making this pass idempotent.
 
@@ -83,16 +83,17 @@ pub struct ConsolidationStats {
 
 ## The SummaryGenerator Trait
 
-Consumers implement `SummaryGenerator` to provide summarization and embedding logic. The engine calls this during cluster fusion and global integration:
+Consumers implement `SummaryGenerator` to provide summarization logic. The engine calls this during cluster fusion and global integration:
 
 ```rust
 pub trait SummaryGenerator {
     fn summarize(&self, facts: &[Fact]) -> Result<String>;
-    fn embed(&self, text: &str) -> Result<Vec<f32>>;
 }
 ```
 
-A typical implementation wraps an LLM call for `summarize()` and an embedding model call for `embed()`. The engine has no LLM dependency -- this is entirely consumer-provided.
+A typical implementation wraps an LLM call for `summarize()`. The engine has no LLM dependency -- this is entirely consumer-provided.
+
+Summary **embedding** is performed by the `EmbeddingProvider` passed alongside the generator into `consolidate()`, so summaries share the same vector space as the facts they summarize. The generator no longer embeds: a dedicated `SummaryGenerator::embed` once duplicated `EmbeddingProvider::embed` and was removed in favor of injecting the embedder directly into the consolidation call chain.
 
 ## Usage
 
@@ -101,7 +102,7 @@ let config = ConsolidationConfig {
     dedup_threshold: 0.92,
     min_cluster_size: 3,
 };
-let stats = engine.consolidate(&my_summary_generator, &config)?;
+let stats = engine.consolidate(&my_summary_generator, &my_embedding_provider, &config)?;
 println!(
     "deduped={}, clusters={}, global={}",
     stats.duplicates_removed, stats.clusters_created, stats.global_summaries
