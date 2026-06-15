@@ -44,6 +44,9 @@ CREATE INDEX idx_events_session ON events(session_id) WHERE session_id IS NOT NU
 -- index: idx_events_timestamp
 CREATE INDEX idx_events_timestamp ON events(timestamp);
 
+-- index: idx_facts_created
+CREATE INDEX idx_facts_created ON facts(t_created);
+
 -- index: idx_facts_expired
 CREATE INDEX idx_facts_expired ON facts(t_expired);
 

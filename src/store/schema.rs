@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{MemoryError, Result};
 
 /// Current schema version. Bump when adding migrations.
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -179,6 +179,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrate_v7_to_v8, false),
     (migrate_v8_to_v9, false),
     (migrate_v9_to_v10, false),
+    (migrate_v10_to_v11, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -752,6 +753,17 @@ fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add an index on `facts.t_created` for recency/horizon sweeps.
+///
+/// A bulk backfill (autonomous-agent-project#53) plus any query filtering or
+/// ordering by `t_created` (recency scans, memarch #42's horizon sweep) would
+/// otherwise full-scan the table. The fresh-init path adds the same index via
+/// `INDEXES_DDL`, so fresh and migrated databases converge.
+fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);")?;
+    Ok(())
+}
+
 // --- DDL constants ---
 
 const TABLES_DDL: &str = "
@@ -939,12 +951,24 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
 CREATE INDEX IF NOT EXISTS idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
 CREATE INDEX IF NOT EXISTS idx_facts_importance_score ON facts(importance_score);
 CREATE INDEX IF NOT EXISTS idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
+CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);
 CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, sequence_id);
 ";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// True if an index with the given name exists in `sqlite_master`.
+    fn index_exists(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
 
     /// Test helper: creates v1 schema (Phase 1 tables only, no scopes, no `scope_id`).
     fn init_schema_v1(conn: &Connection) -> Result<()> {
@@ -1398,8 +1422,8 @@ CREATE TABLE IF NOT EXISTS config (
                 |r| r.get(0),
             )
             .unwrap();
-        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints
-        assert_eq!(count, 26);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11)
+        assert_eq!(count, 27);
     }
 
     // --- Migration framework tests ---
@@ -1432,6 +1456,48 @@ CREATE TABLE IF NOT EXISTS config (
         assert_eq!(
             get_config(&conn, "schema_version").unwrap(),
             Some(CURRENT_SCHEMA_VERSION.to_string())
+        );
+    }
+
+    #[test]
+    fn migrate_v10_to_v11_adds_t_created_index() {
+        // A fresh DB is created at CURRENT_SCHEMA_VERSION with the index already present. To
+        // exercise the v10→v11 migration specifically, simulate a v10 DB by dropping the index
+        // and rolling the recorded version back, then migrate forward.
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute_batch("DROP INDEX IF EXISTS idx_facts_created;")
+            .unwrap();
+        set_config(&conn, "schema_version", "10").unwrap();
+
+        // Precondition: index absent at v10.
+        assert!(
+            !index_exists(&conn, "idx_facts_created"),
+            "idx_facts_created should be absent before the v10→v11 migration"
+        );
+
+        migrate(&conn, None).unwrap();
+
+        // Postcondition: migrated to current (v11), index present.
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some(CURRENT_SCHEMA_VERSION.to_string())
+        );
+        assert!(
+            index_exists(&conn, "idx_facts_created"),
+            "idx_facts_created should exist after the v10→v11 migration"
+        );
+    }
+
+    #[test]
+    fn fresh_db_has_t_created_index() {
+        // The fresh-init path (INDEXES_DDL) must include the index too, so fresh and
+        // migrated databases converge on the same index set.
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        assert!(
+            index_exists(&conn, "idx_facts_created"),
+            "a fresh DB should include idx_facts_created"
         );
     }
 
@@ -2131,11 +2197,11 @@ CREATE TABLE IF NOT EXISTS config (
     }
 
     #[test]
-    fn schema_v10_snapshot() {
+    fn schema_v11_snapshot() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
         let schema = deterministic_schema_dump(&conn);
-        insta::assert_snapshot!("schema_v10", schema);
+        insta::assert_snapshot!("schema_v11", schema);
     }
 
     // --- Property-based migration tests (proptest) ---
