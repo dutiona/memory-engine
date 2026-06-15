@@ -72,14 +72,8 @@ pub fn cluster_fusion(
             .collect();
         let source_ids: Vec<i64> = cluster_facts.iter().map(|f| f.id).collect();
 
-        let summary_text = generator.summarize(&cluster_facts)?;
-        let summary_embedding = embedder.embed(&summary_text)?;
-        if summary_embedding.len() != embed_dim {
-            return Err(crate::error::MemoryError::EmbeddingDimension {
-                expected: embed_dim,
-                actual: summary_embedding.len(),
-            });
-        }
+        let (summary_text, summary_embedding) =
+            super::summarize_and_embed(generator, embedder, &cluster_facts, embed_dim)?;
 
         // Determine scope_id from majority vote of source facts.
         // Deterministic tie-break: lowest scope_id wins on equal counts.

@@ -16,6 +16,33 @@ use rusqlite::Connection;
 use crate::error::Result;
 use crate::store::schema::{get_config, set_config};
 use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
+use crate::types::Fact;
+
+/// Summarize a slice of facts and embed the resulting summary text, validating
+/// the embedding dimension. Shared by cluster fusion and global integration so
+/// the summarize → embed → dimension-check sequence cannot diverge (issue #116:
+/// embedding now flows through the injected `EmbeddingProvider`).
+///
+/// # Errors
+///
+/// Propagates `SummaryGenerator` / `EmbeddingProvider` errors; returns
+/// `MemoryError::EmbeddingDimension` when the embedding length != `embed_dim`.
+pub(crate) fn summarize_and_embed(
+    generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
+    facts: &[Fact],
+    embed_dim: usize,
+) -> Result<(String, Vec<f32>)> {
+    let text = generator.summarize(facts)?;
+    let embedding = embedder.embed(&text)?;
+    if embedding.len() != embed_dim {
+        return Err(crate::error::MemoryError::EmbeddingDimension {
+            expected: embed_dim,
+            actual: embedding.len(),
+        });
+    }
+    Ok((text, embedding))
+}
 
 /// Orchestrate all 3 consolidation passes atomically.
 ///

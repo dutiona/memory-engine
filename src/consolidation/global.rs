@@ -60,14 +60,8 @@ pub fn global_integration(
         })
         .collect();
 
-    let global_text = generator.summarize(&pseudo_facts)?;
-    let global_embedding = embedder.embed(&global_text)?;
-    if global_embedding.len() != embed_dim {
-        return Err(crate::error::MemoryError::EmbeddingDimension {
-            expected: embed_dim,
-            actual: global_embedding.len(),
-        });
-    }
+    let (global_text, global_embedding) =
+        super::summarize_and_embed(generator, embedder, &pseudo_facts, embed_dim)?;
 
     // Collect all source fact ids from all cluster summaries.
     // Pre-size to avoid repeated reallocations: flat_map has no upper-bound hint.
