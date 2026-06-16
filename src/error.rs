@@ -324,6 +324,15 @@ pub enum CycleError {
     /// adjusting or quarantining a fact that is no longer active.
     #[error("fact {0} is already expired")]
     AlreadyExpired(crate::types::FactId),
+
+    /// A cycle reported selecting facts (`facts_selected > 0`) but left
+    /// `processed_ids` empty — a `DreamCycle` impl violating the
+    /// [`processed_ids` contract](crate::traits::DreamCycle::run). Those facts would
+    /// never be dream-marked, so the #209 guarded cycle would defer forever.
+    #[error(
+        "malformed cycle report: facts_selected={facts_selected} but processed_ids is empty (DreamCycle::run contract violated)"
+    )]
+    MalformedReport { facts_selected: usize },
 }
 
 /// Errors returned by the memory engine.
@@ -740,6 +749,11 @@ mod tests {
             }
             .to_string()
             .contains("out of bounds")
+        );
+        assert!(
+            CycleError::MalformedReport { facts_selected: 5 }
+                .to_string()
+                .contains("processed_ids is empty")
         );
     }
 

@@ -36,6 +36,50 @@ collapses produce-and-apply into one call for the daily-hook ergonomic, while
 `memory_apply_cycle_report`. See
 [MCP Server → Cognitive Pipeline](../reference/mcp-server.md#cognitive-pipeline-memory_dream_cycle-memory_apply_cycle_report-memory_get_recent_insights).
 
+## Caller-write deferral (#209)
+
+When the harness fires fact-writes and the cycle on the **same trigger** (the #554
+Ollama→ME swap runs both on SessionStart), running the cycle concurrently with the
+caller's own writes is a race — and redundant, since the caller is actively curating
+memory. `run_dream_cycle_guarded` is the gate:
+
+- It keeps a persisted **fact-id high-water-mark cursor** (`last_caller_write_fact_id`)
+  — the highest `facts.id` of a _caller-written_ fact seen at the last decision.
+  "Caller-written" excludes pinned wisdom and dream-marked facts, so the cycle never
+  trips on its own output.
+- On entry it compares `max_caller_written_fact_id()` to the cursor. **New caller
+  writes** (`max > cursor`) → advance the cursor and return
+  `CycleOutcome::Skipped(SkipReason::CallerWroteFacts { .. })`; the facts stay
+  un-dream-cycled for a later quiet run (**defer, not drop**). **No new writes** →
+  delegate to `run_dream_cycle` and return `CycleOutcome::Ran(report)`. Steady state:
+  each new caller-write batch causes exactly one skip, then a run.
+- A skip touches **only** the cursor — never `last_dream_cycle_at` or the cycle
+  history. The cursor advances only on skip; a real run relies on the `dream_cycle`
+  marker (invariant M below) to drop processed facts from the signal.
+
+**Invariant M** — _every fact a cycle creates or leaves active is dream-marked in the
+apply transaction_: `apply_cycle_report` stamps `processed_ids ∪ new_fact_ids ∪
+promoted_fact_ids ∪ supersede_new_ids`, not just the inputs. Without it the cycle's
+own `AddFact` synthetics / promoted wisdom / Supersede survivors would read as fresh
+caller writes (and re-enter the next cycle's input — a latent double-processing bug
+this also closes). A `DreamCycle` impl must place **all** selected facts in
+`processed_ids` (enforced: a report with `facts_selected > 0` and empty `processed_ids`
+is rejected as `CycleError::MalformedReport`).
+
+This is **deferral, not mutual exclusion** — concurrent guarded calls can both run
+(idempotent via the marker + watermark); true locking is #207.
+
+### Guarded vs unguarded entry points
+
+| Method                    | Returns        | Use                                                     |
+| ------------------------- | -------------- | ------------------------------------------------------- |
+| `run_dream_cycle`         | `CycleReport`  | Unconditional produce (tests, force-a-run).             |
+| `run_dream_cycle_guarded` | `CycleOutcome` | The harness/MCP entry — defers on caller writes (#209). |
+
+`memory_dream_cycle` (MCP) uses the **guarded** path: a skip returns
+`{ "did_run": false, "skipped": { "CallerWroteFacts": { .. } } }`; a run returns
+`{ "did_run": true, "report": .., "did_apply": .. }`.
+
 ## The delta vocabulary
 
 | Delta                                 | Effect on apply                                                                                                                                                     |

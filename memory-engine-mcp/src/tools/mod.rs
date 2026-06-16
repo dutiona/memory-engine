@@ -15,7 +15,7 @@ use memory_engine::traits::{
 use memory_engine::types::{
     AddFactOptions, AddFactRequest, EventType, FactType, NewEvent, Outcome,
 };
-use memory_engine::{CycleReport, DefaultDreamCycle, INSIGHT_MARKER_KEY};
+use memory_engine::{CycleOutcome, CycleReport, DefaultDreamCycle, INSIGHT_MARKER_KEY};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
 use serde_json::{Map, Value, json};
 
@@ -1547,18 +1547,37 @@ fn handle_dream_cycle(
         }
     };
     let cycle = DefaultDreamCycle::with_defaults();
-    let report = engine.run_dream_cycle(&cycle).map_err(to_mcp_error)?;
-
-    let report_json = serde_json::to_value(&report)
-        .map_err(|e| ErrorData::internal_error(format!("serialize report: {e}"), None))?;
-
-    if apply {
-        let applied = engine.apply_cycle_report(&report).map_err(to_mcp_error)?;
-        let applied_json = serde_json::to_value(&applied)
-            .map_err(|e| ErrorData::internal_error(format!("serialize apply result: {e}"), None))?;
-        ok_json(json!({ "report": report_json, "applied": applied_json, "did_apply": true }))
-    } else {
-        ok_json(json!({ "report": report_json, "did_apply": false }))
+    // #209: the guarded entry defers when the caller wrote facts since the cursor.
+    match engine
+        .run_dream_cycle_guarded(&cycle)
+        .map_err(to_mcp_error)?
+    {
+        // Skip is NOT a report — emit `did_run: false` + the reason. No apply, no
+        // watermark touch. (`skipped` serializes as `{"CallerWroteFacts":{…}}`.)
+        CycleOutcome::Skipped(reason) => {
+            let reason_json = serde_json::to_value(reason).map_err(|e| {
+                ErrorData::internal_error(format!("serialize skip reason: {e}"), None)
+            })?;
+            ok_json(json!({ "did_run": false, "skipped": reason_json }))
+        }
+        // Ran: destructure the INNER report (never serialize the CycleOutcome enum —
+        // that would emit `{"Ran":{…}}` and break the top-level `report` key).
+        CycleOutcome::Ran(report) => {
+            let report_json = serde_json::to_value(&report)
+                .map_err(|e| ErrorData::internal_error(format!("serialize report: {e}"), None))?;
+            if apply {
+                let applied = engine.apply_cycle_report(&report).map_err(to_mcp_error)?;
+                let applied_json = serde_json::to_value(&applied).map_err(|e| {
+                    ErrorData::internal_error(format!("serialize apply result: {e}"), None)
+                })?;
+                ok_json(json!({
+                    "did_run": true, "report": report_json,
+                    "applied": applied_json, "did_apply": true
+                }))
+            } else {
+                ok_json(json!({ "did_run": true, "report": report_json, "did_apply": false }))
+            }
+        }
     }
 }
 

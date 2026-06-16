@@ -1,12 +1,14 @@
 use chrono::{DateTime, Utc};
 
 use crate::engine::MemoryEngine;
-use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, TimeWindow};
+use crate::engine::cycle::{
+    CycleContext, CycleMetadata, CycleOutcome, CycleReport, SkipReason, TimeWindow,
+};
 use crate::error::{MemoryError, MigrationError, Result};
 use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::store::facts::FactStore;
 use crate::store::lineage::LineageStore;
-use crate::store::schema::get_config;
+use crate::store::schema::{get_config, set_config};
 use crate::traits::{
     ConsolidationConfig, ConsolidationStats, EmbeddingProvider, ForgetPolicy, PruneStats,
     SummaryGenerator,
@@ -20,10 +22,15 @@ use crate::search::strategy::VectorSearchStrategy;
 pub use crate::traits::{DreamCycle, InsightStream};
 pub use crate::types::Insight;
 
-/// Top-level `metadata` key marking a fact captured via the pre-compaction insight
-/// flush. Written by the MCP `memory_flush_insights` tool and read by
-/// [`MemoryEngine::list_recent_insights`](crate::MemoryEngine::list_recent_insights).
+/// Config key for the #209 caller-write cursor: the highest `facts.id` of a
+/// caller-written fact observed at the last guarded cycle decision. A config value,
+/// not schema (no migration). See [`MemoryEngine::run_dream_cycle_guarded`].
+const CALLER_WRITE_CURSOR: &str = "last_caller_write_fact_id";
+
+/// Top-level `metadata` key marking a fact captured via the pre-compaction insight flush.
 ///
+/// Written by the MCP `memory_flush_insights` tool and read by
+/// [`MemoryEngine::list_recent_insights`](crate::MemoryEngine::list_recent_insights).
 /// Defined once here so the writer (MCP crate) and the reader (core) share a single
 /// literal and cannot drift. The stamped value is an object (e.g.
 /// `{"flushed_at": <rfc3339>}`); readers match on key *presence with a non-null value*.
@@ -202,6 +209,92 @@ impl MemoryEngine {
         }
         let cycle_ctx = self.build_cycle_context()?;
         cycle.run(&cycle_ctx)
+    }
+
+    /// Run a `DreamCycle` **only if the caller has not written facts since the last
+    /// decision** (#209) — the write/consolidate-race gate for the #554 harness, where
+    /// fact-writes and the cycle can fire on the same trigger.
+    ///
+    /// On entry, under a single write-lock acquisition, this compares
+    /// [`FactStore::max_caller_written_fact_id`] against the persisted cursor
+    /// `last_caller_write_fact_id`:
+    ///
+    /// - **New caller writes** (`max > cursor`): advance the cursor to `max` and return
+    ///   [`CycleOutcome::Skipped`] — the cycle stands down this invocation; the facts
+    ///   stay un-dream-cycled for a later quiet run (deferral, not drop). Only the cursor
+    ///   moves — never `last_dream_cycle_at` or the cycle history.
+    /// - **No new caller writes** (`max <= cursor`, or no caller facts at all): delegate
+    ///   to [`Self::run_dream_cycle`] and wrap the report as [`CycleOutcome::Ran`]. A real
+    ///   run does not advance the cursor; the `dream_cycle` marker (invariant M) is what
+    ///   removes processed facts from the signal, so a quiet re-run runs again only when
+    ///   genuinely new caller writes arrive.
+    ///
+    /// **Concurrency:** the cursor read+advance is atomic w.r.t. other writers (the
+    /// write lock), but the lock is released before the cycle runs (so a consumer cycle's
+    /// work does not serialize all writers). A write landing during the run is attributed
+    /// to the *next* invocation — never lost, never double-processed. This is deferral,
+    /// **not** mutual exclusion; concurrent guarded calls can both run (idempotent via the
+    /// marker + watermark). True mutual exclusion is #207.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::ReadOnly` if the engine is read-only, or a store/cycle error.
+    // The `conn` write lock is intentionally held across the cursor read + skip-advance
+    // so the decision is atomic w.r.t. other writers; clippy's drop-tightening nudge
+    // would break that atomicity (same rationale as `add_facts_batch`).
+    #[allow(clippy::significant_drop_tightening)]
+    #[must_use = "the CycleOutcome carries the skip/run decision — a dropped Skipped silently loses the deferral"]
+    pub fn run_dream_cycle_guarded(&self, cycle: &dyn DreamCycle) -> Result<CycleOutcome> {
+        // Atomic cursor read + (skip-only) advance under the write lock.
+        let decision = {
+            let conn = self.write_conn()?;
+            let cursor = Self::read_caller_write_cursor(&conn)?;
+            // `None` (empty / fully-excluded table) ⇒ no caller writes ⇒ run.
+            let max = FactStore::new(&conn, self.embed_dim).max_caller_written_fact_id()?;
+            match max {
+                Some(max_id) if max_id > cursor => {
+                    set_config(&conn, CALLER_WRITE_CURSOR, &max_id.to_string())?;
+                    Some(SkipReason::CallerWroteFacts {
+                        since_fact_id: cursor,
+                        new_max_fact_id: max_id,
+                    })
+                }
+                _ => None,
+            }
+        }; // write lock released here
+
+        // No new caller writes — run. `run_dream_cycle` re-acquires the write lock for
+        // its own probe, so the lock above MUST already be dropped (parking_lot mutexes
+        // are non-reentrant — holding it here would self-deadlock).
+        if let Some(reason) = decision {
+            return Ok(CycleOutcome::Skipped(reason));
+        }
+        let report = self.run_dream_cycle(cycle)?;
+        // Defend invariant M against a buggy consumer `DreamCycle` (the shipped
+        // DefaultDreamCycle complies): a report that selected facts but left
+        // `processed_ids` empty would leave those facts unmarked → the guarded cycle
+        // defers forever. Reject loudly rather than silently livelock. A legitimately
+        // quiet window (facts_selected == 0) is fine.
+        if report.metadata.facts_selected > 0 && report.metadata.processed_ids.is_empty() {
+            return Err(MemoryError::Cycle(
+                crate::error::CycleError::MalformedReport {
+                    facts_selected: report.metadata.facts_selected,
+                },
+            ));
+        }
+        Ok(CycleOutcome::Ran(report))
+    }
+
+    /// Read the #209 caller-write cursor (`last_caller_write_fact_id`); absent ⇒ `0`.
+    /// A config key, not schema — no migration / `CURRENT_SCHEMA_VERSION` bump.
+    fn read_caller_write_cursor(conn: &rusqlite::Connection) -> Result<i64> {
+        get_config(conn, CALLER_WRITE_CURSOR)?.map_or(Ok(0), |s| {
+            s.parse::<i64>().map_err(|e| {
+                MemoryError::Migration(MigrationError::Incompatible(format!(
+                    "invalid {CALLER_WRITE_CURSOR}: {e}"
+                )))
+            })
+        })
     }
 
     /// Build the retrieve-before-reflect context for a cycle: prior wisdom (active
@@ -477,6 +570,151 @@ mod tests {
         let report = engine.run_dream_cycle(&cycle).unwrap();
         assert!(report.deltas.is_empty());
         assert_eq!(report.metadata.method_version, "noop");
+    }
+
+    /// A `DreamCycle` that violates the `processed_ids` contract: claims it selected
+    /// facts but returns none. Used to prove the T4b guard rejects it.
+    struct SelectingButEmptyCycle;
+    impl DreamCycle for SelectingButEmptyCycle {
+        fn run(&self, ctx: &CycleContext) -> Result<CycleReport> {
+            Ok(CycleReport {
+                deltas: vec![],
+                identity: IdentityOutput::empty(),
+                metadata: CycleMetadata {
+                    cycle_id: 0,
+                    ran_at: Utc::now(),
+                    time_window: ctx.time_window(),
+                    facts_selected: 5, // claims work...
+                    method_version: "bad".into(),
+                    processed_ids: vec![], // ...but marks nothing → contract violation
+                },
+            })
+        }
+    }
+
+    fn caller_cursor(engine: &MemoryEngine) -> Option<String> {
+        engine
+            .with_read(|conn| get_config(conn, CALLER_WRITE_CURSOR))
+            .unwrap()
+    }
+
+    /// #209 (a): a caller write since the cursor ⇒ Skipped, cursor advanced to the new
+    /// max, and the dream-cycle watermark is left untouched (skip ≠ run).
+    #[test]
+    fn guarded_skips_and_advances_cursor_when_caller_wrote() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let ids = add_source_facts(&engine, &[0]); // one caller fact; cursor starts absent (=0)
+        let max_id = ids[0];
+
+        let outcome = engine.run_dream_cycle_guarded(&NoopCycle).unwrap();
+        match outcome {
+            CycleOutcome::Skipped(SkipReason::CallerWroteFacts {
+                since_fact_id,
+                new_max_fact_id,
+            }) => {
+                assert_eq!(since_fact_id, 0, "cursor was absent ⇒ 0");
+                assert_eq!(new_max_fact_id, max_id);
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        assert_eq!(
+            caller_cursor(&engine).as_deref(),
+            Some(max_id.to_string().as_str())
+        );
+        // Skip must NOT advance the dream-cycle watermark (only a real apply does).
+        let wm = engine
+            .with_read(|conn| get_config(conn, "last_dream_cycle_at"))
+            .unwrap();
+        assert!(wm.is_none(), "skip must not touch last_dream_cycle_at");
+    }
+
+    /// #209 (b)+(c): cold start on a populated store skips ONCE (advancing the cursor),
+    /// then a second invocation with no new caller writes RUNS.
+    #[test]
+    fn guarded_skip_once_then_runs_when_quiet() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        add_source_facts(&engine, &[0, 0, 0]); // 3 pre-existing caller facts, cursor absent
+
+        // First: caller writes detected ⇒ skip, cursor advanced.
+        assert!(matches!(
+            engine.run_dream_cycle_guarded(&NoopCycle).unwrap(),
+            CycleOutcome::Skipped(_)
+        ));
+        let cursor_after_skip = caller_cursor(&engine);
+        assert!(cursor_after_skip.is_some(), "skip advanced the cursor");
+
+        // Second: no new writes since the advanced cursor ⇒ run.
+        assert!(matches!(
+            engine.run_dream_cycle_guarded(&NoopCycle).unwrap(),
+            CycleOutcome::Ran(_)
+        ));
+        // A real run must NOT advance the cursor (the dream-marker, not the cursor,
+        // removes processed facts from the signal). NoopCycle applies nothing, so the
+        // cursor is exactly where the skip left it.
+        assert_eq!(
+            caller_cursor(&engine),
+            cursor_after_skip,
+            "a run leaves the caller-write cursor unchanged"
+        );
+        // Third: still quiet ⇒ runs again (steady state on a quiet store).
+        assert!(matches!(
+            engine.run_dream_cycle_guarded(&NoopCycle).unwrap(),
+            CycleOutcome::Ran(_)
+        ));
+    }
+
+    /// #209: an empty store (no caller facts at all) ⇒ `max_caller_written_fact_id` is
+    /// `None` ⇒ the guard runs immediately (None treated as "no caller writes").
+    #[test]
+    fn guarded_runs_on_empty_store() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        assert!(matches!(
+            engine.run_dream_cycle_guarded(&NoopCycle).unwrap(),
+            CycleOutcome::Ran(_)
+        ));
+    }
+
+    /// T4b guard: a cycle that selected facts but returned empty `processed_ids` is
+    /// rejected (else those facts would never be dream-marked → perpetual skip).
+    #[test]
+    fn guarded_rejects_malformed_report() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let err = engine
+            .run_dream_cycle_guarded(&SelectingButEmptyCycle)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Cycle(crate::error::CycleError::MalformedReport { facts_selected: 5 })
+            ),
+            "expected MalformedReport, got {err:?}"
+        );
+    }
+
+    /// The malformed-report guard must also fire in the steady-state path: after a
+    /// caller write defers the first call, the SECOND (quiet) call actually runs the
+    /// cycle — and a contract-violating cycle is caught there, not just on cold start.
+    #[test]
+    fn guarded_rejects_malformed_report_after_initial_skip() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        add_source_facts(&engine, &[0]); // caller write ⇒ first call defers
+        assert!(matches!(
+            engine
+                .run_dream_cycle_guarded(&SelectingButEmptyCycle)
+                .unwrap(),
+            CycleOutcome::Skipped(_)
+        ));
+        // Second call: quiet ⇒ runs the cycle ⇒ contract violation is caught.
+        let err = engine
+            .run_dream_cycle_guarded(&SelectingButEmptyCycle)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Cycle(crate::error::CycleError::MalformedReport { facts_selected: 5 })
+            ),
+            "expected MalformedReport on the post-skip run, got {err:?}"
+        );
     }
 
     #[test]

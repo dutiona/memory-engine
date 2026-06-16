@@ -799,6 +799,34 @@ impl<'a> FactStore<'a> {
         )
     }
 
+    /// Highest `id` among **caller-written** active facts — the #209 caller-write
+    /// cursor probe. "Caller-written" = active (`t_expired IS NULL`), not pinned
+    /// (`is_pinned = 0`, so promoted wisdom is excluded), and not dream-cycled
+    /// (`json_type(metadata, '$.dream_cycle') IS NULL`, so the cycle's own marked
+    /// outputs are excluded — this is why invariant M must mark every cycle-created
+    /// fact). Returns `None` when no such fact exists (empty or fully-excluded table),
+    /// which the caller treats as "no caller writes".
+    ///
+    /// Reads no embedding BLOBs — a scalar `MAX(id)`, not a row materialization. Uses
+    /// `json_type` (not `json_extract`) to match `list_undreamt_in_period`'s
+    /// absent-vs-present-null distinction.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn max_caller_written_fact_id(&self) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT MAX(id) FROM facts
+                 WHERE t_expired IS NULL
+                   AND is_pinned = 0
+                   AND json_type(metadata, '$.dream_cycle') IS NULL",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .map_err(MemoryError::Database)
+    }
+
     /// List active facts ordered by materialized `importance_score`, excluding IDs in `exclude`.
     /// Pass empty `scope_ids` to query across all scopes.
     pub fn list_by_importance_score(
@@ -1234,6 +1262,62 @@ mod tests {
             scope_id: 1,
             is_pinned: false,
         }
+    }
+
+    /// #209 cursor probe: `max_caller_written_fact_id` returns the highest id among
+    /// active, unpinned, non-dream-marked facts — excluding pinned (promoted wisdom),
+    /// dream-marked (the cycle's own outputs), and expired facts.
+    #[test]
+    fn max_caller_written_fact_id_excludes_pinned_marked_expired() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        assert_eq!(
+            store.max_caller_written_fact_id().unwrap(),
+            None,
+            "empty table → None"
+        );
+
+        // Two caller writes — the max wins.
+        let c1 = store
+            .insert(&make_fact("caller one", vec![0.1; DIM]))
+            .unwrap();
+        let c2 = store
+            .insert(&make_fact("caller two", vec![0.2; DIM]))
+            .unwrap();
+        assert!(c2 > c1);
+        assert_eq!(store.max_caller_written_fact_id().unwrap(), Some(c2));
+
+        // A pinned fact (promoted wisdom) with a HIGHER id must be excluded.
+        let mut pinned = make_fact("pinned wisdom", vec![0.3; DIM]);
+        pinned.is_pinned = true;
+        let p = store.insert(&pinned).unwrap();
+        assert!(p > c2);
+        assert_eq!(
+            store.max_caller_written_fact_id().unwrap(),
+            Some(c2),
+            "pinned fact excluded"
+        );
+
+        // A dream-marked fact (the cycle's own output) with a HIGHER id must be excluded.
+        let m = store
+            .insert(&make_fact("cycle output", vec![0.4; DIM]))
+            .unwrap();
+        store.mark_dream_cycled(&[m], 7, Utc::now()).unwrap();
+        assert_eq!(
+            store.max_caller_written_fact_id().unwrap(),
+            Some(c2),
+            "dream-marked fact excluded"
+        );
+
+        // An expired caller fact with a HIGHER id must be excluded.
+        let e = store.insert(&make_fact("expired", vec![0.5; DIM])).unwrap();
+        store.expire(e, Utc::now()).unwrap();
+        assert_eq!(
+            store.max_caller_written_fact_id().unwrap(),
+            Some(c2),
+            "expired fact excluded"
+        );
     }
 
     #[test]

@@ -178,8 +178,8 @@ async fn direct_format_embedding() {
 // flush_insights → get_recent_insights round-trip (#225)
 // ---------------------------------------------------------------------------
 
-/// Proves the writer (memory_flush_insights stamps the shared INSIGHT_MARKER_KEY)
-/// connects to the reader (memory_get_recent_insights queries that marker).
+/// Proves the writer (`memory_flush_insights` stamps the shared `INSIGHT_MARKER_KEY`)
+/// connects to the reader (`memory_get_recent_insights` queries that marker).
 #[tokio::test]
 async fn flush_insights_then_get_recent_insights_roundtrip() {
     let server = MockServer::start().await;

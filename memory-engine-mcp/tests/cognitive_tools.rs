@@ -52,7 +52,7 @@ fn extract_json(result: &CallToolResult) -> Value {
     }
 }
 
-/// Seed a Semantic fact directly (dispatch's add_fact needs an HTTP embedder).
+/// Seed a Semantic fact directly (dispatch's `add_fact` needs an HTTP embedder).
 fn seed(engine: &MemoryEngine, content: &str, scope: Option<&str>, insight: bool) -> i64 {
     let metadata =
         insight.then(|| json!({ INSIGHT_MARKER_KEY: { "flushed_at": "2024-01-01T00:00:00Z" } }));
@@ -69,12 +69,32 @@ fn seed(engine: &MemoryEngine, content: &str, scope: Option<&str>, insight: bool
     engine.add_fact(&req, &FakeEmbed, None).unwrap()
 }
 
+// Seeding facts counts as caller writes (#209), so the FIRST guarded dream_cycle
+// invocation always defers. Drain that skip so the next call runs on the now-quiet store.
+fn drain_initial_skip(engine: &MemoryEngine) {
+    let skip = extract_json(
+        &call(
+            engine,
+            "memory_dream_cycle",
+            args(&[("apply", json!(false))]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        skip["did_run"],
+        json!(false),
+        "first call defers (caller wrote)"
+    );
+    assert!(skip["skipped"]["CallerWroteFacts"].is_object());
+}
+
 #[test]
 fn dream_cycle_apply_true_runs_and_applies() {
     let (engine, _d) = engine();
     for i in 0..3 {
         seed(&engine, &format!("pattern {i}"), None, false);
     }
+    drain_initial_skip(&engine);
     let body = extract_json(
         &call(
             &engine,
@@ -83,6 +103,7 @@ fn dream_cycle_apply_true_runs_and_applies() {
         )
         .unwrap(),
     );
+    assert_eq!(body["did_run"], json!(true));
     assert_eq!(body["did_apply"], json!(true));
     assert!(!body["report"]["deltas"].as_array().unwrap().is_empty());
     assert_eq!(
@@ -93,11 +114,33 @@ fn dream_cycle_apply_true_runs_and_applies() {
 }
 
 #[test]
+fn dream_cycle_skips_when_caller_wrote_facts() {
+    let (engine, _d) = engine();
+    seed(&engine, "a caller write", None, false);
+    // #209: caller wrote a fact since the (absent=0) cursor → defer this run.
+    let body = extract_json(
+        &call(
+            &engine,
+            "memory_dream_cycle",
+            args(&[("apply", json!(true))]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(body["did_run"], json!(false), "deferred, did not run");
+    assert!(body.get("report").is_none(), "skip carries no report");
+    assert!(body.get("applied").is_none(), "skip applies nothing");
+    let reason = &body["skipped"]["CallerWroteFacts"];
+    assert_eq!(reason["since_fact_id"], json!(0));
+    assert!(reason["new_max_fact_id"].as_i64().unwrap() > 0);
+}
+
+#[test]
 fn dream_cycle_dry_run_then_apply_roundtrips() {
     let (engine, _d) = engine();
     for i in 0..3 {
         seed(&engine, &format!("pattern {i}"), None, false);
     }
+    drain_initial_skip(&engine);
     // Dry-run: produce but do not apply.
     let dry = extract_json(
         &call(
@@ -107,6 +150,7 @@ fn dream_cycle_dry_run_then_apply_roundtrips() {
         )
         .unwrap(),
     );
+    assert_eq!(dry["did_run"], json!(true), "post-skip quiet call runs");
     assert_eq!(dry["did_apply"], json!(false));
     assert!(dry.get("applied").is_none());
 
@@ -177,6 +221,11 @@ fn dream_cycle_on_empty_store_succeeds_with_no_deltas() {
             args(&[("apply", json!(true))]),
         )
         .unwrap(),
+    );
+    assert_eq!(
+        body["did_run"],
+        json!(true),
+        "empty store ⇒ no caller writes ⇒ runs"
     );
     assert_eq!(body["did_apply"], json!(true));
     assert!(

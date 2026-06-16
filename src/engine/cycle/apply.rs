@@ -85,6 +85,10 @@ impl MemoryEngine {
         let mut expired_ids: Vec<i64> = Vec::new();
         // (new_id, old_id, edge_id) supersede edges — to mirror into the in-memory graph.
         let mut supersede_edges: Vec<(i64, i64, i64)> = Vec::new();
+        // Survivor (`new_id`) facts of a Supersede — still active, so they must be
+        // dream-marked (invariant M, #209) or they re-enter the next cycle / trip the
+        // caller-write cursor. (`old_id` is expired, so it self-excludes.)
+        let mut supersede_new_ids: Vec<i64> = Vec::new();
 
         for delta in &report.deltas {
             match delta {
@@ -138,10 +142,12 @@ impl MemoryEngine {
                     };
                     let promoted = self.promote_in_conn(&tx, &req)?;
                     result.promoted += 1;
+                    // Invariant M (#209): record the promoted fact's id so it gets
+                    // dream-marked below. Captured unconditionally (not just under
+                    // `ann`) — the marker must land in every build profile.
+                    result.promoted_fact_ids.push(promoted.fact_id);
                     #[cfg(feature = "ann")]
                     to_index.push((promoted.fact_id, source.embedding));
-                    #[cfg(not(feature = "ann"))]
-                    let _ = promoted;
                 }
                 CycleDelta::TagOutcome { fact_id, outcome } => {
                     let event = NewEvent {
@@ -173,15 +179,27 @@ impl MemoryEngine {
                     })?;
                     expired_ids.push(*old_id);
                     supersede_edges.push((*new_id, *old_id, edge_id));
+                    supersede_new_ids.push(*new_id);
                     result.superseded += 1;
                 }
             }
         }
 
-        // Stamp processed facts + advance the watermark in the same transaction.
-        if !report.metadata.processed_ids.is_empty() {
+        // Invariant M (#209): dream-mark not just the cycle's *inputs* (`processed_ids`)
+        // but every fact the cycle *creates or leaves active* — AddFact synthetics,
+        // promoted wisdom, and Supersede survivors. Otherwise those facts look like a
+        // fresh caller write to the #209 cursor (and re-enter the next cycle's input).
+        // Every id here is provably present in this transaction (fresh insert or a
+        // validate_report-checked live fact), so `merge_metadata` cannot hit NotFound.
+        let mut to_mark: Vec<i64> = report.metadata.processed_ids.clone();
+        to_mark.extend(&result.new_fact_ids);
+        to_mark.extend(&result.promoted_fact_ids);
+        to_mark.extend(&supersede_new_ids);
+        to_mark.sort_unstable();
+        to_mark.dedup();
+        if !to_mark.is_empty() {
             FactStore::new(&tx, self.embed_dim).mark_dream_cycled(
-                &report.metadata.processed_ids,
+                &to_mark,
                 report.metadata.cycle_id,
                 now,
             )?;
@@ -699,6 +717,91 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// Invariant M (#209): every fact a cycle *creates or leaves active* — the `AddFact`
+    /// synthetic, the promoted wisdom fact, and a Supersede survivor — must be
+    /// dream-marked in the apply transaction. Otherwise it looks like a fresh caller
+    /// write to the #209 cursor and re-enters the next cycle's input. The crisp proof:
+    /// after applying a report that processes every caller fact, NO active unpinned
+    /// fact remains unmarked, so `max_caller_written_fact_id()` returns `None`.
+    #[test]
+    fn apply_dream_marks_all_cycle_outputs_invariant_m() {
+        let engine = engine();
+        let a = add(&engine, "source to promote");
+        let old = add(&engine, "to be superseded");
+        let new = add(&engine, "supersede survivor");
+
+        let nf = NewFact {
+            content: "derived pattern".into(),
+            content_hash: String::new(),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            fact_type: FactType::Semantic,
+            t_created: "2026-06-16T00:30:00Z".parse().unwrap(),
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: "2026-06-16T00:30:00Z".parse().unwrap(),
+            metadata: serde_json::json!({}),
+            scope_id: 1,
+            is_pinned: false,
+        };
+        let res = engine
+            .apply_cycle_report(&report(
+                vec![
+                    CycleDelta::Promote {
+                        fact_id: a,
+                        provenance: stub_provenance(),
+                    },
+                    CycleDelta::AddFact(nf),
+                    CycleDelta::Supersede {
+                        old_id: old,
+                        new_id: new,
+                    },
+                ],
+                // processed_ids deliberately EXCLUDES `new` (the supersede survivor): the
+                // survivor is a cycle *output*, not a processed input, so its marking must
+                // come solely from the invariant-M `supersede_new_ids` union — not from
+                // being listed here. This isolates the Supersede-escape BLOCKER.
+                vec![a, old],
+            ))
+            .unwrap();
+        assert_eq!(
+            res.promoted_fact_ids.len(),
+            1,
+            "one promote → one promoted id"
+        );
+        assert_eq!(res.new_fact_ids.len(), 1, "one AddFact → one synthetic id");
+
+        let is_marked = |id: i64| {
+            engine
+                .with_read(|conn| {
+                    Ok(FactStore::new(conn, DIM)
+                        .get(id)?
+                        .metadata
+                        .get("dream_cycle")
+                        .is_some())
+                })
+                .unwrap()
+        };
+        assert!(is_marked(res.promoted_fact_ids[0]), "promoted fact marked");
+        assert!(is_marked(res.new_fact_ids[0]), "AddFact synthetic marked");
+        assert!(is_marked(new), "supersede survivor marked");
+        assert!(is_marked(a), "promoted source (a processed input) marked");
+
+        // The invariant in one assertion: nothing the cycle produced looks like a
+        // caller write. (Pre-fix, the AddFact synthetic + supersede survivor would be
+        // unmarked, so this would return Some(max(synthetic, survivor)).)
+        let max_caller = engine
+            .with_read(|conn| FactStore::new(conn, DIM).max_caller_written_fact_id())
+            .unwrap();
+        assert_eq!(
+            max_caller, None,
+            "no active unpinned unmarked fact may survive a full-coverage cycle apply"
+        );
     }
 
     #[test]

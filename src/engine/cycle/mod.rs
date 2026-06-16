@@ -14,6 +14,6 @@ mod report;
 pub use context::CycleContext;
 pub use default_impl::DefaultDreamCycle;
 pub use report::{
-    ApplyResult, CycleAnomaly, CycleDelta, CycleMetadata, CycleReport, IMPORTANCE_STEP,
-    IdentityOutput, MAX_ADJUSTMENT, TimeWindow,
+    ApplyResult, CycleAnomaly, CycleDelta, CycleMetadata, CycleOutcome, CycleReport,
+    IMPORTANCE_STEP, IdentityOutput, MAX_ADJUSTMENT, SkipReason, TimeWindow,
 };
