@@ -57,6 +57,69 @@ pub enum ConflictError {
     Arbitration(String),
 }
 
+/// A failure originating from the reranking stage of a query.
+///
+/// This is the typed payload of [`MemoryError::Reranker`]. It distinguishes two
+/// origins: a failure reported by the consumer-supplied
+/// [`Reranker`](crate::traits::Reranker) itself ([`Provider`](RerankerError::Provider)),
+/// and the four output-contract violations the engine detects *after* the
+/// reranker returns (`validate_reranker_output`). The engine-detected variants
+/// carry the offending values as fields, so a caller can `match` on the precise
+/// cause — and act on the data — instead of string-matching the message.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
+/// downstream `match` expressions must include a wildcard (`_`) arm.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RerankerError {
+    /// The consumer-supplied [`Reranker`](crate::traits::Reranker) returned an
+    /// error from its `rerank` call (e.g. an API call, timeout, or inference
+    /// failure). The string carries the consumer's message verbatim.
+    #[error("{0}")]
+    Provider(String),
+
+    /// The reranker returned more `(index, score)` pairs than it was given
+    /// candidates, violating the subset contract (output must be a permutation
+    /// of a subset of the input).
+    #[error(
+        "reranker violated subset contract: output length ({output_len}) exceeds input length ({input_len})"
+    )]
+    OutputTooLong {
+        /// Number of pairs the reranker returned.
+        output_len: usize,
+        /// Number of candidates the reranker was given.
+        input_len: usize,
+    },
+
+    /// The reranker returned an index that is not a valid position in the
+    /// candidate slice (`index >= num_candidates`).
+    #[error("reranker returned out-of-bounds index {index} (candidates length: {num_candidates})")]
+    OutOfBoundsIndex {
+        /// The offending out-of-range index.
+        index: usize,
+        /// Number of candidates the reranker was given.
+        num_candidates: usize,
+    },
+
+    /// The reranker returned the same index more than once, violating the subset
+    /// contract (each candidate may appear at most once in the output).
+    #[error("reranker violated subset contract: duplicate index {index} in output")]
+    DuplicateIndex {
+        /// The index that appeared more than once.
+        index: usize,
+    },
+
+    /// The reranker assigned a non-finite score (`NaN` or `±∞`) to a candidate,
+    /// which cannot participate in a deterministic ordering.
+    #[error("reranker returned non-finite score {score} for index {index}")]
+    NonFiniteScore {
+        /// The non-finite score value.
+        score: f64,
+        /// The index the score was assigned to.
+        index: usize,
+    },
+}
+
 /// Errors returned by the memory engine.
 ///
 /// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
@@ -120,10 +183,11 @@ pub enum MemoryError {
     #[error("bootstrap error: {0}")]
     Bootstrap(String),
 
-    /// The consumer-supplied [`Reranker`](crate::traits::Reranker) failed while
-    /// scoring candidates.
+    /// A failure in the reranking stage; see [`RerankerError`] for the specific
+    /// cause (a consumer-reported `rerank` failure, or one of the four
+    /// engine-detected output-contract violations).
     #[error("reranker error: {0}")]
-    Reranker(String),
+    Reranker(#[from] RerankerError),
 
     /// A cold-storage archive operation (pack/unpack of a `.pak` file) failed.
     #[error("archive error: {0}")]
@@ -166,9 +230,56 @@ mod tests {
     }
 
     #[test]
-    fn reranker_error_display() {
-        let err = MemoryError::Reranker("cross-encoder timeout".into());
+    fn reranker_provider_display() {
+        // Consumer-reported failure: the provider's message is surfaced verbatim
+        // under the outer `reranker error: ` prefix.
+        let err = MemoryError::Reranker(RerankerError::Provider("cross-encoder timeout".into()));
         assert_eq!(err.to_string(), "reranker error: cross-encoder timeout");
+    }
+
+    #[test]
+    fn reranker_contract_variants_display_byte_for_byte() {
+        // Byte-preservation: each engine-detected variant must render exactly the
+        // string the pre-split `format!` call sites produced (under the outer
+        // `reranker error: ` prefix), so existing message-matching keeps working.
+        assert_eq!(
+            MemoryError::Reranker(RerankerError::OutputTooLong {
+                output_len: 5,
+                input_len: 3,
+            })
+            .to_string(),
+            "reranker error: reranker violated subset contract: output length (5) exceeds input length (3)"
+        );
+        assert_eq!(
+            MemoryError::Reranker(RerankerError::OutOfBoundsIndex {
+                index: 7,
+                num_candidates: 4,
+            })
+            .to_string(),
+            "reranker error: reranker returned out-of-bounds index 7 (candidates length: 4)"
+        );
+        assert_eq!(
+            MemoryError::Reranker(RerankerError::DuplicateIndex { index: 2 }).to_string(),
+            "reranker error: reranker violated subset contract: duplicate index 2 in output"
+        );
+        assert_eq!(
+            MemoryError::Reranker(RerankerError::NonFiniteScore {
+                score: f64::NAN,
+                index: 1,
+            })
+            .to_string(),
+            "reranker error: reranker returned non-finite score NaN for index 1"
+        );
+    }
+
+    #[test]
+    fn reranker_error_from_into_memory_error() {
+        // `#[from]` lets a bare `RerankerError` convert via `?`/`.into()`.
+        let err: MemoryError = RerankerError::DuplicateIndex { index: 0 }.into();
+        assert!(matches!(
+            err,
+            MemoryError::Reranker(RerankerError::DuplicateIndex { index: 0 })
+        ));
     }
 
     #[test]

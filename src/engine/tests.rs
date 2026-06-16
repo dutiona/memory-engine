@@ -1682,7 +1682,9 @@ impl Reranker for ReverseReranker {
 struct FailingReranker;
 impl Reranker for FailingReranker {
     fn rerank(&self, _query: &str, _candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
-        Err(MemoryError::Reranker("cross-encoder timeout".into()))
+        Err(MemoryError::Reranker(
+            crate::error::RerankerError::Provider("cross-encoder timeout".into()),
+        ))
     }
     fn name(&self) -> &'static str {
         "failing"
@@ -2114,7 +2116,10 @@ fn reranker_error_propagates() {
     });
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), MemoryError::Reranker(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        MemoryError::Reranker(crate::error::RerankerError::Provider(_))
+    ));
 }
 
 #[test]
@@ -2502,8 +2507,11 @@ fn reranker_rejects_out_of_bounds_index() {
     assert!(result.is_err(), "should reject out-of-bounds index");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MemoryError::Reranker(_)),
-        "should be a Reranker error, got: {err}"
+        matches!(
+            err,
+            MemoryError::Reranker(crate::error::RerankerError::OutOfBoundsIndex { .. })
+        ),
+        "should be a Reranker(OutOfBoundsIndex) error, got: {err}"
     );
     assert!(
         err.to_string().contains("out-of-bounds"),
@@ -2559,8 +2567,11 @@ fn reranker_rejects_duplicates() {
     assert!(result.is_err(), "should reject duplicates");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MemoryError::Reranker(_)),
-        "should be a Reranker error, got: {err}"
+        matches!(
+            err,
+            MemoryError::Reranker(crate::error::RerankerError::DuplicateIndex { .. })
+        ),
+        "should be a Reranker(DuplicateIndex) error, got: {err}"
     );
     assert!(
         err.to_string().contains("duplicate"),
@@ -2739,12 +2750,86 @@ fn reranker_rejects_non_finite_score() {
     assert!(result.is_err(), "should reject NaN score");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MemoryError::Reranker(_)),
-        "should be a Reranker error, got: {err}"
+        matches!(
+            err,
+            MemoryError::Reranker(crate::error::RerankerError::NonFiniteScore { .. })
+        ),
+        "should be a Reranker(NonFiniteScore) error, got: {err}"
     );
     assert!(
         err.to_string().contains("non-finite"),
         "error message should mention non-finite score, got: {err}"
+    );
+}
+
+#[test]
+fn reranker_rejects_output_too_long() {
+    // Returns more (index, score) pairs than it was given candidates, tripping
+    // the subset-contract length check — which `validate_reranker_output` runs
+    // *before* the bounds/duplicate/finite checks. Pins the `OutputTooLong`
+    // variant end-to-end (its three sibling variants already have integration
+    // coverage; this closes the remaining gap).
+    struct TooManyResultsReranker;
+    impl Reranker for TooManyResultsReranker {
+        fn rerank(&self, _query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
+            // One more pair than there are candidates. Index 0 is reused with an
+            // in-bounds value so the *only* invariant violated is output length
+            // (keeps the earlier bounds check from firing first).
+            let mut out: Vec<(usize, f64)> = candidates
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (i, c.score))
+                .collect();
+            out.push((0, 0.0));
+            Ok(out)
+        }
+        fn name(&self) -> &'static str {
+            "too_many"
+        }
+    }
+
+    let engine = MemoryEngine::builder(DIM)
+        .reranker(Box::new(TooManyResultsReranker))
+        .build()
+        .unwrap();
+    let embedder = MockEmbedder { dim: DIM };
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "length contract fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            &embedder,
+            None,
+        )
+        .unwrap();
+
+    let result = engine.query(&SearchQuery {
+        text: Some("length".into()),
+        embedding: None,
+        mode: SearchMode::Fts,
+        limit: 10,
+        rerank_depth: None,
+        valid_at: None,
+        fact_type: None,
+        scope: None,
+    });
+
+    assert!(result.is_err(), "should reject output longer than input");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            MemoryError::Reranker(crate::error::RerankerError::OutputTooLong { .. })
+        ),
+        "should be a Reranker(OutputTooLong) error, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("exceeds input length"),
+        "error message should mention exceeding input length, got: {err}"
     );
 }
 
