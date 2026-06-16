@@ -116,7 +116,7 @@ pub fn consolidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::TimeDelta;
 
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
@@ -170,7 +170,7 @@ mod tests {
         store
             .insert(&NewFact {
                 content: content.into(),
-                content_hash: blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string(),
+                content_hash: String::new(),
                 embedding,
                 fact_type: FactType::Semantic,
                 t_created: Utc::now(),
@@ -288,7 +288,7 @@ mod tests {
         init_schema(&conn).unwrap();
 
         // Seed a watermark in the future so EVERY existing fact predates it.
-        let future = Utc::now() + Duration::days(1);
+        let future = Utc::now() + TimeDelta::days(1);
         set_config(&conn, "last_consolidated_at", &future.to_rfc3339()).unwrap();
 
         // Two near-duplicate facts, both created "now" (before the watermark).

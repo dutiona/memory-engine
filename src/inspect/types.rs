@@ -648,7 +648,10 @@ mod tests {
             lineage: vec![sample_lineage()],
             config,
         };
-        // EngineSnapshot is not PartialEq; assert JSON stability instead.
+        // EngineSnapshot is intentionally not `PartialEq`: `PromotionProvenance`
+        // carries a denormalized `lineage_id` re-derived from its parent entry on
+        // load, so serialize→deserialize is not value-identity. Assert JSON
+        // stability (re-serialization is byte-stable) instead.
         assert_roundtrip_json_stable(&snapshot);
     }
 
