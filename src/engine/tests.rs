@@ -3293,6 +3293,191 @@ fn builder_embed_dim_mismatch_is_rejected() {
     assert!(matches!(err, MemoryError::Migration(_)));
 }
 
+// --- Issue #130: engine-level error-path coverage ---
+//
+// These pin error paths reached *through the engine facade* (not the lower
+// stores), for the gaps not already covered by the ~13 `execute_query_*`
+// store-only tests:
+//   1. `add_fact` — invalid scope path; out-of-range `importance`.
+//   2. `restore_json` — corrupt JSON; `restore_sqlite` — non-SQLite file.
+
+#[test]
+fn add_fact_invalid_scope_path_returns_scope_label_conflict() {
+    // An empty path segment ("a//b" → segments ["a", "", "b"]) is rejected by
+    // `ScopeStore::validate_label` while resolving the scope inside `add_fact`'s
+    // write lock. The error must surface verbatim at the engine boundary as a
+    // typed `Conflict(ScopeLabel)` — not a generic Database/Internal error.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder = MockEmbedder { dim: DIM };
+
+    let err = engine
+        .add_fact(
+            &AddFactRequest {
+                content: "fact with a malformed scope".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: Some("a//b".into()),
+                opts: None,
+            },
+            &embedder,
+            None,
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            MemoryError::Conflict(crate::error::ConflictError::ScopeLabel(_))
+        ),
+        "expected Conflict(ScopeLabel) for an empty scope segment, got {err:?}"
+    );
+
+    // Discriminating: the failed insert must NOT have leaked a fact into the
+    // store (scope resolution happens before the row insert, under one lock).
+    assert!(
+        engine.list_active_facts(None).unwrap().is_empty(),
+        "a rejected scope path must not persist any fact"
+    );
+
+    // A second malformed shape — a leading-whitespace label — must also be
+    // rejected at the same boundary (guards against the check being narrowed
+    // to only the empty-segment case).
+    let err_ws = engine
+        .add_fact(
+            &AddFactRequest {
+                content: "fact with whitespace scope".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: Some(" leading".into()),
+                opts: None,
+            },
+            &embedder,
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            err_ws,
+            MemoryError::Conflict(crate::error::ConflictError::ScopeLabel(_))
+        ),
+        "expected Conflict(ScopeLabel) for a leading-whitespace label, got {err_ws:?}"
+    );
+}
+
+#[test]
+fn add_fact_importance_above_one_is_silently_accepted() {
+    // LATENT BUG (issue #130 follow-up): `AddFactOptions::importance` is
+    // documented as "Must be in [0, 1]", but no layer enforces it — not
+    // `add_fact`, not `FactStore::insert`, and the `facts.importance` column has
+    // no CHECK constraint. An out-of-range value is therefore accepted and
+    // stored verbatim. This test PINS that real behavior (it does not assert the
+    // ideal rejection); when the bug is fixed, this test should be updated to
+    // expect a `Conflict(PolicyParameter)` (or clamp) and will fail loudly here,
+    // flagging the contract change.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder = MockEmbedder { dim: DIM };
+
+    let opts = AddFactOptions {
+        importance: Some(5.0), // grossly out of the documented [0, 1] range
+        ..Default::default()
+    };
+    let id = engine
+        .add_fact(
+            &AddFactRequest {
+                content: "importance way out of range".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(opts),
+            },
+            &embedder,
+            None,
+        )
+        .expect("add_fact currently accepts out-of-range importance (latent bug)");
+
+    // The value is stored verbatim — both the base `importance` and the
+    // materialized `importance_score` seeded from it.
+    let fact = engine.get_fact(id).unwrap();
+    assert!(
+        (fact.importance - 5.0).abs() < f64::EPSILON,
+        "out-of-range importance is stored verbatim (no clamp): got {}",
+        fact.importance
+    );
+    assert!(
+        (fact.importance_score - 5.0).abs() < f64::EPSILON,
+        "importance_score is seeded from the verbatim base importance: got {}",
+        fact.importance_score
+    );
+}
+
+#[test]
+fn restore_json_corrupt_json_returns_serialization_error() {
+    // `restore_json` parses the snapshot via `serde_json::from_reader`; invalid
+    // JSON must surface as `MemoryError::Serialization` at the engine boundary,
+    // and the (not-yet-created) target DB must not be left behind.
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot_path = dir.path().join("corrupt.json");
+    std::fs::write(&snapshot_path, b"{ this is : not valid json ]]").unwrap();
+
+    let target = dir.path().join("restored.db");
+    let config = EngineConfig::new(target.clone(), DIM);
+
+    let err = MemoryEngine::restore_json(&snapshot_path, &config).unwrap_err();
+    assert!(
+        matches!(err, MemoryError::Serialization(_)),
+        "expected Serialization error for corrupt JSON snapshot, got {err:?}"
+    );
+    // The snapshot is parsed BEFORE the DB is opened, so no orphan file.
+    assert!(
+        !target.exists(),
+        "a corrupt-JSON restore must not create the target database"
+    );
+}
+
+#[test]
+fn restore_sqlite_non_sqlite_file_returns_database_error() {
+    // `restore_sqlite` accepts only a real SQLite backup. A regular file that is
+    // NOT a SQLite database passes the `is_file()` precondition, gets copied to
+    // the target, and then fails when the probe connection runs its first
+    // statement against the bogus header — surfacing `MemoryError::Database`.
+    // The orphaned copy must be cleaned up.
+    let dir = tempfile::tempdir().unwrap();
+    let bogus = dir.path().join("not_a_db.bin");
+    // Garbage bytes that do not begin with the "SQLite format 3\0" magic.
+    std::fs::write(&bogus, b"this is plainly not an sqlite database file\n").unwrap();
+
+    let target = dir.path().join("restored.db");
+    let config = EngineConfig::new(target.clone(), DIM);
+
+    let err = MemoryEngine::restore_sqlite(&bogus, &config).unwrap_err();
+    assert!(
+        matches!(err, MemoryError::Database(_)),
+        "expected Database error when restoring from a non-SQLite file, got {err:?}"
+    );
+    // The copied orphan must be removed on the failure path.
+    assert!(
+        !target.exists(),
+        "a failed restore_sqlite must clean up the copied target file"
+    );
+}
+
+#[test]
+fn restore_sqlite_missing_file_returns_not_found() {
+    // The `is_file()` precondition rejects a non-existent backup up front with a
+    // clear `NotFound`, before any copy is attempted.
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does_not_exist.db");
+    let target = dir.path().join("restored.db");
+    let config = EngineConfig::new(target.clone(), DIM);
+
+    let err = MemoryEngine::restore_sqlite(&missing, &config).unwrap_err();
+    assert!(
+        matches!(err, MemoryError::NotFound(_)),
+        "expected NotFound for a missing backup file, got {err:?}"
+    );
+    assert!(!target.exists());
+}
+
 mod snapshot_integration {
     use super::*;
 
