@@ -289,7 +289,10 @@ pub struct LineageSnapshotEntry {
 /// (importance=0.5, metadata={}, no temporal bounds).
 #[derive(Debug, Clone, Default)]
 pub struct AddFactOptions {
-    /// Override default importance (0.5). Must be in [0, 1].
+    /// Override default importance (0.5). Must be in [0, 1]; an out-of-range
+    /// or non-finite value is rejected with `Conflict(PolicyParameter)` by
+    /// [`add_fact`](crate::engine::MemoryEngine::add_fact) and
+    /// [`add_facts_batch`](crate::engine::MemoryEngine::add_facts_batch).
     pub importance: Option<f64>,
     /// Override default metadata (empty object).
     pub metadata: Option<serde_json::Value>,
