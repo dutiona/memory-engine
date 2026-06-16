@@ -26,6 +26,8 @@ struct MigrateReport {
     migrated: bool,
     /// Whether this was a `--check` dry-run.
     checked: bool,
+    /// Whether the DB is NEWER than this binary (forward-incompatible, cannot migrate).
+    newer: bool,
 }
 
 /// Apply pending migrations to the live database, or (with `--check`) report them
@@ -44,6 +46,10 @@ struct MigrateReport {
 pub fn run(db: &Path, args: &MigrateArgs, format: OutputFormat) -> anyhow::Result<ExitCode> {
     let live = peek_schema_version_from_db(db)?;
     let current = memory_engine::CURRENT_SCHEMA_VERSION;
+    // A database from a NEWER binary cannot be migrated forward by this one — the
+    // migrate() primitive would reject it. Signal non-zero for both `migrate` and
+    // `migrate --check` so a release gate never treats a rollback DB as "nothing to do".
+    let newer = live > current;
     let pending: Vec<u32> = if live < current {
         (live + 1..=current).collect()
     } else {
@@ -66,12 +72,17 @@ pub fn run(db: &Path, args: &MigrateArgs, format: OutputFormat) -> anyhow::Resul
         pending: pending.clone(),
         migrated,
         checked: args.check,
+        newer,
     };
 
     match format {
         OutputFormat::Json => output::print_json(&report)?,
         OutputFormat::Table => {
-            if pending.is_empty() {
+            if newer {
+                println!(
+                    "database schema_version {live} is NEWER than this binary (CURRENT_SCHEMA_VERSION {current}) — cannot migrate"
+                );
+            } else if pending.is_empty() {
                 println!("no pending migrations: schema_version = {live} (current {current})");
             } else if args.check {
                 let list = pending
@@ -96,10 +107,14 @@ pub fn run(db: &Path, args: &MigrateArgs, format: OutputFormat) -> anyhow::Resul
             println!("current_schema_version={current}");
             println!("pending={list}");
             println!("migrated={migrated}");
+            println!("newer={newer}");
         }
     }
 
-    Ok(if pending.is_empty() || migrated {
+    Ok(if newer {
+        // Newer-than-binary DB: forward-incompatible, cannot migrate.
+        ExitCode::from(1)
+    } else if pending.is_empty() || migrated {
         ExitCode::SUCCESS
     } else {
         // --check with pending migrations.
