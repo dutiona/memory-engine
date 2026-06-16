@@ -1050,6 +1050,37 @@ fn handle_forget(
 /// concurrent dumps (e.g. parallel tests) never collide on the timestamp.
 static NEXT_DUMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Assemble a default dump filename from its already-resolved components.
+///
+/// Pure (no clock, no process state, no atomic): given a fixed `timestamp`,
+/// `pid`, and `seq`, it always yields the same `memory-dump-<ts>-<pid>-<seq>.<ext>`
+/// name. The atomic counter (`seq`) is the load-bearing uniqueness guard for
+/// same-process dumps; the timestamp only keeps names time-ordered and the pid
+/// disambiguates across processes. Factored out so a test can hold `timestamp`
+/// and `pid` constant and prove that `seq` alone makes the names distinct — if
+/// the counter were dropped the names would collide, which the timestamp would
+/// otherwise mask on a host with a fine-grained clock.
+fn default_dump_name(timestamp: &str, pid: u32, seq: u64, ext: &str) -> String {
+    format!("memory-dump-{timestamp}-{pid}-{seq}.{ext}")
+}
+
+/// Build a collision-safe default dump path inside `base_dir`.
+///
+/// The filename combines a nanosecond timestamp, the process id, and a
+/// process-global monotonic counter:
+/// `memory-dump-<ts>-<pid>-<seq>.<ext>`. The atomic counter guarantees
+/// uniqueness for any two dumps within the same process (the case that made
+/// `test_dump_state_json` flaky under parallel `cargo test`), while the pid
+/// disambiguates across processes and the nanosecond timestamp keeps names
+/// time-ordered. Naming is delegated to [`default_dump_name`] so the uniqueness
+/// invariant can be tested deterministically without wall-clock timing.
+fn default_dump_path(base_dir: &std::path::Path, ext: &str) -> PathBuf {
+    let seq = NEXT_DUMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%9f").to_string();
+    let pid = std::process::id();
+    base_dir.join(default_dump_name(&timestamp, pid, seq, ext))
+}
+
 fn handle_dump_state(
     args: Map<String, Value>,
     engine: &MemoryEngine,
@@ -1083,14 +1114,7 @@ fn handle_dump_state(
             }
             p
         }
-        None => {
-            // Process id + monotonic counter so concurrent dumps (notably
-            // parallel tests) never collide on the millisecond timestamp.
-            let seq = NEXT_DUMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let timestamp = Utc::now().format("%Y%m%dT%H%M%S%3f");
-            let pid = std::process::id();
-            std::env::temp_dir().join(format!("memory-dump-{timestamp}-{pid}-{seq}.{ext}"))
-        }
+        None => default_dump_path(&std::env::temp_dir(), ext),
     };
 
     let dump_format = match format_str.as_str() {
@@ -1398,4 +1422,73 @@ fn handle_load_context(
         .map_err(to_mcp_error)?;
 
     ok_json(depth::shape_project_context(&ctx, depth_level))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_dump_name, default_dump_path};
+    use std::collections::HashSet;
+
+    /// Regression for #546: with a *frozen* timestamp and pid, the only thing
+    /// that can keep default dump names distinct is the process-global atomic
+    /// counter (`seq`). This pins the clock so the test isolates the counter as
+    /// the load-bearing collision guard — it fails the moment `seq` is dropped
+    /// from the filename, even on a host with a fine-grained clock that would
+    /// otherwise mask the regression by advancing the nanosecond timestamp
+    /// between calls.
+    #[test]
+    fn default_dump_names_are_distinguished_by_seq_alone() {
+        // Constant timestamp + pid: zero entropy from the clock or process id.
+        let frozen_ts = "20260616T000000000000000";
+        let frozen_pid = 4242_u32;
+
+        let n = 1024_u64;
+        let names: HashSet<_> = (0..n)
+            .map(|seq| default_dump_name(frozen_ts, frozen_pid, seq, "json"))
+            .collect();
+
+        assert_eq!(
+            names.len() as u64,
+            n,
+            "names collided with frozen ts+pid: {} unique of {n} \
+             (the atomic seq counter is not making paths distinct)",
+            names.len()
+        );
+
+        // Every seq in 0..n must be present exactly once, proving the counter —
+        // not the timestamp — supplies the distinctness.
+        for seq in 0..n {
+            let expected = format!("memory-dump-{frozen_ts}-{frozen_pid}-{seq}.json");
+            assert!(
+                names.contains(&expected),
+                "missing seq segment {seq}: {expected}"
+            );
+        }
+    }
+
+    /// End-to-end smoke check that the live `default_dump_path` (real clock,
+    /// real pid, real atomic) produces well-formed, base-rooted, unique paths.
+    /// Uniqueness here may be aided by the clock — the discriminating guarantee
+    /// is proven by `default_dump_names_are_distinguished_by_seq_alone`.
+    #[test]
+    fn default_dump_paths_are_unique_within_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        let n = 1024;
+        let paths: HashSet<_> = (0..n).map(|_| default_dump_path(base, "json")).collect();
+
+        assert_eq!(
+            paths.len(),
+            n,
+            "default dump paths collided: {} unique of {n}",
+            paths.len()
+        );
+        for p in &paths {
+            assert!(p.starts_with(base));
+            assert_eq!(p.extension().and_then(|e| e.to_str()), Some("json"));
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap();
+            assert!(name.starts_with("memory-dump-"), "unexpected name: {name}");
+        }
+    }
 }
