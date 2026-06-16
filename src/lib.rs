@@ -108,6 +108,7 @@ pub use inspect::types as inspect_types;
 pub use resume::{ResumeConfig, ResumeContext};
 pub use search::{MemoryQuery, QueryDiagnostics, QueryResponse};
 pub use store::UpcasterRegistry;
+pub use store::schema::CURRENT_SCHEMA_VERSION;
 pub use traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
     DreamCycle, EmbeddingProvider, ForgetPolicy, InsightStream, PersistenceClassifier, PruneStats,

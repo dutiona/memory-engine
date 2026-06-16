@@ -380,6 +380,129 @@ fn query_table_output_shows_temporal_columns() {
         .stdout(predicate::str::contains("Invalid"));
 }
 
+// --- migrate / schema (release-gate verify hook) ---
+
+/// Create a current-schema DB, then roll its recorded `schema_version` back one
+/// version to simulate a stale database. The on-disk schema is already current, but
+/// the migration is idempotent (`CREATE INDEX IF NOT EXISTS`), so `migrate` re-applies
+/// it cleanly — exercising the version reading, pending computation, and exit codes.
+fn create_stale_db() -> (TempDir, PathBuf) {
+    let (dir, db_path) = create_test_db();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let prev = memory_engine::CURRENT_SCHEMA_VERSION.saturating_sub(1);
+    conn.execute(
+        "UPDATE config SET value = ?1 WHERE key = 'schema_version'",
+        [prev.to_string()],
+    )
+    .unwrap();
+    (dir, db_path)
+}
+
+#[test]
+fn schema_up_to_date_exits_zero() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "schema"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("up to date"));
+}
+
+#[test]
+fn migrate_check_up_to_date_exits_zero() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "migrate", "--check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no pending"));
+}
+
+#[test]
+fn schema_mismatch_exits_nonzero() {
+    let (_dir, db_path) = create_stale_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "schema"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("MISMATCH"));
+}
+
+#[test]
+fn migrate_check_pending_exits_nonzero_without_mutating() {
+    let (_dir, db_path) = create_stale_db();
+    let current = memory_engine::CURRENT_SCHEMA_VERSION.to_string();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "migrate", "--check"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("pending migrations"))
+        .stdout(predicate::str::contains(current));
+    // --check must NOT mutate — the DB is still stale.
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "schema"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn migrate_applies_pending_then_schema_matches() {
+    let (_dir, db_path) = create_stale_db();
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "migrate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("migrated"));
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "schema"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("up to date"));
+}
+
+#[test]
+fn schema_json_output() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+            "schema",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"matches\""))
+        .stdout(predicate::str::contains("\"current_schema_version\""));
+}
+
+#[test]
+fn migrate_check_newer_db_exits_nonzero() {
+    let (_dir, db_path) = create_test_db();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let future = (memory_engine::CURRENT_SCHEMA_VERSION + 1).to_string();
+    conn.execute(
+        "UPDATE config SET value = ?1 WHERE key = 'schema_version'",
+        [future],
+    )
+    .unwrap();
+    drop(conn);
+
+    // A DB newer than the binary is forward-incompatible: both `migrate --check` and
+    // `schema` must signal non-zero (a release gate must not treat it as "nothing to do").
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "migrate", "--check"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("NEWER"));
+    cli()
+        .args(["--db", db_path.to_str().unwrap(), "schema"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("MISMATCH"));
+}
+
 // --- export + import roundtrip ---
 
 #[test]
