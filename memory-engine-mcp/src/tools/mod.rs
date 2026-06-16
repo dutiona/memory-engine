@@ -1050,6 +1050,23 @@ fn handle_forget(
 /// concurrent dumps (e.g. parallel tests) never collide on the timestamp.
 static NEXT_DUMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Build a collision-safe default dump path inside `base_dir`.
+///
+/// The filename combines a nanosecond timestamp, the process id, and a
+/// process-global monotonic counter:
+/// `memory-dump-<ts>-<pid>-<seq>.<ext>`. The atomic counter guarantees
+/// uniqueness for any two dumps within the same process (the case that made
+/// `test_dump_state_json` flaky under parallel `cargo test`), while the pid
+/// disambiguates across processes and the nanosecond timestamp keeps names
+/// time-ordered. Factored out of [`handle_dump_state`] so the uniqueness
+/// invariant can be tested deterministically without wall-clock timing.
+fn default_dump_path(base_dir: &std::path::Path, ext: &str) -> PathBuf {
+    let seq = NEXT_DUMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%9f");
+    let pid = std::process::id();
+    base_dir.join(format!("memory-dump-{timestamp}-{pid}-{seq}.{ext}"))
+}
+
 fn handle_dump_state(
     args: Map<String, Value>,
     engine: &MemoryEngine,
@@ -1083,14 +1100,7 @@ fn handle_dump_state(
             }
             p
         }
-        None => {
-            // Process id + monotonic counter so concurrent dumps (notably
-            // parallel tests) never collide on the millisecond timestamp.
-            let seq = NEXT_DUMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let timestamp = Utc::now().format("%Y%m%dT%H%M%S%3f");
-            let pid = std::process::id();
-            std::env::temp_dir().join(format!("memory-dump-{timestamp}-{pid}-{seq}.{ext}"))
-        }
+        None => default_dump_path(&std::env::temp_dir(), ext),
     };
 
     let dump_format = match format_str.as_str() {
@@ -1398,4 +1408,38 @@ fn handle_load_context(
         .map_err(to_mcp_error)?;
 
     ok_json(depth::shape_project_context(&ctx, depth_level))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_dump_path;
+    use std::collections::HashSet;
+
+    /// Regression for #546: concurrent default-path dumps within one process
+    /// must never collide. The process-global atomic counter guarantees a
+    /// distinct filename per call regardless of timestamp resolution, so a
+    /// burst of dumps issued faster than the clock ticks still yields unique
+    /// paths. This asserts the invariant deterministically (no wall-clock
+    /// timing), unlike the end-to-end `test_dump_state_json` it backstops.
+    #[test]
+    fn default_dump_paths_are_unique_within_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        let n = 1024;
+        let paths: HashSet<_> = (0..n).map(|_| default_dump_path(base, "json")).collect();
+
+        assert_eq!(
+            paths.len(),
+            n,
+            "default dump paths collided: {} unique of {n}",
+            paths.len()
+        );
+        for p in &paths {
+            assert!(p.starts_with(base));
+            assert_eq!(p.extension().and_then(|e| e.to_str()), Some("json"));
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap();
+            assert!(name.starts_with("memory-dump-"), "unexpected name: {name}");
+        }
+    }
 }
