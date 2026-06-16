@@ -41,24 +41,9 @@ impl ConflictArbiter for FixedArbiter {
 }
 
 fn make_new_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-    let now = Utc::now();
-    NewFact {
-        content: content.into(),
-        content_hash: blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string(),
-        embedding,
-        fact_type: FactType::Semantic,
-        t_created: now,
-        t_expired: None,
-        t_valid: None,
-        t_invalid: None,
-        source_event_id: None,
-        scope_id: 1,
-        importance: 0.5,
-        access_count: 0,
-        last_accessed: now,
-        metadata: serde_json::json!({}),
-        is_pinned: false,
-    }
+    NewFact::builder(content, embedding, FactType::Semantic)
+        .content_hash(blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string())
+        .build()
 }
 
 /// Test helper: insert a raw fact via the write connection (bypasses engine's `add_fact`).
@@ -281,23 +266,12 @@ fn forget_prunes_stale_facts() {
     let old_time = now - chrono::Duration::days(200);
     insert_raw_fact(
         &engine,
-        &NewFact {
-            content: "ancient fact".into(),
-            content_hash: "h_ancient".into(),
-            embedding: vec![0.1; DIM],
-            fact_type: FactType::Episodic,
-            t_created: old_time,
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            scope_id: 1,
-            importance: 0.01,
-            access_count: 0,
-            last_accessed: old_time,
-            metadata: serde_json::json!({}),
-            is_pinned: false,
-        },
+        &NewFact::builder("ancient fact", vec![0.1; DIM], FactType::Episodic)
+            .content_hash("h_ancient")
+            .t_created(old_time)
+            .last_accessed(old_time)
+            .importance(0.01)
+            .build(),
     );
 
     let policy = ForgetPolicy {

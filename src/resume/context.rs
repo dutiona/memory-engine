@@ -151,24 +151,10 @@ mod tests {
     }
 
     fn make_fact(content: &str, importance: f64, scope_id: i64) -> NewFact {
-        let now = Utc::now();
-        NewFact {
-            content: content.into(),
-            content_hash: String::new(),
-            embedding: vec![0.1; DIM],
-            fact_type: FactType::Semantic,
-            t_created: now,
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            scope_id,
-            importance,
-            access_count: 0,
-            last_accessed: now,
-            metadata: serde_json::json!({}),
-            is_pinned: false,
-        }
+        NewFact::builder(content, vec![0.1; DIM], FactType::Semantic)
+            .importance(importance)
+            .scope_id(scope_id)
+            .build()
     }
 
     #[test]
