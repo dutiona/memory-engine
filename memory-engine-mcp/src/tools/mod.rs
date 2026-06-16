@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use memory_engine::ResumeConfig;
 use memory_engine::bootstrap::{BootstrapConfig, KeywordExtractor};
 use memory_engine::engine::MemoryEngine;
 use memory_engine::inspect_types::{DumpFormat, FactExplanation, ReplayFilter, ReplayOrder};
@@ -14,14 +15,13 @@ use memory_engine::traits::{
 use memory_engine::types::{
     AddFactOptions, AddFactRequest, EventType, FactType, NewEvent, Outcome,
 };
-use memory_engine::ResumeConfig;
 use memory_engine::{CycleReport, DefaultDreamCycle, INSIGHT_MARKER_KEY};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::depth::{self, Depth};
 use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
-use crate::error::{to_mcp_error, ValidationError};
+use crate::error::{ValidationError, to_mcp_error};
 
 // ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)
@@ -1531,7 +1531,7 @@ fn handle_load_context(
 
 /// Run the dream-cycle pipeline, optionally applying the report (default: apply).
 fn handle_dream_cycle(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     // `apply` mutates the store, so a present-but-malformed value must NOT silently
@@ -1564,7 +1564,7 @@ fn handle_dream_cycle(
 
 /// Apply a client-supplied `CycleReport` (the gated path).
 fn handle_apply_cycle_report(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let report_val = args
@@ -1578,10 +1578,10 @@ fn handle_apply_cycle_report(
 
 /// Return recent insight facts in a project scope subtree, newest-first.
 fn handle_get_recent_insights(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let project_path = get_str(&args, "project_path")
+    let project_path = get_str(args, "project_path")
         .ok_or_else(|| ErrorData::invalid_params("missing 'project_path'", None))?;
     // The schema declares `limit` as an integer `minimum: 1`; the MCP layer does not
     // validate args against the schema, so enforce it here. A present-but-malformed
@@ -1599,7 +1599,7 @@ fn handle_get_recent_insights(
             }
         },
     };
-    let depth_level = get_depth(&args)?;
+    let depth_level = get_depth(args)?;
 
     let facts = engine
         .list_recent_insights(&project_path, limit)
