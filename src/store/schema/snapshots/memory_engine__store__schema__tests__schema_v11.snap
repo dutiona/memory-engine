@@ -1,5 +1,5 @@
 ---
-source: src/store/schema.rs
+source: src/store/schema/mod.rs
 expression: schema
 ---
 -- index: idx_activities_dedup
