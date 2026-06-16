@@ -20,31 +20,65 @@ gate.** Do not shortcut it.
 > harness never starts a new binary against an un-migrated DB. If the migration fails, restore the
 > backup and **abort** — the old binaries in `bin/` keep serving the old (intact) DB.
 
-**Conventions used below**
+## Preconditions — release offline
+
+Run this checklist with **no live writer holding the DB**: stop the harness and any running
+`memory-engine-mcp` first. This is load-bearing, not advisory:
+
+- The Step-3 `cp` backup of a WAL-mode DB is only consistent when no writer is mid-transaction.
+- `migrate` opens the engine **writable**; a second writer contends for the write lock.
+- Between Step 4 (migrate) and Step 5 (promote) the on-disk DB is at the **new** schema while the
+  **old** binaries in `bin/` would reject it — keep that window offline and brief.
+
+Confirm nothing holds the DB before starting:
+
+```bash
+DB=~/.local/opt/memory-engine/data/memory.db
+{ command -v fuser >/dev/null && fuser "$DB" 2>/dev/null && { echo "STOP: a process still has the DB open"; exit 1; }; } || echo "DB is free (or absent — first release)"
+```
+
+## Step 0 — Establish the release environment (run once; every later step sources it)
+
+Each step runs in its **own** shell — and the gated STOPs mean the steps cannot share one shell — so
+shell variables do **not** persist between them. A re-evaluated `$TS` would also drift between backup
+and restore. Freeze the config (one stable `$TS`) into a sourceable env file now; every later step
+begins by sourcing it.
 
 ```bash
 OPT=~/.local/opt/memory-engine
-DB="$OPT/data/memory.db"              # the live DB the harness uses (env MEMORY_ENGINE_DB)
-BACKUPS="$OPT/data/backups"
-REPO=~/dev/memory-engine              # the source checkout (build here, never consume target/)
+REPO=$(git -C ~/dev/memory-engine rev-parse --show-toplevel 2>/dev/null || echo ~/dev/memory-engine)
 TS=$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "$OPT/data/backups"
+cat > "$OPT/.release-env" <<EOF
+OPT=$OPT
+REPO=$REPO
+DB=$OPT/data/memory.db
+BACKUPS=$OPT/data/backups
+TS=$TS
+BACKUP=$OPT/data/backups/memory.$TS.pre-release.db
+EOF
+cat "$OPT/.release-env"
 ```
 
 ## Step 1 — Build the optimized release (never debug)
 
 ```bash
+source ~/.local/opt/memory-engine/.release-env
 cd "$REPO"
 cargo build --release -p memory-engine-cli -p memory-engine-mcp
 ```
 
-Produces `target/release/memory-engine-cli` and `target/release/memory-engine-mcp`. These are
-**staged**, not yet promoted. **STOP** on any build error.
+Produces `$REPO/target/release/memory-engine-cli` and `…/memory-engine-mcp`. These are **staged**,
+not yet promoted. **STOP** on any build error.
 
 ## Step 2 — Quality gate — GATE (all must pass; blocks promote)
 
 Run in order; **STOP on the first failure** — a failure here means **do not release**:
 
 ```bash
+source ~/.local/opt/memory-engine/.release-env
+cd "$REPO"
+git diff-index --quiet HEAD -- || { echo "STOP: uncommitted changes — commit/stash so the manifest git_sha matches what is built"; exit 1; }
 cargo test --workspace                # includes the schema-migration test(s)
 cargo +nightly fmt --check            # memory-engine is nightly-fmt canonical
 cargo clippy --workspace --all-targets
@@ -57,36 +91,55 @@ patch = fixes, minor = features, major = breaking). Any gate failure → STOP; f
 ## Step 3 — Back up the live DB (before any mutation)
 
 ```bash
-mkdir -p "$BACKUPS"
-[ -f "$DB" ] && cp -- "$DB" "$BACKUPS/memory.$TS.pre-release.db" && echo "backed up → $BACKUPS/memory.$TS.pre-release.db"
+source ~/.local/opt/memory-engine/.release-env
+if [ -f "$DB" ]; then
+  cp -- "$DB" "$BACKUP" && echo "backed up → $BACKUP"
+else
+  echo "first release: no live DB at $DB — nothing to back up (the MCP server creates it on first run)"
+fi
 ```
 
-memory-engine also self-backs-up via `VACUUM INTO` when the writable engine opens for a migration,
-but the gate takes its **own** copy first so restore-on-fail never depends on the very operation
-that just failed. If `$DB` does not exist yet (first release), there is nothing to back up — skip.
+`memory-engine` also self-backs-up via `VACUUM INTO` when the writable engine opens for a migration
+(the WAL-safe primary). The gate takes its **own** independent `cp` copy first so restore-on-fail
+never depends on the very operation that just failed. With the harness stopped (Preconditions) the DB
+is quiescent, so the plain `cp` is consistent.
 
 ## Step 4 — Migrate + verify — IRREVERSIBLE (requires explicit "go")
 
 > **STOP. Ask the user to confirm "go" before migrating the live DB.**
 
 ```bash
-# Dry-run first: report what would change without mutating.
-target/release/memory-engine-cli --db "$DB" migrate --check; echo "check exit=$?"
-# On "go": apply (memory-engine takes its own VACUUM-INTO backup, then migrates transactionally).
-target/release/memory-engine-cli --db "$DB" migrate
-# Verify: schema reports the binary's CURRENT_SCHEMA_VERSION (exit 0 = matched;
-# non-zero = mismatch/newer). `--format` is a GLOBAL flag (before the subcommand).
-target/release/memory-engine-cli --db "$DB" schema; echo "schema exit=$?"
+source ~/.local/opt/memory-engine/.release-env
+cd "$REPO"
+if [ -f "$DB" ]; then
+  # Dry-run report. `migrate --check` exits non-zero when migrations are PENDING — that is a STATUS
+  # signal, NOT a gate failure — so show it but never abort on its exit.
+  target/release/memory-engine-cli --db "$DB" migrate --check || true
+  # On "go": apply. memory-engine takes its own VACUUM-INTO backup, then migrates transactionally;
+  # a genuine failure rolls back and exits non-zero here.
+  target/release/memory-engine-cli --db "$DB" migrate || NEED_RESTORE=1
+  # GATE: schema_version must equal the binary's CURRENT_SCHEMA_VERSION (exit 0). `--format` is a
+  # GLOBAL flag (before the subcommand).
+  if [ -z "$NEED_RESTORE" ]; then
+    target/release/memory-engine-cli --db "$DB" schema || NEED_RESTORE=1
+  fi
+  if [ -n "$NEED_RESTORE" ]; then
+    echo "migrate/verify FAILED — restoring the pre-release backup and ABORTING (do not promote)"
+    # Drop stale WAL sidecars first, or SQLite replays the failed migration's frames onto the
+    # restored file → silent corruption. Restore via a temp file so a short write can't truncate $DB.
+    cp -- "$BACKUP" "$DB.restoring"
+    rm -f -- "$DB-wal" "$DB-shm" "$DB-journal"
+    mv -f -- "$DB.restoring" "$DB"
+    echo "restored from $BACKUP — the old binaries in bin/ keep serving this DB"
+    exit 1
+  fi
+  echo "migrated + verified"
+else
+  echo "first release: no DB to migrate — the promoted MCP server initializes it at CURRENT_SCHEMA_VERSION on first run"
+fi
 ```
 
-**On migration OR verify failure → restore the backup and ABORT (do not promote):**
-
-```bash
-cp -- "$BACKUPS/memory.$TS.pre-release.db" "$DB"   # restore the pre-release copy
-# leave the OLD binaries in bin/ in place — they serve the restored (old, intact) DB.
-```
-
-Only a `schema` exit code of `0` (live `schema_version == CURRENT_SCHEMA_VERSION`) clears this gate.
+Only a clean `schema` exit `0` (live `schema_version == CURRENT_SCHEMA_VERSION`) clears this gate.
 
 ## Step 5 — Promote the binaries atomically — IRREVERSIBLE (requires explicit "go")
 
@@ -94,20 +147,39 @@ Only a `schema` exit code of `0` (live `schema_version == CURRENT_SCHEMA_VERSION
 > the new binaries will open a compatible DB.
 
 ```bash
+source ~/.local/opt/memory-engine/.release-env
+cd "$REPO"
 mkdir -p "$OPT/bin"
+# Stage BOTH binaries beside their targets first; flip only once both copies succeed, so a mid-copy
+# failure (disk full, perms) can never leave a split-version install (new cli + old mcp).
 for b in memory-engine-cli memory-engine-mcp; do
-  cp -- "target/release/$b" "$OPT/bin/.$b.$TS.tmp"   # stage beside the target
-  mv -f -- "$OPT/bin/.$b.$TS.tmp" "$OPT/bin/$b"       # atomic rename into place
+  cp -- "target/release/$b" "$OPT/bin/.$b.$TS.tmp" || { echo "STAGE FAILED: $b"; rm -f "$OPT/bin/".*.$TS.tmp; exit 1; }
 done
-# Write the RELEASE manifest (provenance for "what is installed").
+for b in memory-engine-cli memory-engine-mcp; do
+  mv -f -- "$OPT/bin/.$b.$TS.tmp" "$OPT/bin/$b"   # atomic rename into place
+done
+# schema_version for the manifest: read it from the live DB via `--format plain` (exact key,
+# no JSON grepping). On a first release with no DB yet, record it as pending.
+if [ -f "$DB" ]; then
+  SCHEMA_VER=$("$OPT/bin/memory-engine-cli" --db "$DB" --format plain schema 2>/dev/null | grep '^schema_version=' | cut -d= -f2)
+else
+  SCHEMA_VER="pending (initialized on first MCP run)"
+fi
 cat > "$OPT/RELEASE" <<MANIFEST
 version: $(grep -m1 '^version' "$REPO/Cargo.toml" | cut -d'"' -f2)
 git_sha: $(git -C "$REPO" rev-parse HEAD)
-schema_version: $(target/release/memory-engine-cli --db "$DB" --format json schema 2>/dev/null | grep -oE '"schema_version"[: ]+[0-9]+' | grep -oE '[0-9]+' | head -1)
+schema_version: ${SCHEMA_VER:-unknown}
 released_at: $TS
 MANIFEST
-# Smoke the promoted binary against the live DB.
-"$OPT/bin/memory-engine-cli" --db "$DB" stats; echo "smoke exit=$?"
+cat "$OPT/RELEASE"
+# Smoke the PROMOTED binary. With a live DB → `stats` (proves it opens the migrated DB). On a first
+# release with no DB yet → `--version` (DB-free liveness; the CLI cannot open a missing DB).
+if [ -f "$DB" ]; then
+  "$OPT/bin/memory-engine-cli" --db "$DB" stats >/dev/null || { echo "SMOKE FAILED"; exit 1; }
+else
+  "$OPT/bin/memory-engine-cli" --version >/dev/null || { echo "SMOKE FAILED"; exit 1; }
+fi
+echo "promoted OK"
 ```
 
 A non-zero smoke exit after promote is a **release failure** — investigate before declaring done.
@@ -120,8 +192,9 @@ use. The `RELEASE` manifest at `$OPT/RELEASE` records what is installed.
 
 ## Failure-mode summary
 
-| Failure | Action |
-|---|---|
-| Build (Step 1) / quality gate (Step 2) | STOP — do not release; fix → PR → restart |
-| Migration or verify (Step 4) | restore backup → ABORT; old binaries keep serving the old DB |
-| Promote smoke (Step 5) | release failure — the DB is migrated but the new binary is unhealthy; investigate |
+| Failure                                | Action                                                                             |
+| -------------------------------------- | ---------------------------------------------------------------------------------- |
+| DB still open (Preconditions)          | STOP — stop the harness/mcp; a hot backup or a locked migrate is unsafe            |
+| Build (Step 1) / quality gate (Step 2) | STOP — do not release; fix → PR → restart                                          |
+| Migration or verify (Step 4)           | sidecar-aware restore from `$BACKUP` → ABORT; old binaries keep serving the old DB |
+| Promote smoke (Step 5)                 | release failure — the DB is migrated but the new binary is unhealthy; investigate  |
