@@ -21,8 +21,9 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# Claude Code
-.claude/
+# Claude Code — ignore local config, but track in-repo skills
+.claude/*
+!.claude/skills/
 
 # Codex CLI
 .codex
