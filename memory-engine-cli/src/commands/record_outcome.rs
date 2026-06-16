@@ -8,7 +8,7 @@ use crate::output::OutputFormat;
 
 /// Outcome variant for CLI argument parsing.
 #[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum OutcomeArg {
+pub enum OutcomeArg {
     Positive,
     Negative,
     Neutral,

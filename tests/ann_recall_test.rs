@@ -4,6 +4,9 @@
 //! with the brute-force ground truth across multiple diverse queries.
 
 #![cfg(feature = "ann")]
+// usize→f64 casts for small item counts (K ≤ 10, recalls.len() ≤ 20) are
+// lossless in practice; assessed won't-fix in super-qa #124 findings L1/L2.
+#![allow(clippy::cast_precision_loss)]
 
 use std::collections::HashSet;
 

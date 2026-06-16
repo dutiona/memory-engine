@@ -15,7 +15,7 @@ use crate::search::query::MemoryQuery;
 use crate::search::vector::cosine_similarity;
 
 /// Summary result from scanning archives.
-pub(crate) struct ArchiveSearchResult {
+pub struct ArchiveSearchResult {
     pub(crate) results: Vec<SearchResult>,
     pub(crate) paks_scanned: usize,
     pub(crate) search_ms: u64,

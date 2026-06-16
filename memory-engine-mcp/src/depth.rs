@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Depth {
-    /// ~15 tokens/fact: id, truncated content, importance_score, scope_path.
+    /// ~15 tokens/fact: id, truncated content, `importance_score`, `scope_path`.
     Sparse,
-    /// ~75 tokens/fact: all fields except embedding and content_hash. Default.
+    /// ~75 tokens/fact: all fields except embedding and `content_hash`. Default.
     #[default]
     Standard,
     /// ~300+ tokens/fact: everything including provenance, event history, graph context.
@@ -36,6 +36,7 @@ fn truncate(s: &str, max: usize) -> &str {
 }
 
 /// Shape a [`Fact`] according to the requested depth.
+#[must_use]
 pub fn shape_fact(fact: &Fact, depth: Depth, scope_path: Option<&str>) -> Value {
     match depth {
         Depth::Sparse => json!({
@@ -91,6 +92,7 @@ pub fn shape_fact(fact: &Fact, depth: Depth, scope_path: Option<&str>) -> Value 
 }
 
 /// Shape a [`SearchResult`] according to the requested depth.
+#[must_use]
 pub fn shape_search_result(result: &SearchResult, depth: Depth, scope_path: Option<&str>) -> Value {
     let mut shaped = shape_fact(&result.fact, depth, scope_path);
     if let Value::Object(ref mut map) = shaped {
@@ -104,6 +106,7 @@ pub fn shape_search_result(result: &SearchResult, depth: Depth, scope_path: Opti
 }
 
 /// Shape a [`FactExplanation`] according to the requested depth.
+#[must_use]
 pub fn shape_explanation(explanation: &FactExplanation, depth: Depth) -> Value {
     match depth {
         Depth::Sparse => json!({
@@ -144,6 +147,7 @@ pub fn shape_explanation(explanation: &FactExplanation, depth: Depth) -> Value {
 /// Shape a [`ResumeContext`] according to the requested depth.
 ///
 /// Each tier's facts are shaped independently.
+#[must_use]
 pub fn shape_resume_context(ctx: &ResumeContext, depth: Depth) -> Value {
     let shape_vec = |facts: &[Fact]| -> Vec<Value> {
         facts.iter().map(|f| shape_fact(f, depth, None)).collect()
@@ -162,6 +166,7 @@ pub fn shape_resume_context(ctx: &ResumeContext, depth: Depth) -> Value {
 ///
 /// `scope_path` is resolved externally (via `engine.get_scope_path()`) to provide
 /// human-readable context, consistent with other shapers.
+#[must_use]
 pub fn shape_event(event: &Event, depth: Depth, scope_path: Option<&str>) -> Value {
     match depth {
         Depth::Sparse => json!({
@@ -199,6 +204,7 @@ pub fn shape_event(event: &Event, depth: Depth, scope_path: Option<&str>) -> Val
 ///
 /// - **Sparse**: minimal — just result count and expired matches.
 /// - **Standard / Full**: all diagnostic fields.
+#[must_use]
 pub fn shape_diagnostics(diagnostics: &QueryDiagnostics, depth: Depth) -> Value {
     match depth {
         Depth::Sparse => json!({
@@ -216,6 +222,7 @@ pub fn shape_diagnostics(diagnostics: &QueryDiagnostics, depth: Depth) -> Value 
 }
 
 /// Shape a [`FactHistory`] according to the requested depth.
+#[must_use]
 pub fn shape_fact_history(history: &FactHistory, depth: Depth) -> Value {
     match depth {
         Depth::Sparse => json!({
@@ -242,6 +249,7 @@ pub fn shape_fact_history(history: &FactHistory, depth: Depth) -> Value {
 }
 
 /// Shape an [`Activity`] according to the requested depth.
+#[must_use]
 pub fn shape_activity(activity: &Activity, depth: Depth) -> Value {
     match depth {
         Depth::Sparse => json!({
@@ -281,6 +289,7 @@ pub fn shape_activity(activity: &Activity, depth: Depth) -> Value {
 }
 
 /// Shape a [`SessionCheckpoint`] according to the requested depth.
+#[must_use]
 pub fn shape_checkpoint(checkpoint: &SessionCheckpoint, depth: Depth) -> Value {
     match depth {
         Depth::Sparse => json!({
@@ -300,6 +309,7 @@ pub fn shape_checkpoint(checkpoint: &SessionCheckpoint, depth: Depth) -> Value {
 }
 
 /// Shape a [`ProjectContext`] according to the requested depth.
+#[must_use]
 pub fn shape_project_context(ctx: &ProjectContext, depth: Depth) -> Value {
     let activities: Vec<Value> = ctx
         .recent_activities

@@ -3,7 +3,7 @@ use memory_engine::traits::EmbeddingProvider;
 
 /// HTTP-based embedding provider calling an OpenAI-compatible `/v1/embeddings` endpoint.
 ///
-/// Auto-detects response format: OpenAI (`data[].embedding`), Ollama (`embeddings[]`),
+/// Auto-detects response format: `OpenAI` (`data[].embedding`), Ollama (`embeddings[]`),
 /// or direct (`embedding`). Supports both single and batch embedding calls.
 ///
 /// Uses `reqwest::blocking::Client` because the engine's `EmbeddingProvider` trait is sync.
@@ -54,7 +54,7 @@ impl HttpEmbeddingProvider {
         })
     }
 
-    /// Parse OpenAI batch response: `data` array with `index` + `embedding` fields.
+    /// Parse `OpenAI` batch response: `data` array with `index` + `embedding` fields.
     /// Sorts by `index` to handle out-of-order responses.
     fn parse_openai_batch(
         data: &[serde_json::Value],
@@ -72,7 +72,7 @@ impl HttpEmbeddingProvider {
         for item in data {
             let idx = item
                 .get("index")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| {
                     MemoryError::Internal("batch embedding: missing 'index' in data item".into())
                 })
@@ -144,10 +144,10 @@ impl HttpEmbeddingProvider {
             });
         }
         if emb.iter().any(|v| v.is_nan() || v.is_infinite()) {
-            return Err(MemoryError::Internal(match idx {
-                Some(i) => format!("embedding at index {i} contains NaN or Inf"),
-                None => "embedding contains NaN or Inf".into(),
-            }));
+            return Err(MemoryError::Internal(idx.map_or_else(
+                || "embedding contains NaN or Inf".into(),
+                |i| format!("embedding at index {i} contains NaN or Inf"),
+            )));
         }
         Ok(())
     }
@@ -183,6 +183,8 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         // Auto-detect response format:
         // OpenAI: { "data": [{ "embedding": [...] }] }
         // Ollama: { "embeddings": [[...]] }
+        // Multi-branch if-let chain is clearer than a nested map_or_else here.
+        #[allow(clippy::option_if_let_else)]
         let embedding = if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
             data.first()
                 .and_then(|d| d.get("embedding"))

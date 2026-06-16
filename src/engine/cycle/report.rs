@@ -175,7 +175,9 @@ mod tests {
     #[test]
     fn adjust_score_quantum_arithmetic_and_clamp() {
         let apply = |start: f64, adj: i16| -> f64 {
-            (start + f64::from(adj) * IMPORTANCE_STEP).clamp(0.0, 1.0)
+            f64::from(adj)
+                .mul_add(IMPORTANCE_STEP, start)
+                .clamp(0.0, 1.0)
         };
         // +2 thrice from 0.5 → 0.5 + 6*0.05 = 0.8
         let mut s = 0.5;

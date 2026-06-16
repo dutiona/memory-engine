@@ -7,7 +7,7 @@ use tempfile::TempDir;
 const EMBED_DIM: usize = 4;
 const EMBEDDING_JSON: &str = "[0.1, 0.2, 0.3, 0.4]";
 
-/// Create a test database (empty, with schema initialized) and return (tempdir, db_path).
+/// Create a test database (empty, with schema initialized) and return (tempdir, `db_path`).
 fn create_empty_db() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
@@ -18,7 +18,7 @@ fn create_empty_db() -> (TempDir, PathBuf) {
     (dir, db_path)
 }
 
-/// Create a test database with a seeded event for source_event_id tests.
+/// Create a test database with a seeded event for `source_event_id` tests.
 fn create_db_with_event() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");

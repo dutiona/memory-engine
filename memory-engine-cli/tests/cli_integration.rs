@@ -1,10 +1,15 @@
+// Local `FakeEmbed` structs are defined after let-bindings in test helpers —
+// keeping the struct near its only use site is clearer than hoisting it to
+// module level where it would be far from the code that exercises it.
+#![allow(clippy::items_after_statements)]
+
 use std::path::PathBuf;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-/// Create a test database with sample data and return (tempdir, db_path).
+/// Create a test database with sample data and return (tempdir, `db_path`).
 fn create_test_db() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
@@ -230,7 +235,7 @@ fn query_no_results() {
 
 // --- query: --valid-at temporal filtering ---
 
-/// Create a test database with facts that have explicit t_valid / t_invalid
+/// Create a test database with facts that have explicit `t_valid` / `t_invalid`
 /// temporal bounds, for testing --valid-at filtering.
 fn create_temporal_db() -> (TempDir, PathBuf) {
     use chrono::{TimeZone, Utc};

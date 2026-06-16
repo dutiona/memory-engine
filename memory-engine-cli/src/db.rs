@@ -81,7 +81,7 @@ pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
 /// Open a `MemoryEngine` with **write** capability.
 ///
 /// Needed for commands that mutate the database (e.g., `add-fact`, `export`
-/// with SQLite format). Sets `backup_dir` next to the database so any
+/// with `SQLite` format). Sets `backup_dir` next to the database so any
 /// schema migration creates a WAL-safe backup first.
 pub fn open_engine_writable(path: &Path) -> anyhow::Result<MemoryEngine> {
     let embed_dim = peek_embed_dim_from_db(path)?;

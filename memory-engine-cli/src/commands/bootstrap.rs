@@ -120,7 +120,7 @@ fn print_report(report: &BootstrapReport, format: OutputFormat) -> anyhow::Resul
 ///
 /// Propagates engine errors (embedding, DB, traversal) and bails if neither
 /// `--jsonl-dir` nor `--memory-dir` was given.
-pub(crate) fn run_bootstrap(
+pub fn run_bootstrap(
     engine: &MemoryEngine,
     jsonl_dir: Option<&Path>,
     memory_dir: Option<&Path>,

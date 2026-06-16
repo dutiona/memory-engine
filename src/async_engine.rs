@@ -101,6 +101,14 @@ pub struct AsyncMemoryEngine {
 }
 
 /// Convert a `tokio::task::JoinError` into a `MemoryError::Pool`.
+///
+/// Takes `JoinError` by value so it can be passed directly as `map_err(join_err)`.
+/// The value is only read via `Display`, so the by-value signature is a deliberate
+/// ergonomic choice for the `map_err` combinator.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used as map_err(join_err) fn pointer"
+)]
 fn join_err(e: tokio::task::JoinError) -> MemoryError {
     MemoryError::Pool(format!("task join error: {e}"))
 }
@@ -116,7 +124,7 @@ impl AsyncMemoryEngine {
 
     /// Wrap an existing `Arc<MemoryEngine>`.
     #[must_use]
-    pub fn from_arc(engine: Arc<MemoryEngine>) -> Self {
+    pub const fn from_arc(engine: Arc<MemoryEngine>) -> Self {
         Self { inner: engine }
     }
 
@@ -153,11 +161,21 @@ impl AsyncMemoryEngine {
     }
 
     /// Append an event to the event log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn ingest(&self, event: NewEvent) -> Result<i64> {
         delegate_blocking!(self, engine, engine.ingest(&event))
     }
 
     /// Add a fact with embedding computation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, [`MemoryError::Embedding`]
+    /// if the embedder fails, or [`MemoryError::Pool`] if the blocking task panics.
     pub async fn add_fact(
         &self,
         req: AddFactRequest,
@@ -180,6 +198,11 @@ impl AsyncMemoryEngine {
     /// Add multiple facts atomically via batch embedding + single transaction.
     ///
     /// Async wrapper around [`MemoryEngine::add_facts_batch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, [`MemoryError::Embedding`]
+    /// if the embedder fails, or [`MemoryError::Pool`] if the blocking task panics.
     pub async fn add_facts_batch(
         &self,
         entries: Vec<AddFactRequest>,
@@ -200,11 +223,21 @@ impl AsyncMemoryEngine {
     }
 
     /// Query facts using hybrid search.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn query(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         delegate_blocking!(self, engine, engine.query(&query))
     }
 
     /// Execute a composed query using the [`MemoryQuery`](crate::search::query::MemoryQuery) builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn execute_query(
         &self,
         query: crate::search::query::MemoryQuery,
@@ -216,6 +249,11 @@ impl AsyncMemoryEngine {
     ///
     /// `generator` produces the summary text; `embedder` projects it into the
     /// fact vector space (issue #116 — embedding is no longer on the generator).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, [`MemoryError::Embedding`]
+    /// if the embedder fails, or [`MemoryError::Pool`] if the blocking task panics.
     pub async fn consolidate(
         &self,
         generator: Arc<dyn SummaryGenerator + Send + Sync>,
@@ -230,11 +268,22 @@ impl AsyncMemoryEngine {
     }
 
     /// Prune stale facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn forget(&self, policy: ForgetPolicy) -> Result<PruneStats> {
         delegate_blocking!(self, engine, engine.forget(&policy))
     }
 
     /// Resolve a conflict between facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Conflict`] if the arbiter rejects both facts,
+    /// [`MemoryError::Database`] on SQL failure, or [`MemoryError::Pool`] if
+    /// the blocking task panics.
     pub async fn resolve_conflict(
         &self,
         arbiter: Arc<dyn ConflictArbiter + Send + Sync>,
@@ -249,56 +298,105 @@ impl AsyncMemoryEngine {
     }
 
     /// Get a fact by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+    /// [`MemoryError::Database`] on SQL failure.
     pub async fn get_fact(&self, id: i64) -> Result<Fact> {
         delegate_blocking!(self, engine, engine.get_fact(id))
     }
 
     /// List active facts, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
         delegate_blocking!(self, engine, engine.list_active_facts(limit))
     }
 
     /// List summaries by level.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn list_summaries(&self, level: ConsolidationLevel) -> Result<Vec<Summary>> {
         delegate_blocking!(self, engine, engine.list_summaries(&level))
     }
 
     /// Read a config value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn get_config(&self, key: String) -> Result<Option<String>> {
         delegate_blocking!(self, engine, engine.get_config(&key))
     }
 
     /// Write a config value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn set_config(&self, key: String, value: String) -> Result<()> {
         delegate_blocking!(self, engine, engine.set_config(&key, &value))
     }
 
     /// Retrieve tiered context for resuming a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn resume_context(&self, config: ResumeConfig) -> Result<ResumeContext> {
         delegate_blocking!(self, engine, engine.resume_context(&config))
     }
 
     /// Get facts whose scheduled time has arrived.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn list_due(&self, now: DateTime<Utc>, scope: Option<String>) -> Result<Vec<Fact>> {
         delegate_blocking!(self, engine, engine.list_due(now, scope.as_deref()))
     }
 
     /// Scheduling hint: earliest `t_valid` among active future-dated facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn next_due_time(&self, scope: Option<String>) -> Result<Option<DateTime<Utc>>> {
         delegate_blocking!(self, engine, engine.next_due_time(scope.as_deref()))
     }
 
     /// Pin a fact (make it unforgettable).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+    /// [`MemoryError::Database`] on SQL failure.
     pub async fn pin_fact(&self, id: i64) -> Result<()> {
         delegate_blocking!(self, engine, engine.pin_fact(id))
     }
 
     /// Unpin a fact (allow forgetting).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
+    /// [`MemoryError::Database`] on SQL failure.
     pub async fn unpin_fact(&self, id: i64) -> Result<()> {
         delegate_blocking!(self, engine, engine.unpin_fact(id))
     }
 
     /// Create co-session edges between facts sharing a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn link_session_facts(
         &self,
         session_id: String,
@@ -382,7 +480,7 @@ impl AsyncMemoryEngine {
         self.inner.graph_neighbors(fact_id)
     }
 
-    /// Graph statistics: (node_count, edge_count).
+    /// Graph statistics: (`node_count`, `edge_count`).
     #[must_use]
     pub fn graph_stats(&self) -> (usize, usize) {
         self.inner.graph_stats()
@@ -411,7 +509,7 @@ impl AsyncMemoryEngine {
     /// Async wrapper for [`MemoryEngine::archive`].
     ///
     /// Moves expired, non-pinned facts into a `.pak` file (zstd + blake3),
-    /// records a manifest row, and hard-deletes them from SQLite.
+    /// records a manifest row, and hard-deletes them from `SQLite`.
     ///
     /// Returns `None` if fewer than `policy.min_facts` candidates exist.
     ///
@@ -452,6 +550,11 @@ impl AsyncMemoryEngine {
     // --- Restore (static constructors) ---
 
     /// Async wrapper for [`MemoryEngine::restore_json`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] on I/O or deserialization failure, or
+    /// [`MemoryError::Database`] on SQL failure.
     pub async fn restore_json(
         snapshot_path: std::path::PathBuf,
         config: EngineConfig,
@@ -461,12 +564,22 @@ impl AsyncMemoryEngine {
     }
 
     /// Async wrapper for [`MemoryEngine::restore_json_memory`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] on I/O or deserialization failure, or
+    /// [`MemoryError::Database`] on SQL failure.
     pub async fn restore_json_memory(snapshot_path: std::path::PathBuf) -> Result<Self> {
         let engine = delegate_blocking!(MemoryEngine::restore_json_memory(&snapshot_path))?;
         Ok(Self::new(engine))
     }
 
     /// Async wrapper for [`MemoryEngine::restore_sqlite`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] on I/O failure, or
+    /// [`MemoryError::Database`] on SQL failure.
     pub async fn restore_sqlite(
         backup_path: std::path::PathBuf,
         config: EngineConfig,
@@ -478,6 +591,10 @@ impl AsyncMemoryEngine {
     /// Write a snapshot of in-memory state to the sidecar file.
     ///
     /// Delegates to [`MemoryEngine::write_snapshot`] on a blocking task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] on I/O or serialization failure.
     pub async fn write_snapshot(&self) -> Result<bool> {
         delegate_blocking!(self, engine, engine.write_snapshot())
     }
@@ -487,6 +604,11 @@ impl AsyncMemoryEngine {
     /// Sample dormant facts semantically related to a context.
     ///
     /// See [`MemoryEngine::sample_dormant`] for details.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn sample_dormant(
         &self,
         n: usize,
@@ -503,6 +625,11 @@ impl AsyncMemoryEngine {
     /// Record a high-value insight via the provided `InsightStream`.
     ///
     /// See [`MemoryEngine::record_insight`] for details.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn record_insight(
         &self,
         insight: crate::types::Insight,
@@ -515,9 +642,14 @@ impl AsyncMemoryEngine {
         )
     }
 
-    /// Run a DreamCycle using a capability-restricted `DreamContext`.
+    /// Run a `DreamCycle` using a capability-restricted `DreamContext`.
     ///
     /// See [`MemoryEngine::run_dream_cycle`] for details.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`] on SQL failure, or
+    /// [`MemoryError::Pool`] if the blocking task panics.
     pub async fn run_dream_cycle(
         &self,
         cycle: Arc<dyn crate::traits::DreamCycle + Send + Sync>,

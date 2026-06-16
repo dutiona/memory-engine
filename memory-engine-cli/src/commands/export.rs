@@ -9,7 +9,7 @@ use crate::db::{open_engine, open_engine_writable};
 /// The kebab-cased variant names are the stable CLI value tokens
 /// (`json`, `sqlite`, `json-gz`, `json-zst`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum ExportFormat {
+pub enum ExportFormat {
     /// Plain JSON snapshot (default).
     #[default]
     Json,

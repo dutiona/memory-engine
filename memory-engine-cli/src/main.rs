@@ -68,7 +68,7 @@ enum Commands {
     OutcomeCounts(commands::outcome_counts::OutcomeCountsArgs),
     /// Apply pending schema migrations (use --check for a dry-run)
     Migrate(commands::migrate::MigrateArgs),
-    /// Report the database schema version vs the binary's CURRENT_SCHEMA_VERSION
+    /// Report the database schema version vs the binary's `CURRENT_SCHEMA_VERSION`
     Schema,
 }
 

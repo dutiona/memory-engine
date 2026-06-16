@@ -539,6 +539,10 @@ impl MemoryEngine {
     /// (`scope_subtree`/`scope_exact`/…) return zero results in-session even
     /// though the facts are correctly persisted. [`ScopeTree::insert`] is
     /// idempotent by id, so re-inserting shared ancestors is a no-op.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "write lock must be held for the entire leaf-to-root walk to prevent interleaved inserts from racing on the same path"
+    )]
     fn ensure_scope_with_conn(&self, conn: &Connection, path: &str) -> Result<i64> {
         let scope_store = ScopeStore::new(conn);
         let id = scope_store.ensure_path(path)?;

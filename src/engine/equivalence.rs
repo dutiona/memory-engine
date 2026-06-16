@@ -34,7 +34,7 @@ impl Reranker for NamedReranker {
     fn rerank(&self, _query: &str, _candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
         Ok(Vec::new())
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "named-test-reranker"
     }
 }

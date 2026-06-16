@@ -27,6 +27,11 @@ use crate::error::{ValidationError, to_mcp_error};
 // ---------------------------------------------------------------------------
 
 /// Returns all tool definitions (P0, P1, P2, Phase 5) with JSON schemas.
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one vec! literal per tool definition — extracting helpers adds noise without reducing complexity"
+)]
 pub fn all_tool_definitions() -> Vec<Tool> {
     vec![
         tool_def(
@@ -374,6 +379,16 @@ fn tool_def(name: &'static str, description: &'static str, schema: Value) -> Too
 // ---------------------------------------------------------------------------
 
 /// Route a tool call to the appropriate handler.
+///
+/// # Errors
+///
+/// Returns [`ErrorData`] if the tool name is unknown, required arguments are
+/// missing or malformed, or the underlying engine operation fails.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "args is passed by value from the MCP framework's dispatch boundary; \
+              taking &Map would force callers to retain ownership"
+)]
 pub fn dispatch(
     name: &str,
     args: Map<String, Value>,
@@ -383,6 +398,7 @@ pub fn dispatch(
     embed_dim: usize,
     filter_config: &memory_engine::ActivityFilterConfig,
 ) -> Result<CallToolResult, ErrorData> {
+    let args = &args;
     match name {
         "memory_ingest" => handle_ingest(args, engine),
         "memory_add_fact" => handle_add_fact(args, engine, embedder, embed_dim),
@@ -443,13 +459,11 @@ fn get_usize(args: &Map<String, Value>, key: &str) -> Option<usize> {
 }
 
 fn get_datetime(args: &Map<String, Value>, key: &str) -> Result<Option<DateTime<Utc>>, ErrorData> {
-    match get_str(args, key) {
-        Some(s) => s
-            .parse::<DateTime<Utc>>()
+    get_str(args, key).map_or(Ok(None), |s| {
+        s.parse::<DateTime<Utc>>()
             .map(Some)
-            .map_err(|e| ErrorData::invalid_params(format!("invalid {key}: {e}"), None)),
-        None => Ok(None),
-    }
+            .map_err(|e| ErrorData::invalid_params(format!("invalid {key}: {e}"), None))
+    })
 }
 
 fn get_depth(args: &Map<String, Value>) -> Result<Depth, ErrorData> {
@@ -521,19 +535,19 @@ fn ok_json(value: Value) -> Result<CallToolResult, ErrorData> {
 // ---------------------------------------------------------------------------
 
 fn handle_ingest(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let event_type_str = get_str(&args, "event_type")
+    let event_type_str = get_str(args, "event_type")
         .ok_or_else(|| ErrorData::invalid_params("missing event_type", None))?;
     let event_type = parse_event_type(&event_type_str)?;
-    let payload = args.get("payload").cloned().unwrap_or(json!({}));
-    let source = get_str(&args, "source")
-        .ok_or_else(|| ErrorData::invalid_params("missing source", None))?;
-    let session_id = get_str(&args, "session_id");
-    let timestamp = get_datetime(&args, "timestamp")?.unwrap_or_else(Utc::now);
+    let payload = args.get("payload").cloned().unwrap_or_else(|| json!({}));
+    let source =
+        get_str(args, "source").ok_or_else(|| ErrorData::invalid_params("missing source", None))?;
+    let session_id = get_str(args, "session_id");
+    let timestamp = get_datetime(args, "timestamp")?.unwrap_or_else(Utc::now);
 
-    let scope_id = match get_str(&args, "scope") {
+    let scope_id = match get_str(args, "scope") {
         Some(path) => engine.ensure_scope_path(&path).map_err(to_mcp_error)?,
         None => 1, // root scope
     };
@@ -555,22 +569,22 @@ fn handle_ingest(
 }
 
 fn handle_add_fact(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
     embedder: Option<&HttpEmbeddingProvider>,
     embed_dim: usize,
 ) -> Result<CallToolResult, ErrorData> {
-    let content = get_str(&args, "content")
+    let content = get_str(args, "content")
         .ok_or_else(|| ErrorData::invalid_params("missing content", None))?;
-    let fact_type = match get_str(&args, "fact_type") {
+    let fact_type = match get_str(args, "fact_type") {
         Some(s) => parse_fact_type(&s)?,
         None => FactType::Semantic,
     };
-    let source_event_id = get_i64(&args, "source_event_id");
-    let scope = get_str(&args, "scope");
+    let source_event_id = get_i64(args, "source_event_id");
+    let scope = get_str(args, "scope");
 
     // Validate importance range
-    let importance = get_f64(&args, "importance");
+    let importance = get_f64(args, "importance");
     if let Some(imp) = importance {
         if !(0.0..=1.0).contains(&imp) {
             return Err(ValidationError::ImportanceOutOfRange(imp).into());
@@ -578,19 +592,19 @@ fn handle_add_fact(
     }
 
     // Validate temporal consistency
-    let t_valid = get_datetime(&args, "t_valid")?;
-    let t_invalid = get_datetime(&args, "t_invalid")?;
+    let t_valid = get_datetime(args, "t_valid")?;
+    let t_invalid = get_datetime(args, "t_invalid")?;
     if let (Some(tv), Some(ti)) = (t_valid, t_invalid) {
         if tv >= ti {
             return Err(ValidationError::TemporalInconsistency.into());
         }
     }
 
-    let pinned = get_bool(&args, "pinned");
+    let pinned = get_bool(args, "pinned");
     let metadata = args.get("metadata").cloned();
 
     // Pre-computed embedding or server-side embedding
-    let pre_computed = parse_embedding(&args)?;
+    let pre_computed = parse_embedding(args)?;
 
     if let Some(ref emb) = pre_computed {
         if emb.len() != embed_dim {
@@ -631,31 +645,31 @@ fn handle_add_fact(
 }
 
 fn handle_query(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
     embedder: Option<&HttpEmbeddingProvider>,
 ) -> Result<CallToolResult, ErrorData> {
-    let depth_level = get_depth(&args)?;
+    let depth_level = get_depth(args)?;
 
     let mut query = memory_engine::MemoryQuery::new();
 
     // Parse and validate search mode (if explicit)
-    let explicit_mode = match get_str(&args, "mode") {
+    let explicit_mode = match get_str(args, "mode") {
         Some(s) => Some(parse_search_mode(&s)?),
         None => None,
     };
 
     // Parse embedding (with proper error on malformed input)
-    let pre_emb = parse_embedding(&args)?;
+    let pre_emb = parse_embedding(args)?;
 
-    if let Some(text) = get_str(&args, "text") {
+    if let Some(text) = get_str(args, "text") {
         query = query.text(text.clone());
 
         // Determine effective mode for embedding decision
+        // None defaults to true: try to provide embedding for hybrid if possible
         let needs_embedding = match explicit_mode {
             Some(SearchMode::Fts) => false,
-            Some(SearchMode::Vector | SearchMode::Hybrid) => true,
-            None => true, // Default: try to provide embedding for hybrid if possible
+            Some(SearchMode::Vector | SearchMode::Hybrid) | None => true,
         };
 
         if needs_embedding {
@@ -686,8 +700,8 @@ fn handle_query(
     }
 
     // Scope
-    if let Some(scope) = get_str(&args, "scope") {
-        let scope_mode = get_str(&args, "scope_mode").unwrap_or_else(|| "subtree".to_owned());
+    if let Some(scope) = get_str(args, "scope") {
+        let scope_mode = get_str(args, "scope_mode").unwrap_or_else(|| "subtree".to_owned());
         query = match scope_mode.as_str() {
             "subtree" => query.scope_subtree(scope),
             "exact" => query.scope_exact(scope),
@@ -703,8 +717,8 @@ fn handle_query(
     }
 
     // Temporal filters — reject one-sided periods
-    let period_start = get_datetime(&args, "period_start")?;
-    let period_end = get_datetime(&args, "period_end")?;
+    let period_start = get_datetime(args, "period_start")?;
+    let period_end = get_datetime(args, "period_end")?;
     match (period_start, period_end) {
         (Some(start), Some(end)) => {
             query = query.period(start, end);
@@ -718,19 +732,19 @@ fn handle_query(
         (None, None) => {}
     }
 
-    if let Some(ft) = get_str(&args, "fact_type") {
+    if let Some(ft) = get_str(args, "fact_type") {
         query = query.fact_type(parse_fact_type(&ft)?);
     }
-    if let Some(min) = get_f64(&args, "min_importance") {
+    if let Some(min) = get_f64(args, "min_importance") {
         query = query.min_importance_score(min);
     }
-    if get_bool(&args, "pinned_only").unwrap_or(false) {
+    if get_bool(args, "pinned_only").unwrap_or(false) {
         query = query.pinned_only();
     }
-    if let Some(limit) = get_usize(&args, "limit") {
+    if let Some(limit) = get_usize(args, "limit") {
         query = query.limit(limit);
     }
-    if get_bool(&args, "include_expired_probe").unwrap_or(false) {
+    if get_bool(args, "include_expired_probe").unwrap_or(false) {
         query = query.include_expired_probe();
     }
 
@@ -748,19 +762,19 @@ fn handle_query(
 }
 
 fn handle_resume_context(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let depth_level = get_depth(&args)?;
+    let depth_level = get_depth(args)?;
 
     let config = ResumeConfig {
-        scope_path: get_str(&args, "scope"),
+        scope_path: get_str(args, "scope"),
         now: Utc::now(),
-        pinned_cap: get_usize(&args, "pinned_cap").unwrap_or(50),
-        high_importance_cap: get_usize(&args, "high_importance_cap").unwrap_or(20),
-        high_importance_min: get_f64(&args, "high_importance_min").unwrap_or(0.7),
-        due_cap: get_usize(&args, "due_cap").unwrap_or(10),
-        recent_cap: get_usize(&args, "recent_cap").unwrap_or(10),
+        pinned_cap: get_usize(args, "pinned_cap").unwrap_or(50),
+        high_importance_cap: get_usize(args, "high_importance_cap").unwrap_or(20),
+        high_importance_min: get_f64(args, "high_importance_min").unwrap_or(0.7),
+        due_cap: get_usize(args, "due_cap").unwrap_or(10),
+        recent_cap: get_usize(args, "recent_cap").unwrap_or(10),
     };
 
     let ctx = engine.resume_context(&config).map_err(to_mcp_error)?;
@@ -770,11 +784,11 @@ fn handle_resume_context(
 }
 
 fn handle_list_due(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let depth_level = get_depth(&args)?;
-    let scope = get_str(&args, "scope");
+    let depth_level = get_depth(args)?;
+    let scope = get_str(args, "scope");
 
     let facts = engine
         .list_due(Utc::now(), scope.as_deref())
@@ -789,10 +803,10 @@ fn handle_list_due(
 }
 
 fn handle_next_due_time(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let scope = get_str(&args, "scope");
+    let scope = get_str(args, "scope");
     let next = engine
         .next_due_time(scope.as_deref())
         .map_err(to_mcp_error)?;
@@ -801,12 +815,12 @@ fn handle_next_due_time(
 }
 
 fn handle_explain_fact(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(&args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
-    let depth_level = get_depth(&args)?;
+    let depth_level = get_depth(args)?;
 
     let explanation: FactExplanation = engine.explain_fact(fact_id).map_err(to_mcp_error)?;
     let shaped = depth::shape_explanation(&explanation, depth_level);
@@ -815,12 +829,12 @@ fn handle_explain_fact(
 }
 
 fn handle_get_fact(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(&args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
-    let depth_level = get_depth(&args)?;
+    let depth_level = get_depth(args)?;
 
     let fact = engine.get_fact(fact_id).map_err(to_mcp_error)?;
     let shaped = depth::shape_fact(&fact, depth_level, None);
@@ -836,7 +850,7 @@ fn handle_statistics(engine: &MemoryEngine) -> Result<CallToolResult, ErrorData>
 }
 
 fn handle_flush_insights(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
     embedder: Option<&HttpEmbeddingProvider>,
 ) -> Result<CallToolResult, ErrorData> {
@@ -845,10 +859,12 @@ fn handle_flush_insights(
         .and_then(Value::as_array)
         .ok_or_else(|| ErrorData::invalid_params("missing insights array", None))?;
 
-    let emb = embedder.ok_or(ErrorData::invalid_params(
-        "embedding provider not configured — required for flush_insights",
-        None,
-    ))?;
+    let emb = embedder.ok_or_else(|| {
+        ErrorData::invalid_params(
+            "embedding provider not configured — required for flush_insights",
+            None,
+        )
+    })?;
 
     // --- Phase 1: Parse + validate all insights upfront ---
     let mut entries: Vec<AddFactRequest> = Vec::new();
@@ -856,20 +872,14 @@ fn handle_flush_insights(
     let mut failed: Vec<Value> = Vec::new();
 
     for (i, insight) in insights.iter().enumerate() {
-        let obj = match insight.as_object() {
-            Some(o) => o,
-            None => {
-                failed.push(json!({ "index": i, "error": "not an object" }));
-                continue;
-            }
+        let Some(obj) = insight.as_object() else {
+            failed.push(json!({ "index": i, "error": "not an object" }));
+            continue;
         };
 
-        let content = match get_str(obj, "content") {
-            Some(c) => c,
-            None => {
-                failed.push(json!({ "index": i, "error": "missing content" }));
-                continue;
-            }
+        let Some(content) = get_str(obj, "content") else {
+            failed.push(json!({ "index": i, "error": "missing content" }));
+            continue;
         };
 
         let fact_type = match get_str(obj, "fact_type") {
@@ -893,7 +903,7 @@ fn handle_flush_insights(
             }
         }
 
-        let mut metadata = obj.get("metadata").cloned().unwrap_or(json!({}));
+        let mut metadata = obj.get("metadata").cloned().unwrap_or_else(|| json!({}));
         if let Value::Object(ref mut m) = metadata {
             m.insert("source".to_owned(), json!("pre_compaction_flush"));
         }
@@ -943,7 +953,7 @@ fn handle_flush_insights(
 // ---------------------------------------------------------------------------
 
 fn handle_consolidate(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
     embedder: Option<&HttpEmbeddingProvider>,
     summary_gen: Option<&(dyn SummaryGenerator + Send + Sync)>,
@@ -953,7 +963,10 @@ fn handle_consolidate(
     // SummaryGenerator, so consolidation now requires an embedder too.
     let embedder = embedder.ok_or(ValidationError::NoEmbeddingProvider)?;
 
-    let dedup_threshold = get_f64(&args, "dedup_threshold").unwrap_or(0.92) as f32;
+    // f64→f32 narrowing is intentional: dedup_threshold is a similarity score in [0,1],
+    // well within f32's exact range; the loss of sub-microsecond precision is acceptable.
+    #[allow(clippy::cast_possible_truncation)]
+    let dedup_threshold = get_f64(args, "dedup_threshold").unwrap_or(0.92) as f32;
     if !(0.0..=1.0).contains(&dedup_threshold) {
         return Err(ValidationError::Other(format!(
             "dedup_threshold must be in [0.0, 1.0], got {dedup_threshold}"
@@ -961,7 +974,7 @@ fn handle_consolidate(
         .into());
     }
 
-    let min_cluster_size = get_usize(&args, "min_cluster_size").unwrap_or(3);
+    let min_cluster_size = get_usize(args, "min_cluster_size").unwrap_or(3);
     if min_cluster_size < 2 {
         return Err(ValidationError::Other(format!(
             "min_cluster_size must be >= 2, got {min_cluster_size}"
@@ -986,27 +999,27 @@ fn handle_consolidate(
 }
 
 fn handle_forget(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let mut policy = ForgetPolicy::default();
 
-    if let Some(v) = require_f64_if_present(&args, "half_life_days")? {
+    if let Some(v) = require_f64_if_present(args, "half_life_days")? {
         policy.half_life_days = v;
     }
-    if let Some(v) = require_f64_if_present(&args, "min_importance")? {
+    if let Some(v) = require_f64_if_present(args, "min_importance")? {
         policy.min_importance = v;
     }
-    if let Some(v) = require_f64_if_present(&args, "recency_weight")? {
+    if let Some(v) = require_f64_if_present(args, "recency_weight")? {
         policy.recency_weight = v;
     }
-    if let Some(v) = require_f64_if_present(&args, "frequency_weight")? {
+    if let Some(v) = require_f64_if_present(args, "frequency_weight")? {
         policy.frequency_weight = v;
     }
-    if let Some(v) = require_f64_if_present(&args, "graph_degree_weight")? {
+    if let Some(v) = require_f64_if_present(args, "graph_degree_weight")? {
         policy.graph_degree_weight = v;
     }
-    if let Some(v) = require_f64_if_present(&args, "base_importance_weight")? {
+    if let Some(v) = require_f64_if_present(args, "base_importance_weight")? {
         policy.base_importance_weight = v;
     }
 
@@ -1082,10 +1095,10 @@ fn default_dump_path(base_dir: &std::path::Path, ext: &str) -> PathBuf {
 }
 
 fn handle_dump_state(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let format_str = get_str(&args, "format").unwrap_or_else(|| "json".to_owned());
+    let format_str = get_str(args, "format").unwrap_or_else(|| "json".to_owned());
 
     let ext = match format_str.as_str() {
         "json" => "json",
@@ -1095,7 +1108,7 @@ fn handle_dump_state(
         }
     };
 
-    let path = match get_str(&args, "path") {
+    let path = match get_str(args, "path") {
         Some(p) => {
             let p = PathBuf::from(p);
             // Security: restrict client-supplied paths to the system temp directory.
@@ -1129,10 +1142,10 @@ fn handle_dump_state(
 }
 
 fn handle_pin_fact(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(&args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
 
     engine.pin_fact(fact_id).map_err(to_mcp_error)?;
@@ -1141,10 +1154,10 @@ fn handle_pin_fact(
 }
 
 fn handle_unpin_fact(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(&args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
 
     engine.unpin_fact(fact_id).map_err(to_mcp_error)?;
@@ -1168,13 +1181,13 @@ fn parse_replay_order(s: &str) -> Result<ReplayOrder, ErrorData> {
 }
 
 fn handle_replay_events(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let depth_level = get_depth(&args)?;
+    let depth_level = get_depth(args)?;
 
-    let since = get_datetime(&args, "since")?;
-    let until = get_datetime(&args, "until")?;
+    let since = get_datetime(args, "since")?;
+    let until = get_datetime(args, "until")?;
 
     // Ordering validation: when both bounds are provided, since must not exceed until.
     // Either bound may be omitted independently (open-ended range).
@@ -1184,8 +1197,8 @@ fn handle_replay_events(
         }
     }
 
-    let id_start = get_i64(&args, "id_range_start");
-    let id_end = get_i64(&args, "id_range_end");
+    let id_start = get_i64(args, "id_range_start");
+    let id_end = get_i64(args, "id_range_end");
     let id_range = match (id_start, id_end) {
         (Some(s), Some(e)) => {
             if s > e {
@@ -1205,19 +1218,19 @@ fn handle_replay_events(
         }
     };
 
-    let session_id = get_str(&args, "session_id");
-    let event_type = match get_str(&args, "event_type") {
+    let session_id = get_str(args, "session_id");
+    let event_type = match get_str(args, "event_type") {
         Some(s) => Some(parse_event_type(&s)?),
         None => None,
     };
     // 0 = no limit (unbounded), absent = default cap of 100
-    let limit = match get_usize(&args, "limit") {
+    let limit = match get_usize(args, "limit") {
         Some(0) => None,
         Some(n) => Some(n),
         None => Some(100),
     };
-    let upcast = get_bool(&args, "upcast").unwrap_or(false);
-    let order = match get_str(&args, "order") {
+    let upcast = get_bool(args, "upcast").unwrap_or(false);
+    let order = match get_str(args, "order") {
         Some(s) => parse_replay_order(&s)?,
         None => ReplayOrder::InsertionOrder,
     };
@@ -1243,12 +1256,12 @@ fn handle_replay_events(
 }
 
 fn handle_fact_history(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(&args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
-    let depth_level = get_depth(&args)?;
+    let depth_level = get_depth(args)?;
 
     let history = engine.fact_history(fact_id).map_err(to_mcp_error)?;
     let shaped = depth::shape_fact_history(&history, depth_level);
@@ -1257,17 +1270,19 @@ fn handle_fact_history(
 }
 
 fn handle_bootstrap_session(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
     embedder: Option<&HttpEmbeddingProvider>,
 ) -> Result<CallToolResult, ErrorData> {
-    let jsonl_data = get_str(&args, "jsonl_data")
+    let jsonl_data = get_str(args, "jsonl_data")
         .ok_or_else(|| ErrorData::invalid_params("missing jsonl_data", None))?;
 
-    let emb = embedder.ok_or(ErrorData::invalid_params(
-        "embedding provider not configured — required for bootstrap_session",
-        None,
-    ))?;
+    let emb = embedder.ok_or_else(|| {
+        ErrorData::invalid_params(
+            "embedding provider not configured — required for bootstrap_session",
+            None,
+        )
+    })?;
 
     // Redaction is always on for the live MCP path (#45/#51 — no bypass). The
     // author-seeded denylist is a backfill-time concern (its env var is normally
@@ -1288,9 +1303,9 @@ fn handle_bootstrap_session(
         }
     };
     let config = BootstrapConfig {
-        scope: get_str(&args, "scope"),
-        max_turns: get_usize(&args, "max_turns").unwrap_or(0),
-        skip_existing: get_bool(&args, "skip_existing").unwrap_or(true),
+        scope: get_str(args, "scope"),
+        max_turns: get_usize(args, "max_turns").unwrap_or(0),
+        skip_existing: get_bool(args, "skip_existing").unwrap_or(true),
         redact: true,
         denylist,
     };
@@ -1324,12 +1339,12 @@ fn parse_outcome(s: &str) -> Result<Outcome, ErrorData> {
 }
 
 fn handle_record_outcome(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(&args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
-    let outcome_str = get_str(&args, "outcome")
+    let outcome_str = get_str(args, "outcome")
         .ok_or_else(|| ErrorData::invalid_params("missing outcome", None))?;
     let outcome = parse_outcome(&outcome_str)?;
 
@@ -1345,10 +1360,10 @@ fn handle_record_outcome(
 }
 
 fn handle_outcome_counts(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(&args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
 
     let counts = engine.get_outcome_counts(fact_id).map_err(to_mcp_error)?;
@@ -1366,20 +1381,20 @@ fn handle_outcome_counts(
 // ---------------------------------------------------------------------------
 
 fn handle_record_activity(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
     embedder: Option<&HttpEmbeddingProvider>,
     filter_config: &memory_engine::ActivityFilterConfig,
 ) -> Result<CallToolResult, ErrorData> {
     let tool_name =
-        get_str(&args, "tool").ok_or_else(|| ErrorData::invalid_params("missing tool", None))?;
-    let session_id = get_str(&args, "session_id")
+        get_str(args, "tool").ok_or_else(|| ErrorData::invalid_params("missing tool", None))?;
+    let session_id = get_str(args, "session_id")
         .ok_or_else(|| ErrorData::invalid_params("missing session_id", None))?;
-    let tool_args = args.get("args").cloned().unwrap_or(json!({}));
-    let result_summary = get_str(&args, "result");
-    let timestamp = get_datetime(&args, "timestamp")?.unwrap_or_else(Utc::now);
-    let scope = get_str(&args, "scope");
-    let outcome_class = get_str(&args, "outcome_class");
+    let tool_args = args.get("args").cloned().unwrap_or_else(|| json!({}));
+    let result_summary = get_str(args, "result");
+    let timestamp = get_datetime(args, "timestamp")?.unwrap_or_else(Utc::now);
+    let scope = get_str(args, "scope");
+    let outcome_class = get_str(args, "outcome_class");
 
     let req = memory_engine::RecordActivityRequest {
         tool_name,
@@ -1408,13 +1423,13 @@ fn handle_record_activity(
 }
 
 fn handle_checkpoint_session(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let session_id = get_str(&args, "session_id")
+    let session_id = get_str(args, "session_id")
         .ok_or_else(|| ErrorData::invalid_params("missing session_id", None))?;
-    let scope = get_str(&args, "scope");
-    let summary = get_str(&args, "summary");
+    let scope = get_str(args, "scope");
+    let summary = get_str(args, "summary");
     let metadata = args.get("metadata").cloned();
 
     engine
@@ -1428,14 +1443,14 @@ fn handle_checkpoint_session(
 }
 
 fn handle_load_context(
-    args: Map<String, Value>,
+    args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let scope =
-        get_str(&args, "scope").ok_or_else(|| ErrorData::invalid_params("missing scope", None))?;
-    let activity_limit = get_usize(&args, "activity_limit").unwrap_or(20);
-    let fact_limit = get_usize(&args, "fact_limit").unwrap_or(10);
-    let depth_level = get_depth(&args)?;
+        get_str(args, "scope").ok_or_else(|| ErrorData::invalid_params("missing scope", None))?;
+    let activity_limit = get_usize(args, "activity_limit").unwrap_or(20);
+    let fact_limit = get_usize(args, "fact_limit").unwrap_or(10);
+    let depth_level = get_depth(args)?;
 
     let ctx = engine
         .load_context(&scope, activity_limit, fact_limit)

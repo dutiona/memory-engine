@@ -48,6 +48,10 @@ pub struct FactScoringRow {
     pub is_pinned: bool,
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "used as Option<&FactType>.map(fact_type_to_str) in search paths; changing to by-value would break those call sites"
+)]
 pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
     match ft {
         FactType::Episodic => "episodic",
@@ -946,7 +950,7 @@ impl<'a> FactStore<'a> {
 
     /// Shared core for [`Self::list_active_in_period`] and
     /// [`Self::list_undreamt_in_period`]. `extra_conditions` are additional
-    /// **non-parameterized** SQL predicates ANDed into the `WHERE` clause (they
+    /// **non-parameterized** SQL predicates `ANDed` into the `WHERE` clause (they
     /// must not reference bind parameters — they are appended verbatim, so callers
     /// pass only trusted literals like a `json_extract(metadata, …) IS NULL` filter).
     fn list_active_in_period_inner(
@@ -1727,6 +1731,10 @@ mod tests {
         fs.insert(&past).unwrap();
 
         let mut future = make_fact("future reminder", vec![0.2; DIM]);
+        #[allow(
+            clippy::items_after_statements,
+            reason = "const scoped to the statement that uses it for readability"
+        )]
         const VALID_DURATION_HOURS: i64 = 1;
         future.t_valid = Some(now + TimeDelta::hours(VALID_DURATION_HOURS));
         fs.insert(&future).unwrap();

@@ -758,8 +758,8 @@ pub fn load_secret_denylist() -> std::io::Result<Vec<String>> {
         std::io::Error::new(
             e.kind(),
             format!(
-                "reading denylist file {:?} (from {DENYLIST_ENV_VAR}): {e}",
-                std::path::Path::new(&path)
+                "reading denylist file {} (from {DENYLIST_ENV_VAR}): {e}",
+                std::path::Path::new(&path).display()
             ),
         )
     })?;

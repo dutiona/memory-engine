@@ -35,7 +35,7 @@ pub struct QueryArgs {
 
     /// Filter by bi-temporal validity (RFC 3339, e.g. 2026-03-25T00:00:00Z).
     /// Returns facts valid at this point in time:
-    /// t_valid <= dt AND (t_invalid IS NULL OR t_invalid > dt).
+    /// `t_valid` <= dt AND (`t_invalid` IS NULL OR `t_invalid` > dt).
     #[arg(long, value_parser = parse_datetime)]
     valid_at: Option<DateTime<Utc>>,
 }
@@ -61,10 +61,10 @@ struct ResultRow {
 }
 
 fn fmt_optional_dt(dt: Option<&DateTime<Utc>>) -> String {
-    match dt {
-        Some(t) => t.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        None => "-".into(),
-    }
+    dt.map_or_else(
+        || "-".into(),
+        |t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    )
 }
 
 pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<()> {

@@ -6,9 +6,9 @@ mod cluster;
 mod dedup;
 mod global;
 
-pub(crate) use cluster::cluster_fusion;
-pub(crate) use dedup::local_dedup;
-pub(crate) use global::global_integration;
+pub use cluster::cluster_fusion;
+pub use dedup::local_dedup;
+pub use global::global_integration;
 
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -27,7 +27,7 @@ use crate::types::Fact;
 ///
 /// Propagates `SummaryGenerator` / `EmbeddingProvider` errors; returns
 /// `MemoryError::EmbeddingDimension` when the embedding length != `embed_dim`.
-pub(crate) fn summarize_and_embed(
+pub fn summarize_and_embed(
     generator: &dyn SummaryGenerator,
     embedder: &dyn EmbeddingProvider,
     facts: &[Fact],

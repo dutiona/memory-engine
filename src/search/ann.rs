@@ -62,7 +62,7 @@ pub struct HnswStrategy {
 struct HnswInner {
     index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32>,
     index_to_fact: Vec<i64>,
-    /// Maps fact_id → current HNSW index (latest insert wins).
+    /// Maps `fact_id` → current HNSW index (latest insert wins).
     fact_to_hnsw: HashMap<i64, usize>,
     /// Tombstoned HNSW indices (not fact IDs) — excludes stale entries
     /// when a fact is expired or replaced by a newer insert.
@@ -140,8 +140,12 @@ impl HnswStrategy {
     /// Snapshot active embeddings for fast cold-start.
     ///
     /// Reads embeddings from DB (vectors are not kept in memory). Returns
-    /// compact data: only active facts, ordered by fact_id. On load,
+    /// compact data: only active facts, ordered by `fact_id`. On load,
     /// `from_snapshot` rebuilds a fresh compact HNSW index from this data.
+    #[allow(
+        clippy::unused_self,
+        reason = "future versions will read self.inner metadata (e.g. ef_construction) to store in the snapshot; keeping &self avoids an API break"
+    )]
     pub(crate) fn to_snapshot(
         &self,
         conn: &Connection,
@@ -217,6 +221,10 @@ impl HnswStrategy {
 }
 
 impl VectorSearchStrategy for HnswStrategy {
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "read lock is already scoped to an explicit block that ends before Phase 2; the inner variable binding is intentional for clarity"
+    )]
     fn search(
         &self,
         conn: &Connection,
@@ -316,7 +324,7 @@ impl VectorSearchStrategy for HnswStrategy {
         Ok(results)
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "hnsw"
     }
 

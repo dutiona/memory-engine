@@ -11,7 +11,8 @@ pub struct PassthroughEmbedder {
 }
 
 impl PassthroughEmbedder {
-    pub fn new(embedding: Vec<f32>) -> Self {
+    #[must_use]
+    pub const fn new(embedding: Vec<f32>) -> Self {
         Self { embedding }
     }
 }

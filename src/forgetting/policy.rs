@@ -19,7 +19,7 @@ const CONNECTIVITY_NORMALIZATION_ARG: f64 = 51.0;
 ///
 /// Returns 1.0 at `age=0`, 0.5 at `age=half_life`, 0.25 at `age=2×half_life`.
 #[must_use]
-pub(crate) fn ebbinghaus_decay(age_days: f64, half_life: f64) -> f64 {
+pub fn ebbinghaus_decay(age_days: f64, half_life: f64) -> f64 {
     f64::exp2(-age_days / half_life)
 }
 
@@ -78,7 +78,7 @@ impl ImportanceInputs for FactScoringRow {
 ///    (50 connections = full score)
 /// 4. **Base importance**: `fact.importance` — already in \[0, 1\]
 #[must_use]
-pub(crate) fn compute_importance(
+pub fn compute_importance(
     fact: &impl ImportanceInputs,
     graph_degree: usize,
     now: DateTime<Utc>,

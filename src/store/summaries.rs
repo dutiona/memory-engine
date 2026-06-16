@@ -4,7 +4,7 @@ use crate::error::{MemoryError, Result};
 use crate::store::{deserialize_embedding, parse_timestamp, serialize_embedding};
 use crate::types::{ConsolidationLevel, NewSummary, Summary};
 
-pub(crate) const fn level_to_str(level: &ConsolidationLevel) -> &'static str {
+pub const fn level_to_str(level: &ConsolidationLevel) -> &'static str {
     match level {
         ConsolidationLevel::Local => "local",
         ConsolidationLevel::Cluster => "cluster",

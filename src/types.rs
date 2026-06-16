@@ -119,7 +119,7 @@ fn default_origin_node_id() -> String {
 
 /// Default `scope_id` for a `Fact` deserialized from an archive that predates
 /// the scope column — the root scope (id 1). Keeps old `.pak` archives readable.
-fn default_root_scope_id() -> i64 {
+const fn default_root_scope_id() -> i64 {
     1
 }
 
@@ -1102,6 +1102,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "UNSCORED_IMPORTANCE is a sentinel constant (0.5); exact equality is the correct check here"
+    )]
     fn unscored_importance_sentinel_is_half() {
         // Locks the canonical value of the unscored-fact placeholder. The two
         // production construction sites (conflict::resolve_conflict and
@@ -1216,10 +1220,17 @@ mod tests {
         let fact: Fact = serde_json::from_str(json).unwrap();
         assert_eq!(fact.scope_id, 1, "missing scope_id defaults to root (1)");
         assert!(!fact.is_pinned, "missing is_pinned defaults to false");
-        assert_eq!(
-            fact.importance_score, 0.0,
-            "missing importance_score defaults to 0.0"
-        );
+        // importance_score is missing from JSON → serde default of 0.0 (exact bit-for-bit).
+        #[allow(
+            clippy::float_cmp,
+            reason = "serde default produces exact 0.0; no arithmetic involved"
+        )]
+        {
+            assert_eq!(
+                fact.importance_score, 0.0,
+                "missing importance_score defaults to 0.0"
+            );
+        }
     }
 
     #[test]

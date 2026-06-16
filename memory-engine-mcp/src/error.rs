@@ -2,6 +2,7 @@ use memory_engine::error::MemoryError;
 use rmcp::model::ErrorData;
 
 /// Map a [`MemoryError`] to an MCP [`ErrorData`] with appropriate JSON-RPC error codes.
+#[must_use]
 pub fn to_mcp_error(err: MemoryError) -> ErrorData {
     match err {
         MemoryError::NotFound(msg) => ErrorData::resource_not_found(msg, None),
@@ -94,7 +95,7 @@ pub enum ValidationError {
 
 impl From<ValidationError> for ErrorData {
     fn from(err: ValidationError) -> Self {
-        ErrorData::invalid_params(err.to_string(), None)
+        Self::invalid_params(err.to_string(), None)
     }
 }
 
