@@ -9,7 +9,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::store::events::event_type_to_str;
 use crate::store::lineage::LineageStore;
 use crate::store::schema::{CURRENT_SCHEMA_VERSION, STORAGE_EPOCH, set_config};
@@ -182,9 +182,7 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
 
     let total = event_count + fact_count + edge_count + summary_count + scope_count + lineage_count;
     if total > 0 {
-        return Err(MemoryError::Conflict(
-            "target database is not empty; restore only works on a fresh engine".into(),
-        ));
+        return Err(MemoryError::Conflict(ConflictError::TargetNotEmpty));
     }
     Ok(())
 }

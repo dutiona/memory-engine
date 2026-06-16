@@ -474,21 +474,23 @@ impl DreamCycleConfig {
     ///
     /// Returns `MemoryError::Conflict` if any ratio or percentile is out of [0, 1].
     pub fn validate(&self) -> crate::error::Result<()> {
-        use crate::error::MemoryError;
+        use crate::error::{ConflictError, MemoryError};
 
         for (ft, &ratio) in &self.compression_ratios {
             if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
-                return Err(MemoryError::Conflict(format!(
-                    "compression ratio for {ft:?} must be in [0.0, 1.0], got {ratio}"
+                return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                    format!("compression ratio for {ft:?} must be in [0.0, 1.0], got {ratio}"),
                 )));
             }
         }
         if !self.promotion_percentile.is_finite()
             || !(0.0..=1.0).contains(&self.promotion_percentile)
         {
-            return Err(MemoryError::Conflict(format!(
-                "promotion_percentile must be in [0.0, 1.0], got {}",
-                self.promotion_percentile
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!(
+                    "promotion_percentile must be in [0.0, 1.0], got {}",
+                    self.promotion_percentile
+                ),
             )));
         }
         Ok(())

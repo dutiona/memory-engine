@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::error::{MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::search::hybrid::{
     QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult, hybrid_search,
 };
@@ -171,35 +171,35 @@ impl MemoryEngine {
     fn validate_memory_query(query: &MemoryQuery) -> Result<()> {
         // Period: both start and end must be set, or neither
         if query.period_start.is_some() != query.period_end.is_some() {
-            return Err(MemoryError::Conflict(
+            return Err(MemoryError::Conflict(ConflictError::QueryValidation(
                 "period_start and period_end must both be set or both unset".into(),
-            ));
+            )));
         }
 
         // valid_at and period are mutually exclusive
         if query.valid_at.is_some() && query.has_period() {
-            return Err(MemoryError::Conflict(
+            return Err(MemoryError::Conflict(ConflictError::QueryValidation(
                 "valid_at and period are mutually exclusive".into(),
-            ));
+            )));
         }
 
         // Search mode compatibility (D7)
         if let Some(ref mode) = query.search_mode {
             match mode {
                 SearchMode::Fts if query.text.is_none() => {
-                    return Err(MemoryError::Conflict(
+                    return Err(MemoryError::Conflict(ConflictError::QueryValidation(
                         "SearchMode::Fts requires text to be set".into(),
-                    ));
+                    )));
                 }
                 SearchMode::Vector if query.embedding.is_none() => {
-                    return Err(MemoryError::Conflict(
+                    return Err(MemoryError::Conflict(ConflictError::QueryValidation(
                         "SearchMode::Vector requires embedding to be set".into(),
-                    ));
+                    )));
                 }
                 SearchMode::Hybrid if query.text.is_none() || query.embedding.is_none() => {
-                    return Err(MemoryError::Conflict(
+                    return Err(MemoryError::Conflict(ConflictError::QueryValidation(
                         "SearchMode::Hybrid requires both text and embedding".into(),
-                    ));
+                    )));
                 }
                 _ => {}
             }

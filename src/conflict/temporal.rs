@@ -224,6 +224,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    use crate::error::ConflictError;
     use crate::store::schema::{init_schema, open_memory};
     use crate::types::{Fact, FactType, NewFact};
 
@@ -243,7 +244,9 @@ mod tests {
 
     impl ConflictArbiter for FailingArbiter {
         fn arbitrate(&self, _old: &Fact, _new: &Fact) -> Result<CrudDecision> {
-            Err(MemoryError::Conflict("arbiter failed".into()))
+            Err(MemoryError::Conflict(ConflictError::Arbitration(
+                "arbiter failed".into(),
+            )))
         }
     }
 
