@@ -33,6 +33,38 @@ fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
         .map_err(|_| anyhow::anyhow!("invalid embed_dim value in config table"))
 }
 
+/// Peek the live `schema_version` from an existing database's `config` table.
+///
+/// Opens a transient read-only connection and reads the version **without**
+/// opening the engine — the engine's read-only build validates the schema and
+/// the writable build migrates, so neither can inspect a stale database. Used by
+/// the `migrate` / `schema` operator commands to decide whether to migrate.
+pub fn peek_schema_version_from_db(path: &Path) -> anyhow::Result<u32> {
+    anyhow::ensure!(
+        path.is_file(),
+        "database not found (or is a directory): {}",
+        path.display()
+    );
+
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "database has no schema_version in config table — is this a memory-engine database? ({e})"
+            )
+        })?;
+    raw.parse()
+        .map_err(|_| anyhow::anyhow!("invalid schema_version value in config table: {raw:?}"))
+}
+
 /// Open a `MemoryEngine` in **read-only** mode.
 ///
 /// Uses the library's `read_only` config flag so the connection pool
