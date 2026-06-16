@@ -766,6 +766,10 @@ impl<'a> FactStore<'a> {
     /// Like [`Self::list_active_in_period`] but excludes facts already stamped with
     /// the `dream_cycle` marker — the cycle's input-selection query.
     ///
+    /// The exclusion is pushed into SQL (`json_extract(metadata, '$.dream_cycle') IS
+    /// NULL`) so already-dream-cycled rows — and their embedding BLOBs — are never
+    /// materialized, rather than fetched and discarded Rust-side.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
@@ -776,11 +780,13 @@ impl<'a> FactStore<'a> {
         scope_ids: &[i64],
         fact_type: Option<&FactType>,
     ) -> Result<Vec<Fact>> {
-        let facts = self.list_active_in_period(start, end, scope_ids, fact_type)?;
-        Ok(facts
-            .into_iter()
-            .filter(|f| f.metadata.get("dream_cycle").is_none())
-            .collect())
+        self.list_active_in_period_inner(
+            start,
+            end,
+            scope_ids,
+            fact_type,
+            &["json_extract(metadata, '$.dream_cycle') IS NULL"],
+        )
     }
 
     /// List active facts ordered by materialized `importance_score`, excluding IDs in `exclude`.
@@ -929,6 +935,22 @@ impl<'a> FactStore<'a> {
         scope_ids: &[i64],
         fact_type: Option<&FactType>,
     ) -> Result<Vec<Fact>> {
+        self.list_active_in_period_inner(start, end, scope_ids, fact_type, &[])
+    }
+
+    /// Shared core for [`Self::list_active_in_period`] and
+    /// [`Self::list_undreamt_in_period`]. `extra_conditions` are additional
+    /// **non-parameterized** SQL predicates ANDed into the `WHERE` clause (they
+    /// must not reference bind parameters — they are appended verbatim, so callers
+    /// pass only trusted literals like a `json_extract(metadata, …) IS NULL` filter).
+    fn list_active_in_period_inner(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        scope_ids: &[i64],
+        fact_type: Option<&FactType>,
+        extra_conditions: &[&str],
+    ) -> Result<Vec<Fact>> {
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
         let dim = self.embed_dim;
@@ -957,6 +979,12 @@ impl<'a> FactStore<'a> {
             conditions.push(format!("fact_type = ?{param_idx}"));
         } else {
             ft_str = String::new();
+        }
+
+        // Non-parameterized predicates (e.g. the dream-cycle exclusion filter) are
+        // appended last so they never disturb the `?N` bind-parameter numbering above.
+        for cond in extra_conditions {
+            conditions.push((*cond).to_owned());
         }
 
         let where_clause = conditions.join(" AND ");
@@ -1208,6 +1236,42 @@ mod tests {
         // The marker carries the cycle id and is queryable on the row.
         let marked = store.get(a).unwrap();
         assert_eq!(marked.metadata["dream_cycle"]["cycle_id"], 1);
+    }
+
+    #[test]
+    fn list_undreamt_in_period_composes_with_fact_type_filter() {
+        // Regression guard for the SQL-pushdown refactor: the appended (non-param)
+        // dream-cycle predicate must not disturb the `?N` bind numbering of the
+        // fact_type filter. Mix types, mark one, and query a single type.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut epi = make_fact("episodic", vec![0.1; DIM]);
+        epi.fact_type = FactType::Episodic;
+        let mut sem1 = make_fact("semantic one", vec![0.2; DIM]);
+        sem1.fact_type = FactType::Semantic;
+        let mut sem2 = make_fact("semantic two", vec![0.3; DIM]);
+        sem2.fact_type = FactType::Semantic;
+        store.insert(&epi).unwrap();
+        let s1 = store.insert(&sem1).unwrap();
+        let s2 = store.insert(&sem2).unwrap();
+
+        let start = "2000-01-01T00:00:00Z".parse().unwrap();
+        let end = "2100-01-01T00:00:00Z".parse().unwrap();
+
+        // Semantic-only, both undreamt → exactly the two semantic facts (no episodic).
+        let before = store
+            .list_undreamt_in_period(start, end, &[], Some(&FactType::Semantic))
+            .unwrap();
+        let mut ids: Vec<i64> = before.iter().map(|f| f.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![s1, s2]);
+
+        // Mark one semantic fact → it drops out; the type filter still holds.
+        store.mark_dream_cycled(&[s1], 1, Utc::now()).unwrap();
+        let after = store
+            .list_undreamt_in_period(start, end, &[], Some(&FactType::Semantic))
+            .unwrap();
+        assert_eq!(after.iter().map(|f| f.id).collect::<Vec<_>>(), vec![s2]);
     }
 
     #[test]

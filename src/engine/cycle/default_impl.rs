@@ -206,11 +206,15 @@ impl DreamCycle for DefaultDreamCycle {
         }
 
         // 3. Outcome-driven rescoring + quarantine (skip facts already promoted).
+        // Batch-fetch outcome counts for the whole window in one query (not N+1);
+        // a fact with no recorded outcomes is absent from the map → default (zeros).
+        let outcome_ids: Vec<FactId> = facts.iter().map(|f| f.id).collect();
+        let outcome_counts = ctx.dream().outcome_counts_batch(&outcome_ids)?;
         for fact in &facts {
             if promoted.contains(&fact.id) {
                 continue;
             }
-            let counts = ctx.dream().outcome_counts(fact.id)?;
+            let counts = outcome_counts.get(&fact.id).copied().unwrap_or_default();
             if counts.positive == 0 && counts.negative >= QUARANTINE_NEGATIVE_THRESHOLD {
                 deltas.push(CycleDelta::Quarantine {
                     fact_id: fact.id,

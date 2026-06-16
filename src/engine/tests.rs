@@ -3258,6 +3258,72 @@ fn get_outcome_counts_isolates_per_fact() {
 }
 
 #[test]
+fn get_outcome_counts_batch_matches_per_fact_loop() {
+    use crate::types::Outcome;
+
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let f1 = insert_raw_fact(&engine, &make_new_fact("batch one", vec![0.5; DIM]));
+    let f2 = insert_raw_fact(&engine, &make_new_fact("batch two", vec![0.3; DIM]));
+    let f3 = insert_raw_fact(
+        &engine,
+        &make_new_fact("batch three (no outcomes)", vec![0.1; DIM]),
+    );
+
+    engine.record_outcome(f1, Outcome::Positive).unwrap();
+    engine.record_outcome(f1, Outcome::Positive).unwrap();
+    engine.record_outcome(f1, Outcome::Negative).unwrap();
+    engine.record_outcome(f2, Outcome::Neutral).unwrap();
+    // f3 deliberately has no outcomes.
+
+    let nonexistent = 999_999;
+    let ids = [f1, f2, f3, nonexistent];
+    let batch = engine.get_outcome_counts_batch(&ids).unwrap();
+
+    // Batch must equal the per-fact loop for every existing fact.
+    for &id in &[f1, f2, f3] {
+        let loop_counts = engine.get_outcome_counts(id).unwrap();
+        let batch_counts = batch.get(&id).copied().unwrap_or_default();
+        assert_eq!(
+            batch_counts, loop_counts,
+            "batch and per-fact counts must match for fact {id}"
+        );
+    }
+    // Facts with no outcomes (f3) and nonexistent ids are absent from the map.
+    assert!(
+        !batch.contains_key(&f3),
+        "zero-outcome fact should be absent"
+    );
+    assert!(
+        !batch.contains_key(&nonexistent),
+        "nonexistent id should be absent"
+    );
+    // Spot-check the actual tallies.
+    assert_eq!(
+        batch[&f1],
+        crate::types::OutcomeCounts {
+            positive: 2,
+            negative: 1,
+            neutral: 0
+        }
+    );
+    assert_eq!(
+        batch[&f2],
+        crate::types::OutcomeCounts {
+            positive: 0,
+            negative: 0,
+            neutral: 1
+        }
+    );
+}
+
+#[test]
+fn get_outcome_counts_batch_empty_input_no_query() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let batch = engine.get_outcome_counts_batch(&[]).unwrap();
+    assert!(batch.is_empty());
+}
+
+#[test]
 fn outcome_serde_round_trip() {
     use crate::types::Outcome;
 
