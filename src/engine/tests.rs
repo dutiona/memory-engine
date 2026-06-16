@@ -1682,7 +1682,9 @@ impl Reranker for ReverseReranker {
 struct FailingReranker;
 impl Reranker for FailingReranker {
     fn rerank(&self, _query: &str, _candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>> {
-        Err(MemoryError::Reranker("cross-encoder timeout".into()))
+        Err(MemoryError::Reranker(
+            crate::error::RerankerError::Provider("cross-encoder timeout".into()),
+        ))
     }
     fn name(&self) -> &'static str {
         "failing"
@@ -2114,7 +2116,10 @@ fn reranker_error_propagates() {
     });
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), MemoryError::Reranker(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        MemoryError::Reranker(crate::error::RerankerError::Provider(_))
+    ));
 }
 
 #[test]
@@ -2502,8 +2507,11 @@ fn reranker_rejects_out_of_bounds_index() {
     assert!(result.is_err(), "should reject out-of-bounds index");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MemoryError::Reranker(_)),
-        "should be a Reranker error, got: {err}"
+        matches!(
+            err,
+            MemoryError::Reranker(crate::error::RerankerError::OutOfBoundsIndex { .. })
+        ),
+        "should be a Reranker(OutOfBoundsIndex) error, got: {err}"
     );
     assert!(
         err.to_string().contains("out-of-bounds"),
@@ -2559,8 +2567,11 @@ fn reranker_rejects_duplicates() {
     assert!(result.is_err(), "should reject duplicates");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MemoryError::Reranker(_)),
-        "should be a Reranker error, got: {err}"
+        matches!(
+            err,
+            MemoryError::Reranker(crate::error::RerankerError::DuplicateIndex { .. })
+        ),
+        "should be a Reranker(DuplicateIndex) error, got: {err}"
     );
     assert!(
         err.to_string().contains("duplicate"),
@@ -2739,8 +2750,11 @@ fn reranker_rejects_non_finite_score() {
     assert!(result.is_err(), "should reject NaN score");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MemoryError::Reranker(_)),
-        "should be a Reranker error, got: {err}"
+        matches!(
+            err,
+            MemoryError::Reranker(crate::error::RerankerError::NonFiniteScore { .. })
+        ),
+        "should be a Reranker(NonFiniteScore) error, got: {err}"
     );
     assert!(
         err.to_string().contains("non-finite"),

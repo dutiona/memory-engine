@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::{MutexGuard, RwLock};
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, Result};
+use crate::error::{MemoryError, RerankerError, Result};
 use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::scope::ScopeTree;
@@ -650,29 +650,28 @@ impl MemoryEngine {
         use std::collections::HashSet;
 
         if output.len() > num_candidates {
-            return Err(MemoryError::Reranker(format!(
-                "reranker violated subset contract: output length ({}) exceeds input length ({num_candidates})",
-                output.len(),
-            )));
+            return Err(RerankerError::OutputTooLong {
+                output_len: output.len(),
+                input_len: num_candidates,
+            }
+            .into());
         }
 
         let mut seen = HashSet::with_capacity(output.len());
 
         for &(idx, score) in output {
             if idx >= num_candidates {
-                return Err(MemoryError::Reranker(format!(
-                    "reranker returned out-of-bounds index {idx} (candidates length: {num_candidates})",
-                )));
+                return Err(RerankerError::OutOfBoundsIndex {
+                    index: idx,
+                    num_candidates,
+                }
+                .into());
             }
             if !seen.insert(idx) {
-                return Err(MemoryError::Reranker(format!(
-                    "reranker violated subset contract: duplicate index {idx} in output",
-                )));
+                return Err(RerankerError::DuplicateIndex { index: idx }.into());
             }
             if !score.is_finite() {
-                return Err(MemoryError::Reranker(format!(
-                    "reranker returned non-finite score {score} for index {idx}",
-                )));
+                return Err(RerankerError::NonFiniteScore { score, index: idx }.into());
             }
         }
 
