@@ -237,6 +237,39 @@ impl<'a> FactStore<'a> {
         }
     }
 
+    /// Get multiple facts by id in a single round-trip.
+    ///
+    /// Materializes all requested ids with one `WHERE id IN (...)` query
+    /// (via `json_each`, so `SQLite`'s bound-variable limit is never hit
+    /// regardless of `ids` length) and returns them keyed by id. Missing
+    /// ids are simply absent from the map — callers reconcile against the
+    /// requested set (e.g. to preserve a ranked order and skip dropped rows).
+    ///
+    /// Returns an empty map for an empty `ids` slice (no query issued).
+    /// Order of the returned map is unspecified; callers that need a
+    /// particular order must re-index by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn get_many(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, Fact>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let ids_json = serde_json::to_string(ids)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FACT_COLUMNS} FROM facts WHERE id IN (SELECT value FROM json_each(?1))"
+        ))?;
+        let dim = self.embed_dim;
+        let rows = stmt.query_map(params![ids_json], |row| row_to_fact(row, dim))?;
+        let mut out = std::collections::HashMap::with_capacity(ids.len());
+        for row in rows {
+            let fact = row?;
+            out.insert(fact.id, fact);
+        }
+        Ok(out)
+    }
+
     /// List active facts (`t_expired IS NULL`), optionally limited.
     ///
     /// When `limit` is `Some(n)`, a SQL `LIMIT n` clause is pushed into the
@@ -1222,6 +1255,28 @@ mod tests {
             frac.timestamp_micros(),
             "last_accessed = fractional (latest) in the zero-vs-fractional case"
         );
+    }
+
+    #[test]
+    fn get_many_round_trips_and_skips_missing() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id1 = store.insert(&make_fact("alpha", vec![0.1; DIM])).unwrap();
+        let id2 = store.insert(&make_fact("beta", vec![0.2; DIM])).unwrap();
+
+        // Empty slice issues no query and returns an empty map.
+        assert!(store.get_many(&[]).unwrap().is_empty());
+
+        // A nonexistent id is simply absent — no error, no placeholder.
+        let missing = id2 + 9999;
+        let fetched = store.get_many(&[id1, missing, id2]).unwrap();
+        assert_eq!(fetched.len(), 2);
+        assert_eq!(fetched[&id1].content, "alpha");
+        assert_eq!(fetched[&id2].content, "beta");
+        assert!(!fetched.contains_key(&missing));
+
+        // Each returned fact round-trips its full payload (embedding included).
+        assert_eq!(fetched[&id1].embedding, vec![0.1_f32; DIM]);
     }
 
     #[test]
