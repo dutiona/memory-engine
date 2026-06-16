@@ -2233,7 +2233,7 @@ fn link_session_facts_creates_bidirectional_edges() {
 
     // Verify edges in DB
     let co_edges = {
-        let edges = crate::store::edges::EdgeStore::new(&engine.pool.read())
+        let edges = crate::store::edges::EdgeStore::new(&engine.pool.read().unwrap())
             .list_active()
             .unwrap();
         edges

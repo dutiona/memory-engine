@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use rusqlite::Connection;
@@ -8,6 +9,16 @@ use crate::store::schema::{
     init_schema, migrate, open_connection, open_connection_read_only,
     open_memory as open_memory_conn,
 };
+
+/// Default bound on how long [`ConnectionPool::read`] waits for a read
+/// connection to become available before failing with [`MemoryError::Pool`].
+///
+/// Without a bound the acquire path would block forever on the `Condvar` when
+/// every read connection is checked out and never returned (e.g. a deadlocked
+/// or leaked guard). A finite default turns that silent hang into a clear,
+/// observable error. 30s is generous for healthy contention yet short enough
+/// to surface a genuine leak.
+const DEFAULT_READ_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A connection pool with N read connections and 1 write connection.
 ///
@@ -24,6 +35,11 @@ pub struct ConnectionPool {
     embed_dim: usize,
     read_pool_size: usize,
     read_only: bool,
+    /// Bound on the wait for a read connection in [`Self::read`]. Defaults to
+    /// [`DEFAULT_READ_ACQUIRE_TIMEOUT`]; exposed as a field so a future
+    /// `EngineConfig::read_acquire_timeout` can be wired in without touching
+    /// the acquire path.
+    read_acquire_timeout: Duration,
 }
 
 /// RAII guard that returns a read connection to the pool on drop.
@@ -116,6 +132,7 @@ impl ConnectionPool {
             embed_dim,
             read_pool_size,
             read_only: false,
+            read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
         })
     }
 
@@ -136,6 +153,7 @@ impl ConnectionPool {
             embed_dim,
             read_pool_size: 0,
             read_only: false,
+            read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
         })
     }
 
@@ -184,29 +202,61 @@ impl ConnectionPool {
             embed_dim,
             read_pool_size,
             read_only: true,
+            read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
         })
     }
 
     /// Checkout a read connection.
     ///
-    /// - File-backed: pops from bounded pool. Blocks via `Condvar` if exhausted.
+    /// - File-backed: pops from the bounded pool. If exhausted, waits on a
+    ///   `Condvar` for a connection to be returned, up to
+    ///   `read_acquire_timeout` (default [`DEFAULT_READ_ACQUIRE_TIMEOUT`]).
     /// - In-memory: locks the write connection (serialized but correct).
-    pub fn read(&self) -> ReadConn<'_> {
+    ///
+    /// The happy path (a connection available immediately) returns without
+    /// waiting and never errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Pool`] if no read connection becomes available
+    /// within `read_acquire_timeout` — turning a previously-unbounded hang
+    /// (e.g. a leaked or deadlocked guard) into an observable failure.
+    pub fn read(&self) -> Result<ReadConn<'_>> {
         if self.read_pool_size == 0 {
             // In-memory mode: use write connection for reads (serialized)
             let guard = self.write_conn.lock();
-            return ReadConn::InMemory(WriteAsReadGuard { guard });
+            return Ok(ReadConn::InMemory(WriteAsReadGuard { guard }));
         }
 
         let mut conns = self.read_conns.lock();
+        // Pre-compute an absolute deadline so the total wait is strictly
+        // bounded by `read_acquire_timeout`. `wait_for` would reset the full
+        // timeout on every loop iteration, so under repeated spurious wakeups
+        // (or notify-then-raced-steal) the thread could block far longer than
+        // configured — even indefinitely. `wait_until` shares one fixed
+        // ceiling across all iterations.
+        let deadline = Instant::now() + self.read_acquire_timeout;
         while conns.is_empty() {
-            self.read_available.wait(&mut conns);
+            // `wait_until` returns once notified, or when `deadline` passes.
+            // `timed_out()` distinguishes the two; re-check `is_empty()` to
+            // guard against spurious wakeups (notified but raced).
+            if self
+                .read_available
+                .wait_until(&mut conns, deadline)
+                .timed_out()
+                && conns.is_empty()
+            {
+                return Err(MemoryError::Pool(format!(
+                    "read pool acquire timed out after {:?} (all {} connections checked out)",
+                    self.read_acquire_timeout, self.read_pool_size
+                )));
+            }
         }
         let conn = conns.pop().expect("condvar woke but pool empty");
-        ReadConn::Pooled(ReadGuard {
+        Ok(ReadConn::Pooled(ReadGuard {
             conn: Some(conn),
             pool: self,
-        })
+        }))
     }
 
     /// Lock the write connection.
@@ -275,7 +325,7 @@ mod tests {
     #[test]
     fn pool_memory_read_uses_write_conn() {
         let pool = ConnectionPool::open_memory(4).unwrap();
-        let r = pool.read();
+        let r = pool.read().unwrap();
         let v = get_config(&r, "schema_version").unwrap();
         drop(r);
         assert!(v.is_some());
@@ -295,8 +345,8 @@ mod tests {
 
         // Two concurrent reads: both guards are acquired before either is
         // released, proving the pool grants 2 simultaneous read checkouts.
-        let r1 = pool.read();
-        let r2 = pool.read();
+        let r1 = pool.read().unwrap();
+        let r2 = pool.read().unwrap();
         let v1 = get_config(&r1, "test_key").unwrap();
         drop(r1);
         let v2 = get_config(&r2, "test_key").unwrap();
@@ -313,11 +363,11 @@ mod tests {
 
         // Checkout and return
         {
-            let _r = pool.read();
+            let _r = pool.read().unwrap();
         }
         // Re-checkout succeeds (connection was returned)
         {
-            let _r = pool.read();
+            let _r = pool.read().unwrap();
         }
     }
 
@@ -352,7 +402,7 @@ mod tests {
         assert!(pool.is_read_only());
 
         // Read should work
-        let r = pool.read();
+        let r = pool.read().unwrap();
         let v = get_config(&r, "schema_version").unwrap();
         drop(r);
         assert!(v.is_some());
@@ -409,9 +459,101 @@ mod tests {
         assert!(pool.is_file_backed());
         assert!(!pool.is_read_only());
 
-        let r = pool.read();
+        let r = pool.read().unwrap();
         let v = get_config(&r, "schema_version").unwrap();
         drop(r);
         assert!(v.is_some());
+    }
+
+    /// Exhausting the read pool must make `read()` fail within the configured
+    /// timeout instead of blocking forever (#573 L16). Uses a 1-connection pool
+    /// and a tiny timeout so the test stays fast.
+    #[test]
+    fn pool_read_acquire_times_out_when_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
+        pool.read_acquire_timeout = Duration::from_millis(50);
+
+        // Hold the only read connection so the pool is exhausted.
+        let _held = pool.read().unwrap();
+
+        let start = std::time::Instant::now();
+        // `ReadConn` is not `Debug`, so match instead of `unwrap_err()`. Match
+        // inline so the (significant-Drop) `Ok` guard isn't bound to a local.
+        let timed_out = matches!(pool.read(), Err(MemoryError::Pool(_)));
+        let elapsed = start.elapsed();
+
+        assert!(
+            timed_out,
+            "expected Err(MemoryError::Pool), got Ok or other"
+        );
+        // It must return promptly (bounded), not hang. Generous upper bound to
+        // tolerate scheduler jitter while still proving the wait is finite.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "acquire did not return within bound: {elapsed:?}"
+        );
+    }
+
+    /// The acquire wait must be bounded by an *absolute* deadline, not a
+    /// per-wakeup timeout (#573 L16, Gemini review). A storm of spurious
+    /// wakeups must not be able to extend the wait past `read_acquire_timeout`.
+    ///
+    /// Mutation guard: with the old `wait_for(timeout)` each wakeup reset the
+    /// full budget, so under this wake-storm `read()` could not return until
+    /// the storm stopped (~600ms) — failing the `< 400ms` assert. With
+    /// `wait_until(deadline)` the deadline is immune to wakeups and it returns
+    /// at ~100ms.
+    #[test]
+    fn pool_read_acquire_deadline_survives_spurious_wakeups() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
+        pool.read_acquire_timeout = Duration::from_millis(100);
+
+        // Hold the only read connection so the pool stays exhausted.
+        let _held = pool.read().unwrap();
+
+        std::thread::scope(|s| {
+            // Spuriously wake the acquire-waiter far longer than the timeout.
+            s.spawn(|| {
+                let storm_start = Instant::now();
+                while storm_start.elapsed() < Duration::from_millis(600) {
+                    pool.read_available.notify_one();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+
+            let start = Instant::now();
+            // `ReadConn` is not `Debug`; match inline so the significant-Drop
+            // `Ok` guard isn't bound to a local.
+            let timed_out = matches!(pool.read(), Err(MemoryError::Pool(_)));
+            let elapsed = start.elapsed();
+
+            assert!(timed_out, "expected Err(MemoryError::Pool), got Ok");
+            assert!(
+                elapsed < Duration::from_millis(400),
+                "acquire ignored the absolute deadline under spurious wakeups: {elapsed:?}"
+            );
+        });
+    }
+
+    /// After a connection is checked out and returned, a subsequent acquire
+    /// must succeed (the happy path still works with the bounded wait in place).
+    #[test]
+    fn pool_read_acquire_succeeds_when_connection_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
+        pool.read_acquire_timeout = Duration::from_millis(50);
+
+        // Take and immediately return the only connection.
+        {
+            let _r = pool.read().unwrap();
+        }
+        // Re-acquire succeeds because the connection was returned. Assert
+        // inline so the significant-Drop guard isn't bound to a local.
+        assert!(pool.read().is_ok());
     }
 }

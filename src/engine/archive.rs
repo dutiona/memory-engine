@@ -153,7 +153,7 @@ impl MemoryEngine {
 
     /// Select expired, non-pinned facts and their internal edges.
     fn select_archive_candidates(&self, policy: &ArchivePolicy) -> Result<(Vec<Fact>, Vec<Edge>)> {
-        let conn = self.pool.read();
+        let conn = self.pool.read()?;
         let all_facts = FactStore::new(&conn, self.embed_dim).list_all()?;
         let candidate_facts: Vec<_> = all_facts
             .into_iter()
