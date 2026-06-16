@@ -133,6 +133,38 @@ pub struct CycleReport {
     pub metadata: CycleMetadata,
 }
 
+/// Why [`MemoryEngine::run_dream_cycle_guarded`](crate::MemoryEngine::run_dream_cycle_guarded)
+/// declined to run a cycle.
+///
+/// `#[non_exhaustive]`: new skip *reasons* (e.g. a future distributed-lock contention
+/// from #207) are additive and must not break exhaustive matches on the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SkipReason {
+    /// The caller wrote facts since the last cycle decision (#209): a fact with
+    /// `id > since_fact_id` exists. The cursor was advanced to `new_max_fact_id`;
+    /// the next quiet invocation (no newer writes) will run and clear the backlog.
+    CallerWroteFacts {
+        since_fact_id: i64,
+        new_max_fact_id: i64,
+    },
+}
+
+/// Outcome of [`MemoryEngine::run_dream_cycle_guarded`](crate::MemoryEngine::run_dream_cycle_guarded):
+/// the cycle either **ran** (producing a [`CycleReport`]) or was **skipped** (deferred).
+///
+/// Deliberately **not** `#[non_exhaustive]` so consumers can match `Ran`/`Skipped`
+/// exhaustively. ⚠️ Adding a third variant (e.g. a lock-contention skip, #207) is a
+/// **semver-breaking** change — accepted as the cost of exhaustive matching. Encode new
+/// *reasons* on [`SkipReason`] (which is `#[non_exhaustive]`) instead, not new variants here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CycleOutcome {
+    /// The cycle ran; the (still unapplied) report is attached.
+    Ran(CycleReport),
+    /// The cycle was skipped this invocation; see [`SkipReason`].
+    Skipped(SkipReason),
+}
+
 /// Per-variant tally of what an applied report changed.
 ///
 /// Returned by [`MemoryEngine::apply_cycle_report`](crate::MemoryEngine::apply_cycle_report);
@@ -149,6 +181,13 @@ pub struct ApplyResult {
     pub superseded: usize,
     /// Ids of facts created by [`CycleDelta::AddFact`], in delta order.
     pub new_fact_ids: Vec<FactId>,
+    /// Ids of the pinned wisdom facts created by [`CycleDelta::Promote`], in delta order.
+    ///
+    /// Captured so the apply pass can dream-mark the cycle's *own* promoted outputs
+    /// (invariant M, #209): every fact a cycle creates must carry the `dream_cycle`
+    /// marker, else it re-enters the next cycle's input and the #209 caller-write
+    /// cursor trips on the cycle's own work.
+    pub promoted_fact_ids: Vec<FactId>,
 }
 
 /// Reserved for future soft-fail per-delta reporting (empty in v1; the v1 applier

@@ -631,6 +631,30 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
 mod tests {
     use super::*;
 
+    /// The `facts.id` primary key MUST stay `AUTOINCREMENT`. Issue #209's caller-write
+    /// cursor is a fact-id high-water mark whose soundness depends on ids being
+    /// monotonic and **never reused** — which SQLite guarantees only with the
+    /// `AUTOINCREMENT` keyword (a plain `INTEGER PRIMARY KEY` reuses the largest rowid
+    /// after a delete). A future migration that drops it would silently corrupt the
+    /// cursor (a new fact could be assigned an id below the cursor and never trip a
+    /// skip), so this guard fails CI loudly instead.
+    #[test]
+    fn facts_id_is_autoincrement() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let ddl: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='facts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            ddl.to_uppercase().contains("AUTOINCREMENT"),
+            "facts.id must be AUTOINCREMENT (no rowid reuse) — #209 cursor depends on it; DDL was: {ddl}"
+        );
+    }
+
     /// True if an index with the given name exists in `sqlite_master`.
     fn index_exists(conn: &Connection, name: &str) -> bool {
         conn.query_row(
