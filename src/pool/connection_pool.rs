@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, Result};
+use crate::error::{MemoryError, MigrationError, Result};
 use crate::store::schema::{
     init_schema, migrate, open_connection, open_connection_read_only,
     open_memory as open_memory_conn,
@@ -177,10 +177,11 @@ impl ConnectionPool {
 
         // Reject nonexistent or non-file paths before SQLite can act
         if !path.is_file() {
-            return Err(MemoryError::Migration(format!(
+            return Err(MigrationError::Incompatible(format!(
                 "database path is not a regular file: {}; cannot open read-only",
                 path.display()
-            )));
+            ))
+            .into());
         }
 
         // Open with SQLITE_OPEN_READ_ONLY — no file creation, no WAL mutation

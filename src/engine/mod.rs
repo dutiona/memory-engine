@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::{MutexGuard, RwLock};
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, RerankerError, Result};
+use crate::error::{MemoryError, MigrationError, RerankerError, Result};
 use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::scope::ScopeTree;
@@ -388,12 +388,14 @@ impl MemoryEngine {
     fn validate_or_set_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
         if let Some(stored) = get_config(conn, "embed_dim")? {
             let stored_dim: usize = stored.parse().map_err(|_| {
-                MemoryError::Migration(format!("invalid stored embed_dim: {stored}"))
+                MigrationError::Incompatible(format!("invalid stored embed_dim: {stored}"))
             })?;
             if stored_dim != embed_dim {
-                return Err(MemoryError::Migration(format!(
-                    "embed_dim mismatch: stored {stored_dim} vs requested {embed_dim}"
-                )));
+                return Err(MigrationError::EmbedDimMismatch {
+                    stored: stored_dim,
+                    requested: embed_dim,
+                }
+                .into());
             }
         } else {
             set_config(conn, "embed_dim", &embed_dim.to_string())?;
@@ -405,18 +407,21 @@ impl MemoryEngine {
     fn validate_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
         if let Some(stored) = get_config(conn, "embed_dim")? {
             let stored_dim: usize = stored.parse().map_err(|_| {
-                MemoryError::Migration(format!("invalid stored embed_dim: {stored}"))
+                MigrationError::Incompatible(format!("invalid stored embed_dim: {stored}"))
             })?;
             if stored_dim != embed_dim {
-                return Err(MemoryError::Migration(format!(
-                    "embed_dim mismatch: stored {stored_dim} vs requested {embed_dim}"
-                )));
+                return Err(MigrationError::EmbedDimMismatch {
+                    stored: stored_dim,
+                    requested: embed_dim,
+                }
+                .into());
             }
             Ok(())
         } else {
-            Err(MemoryError::Migration(
+            Err(MigrationError::Incompatible(
                 "embed_dim not set in database; open in read-write mode first".to_string(),
-            ))
+            )
+            .into())
         }
     }
 

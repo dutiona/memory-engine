@@ -9,7 +9,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-use crate::error::{ConflictError, MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, MigrationError, Result};
 use crate::store::events::event_type_to_str;
 use crate::store::lineage::LineageStore;
 use crate::store::schema::{CURRENT_SCHEMA_VERSION, STORAGE_EPOCH, set_config};
@@ -133,10 +133,11 @@ fn read_zstd(_reader: impl Read) -> Result<EngineSnapshot> {
 /// - [`MemoryError::Internal`] if `embed_dim` is zero or root scope is missing.
 pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
     if snapshot.schema_version > CURRENT_SCHEMA_VERSION {
-        return Err(MemoryError::Migration(format!(
+        return Err(MigrationError::Incompatible(format!(
             "snapshot schema_version {} is newer than supported {}",
             snapshot.schema_version, CURRENT_SCHEMA_VERSION
-        )));
+        ))
+        .into());
     }
     if snapshot.storage_epoch > STORAGE_EPOCH {
         return Err(MemoryError::UnsupportedEpoch {
