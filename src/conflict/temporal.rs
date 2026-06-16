@@ -257,24 +257,9 @@ mod tests {
     }
 
     fn make_new_fact(content: &str) -> NewFact {
-        let now = Utc::now();
-        NewFact {
-            content: content.into(),
-            content_hash: blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string(),
-            embedding: vec![0.1; 4],
-            fact_type: FactType::Semantic,
-            t_created: now,
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            scope_id: 1,
-            importance: 0.5,
-            access_count: 0,
-            last_accessed: now,
-            metadata: serde_json::json!({}),
-            is_pinned: false,
-        }
+        NewFact::builder(content, vec![0.1; 4], FactType::Semantic)
+            .content_hash(blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string())
+            .build()
     }
 
     fn insert_fact(conn: &Connection, dim: usize, content: &str) -> i64 {

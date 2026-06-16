@@ -129,6 +129,11 @@ fn default_root_scope_id() -> i64 {
 /// the row existed in the store; **valid-time** (`t_valid`/`t_invalid`) records when the
 /// fact was true in the world. A `None` valid-time bound means "unbounded/unknown" — see
 /// the per-field docs.
+///
+/// Importance is likewise split across two fields, easily confused:
+/// [`importance`](Self::importance) is the *static, consumer-supplied prior* set at insertion,
+/// while [`importance_score`](Self::importance_score) is the *computed, decaying score* the
+/// engine ranks and forgets by (the prior is one of its inputs). See those fields' docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fact {
     pub id: i64,
@@ -150,6 +155,15 @@ pub struct Fact {
     /// Valid-time end: when the fact stopped being true; `None` = still valid.
     pub t_invalid: Option<DateTime<Utc>>,
     pub source_event_id: Option<i64>,
+    /// **Base importance** — the consumer-supplied prior set once at insertion
+    /// (via [`AddFactOptions::importance`], default `0.5`), a finite value in
+    /// `[0.0, 1.0]`. The [`add_fact`](crate::MemoryEngine::add_fact) /
+    /// `add_facts_batch` entry points validate this range (#571); a few
+    /// direct-insert paths (bootstrap, snapshot restore) do not yet enforce it
+    /// (#584), so a `Fact` materialized that way could carry an out-of-range value.
+    /// It is a *static* hint that never decays; the engine only reads it. It feeds the materialized
+    /// [`importance_score`](Self::importance_score) as one of four signals (weight
+    /// `base_importance_weight`). Do not confuse with the decayed score below.
     pub importance: f64,
     pub access_count: i64,
     pub last_accessed: DateTime<Utc>,
@@ -158,6 +172,16 @@ pub struct Fact {
     pub scope_id: i64,
     #[serde(default)]
     pub is_pinned: bool,
+    /// **Materialized importance score** — the *computed, decaying* score the
+    /// engine ranks and forgets by, normally in `[0.0, 1.0]` (seeded from the
+    /// [`importance`](Self::importance) prior, which the `add_fact` entry points
+    /// validate to that range — #571). It is the weighted sum of
+    /// four signals (recency via Ebbinghaus decay, access frequency, graph
+    /// degree, and the static [`importance`](Self::importance) prior); see
+    /// `forgetting::compute_importance`. Seeded to `importance` at ingest, then
+    /// recomputed over the fact's lifetime by the forgetting pass and `DreamCycle`,
+    /// so it drifts away from the base value as the fact ages and is accessed.
+    /// `#[serde(default)]` (0.0) keeps pre-v?-column archives readable.
     #[serde(default)]
     pub importance_score: f64,
     #[serde(default)]
@@ -348,6 +372,12 @@ pub struct NewEvent {
 }
 
 /// Fact to insert (DB assigns id).
+///
+/// Has 14 fields, most of which are optional with sensible defaults. Prefer
+/// [`NewFact::builder`] over a 14-field struct literal: it requires only the
+/// three fields that genuinely vary per call (`content`, `embedding`,
+/// `fact_type`) and fills the rest with defaults (see [`NewFactBuilder`]). The
+/// struct and its literal construction remain fully public and supported.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewFact {
     pub content: String,
@@ -365,6 +395,201 @@ pub struct NewFact {
     pub metadata: serde_json::Value,
     pub scope_id: i64,
     pub is_pinned: bool,
+}
+
+impl NewFact {
+    /// Start building a [`NewFact`] from the three fields that vary at every
+    /// call site. The remaining 11 fields take sensible defaults (see
+    /// [`NewFactBuilder`]) and can be overridden with the builder's setters.
+    ///
+    /// ```
+    /// use memory_engine::types::{FactType, NewFact};
+    ///
+    /// let fact = NewFact::builder("user prefers terse replies", vec![0.1; 384], FactType::Semantic)
+    ///     .importance(0.8)
+    ///     .scope_id(1)
+    ///     .build();
+    /// assert_eq!(fact.importance, 0.8);
+    /// ```
+    pub fn builder(
+        content: impl Into<String>,
+        embedding: Vec<f32>,
+        fact_type: FactType,
+    ) -> NewFactBuilder {
+        NewFactBuilder::new(content, embedding, fact_type)
+    }
+}
+
+/// Fluent builder for [`NewFact`], mirroring the ergonomics of
+/// [`MemoryEngineBuilder`](crate::MemoryEngineBuilder).
+///
+/// Constructed via [`NewFact::builder`]. The three essential fields (`content`,
+/// `embedding`, `fact_type`) are required up front; every other field defaults:
+///
+/// | Field             | Default                                                  |
+/// | ----------------- | -------------------------------------------------------- |
+/// | `content_hash`    | empty — `FactStore::insert` computes the blake3 hash     |
+/// | `t_created`       | `Utc::now()` at [`build`](NewFactBuilder::build)         |
+/// | `t_expired`       | `None` (not soft-deleted)                                |
+/// | `t_valid`         | `None` (valid since creation)                            |
+/// | `t_invalid`       | `None` (still valid)                                     |
+/// | `source_event_id` | `None`                                                   |
+/// | `importance`      | `0.5` (neutral prior; finite `[0, 1]` — not validated on this direct-insert path, #584) |
+/// | `access_count`    | `0`                                                      |
+/// | `last_accessed`   | the resolved `t_created` (coherent for backdated facts)  |
+/// | `metadata`        | `{}` (empty JSON object)                                 |
+/// | `scope_id`        | `1` (root scope)                                         |
+/// | `is_pinned`       | `false`                                                  |
+///
+/// `t_created` defaults to `Utc::now()` at `build()`, and `last_accessed` defaults
+/// to that resolved `t_created`, so a fact (fresh or backdated) stays coherent.
+#[must_use = "a builder does nothing until `.build()` is called"]
+#[derive(Debug, Clone)]
+pub struct NewFactBuilder {
+    content: String,
+    content_hash: String,
+    embedding: Vec<f32>,
+    fact_type: FactType,
+    t_created: Option<DateTime<Utc>>,
+    t_expired: Option<DateTime<Utc>>,
+    t_valid: Option<DateTime<Utc>>,
+    t_invalid: Option<DateTime<Utc>>,
+    source_event_id: Option<i64>,
+    importance: f64,
+    access_count: i64,
+    last_accessed: Option<DateTime<Utc>>,
+    metadata: serde_json::Value,
+    scope_id: i64,
+    is_pinned: bool,
+}
+
+impl NewFactBuilder {
+    /// Create a builder from the three required fields. Prefer
+    /// [`NewFact::builder`], which forwards here.
+    pub fn new(content: impl Into<String>, embedding: Vec<f32>, fact_type: FactType) -> Self {
+        Self {
+            content: content.into(),
+            content_hash: String::new(),
+            embedding,
+            fact_type,
+            t_created: None,
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: None,
+            metadata: serde_json::json!({}),
+            scope_id: default_root_scope_id(),
+            is_pinned: false,
+        }
+    }
+
+    /// Pre-set the content hash. Normally left empty so `FactStore::insert`
+    /// computes the canonical blake3 hash from `content`.
+    pub fn content_hash(mut self, hash: impl Into<String>) -> Self {
+        self.content_hash = hash.into();
+        self
+    }
+
+    /// Override the transaction-time creation timestamp (default: `Utc::now()`
+    /// at `build()`). Used to backdate bootstrapped historical facts.
+    pub const fn t_created(mut self, t_created: DateTime<Utc>) -> Self {
+        self.t_created = Some(t_created);
+        self
+    }
+
+    /// Set the transaction-time expiry (soft-delete marker).
+    pub const fn t_expired(mut self, t_expired: DateTime<Utc>) -> Self {
+        self.t_expired = Some(t_expired);
+        self
+    }
+
+    /// Set the valid-time start (when the fact became true in the world).
+    pub const fn t_valid(mut self, t_valid: DateTime<Utc>) -> Self {
+        self.t_valid = Some(t_valid);
+        self
+    }
+
+    /// Set the valid-time end (when the fact stopped being true).
+    pub const fn t_invalid(mut self, t_invalid: DateTime<Utc>) -> Self {
+        self.t_invalid = Some(t_invalid);
+        self
+    }
+
+    /// Link the fact to the originating event.
+    pub const fn source_event_id(mut self, source_event_id: i64) -> Self {
+        self.source_event_id = Some(source_event_id);
+        self
+    }
+
+    /// Set the base importance prior (default `0.5`), finite in `[0, 1]`. A
+    /// `NewFact` built here is inserted directly, bypassing the `add_fact`
+    /// range check (#571), so the value is stored verbatim — not validated (#584).
+    pub const fn importance(mut self, importance: f64) -> Self {
+        self.importance = importance;
+        self
+    }
+
+    /// Set the initial access count (default `0`).
+    pub const fn access_count(mut self, access_count: i64) -> Self {
+        self.access_count = access_count;
+        self
+    }
+
+    /// Override the last-accessed timestamp (default: `Utc::now()` at `build()`).
+    pub const fn last_accessed(mut self, last_accessed: DateTime<Utc>) -> Self {
+        self.last_accessed = Some(last_accessed);
+        self
+    }
+
+    /// Set the metadata JSON (default: empty object `{}`).
+    pub fn metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Set the scope id (default `1`, the root scope).
+    pub const fn scope_id(mut self, scope_id: i64) -> Self {
+        self.scope_id = scope_id;
+        self
+    }
+
+    /// Pin the fact (unforgettable). Default `false`.
+    pub const fn is_pinned(mut self, is_pinned: bool) -> Self {
+        self.is_pinned = is_pinned;
+        self
+    }
+
+    /// Finalize into a [`NewFact`]. Unset timestamps (`t_created`,
+    /// `last_accessed`) are sampled from a single `Utc::now()` call so they are
+    /// coherent.
+    #[must_use]
+    pub fn build(self) -> NewFact {
+        let now = Utc::now();
+        // Default last_accessed to the resolved t_created (not `now`): when a fact
+        // is backdated (historical import/bootstrap), treating it as freshly
+        // accessed would reset its Ebbinghaus decay and skew importance.
+        let t_created = self.t_created.unwrap_or(now);
+        NewFact {
+            content: self.content,
+            content_hash: self.content_hash,
+            embedding: self.embedding,
+            fact_type: self.fact_type,
+            t_created,
+            t_expired: self.t_expired,
+            t_valid: self.t_valid,
+            t_invalid: self.t_invalid,
+            source_event_id: self.source_event_id,
+            importance: self.importance,
+            access_count: self.access_count,
+            last_accessed: self.last_accessed.unwrap_or(t_created),
+            metadata: self.metadata,
+            scope_id: self.scope_id,
+            is_pinned: self.is_pinned,
+        }
+    }
 }
 
 /// Edge to insert (DB assigns id).
@@ -669,6 +894,30 @@ mod tests {
         assert_eq!(ActivityStatus::Deduplicated.to_string(), "deduplicated");
         assert_eq!(ActivityStatus::Ignored.to_string(), "ignored");
         assert_eq!(ActivityStatus::Promoted.to_string(), "promoted");
+    }
+
+    // --- NewFactBuilder ---
+
+    #[test]
+    fn builder_backdated_t_created_sets_last_accessed_to_match() {
+        use chrono::TimeZone;
+        let past = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        // Backdate t_created without an explicit last_accessed.
+        let nf = NewFact::builder("historical fact", vec![0.1; 4], FactType::Semantic)
+            .t_created(past)
+            .build();
+        assert_eq!(nf.t_created, past);
+        assert_eq!(
+            nf.last_accessed, past,
+            "last_accessed must follow a backdated t_created, not default to now"
+        );
+        // An explicit last_accessed still wins.
+        let later = Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap();
+        let nf2 = NewFact::builder("x", vec![0.1; 4], FactType::Semantic)
+            .t_created(past)
+            .last_accessed(later)
+            .build();
+        assert_eq!(nf2.last_accessed, later);
     }
 
     // --- ActivityStatus::from_str round-trip + error path ---
