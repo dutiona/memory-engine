@@ -5,6 +5,7 @@
 
 pub(crate) mod extract;
 pub(crate) mod filter;
+pub(crate) mod memory_dir;
 pub(crate) mod metrics;
 pub(crate) mod outcome;
 pub(crate) mod parse;
@@ -13,7 +14,7 @@ pub(crate) mod redact;
 use std::io::BufRead;
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::error::Result;
@@ -25,11 +26,13 @@ use crate::types::{EventType, FactType, NewEvent, NewFact};
 
 pub use extract::{ExtractedFact, KeywordExtractor, SessionExtractor};
 pub use filter::{CandidateEpisode, ConversationTurn, EpisodeCategory, ToolCallRecord};
+pub use memory_dir::{parse_memory_file, ParsedMemory};
 pub use metrics::{BootstrapConfig, BootstrapReport, PrewarmMetrics};
 pub use outcome::{OutcomeSignals, SessionOutcome};
 pub use redact::{
-    DENYLIST_ENV_VAR, Finding, RedactionReport, load_secret_denylist, redact_entries,
-    redact_entries_with_denylist, redact_text, redact_text_with_denylist, shannon_entropy,
+    load_secret_denylist, redact_entries, redact_entries_with_denylist, redact_json_strings,
+    redact_text, redact_text_with_denylist, shannon_entropy, Finding, RedactionReport,
+    DENYLIST_ENV_VAR,
 };
 
 /// Bootstrap one session from a JSONL reader into the memory engine.
@@ -148,6 +151,165 @@ fn ingest_bootstrap_marker(
     EventStore::new(conn, upcaster_registry).insert(&marker_event)
 }
 
+/// Redact secrets/PII from every turn in place (user + assistant text and each
+/// tool call's input/stdout/stderr), returning the total finding count.
+///
+/// Run BEFORE extraction so the extractor — which may be a caller-supplied
+/// LLM-powered [`SessionExtractor`] reaching an external service — never sees an
+/// unredacted secret. A `[REDACTED:*]` placeholder is never re-matched, so this
+/// is idempotent.
+fn redact_turns(turns: &mut [ConversationTurn], denylist: &[String]) -> usize {
+    let redact_field = |s: &mut String, n: &mut usize| {
+        let (clean, findings) = redact::redact_text_with_denylist(s, denylist);
+        if !findings.is_empty() {
+            *s = clean;
+            *n += findings.len();
+        }
+    };
+    let mut total = 0;
+    for turn in turns {
+        redact_field(&mut turn.user_text, &mut total);
+        redact_field(&mut turn.assistant_text, &mut total);
+        for tc in &mut turn.tool_calls {
+            total += redact::redact_json_strings(&mut tc.input, denylist);
+            if let Some(s) = tc.stdout.as_mut() {
+                redact_field(s, &mut total);
+            }
+            if let Some(s) = tc.stderr.as_mut() {
+                redact_field(s, &mut total);
+            }
+        }
+    }
+    total
+}
+
+/// Redact, embed, and store one extracted fact (dedup-with-reinforcement).
+///
+/// Returns the importance to fold into the prewarm average — `0.0` when the
+/// fact was *reinforced* rather than created. Updates `report`'s
+/// `facts_created`/`facts_reinforced`/`secrets_redacted` and the prewarm tallies
+/// in place. The session-path analogue of `memory_dir::import_one_memory`.
+#[allow(clippy::too_many_arguments)]
+fn store_extracted_fact(
+    fact_store: &FactStore,
+    embedder: &dyn EmbeddingProvider,
+    config: &BootstrapConfig,
+    classifier: Option<&dyn PersistenceClassifier>,
+    fact: &ExtractedFact,
+    effective_created: DateTime<Utc>,
+    marker_event_id: i64,
+    scope_id: i64,
+    report: &mut BootstrapReport,
+) -> Result<f64> {
+    // Defense-in-depth redaction (#45/#51): the turns were already scrubbed
+    // upfront (see `redact_turns`), so `fact.content` derived from them is
+    // normally clean and this pass finds nothing — but it guards against an
+    // extractor that introduces text not present verbatim in the turns. Findings
+    // here are held in `redactions` and only added to the report on the *created*
+    // branch, so the audit counter stays idempotent (a reinforced re-run
+    // re-scrubs but does not re-count). Disabled only when `config.redact` is
+    // false (library/test callers); the CLI has no bypass.
+    let mut redactions = 0usize;
+    let content = if config.redact {
+        let (clean, findings) = redact::redact_text_with_denylist(&fact.content, &config.denylist);
+        redactions += findings.len();
+        clean
+    } else {
+        fact.content.clone()
+    };
+
+    // Redact the extractor-supplied metadata too: a pluggable SessionExtractor
+    // may place turn-derived text in metadata, and the stored row must carry no
+    // unredacted secret anywhere (not just in content). Keys are left intact.
+    let mut metadata = fact.metadata.clone();
+    if config.redact {
+        redactions += redact::redact_json_strings(&mut metadata, &config.denylist);
+    }
+
+    // Session files are third-party input: a fact whose (redacted) content or
+    // metadata exceeds the ingest bound is skipped best-effort — mirroring the
+    // malformed-line policy — rather than aborting the whole import. Checked on
+    // the redacted, about-to-be-stored values, before the costly embed
+    // (issue #572 / L10). A skipped fact is neither created nor reinforced.
+    if let Err(e) = crate::limits::check_str_size(&content, "fact content")
+        .and_then(|()| crate::limits::check_json_size(&metadata, "fact metadata"))
+    {
+        tracing::warn!(error = %e, "skipping oversized bootstrap fact");
+        return Ok(0.0);
+    }
+
+    let embedding = embedder.embed(&content)?;
+
+    let is_pinned = classifier.is_some_and(|c| {
+        let temp = crate::types::Fact {
+            id: 0,
+            content: content.clone(),
+            content_hash: String::new(),
+            embedding: embedding.clone(),
+            fact_type: fact.fact_type,
+            t_created: effective_created,
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: Some(marker_event_id),
+            importance: fact.importance,
+            access_count: 0,
+            last_accessed: effective_created,
+            metadata: metadata.clone(),
+            scope_id,
+            is_pinned: false,
+            importance_score: fact.importance,
+            surfaced_at: None,
+        };
+        c.should_pin(&temp)
+    });
+
+    // Bi-temporal note (#521): t_created is backdated to the historical turn
+    // timestamp, but t_valid is deliberately left None. Valid-time is the
+    // externally-asserted "true in the world" interval, which a retro-observed
+    // session fact does not carry — transaction-time (t_created) is the temporal
+    // signal here. Consequences: these facts are visible to active-at queries
+    // (None = unbounded-valid) but are NOT scheduled by list_due (which requires
+    // t_valid IS NOT NULL); memarch #42 sweeps on t_created for the same reason.
+    let new_fact = NewFact {
+        content,
+        content_hash: String::new(),
+        embedding,
+        fact_type: fact.fact_type,
+        t_created: effective_created,
+        t_expired: None,
+        t_valid: None,
+        t_invalid: None,
+        source_event_id: Some(marker_event_id),
+        scope_id,
+        importance: fact.importance,
+        access_count: 0,
+        last_accessed: effective_created,
+        metadata,
+        is_pinned,
+    };
+
+    // Dedup-with-reinforcement (#520): a fact whose content already exists
+    // (active, same scope) is reinforced — recency/frequency bumped — rather than
+    // duplicated. A 9-month backfill re-encounters recurring conventions and
+    // decisions across sessions; this collapses them to one reinforced row.
+    let (_, reinforced) = fact_store.insert_or_reinforce(&new_fact)?;
+    if reinforced {
+        // A reinforcement adds no new row, so it does not count toward prewarm
+        // metrics or the created-fact importance average.
+        report.facts_reinforced += 1;
+        return Ok(0.0);
+    }
+    report.facts_created += 1;
+    report.secrets_redacted += redactions;
+    match fact.fact_type {
+        FactType::Episodic => report.prewarm_metrics.episodic_count += 1,
+        FactType::Semantic => report.prewarm_metrics.semantic_count += 1,
+        FactType::Procedural => report.prewarm_metrics.procedural_count += 1,
+    }
+    Ok(fact.importance)
+}
+
 /// Inner pipeline logic running within a savepoint.
 #[allow(clippy::too_many_arguments)]
 fn bootstrap_within_savepoint(
@@ -168,8 +330,20 @@ fn bootstrap_within_savepoint(
     report.events_ingested = 1;
 
     // --- Reconstruct turns ---
-    let turns = filter::reconstruct_turns(entries);
+    let mut turns = filter::reconstruct_turns(entries);
     report.turns_reconstructed = turns.len();
+
+    // --- Redaction gate (#45/#51), applied UPFRONT ---
+    // Scrub secrets/PII from every turn BEFORE extraction so a pluggable
+    // (possibly LLM-powered) SessionExtractor never receives unredacted content —
+    // the gate covers extraction, embedding, AND storage, not just the stored
+    // row. Secrets are never outcome markers or keywords, so this does not
+    // perturb classification or the keyword pre-filter. Counted here (per
+    // session); a redundant re-run is skipped on the bootstrap marker before
+    // reaching this point, so the count stays idempotent.
+    if config.redact {
+        report.secrets_redacted += redact_turns(&mut turns, &config.denylist);
+    }
 
     // --- Classify outcome on FULL turns (before truncation) ---
     // Outcome evidence (commits, test results) lives at the end of sessions,
@@ -215,92 +389,18 @@ fn bootstrap_within_savepoint(
 
     for candidate in &candidates {
         let facts = extractor.extract(candidate, &outcome)?;
-
         for fact in &facts {
-            // Session files are third-party input: an extracted fact whose
-            // content/metadata exceeds the ingest bound is skipped (best-effort,
-            // mirroring the malformed-line policy) rather than aborting the whole
-            // import. Checked before the costly embed (issue #572 / L10).
-            if let Err(e) = crate::limits::check_str_size(&fact.content, "fact content")
-                .and_then(|()| crate::limits::check_json_size(&fact.metadata, "fact metadata"))
-            {
-                tracing::warn!(error = %e, "skipping oversized bootstrap fact");
-                continue;
-            }
-
-            let embedding = embedder.embed(&fact.content)?;
-            let effective_created = candidate.timestamp;
-
-            // Determine pinning
-            let is_pinned = classifier.is_some_and(|c| {
-                let temp = crate::types::Fact {
-                    id: 0,
-                    content: fact.content.clone(),
-                    content_hash: String::new(),
-                    embedding: embedding.clone(),
-                    fact_type: fact.fact_type,
-                    t_created: effective_created,
-                    t_expired: None,
-                    t_valid: None,
-                    t_invalid: None,
-                    source_event_id: Some(marker_event_id),
-                    importance: fact.importance,
-                    access_count: 0,
-                    last_accessed: effective_created,
-                    metadata: fact.metadata.clone(),
-                    scope_id,
-                    is_pinned: false,
-                    importance_score: fact.importance,
-                    surfaced_at: None,
-                };
-                c.should_pin(&temp)
-            });
-
-            // Bi-temporal note (#521): t_created is backdated to the historical turn
-            // timestamp, but t_valid is deliberately left None. Valid-time is the
-            // externally-asserted "true in the world" interval, which a retro-observed
-            // session fact does not carry — transaction-time (t_created) is the temporal
-            // signal here. Consequences: these facts are visible to active-at queries
-            // (None = unbounded-valid) but are NOT scheduled by list_due (which requires
-            // t_valid IS NOT NULL); memarch #42 sweeps on t_created for the same reason.
-            let new_fact = NewFact {
-                content: fact.content.clone(),
-                content_hash: String::new(),
-                embedding,
-                fact_type: fact.fact_type,
-                t_created: effective_created,
-                t_expired: None,
-                t_valid: None,
-                t_invalid: None,
-                source_event_id: Some(marker_event_id),
+            importance_sum += store_extracted_fact(
+                &fact_store,
+                embedder,
+                config,
+                classifier,
+                fact,
+                candidate.timestamp,
+                marker_event_id,
                 scope_id,
-                importance: fact.importance,
-                access_count: 0,
-                last_accessed: effective_created,
-                metadata: fact.metadata.clone(),
-                is_pinned,
-            };
-
-            // Dedup-with-reinforcement (#520): a fact whose content already exists
-            // (active, same scope) is reinforced — recency/frequency bumped — rather
-            // than duplicated. A 9-month backfill re-encounters recurring conventions
-            // and decisions across sessions; this collapses them to one reinforced row.
-            let (_, reinforced) = fact_store.insert_or_reinforce(&new_fact)?;
-            if reinforced {
-                // A reinforcement adds no new row, so it does not count toward
-                // prewarm metrics or the created-fact importance average.
-                report.facts_reinforced += 1;
-                continue;
-            }
-            report.facts_created += 1;
-
-            // Update prewarm metrics (newly-created rows only)
-            match fact.fact_type {
-                FactType::Episodic => report.prewarm_metrics.episodic_count += 1,
-                FactType::Semantic => report.prewarm_metrics.semantic_count += 1,
-                FactType::Procedural => report.prewarm_metrics.procedural_count += 1,
-            }
-            importance_sum += fact.importance;
+                report,
+            )?;
         }
     }
 
@@ -317,9 +417,37 @@ fn bootstrap_within_savepoint(
     Ok(())
 }
 
-/// Bootstrap all JSONL session logs in a directory.
+/// Recursively collect `*.jsonl` session files under `dir`, skipping any
+/// `subagents/` subdirectory (those hold lower-value subagent tool-call logs).
 ///
-/// Discovers top-level `*.jsonl` files (not in `subagents/` subdirectories).
+/// Real Claude/Codex/Gemini transcripts live one level down
+/// (`<project-slug>/<uuid>.jsonl`), so a flat top-level scan would silently find
+/// nothing when pointed at `~/.claude/projects`. This mirrors the `--memory-dir`
+/// path's recursion (`memory_dir::collect_md_files`).
+fn collect_jsonl_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        // `file_type()` reads the dirent's own type (no extra `stat`) and does
+        // NOT follow symlinks, so a circular symlink cannot drive infinite
+        // recursion — a symlink is neither dir nor file here and is skipped.
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            if path.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+                continue;
+            }
+            collect_jsonl_files(&path, out)?;
+        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Bootstrap all JSONL session logs under a directory (recursive).
+///
+/// Discovers `*.jsonl` files at any depth, skipping `subagents/` subdirectories.
 /// Processes each session independently, aggregating reports.
 ///
 /// # Errors
@@ -340,17 +468,12 @@ pub(crate) fn bootstrap_directory_inner(
 ) -> Result<BootstrapReport> {
     let mut aggregate = BootstrapReport::default();
 
-    let entries = std::fs::read_dir(dir)?;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
+    let mut files = Vec::new();
+    collect_jsonl_files(dir, &mut files)?;
+    files.sort();
 
-        // Only top-level .jsonl files (skip directories like subagents/)
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-
-        let file = match std::fs::File::open(&path) {
+    for path in &files {
+        let file = match std::fs::File::open(path) {
             Ok(f) => f,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skipping unreadable session file");

@@ -10,6 +10,9 @@ turns_reconstructed: 18
 candidates_found: 12
 facts_created: 8
 facts_reinforced: 2
+secrets_redacted: 3
+memory_files_parsed: 0
+memory_files_skipped: 0
 events_ingested: 15
 outcome_counts:
   success: 5
