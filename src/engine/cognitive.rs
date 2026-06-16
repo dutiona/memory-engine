@@ -139,6 +139,22 @@ impl<'a> DreamContext<'a> {
     pub fn outcome_counts(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts> {
         self.engine.get_outcome_counts(fact_id)
     }
+
+    /// Aggregated outcome counts for many facts in a single query (batch rescoring).
+    ///
+    /// The batch form of [`Self::outcome_counts`] — one `GROUP BY` scan instead of
+    /// one query per fact. Facts with no outcomes (or unknown ids) are absent from
+    /// the map; callers treat a missing key as [`OutcomeCounts::default`](crate::types::OutcomeCounts).
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the query fails.
+    pub fn outcome_counts_batch(
+        &self,
+        fact_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::types::OutcomeCounts>> {
+        self.engine.get_outcome_counts_batch(fact_ids)
+    }
 }
 
 // --- MemoryEngine integration methods ---

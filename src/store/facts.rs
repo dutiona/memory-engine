@@ -766,6 +766,10 @@ impl<'a> FactStore<'a> {
     /// Like [`Self::list_active_in_period`] but excludes facts already stamped with
     /// the `dream_cycle` marker — the cycle's input-selection query.
     ///
+    /// The exclusion is pushed into SQL (`json_extract(metadata, '$.dream_cycle') IS
+    /// NULL`) so already-dream-cycled rows — and their embedding BLOBs — are never
+    /// materialized, rather than fetched and discarded Rust-side.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
@@ -776,11 +780,19 @@ impl<'a> FactStore<'a> {
         scope_ids: &[i64],
         fact_type: Option<&FactType>,
     ) -> Result<Vec<Fact>> {
-        let facts = self.list_active_in_period(start, end, scope_ids, fact_type)?;
-        Ok(facts
-            .into_iter()
-            .filter(|f| f.metadata.get("dream_cycle").is_none())
-            .collect())
+        // `json_type` (not `json_extract`) keeps this bit-for-bit equivalent to the
+        // prior Rust filter `metadata.get("dream_cycle").is_none()`: `json_extract`
+        // collapses an absent key and a present-`null` value both to SQL NULL, whereas
+        // serde's `get().is_none()` is true only for an *absent* key. `json_type`
+        // returns the text `'null'` for a present-null value (so `IS NULL` is false)
+        // and SQL NULL only when the key is absent or the path doesn't resolve.
+        self.list_active_in_period_inner(
+            start,
+            end,
+            scope_ids,
+            fact_type,
+            &["json_type(metadata, '$.dream_cycle') IS NULL"],
+        )
     }
 
     /// List active facts ordered by materialized `importance_score`, excluding IDs in `exclude`.
@@ -929,6 +941,22 @@ impl<'a> FactStore<'a> {
         scope_ids: &[i64],
         fact_type: Option<&FactType>,
     ) -> Result<Vec<Fact>> {
+        self.list_active_in_period_inner(start, end, scope_ids, fact_type, &[])
+    }
+
+    /// Shared core for [`Self::list_active_in_period`] and
+    /// [`Self::list_undreamt_in_period`]. `extra_conditions` are additional
+    /// **non-parameterized** SQL predicates ANDed into the `WHERE` clause (they
+    /// must not reference bind parameters — they are appended verbatim, so callers
+    /// pass only trusted literals like a `json_extract(metadata, …) IS NULL` filter).
+    fn list_active_in_period_inner(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        scope_ids: &[i64],
+        fact_type: Option<&FactType>,
+        extra_conditions: &[&str],
+    ) -> Result<Vec<Fact>> {
         let start_str = start.to_rfc3339();
         let end_str = end.to_rfc3339();
         let dim = self.embed_dim;
@@ -957,6 +985,12 @@ impl<'a> FactStore<'a> {
             conditions.push(format!("fact_type = ?{param_idx}"));
         } else {
             ft_str = String::new();
+        }
+
+        // Non-parameterized predicates (e.g. the dream-cycle exclusion filter) are
+        // appended last so they never disturb the `?N` bind-parameter numbering above.
+        for cond in extra_conditions {
+            conditions.push((*cond).to_owned());
         }
 
         let where_clause = conditions.join(" AND ");
@@ -1208,6 +1242,80 @@ mod tests {
         // The marker carries the cycle id and is queryable on the row.
         let marked = store.get(a).unwrap();
         assert_eq!(marked.metadata["dream_cycle"]["cycle_id"], 1);
+    }
+
+    #[test]
+    fn list_undreamt_in_period_composes_with_fact_type_filter() {
+        // Regression guard for the SQL-pushdown refactor: the appended (non-param)
+        // dream-cycle predicate must not disturb the `?N` bind numbering of the
+        // fact_type filter. Mix types, mark one, and query a single type.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut epi = make_fact("episodic", vec![0.1; DIM]);
+        epi.fact_type = FactType::Episodic;
+        let mut sem1 = make_fact("semantic one", vec![0.2; DIM]);
+        sem1.fact_type = FactType::Semantic;
+        let mut sem2 = make_fact("semantic two", vec![0.3; DIM]);
+        sem2.fact_type = FactType::Semantic;
+        store.insert(&epi).unwrap();
+        let s1 = store.insert(&sem1).unwrap();
+        let s2 = store.insert(&sem2).unwrap();
+
+        let start = "2000-01-01T00:00:00Z".parse().unwrap();
+        let end = "2100-01-01T00:00:00Z".parse().unwrap();
+
+        // Semantic-only, both undreamt → exactly the two semantic facts (no episodic).
+        let before = store
+            .list_undreamt_in_period(start, end, &[], Some(&FactType::Semantic))
+            .unwrap();
+        let mut ids: Vec<i64> = before.iter().map(|f| f.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![s1, s2]);
+
+        // Mark one semantic fact → it drops out; the type filter still holds.
+        store.mark_dream_cycled(&[s1], 1, Utc::now()).unwrap();
+        let after = store
+            .list_undreamt_in_period(start, end, &[], Some(&FactType::Semantic))
+            .unwrap();
+        assert_eq!(after.iter().map(|f| f.id).collect::<Vec<_>>(), vec![s2]);
+    }
+
+    #[test]
+    fn list_undreamt_filter_matches_serde_is_none_on_null_value() {
+        // Equivalence guard: the SQL filter must match the prior Rust filter
+        // `metadata.get("dream_cycle").is_none()` even for a present-but-null value.
+        // serde's is_none() is true only for an ABSENT key, so a fact carrying
+        // `{"dream_cycle": null}` is treated as already-dreamt (excluded) — which
+        // `json_type(...) IS NULL` reproduces (json_extract would NOT).
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        let mut absent = make_fact("absent key", vec![0.1; DIM]);
+        absent.metadata = serde_json::json!({"other": 1});
+        let mut present_null = make_fact("present null", vec![0.2; DIM]);
+        present_null.metadata = serde_json::json!({"dream_cycle": null});
+        let mut present_obj = make_fact("present object", vec![0.3; DIM]);
+        present_obj.metadata = serde_json::json!({"dream_cycle": {"cycle_id": 9}});
+
+        let a = store.insert(&absent).unwrap();
+        store.insert(&present_null).unwrap();
+        store.insert(&present_obj).unwrap();
+
+        let start = "2000-01-01T00:00:00Z".parse().unwrap();
+        let end = "2100-01-01T00:00:00Z".parse().unwrap();
+        let undreamt: Vec<i64> = store
+            .list_undreamt_in_period(start, end, &[], None)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+
+        // Only the absent-key fact is undreamt; present-null and present-object are excluded.
+        assert_eq!(
+            undreamt,
+            vec![a],
+            "present-null must be treated as dreamt (matching serde get().is_none())"
+        );
     }
 
     #[test]
