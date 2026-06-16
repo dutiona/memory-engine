@@ -854,6 +854,72 @@ pub struct ProjectContext {
     pub relevant_facts: Vec<Fact>,
 }
 
+/// Identity of the embedding model that produced a stored vector.
+///
+/// The canonical **identity tuple** shared across the Memory and Knowledge layers
+/// (see ADR 0015, `docs/design/adr/0015-cross-layer-embedding-identity-policy.md`).
+///
+/// An embedding is only meaningful within the vector space of the exact model that
+/// produced it. Vector *dimension* alone is insufficient identity — two different
+/// models can share a dimension and silently corrupt retrieval. This tuple is the
+/// full identity; mismatch detection (issue #614) compares two fingerprints with
+/// [`PartialEq`]/[`Eq`].
+///
+/// # Cross-layer parity contract
+///
+/// The field **names** (`model`, `provider`, `dim`, `matryoshka_base_dim`,
+/// `element_type`) are **normative** and shared verbatim with the `knowledge-base`
+/// repository's `embed_spaces` registry. Do not rename without updating ADR 0015 in
+/// both repos. `model` is an operator-declared slug, not a weight hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EmbeddingFingerprint {
+    /// Model identity slug, e.g. `"Qwen/Qwen3-Embedding-0.6B"`. Operator-declared.
+    pub model: String,
+    /// Serving backend, e.g. `"tei"`, `"ollama"`, `"openai"`.
+    pub provider: String,
+    /// Stored vector dimension (post-truncation). Literal field name `dim` per ADR 0015.
+    pub dim: usize,
+    /// Native model dimension before Matryoshka (MRL) truncation; `None` if untruncated.
+    pub matryoshka_base_dim: Option<usize>,
+    /// Vector element storage type: `"float32"` today (reserved: `"int8"`).
+    pub element_type: String,
+}
+
+impl EmbeddingFingerprint {
+    /// The default vector element type (`"float32"`).
+    pub const ELEMENT_F32: &'static str = "float32";
+
+    /// Construct a fingerprint for an untruncated `float32` embedding space.
+    ///
+    /// Sets `matryoshka_base_dim` to `None` and `element_type` to
+    /// [`ELEMENT_F32`](Self::ELEMENT_F32).
+    #[must_use]
+    pub fn new(model: impl Into<String>, provider: impl Into<String>, dim: usize) -> Self {
+        Self {
+            model: model.into(),
+            provider: provider.into(),
+            dim,
+            matryoshka_base_dim: None,
+            element_type: Self::ELEMENT_F32.to_string(),
+        }
+    }
+
+    /// Construct a fingerprint for a Matryoshka-truncated `float32` embedding space,
+    /// recording the native `base_dim` the model emits before truncation to `dim`.
+    #[must_use]
+    pub fn with_matryoshka(
+        model: impl Into<String>,
+        provider: impl Into<String>,
+        dim: usize,
+        base_dim: usize,
+    ) -> Self {
+        Self {
+            matryoshka_base_dim: Some(base_dim),
+            ..Self::new(model, provider, dim)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1265,5 +1331,73 @@ mod tests {
         let json = serde_json::to_string(&rec).unwrap();
         let back: LineageRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(rec, back);
+    }
+
+    // --- EmbeddingFingerprint (#612) ---
+
+    #[test]
+    fn fingerprint_new_sets_float32_untruncated_defaults() {
+        let fp = EmbeddingFingerprint::new("m", "p", 768);
+        assert_eq!(fp.model, "m");
+        assert_eq!(fp.provider, "p");
+        assert_eq!(fp.dim, 768);
+        assert_eq!(fp.matryoshka_base_dim, None);
+        assert_eq!(fp.element_type, EmbeddingFingerprint::ELEMENT_F32);
+        assert_eq!(fp.element_type, "float32");
+    }
+
+    #[test]
+    fn fingerprint_with_matryoshka_records_base_dim() {
+        let fp = EmbeddingFingerprint::with_matryoshka("qwen", "tei", 512, 1024);
+        assert_eq!(fp.dim, 512);
+        assert_eq!(fp.matryoshka_base_dim, Some(1024));
+        assert_eq!(fp.element_type, "float32");
+    }
+
+    #[test]
+    fn fingerprint_eq_requires_every_field() {
+        // Equality is the #614 mismatch contract: any differing field => incompatible.
+        let base = EmbeddingFingerprint::new("m", "p", 768);
+        assert_eq!(base, EmbeddingFingerprint::new("m", "p", 768));
+        assert_ne!(base, EmbeddingFingerprint::new("other", "p", 768));
+        assert_ne!(base, EmbeddingFingerprint::new("m", "other", 768));
+        assert_ne!(base, EmbeddingFingerprint::new("m", "p", 384));
+        assert_ne!(
+            base,
+            EmbeddingFingerprint::with_matryoshka("m", "p", 768, 1024)
+        );
+        let mut int8 = EmbeddingFingerprint::new("m", "p", 768);
+        int8.element_type = "int8".to_string();
+        assert_ne!(base, int8);
+    }
+
+    #[test]
+    fn fingerprint_hash_consistent_with_eq() {
+        let mut set = std::collections::HashSet::new();
+        set.insert(EmbeddingFingerprint::new("m", "p", 768));
+        assert!(set.contains(&EmbeddingFingerprint::new("m", "p", 768)));
+        assert!(!set.contains(&EmbeddingFingerprint::new("m", "p", 384)));
+    }
+
+    #[test]
+    fn fingerprint_serde_pins_adr0015_key_set() {
+        // The JSON key set is the normative ME<->KB parity contract (ADR 0015):
+        // a field rename MUST break this test.
+        let fp = EmbeddingFingerprint::with_matryoshka("qwen", "tei", 512, 1024);
+        let v = serde_json::to_value(&fp).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "dim",
+                "element_type",
+                "matryoshka_base_dim",
+                "model",
+                "provider"
+            ]
+        );
+        let back: EmbeddingFingerprint = serde_json::from_value(v).unwrap();
+        assert_eq!(fp, back);
     }
 }

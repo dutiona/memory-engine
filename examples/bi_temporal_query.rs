@@ -5,6 +5,7 @@
 //! Run with: `cargo run --example bi_temporal_query`
 
 use chrono::{Duration, Utc};
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
@@ -16,6 +17,9 @@ struct DummyEmbedder;
 impl EmbeddingProvider for DummyEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
         Ok(vec![0.1; 4])
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 4)
     }
 }
 

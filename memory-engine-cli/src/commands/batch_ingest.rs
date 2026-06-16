@@ -320,6 +320,7 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
     let embedder = HttpEmbeddingProvider::new(
         args.embed_url.clone(),
         args.embed_model.clone(),
+        "ollama".to_string(), // TODO(#618): provider should come from config/CLI
         args.embed_api_key.clone(),
         engine.embed_dim(),
         args.embed_timeout,
@@ -509,6 +510,9 @@ mod tests {
             fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
                 Ok(vec![0.1, 0.2, 0.3, 0.4])
             }
+            fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+                memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
+            }
         }
 
         let engine = MemoryEngine::builder(4).build().unwrap();
@@ -535,6 +539,9 @@ mod tests {
         impl EmbeddingProvider for FakeEmbed {
             fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
                 Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+            fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+                memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
             }
         }
 
@@ -563,6 +570,9 @@ not valid json
             fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
                 Ok(vec![0.1, 0.2, 0.3, 0.4])
             }
+            fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+                memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
+            }
         }
 
         let engine = MemoryEngine::builder(4).build().unwrap();
@@ -588,6 +598,9 @@ not valid json
         impl EmbeddingProvider for FakeEmbed {
             fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
                 Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+            fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+                memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
             }
         }
 

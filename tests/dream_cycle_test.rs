@@ -8,8 +8,8 @@
 
 use memory_engine::inspect::{ExpiredReason, FactState};
 use memory_engine::{
-    AddFactOptions, AddFactRequest, CycleDelta, DefaultDreamCycle, EmbeddingProvider, FactType,
-    MemoryEngine, MemoryError, Outcome,
+    AddFactOptions, AddFactRequest, CycleDelta, DefaultDreamCycle, EmbeddingFingerprint,
+    EmbeddingProvider, FactType, MemoryEngine, MemoryError, Outcome,
 };
 use tempfile::tempdir;
 
@@ -28,6 +28,9 @@ impl EmbeddingProvider for TagEmbed {
             [0.0, 0.0, 1.0, 0.0]
         };
         Ok(v.to_vec())
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 4)
     }
 }
 

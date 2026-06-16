@@ -4,8 +4,8 @@
 //! subtree and assert subtree-scoped, newest-first, limited, active-only retrieval.
 
 use memory_engine::{
-    AddFactOptions, AddFactRequest, EmbeddingProvider, FactType, INSIGHT_MARKER_KEY, MemoryEngine,
-    MemoryError,
+    AddFactOptions, AddFactRequest, EmbeddingFingerprint, EmbeddingProvider, FactType,
+    INSIGHT_MARKER_KEY, MemoryEngine, MemoryError,
 };
 
 const DIM: usize = 4;
@@ -14,6 +14,9 @@ struct FixedEmbed;
 impl EmbeddingProvider for FixedEmbed {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
         Ok(vec![0.1, 0.2, 0.3, 0.4])
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 4)
     }
 }
 

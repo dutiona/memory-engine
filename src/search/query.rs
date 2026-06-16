@@ -16,7 +16,8 @@ const DEFAULT_LIMIT: usize = 50;
 ///
 /// ```
 /// use memory_engine::{
-///     AddFactRequest, EmbeddingProvider, FactType, MemoryEngine, MemoryError, MemoryQuery,
+///     AddFactRequest, EmbeddingFingerprint, EmbeddingProvider, FactType, MemoryEngine, MemoryError,
+///     MemoryQuery,
 /// };
 ///
 /// // Deterministic, dependency-free embedder (see the crate-level example).
@@ -30,6 +31,9 @@ const DEFAULT_LIMIT: usize = 50;
 ///             v[b as usize % self.dim] += 1.0;
 ///         }
 ///         Ok(v)
+///     }
+///     fn fingerprint(&self) -> EmbeddingFingerprint {
+///         EmbeddingFingerprint::new("mock", "test", self.dim)
 ///     }
 /// }
 ///

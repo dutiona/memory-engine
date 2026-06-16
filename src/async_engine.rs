@@ -56,7 +56,7 @@ macro_rules! delegate_blocking {
 ///
 /// use memory_engine::async_engine::AsyncMemoryEngine;
 /// use memory_engine::{
-///     AddFactRequest, EmbeddingProvider, FactType, MemoryEngine, MemoryError,
+///     AddFactRequest, EmbeddingFingerprint, EmbeddingProvider, FactType, MemoryEngine, MemoryError,
 /// };
 ///
 /// // Deterministic, dependency-free embedder (see the crate-level example).
@@ -70,6 +70,9 @@ macro_rules! delegate_blocking {
 ///             v[b as usize % self.dim] += 1.0;
 ///         }
 ///         Ok(v)
+///     }
+///     fn fingerprint(&self) -> EmbeddingFingerprint {
+///         EmbeddingFingerprint::new("mock", "test", self.dim)
 ///     }
 /// }
 ///
@@ -673,6 +676,10 @@ mod tests {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![0.5; self.dim])
         }
+
+        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+            crate::types::EmbeddingFingerprint::new("mock", "test", self.dim)
+        }
     }
 
     #[tokio::test]
@@ -876,6 +883,10 @@ mod tests {
     impl EmbeddingProvider for PanickingEmbedder {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             panic!("deliberate panic inside delegate_blocking! instance arm");
+        }
+
+        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+            crate::types::EmbeddingFingerprint::new("mock", "test", DIM)
         }
     }
 

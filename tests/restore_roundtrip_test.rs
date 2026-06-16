@@ -1,5 +1,6 @@
 //! Integration tests for import/export round-trips.
 
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::EmbeddingProvider;
 use memory_engine::engine::{EngineConfig, MemoryEngine};
 use memory_engine::inspect_types::DumpFormat;
@@ -11,6 +12,9 @@ struct FakeEmbed;
 impl EmbeddingProvider for FakeEmbed {
     fn embed(&self, _text: &str) -> memory_engine::error::Result<Vec<f32>> {
         Ok(vec![0.1, 0.2, 0.3, 0.4])
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 4)
     }
 }
 

@@ -1,3 +1,4 @@
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
 
@@ -16,6 +17,7 @@ use memory_engine::traits::EmbeddingProvider;
 /// let provider = HttpEmbeddingProvider::new(
 ///     "http://localhost:11434/v1/embeddings".to_string(),
 ///     "nomic-embed-text".to_string(),
+///     "ollama".to_string(),
 ///     None,
 ///     768,
 ///     30,
@@ -26,6 +28,7 @@ pub struct HttpEmbeddingProvider {
     client: reqwest::blocking::Client,
     endpoint: String,
     model: String,
+    provider: String,
     api_key: Option<String>,
     expected_dim: usize,
 }
@@ -34,9 +37,18 @@ impl HttpEmbeddingProvider {
     /// # Errors
     ///
     /// Returns an error if the HTTP client cannot be constructed (e.g., TLS init failure).
+    /// `provider` is the operator-declared serving backend (e.g. `"ollama"`, `"tei"`,
+    /// `"openai"`). It **cannot** be sniffed from the endpoint — Ollama and TEI both
+    /// speak `/v1/embeddings` — so it is an explicit argument: it feeds
+    /// [`EmbeddingProvider::fingerprint`] and must reflect the real backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed (e.g., TLS init failure).
     pub fn new(
         endpoint: String,
         model: String,
+        provider: String,
         api_key: Option<String>,
         expected_dim: usize,
         timeout_secs: u64,
@@ -49,6 +61,7 @@ impl HttpEmbeddingProvider {
             client,
             endpoint,
             model,
+            provider,
             api_key,
             expected_dim,
         })
@@ -278,6 +291,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 
         Ok(embeddings)
     }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new(self.model.clone(), self.provider.clone(), self.expected_dim)
+    }
 }
 
 /// Truncate `s` to at most `max` bytes for an error message, snapping the cut
@@ -457,6 +474,7 @@ mod tests {
         let provider = HttpEmbeddingProvider::new(
             "http://127.0.0.1:0/v1/embeddings".to_string(),
             "test-model".to_string(),
+            "test-provider".to_string(),
             None,
             768,
             5,
@@ -474,6 +492,7 @@ mod tests {
         let provider = HttpEmbeddingProvider::new(
             "http://127.0.0.1:0/v1/embeddings".to_string(),
             "test-model".to_string(),
+            "test-provider".to_string(),
             None,
             3,
             5,
@@ -495,6 +514,7 @@ mod tests {
         let provider = HttpEmbeddingProvider::new(
             "http://127.0.0.1:0/v1/embeddings".to_string(),
             "test-model".to_string(),
+            "test-provider".to_string(),
             None,
             2,
             5,
@@ -512,6 +532,7 @@ mod tests {
         let provider = HttpEmbeddingProvider::new(
             "http://127.0.0.1:0/v1/embeddings".to_string(),
             "test-model".to_string(),
+            "test-provider".to_string(),
             None,
             2,
             5,
@@ -522,5 +543,22 @@ mod tests {
             .validate_embedding(&[0.1, f32::INFINITY], None)
             .unwrap_err();
         assert!(err.to_string().contains("Inf"));
+    }
+
+    #[test]
+    fn fingerprint_reports_configured_identity() {
+        let provider = HttpEmbeddingProvider::new(
+            "http://127.0.0.1:0/v1/embeddings".to_string(),
+            "qwen3-0.6b".to_string(),
+            "tei".to_string(),
+            None,
+            1024,
+            5,
+        )
+        .expect("client build should not fail");
+        assert_eq!(
+            provider.fingerprint(),
+            EmbeddingFingerprint::new("qwen3-0.6b", "tei", 1024)
+        );
     }
 }

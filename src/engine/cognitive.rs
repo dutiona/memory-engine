@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 
-use crate::engine::MemoryEngine;
 use crate::engine::cycle::{
     CycleContext, CycleMetadata, CycleOutcome, CycleReport, SkipReason, TimeWindow,
 };
+use crate::engine::MemoryEngine;
 use crate::error::{MemoryError, MigrationError, Result};
 use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::store::facts::FactStore;
@@ -450,8 +450,8 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::MemoryEngine;
     use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, IdentityOutput};
+    use crate::engine::MemoryEngine;
     use crate::error::MemoryError;
     use crate::types::{FactType, Insight, PromoteRequest, PromotionProvenance};
 
@@ -524,6 +524,10 @@ mod tests {
         impl EmbeddingProvider for FixedEmbed {
             fn embed(&self, _text: &str) -> Result<Vec<f32>> {
                 Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                crate::types::EmbeddingFingerprint::new("mock", "test", 4)
             }
         }
 

@@ -517,6 +517,10 @@ mod tests {
         fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
             panic!("embed() must not be called in this test");
         }
+
+        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+            crate::types::EmbeddingFingerprint::new("mock", "test", 4)
+        }
     }
 
     /// JSONL with two valid entries but neither carries a `sessionId`.

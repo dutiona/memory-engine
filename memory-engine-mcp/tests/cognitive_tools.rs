@@ -15,6 +15,9 @@ impl EmbeddingProvider for FakeEmbed {
     fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
         Ok(vec![0.1, 0.2, 0.3]) // identical for all → one DBSCAN cluster
     }
+    fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+        memory_engine::EmbeddingFingerprint::new("mock", "test", 3)
+    }
 }
 
 fn engine() -> (MemoryEngine, tempfile::TempDir) {
