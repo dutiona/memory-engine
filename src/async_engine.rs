@@ -707,12 +707,14 @@ mod tests {
         assert_eq!(val, Some("async_val".into()));
     }
 
-    /// Oracle: a panic inside a `spawn_blocking` task must surface as
-    /// `MemoryError::Pool`, not a silent hang or a different variant.
+    /// Pins the `join_err` helper contract: a panic caught by tokio's
+    /// blocking-task runtime surfaces as `MemoryError::Pool` with the
+    /// "task join error" prefix.
     ///
-    /// We exercise the `join_err` mapping path directly because no public
-    /// `MemoryEngine` method panics in normal use — we fabricate the
-    /// `JoinError` by letting tokio catch a deliberate panic.
+    /// This test calls `join_err` **directly** — it does NOT exercise the
+    /// `delegate_blocking!` macro expansion path. See
+    /// `delegate_blocking_macro_panic_maps_to_pool_error` for the end-to-end
+    /// macro oracle.
     #[tokio::test]
     async fn blocking_panic_maps_to_pool_error() {
         let result: Result<()> = tokio::task::spawn_blocking(|| {
@@ -729,6 +731,65 @@ mod tests {
                 );
             }
             other => panic!("expected MemoryError::Pool, got: {other:?}"),
+        }
+    }
+
+    /// Embedder whose `embed` implementation panics unconditionally.
+    ///
+    /// Used by `delegate_blocking_macro_panic_maps_to_pool_error` to inject a
+    /// panic into the `spawn_blocking` closure expanded by the instance arm of
+    /// `delegate_blocking!`.
+    struct PanickingEmbedder;
+
+    impl EmbeddingProvider for PanickingEmbedder {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            panic!("deliberate panic inside delegate_blocking! instance arm");
+        }
+    }
+
+    /// End-to-end oracle for the `delegate_blocking!` instance arm.
+    ///
+    /// Routes a panic through a real `AsyncMemoryEngine` delegated method
+    /// (`add_fact`) whose inner synchronous call invokes `embedder.embed()`.
+    /// The panic is caught by tokio inside the `spawn_blocking` closure
+    /// expanded by the macro, and MUST surface as `MemoryError::Pool` — not a
+    /// hang, not a different error variant, not an unwinding abort.
+    ///
+    /// **Discrimination**: removing `.map_err(join_err)` from the instance arm
+    /// of `delegate_blocking!` causes a compile error because `JoinError` has
+    /// no `From` impl for `MemoryError`, so the `?` operator cannot coerce the
+    /// `Result<Result<i64, MemoryError>, JoinError>` return type. This is a
+    /// compile-time discrimination signal — the test becomes unreachable before
+    /// the runtime assertion can be evaluated.
+    #[tokio::test]
+    async fn delegate_blocking_macro_panic_maps_to_pool_error() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        let embedder: Arc<dyn EmbeddingProvider + Send + Sync> = Arc::new(PanickingEmbedder);
+
+        let result = engine
+            .add_fact(
+                AddFactRequest {
+                    content: "panic test".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                embedder,
+                None,
+            )
+            .await;
+
+        match result {
+            Err(MemoryError::Pool(msg)) => {
+                assert!(
+                    msg.contains("task join error"),
+                    "expected 'task join error' prefix from delegate_blocking! instance arm, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected MemoryError::Pool from delegate_blocking! instance arm, got: {other:?}"
+            ),
         }
     }
 }
