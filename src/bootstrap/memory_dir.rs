@@ -33,9 +33,9 @@ use crate::store::facts::FactStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{FactType, NewFact};
 
+use super::BootstrapConfig;
 use super::metrics::BootstrapReport;
 use super::redact;
-use super::BootstrapConfig;
 
 /// Baseline importance for curated native-memory facts. Higher than the
 /// keyword-extracted session candidates: these files are hand-authored durable

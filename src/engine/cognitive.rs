@@ -1,15 +1,17 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::engine::MemoryEngine;
-use crate::error::{MemoryError, Result};
+use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, TimeWindow};
+use crate::error::{MemoryError, MigrationError, Result};
 use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::store::facts::FactStore;
 use crate::store::lineage::LineageStore;
+use crate::store::schema::get_config;
 use crate::traits::{
     ConsolidationConfig, ConsolidationStats, EmbeddingProvider, ForgetPolicy, PruneStats,
     SummaryGenerator,
 };
-use crate::types::{CycleReport, Fact, NewFact, NewLineageRecord, PromoteRequest, PromotionResult};
+use crate::types::{Fact, NewFact, NewLineageRecord, PromoteRequest, PromotionResult};
 
 #[cfg(feature = "ann")]
 use crate::search::strategy::VectorSearchStrategy;
@@ -108,6 +110,35 @@ impl<'a> DreamContext<'a> {
     pub fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult> {
         self.engine.promote_with_lineage(req)
     }
+
+    /// List active facts in `window` that have not yet been dream-cycled.
+    ///
+    /// This is a cycle's input-selection query: the metadata `dream_cycle` marker
+    /// excludes facts a previous cycle already processed (idempotency). Root scope,
+    /// all fact types.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store read fails.
+    pub fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>> {
+        self.engine.with_read(|conn| {
+            FactStore::new(conn, self.engine.embed_dim).list_undreamt_in_period(
+                window.start,
+                window.end,
+                &[],
+                None,
+            )
+        })
+    }
+
+    /// Aggregated outcome counts for a fact (for importance rescoring).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the fact does not exist, or a store error.
+    pub fn outcome_counts(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts> {
+        self.engine.get_outcome_counts(fact_id)
+    }
 }
 
 // --- MemoryEngine integration methods ---
@@ -126,31 +157,112 @@ impl MemoryEngine {
         stream.record(insight)
     }
 
-    /// Run a `DreamCycle` using a capability-restricted [`DreamContext`].
+    /// Run a `DreamCycle`, returning the **unapplied** delta-based [`CycleReport`].
     ///
-    /// Creates the context, delegates to `cycle.run()`, returns the report.
-    /// Verifies write access is available before creating the context,
-    /// since `DreamCycle` may need to promote facts.
+    /// Builds a retrieve-before-reflect [`CycleContext`] (prior wisdom + recent
+    /// cycle history + the default `[last_dream_cycle_at, now)` window), delegates
+    /// to `cycle.run()`, and returns its report. The report is **not** applied —
+    /// the caller inspects it (the human review gate) and applies it via
+    /// [`Self::apply_cycle_report`]. Verifies write access up front since applying
+    /// will require it.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
-    /// Returns an error if the cycle's `run()` fails.
+    /// Returns an error if context construction or the cycle's `run()` fails.
     pub fn run_dream_cycle(&self, cycle: &dyn DreamCycle) -> Result<CycleReport> {
-        // Verify write access without holding the lock
+        // Verify write access without holding the lock (apply happens separately).
         {
             let _guard = self.write_conn()?;
         }
-        let ctx = DreamContext::new(self);
-        cycle.run(&ctx)
+        let cycle_ctx = self.build_cycle_context()?;
+        cycle.run(&cycle_ctx)
+    }
+
+    /// Build the retrieve-before-reflect context for a cycle: prior wisdom (active
+    /// pinned facts), the recent cycle-metadata history, and the default time
+    /// window `[last_dream_cycle_at, now)`.
+    fn build_cycle_context(&self) -> Result<CycleContext<'_>> {
+        let now = Utc::now();
+        let (prior_wisdom, start, prior_reports) = self.with_read(|conn| {
+            let wisdom = FactStore::new(conn, self.embed_dim).list_pinned(&[])?;
+            let start = match get_config(conn, "last_dream_cycle_at")? {
+                Some(s) => DateTime::parse_from_rfc3339(&s)
+                    .map_err(|e| {
+                        MemoryError::Migration(MigrationError::Incompatible(format!(
+                            "invalid last_dream_cycle_at: {e}"
+                        )))
+                    })?
+                    .with_timezone(&Utc),
+                None => DateTime::from_timestamp(0, 0).expect("unix epoch is a valid timestamp"),
+            };
+            let history = match get_config(conn, "dream_cycle_history")? {
+                Some(s) => serde_json::from_str::<Vec<CycleMetadata>>(&s)?,
+                None => Vec::new(),
+            };
+            Ok((wisdom, start, history))
+        })?;
+        let time_window = TimeWindow { start, end: now };
+        Ok(CycleContext::new(
+            DreamContext::new(self),
+            prior_wisdom,
+            prior_reports,
+            time_window,
+        ))
     }
 
     /// Atomic promotion: insert promoted fact + lineage record in one savepoint.
     ///
     /// Reuses `FactStore::insert()` (the same store-level helper used by
     /// `add_fact` and `add_facts_batch`) to avoid a divergent insert pipeline.
-    /// Wraps fact insert + lineage insert in a single savepoint for atomicity.
+    /// Wraps fact insert + lineage insert in a single savepoint for atomicity,
+    /// delegating the insert steps to [`Self::promote_in_conn`] so the standalone
+    /// path and `apply_cycle_report`'s `Promote` delta share one pipeline.
     pub(crate) fn promote_with_lineage(&self, req: &PromoteRequest) -> Result<PromotionResult> {
+        // Validate embedding dimension up-front (before taking the lock).
+        if req.embedding.len() != self.embed_dim {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: self.embed_dim,
+                actual: req.embedding.len(),
+            });
+        }
+
+        // Embed HNSW copy before acquiring write lock (for post-lock notification)
+        #[cfg(feature = "ann")]
+        let emb_copy = req.embedding.clone();
+
+        // Acquire write lock and insert both in a savepoint
+        let mut conn = self.write_conn()?;
+        let sp = conn.savepoint().map_err(MemoryError::Database)?;
+        let result = self.promote_in_conn(&sp, req)?;
+        sp.commit().map_err(MemoryError::Database)?;
+
+        drop(conn); // release write lock before HNSW notification
+
+        // Notify HNSW if enabled
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            hnsw.notify_insert(result.fact_id, &emb_copy);
+        }
+
+        Ok(result)
+    }
+
+    /// Promotion steps on an already-open connection/savepoint.
+    ///
+    /// Resolves scope, injects the provenance envelope into metadata, inserts the
+    /// pinned wisdom fact, and writes the lineage record — all against the caller's
+    /// `conn`. Acquires **no** lock, does **not** commit, and does **not** notify
+    /// HNSW; the caller owns the transaction boundary and post-commit index
+    /// notification. This is the shared pipeline behind both
+    /// [`Self::promote_with_lineage`] and `apply_cycle_report`'s `Promote` delta —
+    /// the latter must reuse it (rather than call the lock-acquiring wrapper) to
+    /// avoid self-deadlocking on the non-reentrant connection mutex.
+    pub(crate) fn promote_in_conn(
+        &self,
+        conn: &rusqlite::Connection,
+        req: &PromoteRequest,
+    ) -> Result<PromotionResult> {
         // Validate embedding dimension
         if req.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
@@ -178,16 +290,9 @@ impl MemoryEngine {
 
         let now = Utc::now();
 
-        // Embed HNSW copy before acquiring write lock (for post-lock notification)
-        #[cfg(feature = "ann")]
-        let emb_copy = req.embedding.clone();
-
-        // Acquire write lock and insert both in a savepoint
-        let mut conn = self.write_conn()?;
-
-        // Resolve scope within the write lock (same pattern as add_fact)
+        // Resolve scope on the caller's connection (same pattern as add_fact)
         let scope_id = match &req.scope {
-            Some(path) => self.ensure_scope_with_conn(&conn, path)?,
+            Some(path) => self.ensure_scope_with_conn(conn, path)?,
             None => 1, // root scope
         };
 
@@ -209,25 +314,13 @@ impl MemoryEngine {
             is_pinned: true, // promoted wisdom is pinned (unforgettable)
         };
 
-        let sp = conn.savepoint().map_err(MemoryError::Database)?;
-
-        let fact_id = FactStore::new(&sp, self.embed_dim).insert(&new_fact)?;
+        let fact_id = FactStore::new(conn, self.embed_dim).insert(&new_fact)?;
 
         let lineage_record = NewLineageRecord {
             wisdom_fact_id: fact_id,
             source_fact_ids: req.source_fact_ids.clone(),
         };
-        let lineage_id = LineageStore::new(&sp).insert(&lineage_record, &req.provenance)?;
-
-        sp.commit().map_err(MemoryError::Database)?;
-
-        drop(conn); // release write lock before HNSW notification
-
-        // Notify HNSW if enabled
-        #[cfg(feature = "ann")]
-        if let Some(ref hnsw) = self.hnsw_strategy {
-            hnsw.notify_insert(fact_id, &emb_copy);
-        }
+        let lineage_id = LineageStore::new(conn).insert(&lineage_record, &req.provenance)?;
 
         Ok(PromotionResult {
             fact_id,
@@ -240,8 +333,9 @@ impl MemoryEngine {
 mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
+    use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, IdentityOutput};
     use crate::error::MemoryError;
-    use crate::types::{CycleReport, FactType, Insight, PromoteRequest, PromotionProvenance};
+    use crate::types::{FactType, Insight, PromoteRequest, PromotionProvenance};
 
     // --- Stub implementations ---
 
@@ -272,13 +366,18 @@ mod tests {
     struct NoopCycle;
 
     impl DreamCycle for NoopCycle {
-        fn run(&self, _ctx: &DreamContext) -> Result<CycleReport> {
+        fn run(&self, ctx: &CycleContext) -> Result<CycleReport> {
             Ok(CycleReport {
-                facts_evaluated: 0,
-                facts_promoted: 0,
-                facts_rescored: 0,
-                facts_expired: 0,
-                promotions: vec![],
+                deltas: vec![],
+                identity: IdentityOutput::empty(),
+                metadata: CycleMetadata {
+                    cycle_id: 0,
+                    ran_at: Utc::now(),
+                    time_window: ctx.time_window(),
+                    facts_selected: 0,
+                    method_version: "noop".into(),
+                    processed_ids: vec![],
+                },
             })
         }
     }
@@ -351,8 +450,8 @@ mod tests {
         let cycle = NoopCycle;
 
         let report = engine.run_dream_cycle(&cycle).unwrap();
-        assert_eq!(report.facts_evaluated, 0);
-        assert_eq!(report.facts_promoted, 0);
+        assert!(report.deltas.is_empty());
+        assert_eq!(report.metadata.method_version, "noop");
     }
 
     #[test]

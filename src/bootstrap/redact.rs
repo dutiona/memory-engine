@@ -1254,8 +1254,8 @@ mod tests {
     #[test]
     fn bare_hex_with_unrelated_key_substring_not_redacted() {
         let sha = "a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0"; // 40-char SHA-1
-                                                              // `monkey` contains "key", `key.rs` mentions a key — but neither is the WORD
-                                                              // adjacent to the hex, so the bare SHA must survive (no data loss).
+        // `monkey` contains "key", `key.rs` mentions a key — but neither is the WORD
+        // adjacent to the hex, so the bare SHA must survive (no data loss).
         for line in [
             format!("monkey {sha} bars"),
             format!("modified key.rs: now points to {sha}"),

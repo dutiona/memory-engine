@@ -17,4 +17,6 @@ Key design decisions, documented as ADRs. Each records the context, decision, an
 0010-wisdom-revision-gate-dsl
 0011-allen-interval-algebra
 0012-decay-exemption-knowledge-shaped-facts
+0013-typestate-engine-builder
+0014-delta-based-cycle-report
 ```

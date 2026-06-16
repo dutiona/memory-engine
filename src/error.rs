@@ -280,6 +280,52 @@ pub enum MigrationError {
     Incompatible(String),
 }
 
+/// A failure while validating or applying a [`CycleReport`](crate::CycleReport).
+///
+/// This is the typed payload of [`MemoryError::Cycle`]. Each variant maps to a
+/// specific reason a delta could not be applied — a dangling fact reference, an
+/// out-of-range importance adjustment, a supersede whose target is missing, or an
+/// operation on an already-expired fact. `MemoryEngine::apply_cycle_report`
+/// validates the whole report before mutating, so an `Err` means the store was
+/// left untouched.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
+/// downstream `match` expressions must include a wildcard (`_`) arm.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CycleError {
+    /// A delta referenced a fact id that does not exist.
+    #[error("cycle delta references unknown fact {0}")]
+    UnknownFact(crate::types::FactId),
+
+    /// An `AdjustScore` delta's resulting score would fall outside `[0.0, 1.0]`
+    /// in a way that cannot be clamped meaningfully (reserved; v1 clamps silently).
+    #[error("adjusted importance for fact {fact_id} out of bounds: {attempted}")]
+    ScoreOutOfBounds {
+        fact_id: crate::types::FactId,
+        attempted: f64,
+    },
+
+    /// An `AdjustScore` delta's magnitude exceeds the ±2 symmetric limit.
+    #[error("importance adjustment for fact {fact_id} out of range: {adjustment} (max ±2)")]
+    AdjustmentOutOfRange {
+        fact_id: crate::types::FactId,
+        adjustment: i16,
+    },
+
+    /// A `Supersede` delta's `new_id` neither exists nor is produced by an
+    /// earlier `AddFact` in the same report.
+    #[error(
+        "supersede target fact {0} is missing (not pre-existing and not added earlier in the report)"
+    )]
+    SupersedeMissing(crate::types::FactId),
+
+    /// A delta targeted a fact that is already expired (soft-deleted), e.g.
+    /// adjusting or quarantining a fact that is no longer active.
+    #[error("fact {0} is already expired")]
+    AlreadyExpired(crate::types::FactId),
+}
+
 /// Errors returned by the memory engine.
 ///
 /// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
@@ -364,6 +410,11 @@ pub enum MemoryError {
     /// A wisdom-fact lineage/provenance record is missing or inconsistent.
     #[error("lineage error: {0}")]
     Lineage(String),
+
+    /// A dream-cycle report failed validation or application; see [`CycleError`]
+    /// for the specific delta-level cause.
+    #[error("cycle error: {0}")]
+    Cycle(#[from] CycleError),
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.
@@ -644,5 +695,52 @@ mod tests {
             err,
             MemoryError::Conflict(ConflictError::TargetNotEmpty)
         ));
+    }
+
+    #[test]
+    fn cycle_error_display_per_variant() {
+        assert_eq!(
+            CycleError::UnknownFact(7).to_string(),
+            "cycle delta references unknown fact 7"
+        );
+        assert_eq!(
+            CycleError::AdjustmentOutOfRange {
+                fact_id: 3,
+                adjustment: 5
+            }
+            .to_string(),
+            "importance adjustment for fact 3 out of range: 5 (max ±2)"
+        );
+        assert_eq!(
+            CycleError::SupersedeMissing(9).to_string(),
+            "supersede target fact 9 is missing (not pre-existing and not added earlier in the report)"
+        );
+        assert_eq!(
+            CycleError::AlreadyExpired(4).to_string(),
+            "fact 4 is already expired"
+        );
+        assert!(
+            CycleError::ScoreOutOfBounds {
+                fact_id: 1,
+                attempted: 1.5
+            }
+            .to_string()
+            .contains("out of bounds")
+        );
+    }
+
+    #[test]
+    fn cycle_error_from_into_memory_error() {
+        // `#[from]` lets a bare `CycleError` convert via `?`/`.into()`, wrapped
+        // with the outer "cycle error: " prefix.
+        let err: MemoryError = CycleError::UnknownFact(2).into();
+        assert!(matches!(
+            err,
+            MemoryError::Cycle(CycleError::UnknownFact(2))
+        ));
+        assert_eq!(
+            err.to_string(),
+            "cycle error: cycle delta references unknown fact 2"
+        );
     }
 }

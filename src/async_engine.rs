@@ -585,7 +585,7 @@ impl AsyncMemoryEngine {
     pub async fn run_dream_cycle(
         &self,
         cycle: Arc<dyn crate::traits::DreamCycle + Send + Sync>,
-    ) -> Result<crate::types::CycleReport> {
+    ) -> Result<crate::engine::cycle::CycleReport> {
         let engine = self.inner.clone();
         tokio::task::spawn_blocking(move || engine.run_dream_cycle(cycle.as_ref()))
             .await
