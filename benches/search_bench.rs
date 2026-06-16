@@ -21,6 +21,7 @@
 //!   This is realistic for interactive use where the DB is already open.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::search::cosine_similarity;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
@@ -45,6 +46,9 @@ impl EmbeddingProvider for ConstEmbedder {
             })
             .collect();
         Ok(embedding)
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", self.dim)
     }
 }
 

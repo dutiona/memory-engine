@@ -189,6 +189,7 @@ pub fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Res
     let embedder = HttpEmbeddingProvider::new(
         args.embed_url.clone(),
         args.embed_model.clone(),
+        "ollama".to_string(), // TODO(#618): provider should come from config/CLI
         args.embed_api_key.clone(),
         engine.embed_dim(),
         args.embed_timeout,
@@ -238,6 +239,9 @@ mod tests {
     impl EmbeddingProvider for FakeEmbed {
         fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
             Ok(vec![0.0; 4])
+        }
+        fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+            memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
         }
     }
 

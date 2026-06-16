@@ -118,6 +118,10 @@ mod tests {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![0.5; self.embed_dim])
         }
+
+        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+            crate::types::EmbeddingFingerprint::new("mock", "test", self.embed_dim)
+        }
     }
 
     #[test]

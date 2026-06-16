@@ -18,13 +18,18 @@ use std::path::{Path, PathBuf};
 
 use chrono::Datelike;
 use memory_engine::types::FactType;
-use memory_engine::{BootstrapConfig, EmbeddingProvider, MemoryEngine, MemoryError};
+use memory_engine::{
+    BootstrapConfig, EmbeddingFingerprint, EmbeddingProvider, MemoryEngine, MemoryError,
+};
 
 /// Zero-vector embedder (dim 4) — retrieval is irrelevant here.
 struct TestEmbedder;
 impl EmbeddingProvider for TestEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
         Ok(vec![0.0; 4])
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 4)
     }
 }
 

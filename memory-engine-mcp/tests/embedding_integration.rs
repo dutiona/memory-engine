@@ -64,6 +64,7 @@ async fn openai_format_embedding() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -108,6 +109,7 @@ async fn ollama_format_embedding() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "nomic-embed-text".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -152,6 +154,7 @@ async fn direct_format_embedding() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "custom-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -199,7 +202,14 @@ async fn flush_insights_then_get_recent_insights_roundtrip() {
     let uri = server.uri();
     let body = tokio::task::spawn_blocking(move || {
         let provider =
-            HttpEmbeddingProvider::new(format!("{uri}/v1/embeddings"), "test-model".into(), None, DIM, 5)
+            HttpEmbeddingProvider::new(
+                format!("{uri}/v1/embeddings"),
+                "test-model".into(),
+                "test-provider".to_string(),
+                None,
+                DIM,
+                5,
+            )
                 .unwrap();
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let cfg = memory_engine::ActivityFilterConfig::default();
@@ -274,6 +284,7 @@ async fn flush_two_insights_then_get_recent_returns_both() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -336,6 +347,7 @@ async fn wrong_dimension_from_server() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -377,6 +389,7 @@ async fn server_500_propagates_error() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -425,6 +438,7 @@ async fn bearer_auth_sent_when_configured() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             Some("test-key-123".into()),
             DIM,
             5,
@@ -473,6 +487,7 @@ async fn flush_insights_with_http_embedder() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -520,6 +535,7 @@ async fn flush_insights_partial_failure() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -569,6 +585,7 @@ async fn flush_insights_non_object_metadata_is_rejected() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,
@@ -627,6 +644,7 @@ async fn query_hybrid_with_http_embedder() {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
             "test-model".into(),
+            "test-provider".to_string(),
             None,
             DIM,
             5,

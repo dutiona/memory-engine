@@ -4,6 +4,7 @@
 //! (e.g., `ann_recall_test.rs` uses intentionally different embedder variants).
 
 use chrono::{DateTime, Duration, Utc};
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::traits::{
@@ -45,6 +46,9 @@ impl EmbeddingProvider for TestEmbedder {
             }
         }
         Ok(embedding)
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", DIM)
     }
 }
 

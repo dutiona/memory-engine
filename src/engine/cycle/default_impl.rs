@@ -51,7 +51,8 @@ const METHOD_VERSION: &str = "dbscan-v1";
 ///
 /// ```
 /// use memory_engine::{
-///     AddFactRequest, DefaultDreamCycle, EmbeddingProvider, FactType, MemoryEngine, MemoryError,
+///     AddFactRequest, DefaultDreamCycle, EmbeddingFingerprint, EmbeddingProvider, FactType,
+///     MemoryEngine, MemoryError,
 /// };
 ///
 /// // A trivial embedder (the consumer normally injects a real one).
@@ -59,6 +60,9 @@ const METHOD_VERSION: &str = "dbscan-v1";
 /// impl EmbeddingProvider for Embed {
 ///     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
 ///         Ok(vec![1.0, 0.0])
+///     }
+///     fn fingerprint(&self) -> EmbeddingFingerprint {
+///         EmbeddingFingerprint::new("mock", "test", 2)
 ///     }
 /// }
 ///
@@ -265,7 +269,7 @@ mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
     use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactOptions, AddFactRequest, FactType, Outcome};
+    use crate::types::{AddFactOptions, AddFactRequest, EmbeddingFingerprint, FactType, Outcome};
 
     const DIM: usize = 4;
 
@@ -273,6 +277,10 @@ mod tests {
     impl EmbeddingProvider for FixedEmbed {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![1.0, 0.0, 0.0, 0.0])
+        }
+
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("mock", "test", 4)
         }
     }
 

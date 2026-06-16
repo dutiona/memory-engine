@@ -1,6 +1,7 @@
 //! Phase 3b integration test: full lifecycle with pinned facts, future memory, and forgetting.
 
 use chrono::Utc;
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::ResumeConfig;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
@@ -27,6 +28,9 @@ impl EmbeddingProvider for TestEmbedder {
             }
         }
         Ok(embedding)
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", DIM)
     }
 }
 

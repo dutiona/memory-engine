@@ -155,6 +155,10 @@ mod tests {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![0.5; DIM])
         }
+
+        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+            crate::types::EmbeddingFingerprint::new("mock", "test", DIM)
+        }
     }
 
     fn default_config() -> ConsolidationConfig {

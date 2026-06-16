@@ -174,6 +174,10 @@ mod tests {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![0.5; self.embed_dim])
         }
+
+        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+            crate::types::EmbeddingFingerprint::new("mock", "test", self.embed_dim)
+        }
     }
 
     fn insert_fact(conn: &Connection, dim: usize, content: &str, embedding: Vec<f32>) -> i64 {
