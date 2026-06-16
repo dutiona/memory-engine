@@ -20,6 +20,32 @@ use crate::traits::{
 use crate::types::{AddFactOptions, FactType};
 use crate::types::{AddFactRequest, ConsolidationLevel, Fact, NewEvent, NewFact, Summary};
 
+/// Dispatch `$expr` on a `tokio` blocking thread, propagating any
+/// `JoinError` (including panics) as [`MemoryError::Pool`].
+///
+/// **Instance variant** (`delegate_blocking!(self, engine, $expr)`):
+/// clones `self.inner` into a local named `$engine` that `$expr` can
+/// capture, then spawns the closure.
+///
+/// **Static variant** (`delegate_blocking!($expr)`):
+/// no engine clone — used for associated-function constructors where the
+/// closure captures its own arguments.
+macro_rules! delegate_blocking {
+    // Instance method: clone self.inner into $engine_ident, capture in $expr.
+    ($self:ident, $engine_ident:ident, $expr:expr) => {{
+        let $engine_ident = $self.inner.clone();
+        tokio::task::spawn_blocking(move || $expr)
+            .await
+            .map_err(join_err)?
+    }};
+    // Static/associated constructor: no self, no engine clone.
+    ($expr:expr) => {
+        tokio::task::spawn_blocking(move || $expr)
+            .await
+            .map_err(join_err)?
+    };
+}
+
 /// Async wrapper around [`MemoryEngine`].
 ///
 /// All operations dispatch to `tokio::task::spawn_blocking`.
@@ -103,10 +129,7 @@ impl AsyncMemoryEngine {
     ///
     /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub async fn open(config: EngineConfig) -> Result<Self> {
-        let engine =
-            tokio::task::spawn_blocking(move || MemoryEngine::open_from_config(&config, None))
-                .await
-                .map_err(join_err)??;
+        let engine = delegate_blocking!(MemoryEngine::open_from_config(&config, None))?;
         Ok(Self::new(engine))
     }
 
@@ -125,18 +148,13 @@ impl AsyncMemoryEngine {
     ///
     /// Returns `MemoryError::Database` if the connection or schema setup fails.
     pub async fn open_memory(embed_dim: usize) -> Result<Self> {
-        let engine = tokio::task::spawn_blocking(move || MemoryEngine::builder(embed_dim).build())
-            .await
-            .map_err(join_err)??;
+        let engine = delegate_blocking!(MemoryEngine::builder(embed_dim).build())?;
         Ok(Self::new(engine))
     }
 
     /// Append an event to the event log.
     pub async fn ingest(&self, event: NewEvent) -> Result<i64> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.ingest(&event))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.ingest(&event))
     }
 
     /// Add a fact with embedding computation.
@@ -146,8 +164,9 @@ impl AsyncMemoryEngine {
         embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
         classifier: Option<Arc<dyn PersistenceClassifier + Send + Sync>>,
     ) -> Result<i64> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
+        delegate_blocking!(
+            self,
+            engine,
             engine.add_fact(
                 &req,
                 embedder.as_ref(),
@@ -155,9 +174,7 @@ impl AsyncMemoryEngine {
                     .as_ref()
                     .map(|c| c.as_ref() as &dyn PersistenceClassifier),
             )
-        })
-        .await
-        .map_err(join_err)?
+        )
     }
 
     /// Add multiple facts atomically via batch embedding + single transaction.
@@ -169,8 +186,9 @@ impl AsyncMemoryEngine {
         embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
         classifier: Option<Arc<dyn PersistenceClassifier + Send + Sync>>,
     ) -> Result<Vec<i64>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
+        delegate_blocking!(
+            self,
+            engine,
             engine.add_facts_batch(
                 &entries,
                 embedder.as_ref(),
@@ -178,17 +196,12 @@ impl AsyncMemoryEngine {
                     .as_ref()
                     .map(|c| c.as_ref() as &dyn PersistenceClassifier),
             )
-        })
-        .await
-        .map_err(join_err)?
+        )
     }
 
     /// Query facts using hybrid search.
     pub async fn query(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.query(&query))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.query(&query))
     }
 
     /// Execute a composed query using the [`MemoryQuery`](crate::search::query::MemoryQuery) builder.
@@ -196,10 +209,7 @@ impl AsyncMemoryEngine {
         &self,
         query: crate::search::query::MemoryQuery,
     ) -> Result<QueryResponse> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.execute_query(&query))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.execute_query(&query))
     }
 
     /// Run three-pass consolidation.
@@ -212,20 +222,16 @@ impl AsyncMemoryEngine {
         embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
         config: ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
+        delegate_blocking!(
+            self,
+            engine,
             engine.consolidate(generator.as_ref(), embedder.as_ref(), &config)
-        })
-        .await
-        .map_err(join_err)?
+        )
     }
 
     /// Prune stale facts.
     pub async fn forget(&self, policy: ForgetPolicy) -> Result<PruneStats> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.forget(&policy))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.forget(&policy))
     }
 
     /// Resolve a conflict between facts.
@@ -235,92 +241,61 @@ impl AsyncMemoryEngine {
         old_id: i64,
         new_fact: NewFact,
     ) -> Result<ConflictResolution> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
+        delegate_blocking!(
+            self,
+            engine,
             engine.resolve_conflict(arbiter.as_ref(), old_id, &new_fact)
-        })
-        .await
-        .map_err(join_err)?
+        )
     }
 
     /// Get a fact by id.
     pub async fn get_fact(&self, id: i64) -> Result<Fact> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.get_fact(id))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.get_fact(id))
     }
 
     /// List active facts, optionally limited.
     pub async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.list_active_facts(limit))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.list_active_facts(limit))
     }
 
     /// List summaries by level.
     pub async fn list_summaries(&self, level: ConsolidationLevel) -> Result<Vec<Summary>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.list_summaries(&level))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.list_summaries(&level))
     }
 
     /// Read a config value.
     pub async fn get_config(&self, key: String) -> Result<Option<String>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.get_config(&key))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.get_config(&key))
     }
 
     /// Write a config value.
     pub async fn set_config(&self, key: String, value: String) -> Result<()> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.set_config(&key, &value))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.set_config(&key, &value))
     }
 
     /// Retrieve tiered context for resuming a session.
     pub async fn resume_context(&self, config: ResumeConfig) -> Result<ResumeContext> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.resume_context(&config))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.resume_context(&config))
     }
 
     /// Get facts whose scheduled time has arrived.
     pub async fn list_due(&self, now: DateTime<Utc>, scope: Option<String>) -> Result<Vec<Fact>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.list_due(now, scope.as_deref()))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.list_due(now, scope.as_deref()))
     }
 
     /// Scheduling hint: earliest `t_valid` among active future-dated facts.
     pub async fn next_due_time(&self, scope: Option<String>) -> Result<Option<DateTime<Utc>>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.next_due_time(scope.as_deref()))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.next_due_time(scope.as_deref()))
     }
 
     /// Pin a fact (make it unforgettable).
     pub async fn pin_fact(&self, id: i64) -> Result<()> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.pin_fact(id))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.pin_fact(id))
     }
 
     /// Unpin a fact (allow forgetting).
     pub async fn unpin_fact(&self, id: i64) -> Result<()> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.unpin_fact(id))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.unpin_fact(id))
     }
 
     /// Create co-session edges between facts sharing a session.
@@ -329,12 +304,11 @@ impl AsyncMemoryEngine {
         session_id: String,
         scope: Option<String>,
     ) -> Result<usize> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
+        delegate_blocking!(
+            self,
+            engine,
             engine.link_session_facts(&session_id, scope.as_deref())
-        })
-        .await
-        .map_err(join_err)?
+        )
     }
 
     /// Async wrapper for [`MemoryEngine::statistics`].
@@ -343,10 +317,7 @@ impl AsyncMemoryEngine {
     ///
     /// Returns [`MemoryError::Database`] on SQL failure.
     pub async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.statistics())
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.statistics())
     }
 
     /// Async wrapper for [`MemoryEngine::replay_events`].
@@ -358,11 +329,8 @@ impl AsyncMemoryEngine {
         &self,
         filter: &crate::inspect::ReplayFilter,
     ) -> Result<Vec<crate::types::Event>> {
-        let engine = self.inner.clone();
         let filter = filter.clone();
-        tokio::task::spawn_blocking(move || engine.replay_events(&filter))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.replay_events(&filter))
     }
 
     /// Async wrapper for [`MemoryEngine::explain_fact`].
@@ -372,10 +340,7 @@ impl AsyncMemoryEngine {
     /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
     /// [`MemoryError::Database`] on SQL failure.
     pub async fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.explain_fact(id))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.explain_fact(id))
     }
 
     /// Async wrapper for [`MemoryEngine::fact_history`].
@@ -385,10 +350,7 @@ impl AsyncMemoryEngine {
     /// Returns [`MemoryError::NotFound`] if the fact does not exist, or
     /// [`MemoryError::Database`] on SQL failure.
     pub async fn fact_history(&self, id: i64) -> Result<crate::inspect::FactHistory> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.fact_history(id))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.fact_history(id))
     }
 
     /// Async wrapper for [`MemoryEngine::dump_state`].
@@ -398,11 +360,8 @@ impl AsyncMemoryEngine {
     /// Returns [`MemoryError::Internal`] on I/O or serialization failure,
     /// or [`MemoryError::Database`] on SQL failure.
     pub async fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
-        let engine = self.inner.clone();
         let format = format.clone();
-        tokio::task::spawn_blocking(move || engine.dump_state(&format))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.dump_state(&format))
     }
 
     /// Graph degree for a fact.
@@ -465,10 +424,7 @@ impl AsyncMemoryEngine {
         &self,
         policy: crate::archive::ArchivePolicy,
     ) -> Result<Option<crate::archive::ArchiveStats>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.archive(&policy))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.archive(&policy))
     }
 
     /// Async wrapper for [`MemoryEngine::list_archives`].
@@ -478,10 +434,7 @@ impl AsyncMemoryEngine {
     /// Returns [`MemoryError::Database`] on SQL failure.
     #[cfg(feature = "archive")]
     pub async fn list_archives(&self) -> Result<Vec<crate::archive::ArchiveManifestEntry>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.list_archives())
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.list_archives())
     }
 
     /// Async wrapper for [`MemoryEngine::verify_archives`].
@@ -493,10 +446,7 @@ impl AsyncMemoryEngine {
     /// Returns [`MemoryError::Database`] on SQL failure.
     #[cfg(feature = "archive")]
     pub async fn verify_archives(&self) -> Result<Vec<crate::archive::ArchiveVerifyResult>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.verify_archives())
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.verify_archives())
     }
 
     // --- Restore (static constructors) ---
@@ -506,20 +456,13 @@ impl AsyncMemoryEngine {
         snapshot_path: std::path::PathBuf,
         config: EngineConfig,
     ) -> Result<Self> {
-        let engine = tokio::task::spawn_blocking(move || {
-            MemoryEngine::restore_json(&snapshot_path, &config)
-        })
-        .await
-        .map_err(join_err)??;
+        let engine = delegate_blocking!(MemoryEngine::restore_json(&snapshot_path, &config))?;
         Ok(Self::new(engine))
     }
 
     /// Async wrapper for [`MemoryEngine::restore_json_memory`].
     pub async fn restore_json_memory(snapshot_path: std::path::PathBuf) -> Result<Self> {
-        let engine =
-            tokio::task::spawn_blocking(move || MemoryEngine::restore_json_memory(&snapshot_path))
-                .await
-                .map_err(join_err)??;
+        let engine = delegate_blocking!(MemoryEngine::restore_json_memory(&snapshot_path))?;
         Ok(Self::new(engine))
     }
 
@@ -528,11 +471,7 @@ impl AsyncMemoryEngine {
         backup_path: std::path::PathBuf,
         config: EngineConfig,
     ) -> Result<Self> {
-        let engine = tokio::task::spawn_blocking(move || {
-            MemoryEngine::restore_sqlite(&backup_path, &config)
-        })
-        .await
-        .map_err(join_err)??;
+        let engine = delegate_blocking!(MemoryEngine::restore_sqlite(&backup_path, &config))?;
         Ok(Self::new(engine))
     }
 
@@ -540,10 +479,7 @@ impl AsyncMemoryEngine {
     ///
     /// Delegates to [`MemoryEngine::write_snapshot`] on a blocking task.
     pub async fn write_snapshot(&self) -> Result<bool> {
-        let engine = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || engine.write_snapshot())
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.write_snapshot())
     }
 
     // --- Phase 5a: Cognitive pipeline ---
@@ -557,12 +493,11 @@ impl AsyncMemoryEngine {
         context: Vec<f32>,
         scope_ids: Option<Vec<i64>>,
     ) -> Result<Vec<Fact>> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
+        delegate_blocking!(
+            self,
+            engine,
             engine.sample_dormant(n, &context, scope_ids.as_deref())
-        })
-        .await
-        .map_err(join_err)?
+        )
     }
 
     /// Record a high-value insight via the provided `InsightStream`.
@@ -573,10 +508,11 @@ impl AsyncMemoryEngine {
         insight: crate::types::Insight,
         stream: Arc<dyn crate::traits::InsightStream + Send + Sync>,
     ) -> Result<()> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.record_insight(insight, stream.as_ref()))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(
+            self,
+            engine,
+            engine.record_insight(insight, stream.as_ref())
+        )
     }
 
     /// Run a DreamCycle using a capability-restricted `DreamContext`.
@@ -586,10 +522,7 @@ impl AsyncMemoryEngine {
         &self,
         cycle: Arc<dyn crate::traits::DreamCycle + Send + Sync>,
     ) -> Result<crate::engine::cycle::CycleReport> {
-        let engine = self.inner.clone();
-        tokio::task::spawn_blocking(move || engine.run_dream_cycle(cycle.as_ref()))
-            .await
-            .map_err(join_err)?
+        delegate_blocking!(self, engine, engine.run_dream_cycle(cycle.as_ref()))
     }
 }
 
@@ -772,5 +705,30 @@ mod tests {
             .unwrap();
         let val = engine.get_config("async_key".into()).await.unwrap();
         assert_eq!(val, Some("async_val".into()));
+    }
+
+    /// Oracle: a panic inside a `spawn_blocking` task must surface as
+    /// `MemoryError::Pool`, not a silent hang or a different variant.
+    ///
+    /// We exercise the `join_err` mapping path directly because no public
+    /// `MemoryEngine` method panics in normal use — we fabricate the
+    /// `JoinError` by letting tokio catch a deliberate panic.
+    #[tokio::test]
+    async fn blocking_panic_maps_to_pool_error() {
+        let result: Result<()> = tokio::task::spawn_blocking(|| {
+            panic!("deliberate panic in blocking task");
+        })
+        .await
+        .map_err(join_err);
+
+        match result {
+            Err(MemoryError::Pool(msg)) => {
+                assert!(
+                    msg.contains("task join error"),
+                    "expected 'task join error' prefix, got: {msg}"
+                );
+            }
+            other => panic!("expected MemoryError::Pool, got: {other:?}"),
+        }
     }
 }
