@@ -77,7 +77,7 @@ pub fn consolidate(
         .map(|s| DateTime::parse_from_rfc3339(&s))
         .transpose()
         .map_err(|e| {
-            crate::error::MemoryError::Migration(format!("invalid last_consolidated_at: {e}"))
+            crate::error::MigrationError::Incompatible(format!("invalid last_consolidated_at: {e}"))
         })?
         .map(|dt| dt.with_timezone(&Utc));
     let now = Utc::now();

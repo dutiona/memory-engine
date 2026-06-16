@@ -210,6 +210,76 @@ pub enum ArchiveError {
     Transaction(String),
 }
 
+/// A failure from the schema-migration / database-compatibility subsystem.
+///
+/// This is the typed payload of [`MemoryError::Migration`]. The version and
+/// embed-dim variants carry their operands as fields, so a caller can branch on
+/// "the database is from a newer build", "needs migration", or "embedding
+/// dimension mismatch" without string-matching. The remaining variants group
+/// the operational failure modes — pre-migration backup, a missing event
+/// upcaster, and the terminal incompatibilities (corrupt config values, an
+/// uninitialized database, post-rebuild FK violations, …) whose detail is
+/// carried verbatim in the message.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
+/// downstream `match` expressions must include a wildcard (`_`) arm.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MigrationError {
+    /// The stored `schema_version` is newer than this build supports — a newer
+    /// library wrote the database. Forward-incompatible.
+    #[error(
+        "schema_version {found} is newer than supported {supported}; consider upgrading the memory-engine crate"
+    )]
+    SchemaVersionUnsupported {
+        /// The `schema_version` found in the database.
+        found: u32,
+        /// The highest `schema_version` this build supports.
+        supported: u32,
+    },
+
+    /// The stored `schema_version` is older than current and the database was
+    /// opened read-only, so migrations cannot run. Re-open read-write.
+    #[error(
+        "schema_version {found} needs migration to {target}; open in read-write mode first to run migrations"
+    )]
+    SchemaVersionNeedsMigration {
+        /// The `schema_version` found in the database.
+        found: u32,
+        /// The `schema_version` this build expects.
+        target: u32,
+    },
+
+    /// The database's stored embedding dimension does not match the dimension
+    /// the engine was opened with. All vectors in a store share one dimension.
+    #[error("embed_dim mismatch: stored {stored} vs requested {requested}")]
+    EmbedDimMismatch {
+        /// The `embed_dim` recorded in the database.
+        stored: usize,
+        /// The `embed_dim` the engine was opened with.
+        requested: usize,
+    },
+
+    /// The pre-migration WAL-safe backup step failed (in-memory database,
+    /// null-byte path, removal of a stale backup, or the `VACUUM INTO` itself).
+    /// The string names the precise backup failure.
+    #[error("{0}")]
+    Backup(String),
+
+    /// No registered event upcaster bridges a stored payload revision to the
+    /// current one, so the event cannot be upgraded. The string names the event
+    /// type and revision gap.
+    #[error("{0}")]
+    MissingUpcaster(String),
+
+    /// The database or snapshot is in a state this build cannot open or migrate
+    /// — a corrupt/unparseable config value, an uninitialized database, a
+    /// snapshot from a newer schema, post-rebuild foreign-key violations, or a
+    /// non-file path opened read-only. The string carries the specific cause.
+    #[error("{0}")]
+    Incompatible(String),
+}
+
 /// Errors returned by the memory engine.
 ///
 /// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
@@ -240,9 +310,11 @@ pub enum MemoryError {
     #[error("conflict: {0}")]
     Conflict(#[from] ConflictError),
 
-    /// A schema migration (forward or epoch upgrade) failed to apply.
+    /// A schema migration or database-compatibility check failed; see
+    /// [`MigrationError`] for the specific cause (version mismatch, embed-dim
+    /// mismatch, backup failure, missing upcaster, or terminal incompatibility).
     #[error("schema migration failed: {0}")]
-    Migration(String),
+    Migration(#[from] MigrationError),
 
     /// The requested operation is recognized but not yet implemented.
     #[error("not implemented: {0}")]
@@ -437,6 +509,76 @@ mod tests {
             MemoryError::Archive(ArchiveError::PakVersionUnsupported {
                 found: 9,
                 supported: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn migration_variants_display_byte_for_byte() {
+        // Byte-preservation: each variant renders exactly the string the
+        // pre-split `format!` call sites produced, under the outer
+        // `schema migration failed: ` prefix.
+        assert_eq!(
+            MemoryError::Migration(MigrationError::SchemaVersionUnsupported {
+                found: 12,
+                supported: 11,
+            })
+            .to_string(),
+            "schema migration failed: schema_version 12 is newer than supported 11; consider upgrading the memory-engine crate"
+        );
+        assert_eq!(
+            MemoryError::Migration(MigrationError::SchemaVersionNeedsMigration {
+                found: 9,
+                target: 11,
+            })
+            .to_string(),
+            "schema migration failed: schema_version 9 needs migration to 11; open in read-write mode first to run migrations"
+        );
+        assert_eq!(
+            MemoryError::Migration(MigrationError::EmbedDimMismatch {
+                stored: 768,
+                requested: 512,
+            })
+            .to_string(),
+            "schema migration failed: embed_dim mismatch: stored 768 vs requested 512"
+        );
+        // String-carrying variants surface their message verbatim under the prefix.
+        assert_eq!(
+            MemoryError::Migration(MigrationError::Backup(
+                "cannot backup in-memory database".into()
+            ))
+            .to_string(),
+            "schema migration failed: cannot backup in-memory database"
+        );
+        assert_eq!(
+            MemoryError::Migration(MigrationError::MissingUpcaster(
+                "missing upcaster for event type 'ToolCall' from revision 1 to 2".into()
+            ))
+            .to_string(),
+            "schema migration failed: missing upcaster for event type 'ToolCall' from revision 1 to 2"
+        );
+        assert_eq!(
+            MemoryError::Migration(MigrationError::Incompatible(
+                "invalid schema_version: abc".into()
+            ))
+            .to_string(),
+            "schema migration failed: invalid schema_version: abc"
+        );
+    }
+
+    #[test]
+    fn migration_error_from_into_memory_error() {
+        // `#[from]` lets a bare `MigrationError` convert via `?`/`.into()`.
+        let err: MemoryError = MigrationError::SchemaVersionNeedsMigration {
+            found: 9,
+            target: 11,
+        }
+        .into();
+        assert!(matches!(
+            err,
+            MemoryError::Migration(MigrationError::SchemaVersionNeedsMigration {
+                found: 9,
+                target: 11
             })
         ));
     }

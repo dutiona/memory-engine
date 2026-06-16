@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::error::{MemoryError, Result};
+use crate::error::{MigrationError, Result};
 
 /// Function that transforms an event payload from revision N to N+1.
 pub type UpcasterFn = fn(serde_json::Value) -> Result<serde_json::Value>;
@@ -107,7 +107,7 @@ impl UpcasterRegistry {
         while rev < latest {
             let key = (type_key.clone(), rev);
             let func = self.upcasters.get(&key).ok_or_else(|| {
-                MemoryError::Migration(format!(
+                MigrationError::MissingUpcaster(format!(
                     "missing upcaster for event type '{event_type}' from revision {rev} to {}",
                     rev + 1
                 ))
@@ -123,6 +123,7 @@ impl UpcasterRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::MemoryError;
 
     #[test]
     fn empty_returns_unchanged() {
@@ -190,7 +191,7 @@ mod tests {
         let payload = serde_json::json!({});
         let err = registry.upcast("ToolCall", 1, payload).unwrap_err();
         assert!(
-            matches!(err, MemoryError::Migration(ref msg) if msg.contains("missing upcaster")),
+            matches!(err, MemoryError::Migration(MigrationError::MissingUpcaster(ref msg)) if msg.contains("missing upcaster")),
             "expected missing upcaster error, got: {err:?}"
         );
     }

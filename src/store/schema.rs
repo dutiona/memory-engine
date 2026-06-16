@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, Result};
+use crate::error::{MemoryError, MigrationError, Result};
 
 /// Current schema version. Bump when adding migrations.
 pub const CURRENT_SCHEMA_VERSION: u32 = 11;
@@ -199,16 +199,16 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
 /// supported, or if any migration step fails.
 pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
     let version_str = get_config(conn, "schema_version")?.unwrap_or_else(|| "1".to_string());
-    let version: u32 = version_str
-        .parse()
-        .map_err(|_| MemoryError::Migration(format!("invalid schema_version: {version_str}")))?;
+    let version: u32 = version_str.parse().map_err(|_| {
+        MigrationError::Incompatible(format!("invalid schema_version: {version_str}"))
+    })?;
 
     // --- Epoch gate ---
     let epoch_str = get_config(conn, "storage_epoch")?;
     let epoch_raw = epoch_str.as_deref().unwrap_or("1"); // pre-epoch DBs are implicitly epoch 1
     let db_epoch: u16 = epoch_raw
         .parse()
-        .map_err(|_| MemoryError::Migration(format!("invalid storage_epoch: {epoch_raw}")))?;
+        .map_err(|_| MigrationError::Incompatible(format!("invalid storage_epoch: {epoch_raw}")))?;
     if db_epoch > STORAGE_EPOCH {
         return Err(MemoryError::UnsupportedEpoch {
             db_epoch,
@@ -217,10 +217,11 @@ pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
     }
 
     if version > CURRENT_SCHEMA_VERSION {
-        return Err(MemoryError::Migration(format!(
-            "schema_version {version} is newer than supported {CURRENT_SCHEMA_VERSION}; \
-             consider upgrading the memory-engine crate"
-        )));
+        return Err(MigrationError::SchemaVersionUnsupported {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }
+        .into());
     }
 
     // Nothing to migrate
@@ -297,10 +298,11 @@ pub fn validate_schema_version(conn: &Connection) -> Result<()> {
         .map_err(MemoryError::Database)?;
 
     if !has_config {
-        return Err(MemoryError::Migration(
+        return Err(MigrationError::Incompatible(
             "database has no config table; cannot open read-only on an uninitialized database"
                 .to_string(),
-        ));
+        )
+        .into());
     }
 
     // Check epoch
@@ -308,7 +310,7 @@ pub fn validate_schema_version(conn: &Connection) -> Result<()> {
     let epoch_raw = epoch_str.as_deref().unwrap_or("1");
     let db_epoch: u16 = epoch_raw
         .parse()
-        .map_err(|_| MemoryError::Migration(format!("invalid storage_epoch: {epoch_raw}")))?;
+        .map_err(|_| MigrationError::Incompatible(format!("invalid storage_epoch: {epoch_raw}")))?;
     if db_epoch > STORAGE_EPOCH {
         return Err(MemoryError::UnsupportedEpoch {
             db_epoch,
@@ -318,22 +320,24 @@ pub fn validate_schema_version(conn: &Connection) -> Result<()> {
 
     // Check schema version
     let version_str = get_config(conn, "schema_version")?.unwrap_or_else(|| "1".to_string());
-    let version: u32 = version_str
-        .parse()
-        .map_err(|_| MemoryError::Migration(format!("invalid schema_version: {version_str}")))?;
+    let version: u32 = version_str.parse().map_err(|_| {
+        MigrationError::Incompatible(format!("invalid schema_version: {version_str}"))
+    })?;
 
     if version > CURRENT_SCHEMA_VERSION {
-        return Err(MemoryError::Migration(format!(
-            "schema_version {version} is newer than supported {CURRENT_SCHEMA_VERSION}; \
-             consider upgrading the memory-engine crate"
-        )));
+        return Err(MigrationError::SchemaVersionUnsupported {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }
+        .into());
     }
 
     if version < CURRENT_SCHEMA_VERSION {
-        return Err(MemoryError::Migration(format!(
-            "schema_version {version} needs migration to {CURRENT_SCHEMA_VERSION}; \
-             open in read-write mode first to run migrations"
-        )));
+        return Err(MigrationError::SchemaVersionNeedsMigration {
+            found: version,
+            target: CURRENT_SCHEMA_VERSION,
+        }
+        .into());
     }
 
     Ok(())
@@ -365,12 +369,10 @@ pub fn backup_before_migration(
     // Extract the source database file path via PRAGMA database_list
     let db_path: String = conn
         .query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
-        .map_err(|e| MemoryError::Migration(format!("cannot read database path: {e}")))?;
+        .map_err(|e| MigrationError::Backup(format!("cannot read database path: {e}")))?;
 
     if db_path.is_empty() || db_path == ":memory:" {
-        return Err(MemoryError::Migration(
-            "cannot backup in-memory database".to_string(),
-        ));
+        return Err(MigrationError::Backup("cannot backup in-memory database".to_string()).into());
     }
 
     let db_name = Path::new(&db_path)
@@ -385,15 +387,13 @@ pub fn backup_before_migration(
     // the target path. Validate-before-use / fail-fast. Mirrors the guard in
     // `inspect::dump::dump_sqlite`.
     if backup_path.to_string_lossy().contains('\0') {
-        return Err(MemoryError::Migration(
-            "backup path contains null byte".to_string(),
-        ));
+        return Err(MigrationError::Backup("backup path contains null byte".to_string()).into());
     }
 
     // Remove existing backup to avoid VACUUM INTO failure on re-run
     if backup_path.exists() {
         std::fs::remove_file(&backup_path).map_err(|e| {
-            MemoryError::Migration(format!(
+            MigrationError::Backup(format!(
                 "cannot remove existing backup {}: {e}",
                 backup_path.display()
             ))
@@ -407,7 +407,7 @@ pub fn backup_before_migration(
     let escaped = backup_path.to_string_lossy().replace('\'', "''");
     let sql = format!("VACUUM INTO '{escaped}'");
     conn.execute_batch(&sql)
-        .map_err(|e| MemoryError::Migration(format!("backup failed: {e}")))?;
+        .map_err(|e| MigrationError::Backup(format!("backup failed: {e}")))?;
 
     Ok(backup_path)
 }
@@ -426,9 +426,10 @@ fn check_foreign_keys(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
     let mut rows = stmt.query([])?;
     if rows.next()?.is_some() {
-        return Err(MemoryError::Migration(
+        return Err(MigrationError::Incompatible(
             "foreign key violations detected after table rebuild".to_string(),
-        ));
+        )
+        .into());
     }
     Ok(())
 }
@@ -1872,7 +1873,7 @@ CREATE TABLE IF NOT EXISTS config (
         let dir = tempfile::tempdir().unwrap();
         let err = backup_before_migration(&conn, dir.path(), 4).unwrap_err();
         assert!(
-            matches!(err, MemoryError::Migration(ref msg) if msg.contains("in-memory")),
+            matches!(err, MemoryError::Migration(MigrationError::Backup(ref msg)) if msg.contains("in-memory")),
             "expected in-memory error, got: {err:?}"
         );
     }
@@ -1931,7 +1932,7 @@ CREATE TABLE IF NOT EXISTS config (
 
         let err = backup_before_migration(&conn, &evil_dir, 4).unwrap_err();
         assert!(
-            matches!(err, MemoryError::Migration(ref msg) if msg.contains("null byte")),
+            matches!(err, MemoryError::Migration(MigrationError::Backup(ref msg)) if msg.contains("null byte")),
             "expected null-byte rejection, got: {err:?}"
         );
     }
@@ -1946,7 +1947,7 @@ CREATE TABLE IF NOT EXISTS config (
         let bad_dir = dir.path().join("nonexistent");
         let err = backup_before_migration(&conn, &bad_dir, 4).unwrap_err();
         assert!(
-            matches!(err, MemoryError::Migration(ref msg) if msg.contains("backup failed")),
+            matches!(err, MemoryError::Migration(MigrationError::Backup(ref msg)) if msg.contains("backup failed")),
             "expected backup failed error, got: {err:?}"
         );
     }
