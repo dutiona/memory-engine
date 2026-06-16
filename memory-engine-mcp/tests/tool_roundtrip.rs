@@ -763,12 +763,12 @@ fn unknown_tool_returns_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_tool_definitions_returns_23() {
+fn all_tool_definitions_returns_26() {
     let defs = tools::all_tool_definitions();
     assert_eq!(
         defs.len(),
-        23,
-        "expected 10 P0 + 5 P1 + 3 P2 + 2 Phase 5a + 3 activity stream tools"
+        26,
+        "expected 10 P0 + 5 P1 + 3 P2 + 2 Phase 5a outcome + 3 activity stream + 3 cognitive (#225) tools"
     );
 }
 
