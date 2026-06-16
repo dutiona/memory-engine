@@ -79,9 +79,10 @@ impl VectorSearchStrategy for BruteForce {
 
 /// Configuration for vector search dispatch.
 ///
-/// Documents the intended threshold semantics for switching between brute-force
-/// and ANN strategies.  **Not wired into the engine yet** — dispatch requires a
-/// second strategy (ANN) to exist.
+/// Documents the threshold semantics for switching between brute-force and ANN
+/// strategies. Dispatch is wired via `MemoryEngine::active_vector_strategy`
+/// (behind the `ann` feature): the engine uses the HNSW index once
+/// `should_use_hnsw()` holds, and brute-force cosine otherwise.
 ///
 /// # Threshold semantics
 ///

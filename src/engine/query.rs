@@ -17,7 +17,11 @@ impl MemoryEngine {
     fn active_vector_strategy(&self) -> &dyn VectorSearchStrategy {
         #[cfg(feature = "ann")]
         if self.should_use_hnsw() {
-            return self.hnsw_strategy.as_ref().unwrap() as &dyn VectorSearchStrategy;
+            return self
+                .hnsw_strategy
+                .as_ref()
+                .expect("should_use_hnsw() returns true only when hnsw_strategy is Some")
+                as &dyn VectorSearchStrategy;
         }
         &*self.vector_strategy
     }
