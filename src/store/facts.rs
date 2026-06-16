@@ -780,12 +780,18 @@ impl<'a> FactStore<'a> {
         scope_ids: &[i64],
         fact_type: Option<&FactType>,
     ) -> Result<Vec<Fact>> {
+        // `json_type` (not `json_extract`) keeps this bit-for-bit equivalent to the
+        // prior Rust filter `metadata.get("dream_cycle").is_none()`: `json_extract`
+        // collapses an absent key and a present-`null` value both to SQL NULL, whereas
+        // serde's `get().is_none()` is true only for an *absent* key. `json_type`
+        // returns the text `'null'` for a present-null value (so `IS NULL` is false)
+        // and SQL NULL only when the key is absent or the path doesn't resolve.
         self.list_active_in_period_inner(
             start,
             end,
             scope_ids,
             fact_type,
-            &["json_extract(metadata, '$.dream_cycle') IS NULL"],
+            &["json_type(metadata, '$.dream_cycle') IS NULL"],
         )
     }
 
@@ -1272,6 +1278,44 @@ mod tests {
             .list_undreamt_in_period(start, end, &[], Some(&FactType::Semantic))
             .unwrap();
         assert_eq!(after.iter().map(|f| f.id).collect::<Vec<_>>(), vec![s2]);
+    }
+
+    #[test]
+    fn list_undreamt_filter_matches_serde_is_none_on_null_value() {
+        // Equivalence guard: the SQL filter must match the prior Rust filter
+        // `metadata.get("dream_cycle").is_none()` even for a present-but-null value.
+        // serde's is_none() is true only for an ABSENT key, so a fact carrying
+        // `{"dream_cycle": null}` is treated as already-dreamt (excluded) — which
+        // `json_type(...) IS NULL` reproduces (json_extract would NOT).
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        let mut absent = make_fact("absent key", vec![0.1; DIM]);
+        absent.metadata = serde_json::json!({"other": 1});
+        let mut present_null = make_fact("present null", vec![0.2; DIM]);
+        present_null.metadata = serde_json::json!({"dream_cycle": null});
+        let mut present_obj = make_fact("present object", vec![0.3; DIM]);
+        present_obj.metadata = serde_json::json!({"dream_cycle": {"cycle_id": 9}});
+
+        let a = store.insert(&absent).unwrap();
+        store.insert(&present_null).unwrap();
+        store.insert(&present_obj).unwrap();
+
+        let start = "2000-01-01T00:00:00Z".parse().unwrap();
+        let end = "2100-01-01T00:00:00Z".parse().unwrap();
+        let undreamt: Vec<i64> = store
+            .list_undreamt_in_period(start, end, &[], None)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+
+        // Only the absent-key fact is undreamt; present-null and present-object are excluded.
+        assert_eq!(
+            undreamt,
+            vec![a],
+            "present-null must be treated as dreamt (matching serde get().is_none())"
+        );
     }
 
     #[test]
