@@ -121,11 +121,20 @@ impl<'a> FactStore<'a> {
     /// first-seen and last-seen are independent of import order) — and returns its
     /// id. Otherwise it inserts a new row.
     ///
+    /// Reinforcement also keeps the **strongest** per-occurrence signal: `is_pinned`
+    /// and `importance` move to the max across occurrences (a fact later judged pinned
+    /// or more important stays so). Frequency does not inflate `importance` — only the
+    /// independent per-occurrence score does.
+    ///
     /// This instantiates "memory decays unless reinforced": a re-mention strengthens
     /// the recency/frequency signal rather than spawning a duplicate. It is
     /// deliberately **not** a global `UNIQUE` constraint — identical content in
     /// different scopes is legitimate, and the reinforce-vs-insert decision is
     /// per-scope and active-only.
+    ///
+    /// The lookup-then-write is non-atomic but safe under the engine's single-writer
+    /// pool (one mutex-guarded write connection); a caller outside that serialization
+    /// must provide its own.
     ///
     /// Returns `(id, reinforced)`: `reinforced` is `true` when an existing fact was
     /// reinforced instead of a new row inserted.
@@ -157,17 +166,28 @@ impl<'a> FactStore<'a> {
 
         match existing {
             Some(id) => {
-                // RFC-3339 produced by to_rfc3339() sorts lexicographically ==
-                // chronologically, so SQL min/max give earliest/latest.
+                // to_rfc3339() emits a `+00:00` offset with AutoSi-padded (0/3/6/9-digit)
+                // fractions; `+` (0x2B) sorts before any digit, so a shorter fraction
+                // (chronologically <=) always sorts first — lexicographic == chronological,
+                // and SQL min/max give earliest/latest. (Same invariant the rest of the
+                // store relies on for t_created/t_valid string comparison.)
                 let t_created = fact.t_created.to_rfc3339();
                 let last_accessed = fact.last_accessed.to_rfc3339();
                 self.conn.execute(
                     "UPDATE facts
                      SET access_count = access_count + 1,
                          t_created = min(t_created, ?1),
-                         last_accessed = max(last_accessed, ?2)
-                     WHERE id = ?3",
-                    params![t_created, last_accessed, id],
+                         last_accessed = max(last_accessed, ?2),
+                         is_pinned = max(is_pinned, ?3),
+                         importance = max(importance, ?4)
+                     WHERE id = ?5",
+                    params![
+                        t_created,
+                        last_accessed,
+                        i64::from(fact.is_pinned),
+                        fact.importance,
+                        id
+                    ],
                 )?;
                 Ok((id, true))
             }
@@ -1033,6 +1053,75 @@ mod tests {
             .unwrap();
         assert!(!reinforced, "an expired fact must not be reinforced");
         assert_ne!(id2, id, "a fresh row is inserted instead");
+    }
+
+    #[test]
+    fn insert_or_reinforce_keeps_strongest_pin_and_importance() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut weak = make_fact("shared note", vec![0.1; DIM]);
+        weak.is_pinned = false;
+        weak.importance = 0.3;
+        let (id, _) = store.insert_or_reinforce(&weak).unwrap();
+
+        // A later occurrence judged pinned + more important — the strongest signal wins.
+        let mut strong = make_fact("shared note", vec![0.1; DIM]);
+        strong.is_pinned = true;
+        strong.importance = 0.9;
+        store.insert_or_reinforce(&strong).unwrap();
+        let got = store.get(id).unwrap();
+        assert!(got.is_pinned, "is_pinned rises to pinned on reinforcement");
+        assert!(
+            (got.importance - 0.9).abs() < f64::EPSILON,
+            "importance rises to the max"
+        );
+
+        // A weaker later occurrence lowers neither signal.
+        let mut weaker = make_fact("shared note", vec![0.1; DIM]);
+        weaker.is_pinned = false;
+        weaker.importance = 0.2;
+        store.insert_or_reinforce(&weaker).unwrap();
+        let got = store.get(id).unwrap();
+        assert!(got.is_pinned, "pin is not lost by a weaker reinforcement");
+        assert!(
+            (got.importance - 0.9).abs() < f64::EPSILON,
+            "importance does not drop"
+        );
+    }
+
+    #[test]
+    fn insert_or_reinforce_subsecond_timestamps_sort_chronologically() {
+        // Regression guard for the RFC-3339 min/max invariant: variable sub-second
+        // precision (3-digit vs 6-digit fraction sharing a prefix) is the lexicographic-
+        // vs-chronological trap. The `+00:00` offset + AutoSi padding must keep min/max
+        // chronologically correct.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let early: DateTime<Utc> = "2024-07-20T14:00:00.500+00:00".parse().unwrap();
+        let late: DateTime<Utc> = "2024-07-20T14:00:00.500123+00:00".parse().unwrap();
+        assert!(early < late, "fixture sanity: early precedes late");
+
+        // Insert the LATER occurrence first, then reinforce with the EARLIER.
+        let mut first = make_fact("conv", vec![0.1; DIM]);
+        first.t_created = late;
+        first.last_accessed = late;
+        let (id, _) = store.insert_or_reinforce(&first).unwrap();
+        let mut second = make_fact("conv", vec![0.1; DIM]);
+        second.t_created = early;
+        second.last_accessed = early;
+        store.insert_or_reinforce(&second).unwrap();
+
+        let got = store.get(id).unwrap();
+        assert_eq!(
+            got.t_created.timestamp_micros(),
+            early.timestamp_micros(),
+            "t_created = earliest even at sub-second precision"
+        );
+        assert_eq!(
+            got.last_accessed.timestamp_micros(),
+            late.timestamp_micros(),
+            "last_accessed = latest even at sub-second precision"
+        );
     }
 
     #[test]
