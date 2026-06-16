@@ -206,6 +206,17 @@ pub trait DreamCycle {
     /// [`dream()`](crate::engine::cycle::CycleContext::dream), plus retrieve-before-reflect
     /// prior state.
     ///
+    /// # Contract
+    ///
+    /// **Every fact the cycle selects for its window MUST appear in
+    /// [`CycleMetadata::processed_ids`](crate::CycleMetadata), whether or not it produced
+    /// a delta.** At apply time those ids are stamped with the `dream_cycle` marker, which
+    /// (a) makes a re-run idempotent and (b) removes them from the #209 caller-write
+    /// signal ([`MemoryEngine::run_dream_cycle_guarded`](crate::MemoryEngine::run_dream_cycle_guarded)).
+    /// An implementation that omits a selected-but-no-delta fact leaves it permanently
+    /// "caller-written" — the guarded cycle would then defer forever. The shipped
+    /// [`DefaultDreamCycle`](crate::DefaultDreamCycle) satisfies this by construction.
+    ///
     /// # Errors
     ///
     /// Returns an error if the cycle fails.

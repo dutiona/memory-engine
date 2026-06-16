@@ -86,7 +86,7 @@ Read these docs when working on the relevant area:
 
 ## Status
 
-Phase 4a ✅ (inspection APIs, import/export, bootstrap, reranker). Phase 4b in progress: CLI inspector ✅ (`memory-engine-cli`), MCP server ✅ (`memory-engine-mcp`, 21 tools + tiered depth). P2 tools (#96) pending. Phase 5a cognitive pipeline ✅: DreamCycle (#49) + its MCP endpoints (#225, `memory_dream_cycle` / `memory_apply_cycle_report` / `memory_get_recent_insights`). Then the rest of Phase 5 (outcome tracking, provenance). See **GitHub Projects** ([Roadmap board #6](https://github.com/users/dutiona/projects/6)) for open issues and the dependency graph; `docs/ROADMAP.md` is a frozen historical reference.
+Phase 4a ✅ (inspection APIs, import/export, bootstrap, reranker). Phase 4b in progress: CLI inspector ✅ (`memory-engine-cli`), MCP server ✅ (`memory-engine-mcp`, 21 tools + tiered depth). P2 tools (#96) pending. Phase 5a cognitive pipeline ✅: DreamCycle (#49) + its MCP endpoints (#225, `memory_dream_cycle` / `memory_apply_cycle_report` / `memory_get_recent_insights`) + caller-write deferral (#209, `run_dream_cycle_guarded`). Then the rest of Phase 5 (outcome tracking, provenance) and the #554 Ollama→ME harness swap. See **GitHub Projects** ([Roadmap board #6](https://github.com/users/dutiona/projects/6)) for open issues and the dependency graph; `docs/ROADMAP.md` is a frozen historical reference.
 
 <!-- pm-contract:start -->
 
