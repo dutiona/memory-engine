@@ -25,12 +25,44 @@ use crate::types::{AddFactRequest, ConsolidationLevel, Fact, NewEvent, NewFact, 
 /// All operations dispatch to `tokio::task::spawn_blocking`.
 /// Async methods take **owned** values (not references) for `'static` lifetime.
 ///
-/// ```rust,ignore
-/// let engine = MemoryEngine::builder(768).build()?;
-/// let async_engine = AsyncMemoryEngine::new(engine);
-/// let req = AddFactRequest { content: "hello".into(), fact_type: FactType::Semantic,
-///     source_event_id: None, scope: None, opts: None };
+/// ```
+/// use std::sync::Arc;
+///
+/// use memory_engine::async_engine::AsyncMemoryEngine;
+/// use memory_engine::{
+///     AddFactRequest, EmbeddingProvider, FactType, MemoryEngine, MemoryError,
+/// };
+///
+/// // Deterministic, dependency-free embedder (see the crate-level example).
+/// struct HashEmbedder {
+///     dim: usize,
+/// }
+/// impl EmbeddingProvider for HashEmbedder {
+///     fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
+///         let mut v = vec![0.0_f32; self.dim];
+///         for &b in text.as_bytes() {
+///             v[b as usize % self.dim] += 1.0;
+///         }
+///         Ok(v)
+///     }
+/// }
+///
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let dim = 64;
+/// let async_engine = AsyncMemoryEngine::new(MemoryEngine::builder(dim).build()?);
+/// // Owned values cross the spawn_blocking boundary; the embedder is shared as an Arc.
+/// let embedder: Arc<dyn EmbeddingProvider + Send + Sync> = Arc::new(HashEmbedder { dim });
+/// let req = AddFactRequest {
+///     content: "hello".into(),
+///     fact_type: FactType::Semantic,
+///     source_event_id: None,
+///     scope: None,
+///     opts: None,
+/// };
 /// let id = async_engine.add_fact(req, embedder, None).await?;
+/// assert!(id > 0);
+/// # Ok::<(), MemoryError>(())
+/// # }).unwrap();
 /// ```
 #[derive(Clone)]
 pub struct AsyncMemoryEngine {

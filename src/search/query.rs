@@ -14,21 +14,55 @@ const DEFAULT_LIMIT: usize = 50;
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// // Semantic search within a scope and time period
-/// let results = engine.execute_query(
-///     &MemoryQuery::new()
-///         .scope_subtree("user:michael/project:demo")
-///         .period(week_ago, now)
-///         .text("deployment issue")
-///         .min_importance_score(0.3)
-///         .limit(20)
+/// ```
+/// use memory_engine::{
+///     AddFactRequest, EmbeddingProvider, FactType, MemoryEngine, MemoryError, MemoryQuery,
+/// };
+///
+/// // Deterministic, dependency-free embedder (see the crate-level example).
+/// struct HashEmbedder {
+///     dim: usize,
+/// }
+/// impl EmbeddingProvider for HashEmbedder {
+///     fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
+///         let mut v = vec![0.0_f32; self.dim];
+///         for &b in text.as_bytes() {
+///             v[b as usize % self.dim] += 1.0;
+///         }
+///         Ok(v)
+///     }
+/// }
+///
+/// let dim = 64;
+/// let engine = MemoryEngine::builder(dim).build()?;
+/// let embedder = HashEmbedder { dim };
+/// engine.add_fact(
+///     &AddFactRequest {
+///         content: "deployment issue in the demo project".into(),
+///         fact_type: FactType::Episodic,
+///         source_event_id: None,
+///         scope: Some("project:demo".into()),
+///         opts: None,
+///     },
+///     &embedder,
+///     None,
 /// )?;
 ///
-/// // All pinned facts
-/// let pinned = engine.execute_query(
-///     &MemoryQuery::new().pinned_only()
+/// // Scoped retrieval: all facts in the subtree rooted at `project:demo`, capped
+/// // at 20 results. An empty query (no `text`/`embedding`) returns every
+/// // temporally-valid fact in scope, sorted by importance.
+/// let response = engine.execute_query(
+///     &MemoryQuery::new()
+///         .scope_subtree("project:demo")
+///         .limit(20),
 /// )?;
+/// assert_eq!(response.results.len(), 1);
+/// assert_eq!(response.results[0].fact.content, "deployment issue in the demo project");
+///
+/// // All pinned facts (none were pinned, so this is empty).
+/// let pinned = engine.execute_query(&MemoryQuery::new().pinned_only())?;
+/// assert!(pinned.results.is_empty());
+/// # Ok::<(), MemoryError>(())
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct MemoryQuery {

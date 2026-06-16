@@ -20,6 +20,58 @@
 //! `MemoryEngine` is `Send + Sync`. Thread safety is provided by an internal
 //! connection pool (N readers + 1 writer) and `RwLock`-protected caches.
 //! Consumers can share via `Arc<MemoryEngine>`.
+//!
+//! ## Quick start
+//!
+//! Build an in-memory engine with the typestate [`MemoryEngine::builder`], add a
+//! fact, and retrieve it. The engine delegates embedding to a consumer-supplied
+//! [`EmbeddingProvider`]; the example wires a tiny deterministic one so it is
+//! fully self-contained and runs under `cargo test --doc`.
+//!
+//! ```
+//! use memory_engine::{
+//!     AddFactRequest, EmbeddingProvider, FactType, MemoryEngine, MemoryError, MemoryQuery,
+//! };
+//!
+//! // A deterministic, dependency-free embedder: hash each byte into a fixed-dim
+//! // bag-of-bytes vector. Real consumers plug in a model here instead.
+//! struct HashEmbedder {
+//!     dim: usize,
+//! }
+//! impl EmbeddingProvider for HashEmbedder {
+//!     fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
+//!         let mut v = vec![0.0_f32; self.dim];
+//!         for &b in text.as_bytes() {
+//!             v[b as usize % self.dim] += 1.0;
+//!         }
+//!         Ok(v)
+//!     }
+//! }
+//!
+//! let dim = 64;
+//! let engine = MemoryEngine::builder(dim).build()?;
+//! let embedder = HashEmbedder { dim };
+//!
+//! // Ingest a fact (embedding computed via the provider, then persisted).
+//! let id = engine.add_fact(
+//!     &AddFactRequest {
+//!         content: "Rust has no garbage collector".into(),
+//!         fact_type: FactType::Semantic,
+//!         source_event_id: None,
+//!         scope: None,
+//!         opts: None,
+//!     },
+//!     &embedder,
+//!     None,
+//! )?;
+//! assert!(id > 0);
+//!
+//! // Retrieve it back via full-text search and assert on the result.
+//! let response = engine.execute_query(&MemoryQuery::new().text("garbage collector"))?;
+//! assert_eq!(response.results.len(), 1);
+//! assert_eq!(response.results[0].fact.content, "Rust has no garbage collector");
+//! # Ok::<(), MemoryError>(())
+//! ```
 
 // === Public modules (consumer-facing API) ===
 #[cfg(feature = "async")]
