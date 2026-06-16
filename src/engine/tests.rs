@@ -3420,47 +3420,71 @@ fn add_fact_invalid_scope_path_returns_scope_label_conflict() {
 }
 
 #[test]
-fn add_fact_importance_above_one_is_silently_accepted() {
-    // LATENT BUG (issue #130 follow-up): `AddFactOptions::importance` is
-    // documented as "Must be in [0, 1]", but no layer enforces it — not
-    // `add_fact`, not `FactStore::insert`, and the `facts.importance` column has
-    // no CHECK constraint. An out-of-range value is therefore accepted and
-    // stored verbatim. This test PINS that real behavior (it does not assert the
-    // ideal rejection); when the bug is fixed, this test should be updated to
-    // expect a `Conflict(PolicyParameter)` (or clamp) and will fail loudly here,
-    // flagging the contract change.
+fn add_fact_rejects_out_of_range_importance() {
+    // CONTRACT (issue #571, follow-up to #130): `AddFactOptions::importance` is
+    // documented as "Must be in [0, 1]". `add_fact` now ENFORCES this loudly —
+    // an out-of-range (or non-finite) value is rejected with
+    // `Conflict(PolicyParameter)` BEFORE anything is persisted (no event, no
+    // fact), rather than being silently stored verbatim. A valid [0, 1] value
+    // still succeeds.
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder = MockEmbedder { dim: DIM };
 
-    let opts = AddFactOptions {
-        importance: Some(5.0), // grossly out of the documented [0, 1] range
-        ..Default::default()
+    let request = |importance: f64| AddFactRequest {
+        content: format!("importance = {importance}"),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: Some(AddFactOptions {
+            importance: Some(importance),
+            ..Default::default()
+        }),
     };
-    let id = engine
-        .add_fact(
-            &AddFactRequest {
-                content: "importance way out of range".into(),
-                fact_type: FactType::Semantic,
-                source_event_id: None,
-                scope: None,
-                opts: Some(opts),
-            },
-            &embedder,
-            None,
-        )
-        .expect("add_fact currently accepts out-of-range importance (latent bug)");
 
-    // The value is stored verbatim — both the base `importance` and the
-    // materialized `importance_score` seeded from it.
+    // Above the range: rejected as Conflict(PolicyParameter), nothing persisted.
+    let err_high = engine
+        .add_fact(&request(5.0), &embedder, None)
+        .expect_err("importance > 1.0 must be rejected");
+    assert!(
+        matches!(
+            err_high,
+            MemoryError::Conflict(crate::error::ConflictError::PolicyParameter(_))
+        ),
+        "expected Conflict(PolicyParameter) for importance 5.0, got {err_high:?}"
+    );
+
+    // Below the range: also rejected.
+    let err_low = engine
+        .add_fact(&request(-0.1), &embedder, None)
+        .expect_err("importance < 0.0 must be rejected");
+    assert!(
+        matches!(
+            err_low,
+            MemoryError::Conflict(crate::error::ConflictError::PolicyParameter(_))
+        ),
+        "expected Conflict(PolicyParameter) for importance -0.1, got {err_low:?}"
+    );
+
+    // Neither rejected insert left a fact behind.
+    assert_eq!(
+        engine.list_active_facts(None).unwrap().len(),
+        0,
+        "rejected out-of-range inserts must not persist any fact"
+    );
+
+    // In-range still works and is stored verbatim (base + materialized score).
+    let id = engine
+        .add_fact(&request(0.8), &embedder, None)
+        .expect("in-range importance 0.8 must succeed");
     let fact = engine.get_fact(id).unwrap();
     assert!(
-        (fact.importance - 5.0).abs() < f64::EPSILON,
-        "out-of-range importance is stored verbatim (no clamp): got {}",
+        (fact.importance - 0.8).abs() < f64::EPSILON,
+        "in-range importance stored verbatim: got {}",
         fact.importance
     );
     assert!(
-        (fact.importance_score - 5.0).abs() < f64::EPSILON,
-        "importance_score is seeded from the verbatim base importance: got {}",
+        (fact.importance_score - 0.8).abs() < f64::EPSILON,
+        "importance_score seeded from the base importance: got {}",
         fact.importance_score
     );
 }

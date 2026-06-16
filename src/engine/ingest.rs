@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::error::{MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
@@ -38,6 +38,24 @@ impl MemoryEngine {
         EventStore::new(&conn, &self.upcaster_registry).insert(event)
     }
 
+    /// Validate a caller-supplied `importance` override.
+    ///
+    /// `AddFactOptions::importance` is documented as living in `[0, 1]`. We
+    /// reject out-of-range values (and non-finite ones such as `NaN`/`±inf`)
+    /// loudly rather than clamping silently, mirroring the typed
+    /// `Conflict(PolicyParameter)` errors raised elsewhere for out-of-range
+    /// policy parameters. `None` is always valid (the engine default is used).
+    fn validate_importance(importance: Option<f64>) -> Result<()> {
+        if let Some(v) = importance {
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                    format!("importance must be in [0, 1], got {v}"),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Add a fact: compute embedding via `embedder`, compute blake3 content hash,
     /// and insert into the fact store. Returns the assigned fact id.
     ///
@@ -47,6 +65,9 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
+    /// Returns `MemoryError::Conflict(ConflictError::PolicyParameter)` if
+    /// `opts.importance` is set and outside `[0, 1]` (or non-finite); the
+    /// request is rejected before any embedding, event, or fact is written.
     /// Returns errors from embedding computation, dimension validation, or DB insert.
     // `conn` (write lock) is reused by `FactStore::new(&conn).insert(..)` at the
     // block's return expression; clippy's nursery suggestion to drop it after
@@ -58,10 +79,14 @@ impl MemoryEngine {
         embedder: &dyn EmbeddingProvider,
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<i64> {
-        // Embed OUTSIDE the write lock (potentially slow)
-        let embedding = embedder.embed(&req.content)?;
         let now = Utc::now();
         let opts = req.opts.clone().unwrap_or_default();
+        // Reject an out-of-range importance BEFORE embedding or persisting:
+        // no event, no fact, no slow embedding call for an invalid request.
+        Self::validate_importance(opts.importance)?;
+
+        // Embed OUTSIDE the write lock (potentially slow)
+        let embedding = embedder.embed(&req.content)?;
         let base_importance = opts.importance.unwrap_or(0.5);
         let effective_created = opts.t_created.unwrap_or(now);
         let effective_last_accessed = opts.last_accessed.unwrap_or(now);
@@ -240,6 +265,9 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
+    /// Returns `MemoryError::Conflict(ConflictError::PolicyParameter)` if any
+    /// entry's `opts.importance` is set and outside `[0, 1]` (or non-finite);
+    /// the whole batch is rejected up front, so no entry is embedded or written.
     /// Returns errors from batch embedding, dimension validation, or DB insert.
     /// Returns `MemoryError::Internal` if the embedder returns a different
     /// number of embeddings than input entries.
@@ -254,6 +282,12 @@ impl MemoryEngine {
     ) -> Result<Vec<i64>> {
         if entries.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Reject any out-of-range importance up front: the batch is
+        // all-or-nothing, so no entry is embedded or persisted if one is invalid.
+        for entry in entries {
+            Self::validate_importance(entry.opts.as_ref().and_then(|o| o.importance))?;
         }
 
         // --- Phase 1: Batch embed OUTSIDE the write lock ---
