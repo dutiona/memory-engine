@@ -34,9 +34,8 @@ pub struct HttpEmbeddingProvider {
 }
 
 impl HttpEmbeddingProvider {
-    /// # Errors
+    /// Build an HTTP embedding provider.
     ///
-    /// Returns an error if the HTTP client cannot be constructed (e.g., TLS init failure).
     /// `provider` is the operator-declared serving backend (e.g. `"ollama"`, `"tei"`,
     /// `"openai"`). It **cannot** be sniffed from the endpoint — Ollama and TEI both
     /// speak `/v1/embeddings` — so it is an explicit argument: it feeds
