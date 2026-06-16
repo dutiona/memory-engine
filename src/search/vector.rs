@@ -13,6 +13,33 @@ pub struct VectorResult {
     pub score: f32,
 }
 
+/// Candidate-set size above which a brute-force scan is flagged as a scaling
+/// signal.
+///
+/// Brute-force cosine search is inherently O(N) per query — every active
+/// embedding in the (post-SQL-filter) candidate set is deserialized and scored.
+/// There is therefore **no correctness-preserving way to cap the scan**: a SQL
+/// `LIMIT` would silently drop candidates and corrupt recall. The bound is
+/// instead observational — past this many candidates we emit a one-time `warn`
+/// directing operators at the `ann` feature (HNSW), which provides the actual
+/// sublinear path.
+///
+/// Kept equal to the default [`SearchConfig::ann_threshold`](crate::search::strategy::SearchConfig)
+/// (50,000) — the documented fact count at which ANN should take over.
+pub(crate) const BRUTE_FORCE_WARN_THRESHOLD: usize = 50_000;
+
+/// Whether a brute-force candidate set is large enough to warrant the scaling
+/// warning. Split out as a pure predicate so the boundary is unit-testable
+/// without materializing a 50k-fact corpus.
+#[must_use]
+pub(crate) const fn brute_force_scan_is_oversized(candidates: usize) -> bool {
+    candidates > BRUTE_FORCE_WARN_THRESHOLD
+}
+
+/// Process-lifetime guard so the scaling warning fires at most once, rather than
+/// spamming a line per query once a deployment has outgrown brute-force.
+static BRUTE_FORCE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
+
 /// Compute the cosine similarity between two vectors.
 ///
 /// Returns 0.0 if either vector has zero magnitude (avoids NaN).
@@ -77,6 +104,21 @@ pub fn vector_search(
         scored.push(VectorResult { fact_id: id, score });
     }
 
+    // Scaling signal (issue #572 / L9): brute force is O(N) per query and cannot
+    // be capped without dropping recall, so flag — once — when the candidate set
+    // has outgrown it. The `ann` feature is the sublinear remedy.
+    if brute_force_scan_is_oversized(scored.len()) {
+        let candidates = scored.len();
+        BRUTE_FORCE_WARN_ONCE.call_once(|| {
+            tracing::warn!(
+                candidates,
+                threshold = BRUTE_FORCE_WARN_THRESHOLD,
+                "brute-force vector scan exceeded the scaling threshold; \
+                 enable the `ann` feature for sublinear search"
+            );
+        });
+    }
+
     // Partial sort: O(N) partition then sort only top `limit` elements
     if scored.len() > limit {
         scored.select_nth_unstable_by(limit, |a, b| {
@@ -128,6 +170,27 @@ mod tests {
             metadata: serde_json::json!({}),
             is_pinned: false,
         }
+    }
+
+    #[test]
+    fn brute_force_oversized_predicate_boundary() {
+        // Strictly greater than the threshold is "oversized"; equal is not.
+        assert!(!brute_force_scan_is_oversized(0));
+        assert!(!brute_force_scan_is_oversized(BRUTE_FORCE_WARN_THRESHOLD));
+        assert!(brute_force_scan_is_oversized(
+            BRUTE_FORCE_WARN_THRESHOLD + 1
+        ));
+    }
+
+    #[test]
+    fn brute_force_threshold_tracks_ann_threshold_default() {
+        // The scaling warning must fire at the same corpus size the engine
+        // documents for switching to ANN, so the two never drift apart.
+        use crate::search::strategy::SearchConfig;
+        assert_eq!(
+            BRUTE_FORCE_WARN_THRESHOLD,
+            SearchConfig::default().ann_threshold
+        );
     }
 
     #[test]

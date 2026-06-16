@@ -71,6 +71,33 @@ fn insert_raw_fact(engine: &MemoryEngine, fact: &NewFact) -> i64 {
 
 // --- Phase 1 tests ---
 
+/// The L10 size bound also guards `resolve_conflict`, which persists the
+/// candidate `NewFact` verbatim on an Add/Update decision. The check runs
+/// before the arbiter and the old-fact lookup, so a non-existent `old_id`
+/// still surfaces `PayloadTooLarge` rather than `NotFound`.
+#[test]
+fn resolve_conflict_rejects_oversized_fact() {
+    use crate::error::{ConflictError, MemoryError};
+
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let arbiter = FixedArbiter {
+        decision: CrudDecision::Add,
+    };
+    let mut oversized = make_new_fact("seed", vec![0.5; DIM]);
+    oversized.content = "x".repeat(crate::limits::MAX_PAYLOAD_BYTES + 1);
+
+    let err = engine
+        .resolve_conflict(&arbiter, 9999, &oversized)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MemoryError::Conflict(ConflictError::PayloadTooLarge {
+            kind: "fact content",
+            ..
+        })
+    ));
+}
+
 #[test]
 fn open_memory_succeeds() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();

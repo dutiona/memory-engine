@@ -4,9 +4,9 @@ use rusqlite::Connection;
 use crate::error::Result;
 use crate::graph::MemoryGraph;
 use crate::store::edges::EdgeStore;
-use crate::store::facts::FactStore;
+use crate::store::facts::{FactScoringRow, FactStore};
 use crate::traits::{ForgetPolicy, PruneStats};
-use crate::types::Fact;
+use crate::types::{Fact, FactType};
 
 /// Argument to `ln()` for access-frequency normalization: 100 + 1.
 /// Gives `ln(101)` as the divisor so that 100 accesses produce a full score of 1.0.
@@ -23,6 +23,51 @@ pub(crate) fn ebbinghaus_decay(age_days: f64, half_life: f64) -> f64 {
     f64::exp2(-age_days / half_life)
 }
 
+/// The fact attributes [`compute_importance`] reads.
+///
+/// Implemented by both the full [`Fact`] and the lightweight [`FactScoringRow`]
+/// projection, so the prune pass can score the entire active set without
+/// materializing `content`/`embedding`/`metadata` (see [`prune`]).
+///
+/// `id` and `is_pinned` are intentionally absent — `prune` reads those directly
+/// off the concrete row; the trait captures only the scoring inputs.
+pub trait ImportanceInputs {
+    fn fact_type(&self) -> &FactType;
+    fn last_accessed(&self) -> DateTime<Utc>;
+    fn access_count(&self) -> i64;
+    fn importance(&self) -> f64;
+}
+
+impl ImportanceInputs for Fact {
+    fn fact_type(&self) -> &FactType {
+        &self.fact_type
+    }
+    fn last_accessed(&self) -> DateTime<Utc> {
+        self.last_accessed
+    }
+    fn access_count(&self) -> i64 {
+        self.access_count
+    }
+    fn importance(&self) -> f64 {
+        self.importance
+    }
+}
+
+impl ImportanceInputs for FactScoringRow {
+    fn fact_type(&self) -> &FactType {
+        &self.fact_type
+    }
+    fn last_accessed(&self) -> DateTime<Utc> {
+        self.last_accessed
+    }
+    fn access_count(&self) -> i64 {
+        self.access_count
+    }
+    fn importance(&self) -> f64 {
+        self.importance
+    }
+}
+
 /// Compute composite importance score for a fact.
 ///
 /// Weighted sum of 4 signals, each normalized to \[0, 1\]:
@@ -34,24 +79,24 @@ pub(crate) fn ebbinghaus_decay(age_days: f64, half_life: f64) -> f64 {
 /// 4. **Base importance**: `fact.importance` — already in \[0, 1\]
 #[must_use]
 pub(crate) fn compute_importance(
-    fact: &Fact,
+    fact: &impl ImportanceInputs,
     graph_degree: usize,
     now: DateTime<Utc>,
     policy: &ForgetPolicy,
 ) -> f64 {
     // Knowledge-shaped types don't lose validity with age: recency stays 1.0.
     // An explicit half-life override wins and re-enables decay.
-    let recency = if policy.is_decay_exempt(&fact.fact_type) {
+    let recency = if policy.is_decay_exempt(fact.fact_type()) {
         1.0
     } else {
         let half_life = policy
             .half_life_overrides
-            .get(&fact.fact_type)
+            .get(fact.fact_type())
             .copied()
             .unwrap_or(policy.half_life_days);
 
         #[allow(clippy::cast_precision_loss)]
-        let age_days = (now - fact.last_accessed).num_seconds() as f64 / 86400.0;
+        let age_days = (now - fact.last_accessed()).num_seconds() as f64 / 86400.0;
         ebbinghaus_decay(age_days.max(0.0), half_life)
     };
 
@@ -59,7 +104,7 @@ pub(crate) fn compute_importance(
     // Using ln_1p for numerical accuracy near zero.
     #[allow(clippy::cast_precision_loss)]
     let frequency =
-        (f64::ln_1p(fact.access_count as f64) / FREQUENCY_NORMALIZATION_ARG.ln()).min(1.0);
+        (f64::ln_1p(fact.access_count() as f64) / FREQUENCY_NORMALIZATION_ARG.ln()).min(1.0);
     #[allow(clippy::cast_precision_loss)]
     let connectivity =
         (f64::ln_1p(graph_degree as f64) / CONNECTIVITY_NORMALIZATION_ARG.ln()).min(1.0);
@@ -69,7 +114,7 @@ pub(crate) fn compute_importance(
         .mul_add(recency, policy.frequency_weight * frequency)
         + policy.graph_degree_weight.mul_add(
             connectivity,
-            policy.base_importance_weight * fact.importance,
+            policy.base_importance_weight * fact.importance(),
         )
 }
 
@@ -101,7 +146,11 @@ pub fn prune(
     policy.validate()?;
 
     let fact_store = FactStore::new(conn, embed_dim);
-    let active_facts = fact_store.list_active(None)?;
+    // Prune must evaluate the *entire* active set (importance is global), so we
+    // load the lightweight scoring projection rather than full facts — bounding
+    // the working set to a few scalars per fact instead of content + embedding
+    // + metadata. See `FactStore::list_active_scoring` (issue #572 / L8).
+    let active_facts = fact_store.list_active_scoring()?;
     let facts_evaluated = active_facts.len();
 
     // Score all facts once before mutating, so degree values are consistent

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::error::{ConflictError, MemoryError, Result};
+use crate::limits::{check_json_size, check_str_size};
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
@@ -34,6 +35,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on insert failure.
     pub fn ingest(&self, event: &NewEvent) -> Result<i64> {
+        check_json_size(&event.payload, "event payload")?;
         let conn = self.write_conn()?;
         EventStore::new(&conn, &self.upcaster_registry).insert(event)
     }
@@ -84,6 +86,12 @@ impl MemoryEngine {
         // embedding, or persisting: no event, no fact, no slow embedding call,
         // and no (potentially expensive) metadata clone for an invalid request.
         Self::validate_importance(req.opts.as_ref().and_then(|o| o.importance))?;
+        // Reject oversized content/metadata before any expensive work so a
+        // hostile request fails fast and cheap (issue #572 / L10).
+        check_str_size(&req.content, "fact content")?;
+        if let Some(metadata) = req.opts.as_ref().and_then(|o| o.metadata.as_ref()) {
+            check_json_size(metadata, "fact metadata")?;
+        }
         let opts = req.opts.clone().unwrap_or_default();
 
         // Embed OUTSIDE the write lock (potentially slow)
@@ -285,10 +293,15 @@ impl MemoryEngine {
             return Ok(Vec::new());
         }
 
-        // Reject any out-of-range importance up front: the batch is
-        // all-or-nothing, so no entry is embedded or persisted if one is invalid.
+        // Validate every entry up front: the batch is all-or-nothing, so a
+        // single invalid importance or oversized content/metadata rejects the
+        // whole call before any entry is embedded or persisted.
         for entry in entries {
             Self::validate_importance(entry.opts.as_ref().and_then(|o| o.importance))?;
+            check_str_size(&entry.content, "fact content")?;
+            if let Some(metadata) = entry.opts.as_ref().and_then(|o| o.metadata.as_ref()) {
+                check_json_size(metadata, "fact metadata")?;
+            }
         }
 
         // --- Phase 1: Batch embed OUTSIDE the write lock ---
@@ -398,5 +411,111 @@ impl MemoryEngine {
         }
 
         Ok(fact_ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ConflictError;
+    use crate::limits::MAX_PAYLOAD_BYTES;
+    use crate::traits::EmbeddingProvider;
+    use crate::types::{AddFactOptions, AddFactRequest, EventType, FactType};
+
+    const DIM: usize = 4;
+
+    struct FakeEmbed;
+    impl EmbeddingProvider for FakeEmbed {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
+    }
+
+    /// An oversized event payload is rejected by `ingest` before it touches the
+    /// write path.
+    #[test]
+    fn ingest_rejects_oversized_payload() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let big = "x".repeat(MAX_PAYLOAD_BYTES + 10);
+        let event = NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::Interaction,
+            payload: serde_json::Value::String(big),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        let err = engine.ingest(&event).unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Conflict(ConflictError::PayloadTooLarge {
+                kind: "event payload",
+                ..
+            })
+        ));
+    }
+
+    /// An oversized fact `metadata` is rejected by `add_fact`, and a normal one
+    /// is accepted (guard does not regress the happy path).
+    #[test]
+    fn add_fact_rejects_oversized_metadata() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let big = "x".repeat(MAX_PAYLOAD_BYTES + 10);
+        let req = AddFactRequest {
+            content: "fact".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: Some(AddFactOptions {
+                metadata: Some(serde_json::json!({ "blob": big })),
+                ..Default::default()
+            }),
+        };
+        let err = engine.add_fact(&req, &FakeEmbed, None).unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Conflict(ConflictError::PayloadTooLarge {
+                kind: "fact metadata",
+                ..
+            })
+        ));
+
+        // Small metadata is accepted.
+        let ok_req = AddFactRequest {
+            content: "fact".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: Some(AddFactOptions {
+                metadata: Some(serde_json::json!({ "k": "v" })),
+                ..Default::default()
+            }),
+        };
+        assert!(engine.add_fact(&ok_req, &FakeEmbed, None).is_ok());
+    }
+
+    /// An oversized fact `content` body is rejected by `add_fact` — the content
+    /// String is the larger unbounded vector, guarded alongside metadata.
+    #[test]
+    fn add_fact_rejects_oversized_content() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let req = AddFactRequest {
+            content: "x".repeat(MAX_PAYLOAD_BYTES + 1),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        };
+        let err = engine.add_fact(&req, &FakeEmbed, None).unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Conflict(ConflictError::PayloadTooLarge {
+                kind: "fact content",
+                ..
+            })
+        ));
     }
 }

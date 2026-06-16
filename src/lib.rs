@@ -91,6 +91,7 @@ pub(crate) mod conflict;
 pub(crate) mod consolidation;
 pub(crate) mod forgetting;
 pub(crate) mod graph;
+pub(crate) mod limits;
 pub(crate) mod pool;
 pub(crate) mod resume;
 pub(crate) mod scope;
