@@ -245,6 +245,13 @@ fn bootstrap_within_savepoint(
                 c.should_pin(&temp)
             });
 
+            // Bi-temporal note (#521): t_created is backdated to the historical turn
+            // timestamp, but t_valid is deliberately left None. Valid-time is the
+            // externally-asserted "true in the world" interval, which a retro-observed
+            // session fact does not carry — transaction-time (t_created) is the temporal
+            // signal here. Consequences: these facts are visible to active-at queries
+            // (None = unbounded-valid) but are NOT scheduled by list_due (which requires
+            // t_valid IS NOT NULL); memarch #42 sweeps on t_created for the same reason.
             let new_fact = NewFact {
                 content: fact.content.clone(),
                 content_hash: String::new(),

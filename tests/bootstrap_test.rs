@@ -2,6 +2,7 @@
 
 use std::io::Cursor;
 
+use chrono::Utc;
 use memory_engine::{
     BootstrapConfig, EmbeddingProvider, KeywordExtractor, MemoryEngine, MemoryError,
 };
@@ -49,6 +50,43 @@ fn bootstrap_success_session() {
         "should classify as success or indeterminate"
     );
     assert_eq!(report.events_ingested, 1, "one marker event per session");
+}
+
+#[test]
+fn bootstrap_leaves_t_valid_none_visible_but_unscheduled() {
+    // #521: bootstrap intentionally leaves t_valid = None (valid-time is not externally
+    // asserted for retro-observed facts; t_created carries the recency signal). Pin the
+    // observable consequences: such facts are visible to active-at queries (None =
+    // unbounded-valid) but are NOT scheduled by list_due (which requires t_valid IS NOT NULL).
+    let engine = engine();
+    let extractor = KeywordExtractor;
+    let config = BootstrapConfig::default();
+
+    let reader = Cursor::new(success_fixture());
+    let report = engine
+        .bootstrap_session(reader, &TestEmbedder, &extractor, &config, None)
+        .unwrap();
+    assert!(report.facts_created > 0, "fixture should create facts");
+
+    // Visible, and every bootstrapped fact carries t_valid = None.
+    let active = engine.list_active_facts(None).unwrap();
+    assert_eq!(
+        active.len(),
+        report.facts_created,
+        "all bootstrapped facts should be active/visible"
+    );
+    assert!(
+        active.iter().all(|f| f.t_valid.is_none()),
+        "bootstrap must leave t_valid = None on every created fact"
+    );
+
+    // Unscheduled: list_due requires t_valid IS NOT NULL, so none are due.
+    let due = engine.list_due(Utc::now(), None).unwrap();
+    assert!(
+        due.is_empty(),
+        "facts with t_valid = None must not be scheduled by list_due; got {} due",
+        due.len()
+    );
 }
 
 #[test]
