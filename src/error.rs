@@ -750,6 +750,11 @@ mod tests {
             .to_string()
             .contains("out of bounds")
         );
+        assert!(
+            CycleError::MalformedReport { facts_selected: 5 }
+                .to_string()
+                .contains("processed_ids is empty")
+        );
     }
 
     #[test]

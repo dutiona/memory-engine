@@ -239,6 +239,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only, or a store/cycle error.
+    #[must_use = "the CycleOutcome carries the skip/run decision — a dropped Skipped silently loses the deferral"]
     pub fn run_dream_cycle_guarded(&self, cycle: &dyn DreamCycle) -> Result<CycleOutcome> {
         // Atomic cursor read + (skip-only) advance under the write lock.
         let decision = {
@@ -638,7 +639,23 @@ mod tests {
             engine.run_dream_cycle_guarded(&NoopCycle).unwrap(),
             CycleOutcome::Skipped(_)
         ));
+        let cursor_after_skip = caller_cursor(&engine);
+        assert!(cursor_after_skip.is_some(), "skip advanced the cursor");
+
         // Second: no new writes since the advanced cursor ⇒ run.
+        assert!(matches!(
+            engine.run_dream_cycle_guarded(&NoopCycle).unwrap(),
+            CycleOutcome::Ran(_)
+        ));
+        // A real run must NOT advance the cursor (the dream-marker, not the cursor,
+        // removes processed facts from the signal). NoopCycle applies nothing, so the
+        // cursor is exactly where the skip left it.
+        assert_eq!(
+            caller_cursor(&engine),
+            cursor_after_skip,
+            "a run leaves the caller-write cursor unchanged"
+        );
+        // Third: still quiet ⇒ runs again (steady state on a quiet store).
         assert!(matches!(
             engine.run_dream_cycle_guarded(&NoopCycle).unwrap(),
             CycleOutcome::Ran(_)
@@ -670,6 +687,32 @@ mod tests {
                 MemoryError::Cycle(crate::error::CycleError::MalformedReport { facts_selected: 5 })
             ),
             "expected MalformedReport, got {err:?}"
+        );
+    }
+
+    /// The malformed-report guard must also fire in the steady-state path: after a
+    /// caller write defers the first call, the SECOND (quiet) call actually runs the
+    /// cycle — and a contract-violating cycle is caught there, not just on cold start.
+    #[test]
+    fn guarded_rejects_malformed_report_after_initial_skip() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        add_source_facts(&engine, &[0]); // caller write ⇒ first call defers
+        assert!(matches!(
+            engine
+                .run_dream_cycle_guarded(&SelectingButEmptyCycle)
+                .unwrap(),
+            CycleOutcome::Skipped(_)
+        ));
+        // Second call: quiet ⇒ runs the cycle ⇒ contract violation is caught.
+        let err = engine
+            .run_dream_cycle_guarded(&SelectingButEmptyCycle)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Cycle(crate::error::CycleError::MalformedReport { facts_selected: 5 })
+            ),
+            "expected MalformedReport on the post-skip run, got {err:?}"
         );
     }
 

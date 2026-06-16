@@ -208,7 +208,8 @@ pub trait DreamCycle {
     ///
     /// # Contract
     ///
-    /// **Every fact the cycle selects for its window MUST appear in
+    /// **Every fact the cycle touches — selects for its window, adjusts (`AdjustScore`),
+    /// or tags (`TagOutcome`) — MUST appear in
     /// [`CycleMetadata::processed_ids`](crate::CycleMetadata), whether or not it produced
     /// a delta.** At apply time those ids are stamped with the `dream_cycle` marker, which
     /// (a) makes a re-run idempotent and (b) removes them from the #209 caller-write

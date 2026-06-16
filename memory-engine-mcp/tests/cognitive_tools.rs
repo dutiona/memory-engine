@@ -150,6 +150,7 @@ fn dream_cycle_dry_run_then_apply_roundtrips() {
         )
         .unwrap(),
     );
+    assert_eq!(dry["did_run"], json!(true), "post-skip quiet call runs");
     assert_eq!(dry["did_apply"], json!(false));
     assert!(dry.get("applied").is_none());
 
@@ -220,6 +221,11 @@ fn dream_cycle_on_empty_store_succeeds_with_no_deltas() {
             args(&[("apply", json!(true))]),
         )
         .unwrap(),
+    );
+    assert_eq!(
+        body["did_run"],
+        json!(true),
+        "empty store ⇒ no caller writes ⇒ runs"
     );
     assert_eq!(body["did_apply"], json!(true));
     assert!(
