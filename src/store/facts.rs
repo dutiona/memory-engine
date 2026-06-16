@@ -928,6 +928,76 @@ impl<'a> FactStore<'a> {
             .map_err(MemoryError::Database)
     }
 
+    /// List active facts in `scope_ids` whose `metadata` JSON carries the top-level
+    /// key `marker_key` with a non-null value, ordered by `t_created` DESC (newest
+    /// first), capped at `limit`.
+    ///
+    /// Matched with `json_extract(metadata, '$.<marker_key>') IS NOT NULL`.
+    /// `json_extract` collapses an **absent** key and a present-`null` value both to
+    /// SQL NULL, returning the value only when the key is present with a non-null
+    /// value — exactly "key present with a non-null value" (the marker is always a
+    /// non-null object, e.g. `{"flushed_at": …}`). (Note: `json_type` would NOT work
+    /// here — it returns the text `'null'` for a present-null value, so
+    /// `json_type(...) IS NOT NULL` would wrongly include `{"<key>": null}`.)
+    ///
+    /// Contrast `list_undreamt_in_period`, which uses `json_type(...) IS NULL` for the
+    /// *complementary* (absence) predicate — there `json_type` is the correct idiom
+    /// because `json_extract(...) IS NULL` would conflate absent with present-`null`.
+    /// The two methods diverge by design: `json_extract` for presence, `json_type` for
+    /// absence.
+    ///
+    /// `marker_key` **MUST** be a trusted caller-supplied literal (an engine const
+    /// such as [`INSIGHT_MARKER_KEY`](crate::INSIGHT_MARKER_KEY)): it is interpolated
+    /// into the SQL JSON path, **never bound**, so it must never carry client input.
+    /// A runtime guard rejects a non-identifier key in **all** build profiles
+    /// (not just `debug`), since the key is interpolated into SQL.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Conflict(ConflictError::QueryValidation)` if
+    /// `marker_key` is not a non-empty `[A-Za-z0-9_]+` identifier.
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_active_by_metadata_key_recent(
+        &self,
+        scope_ids: &[i64],
+        marker_key: &str,
+        limit: usize,
+    ) -> Result<Vec<Fact>> {
+        // Defense in depth: although every current caller passes a trusted engine
+        // const, this is a runtime check (not a `debug_assert`, which compiles out in
+        // release) because `marker_key` is interpolated into the SQL JSON path. A
+        // future caller wiring client input here cannot silently open an injection.
+        if marker_key.is_empty()
+            || !marker_key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(MemoryError::Conflict(
+                crate::error::ConflictError::QueryValidation(format!(
+                    "marker_key must be a non-empty alphanumeric/underscore identifier, got {marker_key:?}"
+                )),
+            ));
+        }
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
+        let dim = self.embed_dim;
+        // marker_key is a trusted const (see doc) — interpolated, not bound, because
+        // `json_extract` paths cannot be parameterized portably. `json_extract` (not
+        // `json_type`) gives "present with a non-null value" semantics.
+        let marker_predicate = format!("json_extract(metadata, '$.{marker_key}') IS NOT NULL");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FACT_COLUMNS} FROM facts
+             WHERE t_expired IS NULL
+               AND scope_id IN (SELECT value FROM json_each(?1))
+               AND {marker_predicate}
+             ORDER BY t_created DESC
+             LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![scope_json, limit_i64], |row| row_to_fact(row, dim))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(MemoryError::Database)
+    }
+
     /// List active facts whose validity interval overlaps the given period `[start, end)`.
     ///
     /// A fact with `[t_valid, t_invalid)` overlaps `[start, end)` when:
@@ -1320,6 +1390,85 @@ mod tests {
             vec![a],
             "present-null must be treated as dreamt (matching serde get().is_none())"
         );
+    }
+
+    #[test]
+    fn list_active_by_metadata_key_recent_filters_marker_scope_active_recency() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        // Two marked active in-scope facts at distinct t_created (newest = m2).
+        let mut m1 = make_fact("marked older", vec![0.1; DIM]);
+        m1.metadata = serde_json::json!({"insight": {"flushed_at": "x"}});
+        m1.t_created = "2024-01-01T00:00:00Z".parse().unwrap();
+        let mut m2 = make_fact("marked newer", vec![0.2; DIM]);
+        m2.metadata = serde_json::json!({"insight": {"flushed_at": "y"}});
+        m2.t_created = "2024-06-01T00:00:00Z".parse().unwrap();
+        // Marked but expired → excluded.
+        let mut expired = make_fact("marked expired", vec![0.3; DIM]);
+        expired.metadata = serde_json::json!({"insight": {"flushed_at": "z"}});
+        expired.t_expired = Some("2024-07-01T00:00:00Z".parse().unwrap());
+        // Active in-scope but unmarked → excluded.
+        let unmarked = make_fact("unmarked", vec![0.4; DIM]);
+        // Marker key present but null → excluded (presence-of-non-null contract).
+        let mut null_marker = make_fact("null marker", vec![0.5; DIM]);
+        null_marker.metadata = serde_json::json!({"insight": null});
+
+        let id1 = store.insert(&m1).unwrap();
+        let id2 = store.insert(&m2).unwrap();
+        store.insert(&expired).unwrap();
+        store.insert(&unmarked).unwrap();
+        store.insert(&null_marker).unwrap();
+
+        // All facts are in root scope (id 1).
+        let got: Vec<i64> = store
+            .list_active_by_metadata_key_recent(&[1], "insight", 10)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            got,
+            vec![id2, id1],
+            "only marked active in-scope, newest-first"
+        );
+
+        // limit truncates to the newest.
+        let top1: Vec<i64> = store
+            .list_active_by_metadata_key_recent(&[1], "insight", 1)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(top1, vec![id2]);
+
+        // A scope with no facts → empty (scope filter holds).
+        assert!(
+            store
+                .list_active_by_metadata_key_recent(&[999], "insight", 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The runtime guard rejects a non-identifier `marker_key` in ALL build profiles
+    /// (the key is interpolated into SQL) — a release build must not skip it.
+    #[test]
+    fn list_active_by_metadata_key_recent_rejects_non_identifier_key() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        for bad in ["", "in'sight", "$.x", "a b", "a;b"] {
+            let err = store
+                .list_active_by_metadata_key_recent(&[1], bad, 10)
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    MemoryError::Conflict(crate::error::ConflictError::QueryValidation(_))
+                ),
+                "key {bad:?} should be rejected as QueryValidation, got {err:?}"
+            );
+        }
     }
 
     #[test]

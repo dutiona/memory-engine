@@ -28,6 +28,14 @@ flowchart LR
 `run_dream_cycle` returns the unapplied report; the caller inspects it and calls
 `apply_cycle_report`. This split is what lets a consumer gate promotion on review.
 
+**Exposed via MCP.** The `memory_dream_cycle`, `memory_apply_cycle_report`, and
+`memory_get_recent_insights` tools surface this pipeline over the Model Context
+Protocol. `memory_dream_cycle` carries an `apply` flag (default `true`) that
+collapses produce-and-apply into one call for the daily-hook ergonomic, while
+`apply:false` preserves the review gate by returning the report for a later
+`memory_apply_cycle_report`. See
+[MCP Server → Cognitive Pipeline](../reference/mcp-server.md#cognitive-pipeline-memory_dream_cycle-memory_apply_cycle_report-memory_get_recent_insights).
+
 ## The delta vocabulary
 
 | Delta                                 | Effect on apply                                                                                                                                                     |

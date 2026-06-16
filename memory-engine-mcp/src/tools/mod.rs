@@ -15,6 +15,7 @@ use memory_engine::traits::{
 use memory_engine::types::{
     AddFactOptions, AddFactRequest, EventType, FactType, NewEvent, Outcome,
 };
+use memory_engine::{CycleReport, DefaultDreamCycle, INSIGHT_MARKER_KEY};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
 use serde_json::{Map, Value, json};
 
@@ -363,6 +364,41 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "required": ["scope"]
             }),
         ),
+        // Phase 5a: Cognitive pipeline (dream cycle) tools (#225)
+        tool_def(
+            "memory_dream_cycle",
+            "Run the dream-cycle cognitive pipeline (cluster → promote → rescore → quarantine) and return a delta-based CycleReport. With apply=true (default) the report is applied immediately; with apply=false it is returned unapplied for review and applied later via memory_apply_cycle_report. Does NOT run consolidation (use memory_consolidate for that).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "apply": { "type": "boolean", "default": true, "description": "Apply the produced report immediately. If false, return the unapplied report for review." }
+                }
+            }),
+        ),
+        tool_def(
+            "memory_apply_cycle_report",
+            "Apply a CycleReport (as returned by memory_dream_cycle with apply=false) to the store, returning an ApplyResult. The whole report is validated before any mutation; a malformed or stale report is rejected without changing the store.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "report": { "type": "object", "description": "A CycleReport JSON object produced by memory_dream_cycle (apply=false)." }
+                },
+                "required": ["report"]
+            }),
+        ),
+        tool_def(
+            "memory_get_recent_insights",
+            "Return recent model-logged insights (facts flushed via memory_flush_insights) within a project scope subtree, newest-first.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_path": { "type": "string", "description": "Scope path of the project (e.g. 'project:memory-engine'). Insights anywhere in this subtree are returned." },
+                    "limit": { "type": "integer", "minimum": 1, "default": 20, "description": "Max insights to return (newest-first)." },
+                    "depth": { "type": "string", "enum": ["sparse", "standard", "full"], "default": "standard" }
+                },
+                "required": ["project_path"]
+            }),
+        ),
     ]
 }
 
@@ -427,6 +463,10 @@ pub fn dispatch(
         "memory_record_activity" => handle_record_activity(args, engine, embedder, filter_config),
         "memory_checkpoint_session" => handle_checkpoint_session(args, engine),
         "memory_load_context" => handle_load_context(args, engine),
+        // Phase 5a: Cognitive pipeline (dream cycle) (#225)
+        "memory_dream_cycle" => handle_dream_cycle(args, engine),
+        "memory_apply_cycle_report" => handle_apply_cycle_report(args, engine),
+        "memory_get_recent_insights" => handle_get_recent_insights(args, engine),
         _ => Err(ErrorData::invalid_params(
             format!("unknown tool: {name}"),
             None,
@@ -528,6 +568,15 @@ fn require_f64_if_present(args: &Map<String, Value>, key: &str) -> Result<Option
 
 fn ok_json(value: Value) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::json(value)?]))
+}
+
+/// Serialize an engine-produced value into a tool result. A serde failure maps to an
+/// internal error (the value is engine-produced, so failure is a server bug).
+#[must_use = "the serialized tool result must be returned to the caller"]
+fn ok_serialized<T: serde::Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
+    let v = serde_json::to_value(value)
+        .map_err(|e| ErrorData::internal_error(format!("serialize: {e}"), None))?;
+    ok_json(v)
 }
 
 // ---------------------------------------------------------------------------
@@ -903,14 +952,31 @@ fn handle_flush_insights(
             }
         }
 
-        let mut metadata = obj.get("metadata").cloned().unwrap_or_else(|| json!({}));
-        if let Value::Object(ref mut m) = metadata {
-            m.insert("source".to_owned(), json!("pre_compaction_flush"));
-        }
+        // Metadata must be absent/null or an object — a present non-object (e.g.
+        // `"metadata": "foo"`) is a malformed entry, rejected into `failed` rather than
+        // silently coerced (which would also drop the load-bearing insight marker). The
+        // marker is then always stamped onto a valid object, so a flushed insight is
+        // never invisible to get_recent_insights.
+        let mut metadata = match obj.get("metadata") {
+            None | Some(Value::Null) => serde_json::Map::new(),
+            Some(Value::Object(m)) => m.clone(),
+            Some(v) => {
+                failed.push(
+                    json!({ "index": i, "error": format!("metadata must be an object, got {v}") }),
+                );
+                continue;
+            }
+        };
+        metadata.insert("source".to_owned(), json!("pre_compaction_flush"));
+        // Insight marker read by memory_get_recent_insights (shared INSIGHT_MARKER_KEY).
+        metadata.insert(
+            INSIGHT_MARKER_KEY.to_owned(),
+            json!({ "flushed_at": Utc::now().to_rfc3339() }),
+        );
 
         let opts = AddFactOptions {
             importance,
-            metadata: Some(metadata),
+            metadata: Some(Value::Object(metadata)),
             ..Default::default()
         };
 
@@ -1457,6 +1523,92 @@ fn handle_load_context(
         .map_err(to_mcp_error)?;
 
     ok_json(depth::shape_project_context(&ctx, depth_level))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5a: Cognitive pipeline (dream cycle) handlers (#225)
+// ---------------------------------------------------------------------------
+
+/// Run the dream-cycle pipeline, optionally applying the report (default: apply).
+fn handle_dream_cycle(
+    args: &Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    // `apply` mutates the store, so a present-but-malformed value must NOT silently
+    // fall back to `true` — reject it. Absent/null → default true.
+    let apply = match args.get("apply") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(v) => {
+            return Err(ErrorData::invalid_params(
+                format!("'apply' must be a boolean, got {v}"),
+                None,
+            ));
+        }
+    };
+    let cycle = DefaultDreamCycle::with_defaults();
+    let report = engine.run_dream_cycle(&cycle).map_err(to_mcp_error)?;
+
+    let report_json = serde_json::to_value(&report)
+        .map_err(|e| ErrorData::internal_error(format!("serialize report: {e}"), None))?;
+
+    if apply {
+        let applied = engine.apply_cycle_report(&report).map_err(to_mcp_error)?;
+        let applied_json = serde_json::to_value(&applied)
+            .map_err(|e| ErrorData::internal_error(format!("serialize apply result: {e}"), None))?;
+        ok_json(json!({ "report": report_json, "applied": applied_json, "did_apply": true }))
+    } else {
+        ok_json(json!({ "report": report_json, "did_apply": false }))
+    }
+}
+
+/// Apply a client-supplied `CycleReport` (the gated path).
+fn handle_apply_cycle_report(
+    args: &Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let report_val = args
+        .get("report")
+        .ok_or_else(|| ErrorData::invalid_params("missing 'report'", None))?;
+    let report: CycleReport = serde_json::from_value(report_val.clone())
+        .map_err(|e| ErrorData::invalid_params(format!("invalid CycleReport: {e}"), None))?;
+    let applied = engine.apply_cycle_report(&report).map_err(to_mcp_error)?;
+    ok_serialized(&applied)
+}
+
+/// Return recent insight facts in a project scope subtree, newest-first.
+fn handle_get_recent_insights(
+    args: &Map<String, Value>,
+    engine: &MemoryEngine,
+) -> Result<CallToolResult, ErrorData> {
+    let project_path = get_str(args, "project_path")
+        .ok_or_else(|| ErrorData::invalid_params("missing 'project_path'", None))?;
+    // The schema declares `limit` as an integer `minimum: 1`; the MCP layer does not
+    // validate args against the schema, so enforce it here. A present-but-malformed
+    // value (string, negative, 0) is rejected rather than silently defaulting to 20 or
+    // returning an empty list indistinguishable from "no insights exist". Absent → 20.
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => 20,
+        Some(v) => match v.as_u64().and_then(|n| usize::try_from(n).ok()) {
+            Some(n) if n >= 1 => n,
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    format!("'limit' must be an integer >= 1, got {v}"),
+                    None,
+                ));
+            }
+        },
+    };
+    let depth_level = get_depth(args)?;
+
+    let facts = engine
+        .list_recent_insights(&project_path, limit)
+        .map_err(to_mcp_error)?;
+    let shaped: Vec<Value> = facts
+        .iter()
+        .map(|f| depth::shape_fact(f, depth_level, None))
+        .collect();
+    ok_json(json!({ "insights": shaped, "count": shaped.len() }))
 }
 
 #[cfg(test)]

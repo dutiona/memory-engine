@@ -175,6 +175,146 @@ async fn direct_format_embedding() {
 }
 
 // ---------------------------------------------------------------------------
+// flush_insights → get_recent_insights round-trip (#225)
+// ---------------------------------------------------------------------------
+
+/// Proves the writer (memory_flush_insights stamps the shared INSIGHT_MARKER_KEY)
+/// connects to the reader (memory_get_recent_insights queries that marker).
+#[tokio::test]
+async fn flush_insights_then_get_recent_insights_roundtrip() {
+    let server = MockServer::start().await;
+    let emb = make_embedding(DIM);
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        // `index` is REQUIRED for the batch (`embed_batch`) parse path that
+        // `flush_insights` exercises via `add_facts_batch` — the OpenAI batch
+        // parser sorts by it for order-safety. (The single-embed path tolerates
+        // its absence, which is why the other tests omit it.)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "index": 0, "embedding": emb }]
+        })))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    let body = tokio::task::spawn_blocking(move || {
+        let provider =
+            HttpEmbeddingProvider::new(format!("{uri}/v1/embeddings"), "test-model".into(), None, DIM, 5)
+                .unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let cfg = memory_engine::ActivityFilterConfig::default();
+
+        // Writer: flush an insight scoped to project:p (creates the scope, stamps the marker).
+        unwrap_ok(tools::dispatch(
+            "memory_flush_insights",
+            args(json!({ "insights": [{ "content": "re-gate before merge", "scope": "project:p" }] })),
+            &engine,
+            Some(&provider),
+            None,
+            DIM,
+            &cfg,
+        ));
+        // Add a plain (non-insight) fact in the same scope — must be excluded.
+        unwrap_ok(tools::dispatch(
+            "memory_add_fact",
+            args(json!({ "content": "ordinary fact", "scope": "project:p" })),
+            &engine,
+            Some(&provider),
+            None,
+            DIM,
+            &cfg,
+        ));
+        // Reader.
+        unwrap_ok(tools::dispatch(
+            "memory_get_recent_insights",
+            args(json!({ "project_path": "project:p" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &cfg,
+        ))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        body["count"].as_i64().unwrap(),
+        1,
+        "only the flushed insight is returned"
+    );
+    assert!(
+        body["insights"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("re-gate")
+    );
+}
+
+/// Two insights flushed in one batch must BOTH be readable — guards against a
+/// batch-indexing bug that drops or reorders the second item (the single-insight
+/// roundtrip above cannot catch that).
+#[tokio::test]
+async fn flush_two_insights_then_get_recent_returns_both() {
+    let server = MockServer::start().await;
+    let emb = make_embedding(DIM);
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "index": 0, "embedding": emb.clone() },
+                { "index": 1, "embedding": emb }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    let body = tokio::task::spawn_blocking(move || {
+        let provider = HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "test-model".into(),
+            None,
+            DIM,
+            5,
+        )
+        .unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let cfg = memory_engine::ActivityFilterConfig::default();
+
+        unwrap_ok(tools::dispatch(
+            "memory_flush_insights",
+            args(json!({ "insights": [
+                { "content": "insight alpha", "scope": "project:p" },
+                { "content": "insight beta", "scope": "project:p" }
+            ] })),
+            &engine,
+            Some(&provider),
+            None,
+            DIM,
+            &cfg,
+        ));
+        unwrap_ok(tools::dispatch(
+            "memory_get_recent_insights",
+            args(json!({ "project_path": "project:p" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &cfg,
+        ))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        body["count"].as_i64().unwrap(),
+        2,
+        "both flushed insights must be readable"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Dimension mismatch from remote server
 // ---------------------------------------------------------------------------
 
@@ -407,6 +547,61 @@ async fn flush_insights_partial_failure() {
     .unwrap();
     assert_eq!(body["added"].as_u64().unwrap(), 1);
     assert_eq!(body["failed_count"].as_u64().unwrap(), 2);
+}
+
+/// A present-but-non-object `metadata` is rejected per-entry into `failed` (not
+/// silently coerced to `{}`), while a sibling insight with valid metadata still flushes.
+#[tokio::test(flavor = "multi_thread")]
+async fn flush_insights_non_object_metadata_is_rejected() {
+    let server = MockServer::start().await;
+    let emb = make_embedding(DIM);
+    // Only the one valid insight reaches the batch embed → 1 indexed embedding.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "index": 0, "embedding": emb }]
+        })))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    let body = tokio::task::spawn_blocking(move || {
+        let provider = HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "test-model".into(),
+            None,
+            DIM,
+            5,
+        )
+        .unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let result = tools::dispatch(
+            "memory_flush_insights",
+            args(json!({
+                "insights": [
+                    { "content": "valid", "metadata": { "k": "v" } },
+                    { "content": "bad meta", "metadata": "not-an-object" }
+                ]
+            })),
+            &engine,
+            Some(&provider),
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        );
+        unwrap_ok(result)
+    })
+    .await
+    .unwrap();
+    assert_eq!(body["added"].as_u64().unwrap(), 1);
+    assert_eq!(body["failed_count"].as_u64().unwrap(), 1);
+    assert_eq!(body["failed"][0]["index"], json!(1));
+    assert!(
+        body["failed"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("metadata must be an object")
+    );
 }
 
 // ---------------------------------------------------------------------------
