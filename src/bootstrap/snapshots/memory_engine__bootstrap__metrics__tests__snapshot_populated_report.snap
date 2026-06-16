@@ -1,6 +1,5 @@
 ---
 source: src/bootstrap/metrics.rs
-assertion_line: 189
 expression: report
 ---
 sessions_processed: 3
@@ -10,6 +9,7 @@ entries_malformed: 2
 turns_reconstructed: 18
 candidates_found: 12
 facts_created: 8
+facts_reinforced: 2
 events_ingested: 15
 outcome_counts:
   success: 5

@@ -7,8 +7,9 @@
 //!   2. idempotency — re-running a bootstrapped session is a no-op (`skip_existing`);
 //!   3. `t_created` backdating — facts carry the historical session timestamp,
 //!      never `Utc::now()`;
-//!   4. NO cross-session fact dedup — the same fact in two sessions is stored
-//!      twice (relevant to a 9-month backfill).
+//!   4. cross-session dedup-with-reinforcement (#520) — the same fact in two
+//!      sessions is stored ONCE and reinforced (access_count bumped, t_created =
+//!      earliest, last_accessed = latest), relevant to a 9-month backfill.
 //!
 //! Hermetic: in-memory engine + zero-vector embedder. No network, no Ollama,
 //! no GPU contention (S0 is build-only). See `docs/audits/S0.3-bootstrap-audit.md`.
@@ -138,9 +139,9 @@ fn specs() -> Vec<SessionSpec> {
             vec![
                 // Convention turn — byte-identical (user + assistant) to session 3, so the
                 // extracted fact content matches VERBATIM across two distinct sessions: the
-                // real cross-session dedup probe. A content-hash dedup-on-insert would collapse
-                // the two identical facts, dropping the stored count below 2 and FAILING the
-                // no-dedup assertions below (which a mere substring match would not catch).
+                // cross-session dedup-with-reinforcement probe. insert_or_reinforce collapses
+                // the two identical facts into one stored row and reinforces it (access_count
+                // bumped, t_created = earliest, last_accessed = latest) — asserted below.
                 ("user", "Any formatting rule for commits?"),
                 (
                     "assistant",
@@ -164,7 +165,7 @@ const SHARED: &str = "always use rustfmt before every commit";
 // no-dedup) sharing one engine + recorder; kept as a single test on purpose.
 #[allow(clippy::too_many_lines)]
 #[test]
-fn dryrun_yield_backdate_idempotency_no_dedup() {
+fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
     let engine = MemoryEngine::builder(4).build().unwrap();
     let extractor = KeywordExtractor;
     let recorder = RecordingClassifier::default();
@@ -178,6 +179,7 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
 
     // --- First pass: yield ---
     let mut total_facts = 0;
+    let mut total_reinforced = 0;
     for (i, jsonl) in sessions.iter().enumerate() {
         let report = engine
             .bootstrap_session(
@@ -207,18 +209,29 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         assert_eq!(report.sessions_processed, 1, "session {i} should process");
         assert_eq!(report.events_ingested, 1, "one marker event per session");
         total_facts += report.facts_created;
+        total_reinforced += report.facts_reinforced;
     }
     println!("TOTAL facts (first pass) = {total_facts}");
     for (content, t) in recorder.seen.lock().unwrap().iter() {
         let snippet: String = content.chars().take(90).collect();
         println!("  fact t_created={t} content={snippet:?}");
     }
-    // Deterministic yield: sessions 1–4 → 1 fact each (4); session 5 → 2 facts (a
-    // convention turn identical to session 3's + a separate bug turn) => 6. Pins expected
-    // yield against extractor drift.
+    // Deterministic yield with dedup-with-reinforcement: sessions 1–4 → 1 created fact
+    // each (4); session 5 → its bug turn is created (1) while its convention turn (identical
+    // to session 3's) is REINFORCED, not created ⇒ 5 created + 1 reinforced. The classifier
+    // still sees all 6 candidate facts (it runs before the dedup decision).
     assert_eq!(
-        total_facts, 6,
-        "expected 6 facts (sessions 1–4 single + session-5 convention + bug), got {total_facts}"
+        total_facts, 5,
+        "expected 5 created facts (sessions 1–4 + session-5 bug; convention reinforced), got {total_facts}"
+    );
+    assert_eq!(
+        total_reinforced, 1,
+        "expected 1 reinforced fact (session-5 convention dedups onto session-3's), got {total_reinforced}"
+    );
+    assert_eq!(
+        recorder.seen.lock().unwrap().len(),
+        6,
+        "classifier should be offered all 6 candidate facts (it runs pre-dedup)"
     );
 
     // --- Idempotency: re-run all five, expect skips + zero new facts ---
@@ -236,6 +249,10 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         assert_eq!(report.sessions_processed, 0, "re-run must skip");
         assert_eq!(report.sessions_skipped, 1);
         assert_eq!(report.facts_created, 0);
+        assert_eq!(
+            report.facts_reinforced, 0,
+            "skipped session reinforces nothing"
+        );
         assert_eq!(
             report.events_ingested, 0,
             "skipped session ingests no marker"
@@ -260,48 +277,72 @@ fn dryrun_yield_backdate_idempotency_no_dedup() {
         assert!(t < &now, "t_created must be historical, got {t}");
     }
 
-    // --- No cross-session dedup: the IDENTICAL convention sentence appears verbatim
-    //     in sessions 3 and 5. Assert (a) it is stored more than once (no dedup) AND
-    //     (b) the copies originate in distinct backdated sessions (cross-session, not
-    //     merely session 5's intra-session dual-category fan-out). ---
-    let shared_copies = seen.iter().filter(|(c, _)| c.contains(SHARED)).count();
-    let shared_sessions: std::collections::BTreeSet<i64> = seen
+    // --- Cross-session dedup-with-reinforcement (#520): the IDENTICAL convention sentence
+    //     appears verbatim in sessions 3 and 5. The classifier runs BEFORE the dedup
+    //     decision, so it is offered both occurrences across two distinct backdated
+    //     sessions — that is the pre-dedup view, not the stored view. ---
+    let classifier_copies = seen.iter().filter(|(c, _)| c.contains(SHARED)).count();
+    let classifier_sessions: std::collections::BTreeSet<i64> = seen
         .iter()
         .filter(|(c, _)| c.contains(SHARED))
         .map(|(_, t)| t.timestamp())
         .collect();
     println!(
-        "shared convention: {shared_copies} stored copies across {} distinct sessions",
-        shared_sessions.len()
+        "shared convention: classifier saw {classifier_copies} copies across {} distinct sessions",
+        classifier_sessions.len()
     );
-    assert!(
-        shared_copies >= 2,
-        "identical fact must be stored more than once (no dedup), got {shared_copies}"
+    assert_eq!(
+        classifier_copies, 2,
+        "classifier (pre-dedup) must be offered both occurrences, got {classifier_copies}"
     );
-    assert!(
-        shared_sessions.len() >= 2,
-        "duplicate copies must originate in distinct backdated sessions (cross-session), got {}",
-        shared_sessions.len()
+    assert_eq!(
+        classifier_sessions.len(),
+        2,
+        "the two occurrences originate in distinct backdated sessions, got {}",
+        classifier_sessions.len()
     );
 
     // Drop the borrow so we can call engine methods below.
     drop(seen);
 
-    // --- Store-level no-dedup: query the persisted rows directly.
-    //     This is the authoritative check: both identical-content facts must
-    //     actually be present in the store, not merely have reached the
-    //     classifier.  The assertion stays true even if bootstrap is later
-    //     changed to skip classifier calls for duplicates (as long as it
-    //     still stores them), and it would catch a dedup-on-insert regression
-    //     that the recorder-only check cannot. ---
+    // --- Store-level dedup-with-reinforcement: query the persisted rows directly.
+    //     Authoritative check — the two identical-content occurrences collapse to ONE
+    //     stored row, reinforced: access_count bumped (one reinforcement), t_created
+    //     rolled back to the earliest session (2024), last_accessed advanced to the
+    //     latest (2025). Total active facts drop from 6 candidates to 5 stored. ---
     let stored_facts = engine.list_active_facts(None).unwrap();
-    let stored_shared_count = stored_facts
+    assert_eq!(
+        stored_facts.len(),
+        5,
+        "store must contain 5 active facts after dedup, got {}",
+        stored_facts.len()
+    );
+    let shared_rows: Vec<&Fact> = stored_facts
         .iter()
         .filter(|f| f.content.contains(SHARED))
-        .count();
-    assert!(
-        stored_shared_count >= 2,
-        "store must contain ≥2 rows with the shared convention text (no dedup-on-insert), \
-         got {stored_shared_count}"
+        .collect();
+    assert_eq!(
+        shared_rows.len(),
+        1,
+        "store must contain exactly ONE row for the shared convention (dedup-on-insert), got {}",
+        shared_rows.len()
+    );
+    let shared = shared_rows[0];
+    assert_eq!(
+        shared.access_count, 1,
+        "the shared convention must be reinforced once (access_count), got {}",
+        shared.access_count
+    );
+    assert_eq!(
+        shared.t_created.year(),
+        2024,
+        "t_created must roll back to the earliest occurrence (session 3, 2024), got {}",
+        shared.t_created.year()
+    );
+    assert_eq!(
+        shared.last_accessed.year(),
+        2025,
+        "last_accessed must advance to the latest occurrence (session 5, 2025), got {}",
+        shared.last_accessed.year()
     );
 }

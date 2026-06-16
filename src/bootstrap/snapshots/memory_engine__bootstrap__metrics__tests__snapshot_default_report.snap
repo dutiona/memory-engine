@@ -1,6 +1,5 @@
 ---
 source: src/bootstrap/metrics.rs
-assertion_line: 157
 expression: report
 ---
 sessions_processed: 0
@@ -10,6 +9,7 @@ entries_malformed: 0
 turns_reconstructed: 0
 candidates_found: 0
 facts_created: 0
+facts_reinforced: 0
 events_ingested: 0
 outcome_counts:
   success: 0
