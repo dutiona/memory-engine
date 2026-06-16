@@ -1215,6 +1215,61 @@ fn execute_query_scope_only() {
     assert_eq!(results[0].fact.content, "scoped fact");
 }
 
+/// Regression for the multi-segment scope-cache bug: `add_fact` on a path with
+/// depth > 1 (`user:michael/project:demo`) must make the fact retrievable via a
+/// `scope_subtree` query on that same path *in the same session*.
+///
+/// The defect was that `ensure_scope_with_conn` inserted only the leaf node into
+/// the in-memory `scope_tree`, leaving the intermediate `user:michael` link
+/// absent. `resolve_path` walks children from root, so it failed at the first
+/// missing segment and `scope_subtree("user:michael/project:demo")` resolved to
+/// `None` → 0 results, even though the DB held the full chain.
+#[test]
+fn execute_query_subtree_multi_segment_scope() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder = MockEmbedder { dim: DIM };
+
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "multi-segment scoped fact".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: None,
+                scope: Some("user:michael/project:demo".into()),
+                opts: None,
+            },
+            &embedder,
+            None,
+        )
+        .unwrap();
+
+    // Subtree of the deep leaf must find the fact.
+    let leaf = engine
+        .execute_query(&MemoryQuery::new().scope_subtree("user:michael/project:demo"))
+        .unwrap()
+        .results;
+    assert_eq!(leaf.len(), 1, "leaf subtree must retrieve the fact");
+    assert_eq!(leaf[0].fact.content, "multi-segment scoped fact");
+
+    // Subtree of an intermediate ancestor must also find the descendant fact.
+    let ancestor = engine
+        .execute_query(&MemoryQuery::new().scope_subtree("user:michael"))
+        .unwrap()
+        .results;
+    assert_eq!(
+        ancestor.len(),
+        1,
+        "ancestor subtree must retrieve the descendant fact"
+    );
+
+    // Exact match on the deep leaf must also resolve.
+    let exact = engine
+        .execute_query(&MemoryQuery::new().scope_exact("user:michael/project:demo"))
+        .unwrap()
+        .results;
+    assert_eq!(exact.len(), 1, "exact deep-path query must resolve");
+}
+
 #[test]
 fn execute_query_fact_type_filter() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();

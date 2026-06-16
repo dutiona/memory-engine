@@ -61,6 +61,11 @@ use crate::types::{AddFactRequest, ConsolidationLevel, Fact, NewEvent, NewFact, 
 /// };
 /// let id = async_engine.add_fact(req, embedder, None).await?;
 /// assert!(id > 0);
+///
+/// // Read the fact back through a second spawn_blocking hop to prove the
+/// // async round-trip actually persisted it (not just returned an id).
+/// let fact = async_engine.get_fact(id).await?;
+/// assert_eq!(fact.content, "hello");
 /// # Ok::<(), MemoryError>(())
 /// # }).unwrap();
 /// ```

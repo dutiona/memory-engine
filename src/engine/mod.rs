@@ -523,11 +523,34 @@ impl MemoryEngine {
     ///
     /// Shared helper for [`ensure_scope_path()`] and [`add_fact()`] to avoid
     /// duplicating scope resolution logic.
+    ///
+    /// `ensure_path` creates *every* segment of a multi-level path in the DB but
+    /// returns only the leaf id. The in-memory [`ScopeTree`] must mirror the DB,
+    /// so we insert the entire newly-resolved chain — leaf **and all ancestors up
+    /// to (but excluding) the root** — not just the leaf. Inserting only the leaf
+    /// would leave `resolve_path` (which walks `children` from root) unable to
+    /// traverse the missing intermediate links, making any depth > 1 scope query
+    /// (`scope_subtree`/`scope_exact`/…) return zero results in-session even
+    /// though the facts are correctly persisted. [`ScopeTree::insert`] is
+    /// idempotent by id, so re-inserting shared ancestors is a no-op.
     fn ensure_scope_with_conn(&self, conn: &Connection, path: &str) -> Result<i64> {
         let scope_store = ScopeStore::new(conn);
         let id = scope_store.ensure_path(path)?;
-        let node = scope_store.get(id)?;
-        self.scope_tree.write().insert(node);
+
+        // Walk leaf → root via parent_id, caching every node into the tree.
+        // Stop at the root (always present) and guard against a malformed
+        // parent cycle so a hostile DB can't spin this loop forever.
+        let mut tree = self.scope_tree.write();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            if node_id == ScopeTree::root_id() || !seen.insert(node_id) {
+                break;
+            }
+            let node = scope_store.get(node_id)?;
+            current = node.parent_id;
+            tree.insert(node);
+        }
         Ok(id)
     }
 

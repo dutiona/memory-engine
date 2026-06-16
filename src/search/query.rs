@@ -36,24 +36,30 @@ const DEFAULT_LIMIT: usize = 50;
 /// let dim = 64;
 /// let engine = MemoryEngine::builder(dim).build()?;
 /// let embedder = HashEmbedder { dim };
+/// // A deep, hierarchical scope: the fact lives under `user:michael/project:demo`.
+/// // `add_fact` auto-creates every missing segment (`user:michael`, then
+/// // `project:demo`) in both the database and the in-memory scope tree.
 /// engine.add_fact(
 ///     &AddFactRequest {
 ///         content: "deployment issue in the demo project".into(),
 ///         fact_type: FactType::Episodic,
 ///         source_event_id: None,
-///         scope: Some("project:demo".into()),
+///         scope: Some("user:michael/project:demo".into()),
 ///         opts: None,
 ///     },
 ///     &embedder,
 ///     None,
 /// )?;
 ///
-/// // Scoped retrieval: all facts in the subtree rooted at `project:demo`, capped
-/// // at 20 results. An empty query (no `text`/`embedding`) returns every
-/// // temporally-valid fact in scope, sorted by importance.
+/// // Scoped retrieval over a *subtree*: every fact rooted at the `user:michael`
+/// // ancestor (which includes the deeper `project:demo` child), capped at 20
+/// // results. An empty query (no `text`/`embedding`) returns every
+/// // temporally-valid fact in scope, sorted by importance. This exercises the
+/// // multi-segment scope path: the intermediate `user:michael` node must be
+/// // resolvable for the subtree walk to reach its descendant.
 /// let response = engine.execute_query(
 ///     &MemoryQuery::new()
-///         .scope_subtree("project:demo")
+///         .scope_subtree("user:michael")
 ///         .limit(20),
 /// )?;
 /// assert_eq!(response.results.len(), 1);
