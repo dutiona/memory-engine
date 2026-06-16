@@ -80,10 +80,11 @@ impl MemoryEngine {
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<i64> {
         let now = Utc::now();
+        // Reject an out-of-range importance BEFORE any work — the opts clone,
+        // embedding, or persisting: no event, no fact, no slow embedding call,
+        // and no (potentially expensive) metadata clone for an invalid request.
+        Self::validate_importance(req.opts.as_ref().and_then(|o| o.importance))?;
         let opts = req.opts.clone().unwrap_or_default();
-        // Reject an out-of-range importance BEFORE embedding or persisting:
-        // no event, no fact, no slow embedding call for an invalid request.
-        Self::validate_importance(opts.importance)?;
 
         // Embed OUTSIDE the write lock (potentially slow)
         let embedding = embedder.embed(&req.content)?;
