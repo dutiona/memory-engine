@@ -251,6 +251,69 @@ async fn flush_insights_then_get_recent_insights_roundtrip() {
     );
 }
 
+/// Two insights flushed in one batch must BOTH be readable — guards against a
+/// batch-indexing bug that drops or reorders the second item (the single-insight
+/// roundtrip above cannot catch that).
+#[tokio::test]
+async fn flush_two_insights_then_get_recent_returns_both() {
+    let server = MockServer::start().await;
+    let emb = make_embedding(DIM);
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "index": 0, "embedding": emb.clone() },
+                { "index": 1, "embedding": emb }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    let body = tokio::task::spawn_blocking(move || {
+        let provider = HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "test-model".into(),
+            None,
+            DIM,
+            5,
+        )
+        .unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let cfg = memory_engine::ActivityFilterConfig::default();
+
+        unwrap_ok(tools::dispatch(
+            "memory_flush_insights",
+            args(json!({ "insights": [
+                { "content": "insight alpha", "scope": "project:p" },
+                { "content": "insight beta", "scope": "project:p" }
+            ] })),
+            &engine,
+            Some(&provider),
+            None,
+            DIM,
+            &cfg,
+        ));
+        unwrap_ok(tools::dispatch(
+            "memory_get_recent_insights",
+            args(json!({ "project_path": "project:p" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &cfg,
+        ))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        body["count"].as_i64().unwrap(),
+        2,
+        "both flushed insights must be readable"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Dimension mismatch from remote server
 // ---------------------------------------------------------------------------

@@ -133,3 +133,15 @@ Per-task disposition (T0–T14). Plan size: 15 tasks. Modified: 2 (T3, T12). Add
 | T14 — Git ops | In progress | Commit → PR → `/super-review` → rebase+re-gate → squash-merge (pending user authorization). |
 
 **Decision E (unknown-scope semantics):** shipped as empty-vec (not `NotFound`), per the fixed decision. Flagged for reviewer preference.
+
+### Review Round 1 (3 adversarial subagent reviewers + gemini bot)
+
+Reviewers: correctness/SQL (rust-specialist), security/boundary (code-reviewer), tests/contract (test-engineer). Findings actioned in commit `fix(...)` on this branch:
+
+- **[HIGH] `memory_apply_cycle_report` validation bypass** (security lens): a client-supplied `CycleReport` with an `AddFact` delta skipped the `validate_importance` / `check_str_size` / `check_json_size` guards the trusted `add_fact` path enforces — letting a hostile report write out-of-range `importance` (no column CHECK → poisons Ebbinghaus decay) or oversized payloads. **Fixed** in `validate_report` (engine, shared by all DreamCycle consumers — correct altitude), with two engine tests (`add_fact_out_of_range_importance_rejected`, `add_fact_oversized_content_rejected`). Required widening `MemoryEngine::validate_importance` to `pub(crate)`.
+- **[HIGH] `limit=0` slipped through** (tests lens): schema declares `minimum:1` but the handler accepted `limit=0` → silent empty result. **Fixed** with an explicit guard in `handle_get_recent_insights` + test `get_recent_insights_limit_zero_is_invalid_params`.
+- **[HIGH] empty-store `dream_cycle` untested** + MEDIUM gaps: added `dream_cycle_on_empty_store_succeeds_with_no_deltas`, `apply_cycle_report_missing_report_key_is_invalid_params`, `get_recent_insights_sparse_depth_shapes_facts`, and a 2-insight batch writer→reader roundtrip (`flush_two_insights_then_get_recent_returns_both`).
+- **[MEDIUM] json_extract/json_type asymmetry**: added a docstring cross-reference to the complementary `list_undreamt_in_period` (presence vs absence predicate).
+- **Dispositioned, no change:** `pub` (not `pub(crate)`) on `list_active_by_metadata_key_recent` — kept to match its sibling `list_by_scopes_recent`; `FactStore` is crate-internal so it is effectively `pub(crate)` at the boundary, and a `debug_assert` + rustdoc contract guard the trusted-literal interpolation. CycleError mis-tier for a hypothetical buggy custom `DreamCycle` — documented/benign with the shipped `DefaultDreamCycle`.
+
+Gate after fixes: workspace 1110 passed / 4 ignored; `--all-features` 926 passed / 4 ignored; clippy exit 0; fmt clean.

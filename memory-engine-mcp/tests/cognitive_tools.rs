@@ -158,6 +158,73 @@ fn apply_cycle_report_malformed_json_is_invalid_params() {
 }
 
 #[test]
+fn apply_cycle_report_missing_report_key_is_invalid_params() {
+    let (engine, _d) = engine();
+    // The `report` key is absent entirely (distinct from present-but-malformed).
+    let err = call(&engine, "memory_apply_cycle_report", args(&[])).unwrap_err();
+    assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+}
+
+#[test]
+fn dream_cycle_on_empty_store_succeeds_with_no_deltas() {
+    let (engine, _d) = engine();
+    // No facts seeded: DefaultDreamCycle guards empty/under-min buckets, so the cycle
+    // must succeed (not error) and produce an empty delta set.
+    let body = extract_json(
+        &call(
+            &engine,
+            "memory_dream_cycle",
+            args(&[("apply", json!(true))]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(body["did_apply"], json!(true));
+    assert!(
+        body["report"]["deltas"].as_array().unwrap().is_empty(),
+        "empty store yields no deltas"
+    );
+}
+
+#[test]
+fn get_recent_insights_limit_zero_is_invalid_params() {
+    let (engine, _d) = engine();
+    seed(&engine, "insight", Some("project:p"), true);
+    // Schema declares minimum:1; limit=0 must be rejected, not silently empty.
+    let err = call(
+        &engine,
+        "memory_get_recent_insights",
+        args(&[("project_path", json!("project:p")), ("limit", json!(0))]),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+}
+
+#[test]
+fn get_recent_insights_sparse_depth_shapes_facts() {
+    let (engine, _d) = engine();
+    seed(&engine, "insight one", Some("project:p"), true);
+    let body = extract_json(
+        &call(
+            &engine,
+            "memory_get_recent_insights",
+            args(&[
+                ("project_path", json!("project:p")),
+                ("depth", json!("sparse")),
+            ]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(body["count"], json!(1));
+    // Sparse shaping drops heavy fields (embedding/content_hash) but keeps id + content.
+    let fact = &body["insights"][0];
+    assert!(fact["id"].as_i64().is_some());
+    assert!(
+        fact.get("embedding").is_none(),
+        "sparse must omit embedding"
+    );
+}
+
+#[test]
 fn get_recent_insights_returns_marked_facts_scoped_and_limited() {
     let (engine, _d) = engine();
     seed(&engine, "insight one", Some("project:p"), true);

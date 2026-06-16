@@ -1567,6 +1567,12 @@ fn handle_get_recent_insights(
     let project_path = get_str(&args, "project_path")
         .ok_or_else(|| ErrorData::invalid_params("missing 'project_path'", None))?;
     let limit = get_usize(&args, "limit").unwrap_or(20);
+    // The schema declares `minimum: 1`; enforce it here since the MCP layer does not
+    // validate args against the schema. A silent `limit=0` would return an empty list
+    // indistinguishable from "no insights exist".
+    if limit == 0 {
+        return Err(ErrorData::invalid_params("'limit' must be >= 1", None));
+    }
     let depth_level = get_depth(&args)?;
 
     let facts = engine

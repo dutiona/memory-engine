@@ -940,6 +940,12 @@ impl<'a> FactStore<'a> {
     /// here — it returns the text `'null'` for a present-null value, so
     /// `json_type(...) IS NOT NULL` would wrongly include `{"<key>": null}`.)
     ///
+    /// Contrast `list_undreamt_in_period`, which uses `json_type(...) IS NULL` for the
+    /// *complementary* (absence) predicate — there `json_type` is the correct idiom
+    /// because `json_extract(...) IS NULL` would conflate absent with present-`null`.
+    /// The two methods diverge by design: `json_extract` for presence, `json_type` for
+    /// absence.
+    ///
     /// `marker_key` **MUST** be a trusted caller-supplied literal (an engine const
     /// such as [`INSIGHT_MARKER_KEY`](crate::INSIGHT_MARKER_KEY)): it is interpolated
     /// into the SQL JSON path, **never bound**, so it must never carry client input.

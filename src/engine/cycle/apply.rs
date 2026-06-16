@@ -282,6 +282,15 @@ impl MemoryEngine {
                             actual: nf.embedding.len(),
                         });
                     }
+                    // Parity with the trusted `add_fact` ingest path: a report can be
+                    // client-supplied (via the `memory_apply_cycle_report` MCP tool), so
+                    // an `AddFact` delta must clear the same importance/payload guards.
+                    // Without this, a hostile report could write an out-of-range
+                    // `importance` (no column CHECK → poisons Ebbinghaus decay globally)
+                    // or an oversized `content`/`metadata` that ordinary ingest forbids.
+                    Self::validate_importance(Some(nf.importance))?;
+                    crate::limits::check_str_size(&nf.content, "fact content")?;
+                    crate::limits::check_json_size(&nf.metadata, "fact metadata")?;
                 }
                 CycleDelta::AdjustScore {
                     fact_id,
@@ -717,6 +726,50 @@ mod tests {
             .apply_cycle_report(&report(vec![CycleDelta::AddFact(nf)], vec![]))
             .unwrap_err();
         assert!(matches!(err, MemoryError::EmbeddingDimension { .. }));
+    }
+
+    /// A client-supplied report (via `memory_apply_cycle_report`) must not bypass the
+    /// importance guard the trusted `add_fact` path enforces: an out-of-range
+    /// `importance` would otherwise persist (no column CHECK) and poison decay/forget
+    /// ranking. The whole report is rejected and nothing is written.
+    #[test]
+    fn add_fact_out_of_range_importance_rejected() {
+        let engine = engine();
+        let nf = NewFact::builder("hostile", vec![0.1, 0.2, 0.3, 0.4], FactType::Semantic)
+            .importance(5.0) // outside [0, 1]
+            .scope_id(1)
+            .build();
+        let err = engine
+            .apply_cycle_report(&report(vec![CycleDelta::AddFact(nf)], vec![]))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Conflict(crate::error::ConflictError::PolicyParameter(_))
+        ));
+        // Nothing was written — validation runs before any delta is applied.
+        let stats = engine.statistics().unwrap();
+        assert_eq!(
+            stats.facts.total, 0,
+            "rejected report must not write any fact"
+        );
+    }
+
+    /// Same boundary, payload-size dimension: an oversized `content` in an `AddFact`
+    /// delta is rejected with the same guard `add_fact` uses (issue #572 / L10).
+    #[test]
+    fn add_fact_oversized_content_rejected() {
+        let engine = engine();
+        let huge = "x".repeat(crate::limits::MAX_PAYLOAD_BYTES + 1);
+        let nf = NewFact::builder(huge, vec![0.1, 0.2, 0.3, 0.4], FactType::Semantic)
+            .scope_id(1)
+            .build();
+        let err = engine
+            .apply_cycle_report(&report(vec![CycleDelta::AddFact(nf)], vec![]))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Conflict(crate::error::ConflictError::PayloadTooLarge { .. })
+        ));
     }
 
     #[test]
