@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use rusqlite::Connection;
@@ -229,13 +229,20 @@ impl ConnectionPool {
         }
 
         let mut conns = self.read_conns.lock();
+        // Pre-compute an absolute deadline so the total wait is strictly
+        // bounded by `read_acquire_timeout`. `wait_for` would reset the full
+        // timeout on every loop iteration, so under repeated spurious wakeups
+        // (or notify-then-raced-steal) the thread could block far longer than
+        // configured — even indefinitely. `wait_until` shares one fixed
+        // ceiling across all iterations.
+        let deadline = Instant::now() + self.read_acquire_timeout;
         while conns.is_empty() {
-            // `wait_for` returns once notified, or when the timeout elapses.
+            // `wait_until` returns once notified, or when `deadline` passes.
             // `timed_out()` distinguishes the two; re-check `is_empty()` to
             // guard against spurious wakeups (notified but raced).
             if self
                 .read_available
-                .wait_for(&mut conns, self.read_acquire_timeout)
+                .wait_until(&mut conns, deadline)
                 .timed_out()
                 && conns.is_empty()
             {
@@ -487,6 +494,49 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "acquire did not return within bound: {elapsed:?}"
         );
+    }
+
+    /// The acquire wait must be bounded by an *absolute* deadline, not a
+    /// per-wakeup timeout (#573 L16, Gemini review). A storm of spurious
+    /// wakeups must not be able to extend the wait past `read_acquire_timeout`.
+    ///
+    /// Mutation guard: with the old `wait_for(timeout)` each wakeup reset the
+    /// full budget, so under this wake-storm `read()` could not return until
+    /// the storm stopped (~600ms) — failing the `< 400ms` assert. With
+    /// `wait_until(deadline)` the deadline is immune to wakeups and it returns
+    /// at ~100ms.
+    #[test]
+    fn pool_read_acquire_deadline_survives_spurious_wakeups() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
+        pool.read_acquire_timeout = Duration::from_millis(100);
+
+        // Hold the only read connection so the pool stays exhausted.
+        let _held = pool.read().unwrap();
+
+        std::thread::scope(|s| {
+            // Spuriously wake the acquire-waiter far longer than the timeout.
+            s.spawn(|| {
+                let storm_start = Instant::now();
+                while storm_start.elapsed() < Duration::from_millis(600) {
+                    pool.read_available.notify_one();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+
+            let start = Instant::now();
+            // `ReadConn` is not `Debug`; match inline so the significant-Drop
+            // `Ok` guard isn't bound to a local.
+            let timed_out = matches!(pool.read(), Err(MemoryError::Pool(_)));
+            let elapsed = start.elapsed();
+
+            assert!(timed_out, "expected Err(MemoryError::Pool), got Ok");
+            assert!(
+                elapsed < Duration::from_millis(400),
+                "acquire ignored the absolute deadline under spurious wakeups: {elapsed:?}"
+            );
+        });
     }
 
     /// After a connection is checked out and returned, a subsequent acquire
