@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{
@@ -107,6 +107,72 @@ impl<'a> FactStore<'a> {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Insert a fact, or reinforce an existing active fact with identical content
+    /// in the same scope.
+    ///
+    /// A bulk backfill (autonomous-agent-project#53) re-encounters recurring facts
+    /// (conventions, decisions) across many sessions; inserting each occurrence
+    /// duplicates rows. Instead, if an active (`t_expired IS NULL`) fact with the
+    /// same `content_hash` **and** identical content exists in the same `scope_id`,
+    /// this reinforces it — increments `access_count`, advances `last_accessed` to
+    /// the later timestamp, and rolls `t_created` back to the earlier one (so
+    /// first-seen and last-seen are independent of import order) — and returns its
+    /// id. Otherwise it inserts a new row.
+    ///
+    /// This instantiates "memory decays unless reinforced": a re-mention strengthens
+    /// the recency/frequency signal rather than spawning a duplicate. It is
+    /// deliberately **not** a global `UNIQUE` constraint — identical content in
+    /// different scopes is legitimate, and the reinforce-vs-insert decision is
+    /// per-scope and active-only.
+    ///
+    /// Returns `(id, reinforced)`: `reinforced` is `true` when an existing fact was
+    /// reinforced instead of a new row inserted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::EmbeddingDimension` if embedding length != `embed_dim`.
+    /// Returns `MemoryError::Database` on query or insert failure.
+    pub fn insert_or_reinforce(&self, fact: &NewFact) -> Result<(i64, bool)> {
+        if fact.embedding.len() != self.embed_dim {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: self.embed_dim,
+                actual: fact.embedding.len(),
+            });
+        }
+        let hash = content_hash(&fact.content);
+        // content_hash is index-backed (idx_facts_hash); the content equality guard
+        // rejects the astronomically-unlikely 128-bit hash collision.
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM facts
+                 WHERE content_hash = ?1 AND content = ?2 AND scope_id = ?3 AND t_expired IS NULL
+                 ORDER BY id LIMIT 1",
+                params![hash, fact.content, fact.scope_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match existing {
+            Some(id) => {
+                // RFC-3339 produced by to_rfc3339() sorts lexicographically ==
+                // chronologically, so SQL min/max give earliest/latest.
+                let t_created = fact.t_created.to_rfc3339();
+                let last_accessed = fact.last_accessed.to_rfc3339();
+                self.conn.execute(
+                    "UPDATE facts
+                     SET access_count = access_count + 1,
+                         t_created = min(t_created, ?1),
+                         last_accessed = max(last_accessed, ?2)
+                     WHERE id = ?3",
+                    params![t_created, last_accessed, id],
+                )?;
+                Ok((id, true))
+            }
+            None => Ok((self.insert(fact)?, false)),
+        }
     }
 
     /// Get a fact by id, including full embedding deserialization.
@@ -864,6 +930,109 @@ mod tests {
         assert_eq!(retrieved.content, "Rust is a systems language");
         assert_eq!(retrieved.fact_type, FactType::Episodic);
         assert!(!retrieved.content_hash.is_empty());
+    }
+
+    #[test]
+    fn insert_or_reinforce_dedups_and_reinforces_in_scope() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut first = make_fact("always use rustfmt", vec![0.1; DIM]);
+        first.t_created = "2024-07-20T14:00:00Z".parse().unwrap();
+        first.last_accessed = first.t_created;
+        let (id, reinforced) = store.insert_or_reinforce(&first).unwrap();
+        assert!(!reinforced, "first occurrence inserts");
+
+        let mut again = make_fact("always use rustfmt", vec![0.9; DIM]);
+        again.t_created = "2025-01-12T10:00:00Z".parse().unwrap();
+        again.last_accessed = again.t_created;
+        let (id2, reinforced2) = store.insert_or_reinforce(&again).unwrap();
+        assert_eq!(id2, id, "reinforce returns the existing id");
+        assert!(reinforced2, "second occurrence reinforces");
+
+        assert_eq!(
+            store.list_active(None).unwrap().len(),
+            1,
+            "deduped to one row"
+        );
+        let got = store.get(id).unwrap();
+        assert_eq!(got.access_count, 1, "reinforced once");
+        assert_eq!(
+            got.t_created.timestamp(),
+            first.t_created.timestamp(),
+            "t_created rolls back to the earliest occurrence"
+        );
+        assert_eq!(
+            got.last_accessed.timestamp(),
+            again.last_accessed.timestamp(),
+            "last_accessed advances to the latest occurrence"
+        );
+    }
+
+    #[test]
+    fn insert_or_reinforce_timestamps_are_order_independent() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        // Insert the LATER occurrence first, then the EARLIER one.
+        let mut late = make_fact("conv", vec![0.1; DIM]);
+        late.t_created = "2025-01-12T10:00:00Z".parse().unwrap();
+        late.last_accessed = late.t_created;
+        let (id, _) = store.insert_or_reinforce(&late).unwrap();
+        let mut early = make_fact("conv", vec![0.1; DIM]);
+        early.t_created = "2024-07-20T14:00:00Z".parse().unwrap();
+        early.last_accessed = early.t_created;
+        store.insert_or_reinforce(&early).unwrap();
+        let got = store.get(id).unwrap();
+        assert_eq!(
+            got.t_created.timestamp(),
+            early.t_created.timestamp(),
+            "earliest t_created wins regardless of import order"
+        );
+        assert_eq!(
+            got.last_accessed.timestamp(),
+            late.last_accessed.timestamp(),
+            "latest last_accessed wins"
+        );
+    }
+
+    #[test]
+    fn insert_or_reinforce_distinguishes_scope_and_content() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'other', 1)",
+            [],
+        )
+        .unwrap();
+        let mut a = make_fact("same text", vec![0.1; DIM]);
+        a.scope_id = 1;
+        let mut b = make_fact("same text", vec![0.1; DIM]);
+        b.scope_id = 2;
+        let (_, ra) = store.insert_or_reinforce(&a).unwrap();
+        let (_, rb) = store.insert_or_reinforce(&b).unwrap();
+        assert!(
+            !ra && !rb,
+            "identical content in different scopes is not deduped"
+        );
+        let (_, rc) = store
+            .insert_or_reinforce(&make_fact("different text", vec![0.1; DIM]))
+            .unwrap();
+        assert!(!rc, "different content is not deduped");
+        assert_eq!(store.list_active(None).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn insert_or_reinforce_ignores_expired_facts() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let (id, _) = store
+            .insert_or_reinforce(&make_fact("convention", vec![0.1; DIM]))
+            .unwrap();
+        store.expire(id, Utc::now()).unwrap();
+        let (id2, reinforced) = store
+            .insert_or_reinforce(&make_fact("convention", vec![0.1; DIM]))
+            .unwrap();
+        assert!(!reinforced, "an expired fact must not be reinforced");
+        assert_ne!(id2, id, "a fresh row is inserted instead");
     }
 
     #[test]

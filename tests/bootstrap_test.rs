@@ -172,7 +172,16 @@ fn bootstrap_skip_existing_false_allows_reimport() {
         .unwrap();
     assert_eq!(report2.sessions_processed, 1);
     assert_eq!(report2.sessions_skipped, 0);
-    assert_eq!(report2.facts_created, first_facts);
+    // Re-processed (not skipped), but dedup-with-reinforcement (#520) reinforces the
+    // already-stored facts instead of duplicating them.
+    assert_eq!(
+        report2.facts_created, 0,
+        "re-import creates no new rows — the facts already exist"
+    );
+    assert_eq!(
+        report2.facts_reinforced, first_facts,
+        "re-import reinforces the existing facts"
+    );
 }
 
 #[test]

@@ -270,10 +270,20 @@ fn bootstrap_within_savepoint(
                 is_pinned,
             };
 
-            fact_store.insert(&new_fact)?;
+            // Dedup-with-reinforcement (#520): a fact whose content already exists
+            // (active, same scope) is reinforced — recency/frequency bumped — rather
+            // than duplicated. A 9-month backfill re-encounters recurring conventions
+            // and decisions across sessions; this collapses them to one reinforced row.
+            let (_, reinforced) = fact_store.insert_or_reinforce(&new_fact)?;
+            if reinforced {
+                // A reinforcement adds no new row, so it does not count toward
+                // prewarm metrics or the created-fact importance average.
+                report.facts_reinforced += 1;
+                continue;
+            }
             report.facts_created += 1;
 
-            // Update prewarm metrics
+            // Update prewarm metrics (newly-created rows only)
             match fact.fact_type {
                 FactType::Episodic => report.prewarm_metrics.episodic_count += 1,
                 FactType::Semantic => report.prewarm_metrics.semantic_count += 1,

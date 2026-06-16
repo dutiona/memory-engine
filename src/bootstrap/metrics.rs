@@ -34,6 +34,8 @@ pub struct BootstrapReport {
     pub turns_reconstructed: usize,
     pub candidates_found: usize,
     pub facts_created: usize,
+    /// Existing facts reinforced (dedup-with-reinforcement) instead of duplicated.
+    pub facts_reinforced: usize,
     pub events_ingested: usize,
     pub outcome_counts: OutcomeCounts,
     pub category_counts: CategoryCounts,
@@ -50,6 +52,7 @@ impl BootstrapReport {
         self.turns_reconstructed += other.turns_reconstructed;
         self.candidates_found += other.candidates_found;
         self.facts_created += other.facts_created;
+        self.facts_reinforced += other.facts_reinforced;
         self.events_ingested += other.events_ingested;
         self.outcome_counts.success += other.outcome_counts.success;
         self.outcome_counts.failure += other.outcome_counts.failure;
@@ -174,6 +177,7 @@ mod tests {
             turns_reconstructed: 18,
             candidates_found: 12,
             facts_created: 8,
+            facts_reinforced: 2,
             events_ingested: 15,
             outcome_counts: OutcomeCounts {
                 success: 5,
