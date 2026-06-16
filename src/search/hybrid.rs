@@ -211,12 +211,23 @@ pub fn hybrid_search(
     let effective_limit = effective_target;
     let ranked_count = ranked.len();
     let store = FactStore::new(conn, embed_dim);
+
+    // Batch-materialize all ranked ids in a single round-trip, then re-order
+    // to the ranked order below. Fetching every ranked id (not just the first
+    // `effective_limit`) preserves the previous semantics: the temporal
+    // post-filter can drop candidates, so later ranked ids may be needed to
+    // fill the limit. The map keys back to ranked order; ids the store failed
+    // to load (e.g. raced deletion) are simply absent and skipped, matching
+    // the prior per-id `store.get` warn-and-continue behavior.
+    let ranked_ids: Vec<i64> = ranked.iter().map(|&(id, _)| id).collect();
+    let mut facts_by_id = store.get_many(&ranked_ids)?;
+
     let mut results = Vec::new();
     for (id, score) in ranked {
         if results.len() >= effective_limit {
             break;
         }
-        let Ok(fact) = store.get(id) else {
+        let Some(fact) = facts_by_id.remove(&id) else {
             tracing::warn!("failed to load fact id={id} during result collection, skipping");
             continue;
         };
