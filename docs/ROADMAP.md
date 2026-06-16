@@ -205,7 +205,7 @@ Two new Phase 5 issues (#212, #213) and two existing-issue updates (#49, #133) f
 
 ### Phase 4: Operability & MCP Server ✅
 
-**Design:** [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md)
+**Design:** [Future Phases Design plan (archived: memory-engine#605)](https://github.com/dutiona/memory-engine/issues/605)
 
 #### Prerequisites (gate Phase 4 — completed in parallel)
 
@@ -306,7 +306,7 @@ Non-blocking incremental improvements to #31.
 
 **Theme:** Close the Memory → Wisdom gap identified by the [four-layer cognitive architecture](https://github.com/dutiona/research-index/blob/master/docs/insights/four-layer-cognitive-architecture.md). Make the engine self-improving.
 
-**Design:** Community research synthesis (5 projects) + three-way debate (Claude/Codex/Gemini, 2 rounds, 7 questions) + context adaptation survey (6 papers, 2026-03-19). See `docs/design/debate-phase5/synthesis.md`, `docs/design/2026-03-12-community-research-synthesis.md`, and `~/dev/autonomous-agent-project/docs/summaries/05-context-adaptation-research.md`.
+**Design:** Community research synthesis (5 projects) + three-way debate (Claude/Codex/Gemini, 2 rounds, 7 questions) + context adaptation survey (6 papers, 2026-03-19). The Phase 5 debate decisions are captured in [ADR 0010](design/adr/0010-wisdom-revision-gate-dsl.md) and [ADR 0014](design/adr/0014-delta-based-cycle-report.md); the community research synthesis was migrated to the research wiki (reify-research). See also `~/dev/autonomous-agent-project/docs/summaries/05-context-adaptation-research.md`.
 
 #### Phase 5a: Minimum Viable Cognitive Pipeline
 
@@ -412,7 +412,7 @@ Sourced from `~/dev/autonomous-agent-project/raw/docs/summaries/04-results-and-r
 
 ### Phase 6: Knowledge Integration 🔲
 
-**Design:** [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md)
+**Design:** [Future Phases Design plan (archived: memory-engine#605)](https://github.com/dutiona/memory-engine/issues/605)
 
 **Gate:** Phase 5a minimum (DreamCycle default impl #49, cognitive MCP #225) should be complete before starting core Phase 6 work. #158 (`agent_id`) is a prerequisite for #166 (ACL).
 
@@ -723,5 +723,5 @@ Knowledge (raw content)       → Knowledge Base (research-index)
 
 The engine sits at the **Memory** layer. It consolidates experiences, forgets irrelevant ones, and (Phase 5) proposes promotions to the **Wisdom** layer. It does not own knowledge (that's research-index) or intelligence (that's the model). This separation prevents the category error of applying decay to knowledge or treating all persistent data identically.
 
-See [`docs/design/plans/2026-03-09-future-phases-design.md`](design/plans/2026-03-09-future-phases-design.md) for Phase 4-6 design rationale.
+See [Future Phases Design plan (archived: memory-engine#605)](https://github.com/dutiona/memory-engine/issues/605) for Phase 4-6 design rationale.
 See [four-layer cognitive architecture](https://github.com/dutiona/research-index/blob/master/docs/insights/four-layer-cognitive-architecture.md) for the foundational framework.

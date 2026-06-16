@@ -78,5 +78,5 @@ metadata }`. `CycleDelta` is a typed, bounded vocabulary — `AddFact`, `AdjustS
 
 ## References
 
-- ACE (arXiv:2510.04618), DC (arXiv:2504.07952); `docs/design/debate-phase5/synthesis.md`.
-- Implementation plan: `docs/plans/2026-06-16-dreamcycle-r7r8-default-impl.md`.
+- ACE (arXiv:2510.04618), DC (arXiv:2504.07952).
+- Implementation plan: archived in [memory-engine#49](https://github.com/dutiona/memory-engine/issues/49).

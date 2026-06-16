@@ -66,7 +66,6 @@ Read these docs when working on the relevant area:
 | Research basis (15 papers)                                                               | `docs/design/research-basis.md`          |
 | ADRs (9 decisions)                                                                       | `docs/design/adr/`                       |
 | Phase history + research→design narrative (⚠️ frozen — live status → GitHub Projects #6) | `docs/ROADMAP.md`                        |
-| Phase 5 design (cognitive)                                                               | `docs/design/plans/`                     |
 | Bi-temporal semantics                                                                    | `docs/advanced/bi-temporal-semantics.md` |
 | Consolidation pipeline                                                                   | `docs/advanced/consolidation.md`         |
 | Dream cycle (Phase 5a)                                                                   | `docs/advanced/dream-cycle.md`           |

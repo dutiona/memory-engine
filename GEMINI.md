@@ -77,7 +77,7 @@ Read only when working on the relevant area:
 | Research basis (15 papers)                        | `docs/design/research-basis.md`          |
 | ADRs (9 decisions)                                | `docs/design/adr/`                       |
 | Phase history (frozen; live status → Projects #6) | `docs/ROADMAP.md`                        |
-| Phase 5 design (cognitive)                        | `docs/design/plans/`                     |
+| Phase 5 design (cognitive)                        | `docs/advanced/dream-cycle.md`           |
 | Bi-temporal semantics                             | `docs/advanced/bi-temporal-semantics.md` |
 | Consolidation pipeline                            | `docs/advanced/consolidation.md`         |
 | Hybrid search tuning                              | `docs/advanced/hybrid-search.md`         |

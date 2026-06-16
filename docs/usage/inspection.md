@@ -21,7 +21,7 @@ the questions developers and operators ask most:
 ### Research context
 
 The design draws on **context adaptation** research (ACE, AWM, Reflexion — see
-`docs/design/plans/2026-03-09-future-phases-design.md`) which emphasizes that
+the archived Future Phases Design plan, [memory-engine#605](https://github.com/dutiona/memory-engine/issues/605)) which emphasizes that
 memory systems for agents must be _observable_ to support self-correction loops
 and human-in-the-loop debugging.
 
@@ -185,7 +185,7 @@ Long-running agents need backup/restore for disaster recovery, migration between
 machines, and offline analysis. The event-sourced architecture (ADR-0001) makes
 full-state export/import natural — the `EngineSnapshot` captures the complete
 materialized view. Compressed exports reduce storage costs for archival
-(see `docs/design/plans/2026-03-09-future-phases-design.md` § Phase 4 for the
+(see the archived Future Phases Design plan [memory-engine#605](https://github.com/dutiona/memory-engine/issues/605) § Phase 4 for the
 "10 agents × 10 years" cold storage scenario).
 
 Research context: context adaptation research (ACE, AWM — see research basis)
