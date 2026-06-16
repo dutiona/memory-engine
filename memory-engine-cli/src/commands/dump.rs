@@ -8,7 +8,7 @@ use crate::output::{self, OutputFormat, truncate_str};
 
 /// What to dump from the database.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum DumpTarget {
+pub enum DumpTarget {
     /// Active facts only (default).
     #[default]
     Facts,

@@ -99,6 +99,8 @@ impl SummaryGenerator for HttpSummaryGenerator {
         // Auto-detect response format:
         // OpenAI: { "choices": [{ "message": { "content": "..." } }] }
         // Ollama: { "message": { "content": "..." } }
+        // Multi-branch if-let chain is clearer than a nested map_or_else here.
+        #[allow(clippy::option_if_let_else)]
         let content = if let Some(choices) = body.get("choices") {
             choices
                 .get(0)

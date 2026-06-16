@@ -10,7 +10,7 @@ use crate::output::{self, OutputFormat, parse_datetime};
 
 /// Fact type for CLI argument parsing.
 #[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum FactTypeArg {
+pub enum FactTypeArg {
     Episodic,
     Semantic,
     Procedural,

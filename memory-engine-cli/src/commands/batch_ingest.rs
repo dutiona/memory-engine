@@ -143,7 +143,7 @@ fn jsonl_to_request(fact: JsonlFact, default_scope: Option<&str>) -> AddFactRequ
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
-pub(crate) struct IngestSummary {
+pub struct IngestSummary {
     pub(crate) total_ingested: usize,
     pub(crate) total_skipped: usize,
     pub(crate) failed_batches: usize,
@@ -177,7 +177,7 @@ fn print_summary(summary: &IngestSummary, format: OutputFormat) -> anyhow::Resul
 // Core ingestion logic (testable — accepts reader + embedder)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn ingest_from_reader(
+pub fn ingest_from_reader(
     engine: &MemoryEngine,
     reader: impl Read,
     embedder: &dyn EmbeddingProvider,
@@ -592,14 +592,8 @@ not valid json
         }
 
         let engine = MemoryEngine::builder(4).build().unwrap();
-        let summary = ingest_from_reader(
-            &engine,
-            "".as_bytes(),
-            &FakeEmbed,
-            100,
-            None,
-            OutputFormat::Json,
-        );
+        let summary =
+            ingest_from_reader(&engine, &b""[..], &FakeEmbed, 100, None, OutputFormat::Json);
         // Empty input = 0 ingested, 0 skipped → returns Ok (not an error)
         let s = summary.unwrap();
         assert_eq!(s.total_ingested, 0);

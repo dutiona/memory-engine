@@ -8,8 +8,8 @@
 //!   3. `t_created` backdating — facts carry the historical session timestamp,
 //!      never `Utc::now()`;
 //!   4. cross-session dedup-with-reinforcement (#520) — the same fact in two
-//!      sessions is stored ONCE and reinforced (access_count bumped, t_created =
-//!      earliest, last_accessed = latest), relevant to a 9-month backfill.
+//!      sessions is stored ONCE and reinforced (`access_count` bumped, `t_created` =
+//!      earliest, `last_accessed` = latest), relevant to a 9-month backfill.
 //!
 //! Hermetic: in-memory engine + zero-vector embedder. No network, no Ollama,
 //! no GPU contention (S0 is build-only). See `docs/audits/S0.3-bootstrap-audit.md`.

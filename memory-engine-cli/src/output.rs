@@ -3,7 +3,7 @@ use clap::ValueEnum;
 
 /// Output format for CLI commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub(crate) enum OutputFormat {
+pub enum OutputFormat {
     /// Human-readable table (default)
     #[default]
     Table,
@@ -19,7 +19,7 @@ pub(crate) enum OutputFormat {
 /// When `max_chars < 3` the suffix itself cannot fit; the returned string is at
 /// most `max_chars` characters long (taken from the beginning of `s`) with no
 /// ellipsis appended.
-pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
+pub fn truncate_str(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }
@@ -47,7 +47,7 @@ pub fn parse_datetime(s: &str) -> Result<DateTime<Utc>, String> {
 /// # Errors
 ///
 /// Returns an error if serialization or writing to stdout fails.
-pub(crate) fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
+pub fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     serde_json::to_writer_pretty(std::io::stdout(), value)?;
     println!();
     Ok(())

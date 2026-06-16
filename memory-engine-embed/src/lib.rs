@@ -1,7 +1,7 @@
 //! HTTP embedding provider for `memory-engine`.
 //!
 //! Implements [`memory_engine::traits::EmbeddingProvider`] by calling an
-//! OpenAI-compatible `/v1/embeddings` endpoint (OpenAI, Ollama, and any
+//! OpenAI-compatible `/v1/embeddings` endpoint (`OpenAI`, Ollama, and any
 //! compatible server).
 //!
 //! # Quick start

@@ -18,10 +18,7 @@ impl MemoryEngine {
     ///
     /// Returns errors from `ScopeStore::ensure_path` or `ScopeStore::get`.
     fn ensure_bootstrap_scope(&self, conn: &Connection, scope: Option<&str>) -> Result<i64> {
-        match scope {
-            Some(path) => self.ensure_scope_with_conn(conn, path),
-            None => Ok(1),
-        }
+        scope.map_or_else(|| Ok(1), |path| self.ensure_scope_with_conn(conn, path))
     }
 
     // --- Public API: Bootstrap ---

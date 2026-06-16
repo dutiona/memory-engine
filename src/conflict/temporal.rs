@@ -51,6 +51,10 @@ const DEFAULT_EDGE_WEIGHT: f64 = 1.0;
 ///
 /// Returns `MemoryError::NotFound` if the old fact doesn't exist.
 /// Propagates errors from the arbiter or database operations.
+#[allow(
+    clippy::too_many_lines,
+    reason = "conflict resolution is inherently a multi-step pipeline; extracting sub-fns would obscure the transaction boundary"
+)]
 pub fn resolve_conflict(
     conn: &Connection,
     graph: &mut MemoryGraph,

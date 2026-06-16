@@ -2,18 +2,18 @@
 //!
 //! Uses WAL mode for concurrent reads during writes.
 
-pub(crate) mod activities;
+pub mod activities;
 #[cfg(feature = "archive")]
-pub(crate) mod archive_manifest;
-pub(crate) mod checkpoints;
-pub(crate) mod edges;
-pub(crate) mod events;
-pub(crate) mod facts;
-pub(crate) mod lineage;
-pub(crate) mod schema;
-pub(crate) mod scopes;
-pub(crate) mod summaries;
-pub(crate) mod upcaster;
+pub mod archive_manifest;
+pub mod checkpoints;
+pub mod edges;
+pub mod events;
+pub mod facts;
+pub mod lineage;
+pub mod schema;
+pub mod scopes;
+pub mod summaries;
+pub mod upcaster;
 
 pub use scopes::ScopeStore;
 pub use upcaster::UpcasterRegistry;

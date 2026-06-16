@@ -792,6 +792,10 @@ mod tests {
     /// write path (the read-side `str_to_*` parsers only accept the canonical
     /// strings).
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exhaustive round-trip test covering all FactType and ConsolidationLevel variants; extracting helpers would scatter the assertions"
+    )]
     fn restore_writes_canonical_column_strings() {
         use crate::store::facts::FactStore;
         use crate::types::{ConsolidationLevel, FactType, NewFact};

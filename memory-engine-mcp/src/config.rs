@@ -11,7 +11,7 @@ pub struct McpConfig {
     /// Engine database configuration.
     pub engine: EngineSection,
 
-    /// Embedding provider configuration (optional — needed for add_fact + vector queries).
+    /// Embedding provider configuration (optional — needed for `add_fact` + vector queries).
     pub embedding: Option<EmbeddingSection>,
 
     /// Summary generator configuration (optional — needed for consolidation).
@@ -24,7 +24,7 @@ pub struct McpConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineSection {
-    /// Path to the memory-engine SQLite database.
+    /// Path to the memory-engine `SQLite` database.
     pub db_path: PathBuf,
 
     /// Embedding dimension. If omitted, probed from existing database.

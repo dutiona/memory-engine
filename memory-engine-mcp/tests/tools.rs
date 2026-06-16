@@ -1,3 +1,7 @@
+// Engine-generated dump filenames are always lowercase ".json" on all supported
+// platforms; the case-sensitive ends_with check is intentionally exact.
+#![allow(clippy::case_sensitive_file_extension_comparisons)]
+
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, FactType};

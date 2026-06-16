@@ -2,12 +2,12 @@ use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
 
 /// Pass-through embedder for pre-computed embeddings supplied via `--embedding`.
-pub(crate) struct PassthroughEmbedder {
+pub struct PassthroughEmbedder {
     embedding: Vec<f32>,
 }
 
 impl PassthroughEmbedder {
-    pub(crate) fn new(embedding: Vec<f32>) -> Self {
+    pub(crate) const fn new(embedding: Vec<f32>) -> Self {
         Self { embedding }
     }
 }

@@ -259,6 +259,10 @@ impl MemoryEngine {
         // A fact is "expired" for validation if it was already expired in the store OR
         // expired earlier in this report. Free fn (not a closure) so it does not hold a
         // borrow on `expired_in_report` across the later `.insert()` calls.
+        #[allow(
+            clippy::items_after_statements,
+            reason = "fn defined near its only call site for locality; hoisting above the HashSet init would obscure the intent"
+        )]
         fn ensure_active(
             f: &crate::types::Fact,
             expired_in_report: &std::collections::HashSet<i64>,

@@ -16,7 +16,7 @@ struct Cli {
     #[arg(long, env = "MEMORY_MCP_CONFIG")]
     config: Option<std::path::PathBuf>,
 
-    /// Path to the memory-engine SQLite database.
+    /// Path to the memory-engine `SQLite` database.
     #[arg(long, env = "MEMORY_MCP_DB_PATH")]
     db_path: Option<std::path::PathBuf>,
 
@@ -92,9 +92,9 @@ async fn main() -> Result<(), BoxError> {
     Ok(())
 }
 
-/// Build the embedding provider from config + CLI, using the probed embed_dim.
+/// Build the embedding provider from config + CLI, using the probed `embed_dim`.
 ///
-/// CLI flags override TOML values (endpoint, model, api_key) when provided,
+/// CLI flags override TOML values (endpoint, model, `api_key`) when provided,
 /// enabling operators to inject runtime secrets via env/CLI.
 fn build_embedder(
     cli: &Cli,
@@ -156,7 +156,7 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
 
     // CLI overrides
     if let Some(db_path) = &cli.db_path {
-        mcp_config.engine.db_path = db_path.clone();
+        mcp_config.engine.db_path.clone_from(db_path);
     }
 
     // NOTE: Embedding config from CLI is handled in build_embedder(),
