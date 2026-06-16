@@ -1122,6 +1122,38 @@ mod tests {
             late.timestamp_micros(),
             "last_accessed = latest even at sub-second precision"
         );
+
+        // The zero-fraction-vs-fractional case (the one the review flagged): to_rfc3339()
+        // uses a numeric `+00:00` offset, NOT `Z`. The whole-second string ends in `+...`
+        // where the fractional one has `.123`; `+` (0x2B) < `.` (0x2E), so the whole second
+        // (earlier) still sorts first. (With a `Z` suffix this WOULD invert — hence the
+        // explicit format assertion below guarding the invariant.)
+        let whole: DateTime<Utc> = "2024-07-20T15:00:00+00:00".parse().unwrap();
+        let frac: DateTime<Utc> = "2024-07-20T15:00:00.123+00:00".parse().unwrap();
+        assert!(
+            whole.to_rfc3339().ends_with("+00:00") && !whole.to_rfc3339().contains('Z'),
+            "to_rfc3339() must use a numeric offset, not Z: {}",
+            whole.to_rfc3339()
+        );
+        let mut w = make_fact("conv2", vec![0.1; DIM]);
+        w.t_created = frac;
+        w.last_accessed = whole;
+        let (id2, _) = store.insert_or_reinforce(&w).unwrap();
+        let mut x = make_fact("conv2", vec![0.1; DIM]);
+        x.t_created = whole;
+        x.last_accessed = frac;
+        store.insert_or_reinforce(&x).unwrap();
+        let got2 = store.get(id2).unwrap();
+        assert_eq!(
+            got2.t_created.timestamp_micros(),
+            whole.timestamp_micros(),
+            "t_created = whole-second (earliest) in the zero-vs-fractional case"
+        );
+        assert_eq!(
+            got2.last_accessed.timestamp_micros(),
+            frac.timestamp_micros(),
+            "last_accessed = fractional (latest) in the zero-vs-fractional case"
+        );
     }
 
     #[test]
