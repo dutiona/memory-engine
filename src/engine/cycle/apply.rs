@@ -719,7 +719,7 @@ mod tests {
             .unwrap();
     }
 
-    /// Invariant M (#209): every fact a cycle *creates or leaves active* — the AddFact
+    /// Invariant M (#209): every fact a cycle *creates or leaves active* — the `AddFact`
     /// synthetic, the promoted wisdom fact, and a Supersede survivor — must be
     /// dream-marked in the apply transaction. Otherwise it looks like a fresh caller
     /// write to the #209 cursor and re-enters the next cycle's input. The crisp proof:

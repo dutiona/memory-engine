@@ -52,7 +52,7 @@ fn extract_json(result: &CallToolResult) -> Value {
     }
 }
 
-/// Seed a Semantic fact directly (dispatch's add_fact needs an HTTP embedder).
+/// Seed a Semantic fact directly (dispatch's `add_fact` needs an HTTP embedder).
 fn seed(engine: &MemoryEngine, content: &str, scope: Option<&str>, insight: bool) -> i64 {
     let metadata =
         insight.then(|| json!({ INSIGHT_MARKER_KEY: { "flushed_at": "2024-01-01T00:00:00Z" } }));

@@ -27,10 +27,10 @@ pub use crate::types::Insight;
 /// not schema (no migration). See [`MemoryEngine::run_dream_cycle_guarded`].
 const CALLER_WRITE_CURSOR: &str = "last_caller_write_fact_id";
 
-/// Top-level `metadata` key marking a fact captured via the pre-compaction insight
-/// flush. Written by the MCP `memory_flush_insights` tool and read by
-/// [`MemoryEngine::list_recent_insights`](crate::MemoryEngine::list_recent_insights).
+/// Top-level `metadata` key marking a fact captured via the pre-compaction insight flush.
 ///
+/// Written by the MCP `memory_flush_insights` tool and read by
+/// [`MemoryEngine::list_recent_insights`](crate::MemoryEngine::list_recent_insights).
 /// Defined once here so the writer (MCP crate) and the reader (core) share a single
 /// literal and cannot drift. The stamped value is an object (e.g.
 /// `{"flushed_at": <rfc3339>}`); readers match on key *presence with a non-null value*.
@@ -239,6 +239,10 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only, or a store/cycle error.
+    // The `conn` write lock is intentionally held across the cursor read + skip-advance
+    // so the decision is atomic w.r.t. other writers; clippy's drop-tightening nudge
+    // would break that atomicity (same rationale as `add_facts_batch`).
+    #[allow(clippy::significant_drop_tightening)]
     #[must_use = "the CycleOutcome carries the skip/run decision — a dropped Skipped silently loses the deferral"]
     pub fn run_dream_cycle_guarded(&self, cycle: &dyn DreamCycle) -> Result<CycleOutcome> {
         // Atomic cursor read + (skip-only) advance under the write lock.
@@ -259,41 +263,38 @@ impl MemoryEngine {
             }
         }; // write lock released here
 
-        match decision {
-            Some(reason) => Ok(CycleOutcome::Skipped(reason)),
-            // No new caller writes — run. `run_dream_cycle` re-acquires the write lock
-            // for its own probe, so the lock above MUST already be dropped (parking_lot
-            // mutexes are non-reentrant — holding it here would self-deadlock).
-            None => {
-                let report = self.run_dream_cycle(cycle)?;
-                // Defend invariant M against a buggy consumer `DreamCycle` (the shipped
-                // DefaultDreamCycle complies): a report that selected facts but left
-                // `processed_ids` empty would leave those facts unmarked → the guarded
-                // cycle defers forever. Reject loudly rather than silently livelock. A
-                // legitimately quiet window (facts_selected == 0) is fine.
-                if report.metadata.facts_selected > 0 && report.metadata.processed_ids.is_empty() {
-                    return Err(MemoryError::Cycle(
-                        crate::error::CycleError::MalformedReport {
-                            facts_selected: report.metadata.facts_selected,
-                        },
-                    ));
-                }
-                Ok(CycleOutcome::Ran(report))
-            }
+        // No new caller writes — run. `run_dream_cycle` re-acquires the write lock for
+        // its own probe, so the lock above MUST already be dropped (parking_lot mutexes
+        // are non-reentrant — holding it here would self-deadlock).
+        if let Some(reason) = decision {
+            return Ok(CycleOutcome::Skipped(reason));
         }
+        let report = self.run_dream_cycle(cycle)?;
+        // Defend invariant M against a buggy consumer `DreamCycle` (the shipped
+        // DefaultDreamCycle complies): a report that selected facts but left
+        // `processed_ids` empty would leave those facts unmarked → the guarded cycle
+        // defers forever. Reject loudly rather than silently livelock. A legitimately
+        // quiet window (facts_selected == 0) is fine.
+        if report.metadata.facts_selected > 0 && report.metadata.processed_ids.is_empty() {
+            return Err(MemoryError::Cycle(
+                crate::error::CycleError::MalformedReport {
+                    facts_selected: report.metadata.facts_selected,
+                },
+            ));
+        }
+        Ok(CycleOutcome::Ran(report))
     }
 
     /// Read the #209 caller-write cursor (`last_caller_write_fact_id`); absent ⇒ `0`.
     /// A config key, not schema — no migration / `CURRENT_SCHEMA_VERSION` bump.
     fn read_caller_write_cursor(conn: &rusqlite::Connection) -> Result<i64> {
-        match get_config(conn, CALLER_WRITE_CURSOR)? {
-            Some(s) => s.parse::<i64>().map_err(|e| {
+        get_config(conn, CALLER_WRITE_CURSOR)?.map_or(Ok(0), |s| {
+            s.parse::<i64>().map_err(|e| {
                 MemoryError::Migration(MigrationError::Incompatible(format!(
                     "invalid {CALLER_WRITE_CURSOR}: {e}"
                 )))
-            }),
-            None => Ok(0),
-        }
+            })
+        })
     }
 
     /// Build the retrieve-before-reflect context for a cycle: prior wisdom (active

@@ -633,7 +633,7 @@ mod tests {
 
     /// The `facts.id` primary key MUST stay `AUTOINCREMENT`. Issue #209's caller-write
     /// cursor is a fact-id high-water mark whose soundness depends on ids being
-    /// monotonic and **never reused** — which SQLite guarantees only with the
+    /// monotonic and **never reused** — which `SQLite` guarantees only with the
     /// `AUTOINCREMENT` keyword (a plain `INTEGER PRIMARY KEY` reuses the largest rowid
     /// after a delete). A future migration that drops it would silently corrupt the
     /// cursor (a new fact could be assigned an id below the cursor and never trip a
