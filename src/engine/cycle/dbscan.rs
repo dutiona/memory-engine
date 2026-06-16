@@ -1,10 +1,10 @@
 //! Pure, deterministic DBSCAN clustering over embedding space.
 //!
-//! No SQLite, no engine state — a free function over `(FactId, embedding)` pairs,
+//! No `SQLite`, no engine state — a free function over `(FactId, embedding)` pairs,
 //! so it is trivially unit-testable. Distance is `1 - cosine_similarity`; two points
 //! are neighbours when their cosine similarity is `>= 1 - eps`. `cosine_similarity`
 //! returns `0.0` for a zero vector, so degenerate embeddings become isolated noise
-//! rather than producing NaN. Determinism: points are visited in slice order and a
+//! rather than producing `NaN`. Determinism: points are visited in slice order and a
 //! cluster's seed set is expanded in discovery order, so the same input always yields
 //! the same clusters.
 
@@ -27,7 +27,7 @@ const NOISE: i32 = -1;
 ///
 /// Returns an empty vec for an empty input, `min_pts == 0`, or an input larger than
 /// [`MAX_DBSCAN_POINTS`].
-pub(crate) fn dbscan(points: &[(FactId, &[f32])], eps: f32, min_pts: usize) -> Vec<Vec<FactId>> {
+pub(super) fn dbscan(points: &[(FactId, &[f32])], eps: f32, min_pts: usize) -> Vec<Vec<FactId>> {
     let n = points.len();
     if n == 0 || min_pts == 0 {
         return Vec::new();
@@ -95,10 +95,14 @@ pub(crate) fn dbscan(points: &[(FactId, &[f32])], eps: f32, min_pts: usize) -> V
         cluster_id += 1;
     }
 
+    // `cluster_id` only ever increments from 0, and `label >= 0` is guarded — both
+    // casts are non-negative by construction.
+    #[allow(clippy::cast_sign_loss)]
     let mut clusters: Vec<Vec<FactId>> = vec![Vec::new(); cluster_id as usize];
     for (idx, &(fact_id, _)) in points.iter().enumerate() {
         let label = labels[idx];
         if label >= 0 {
+            #[allow(clippy::cast_sign_loss)]
             clusters[label as usize].push(fact_id);
         }
     }
@@ -123,12 +127,16 @@ mod tests {
         let clusters = dbscan(&points, 0.15, 3);
         assert_eq!(clusters.len(), 2, "expected two clusters, got {clusters:?}");
         // Each cluster holds one of the blobs.
-        assert!(clusters
-            .iter()
-            .any(|c| c.contains(&1) && c.contains(&2) && c.contains(&3)));
-        assert!(clusters
-            .iter()
-            .any(|c| c.contains(&4) && c.contains(&5) && c.contains(&6)));
+        assert!(
+            clusters
+                .iter()
+                .any(|c| c.contains(&1) && c.contains(&2) && c.contains(&3))
+        );
+        assert!(
+            clusters
+                .iter()
+                .any(|c| c.contains(&4) && c.contains(&5) && c.contains(&6))
+        );
     }
 
     #[test]

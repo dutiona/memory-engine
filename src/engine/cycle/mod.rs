@@ -5,15 +5,15 @@
 //! Further submodules (`context`, `apply`, `dbscan`, `default_impl`) are added by
 //! later tasks. Public items are re-exported flat from the crate root (`lib.rs`).
 
-pub(crate) mod apply;
-pub(crate) mod context;
-pub(crate) mod dbscan;
-pub(crate) mod default_impl;
-pub(crate) mod report;
+mod apply;
+mod context;
+mod dbscan;
+mod default_impl;
+mod report;
 
 pub use context::CycleContext;
 pub use default_impl::DefaultDreamCycle;
 pub use report::{
-    ApplyResult, CycleAnomaly, CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
-    IMPORTANCE_STEP, MAX_ADJUSTMENT,
+    ApplyResult, CycleAnomaly, CycleDelta, CycleMetadata, CycleReport, IMPORTANCE_STEP,
+    IdentityOutput, MAX_ADJUSTMENT, TimeWindow,
 };

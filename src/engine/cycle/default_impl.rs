@@ -46,6 +46,40 @@ const QUARANTINE_NEGATIVE_THRESHOLD: u32 = 3;
 const METHOD_VERSION: &str = "dbscan-v1";
 
 /// The shipped pure-Rust DBSCAN dream cycle.
+///
+/// # Example
+///
+/// ```
+/// use memory_engine::{
+///     AddFactRequest, DefaultDreamCycle, EmbeddingProvider, FactType, MemoryEngine, MemoryError,
+/// };
+///
+/// // A trivial embedder (the consumer normally injects a real one).
+/// struct Embed;
+/// impl EmbeddingProvider for Embed {
+///     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
+///         Ok(vec![1.0, 0.0])
+///     }
+/// }
+///
+/// let engine = MemoryEngine::builder(2).build().unwrap();
+/// for i in 0..3 {
+///     let req = AddFactRequest {
+///         content: format!("recurring pattern {i}"),
+///         fact_type: FactType::Semantic,
+///         source_event_id: None,
+///         scope: None,
+///         opts: None,
+///     };
+///     engine.add_fact(&req, &Embed, None).unwrap();
+/// }
+///
+/// // Produce an unapplied report (the review gate), then apply it atomically.
+/// let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults()).unwrap();
+/// assert_eq!(report.metadata.facts_selected, 3);
+/// let applied = engine.apply_cycle_report(&report).unwrap();
+/// assert_eq!(applied.promoted, 1); // the three-fact cluster promotes one representative
+/// ```
 #[derive(Debug, Clone)]
 pub struct DefaultDreamCycle {
     config: DreamCycleConfig,
@@ -54,7 +88,7 @@ pub struct DefaultDreamCycle {
 impl DefaultDreamCycle {
     /// Construct with an explicit [`DreamCycleConfig`].
     #[must_use]
-    pub fn new(config: DreamCycleConfig) -> Self {
+    pub const fn new(config: DreamCycleConfig) -> Self {
         Self { config }
     }
 
@@ -79,7 +113,11 @@ fn percentile(values: &[f64], p: f64) -> f64 {
     }
     let mut v = values.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let idx = ((p * (v.len() - 1) as f64).round() as usize).min(v.len() - 1);
     v[idx]
 }
@@ -104,12 +142,14 @@ fn cluster_provenance(cluster: &[FactId], by_id: &HashMap<FactId, &Fact>) -> Pro
     representative_ids.truncate(5);
     #[allow(clippy::cast_possible_truncation)]
     let source_count = cluster.len() as u32;
+    #[allow(clippy::cast_precision_loss)]
+    let confidence = 1.0 - 1.0 / (cluster.len() as f64);
     PromotionProvenance {
         source_count,
         session_count: 1, // best-effort in v1
         date_range_start: start,
         date_range_end: end,
-        confidence: 1.0 - 1.0 / (cluster.len() as f64),
+        confidence,
         method_version: METHOD_VERSION.to_owned(),
         representative_ids,
         lineage_id: 0,

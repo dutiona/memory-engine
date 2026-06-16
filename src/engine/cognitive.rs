@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 
-use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, TimeWindow};
 use crate::engine::MemoryEngine;
+use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, TimeWindow};
 use crate::error::{MemoryError, Result};
 use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::store::facts::FactStore;
@@ -330,8 +330,8 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, IdentityOutput};
     use crate::engine::MemoryEngine;
+    use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, IdentityOutput};
     use crate::error::MemoryError;
     use crate::types::{FactType, Insight, PromoteRequest, PromotionProvenance};
 

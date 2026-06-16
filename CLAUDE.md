@@ -69,6 +69,7 @@ Read these docs when working on the relevant area:
 | Phase 5 design (cognitive)                                                               | `docs/design/plans/`                     |
 | Bi-temporal semantics                                                                    | `docs/advanced/bi-temporal-semantics.md` |
 | Consolidation pipeline                                                                   | `docs/advanced/consolidation.md`         |
+| Dream cycle (Phase 5a)                                                                   | `docs/advanced/dream-cycle.md`           |
 | Hybrid search tuning                                                                     | `docs/advanced/hybrid-search.md`         |
 | Schema evolution policy                                                                  | `docs/design/schema-evolution-policy.md` |
 | CLI inspector usage                                                                      | `docs/reference/cli-inspector.md`        |

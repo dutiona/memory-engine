@@ -32,7 +32,7 @@ pub struct CycleContext<'a> {
 
 impl<'a> CycleContext<'a> {
     /// Construct a cycle context. The engine builds this in `run_dream_cycle`.
-    pub(crate) fn new(
+    pub(crate) const fn new(
         ctx: DreamContext<'a>,
         prior_wisdom: Vec<Fact>,
         prior_reports: Vec<CycleMetadata>,

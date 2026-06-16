@@ -121,7 +121,7 @@ pub use types::*;
 pub use engine::cognitive::DreamContext;
 pub use engine::cycle::{
     ApplyResult, CycleAnomaly, CycleContext, CycleDelta, CycleMetadata, CycleReport,
-    DefaultDreamCycle, IdentityOutput, TimeWindow, IMPORTANCE_STEP, MAX_ADJUSTMENT,
+    DefaultDreamCycle, IMPORTANCE_STEP, IdentityOutput, MAX_ADJUSTMENT, TimeWindow,
 };
 
 #[cfg(test)]

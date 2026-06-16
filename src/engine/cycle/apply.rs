@@ -22,6 +22,9 @@ use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};
 use crate::types::{EventType, NewEdge, NewEvent, PromoteRequest};
 
+#[cfg(feature = "ann")]
+use crate::search::strategy::VectorSearchStrategy;
+
 use super::report::{
     ApplyResult, CycleDelta, CycleMetadata, CycleReport, IMPORTANCE_STEP, MAX_ADJUSTMENT,
 };
@@ -57,6 +60,9 @@ impl MemoryEngine {
     /// - [`MemoryError::EmbeddingDimension`] if an `AddFact`/`Promote` embedding
     ///   does not match the engine dimension.
     /// - [`MemoryError::Database`] on a store failure.
+    // One delta-dispatch match makes the body long but cohesive; splitting per-variant
+    // helpers would scatter the single-transaction invariant across functions.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_cycle_report(&self, report: &CycleReport) -> Result<ApplyResult> {
         // Single lock acquisition for the whole operation (validate + apply).
         let conn = self.write_conn()?;
@@ -89,8 +95,9 @@ impl MemoryEngine {
                 } => {
                     let store = FactStore::new(&tx, self.embed_dim);
                     let current = store.get(*fact_id)?.importance;
-                    let new_importance =
-                        (current + f64::from(*adjustment) * IMPORTANCE_STEP).clamp(0.0, 1.0);
+                    let new_importance = f64::from(*adjustment)
+                        .mul_add(IMPORTANCE_STEP, current)
+                        .clamp(0.0, 1.0);
                     store.update_importance(*fact_id, new_importance)?;
                     result.scores_adjusted += 1;
                 }

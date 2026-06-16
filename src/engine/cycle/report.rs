@@ -128,9 +128,11 @@ pub struct CycleReport {
     pub metadata: CycleMetadata,
 }
 
-/// Per-variant tally of what [`MemoryEngine::apply_cycle_report`](crate::MemoryEngine::apply_cycle_report)
-/// actually applied. The old counts-based report is derivable from this for any
-/// future observability layer (e.g. an MCP wrapper). Engine-constructed only.
+/// Per-variant tally of what an applied report changed.
+///
+/// Returned by [`MemoryEngine::apply_cycle_report`](crate::MemoryEngine::apply_cycle_report);
+/// the old counts-based report is derivable from this for any future observability
+/// layer (e.g. an MCP wrapper). Engine-constructed only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ApplyResult {

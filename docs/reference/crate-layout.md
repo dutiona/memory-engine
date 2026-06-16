@@ -27,6 +27,9 @@ memory_engine (lib.rs)
 `engine`
 : Facade over all memory primitives. Defines `MemoryEngine` (the main entry point) and `EngineConfig`. All public methods take `&self`; thread safety is handled internally via `ConnectionPool` and `RwLock`-protected caches.
 
+`engine::cycle`
+: Phase-5a dream-cycle subsystem (#49). `report` — the delta-based `CycleReport` vocabulary (`CycleDelta`, `IdentityOutput`, `CycleMetadata`, `ApplyResult`, `IMPORTANCE_STEP`). `context` — `CycleContext`, the retrieve-before-reflect wrapper around `DreamContext`. `apply` — `MemoryEngine::apply_cycle_report`, the validate-all-then-apply-all transactional delta applier. `dbscan` — a pure deterministic DBSCAN clustering core. `default_impl` — `DefaultDreamCycle`, the shipped pure-Rust producer. See `docs/advanced/dream-cycle.md` and ADR 0014.
+
 `types`
 : Core data types returned by and passed into the engine. Includes full structs (`Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`), insertion structs (`NewEvent`, `NewFact`, `NewEdge`, `NewSummary`), enums (`EventType`, `FactType`, `ConsolidationLevel`, `ScopeQuery`), and option structs (`AddFactOptions`).
 

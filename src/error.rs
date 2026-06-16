@@ -315,7 +315,9 @@ pub enum CycleError {
 
     /// A `Supersede` delta's `new_id` neither exists nor is produced by an
     /// earlier `AddFact` in the same report.
-    #[error("supersede target fact {0} is missing (not pre-existing and not added earlier in the report)")]
+    #[error(
+        "supersede target fact {0} is missing (not pre-existing and not added earlier in the report)"
+    )]
     SupersedeMissing(crate::types::FactId),
 
     /// A delta targeted a fact that is already expired (soft-deleted), e.g.
@@ -717,12 +719,14 @@ mod tests {
             CycleError::AlreadyExpired(4).to_string(),
             "fact 4 is already expired"
         );
-        assert!(CycleError::ScoreOutOfBounds {
-            fact_id: 1,
-            attempted: 1.5
-        }
-        .to_string()
-        .contains("out of bounds"));
+        assert!(
+            CycleError::ScoreOutOfBounds {
+                fact_id: 1,
+                attempted: 1.5
+            }
+            .to_string()
+            .contains("out of bounds")
+        );
     }
 
     #[test]
