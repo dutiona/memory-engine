@@ -109,3 +109,27 @@ Acceptance: all green; no clippy findings in new code; new MCP tools dispatch en
 - **`#[non_exhaustive]` serde passthrough** — `to_value` means #57/#578 field/variant additions flow to the wire automatically (no adapter edit).
 - **Unknown-scope semantics (decision E)** — empty-vec chosen; reviewer may prefer NotFound.
 - **`unsafe_code = forbid`** — satisfied (pure Rust, no FFI).
+
+## Post-Implementation Audit
+
+Per-task disposition (T0–T14). Plan size: 15 tasks. Modified: 2 (T3, T12). Added work: 1 (extra roundtrip test). Divergence ≈ 13% — below the 30% advisor-arbitration threshold.
+
+| Task | Status | Notes |
+| ---- | ------ | ----- |
+| T0 — Baseline | Implemented | Worktree off latest `origin/main` (incl. merged #49 + #595); workspace green. |
+| T1 — `CycleError → invalid_params` | Implemented | Mapping + `cycle_maps_to_invalid_params` test, exactly as planned. |
+| T2 — `INSIGHT_MARKER_KEY` const | Implemented | Const in `cognitive.rs`; `lib.rs` re-export converted to braced group. |
+| **T3 — Generic store query** | **Modified** | **The plan prescribed `json_type(metadata, '$.{key}') IS NOT NULL`; the shipped code uses `json_extract(...) IS NOT NULL`.** The store-level unit test (written first) caught the planned predicate as *wrong* for the present-`null` case: SQLite `json_type` returns the text `'null'` (not SQL `NULL`) for `{"insight": null}`, so that fact was incorrectly included (`[5,2,1]` vs expected `[2,1]`). `json_extract` collapses both absent-key AND present-`null` to SQL `NULL`, returning a value only for present-non-null — the correct "key present with a non-null value" contract. This **reverses** the plan/reviewer suggestion, which had conflated #595's *absent-key* case (where `json_type` is right) with this *non-null-value* case. Trusted-literal interpolation + rustdoc contract retained as planned. |
+| T4 — Engine method | Implemented | `list_recent_insights` with explicit `resolve_path → None ⇒ Ok(vec![])` early-return (the HIGH fix). |
+| T5 — Engine integration test | Implemented | `tests/recent_insights_test.rs`, public-API, subtree/newest-first/limit/expired/unknown-scope. |
+| T6 — `ok_serialized` helper | Implemented | Next to `ok_json`; serde failure → `internal_error`. |
+| T7 — `flush_insights` stamps marker | Implemented | Non-object metadata normalized to `{}` before stamping `source` + marker (the HIGH fix); marker always lands. |
+| T8 — `memory_dream_cycle` | Implemented | `apply` flag (default true); `{report, did_apply, applied?}`; no consolidation, no embedder. |
+| T9 — `memory_apply_cycle_report` | Implemented | `from_value::<CycleReport>` (fail → `invalid_params`) → apply → `ok_serialized`. |
+| T10 — `memory_get_recent_insights` | Implemented | `project_path` required, `limit` default 20, tiered depth; unknown scope → empty. |
+| T11 — MCP integration tests | Implemented + **Added** | `cognitive_tools.rs` (5 dispatch tests) as planned. **Added** a wiremock writer→reader roundtrip in `embedding_integration.rs` — it surfaced a *test-fidelity* bug (the OpenAI mock omitted the `index` field that the `embed_batch` parser requires; `flush_insights` uses the batch path). Fixed the mock; product code was correct. |
+| **T12 — Docs** | **Modified** | The `mcp-server.md` tool table was already **stale** (claimed 18 tools; code had 23 pre-#225 — 3 P2 + 2 Phase-5a outcome tools were undocumented). Rather than ship a half-correct "21", the table was completed to the true **26** (incl. the 5 previously-missing rows + the 3 new cognitive tools) and the headline count corrected. Also added a "Cognitive Pipeline" subsection, an "Exposed via MCP" note in `dream-cycle.md`, and the `CLAUDE.md` status line. **Collateral:** the count-assertion test `all_tool_definitions_returns_23` → `_returns_26` was updated (would otherwise fail the workspace gate); the doc-drift fix lands in this PR, no separate issue needed. |
+| T13 — Verification gate | Implemented | `cargo build/test --workspace` green; MCP crate 125 passed; `cargo test --all-features` 924 passed / 4 ignored; `cargo clippy --workspace --all-targets` exit 0; `cargo fmt --check` clean. |
+| T14 — Git ops | In progress | Commit → PR → `/super-review` → rebase+re-gate → squash-merge (pending user authorization). |
+
+**Decision E (unknown-scope semantics):** shipped as empty-vec (not `NotFound`), per the fixed decision. Flagged for reviewer preference.

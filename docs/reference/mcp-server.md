@@ -2,7 +2,7 @@
 
 ## What
 
-A stdio-based MCP server binary that exposes memory-engine as 18 tools (10 P0 + 5 P1 + 3 activity stream) for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
+A stdio-based MCP server binary that exposes memory-engine as 26 tools (10 P0 + 5 P1 + 3 P2 + 2 Phase-5a outcome + 3 cognitive + 3 activity stream) for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
 
 ## Why
 
@@ -70,26 +70,34 @@ Add to `.claude/settings.json`:
 
 ### Tools
 
-| Tool                        | Priority | Purpose                                | Depth                |
-| --------------------------- | -------- | -------------------------------------- | -------------------- |
-| `memory_ingest`             | P0       | Append event to log                    | —                    |
-| `memory_add_fact`           | P0       | Add fact with embedding                | —                    |
-| `memory_query`              | P0       | Hybrid FTS + vector search             | sparse/standard/full |
-| `memory_resume_context`     | P0       | 5-tier cognitive boot                  | sparse/standard/full |
-| `memory_list_due`           | P0       | Scheduled fact surfacing               | sparse/standard/full |
-| `memory_next_due_time`      | P0       | Next scheduled time                    | —                    |
-| `memory_explain_fact`       | P0       | Fact provenance                        | sparse/standard/full |
-| `memory_get_fact`           | P0       | Single fact by ID                      | sparse/standard/full |
-| `memory_statistics`         | P0       | Aggregate stats                        | —                    |
-| `memory_flush_insights`     | P0       | Batch pre-compaction capture           | —                    |
-| `memory_consolidate`        | P1       | Dedup + cluster facts into summaries   | —                    |
-| `memory_forget`             | P1       | Ebbinghaus decay pruning               | —                    |
-| `memory_dump_state`         | P1       | Export snapshot (JSON/SQLite)          | —                    |
-| `memory_pin_fact`           | P1       | Make fact unforgettable                | —                    |
-| `memory_unpin_fact`         | P1       | Allow forgetting a pinned fact         | —                    |
-| `memory_record_activity`    | Activity | Record tool invocation with dedup      | —                    |
-| `memory_checkpoint_session` | Activity | Checkpoint session state (LWW)         | —                    |
-| `memory_load_context`       | Activity | Load project context for session start | sparse/standard/full |
+| Tool                         | Priority  | Purpose                                | Depth                |
+| ---------------------------- | --------- | -------------------------------------- | -------------------- |
+| `memory_ingest`              | P0        | Append event to log                    | —                    |
+| `memory_add_fact`            | P0        | Add fact with embedding                | —                    |
+| `memory_query`               | P0        | Hybrid FTS + vector search             | sparse/standard/full |
+| `memory_resume_context`      | P0        | 5-tier cognitive boot                  | sparse/standard/full |
+| `memory_list_due`            | P0        | Scheduled fact surfacing               | sparse/standard/full |
+| `memory_next_due_time`       | P0        | Next scheduled time                    | —                    |
+| `memory_explain_fact`        | P0        | Fact provenance                        | sparse/standard/full |
+| `memory_get_fact`            | P0        | Single fact by ID                      | sparse/standard/full |
+| `memory_statistics`          | P0        | Aggregate stats                        | —                    |
+| `memory_flush_insights`      | P0        | Batch pre-compaction capture           | —                    |
+| `memory_consolidate`         | P1        | Dedup + cluster facts into summaries   | —                    |
+| `memory_forget`              | P1        | Ebbinghaus decay pruning               | —                    |
+| `memory_dump_state`          | P1        | Export snapshot (JSON/SQLite)          | —                    |
+| `memory_pin_fact`            | P1        | Make fact unforgettable                | —                    |
+| `memory_unpin_fact`          | P1        | Allow forgetting a pinned fact         | —                    |
+| `memory_replay_events`       | P2        | Replay the event log                   | —                    |
+| `memory_fact_history`        | P2        | Bi-temporal history of a fact          | —                    |
+| `memory_bootstrap_session`   | P2        | Seed a session from prior memory       | sparse/standard/full |
+| `memory_record_outcome`      | Phase 5a  | Record an outcome for a fact           | —                    |
+| `memory_outcome_counts`      | Phase 5a  | Aggregate outcome counts               | —                    |
+| `memory_dream_cycle`         | Cognitive | Run the DreamCycle (`apply` flag)      | —                    |
+| `memory_apply_cycle_report`  | Cognitive | Apply a previously-produced report     | —                    |
+| `memory_get_recent_insights` | Cognitive | Recent flushed insights by scope       | sparse/standard/full |
+| `memory_record_activity`     | Activity  | Record tool invocation with dedup      | —                    |
+| `memory_checkpoint_session`  | Activity  | Checkpoint session state (LWW)         | —                    |
+| `memory_load_context`        | Activity  | Load project context for session start | sparse/standard/full |
 
 ### Tiered Depth
 
@@ -146,6 +154,18 @@ Exports the full engine snapshot. Formats: `json`, `sqlite`. Client-supplied pat
 ### Pin / Unpin
 
 `memory_pin_fact` and `memory_unpin_fact` toggle a fact's persistence. Pinned facts are immune to `memory_forget`.
+
+### Cognitive Pipeline (`memory_dream_cycle`, `memory_apply_cycle_report`, `memory_get_recent_insights`)
+
+These expose the Phase-5a [DreamCycle](../advanced/dream-cycle.md) over MCP. The engine separates _producing_ a cycle report (a pure analysis pass, no mutation) from _applying_ it (the mutating step). The MCP surface offers both the ergonomic one-call form and the explicit two-step gate:
+
+| Tool                         | Behavior                                                                                                                                                                                                                                                      |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory_dream_cycle`         | Runs `DefaultDreamCycle::with_defaults()` and returns the `CycleReport`. `apply` (bool, default `true`) controls whether the report is applied in the same call. Returns `{ report, did_apply, applied? }` — `applied` present only when `did_apply` is true. |
+| `memory_apply_cycle_report`  | Applies a report produced by an earlier `apply:false` run (serde round-trips across the boundary). Malformed JSON or a report referencing an unknown fact → `invalid_params`. Returns the `ApplyResult`.                                                      |
+| `memory_get_recent_insights` | Returns facts flushed via `memory_flush_insights`, scoped to `project_path`'s subtree, newest-first, capped by `limit` (default 20). An unknown `project_path` returns an empty list, not an error. Honors tiered `depth`.                                    |
+
+The dream cycle does **not** run consolidation — it is a lightweight, idempotent-by-report analysis pass. The `apply:false` → `memory_apply_cycle_report` split lets an agent review the proposed deltas before committing them. `memory_get_recent_insights` reads the same shared insight marker (`INSIGHT_MARKER_KEY`) that `memory_flush_insights` stamps, so the writer and reader cannot drift.
 
 ### Activity Stream (`memory_record_activity`)
 
