@@ -12,6 +12,17 @@ pub struct BootstrapConfig {
     pub max_turns: usize,
     /// Skip sessions already bootstrapped (idempotency via `session_id` check).
     pub skip_existing: bool,
+    /// Redact secrets/PII from every candidate's content **before** it is
+    /// embedded or stored (#45/#51 gate). Default `true`; the CLI offers no
+    /// flag to disable it in normal operation. The switch exists for library
+    /// callers and for tests that assert on raw content. Redaction touches the
+    /// ME copy only — the source `.jsonl`/`.md` backbone is never modified.
+    pub redact: bool,
+    /// Author-seeded known-secret literals (loaded from the gitignored denylist
+    /// file, see [`crate::bootstrap::load_secret_denylist`]). Augments the
+    /// signature detectors; empty = signatures-only. Ignored when `redact` is
+    /// `false`.
+    pub denylist: Vec<String>,
 }
 
 impl Default for BootstrapConfig {
@@ -20,6 +31,8 @@ impl Default for BootstrapConfig {
             scope: None,
             max_turns: 0,
             skip_existing: true,
+            redact: true,
+            denylist: Vec::new(),
         }
     }
 }
@@ -36,6 +49,17 @@ pub struct BootstrapReport {
     pub facts_created: usize,
     /// Existing facts reinforced (dedup-with-reinforcement) instead of duplicated.
     pub facts_reinforced: usize,
+    /// Secret/PII findings scrubbed before any content reaches an extractor, the
+    /// embedder, or storage (#51). Counts individual findings, not facts. The
+    /// jsonl path scrubs whole turns upfront; the md path scrubs body + metadata.
+    /// A redundant re-run reports `0`: the jsonl path skips already-bootstrapped
+    /// sessions before redacting, and the md path counts only on fact creation.
+    pub secrets_redacted: usize,
+    /// Native `.md` memory files parsed (the `--memory-dir` path only).
+    pub memory_files_parsed: usize,
+    /// Native `.md` memory files skipped — unreadable or no parseable body
+    /// (the `--memory-dir` path only).
+    pub memory_files_skipped: usize,
     pub events_ingested: usize,
     pub outcome_counts: OutcomeCounts,
     pub category_counts: CategoryCounts,
@@ -53,6 +77,9 @@ impl BootstrapReport {
         self.candidates_found += other.candidates_found;
         self.facts_created += other.facts_created;
         self.facts_reinforced += other.facts_reinforced;
+        self.secrets_redacted += other.secrets_redacted;
+        self.memory_files_parsed += other.memory_files_parsed;
+        self.memory_files_skipped += other.memory_files_skipped;
         self.events_ingested += other.events_ingested;
         self.outcome_counts.success += other.outcome_counts.success;
         self.outcome_counts.failure += other.outcome_counts.failure;
@@ -178,6 +205,9 @@ mod tests {
             candidates_found: 12,
             facts_created: 8,
             facts_reinforced: 2,
+            secrets_redacted: 3,
+            memory_files_parsed: 0,
+            memory_files_skipped: 0,
             events_ingested: 15,
             outcome_counts: OutcomeCounts {
                 success: 5,

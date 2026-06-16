@@ -1269,10 +1269,30 @@ fn handle_bootstrap_session(
         None,
     ))?;
 
+    // Redaction is always on for the live MCP path (#45/#51 — no bypass). The
+    // author-seeded denylist is a backfill-time concern (its env var is normally
+    // unset here → signatures-only). An UNSET var yields Ok(empty) and is fine to
+    // stay silent about; a SET-but-unreadable file is a misconfiguration we
+    // surface (warn) while still proceeding signatures-only rather than failing a
+    // live bootstrap. Mirrors the CLI, which logs the literal count loudly.
+    let denylist = match memory_engine::bootstrap::load_secret_denylist() {
+        Ok(d) => {
+            if !d.is_empty() {
+                tracing::info!(literals = d.len(), "redaction denylist loaded");
+            }
+            d
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "denylist file set but unreadable; bootstrap proceeding signatures-only");
+            Vec::new()
+        }
+    };
     let config = BootstrapConfig {
         scope: get_str(&args, "scope"),
         max_turns: get_usize(&args, "max_turns").unwrap_or(0),
         skip_existing: get_bool(&args, "skip_existing").unwrap_or(true),
+        redact: true,
+        denylist,
     };
 
     let reader = Cursor::new(jsonl_data.into_bytes());

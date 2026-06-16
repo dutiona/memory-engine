@@ -679,6 +679,38 @@ pub fn redact_entries_with_denylist(
     (redacted, report)
 }
 
+/// Redact every string leaf of a JSON value in place, returning the total
+/// finding count.
+///
+/// Walks objects (values), arrays (elements), and a bare string root; object
+/// **keys are left intact** (they are structural identifiers, not content).
+/// Used to scrub fact `metadata` before it is persisted — frontmatter
+/// `name`/`description` on the `.md` path and any pluggable extractor's
+/// `metadata` on the `.jsonl` path — so the redaction gate covers the whole
+/// stored row, not just the fact content. Idempotent (a `[REDACTED:*]`
+/// placeholder is never re-matched).
+pub fn redact_json_strings(value: &mut serde_json::Value, denylist: &[String]) -> usize {
+    match value {
+        serde_json::Value::String(s) => {
+            let (clean, findings) = redact_text_with_denylist(s, denylist);
+            if !findings.is_empty() {
+                *s = clean;
+            }
+            findings.len()
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .map(|v| redact_json_strings(v, denylist))
+            .sum(),
+        serde_json::Value::Object(map) => map
+            .values_mut()
+            .map(|v| redact_json_strings(v, denylist))
+            .sum(),
+        // Numbers, booleans, and null carry no redactable text.
+        _ => 0,
+    }
+}
+
 // ── Author-seeded denylist loading (#51) ──────────────────────────────────────
 
 /// Environment variable naming a file of author-known secret literals, one per line.
@@ -739,6 +771,38 @@ pub fn load_secret_denylist() -> std::io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── JSON metadata redaction ───────────────────────────────────────────────
+
+    #[test]
+    fn redact_json_strings_scrubs_nested_values_keeps_keys() {
+        let mut v = serde_json::json!({
+            "description": "leaked AKIAIOSFODNN7EXAMPLE here",
+            "nested": { "note": "token ghp_0123456789abcdefghij0123456789abcdef" },
+            "list": ["sk-abcdefghijklmnopqrstuvwxyz0123", "harmless"],
+            "count": 7,
+            "flag": true,
+        });
+        let n = redact_json_strings(&mut v, &[]);
+        assert_eq!(n, 3, "three secrets across the tree");
+        let s = v.to_string();
+        assert!(!s.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!s.contains("ghp_0123456789abcdefghij0123456789abcdef"));
+        assert!(!s.contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
+        // Structural keys + non-secret leaves survive intact.
+        assert!(v.get("description").is_some());
+        assert_eq!(v["list"][1], "harmless");
+        assert_eq!(v["count"], 7);
+        assert_eq!(v["flag"], true);
+    }
+
+    #[test]
+    fn redact_json_strings_clean_input_is_noop() {
+        let mut v = serde_json::json!({ "a": "nothing secret", "b": [1, 2, 3] });
+        let before = v.clone();
+        assert_eq!(redact_json_strings(&mut v, &[]), 0);
+        assert_eq!(v, before);
+    }
 
     // ── Provider prefixes ─────────────────────────────────────────────────────
 
@@ -1190,8 +1254,8 @@ mod tests {
     #[test]
     fn bare_hex_with_unrelated_key_substring_not_redacted() {
         let sha = "a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0"; // 40-char SHA-1
-        // `monkey` contains "key", `key.rs` mentions a key — but neither is the WORD
-        // adjacent to the hex, so the bare SHA must survive (no data loss).
+                                                              // `monkey` contains "key", `key.rs` mentions a key — but neither is the WORD
+                                                              // adjacent to the hex, so the bare SHA must survive (no data loss).
         for line in [
             format!("monkey {sha} bars"),
             format!("modified key.rs: now points to {sha}"),

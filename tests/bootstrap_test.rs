@@ -212,6 +212,108 @@ fn bootstrap_directory_multiple() {
 }
 
 #[test]
+fn bootstrap_directory_recurses_and_skips_subagents() {
+    // Real transcripts live one level down (`<project-slug>/<uuid>.jsonl`), and
+    // `subagents/` holds lower-value subagent logs we exclude. Regression: a flat
+    // top-level scan silently found nothing when pointed at `~/.claude/projects`.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("proj/subagents")).unwrap();
+    // Nested main transcript — must be discovered by recursion.
+    std::fs::write(dir.path().join("proj/main.jsonl"), success_fixture()).unwrap();
+    // Subagent transcript with a DISTINCT session id — must be skipped, so it
+    // does not add to sessions_processed even though it would yield a fact.
+    let subagent = "{\"type\":\"user\",\"sessionId\":\"subagent-xyz\",\"timestamp\":\"2024-03-01T10:00:00Z\",\"uuid\":\"sa-0\",\"parentUuid\":null,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Fix the bug in parser.rs\"}]}}\n{\"type\":\"assistant\",\"sessionId\":\"subagent-xyz\",\"timestamp\":\"2024-03-01T10:00:30Z\",\"uuid\":\"sa-1\",\"parentUuid\":\"sa-0\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Found the root cause and applied the fix; tests pass.\"}]}}\n";
+    std::fs::write(dir.path().join("proj/subagents/sub.jsonl"), subagent).unwrap();
+
+    let engine = engine();
+    let extractor = KeywordExtractor;
+    let config = BootstrapConfig::default();
+
+    let report = engine
+        .bootstrap_directory(dir.path(), &TestEmbedder, &extractor, &config, None)
+        .unwrap();
+
+    assert_eq!(
+        report.sessions_processed, 1,
+        "nested main.jsonl imported (recursion); subagents/ excluded"
+    );
+    assert!(report.entries_parsed > 0);
+}
+
+#[test]
+fn redaction_runs_before_extraction() {
+    // #45/#51 (review P1): a pluggable SessionExtractor (the public API supports
+    // LLM-powered extractors reaching external services) must receive ALREADY
+    // REDACTED turns. Plant a secret in a turn, record what the extractor sees,
+    // and assert the secret never reaches it.
+    use std::sync::Mutex;
+
+    use memory_engine::bootstrap::{
+        CandidateEpisode, ExtractedFact, SessionExtractor, SessionOutcome,
+    };
+
+    const PLANTED: &str = "AKIAIOSFODNN7EXAMPLE";
+
+    #[derive(Default)]
+    struct RecordingExtractor {
+        seen: Mutex<Vec<String>>,
+    }
+    impl SessionExtractor for RecordingExtractor {
+        fn extract(
+            &self,
+            episode: &CandidateEpisode,
+            _outcome: &SessionOutcome,
+        ) -> memory_engine::Result<Vec<ExtractedFact>> {
+            for turn in &episode.turns {
+                self.seen.lock().unwrap().push(turn.user_text.clone());
+                self.seen.lock().unwrap().push(turn.assistant_text.clone());
+            }
+            Ok(vec![]) // we only care about the extractor's INPUT
+        }
+    }
+
+    let jsonl = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "user", "sessionId": "redact-extract", "timestamp": "2024-02-01T10:00:00Z",
+            "uuid": "r-0", "parentUuid": serde_json::Value::Null,
+            "message": {"role": "user", "content": [{"type": "text", "text": "Fix the bug in parser.rs"}]}
+        }),
+        serde_json::json!({
+            "type": "assistant", "sessionId": "redact-extract", "timestamp": "2024-02-01T10:00:30Z",
+            "uuid": "r-1", "parentUuid": "r-0",
+            "message": {"role": "assistant", "content": [{"type": "text",
+                "text": format!("Found the root cause and applied the fix; tests pass. Token {PLANTED} leaked.")}]}
+        }),
+    );
+
+    let engine = engine();
+    let recorder = RecordingExtractor::default();
+    let config = BootstrapConfig::default(); // redact = true
+
+    engine
+        .bootstrap_session(Cursor::new(jsonl), &TestEmbedder, &recorder, &config, None)
+        .unwrap();
+
+    let seen = recorder.seen.lock().unwrap().clone();
+    assert!(
+        !seen.is_empty(),
+        "extractor should have been offered a candidate"
+    );
+    for text in &seen {
+        assert!(
+            !text.contains(PLANTED),
+            "extractor received UNREDACTED turn text: {text:?}"
+        );
+    }
+    // And the redaction was actually applied (placeholder present somewhere).
+    assert!(
+        seen.iter().any(|t| t.contains("[REDACTED:")),
+        "expected a redaction placeholder in the extractor's input"
+    );
+}
+
+#[test]
 fn bootstrap_with_scope() {
     let engine = engine();
     let extractor = KeywordExtractor;

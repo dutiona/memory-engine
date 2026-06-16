@@ -104,4 +104,46 @@ impl MemoryEngine {
             scope_id,
         )
     }
+
+    /// Import native `.md` memory files (recursive) from a directory.
+    ///
+    /// Each file becomes one fact with a **backdated** `t_created` (frontmatter
+    /// date, else a filename-encoded date, else file mtime), type-routed from
+    /// its frontmatter `type:`,
+    /// redaction-gated, and dedup-with-reinforced. Unlike [`Self::bootstrap_directory`]
+    /// this path has no session/turn structure and no LLM extractor — the file
+    /// body is the fact. Sources are read-only.
+    ///
+    /// Dedup matches on body content (per #520), so a re-import after editing
+    /// ONLY a file's frontmatter (e.g. correcting `type:` or `description`) while
+    /// the body is unchanged reinforces the existing row and **keeps its original
+    /// `fact_type`/metadata** — frontmatter-only corrections are not re-synced.
+    /// This is an import/backfill tool, not an edit-sync tool; change the body or
+    /// expire the fact to re-derive metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
+    /// Returns `MemoryError::Io` for directory traversal failures, or an
+    /// embedding/DB error (which aborts; a re-run resumes idempotently).
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn bootstrap_memory_directory(
+        &self,
+        dir: &std::path::Path,
+        embedder: &dyn EmbeddingProvider,
+        config: &crate::bootstrap::BootstrapConfig,
+        classifier: Option<&dyn PersistenceClassifier>,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let conn = self.write_conn()?;
+        let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
+        crate::bootstrap::memory_dir::bootstrap_memory_directory_inner(
+            &conn,
+            self.embed_dim,
+            dir,
+            embedder,
+            config,
+            classifier,
+            scope_id,
+        )
+    }
 }

@@ -455,7 +455,11 @@ mod tests {
     }
 
     fn opt(s: &str) -> Option<String> {
-        if s.is_empty() { None } else { Some(s.into()) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.into())
+        }
     }
 
     fn user_entry(uuid: &str, parent: &str, text: &str, secs: i64) -> SessionEntry {
@@ -701,11 +705,9 @@ mod tests {
         let episodes = keyword_prefilter(&[turn], "s1");
         assert_eq!(episodes.len(), 1);
         assert_eq!(episodes[0].category, EpisodeCategory::Bug);
-        assert!(
-            episodes[0]
-                .matched_keywords
-                .contains(&"root cause".to_owned())
-        );
+        assert!(episodes[0]
+            .matched_keywords
+            .contains(&"root cause".to_owned()));
     }
 
     #[test]
@@ -732,11 +734,9 @@ mod tests {
         let episodes = keyword_prefilter(&[turn], "s1");
         assert_eq!(episodes.len(), 1);
         assert_eq!(episodes[0].category, EpisodeCategory::Convention);
-        assert!(
-            episodes[0]
-                .matched_keywords
-                .contains(&"always use".to_owned())
-        );
+        assert!(episodes[0]
+            .matched_keywords
+            .contains(&"always use".to_owned()));
     }
 
     #[test]
@@ -745,11 +745,9 @@ mod tests {
         let episodes = keyword_prefilter(&[turn], "s1");
         assert_eq!(episodes.len(), 1);
         assert_eq!(episodes[0].category, EpisodeCategory::Learning);
-        assert!(
-            episodes[0]
-                .matched_keywords
-                .contains(&"turns out".to_owned())
-        );
+        assert!(episodes[0]
+            .matched_keywords
+            .contains(&"turns out".to_owned()));
     }
 
     #[test]

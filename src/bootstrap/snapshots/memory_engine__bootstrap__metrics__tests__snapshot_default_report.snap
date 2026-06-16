@@ -10,6 +10,9 @@ turns_reconstructed: 0
 candidates_found: 0
 facts_created: 0
 facts_reinforced: 0
+secrets_redacted: 0
+memory_files_parsed: 0
+memory_files_skipped: 0
 events_ingested: 0
 outcome_counts:
   success: 0

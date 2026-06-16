@@ -60,6 +60,8 @@ enum Commands {
     AddFact(commands::add_fact::AddFactArgs),
     /// Ingest facts from a JSONL file via an embedding API
     BatchIngest(commands::batch_ingest::BatchIngestArgs),
+    /// Import historical memory from session `.jsonl` and/or native `.md` dirs
+    Bootstrap(commands::bootstrap::BootstrapArgs),
     /// Record an outcome signal (positive/negative/neutral) for a fact
     RecordOutcome(commands::record_outcome::RecordOutcomeArgs),
     /// Show aggregated outcome counts for a fact
@@ -100,6 +102,9 @@ fn main() -> ExitCode {
         }
         Commands::BatchIngest(ref args) => {
             commands::batch_ingest::run(&cli.db, args, cli.format).map(|()| ExitCode::SUCCESS)
+        }
+        Commands::Bootstrap(ref args) => {
+            commands::bootstrap::run(&cli.db, args, cli.format).map(|()| ExitCode::SUCCESS)
         }
         Commands::RecordOutcome(ref args) => {
             commands::record_outcome::run(&cli.db, args, cli.format).map(|()| ExitCode::SUCCESS)
