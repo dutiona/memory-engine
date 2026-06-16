@@ -14,7 +14,7 @@ use crate::archive::types::{
     ArchiveManifestEntry, ArchivePak, ArchivePolicy, ArchiveStats, ArchiveVerifyResult,
     CURRENT_PAK_VERSION,
 };
-use crate::error::{MemoryError, Result};
+use crate::error::{ArchiveError, Result};
 use crate::store::archive_manifest::ArchiveManifestStore;
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
@@ -49,9 +49,10 @@ impl MemoryEngine {
         drop(self.pool.try_write()?);
 
         if !self.is_file_backed() {
-            return Err(MemoryError::Archive(
+            return Err(ArchiveError::NotFileBacked(
                 "archival requires a file-backed engine".to_string(),
-            ));
+            )
+            .into());
         }
 
         let archive_dir = self.archive_dir()?;
@@ -192,7 +193,7 @@ impl MemoryEngine {
         pak: &ArchivePak,
     ) -> Result<(PathBuf, u64, String)> {
         std::fs::create_dir_all(archive_dir).map_err(|e| {
-            MemoryError::Archive(format!(
+            ArchiveError::Io(format!(
                 "failed to create archive dir {}: {e}",
                 archive_dir.display()
             ))
@@ -206,7 +207,7 @@ impl MemoryEngine {
         let blake3_hash = write_pak_and_hash(pak, &pak_path)?;
         let pak_size_bytes = std::fs::metadata(&pak_path)
             .map_err(|e| {
-                MemoryError::Archive(format!(
+                ArchiveError::Io(format!(
                     "failed to stat pak file {}: {e}",
                     pak_path.display()
                 ))
@@ -245,7 +246,7 @@ impl MemoryEngine {
         let conn = self.write_conn()?;
         let tx = conn
             .unchecked_transaction()
-            .map_err(|e| MemoryError::Archive(format!("failed to begin transaction: {e}")))?;
+            .map_err(|e| ArchiveError::Transaction(format!("failed to begin transaction: {e}")))?;
 
         ArchiveManifestStore::new(&tx).insert(
             pak_filename,
@@ -265,7 +266,7 @@ impl MemoryEngine {
         FactStore::new(&tx, self.embed_dim).hard_delete_ids(fact_ids)?;
 
         tx.commit().map_err(|e| {
-            MemoryError::Archive(format!("failed to commit archive transaction: {e}"))
+            ArchiveError::Transaction(format!("failed to commit archive transaction: {e}"))
         })?;
 
         Ok(())
@@ -332,10 +333,12 @@ impl MemoryEngine {
     /// Resolve the archive directory (sibling of DB file + `/archives/`).
     fn archive_dir(&self) -> Result<PathBuf> {
         let db_path = self.pool.path().ok_or_else(|| {
-            MemoryError::Archive("cannot resolve archive dir for in-memory database".to_string())
+            ArchiveError::NotFileBacked(
+                "cannot resolve archive dir for in-memory database".to_string(),
+            )
         })?;
         let parent = db_path.parent().ok_or_else(|| {
-            MemoryError::Archive(format!(
+            ArchiveError::Io(format!(
                 "database path has no parent: {}",
                 db_path.display()
             ))
