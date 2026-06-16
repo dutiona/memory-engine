@@ -19,13 +19,19 @@ use crate::error::{CycleError, MemoryError, Result};
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
-use crate::store::schema::set_config;
+use crate::store::schema::{get_config, set_config};
 use crate::types::{EventType, NewEdge, NewEvent, PromoteRequest};
 
-use super::report::{ApplyResult, CycleDelta, CycleReport, IMPORTANCE_STEP, MAX_ADJUSTMENT};
+use super::report::{
+    ApplyResult, CycleDelta, CycleMetadata, CycleReport, IMPORTANCE_STEP, MAX_ADJUSTMENT,
+};
 
 /// Config key holding the RFC3339 high-water mark of the last applied cycle.
 const LAST_DREAM_CYCLE_AT: &str = "last_dream_cycle_at";
+/// Config key holding the bounded JSON history of recent [`CycleMetadata`].
+const DREAM_CYCLE_HISTORY: &str = "dream_cycle_history";
+/// How many recent cycles to retain in the history ring (for `prior_reports`).
+const DREAM_CYCLE_HISTORY_MAX: usize = 8;
 /// `relation_type` of the graph edge written by a [`CycleDelta::Supersede`].
 const SUPERSEDES_RELATION: &str = "supersedes";
 
@@ -169,6 +175,7 @@ impl MemoryEngine {
             LAST_DREAM_CYCLE_AT,
             &report.metadata.time_window.end.to_rfc3339(),
         )?;
+        Self::append_cycle_history(&tx, &report.metadata)?;
 
         tx.commit().map_err(MemoryError::Database)?;
         drop(conn); // release the write lock before notifying HNSW
@@ -241,6 +248,23 @@ impl MemoryEngine {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Append a cycle's metadata to the bounded history ring (oldest dropped past
+    /// [`DREAM_CYCLE_HISTORY_MAX`]). `run_dream_cycle` reads this back to populate
+    /// `CycleContext::prior_reports` — the retrieve-before-reflect input.
+    fn append_cycle_history(conn: &Connection, metadata: &CycleMetadata) -> Result<()> {
+        let mut history: Vec<CycleMetadata> = match get_config(conn, DREAM_CYCLE_HISTORY)? {
+            Some(s) => serde_json::from_str(&s)?,
+            None => Vec::new(),
+        };
+        history.push(metadata.clone());
+        let len = history.len();
+        if len > DREAM_CYCLE_HISTORY_MAX {
+            history.drain(0..len - DREAM_CYCLE_HISTORY_MAX);
+        }
+        set_config(conn, DREAM_CYCLE_HISTORY, &serde_json::to_string(&history)?)?;
         Ok(())
     }
 }

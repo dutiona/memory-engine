@@ -119,6 +119,10 @@ pub use types::*;
 
 // Phase 5a cognitive pipeline re-exports
 pub use engine::cognitive::DreamContext;
+pub use engine::cycle::{
+    ApplyResult, CycleAnomaly, CycleContext, CycleDelta, CycleMetadata, CycleReport, IdentityOutput,
+    TimeWindow, IMPORTANCE_STEP, MAX_ADJUSTMENT,
+};
 
 #[cfg(test)]
 mod tests {

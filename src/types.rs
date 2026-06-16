@@ -642,20 +642,8 @@ pub struct Insight {
     pub scope: Option<String>,
 }
 
-/// Report returned by [`crate::traits::DreamCycle::run`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CycleReport {
-    /// Total facts evaluated during this cycle.
-    pub facts_evaluated: usize,
-    /// Facts promoted to wisdom.
-    pub facts_promoted: usize,
-    /// Facts whose importance scores were adjusted.
-    pub facts_rescored: usize,
-    /// Facts expired (soft-deleted) during this cycle.
-    pub facts_expired: usize,
-    /// Provenance envelopes for each promotion.
-    pub promotions: Vec<PromotionProvenance>,
-}
+// `CycleReport` (delta-based, R7) now lives in `crate::engine::cycle::report` and is
+// re-exported from the crate root. The old counts-based struct was removed in #49.
 
 /// Per-`FactType` compression configuration for `DreamCycle`.
 ///
@@ -1089,19 +1077,7 @@ mod tests {
         assert_eq!(insight, back);
     }
 
-    #[test]
-    fn cycle_report_serde_round_trip() {
-        let report = CycleReport {
-            facts_evaluated: 100,
-            facts_promoted: 5,
-            facts_rescored: 20,
-            facts_expired: 10,
-            promotions: vec![],
-        };
-        let json = serde_json::to_string(&report).unwrap();
-        let back: CycleReport = serde_json::from_str(&json).unwrap();
-        assert_eq!(report, back);
-    }
+    // `CycleReport` serde round-trip moved to `engine::cycle::report` tests (#49).
 
     // --- Existing tests ---
 

@@ -184,26 +184,35 @@ pub trait InsightStream {
 /// Periodic batch processing: consolidation, pattern detection, promotion.
 ///
 /// Consumer-implemented. Called on a schedule (e.g., end of session, daily).
-/// The implementation drives the full pipeline through a capability-restricted
-/// [`DreamContext`](crate::engine::cognitive::DreamContext):
-/// consolidation → pattern detection → behavioral compression → promotion
-/// with provenance.
+/// The implementation drives the full pipeline through a
+/// [`CycleContext`](crate::engine::cycle::CycleContext) — the retrieve-before-reflect
+/// wrapper around the capability-restricted
+/// [`DreamContext`](crate::engine::cognitive::DreamContext): it exposes the
+/// query/consolidate/promote capability bag via
+/// [`dream()`](crate::engine::cycle::CycleContext::dream) **plus** the retrieved
+/// prior wisdom, prior cycle metadata, and the time window to process.
+///
+/// `run` **proposes** mutations as a delta-based [`CycleReport`](crate::CycleReport);
+/// it does not write to the store. The caller applies the report via
+/// [`MemoryEngine::apply_cycle_report`](crate::MemoryEngine::apply_cycle_report) — the
+/// produce/apply split is what enables a human review gate before promotion.
 ///
 /// Passed as `&dyn DreamCycle` per-call (not stored in the engine).
 pub trait DreamCycle {
-    /// Run one cycle of the cognitive pipeline.
+    /// Run one cycle of the cognitive pipeline, returning a delta-based report.
     ///
-    /// The [`DreamContext`](crate::engine::cognitive::DreamContext) provides
-    /// read access, consolidation/forget delegation, and an atomic `promote()`
-    /// write path for wisdom promotion with lineage tracking.
+    /// The [`CycleContext`](crate::engine::cycle::CycleContext) provides read access
+    /// and consolidation delegation via
+    /// [`dream()`](crate::engine::cycle::CycleContext::dream), plus retrieve-before-reflect
+    /// prior state.
     ///
     /// # Errors
     ///
     /// Returns an error if the cycle fails.
     fn run(
         &self,
-        ctx: &crate::engine::cognitive::DreamContext,
-    ) -> Result<crate::types::CycleReport>;
+        ctx: &crate::engine::cycle::CycleContext,
+    ) -> Result<crate::engine::cycle::CycleReport>;
 }
 
 /// Configuration for the consolidation process (Phase 2).
