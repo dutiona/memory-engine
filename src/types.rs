@@ -155,10 +155,13 @@ pub struct Fact {
     /// Valid-time end: when the fact stopped being true; `None` = still valid.
     pub t_invalid: Option<DateTime<Utc>>,
     pub source_event_id: Option<i64>,
-    /// **Base importance** — the consumer-supplied prior in `[0.0, 1.0]`, set once
-    /// at insertion (via [`AddFactOptions::importance`], default `0.5`) and
-    /// validated to be a finite value in range (#571). It is a *static* hint that
-    /// never decays; the engine only reads it. It feeds the materialized
+    /// **Base importance** — the consumer-supplied prior set once at insertion
+    /// (via [`AddFactOptions::importance`], default `0.5`). It *should* be a
+    /// finite value in `[0.0, 1.0]`, but this is an unenforced caller
+    /// precondition: no layer validates or clamps it, so an out-of-range value
+    /// (e.g. `5.0` or `NaN`) is stored verbatim and propagated to
+    /// [`importance_score`](Self::importance_score) (known non-enforcement, #130).
+    /// It is a *static* hint that never decays; the engine only reads it. It feeds the materialized
     /// [`importance_score`](Self::importance_score) as one of four signals (weight
     /// `base_importance_weight`). Do not confuse with the decayed score below.
     pub importance: f64,
@@ -170,7 +173,9 @@ pub struct Fact {
     #[serde(default)]
     pub is_pinned: bool,
     /// **Materialized importance score** — the *computed, decaying* score the
-    /// engine ranks and forgets by, in `[0.0, 1.0]`. It is the weighted sum of
+    /// engine ranks and forgets by, normally in `[0.0, 1.0]` (it is seeded verbatim
+    /// from the unenforced [`importance`](Self::importance) prior, so an
+    /// out-of-range prior leaks through until recomputed). It is the weighted sum of
     /// four signals (recency via Ebbinghaus decay, access frequency, graph
     /// degree, and the static [`importance`](Self::importance) prior); see
     /// `forgetting::compute_importance`. Seeded to `importance` at ingest, then
@@ -429,7 +434,7 @@ impl NewFact {
 /// | `t_valid`         | `None` (valid since creation)                            |
 /// | `t_invalid`       | `None` (still valid)                                     |
 /// | `source_event_id` | `None`                                                   |
-/// | `importance`      | `0.5` (neutral prior; must be finite in `[0, 1]`)        |
+/// | `importance`      | `0.5` (neutral prior; caller *should* keep it finite in `[0, 1]` — unenforced) |
 /// | `access_count`    | `0`                                                      |
 /// | `last_accessed`   | `Utc::now()` at [`build`](NewFactBuilder::build)        |
 /// | `metadata`        | `{}` (empty JSON object)                                 |
@@ -519,7 +524,9 @@ impl NewFactBuilder {
         self
     }
 
-    /// Set the base importance prior (default `0.5`); must be finite in `[0, 1]`.
+    /// Set the base importance prior (default `0.5`). Should be finite in
+    /// `[0, 1]`, but this is an unenforced caller precondition: the value is
+    /// stored verbatim with no validation or clamping (#130).
     pub const fn importance(mut self, importance: f64) -> Self {
         self.importance = importance;
         self
