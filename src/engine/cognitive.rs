@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 
 use crate::engine::MemoryEngine;
 use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, TimeWindow};
-use crate::error::{MemoryError, Result};
+use crate::error::{MemoryError, MigrationError, Result};
 use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::store::facts::FactStore;
 use crate::store::lineage::LineageStore;
@@ -189,7 +189,9 @@ impl MemoryEngine {
             let start = match get_config(conn, "last_dream_cycle_at")? {
                 Some(s) => DateTime::parse_from_rfc3339(&s)
                     .map_err(|e| {
-                        MemoryError::Migration(format!("invalid last_dream_cycle_at: {e}"))
+                        MemoryError::Migration(MigrationError::Incompatible(format!(
+                            "invalid last_dream_cycle_at: {e}"
+                        )))
                     })?
                     .with_timezone(&Utc),
                 None => DateTime::from_timestamp(0, 0).expect("unix epoch is a valid timestamp"),

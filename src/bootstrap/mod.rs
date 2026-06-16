@@ -26,13 +26,13 @@ use crate::types::{EventType, FactType, NewEvent, NewFact};
 
 pub use extract::{ExtractedFact, KeywordExtractor, SessionExtractor};
 pub use filter::{CandidateEpisode, ConversationTurn, EpisodeCategory, ToolCallRecord};
-pub use memory_dir::{parse_memory_file, ParsedMemory};
+pub use memory_dir::{ParsedMemory, parse_memory_file};
 pub use metrics::{BootstrapConfig, BootstrapReport, PrewarmMetrics};
 pub use outcome::{OutcomeSignals, SessionOutcome};
 pub use redact::{
-    load_secret_denylist, redact_entries, redact_entries_with_denylist, redact_json_strings,
-    redact_text, redact_text_with_denylist, shannon_entropy, Finding, RedactionReport,
-    DENYLIST_ENV_VAR,
+    DENYLIST_ENV_VAR, Finding, RedactionReport, load_secret_denylist, redact_entries,
+    redact_entries_with_denylist, redact_json_strings, redact_text, redact_text_with_denylist,
+    shannon_entropy,
 };
 
 /// Bootstrap one session from a JSONL reader into the memory engine.
