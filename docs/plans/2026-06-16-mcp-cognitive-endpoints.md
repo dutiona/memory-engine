@@ -145,3 +145,14 @@ Reviewers: correctness/SQL (rust-specialist), security/boundary (code-reviewer),
 - **Dispositioned, no change:** `pub` (not `pub(crate)`) on `list_active_by_metadata_key_recent` — kept to match its sibling `list_by_scopes_recent`; `FactStore` is crate-internal so it is effectively `pub(crate)` at the boundary, and a `debug_assert` + rustdoc contract guard the trusted-literal interpolation. CycleError mis-tier for a hypothetical buggy custom `DreamCycle` — documented/benign with the shipped `DefaultDreamCycle`.
 
 Gate after fixes: workspace 1110 passed / 4 ignored; `--all-features` 926 passed / 4 ignored; clippy exit 0; fmt clean.
+
+### Review Round 2 (gemini-code-assist bot)
+
+The bot raised 4 findings, all on the "validate-at-boundary, never silently coerce" theme — consistent with the MCP server's stated contract. All adopted (committed as a second `fix(...)`):
+
+- **[security-high] `marker_key` runtime guard**: replaced the `debug_assert` (compiled out in release) with a real runtime check returning `ConflictError::QueryValidation`. The bot suggested `MemoryError::InvalidArgument` — that variant does **not** exist (the bot is type-blind); used the real `QueryValidation` variant. Store test `list_active_by_metadata_key_recent_rejects_non_identifier_key`.
+- **[medium] flush_insights non-object metadata**: reverted the earlier normalize-to-`{}` to a per-entry rejection into `failed[]` (matches the batch-failure pattern; the client learns, sibling insights still flush). This supersedes the Round-1 normalization. Test `flush_insights_non_object_metadata_is_rejected`.
+- **[medium] `apply` malformed → invalid_params** (it mutates; silent-true is a footgun). Test `dream_cycle_malformed_apply_is_invalid_params`.
+- **[medium] `limit` malformed → invalid_params** (strengthened the Round-1 `limit==0` guard to reject strings/negatives/zero/non-integers). Test `get_recent_insights_malformed_limit_is_invalid_params`.
+
+Gate after Round 2: workspace 1114 passed / 4 ignored; clippy exit 0; fmt clean.

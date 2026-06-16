@@ -200,6 +200,39 @@ fn get_recent_insights_limit_zero_is_invalid_params() {
 }
 
 #[test]
+fn get_recent_insights_malformed_limit_is_invalid_params() {
+    let (engine, _d) = engine();
+    seed(&engine, "insight", Some("project:p"), true);
+    // A present-but-wrong-type limit must reject, not silently default to 20.
+    for bad in [json!("ten"), json!(-3), json!(1.5)] {
+        let err = call(
+            &engine,
+            "memory_get_recent_insights",
+            args(&[("project_path", json!("project:p")), ("limit", bad.clone())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::INVALID_PARAMS,
+            "limit {bad} must reject"
+        );
+    }
+}
+
+#[test]
+fn dream_cycle_malformed_apply_is_invalid_params() {
+    let (engine, _d) = engine();
+    // `apply` mutates; a present-but-non-bool value must reject, not default to true.
+    let err = call(
+        &engine,
+        "memory_dream_cycle",
+        args(&[("apply", json!("yes"))]),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+}
+
+#[test]
 fn get_recent_insights_sparse_depth_shapes_facts() {
     let (engine, _d) = engine();
     seed(&engine, "insight one", Some("project:p"), true);

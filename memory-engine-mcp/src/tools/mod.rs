@@ -952,25 +952,31 @@ fn handle_flush_insights(
             }
         }
 
-        // Normalize non-object metadata to {} so the (load-bearing) insight marker
-        // always lands — a client passing e.g. `"metadata": "foo"` must not silently
-        // drop the marker and make the fact invisible to get_recent_insights.
-        let mut metadata = match obj.get("metadata").cloned().unwrap_or(json!({})) {
-            Value::Object(m) => Value::Object(m),
-            _ => json!({}),
+        // Metadata must be absent/null or an object — a present non-object (e.g.
+        // `"metadata": "foo"`) is a malformed entry, rejected into `failed` rather than
+        // silently coerced (which would also drop the load-bearing insight marker). The
+        // marker is then always stamped onto a valid object, so a flushed insight is
+        // never invisible to get_recent_insights.
+        let mut metadata = match obj.get("metadata") {
+            None | Some(Value::Null) => serde_json::Map::new(),
+            Some(Value::Object(m)) => m.clone(),
+            Some(v) => {
+                failed.push(
+                    json!({ "index": i, "error": format!("metadata must be an object, got {v}") }),
+                );
+                continue;
+            }
         };
-        if let Value::Object(ref mut m) = metadata {
-            m.insert("source".to_owned(), json!("pre_compaction_flush"));
-            // Insight marker read by memory_get_recent_insights (shared INSIGHT_MARKER_KEY).
-            m.insert(
-                INSIGHT_MARKER_KEY.to_owned(),
-                json!({ "flushed_at": Utc::now().to_rfc3339() }),
-            );
-        }
+        metadata.insert("source".to_owned(), json!("pre_compaction_flush"));
+        // Insight marker read by memory_get_recent_insights (shared INSIGHT_MARKER_KEY).
+        metadata.insert(
+            INSIGHT_MARKER_KEY.to_owned(),
+            json!({ "flushed_at": Utc::now().to_rfc3339() }),
+        );
 
         let opts = AddFactOptions {
             importance,
-            metadata: Some(metadata),
+            metadata: Some(Value::Object(metadata)),
             ..Default::default()
         };
 
@@ -1528,7 +1534,18 @@ fn handle_dream_cycle(
     args: Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let apply = get_bool(&args, "apply").unwrap_or(true);
+    // `apply` mutates the store, so a present-but-malformed value must NOT silently
+    // fall back to `true` — reject it. Absent/null → default true.
+    let apply = match args.get("apply") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(v) => {
+            return Err(ErrorData::invalid_params(
+                format!("'apply' must be a boolean, got {v}"),
+                None,
+            ));
+        }
+    };
     let cycle = DefaultDreamCycle::with_defaults();
     let report = engine.run_dream_cycle(&cycle).map_err(to_mcp_error)?;
 
@@ -1566,13 +1583,22 @@ fn handle_get_recent_insights(
 ) -> Result<CallToolResult, ErrorData> {
     let project_path = get_str(&args, "project_path")
         .ok_or_else(|| ErrorData::invalid_params("missing 'project_path'", None))?;
-    let limit = get_usize(&args, "limit").unwrap_or(20);
-    // The schema declares `minimum: 1`; enforce it here since the MCP layer does not
-    // validate args against the schema. A silent `limit=0` would return an empty list
-    // indistinguishable from "no insights exist".
-    if limit == 0 {
-        return Err(ErrorData::invalid_params("'limit' must be >= 1", None));
-    }
+    // The schema declares `limit` as an integer `minimum: 1`; the MCP layer does not
+    // validate args against the schema, so enforce it here. A present-but-malformed
+    // value (string, negative, 0) is rejected rather than silently defaulting to 20 or
+    // returning an empty list indistinguishable from "no insights exist". Absent → 20.
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => 20,
+        Some(v) => match v.as_u64().and_then(|n| usize::try_from(n).ok()) {
+            Some(n) if n >= 1 => n,
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    format!("'limit' must be an integer >= 1, got {v}"),
+                    None,
+                ));
+            }
+        },
+    };
     let depth_level = get_depth(&args)?;
 
     let facts = engine

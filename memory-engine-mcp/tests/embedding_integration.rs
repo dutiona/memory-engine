@@ -549,6 +549,61 @@ async fn flush_insights_partial_failure() {
     assert_eq!(body["failed_count"].as_u64().unwrap(), 2);
 }
 
+/// A present-but-non-object `metadata` is rejected per-entry into `failed` (not
+/// silently coerced to `{}`), while a sibling insight with valid metadata still flushes.
+#[tokio::test(flavor = "multi_thread")]
+async fn flush_insights_non_object_metadata_is_rejected() {
+    let server = MockServer::start().await;
+    let emb = make_embedding(DIM);
+    // Only the one valid insight reaches the batch embed → 1 indexed embedding.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "index": 0, "embedding": emb }]
+        })))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    let body = tokio::task::spawn_blocking(move || {
+        let provider = HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "test-model".into(),
+            None,
+            DIM,
+            5,
+        )
+        .unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let result = tools::dispatch(
+            "memory_flush_insights",
+            args(json!({
+                "insights": [
+                    { "content": "valid", "metadata": { "k": "v" } },
+                    { "content": "bad meta", "metadata": "not-an-object" }
+                ]
+            })),
+            &engine,
+            Some(&provider),
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        );
+        unwrap_ok(result)
+    })
+    .await
+    .unwrap();
+    assert_eq!(body["added"].as_u64().unwrap(), 1);
+    assert_eq!(body["failed_count"].as_u64().unwrap(), 1);
+    assert_eq!(body["failed"][0]["index"], json!(1));
+    assert!(
+        body["failed"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("metadata must be an object")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Query with server-side embedding
 // ---------------------------------------------------------------------------

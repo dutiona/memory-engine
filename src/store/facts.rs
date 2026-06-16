@@ -949,10 +949,13 @@ impl<'a> FactStore<'a> {
     /// `marker_key` **MUST** be a trusted caller-supplied literal (an engine const
     /// such as [`INSIGHT_MARKER_KEY`](crate::INSIGHT_MARKER_KEY)): it is interpolated
     /// into the SQL JSON path, **never bound**, so it must never carry client input.
-    /// A `debug_assert` guards against a non-identifier key in tests.
+    /// A runtime guard rejects a non-identifier key in **all** build profiles
+    /// (not just `debug`), since the key is interpolated into SQL.
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::Conflict(ConflictError::QueryValidation)` if
+    /// `marker_key` is not a non-empty `[A-Za-z0-9_]+` identifier.
     /// Returns `MemoryError::Database` on query failure.
     pub fn list_active_by_metadata_key_recent(
         &self,
@@ -960,13 +963,21 @@ impl<'a> FactStore<'a> {
         marker_key: &str,
         limit: usize,
     ) -> Result<Vec<Fact>> {
-        debug_assert!(
-            !marker_key.is_empty()
-                && marker_key
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_'),
-            "marker_key must be a trusted identifier literal, got {marker_key:?}"
-        );
+        // Defense in depth: although every current caller passes a trusted engine
+        // const, this is a runtime check (not a `debug_assert`, which compiles out in
+        // release) because `marker_key` is interpolated into the SQL JSON path. A
+        // future caller wiring client input here cannot silently open an injection.
+        if marker_key.is_empty()
+            || !marker_key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(MemoryError::Conflict(
+                crate::error::ConflictError::QueryValidation(format!(
+                    "marker_key must be a non-empty alphanumeric/underscore identifier, got {marker_key:?}"
+                )),
+            ));
+        }
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
         let dim = self.embed_dim;
@@ -1438,6 +1449,26 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The runtime guard rejects a non-identifier `marker_key` in ALL build profiles
+    /// (the key is interpolated into SQL) — a release build must not skip it.
+    #[test]
+    fn list_active_by_metadata_key_recent_rejects_non_identifier_key() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        for bad in ["", "in'sight", "$.x", "a b", "a;b"] {
+            let err = store
+                .list_active_by_metadata_key_recent(&[1], bad, 10)
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    MemoryError::Conflict(crate::error::ConflictError::QueryValidation(_))
+                ),
+                "key {bad:?} should be rejected as QueryValidation, got {err:?}"
+            );
+        }
     }
 
     #[test]
