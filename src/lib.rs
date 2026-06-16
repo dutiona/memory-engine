@@ -118,7 +118,7 @@ pub use traits::{
 pub use types::*;
 
 // Phase 5a cognitive pipeline re-exports
-pub use engine::cognitive::DreamContext;
+pub use engine::cognitive::{DreamContext, INSIGHT_MARKER_KEY};
 pub use engine::cycle::{
     ApplyResult, CycleAnomaly, CycleContext, CycleDelta, CycleMetadata, CycleReport,
     DefaultDreamCycle, IMPORTANCE_STEP, IdentityOutput, MAX_ADJUSTMENT, TimeWindow,

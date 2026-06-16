@@ -20,6 +20,15 @@ use crate::search::strategy::VectorSearchStrategy;
 pub use crate::traits::{DreamCycle, InsightStream};
 pub use crate::types::Insight;
 
+/// Top-level `metadata` key marking a fact captured via the pre-compaction insight
+/// flush. Written by the MCP `memory_flush_insights` tool and read by
+/// [`MemoryEngine::list_recent_insights`](crate::MemoryEngine::list_recent_insights).
+///
+/// Defined once here so the writer (MCP crate) and the reader (core) share a single
+/// literal and cannot drift. The stamped value is an object (e.g.
+/// `{"flushed_at": <rfc3339>}`); readers match on key *presence with a non-null value*.
+pub const INSIGHT_MARKER_KEY: &str = "insight";
+
 /// Capability-restricted handle passed to [`DreamCycle::run`].
 ///
 /// Exposes only the operations a `DreamCycle` consumer needs:

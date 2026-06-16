@@ -14,6 +14,11 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
 
         MemoryError::Conflict(msg) => ErrorData::invalid_params(format!("conflict: {msg}"), None),
 
+        // A dream-cycle report that fails validation/application is a client-input
+        // error (the report is client-supplied to `memory_apply_cycle_report`), so it
+        // maps to invalid_params alongside `Conflict` — not the internal-error default.
+        MemoryError::Cycle(e) => ErrorData::invalid_params(format!("cycle error: {e}"), None),
+
         MemoryError::Database(e) => ErrorData::internal_error(format!("database error: {e}"), None),
 
         MemoryError::Serialization(e) => {
@@ -125,6 +130,15 @@ mod tests {
         let err = MemoryError::Database(rusqlite::Error::QueryReturnedNoRows);
         let mcp = to_mcp_error(err);
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn cycle_maps_to_invalid_params() {
+        use memory_engine::error::CycleError;
+        let err = MemoryError::Cycle(CycleError::UnknownFact(7));
+        let mcp = to_mcp_error(err);
+        assert_eq!(mcp.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(mcp.message.contains("cycle error"));
     }
 
     #[test]

@@ -20,6 +20,39 @@ impl MemoryEngine {
         })
     }
 
+    /// List recent insight facts within a project scope subtree, newest-first.
+    ///
+    /// Returns active facts whose `metadata` carries the insight marker
+    /// ([`INSIGHT_MARKER_KEY`](crate::INSIGHT_MARKER_KEY)) — written by the MCP
+    /// `memory_flush_insights` tool — anywhere in the subtree rooted at `scope_path`,
+    /// ordered `t_created` DESC and capped at `limit`. An unknown `scope_path` yields
+    /// an empty vec: a not-yet-created project legitimately has no scope node, so this
+    /// is "no insights" rather than an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_recent_insights(
+        &self,
+        scope_path: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::types::Fact>> {
+        // Resolve the scope subtree under a short-lived read lock. `subtree(unknown_id)`
+        // would return a singleton, so branch on `resolve_path` returning `None` and
+        // early-return empty — never call `subtree` with a fallback id.
+        let scope_ids = {
+            let tree = self.scope_tree.read();
+            match tree.resolve_path(scope_path) {
+                Some(id) => tree.subtree(id),
+                None => return Ok(Vec::new()),
+            }
+        };
+        self.with_read(|conn| {
+            crate::store::facts::FactStore::new(conn, self.embed_dim)
+                .list_active_by_metadata_key_recent(&scope_ids, crate::INSIGHT_MARKER_KEY, limit)
+        })
+    }
+
     /// Replay a segment of the event log for debugging.
     ///
     /// Supports filtering by time range, ID range, session, and event type.
