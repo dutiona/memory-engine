@@ -363,10 +363,19 @@ pub enum MemoryError {
     Migration(#[from] MigrationError),
 
     /// The requested operation is recognized but not yet implemented.
+    ///
+    /// **Terminal — propagate, don't `match`.** Informational only; the message
+    /// identifies the unbuilt path (e.g. a disabled compression feature gate).
+    /// Deliberately kept as a plain string rather than a typed sub-enum (see
+    /// #560): callers cannot recover differently per cause.
     #[error("not implemented: {0}")]
     NotImplemented(String),
 
     /// The connection pool could not hand out or manage a connection.
+    ///
+    /// **Terminal — propagate, don't `match`.** Only surfaced under the `async`
+    /// feature (a task-join failure); a single failure mode, so no typed
+    /// sub-enum is warranted (see #560).
     #[error("connection pool error: {0}")]
     Pool(String),
 
@@ -379,6 +388,11 @@ pub enum MemoryError {
 
     /// An invariant was violated inside the engine — a bug or corrupted state
     /// that the caller cannot meaningfully recover from.
+    ///
+    /// **Terminal by definition — propagate (or log), never `match` on the
+    /// message.** It spans many unrelated internal failure domains and exists to
+    /// signal "this shouldn't happen", so it is intentionally *not* split into a
+    /// typed sub-enum (see #560).
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -403,6 +417,11 @@ pub enum MemoryError {
     ReadOnly,
 
     /// A wisdom-fact lineage/provenance record is missing or inconsistent.
+    ///
+    /// **Terminal / low-traffic — propagate, don't `match`.** Too few sites and
+    /// too thin to warrant a typed sub-enum (see #560); a future change may fold
+    /// it into [`Conflict`](MemoryError::Conflict)/[`NotFound`](MemoryError::NotFound)
+    /// instead.
     #[error("lineage error: {0}")]
     Lineage(String),
 
