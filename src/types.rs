@@ -436,13 +436,13 @@ impl NewFact {
 /// | `source_event_id` | `None`                                                   |
 /// | `importance`      | `0.5` (neutral prior; finite `[0, 1]` — not validated on this direct-insert path, #584) |
 /// | `access_count`    | `0`                                                      |
-/// | `last_accessed`   | `Utc::now()` at [`build`](NewFactBuilder::build)        |
+/// | `last_accessed`   | the resolved `t_created` (coherent for backdated facts)  |
 /// | `metadata`        | `{}` (empty JSON object)                                 |
 /// | `scope_id`        | `1` (root scope)                                         |
 /// | `is_pinned`       | `false`                                                  |
 ///
-/// `t_created` and `last_accessed` are sampled once, together, at `build()` so a
-/// freshly built fact has a single coherent timestamp.
+/// `t_created` defaults to `Utc::now()` at `build()`, and `last_accessed` defaults
+/// to that resolved `t_created`, so a fact (fresh or backdated) stays coherent.
 #[must_use = "a builder does nothing until `.build()` is called"]
 #[derive(Debug, Clone)]
 pub struct NewFactBuilder {
@@ -568,19 +568,23 @@ impl NewFactBuilder {
     #[must_use]
     pub fn build(self) -> NewFact {
         let now = Utc::now();
+        // Default last_accessed to the resolved t_created (not `now`): when a fact
+        // is backdated (historical import/bootstrap), treating it as freshly
+        // accessed would reset its Ebbinghaus decay and skew importance.
+        let t_created = self.t_created.unwrap_or(now);
         NewFact {
             content: self.content,
             content_hash: self.content_hash,
             embedding: self.embedding,
             fact_type: self.fact_type,
-            t_created: self.t_created.unwrap_or(now),
+            t_created,
             t_expired: self.t_expired,
             t_valid: self.t_valid,
             t_invalid: self.t_invalid,
             source_event_id: self.source_event_id,
             importance: self.importance,
             access_count: self.access_count,
-            last_accessed: self.last_accessed.unwrap_or(now),
+            last_accessed: self.last_accessed.unwrap_or(t_created),
             metadata: self.metadata,
             scope_id: self.scope_id,
             is_pinned: self.is_pinned,
@@ -890,6 +894,30 @@ mod tests {
         assert_eq!(ActivityStatus::Deduplicated.to_string(), "deduplicated");
         assert_eq!(ActivityStatus::Ignored.to_string(), "ignored");
         assert_eq!(ActivityStatus::Promoted.to_string(), "promoted");
+    }
+
+    // --- NewFactBuilder ---
+
+    #[test]
+    fn builder_backdated_t_created_sets_last_accessed_to_match() {
+        use chrono::TimeZone;
+        let past = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        // Backdate t_created without an explicit last_accessed.
+        let nf = NewFact::builder("historical fact", vec![0.1; 4], FactType::Semantic)
+            .t_created(past)
+            .build();
+        assert_eq!(nf.t_created, past);
+        assert_eq!(
+            nf.last_accessed, past,
+            "last_accessed must follow a backdated t_created, not default to now"
+        );
+        // An explicit last_accessed still wins.
+        let later = Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap();
+        let nf2 = NewFact::builder("x", vec![0.1; 4], FactType::Semantic)
+            .t_created(past)
+            .last_accessed(later)
+            .build();
+        assert_eq!(nf2.last_accessed, later);
     }
 
     // --- ActivityStatus::from_str round-trip + error path ---
