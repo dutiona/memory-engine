@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{
@@ -695,6 +695,94 @@ impl<'a> FactStore<'a> {
         Ok(())
     }
 
+    /// Shallow-merge a JSON object `patch` into a fact's `metadata` column.
+    ///
+    /// Existing keys are overwritten by colliding patch keys; other keys are
+    /// preserved. Used by the dream-cycle to stamp the `dream_cycle` marker and
+    /// `quarantine` annotations without a schema migration (the `metadata` column
+    /// is free-form JSON).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Internal` if `patch` is not a JSON object, and
+    /// `MemoryError::NotFound` if no fact with `id` exists.
+    pub(crate) fn merge_metadata(&self, id: i64, patch: &serde_json::Value) -> Result<()> {
+        let patch_obj = patch.as_object().ok_or_else(|| {
+            MemoryError::Internal("merge_metadata patch must be a JSON object".to_owned())
+        })?;
+
+        let current: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT metadata FROM facts WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let current = current.ok_or_else(|| MemoryError::NotFound(format!("fact {id}")))?;
+
+        let mut value: serde_json::Value = serde_json::from_str(&current)?;
+        if !value.is_object() {
+            value = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let serde_json::Value::Object(ref mut map) = value {
+            for (k, v) in patch_obj {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+
+        let new_str = serde_json::to_string(&value)?;
+        let changed = self.conn.execute(
+            "UPDATE facts SET metadata = ?1 WHERE id = ?2",
+            params![new_str, id],
+        )?;
+        if changed == 0 {
+            return Err(MemoryError::NotFound(format!("fact {id}")));
+        }
+        Ok(())
+    }
+
+    /// Stamp each fact with the `dream_cycle` marker so a later cycle excludes it
+    /// (idempotency). No schema change — the marker lives in `metadata` JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if any id does not exist.
+    pub(crate) fn mark_dream_cycled(
+        &self,
+        ids: &[i64],
+        cycle_id: u64,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let marker = serde_json::json!({
+            "dream_cycle": { "cycled_at": now.to_rfc3339(), "cycle_id": cycle_id }
+        });
+        for &id in ids {
+            self.merge_metadata(id, &marker)?;
+        }
+        Ok(())
+    }
+
+    /// Like [`Self::list_active_in_period`] but excludes facts already stamped with
+    /// the `dream_cycle` marker — the cycle's input-selection query.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub(crate) fn list_undreamt_in_period(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        scope_ids: &[i64],
+        fact_type: Option<&FactType>,
+    ) -> Result<Vec<Fact>> {
+        let facts = self.list_active_in_period(start, end, scope_ids, fact_type)?;
+        Ok(facts
+            .into_iter()
+            .filter(|f| f.metadata.get("dream_cycle").is_none())
+            .collect())
+    }
+
     /// List active facts ordered by materialized `importance_score`, excluding IDs in `exclude`.
     /// Pass empty `scope_ids` to query across all scopes.
     pub fn list_by_importance_score(
@@ -1051,6 +1139,72 @@ mod tests {
         assert_eq!(retrieved.content, "Rust is a systems language");
         assert_eq!(retrieved.fact_type, FactType::Episodic);
         assert!(!retrieved.content_hash.is_empty());
+    }
+
+    #[test]
+    fn merge_metadata_preserves_and_overwrites_keys() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut fact = make_fact("m", vec![0.1; DIM]);
+        fact.metadata = serde_json::json!({"keep": 1, "collide": "old"});
+        let id = store.insert(&fact).unwrap();
+
+        store
+            .merge_metadata(id, &serde_json::json!({"collide": "new", "added": true}))
+            .unwrap();
+
+        let md = store.get(id).unwrap().metadata;
+        assert_eq!(md["keep"], 1, "existing non-colliding key preserved");
+        assert_eq!(md["collide"], "new", "colliding key overwritten");
+        assert_eq!(md["added"], true, "new key added");
+    }
+
+    #[test]
+    fn merge_metadata_errors_on_missing_fact_and_non_object_patch() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        assert!(matches!(
+            store.merge_metadata(999, &serde_json::json!({"a": 1})),
+            Err(MemoryError::NotFound(_))
+        ));
+        let id = store.insert(&make_fact("x", vec![0.1; DIM])).unwrap();
+        assert!(matches!(
+            store.merge_metadata(id, &serde_json::json!("not-an-object")),
+            Err(MemoryError::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn mark_dream_cycled_excludes_from_undreamt_selection() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let a = store.insert(&make_fact("a", vec![0.1; DIM])).unwrap();
+        let b = store.insert(&make_fact("b", vec![0.2; DIM])).unwrap();
+
+        let start = "2000-01-01T00:00:00Z".parse().unwrap();
+        let end = "2100-01-01T00:00:00Z".parse().unwrap();
+
+        // Both visible before marking.
+        let before = store
+            .list_undreamt_in_period(start, end, &[], None)
+            .unwrap();
+        assert_eq!(before.len(), 2);
+
+        store.mark_dream_cycled(&[a], 1, Utc::now()).unwrap();
+
+        let after = store
+            .list_undreamt_in_period(start, end, &[], None)
+            .unwrap();
+        let ids: Vec<i64> = after.iter().map(|f| f.id).collect();
+        assert_eq!(
+            ids,
+            vec![b],
+            "the dream-cycled fact is excluded; the other remains"
+        );
+
+        // The marker carries the cycle id and is queryable on the row.
+        let marked = store.get(a).unwrap();
+        assert_eq!(marked.metadata["dream_cycle"]["cycle_id"], 1);
     }
 
     #[test]

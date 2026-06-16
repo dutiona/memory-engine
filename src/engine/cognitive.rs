@@ -149,8 +149,54 @@ impl MemoryEngine {
     ///
     /// Reuses `FactStore::insert()` (the same store-level helper used by
     /// `add_fact` and `add_facts_batch`) to avoid a divergent insert pipeline.
-    /// Wraps fact insert + lineage insert in a single savepoint for atomicity.
+    /// Wraps fact insert + lineage insert in a single savepoint for atomicity,
+    /// delegating the insert steps to [`Self::promote_in_conn`] so the standalone
+    /// path and `apply_cycle_report`'s `Promote` delta share one pipeline.
     pub(crate) fn promote_with_lineage(&self, req: &PromoteRequest) -> Result<PromotionResult> {
+        // Validate embedding dimension up-front (before taking the lock).
+        if req.embedding.len() != self.embed_dim {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: self.embed_dim,
+                actual: req.embedding.len(),
+            });
+        }
+
+        // Embed HNSW copy before acquiring write lock (for post-lock notification)
+        #[cfg(feature = "ann")]
+        let emb_copy = req.embedding.clone();
+
+        // Acquire write lock and insert both in a savepoint
+        let mut conn = self.write_conn()?;
+        let sp = conn.savepoint().map_err(MemoryError::Database)?;
+        let result = self.promote_in_conn(&sp, req)?;
+        sp.commit().map_err(MemoryError::Database)?;
+
+        drop(conn); // release write lock before HNSW notification
+
+        // Notify HNSW if enabled
+        #[cfg(feature = "ann")]
+        if let Some(ref hnsw) = self.hnsw_strategy {
+            hnsw.notify_insert(result.fact_id, &emb_copy);
+        }
+
+        Ok(result)
+    }
+
+    /// Promotion steps on an already-open connection/savepoint.
+    ///
+    /// Resolves scope, injects the provenance envelope into metadata, inserts the
+    /// pinned wisdom fact, and writes the lineage record — all against the caller's
+    /// `conn`. Acquires **no** lock, does **not** commit, and does **not** notify
+    /// HNSW; the caller owns the transaction boundary and post-commit index
+    /// notification. This is the shared pipeline behind both
+    /// [`Self::promote_with_lineage`] and `apply_cycle_report`'s `Promote` delta —
+    /// the latter must reuse it (rather than call the lock-acquiring wrapper) to
+    /// avoid self-deadlocking on the non-reentrant connection mutex.
+    pub(crate) fn promote_in_conn(
+        &self,
+        conn: &rusqlite::Connection,
+        req: &PromoteRequest,
+    ) -> Result<PromotionResult> {
         // Validate embedding dimension
         if req.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
@@ -178,16 +224,9 @@ impl MemoryEngine {
 
         let now = Utc::now();
 
-        // Embed HNSW copy before acquiring write lock (for post-lock notification)
-        #[cfg(feature = "ann")]
-        let emb_copy = req.embedding.clone();
-
-        // Acquire write lock and insert both in a savepoint
-        let mut conn = self.write_conn()?;
-
-        // Resolve scope within the write lock (same pattern as add_fact)
+        // Resolve scope on the caller's connection (same pattern as add_fact)
         let scope_id = match &req.scope {
-            Some(path) => self.ensure_scope_with_conn(&conn, path)?,
+            Some(path) => self.ensure_scope_with_conn(conn, path)?,
             None => 1, // root scope
         };
 
@@ -209,25 +248,13 @@ impl MemoryEngine {
             is_pinned: true, // promoted wisdom is pinned (unforgettable)
         };
 
-        let sp = conn.savepoint().map_err(MemoryError::Database)?;
-
-        let fact_id = FactStore::new(&sp, self.embed_dim).insert(&new_fact)?;
+        let fact_id = FactStore::new(conn, self.embed_dim).insert(&new_fact)?;
 
         let lineage_record = NewLineageRecord {
             wisdom_fact_id: fact_id,
             source_fact_ids: req.source_fact_ids.clone(),
         };
-        let lineage_id = LineageStore::new(&sp).insert(&lineage_record, &req.provenance)?;
-
-        sp.commit().map_err(MemoryError::Database)?;
-
-        drop(conn); // release write lock before HNSW notification
-
-        // Notify HNSW if enabled
-        #[cfg(feature = "ann")]
-        if let Some(ref hnsw) = self.hnsw_strategy {
-            hnsw.notify_insert(fact_id, &emb_copy);
-        }
+        let lineage_id = LineageStore::new(conn).insert(&lineage_record, &req.provenance)?;
 
         Ok(PromotionResult {
             fact_id,

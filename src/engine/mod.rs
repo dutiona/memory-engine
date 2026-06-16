@@ -25,6 +25,7 @@ pub mod builder;
 pub(crate) mod cognitive;
 mod conflict;
 mod consolidation;
+pub(crate) mod cycle;
 mod dormant;
 mod forgetting;
 mod graph;
