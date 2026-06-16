@@ -386,11 +386,6 @@ pub enum MemoryError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A bootstrap/backdate import step failed (e.g. parsing or validating the
-    /// seed dataset).
-    #[error("bootstrap error: {0}")]
-    Bootstrap(String),
-
     /// A failure in the reranking stage; see [`RerankerError`] for the specific
     /// cause (a consumer-reported `rerank` failure, or one of the four
     /// engine-detected output-contract violations).

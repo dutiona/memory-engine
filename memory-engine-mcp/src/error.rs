@@ -39,10 +39,6 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
 
         MemoryError::Io(e) => ErrorData::internal_error(format!("I/O error: {e}"), None),
 
-        MemoryError::Bootstrap(msg) => {
-            ErrorData::internal_error(format!("bootstrap error: {msg}"), None)
-        }
-
         MemoryError::Reranker(msg) => {
             ErrorData::internal_error(format!("reranker error: {msg}"), None)
         }
