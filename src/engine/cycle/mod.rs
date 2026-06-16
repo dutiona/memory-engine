@@ -7,9 +7,12 @@
 
 pub(crate) mod apply;
 pub(crate) mod context;
+pub(crate) mod dbscan;
+pub(crate) mod default_impl;
 pub(crate) mod report;
 
 pub use context::CycleContext;
+pub use default_impl::DefaultDreamCycle;
 pub use report::{
     ApplyResult, CycleAnomaly, CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
     IMPORTANCE_STEP, MAX_ADJUSTMENT,

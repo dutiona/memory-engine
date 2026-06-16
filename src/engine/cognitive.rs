@@ -110,6 +110,35 @@ impl<'a> DreamContext<'a> {
     pub fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult> {
         self.engine.promote_with_lineage(req)
     }
+
+    /// List active facts in `window` that have not yet been dream-cycled.
+    ///
+    /// This is a cycle's input-selection query: the metadata `dream_cycle` marker
+    /// excludes facts a previous cycle already processed (idempotency). Root scope,
+    /// all fact types.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store read fails.
+    pub fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>> {
+        self.engine.with_read(|conn| {
+            FactStore::new(conn, self.engine.embed_dim).list_undreamt_in_period(
+                window.start,
+                window.end,
+                &[],
+                None,
+            )
+        })
+    }
+
+    /// Aggregated outcome counts for a fact (for importance rescoring).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the fact does not exist, or a store error.
+    pub fn outcome_counts(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts> {
+        self.engine.get_outcome_counts(fact_id)
+    }
 }
 
 // --- MemoryEngine integration methods ---

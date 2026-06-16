@@ -91,9 +91,14 @@ pub(crate) fn explain_fact_with_graph_context(
 fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     // Priority: Expired > Invalidated > Pinned > Due > Active
     if fact.t_expired.is_some() {
-        return FactState::Expired {
-            reason: ExpiredReason::Unknown,
+        // A DreamCycle quarantine leaves a `quarantine` metadata marker, letting us
+        // distinguish it from ordinary Ebbinghaus forgetting.
+        let reason = if fact.metadata.get("quarantine").is_some() {
+            ExpiredReason::Quarantined
+        } else {
+            ExpiredReason::Unknown
         };
+        return FactState::Expired { reason };
     }
     if let Some(t_invalid) = fact.t_invalid {
         if t_invalid <= now {

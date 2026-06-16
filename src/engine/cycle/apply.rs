@@ -474,6 +474,30 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_is_distinguishable_from_forgetting_in_explain_fact() {
+        use crate::inspect::{ExpiredReason, FactState};
+        let engine = engine();
+        let id = add(&engine, "to quarantine");
+        engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Quarantine {
+                    fact_id: id,
+                    reason: "explicit correction".into(),
+                }],
+                vec![id],
+            ))
+            .unwrap();
+        let explanation = engine.explain_fact(id).unwrap();
+        assert_eq!(
+            explanation.state,
+            FactState::Expired {
+                reason: ExpiredReason::Quarantined
+            },
+            "explain_fact must report a quarantined fact as Quarantined, not Unknown/Forgotten"
+        );
+    }
+
+    #[test]
     fn supersede_expires_old_and_creates_edge() {
         let engine = engine();
         let old = add(&engine, "old fact");

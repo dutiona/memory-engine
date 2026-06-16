@@ -47,8 +47,16 @@ pub enum FactState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExpiredReason {
     Forgotten,
-    ConflictResolved { superseded_by: Option<i64> },
-    Deduplicated { canonical_id: Option<i64> },
+    ConflictResolved {
+        superseded_by: Option<i64>,
+    },
+    Deduplicated {
+        canonical_id: Option<i64>,
+    },
+    /// Removed from retrieval by a `DreamCycle` quarantine (binary removal); the
+    /// row is retained for audit/mining. Distinguished from ordinary forgetting by
+    /// the `quarantine` metadata marker, so `explain_fact` can tell them apart.
+    Quarantined,
     Unknown,
 }
 
