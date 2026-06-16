@@ -142,7 +142,9 @@ pub trait PersistenceClassifier: Send + Sync {
 /// the reranker from mutating fact content, embeddings, or match types (issue #144).
 ///
 /// These invariants are enforced at runtime by `MemoryEngine::query()`.
-/// Violations produce `MemoryError::Reranker`.
+/// Violations produce `MemoryError::Reranker` with the matching
+/// [`RerankerError`](crate::error::RerankerError) variant
+/// (`OutputTooLong`, `OutOfBoundsIndex`, `DuplicateIndex`, `NonFiniteScore`).
 pub trait Reranker: Send + Sync {
     /// Rerank candidates for the given query text.
     ///
@@ -152,7 +154,9 @@ pub trait Reranker: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Reranker` if reranking fails (e.g., API call, inference error).
+    /// Returns `MemoryError::Reranker` (wrapping
+    /// [`RerankerError::Provider`](crate::error::RerankerError::Provider)) if
+    /// reranking fails (e.g., API call, inference error).
     fn rerank(&self, query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>>;
 
     /// Human-readable name for logging and debug output.
