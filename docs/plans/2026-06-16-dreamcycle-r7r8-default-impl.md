@@ -151,3 +151,41 @@ Acceptance: all green; no clippy findings; `CURRENT_SCHEMA_VERSION` still 11; sc
 - **DBSCAN O(N²)** — windowed N bounds it; mirror the `MAX_CLUSTER_FACTS` skip-with-warn.
 - **`prior_reports` shape (D2)** deviates from issue text — flagged.
 - **`unsafe_code = forbid`** — satisfied by construction (pure Rust, no FFI).
+
+---
+
+## Post-Implementation Audit (2026-06-16)
+
+All 14 tasks implemented; full workspace gate green (build/test/clippy `--workspace`
++ `--all-features`, fmt, doc-tests, schema snapshot v11 unchanged). 734 core tests
+pass (+11 new). Per-task status and divergences from the approved plan:
+
+| Task | Status | Note |
+| ---- | ------ | ---- |
+| 0 Baseline | Implemented | — |
+| 1 Spike R-A/R-B | Implemented | R-A as `IMPORTANCE_STEP` arithmetic test in `report.rs`; R-B verified via the apply quarantine/`t_expired` test. Folded into Tasks 2/5. |
+| 2 Delta types | **Modified** | `#[non_exhaustive]` applies to `CycleDelta`/`IdentityOutput`/`ApplyResult`/`CycleAnomaly` only — **not** `CycleReport`/`CycleMetadata`, which external `DreamCycle` impls must construct (`#[non_exhaustive]` would forbid the struct literal). Correctness fix to plan D4. |
+| 3 CycleError | Implemented | Dropped the `EmptyReport` variant (an empty report is `Ok(default)`, not an error). |
+| 4 merge_metadata + marker | Implemented | — |
+| 5 apply_cycle_report + promote_in_conn | Implemented | Per revised plan: Supersede→`"supersedes"` edge, single-connection validate+apply, `TagOutcome` on shared tx. |
+| 6 Trait flip + CycleContext | Implemented | Breaking change; blast radius core-internal as predicted. |
+| 7 Persistence + run_dream_cycle | Implemented | History ring persisted in `apply_cycle_report`; `run_dream_cycle` produces (unapplied). |
+| 8 DBSCAN core | Implemented | — |
+| 9 DefaultDreamCycle | **Modified** | (a) Consolidation is **not** run inside `run()` — it mutates the store, which would break the producer's purity/determinism (the ACE produce/apply split); it is a separate operator step. (b) The struct therefore drops the `SummaryGenerator`/`EmbeddingProvider` fields (resolves the "pure-Rust but needs a generator" tension the reviewers flagged). (c) Content-token correction detection replaced by outcome-driven quarantine (consistent-negative); content-based correction deferred to #578. |
+| 10 ExpiredReason::Quarantined | Implemented | — |
+| 11 Integration + idempotency | Implemented | `tests/dream_cycle_test.rs`: full produce→apply→re-run-noop + read-only rejection. |
+| 12 Docs | Implemented | dream-cycle.md, ADR 0014, crate-layout, doc-example. |
+| 13 Verification gate | Implemented | + caught a `cfg(ann)` import gap (`VectorSearchStrategy`) only visible under `--all-features`. |
+
+**Divergence:** 2 of 14 tasks Modified (~14%, < 30% threshold → no arbitration needed).
+Both are correctness/purity refinements surfaced during implementation, not scope
+changes; all flagged here and in commit messages.
+
+**Supersede simplification (cross-task):** the plan's apply-time forward-ref (`AddFact`
+then `Supersede` to the new id) was **dropped** — a `NewFact` has no id until inserted,
+so the producer cannot reference it; `Supersede` requires both facts to pre-exist. The
+default impl only supersedes pre-existing facts, so nothing is lost. Documented in code
++ ADR 0014.
+
+**Deferred (unchanged from plan):** R9 abstract patterns, R13 composition, PromptBreeder,
+content-based correction, single-transaction cycle → #578. IdentityOutput computation → #57.
