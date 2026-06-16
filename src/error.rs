@@ -120,6 +120,74 @@ pub enum RerankerError {
     },
 }
 
+/// A failure from the cold-storage archive subsystem (`.pak` pack/unpack).
+///
+/// This is the typed payload of [`MemoryError::Archive`]. The two
+/// version-mismatch variants carry the offending and supported versions as
+/// fields, so a caller can detect "archive written by a newer build" and react
+/// (e.g. prompt to upgrade) without string-matching. The remaining variants
+/// group the operational failure modes — preconditions, compression codec,
+/// filesystem I/O, and the archive write transaction — each carrying the
+/// underlying error message verbatim (these wrap arbitrary `std::io`/codec
+/// errors that cannot be enumerated further).
+///
+/// Only constructed when the `archive` feature is enabled; the type itself is
+/// always present so [`MemoryError`] has a stable shape across feature sets.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
+/// downstream `match` expressions must include a wildcard (`_`) arm.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ArchiveError {
+    /// The `.pak` file's `pak_version` is newer than this build supports —
+    /// forward-incompatible (a newer library wrote it). Reading older versions
+    /// is allowed; only newer ones are rejected.
+    #[error(
+        "pak_version {found} is newer than supported {supported}; consider upgrading the memory-engine crate"
+    )]
+    PakVersionUnsupported {
+        /// The `pak_version` read from the archive.
+        found: u32,
+        /// The highest `pak_version` this build supports.
+        supported: u32,
+    },
+
+    /// The `.pak` file's `engine_schema_version` is newer than this build
+    /// supports — same forward-only incompatibility as
+    /// [`PakVersionUnsupported`](ArchiveError::PakVersionUnsupported).
+    #[error(
+        "engine_schema_version {found} is newer than supported {supported}; consider upgrading the memory-engine crate"
+    )]
+    SchemaVersionUnsupported {
+        /// The `engine_schema_version` read from the archive.
+        found: u32,
+        /// The highest `engine_schema_version` this build supports.
+        supported: u32,
+    },
+
+    /// Archival requires a file-backed engine, but the engine is in-memory (or
+    /// its database path cannot be resolved). The string names the precise
+    /// precondition violated.
+    #[error("{0}")]
+    NotFileBacked(String),
+
+    /// A zstd compression or decompression step failed (encoder/decoder
+    /// creation or stream finalization). The string carries the codec message.
+    #[error("{0}")]
+    Codec(String),
+
+    /// A filesystem operation on a `.pak` file or the archive directory failed
+    /// (create, open, read, rename, stat, mkdir, path resolution). The string
+    /// carries the underlying I/O message.
+    #[error("{0}")]
+    Io(String),
+
+    /// The archive write transaction failed to begin or commit. The string
+    /// carries the underlying database message.
+    #[error("{0}")]
+    Transaction(String),
+}
+
 /// Errors returned by the memory engine.
 ///
 /// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
@@ -189,9 +257,11 @@ pub enum MemoryError {
     #[error("reranker error: {0}")]
     Reranker(#[from] RerankerError),
 
-    /// A cold-storage archive operation (pack/unpack of a `.pak` file) failed.
+    /// A cold-storage archive operation (pack/unpack of a `.pak` file) failed;
+    /// see [`ArchiveError`] for the specific cause (version mismatch, precondition,
+    /// compression codec, filesystem I/O, or the archive transaction).
     #[error("archive error: {0}")]
-    Archive(String),
+    Archive(#[from] ArchiveError),
 
     /// Attempted a write operation on a read-only engine.
     #[error("operation requires write access, but engine was opened read-only")]
@@ -279,6 +349,73 @@ mod tests {
         assert!(matches!(
             err,
             MemoryError::Reranker(RerankerError::DuplicateIndex { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn archive_variants_display_byte_for_byte() {
+        // Byte-preservation: each variant must render exactly the string the
+        // pre-split `format!` call sites produced (under the outer `archive
+        // error: ` prefix), so existing message consumers keep working.
+        assert_eq!(
+            MemoryError::Archive(ArchiveError::PakVersionUnsupported {
+                found: 2,
+                supported: 1,
+            })
+            .to_string(),
+            "archive error: pak_version 2 is newer than supported 1; consider upgrading the memory-engine crate"
+        );
+        assert_eq!(
+            MemoryError::Archive(ArchiveError::SchemaVersionUnsupported {
+                found: 12,
+                supported: 11,
+            })
+            .to_string(),
+            "archive error: engine_schema_version 12 is newer than supported 11; consider upgrading the memory-engine crate"
+        );
+        // String-carrying variants surface their message verbatim under the prefix.
+        assert_eq!(
+            MemoryError::Archive(ArchiveError::NotFileBacked(
+                "archival requires a file-backed engine".into()
+            ))
+            .to_string(),
+            "archive error: archival requires a file-backed engine"
+        );
+        assert_eq!(
+            MemoryError::Archive(ArchiveError::Codec(
+                "failed to create zstd encoder: boom".into()
+            ))
+            .to_string(),
+            "archive error: failed to create zstd encoder: boom"
+        );
+        assert_eq!(
+            MemoryError::Archive(ArchiveError::Io("failed to open pak file /x: boom".into()))
+                .to_string(),
+            "archive error: failed to open pak file /x: boom"
+        );
+        assert_eq!(
+            MemoryError::Archive(ArchiveError::Transaction(
+                "failed to begin transaction: boom".into()
+            ))
+            .to_string(),
+            "archive error: failed to begin transaction: boom"
+        );
+    }
+
+    #[test]
+    fn archive_error_from_into_memory_error() {
+        // `#[from]` lets a bare `ArchiveError` convert via `?`/`.into()`.
+        let err: MemoryError = ArchiveError::PakVersionUnsupported {
+            found: 9,
+            supported: 1,
+        }
+        .into();
+        assert!(matches!(
+            err,
+            MemoryError::Archive(ArchiveError::PakVersionUnsupported {
+                found: 9,
+                supported: 1
+            })
         ));
     }
 

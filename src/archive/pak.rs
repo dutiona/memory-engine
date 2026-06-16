@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::archive::types::{ArchivePak, CURRENT_PAK_VERSION};
-use crate::error::{MemoryError, Result};
+use crate::error::{ArchiveError, Result};
 use crate::store::schema::CURRENT_SCHEMA_VERSION;
 
 /// Maximum decompressed `.pak` size (4 GiB) — prevents decompression bombs.
@@ -22,7 +22,7 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
         .create_new(true)
         .open(&tmp_path)
         .map_err(|e| {
-            MemoryError::Archive(format!(
+            ArchiveError::Io(format!(
                 "failed to create temp pak file {}: {e}",
                 tmp_path.display()
             ))
@@ -34,16 +34,16 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
         hasher: &mut hasher,
     };
     let mut encoder = zstd::Encoder::new(hashing_writer, 3)
-        .map_err(|e| MemoryError::Archive(format!("failed to create zstd encoder: {e}")))?;
+        .map_err(|e| ArchiveError::Codec(format!("failed to create zstd encoder: {e}")))?;
     serde_json::to_writer(&mut encoder, pak)?;
     encoder
         .finish()
-        .map_err(|e| MemoryError::Archive(format!("failed to finalize zstd stream: {e}")))?;
+        .map_err(|e| ArchiveError::Codec(format!("failed to finalize zstd stream: {e}")))?;
 
     let hash = hasher.finalize().to_hex().to_string();
 
     fs::rename(&tmp_path, path).map_err(|e| {
-        MemoryError::Archive(format!(
+        ArchiveError::Io(format!(
             "failed to rename {} -> {}: {e}",
             tmp_path.display(),
             path.display()
@@ -55,10 +55,10 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 /// Read and decompress a `.pak` file. Caps at 4 GiB decompressed.
 pub fn read_pak(path: &Path) -> Result<ArchivePak> {
     let file = fs::File::open(path).map_err(|e| {
-        MemoryError::Archive(format!("failed to open pak file {}: {e}", path.display()))
+        ArchiveError::Io(format!("failed to open pak file {}: {e}", path.display()))
     })?;
     let decoder = zstd::Decoder::new(file)
-        .map_err(|e| MemoryError::Archive(format!("failed to create zstd decoder: {e}")))?;
+        .map_err(|e| ArchiveError::Codec(format!("failed to create zstd decoder: {e}")))?;
     let limited = std::io::Read::take(decoder, MAX_PAK_DECOMPRESSED_SIZE);
     let pak: ArchivePak = serde_json::from_reader(limited)?;
 
@@ -66,18 +66,18 @@ pub fn read_pak(path: &Path) -> Result<ArchivePak> {
     // (store/schema.rs): reject archives written by a *newer* library, but
     // accept older ones (forward-only incompatibility, backward-compatible read).
     if pak.pak_version > CURRENT_PAK_VERSION {
-        return Err(MemoryError::Archive(format!(
-            "pak_version {} is newer than supported {CURRENT_PAK_VERSION}; \
-             consider upgrading the memory-engine crate",
-            pak.pak_version
-        )));
+        return Err(ArchiveError::PakVersionUnsupported {
+            found: pak.pak_version,
+            supported: CURRENT_PAK_VERSION,
+        }
+        .into());
     }
     if pak.engine_schema_version > CURRENT_SCHEMA_VERSION {
-        return Err(MemoryError::Archive(format!(
-            "engine_schema_version {} is newer than supported {CURRENT_SCHEMA_VERSION}; \
-             consider upgrading the memory-engine crate",
-            pak.engine_schema_version
-        )));
+        return Err(ArchiveError::SchemaVersionUnsupported {
+            found: pak.engine_schema_version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }
+        .into());
     }
 
     Ok(pak)
@@ -86,10 +86,10 @@ pub fn read_pak(path: &Path) -> Result<ArchivePak> {
 /// Compute blake3 hash of a file (streaming, not `fs::read`).
 pub fn hash_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
-        .map_err(|e| MemoryError::Archive(format!("failed to read pak file for hashing: {e}")))?;
+        .map_err(|e| ArchiveError::Io(format!("failed to read pak file for hashing: {e}")))?;
     let mut hasher = blake3::Hasher::new();
     std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| MemoryError::Archive(format!("failed to hash pak file: {e}")))?;
+        .map_err(|e| ArchiveError::Io(format!("failed to hash pak file: {e}")))?;
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -121,6 +121,7 @@ impl<W: Write> Write for HashingWriter<'_, W> {
 mod tests {
     use super::*;
     use crate::archive::types::CURRENT_PAK_VERSION;
+    use crate::error::MemoryError;
     use chrono::Utc;
 
     /// Write an `ArchivePak` as zstd-compressed JSON (test convenience wrapper).
@@ -195,19 +196,23 @@ mod tests {
         write_pak(&pak, &pak_path).unwrap();
 
         let err = read_pak(&pak_path).unwrap_err();
+        let display = err.to_string();
         match err {
-            MemoryError::Archive(msg) => {
-                assert!(
-                    msg.contains("newer than supported"),
-                    "expected 'newer than supported' in {msg:?}"
-                );
-                assert!(
-                    msg.contains("pak_version"),
-                    "expected 'pak_version' in {msg:?}"
-                );
+            MemoryError::Archive(ArchiveError::PakVersionUnsupported { found, supported }) => {
+                assert_eq!(found, CURRENT_PAK_VERSION + 1);
+                assert_eq!(supported, CURRENT_PAK_VERSION);
             }
-            other => panic!("expected MemoryError::Archive, got {other:?}"),
+            other => panic!("expected Archive(PakVersionUnsupported), got {other:?}"),
         }
+        // Display byte-preservation: message still names the field and the cause.
+        assert!(
+            display.contains("newer than supported"),
+            "expected 'newer than supported' in {display:?}"
+        );
+        assert!(
+            display.contains("pak_version"),
+            "expected 'pak_version' in {display:?}"
+        );
     }
 
     #[test]
@@ -220,19 +225,23 @@ mod tests {
         write_pak(&pak, &pak_path).unwrap();
 
         let err = read_pak(&pak_path).unwrap_err();
+        let display = err.to_string();
         match err {
-            MemoryError::Archive(msg) => {
-                assert!(
-                    msg.contains("newer than supported"),
-                    "expected 'newer than supported' in {msg:?}"
-                );
-                assert!(
-                    msg.contains("engine_schema_version"),
-                    "expected 'engine_schema_version' in {msg:?}"
-                );
+            MemoryError::Archive(ArchiveError::SchemaVersionUnsupported { found, supported }) => {
+                assert_eq!(found, CURRENT_SCHEMA_VERSION + 1);
+                assert_eq!(supported, CURRENT_SCHEMA_VERSION);
             }
-            other => panic!("expected MemoryError::Archive, got {other:?}"),
+            other => panic!("expected Archive(SchemaVersionUnsupported), got {other:?}"),
         }
+        // Display byte-preservation: message still names the field and the cause.
+        assert!(
+            display.contains("newer than supported"),
+            "expected 'newer than supported' in {display:?}"
+        );
+        assert!(
+            display.contains("engine_schema_version"),
+            "expected 'engine_schema_version' in {display:?}"
+        );
     }
 
     #[test]
