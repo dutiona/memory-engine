@@ -8,6 +8,7 @@ design-choices
 roadmap
 research-basis
 schema-evolution-policy
+embedding-identity-and-tei-qwen-migration
 adr/index
 plans/2026-03-09-future-phases-design
 ```
