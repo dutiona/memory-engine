@@ -24,6 +24,30 @@ const FACT_COLUMNS: &str = "id, content, content_hash, embedding, fact_type, \
      source_event_id, importance, access_count, last_accessed, metadata, scope_id, \
      is_pinned, importance_score, surfaced_at";
 
+/// The minimal column set needed to score a fact's importance during a prune
+/// pass — identity, decay inputs, and the pin flag. Deliberately excludes the
+/// heavy `content`, `embedding`, and `metadata` columns. Kept in lockstep with
+/// [`row_to_scoring_row`].
+const SCORING_COLUMNS: &str = "id, fact_type, last_accessed, access_count, importance, is_pinned";
+
+/// A lightweight projection of a fact carrying only the fields the forgetting
+/// pass reads when scoring importance.
+///
+/// Prune evaluates **every** active fact (importance is a global, full-scan
+/// computation), so materializing full [`Fact`] rows made the prune working set
+/// scale with corpus size × embedding dimension × content length. This
+/// projection bounds it to a handful of scalar fields per fact while preserving
+/// exact full-scan semantics. See [`FactStore::list_active_scoring`].
+#[derive(Debug, Clone)]
+pub struct FactScoringRow {
+    pub id: i64,
+    pub fact_type: FactType,
+    pub last_accessed: DateTime<Utc>,
+    pub access_count: i64,
+    pub importance: f64,
+    pub is_pinned: bool,
+}
+
 pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
     match ft {
         FactType::Episodic => "episodic",
@@ -233,6 +257,29 @@ impl<'a> FactStore<'a> {
             facts.push(row?);
         }
         Ok(facts)
+    }
+
+    /// List the importance-scoring projection of all active facts
+    /// (`t_expired IS NULL`).
+    ///
+    /// Like [`list_active`](Self::list_active) but selects only the columns the
+    /// forgetting pass needs (see [`FactScoringRow`]), so the working set never
+    /// materializes `content`, `embedding`, or `metadata`. Used by `prune`,
+    /// which must scan the entire active set to compute global importance.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn list_active_scoring(&self) -> Result<Vec<FactScoringRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SCORING_COLUMNS} FROM facts WHERE t_expired IS NULL"
+        ))?;
+        let rows = stmt.query_map([], row_to_scoring_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// List facts active at a given point in time (bi-temporal query).
@@ -902,6 +949,27 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
     })
 }
 
+/// Map a [`SCORING_COLUMNS`] row to a [`FactScoringRow`]. Kept in lockstep with
+/// the column list; reads by name so column order is irrelevant.
+fn row_to_scoring_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FactScoringRow> {
+    let fact_type_str: String = row.get("fact_type")?;
+    let last_accessed_str: String = row.get("last_accessed")?;
+    let last_accessed = parse_timestamp(&last_accessed_str)?;
+    let fact_type = str_to_fact_type(&fact_type_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let is_pinned_i64: i64 = row.get("is_pinned")?;
+
+    Ok(FactScoringRow {
+        id: row.get("id")?,
+        fact_type,
+        last_accessed,
+        access_count: row.get("access_count")?,
+        importance: row.get("importance")?,
+        is_pinned: is_pinned_i64 != 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1194,6 +1262,37 @@ mod tests {
         let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, id2);
+    }
+
+    #[test]
+    fn list_active_scoring_returns_projection_and_excludes_expired() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        let mut pinned = make_fact("pinned semantic", vec![0.1; DIM]);
+        pinned.fact_type = FactType::Semantic;
+        pinned.is_pinned = true;
+        pinned.importance = 0.9;
+        pinned.access_count = 7;
+        let pinned_id = store.insert(&pinned).unwrap();
+
+        let plain_id = store.insert(&make_fact("plain", vec![0.2; DIM])).unwrap();
+
+        let expired_id = store.insert(&make_fact("gone", vec![0.3; DIM])).unwrap();
+        store.expire(expired_id, Utc::now()).unwrap();
+
+        let rows = store.list_active_scoring().unwrap();
+        assert_eq!(rows.len(), 2, "expired facts must be excluded");
+
+        let pinned_row = rows.iter().find(|r| r.id == pinned_id).unwrap();
+        assert_eq!(pinned_row.fact_type, FactType::Semantic);
+        assert!(pinned_row.is_pinned);
+        assert!((pinned_row.importance - 0.9).abs() < f64::EPSILON);
+        assert_eq!(pinned_row.access_count, 7);
+
+        let plain_row = rows.iter().find(|r| r.id == plain_id).unwrap();
+        assert!(!plain_row.is_pinned);
+        assert_eq!(plain_row.fact_type, FactType::Episodic);
     }
 
     #[test]

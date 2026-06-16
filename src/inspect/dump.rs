@@ -181,12 +181,25 @@ pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 ///
 /// Works for both file-backed and in-memory databases (`SQLite` 3.27+).
 ///
+/// # Trusted-path contract
+///
+/// `path` is treated as a caller-controlled destination. The function probes
+/// the path and then writes to it, leaving an inherent check-then-act (TOCTOU)
+/// window; it does **not** defend against an adversary racing the filesystem to
+/// swap `path` between the probe and the write. Callers must not direct dumps at
+/// a location writable by an untrusted party. The guards below turn the common
+/// *mistakes* (live DB, a directory) into clear errors — they are not a defense
+/// against a concurrent attacker.
+///
 /// # Errors
 ///
-/// Returns [`MemoryError::Conflict`] if `path` resolves to the live database
-/// file (refusing to overwrite the source), [`MemoryError::Io`] on filesystem
-/// failures, or [`MemoryError::Internal`] if the database path cannot be read,
-/// `path` contains a null byte, or `VACUUM INTO` fails.
+/// Returns [`MemoryError::Conflict`] with
+/// [`ConflictError::DumpTargetIsLiveDatabase`] if `path` resolves to the live
+/// database file (refusing to overwrite the source) or
+/// [`ConflictError::DumpTargetIsDirectory`] if `path` is an existing directory;
+/// [`MemoryError::Io`] on filesystem failures; or [`MemoryError::Internal`] if
+/// the database path cannot be read, `path` contains a null byte, or
+/// `VACUUM INTO` fails.
 pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
     // Detect whether this is a file-backed database.
     let db_path: String = conn
@@ -207,9 +220,32 @@ pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
         }
     }
 
-    // Remove existing file to avoid VACUUM INTO failure on re-run.
-    if path.exists() {
-        std::fs::remove_file(path)?;
+    // Re-run support: `VACUUM INTO` refuses to write to a path that already
+    // exists, so a prior dump file must be unlinked first.
+    //
+    // Trusted-path contract: `path` is a caller-controlled dump destination. A
+    // residual check-then-act window remains between this probe and the
+    // `VACUUM INTO` below (a classic TOCTOU); the engine does *not* defend
+    // against an adversary racing the filesystem in that window, so callers
+    // MUST NOT direct dumps at a location writable by an untrusted party.
+    //
+    // What this guard *does* enforce: probe with `symlink_metadata` (which does
+    // not follow symlinks, unlike the previous `path.exists()`) and only ever
+    // unlink a non-directory. A directory target is rejected with a clear typed
+    // error instead of the opaque "Is a directory" I/O failure.
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            // `is_dir()` follows symlinks, so this refuses both a real directory
+            // and a symlink that resolves to one — neither is a valid VACUUM INTO
+            // target and we must never unlink a directory. A symlink to a regular
+            // file (or a broken symlink) is removed as the link itself.
+            if path.is_dir() {
+                return Err(MemoryError::Conflict(ConflictError::DumpTargetIsDirectory));
+            }
+            std::fs::remove_file(path)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // absent: nothing to remove
+        Err(e) => return Err(MemoryError::Io(e)),
     }
 
     let escaped = path.to_string_lossy().replace('\'', "''");
@@ -521,5 +557,53 @@ mod tests {
             ".events" => "[]",
             ".config" => "{}",
         });
+    }
+
+    /// L6 hardening: a mistaken or hostile dump target that is a directory must
+    /// be refused with a clear typed error, not the opaque `remove_file`-on-a-
+    /// directory I/O failure the bare `path.exists()` check produced before.
+    #[test]
+    fn dump_sqlite_refuses_directory_target() {
+        use crate::store::schema::{init_schema, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let result = dump_sqlite(&conn, dir.path());
+
+        assert!(
+            matches!(
+                result,
+                Err(MemoryError::Conflict(ConflictError::DumpTargetIsDirectory))
+            ),
+            "dumping onto a directory must be refused with DumpTargetIsDirectory, got {result:?}"
+        );
+    }
+
+    /// A symlink resolving to a directory must also be refused — `is_dir()`
+    /// follows the link, so the guard is not bypassed by indirection.
+    #[cfg(unix)]
+    #[test]
+    fn dump_sqlite_refuses_symlink_to_directory() {
+        use crate::store::schema::{init_schema, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link = dir.path().join("link_to_dir");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let result = dump_sqlite(&conn, &link);
+        assert!(
+            matches!(
+                result,
+                Err(MemoryError::Conflict(ConflictError::DumpTargetIsDirectory))
+            ),
+            "a symlink to a directory must be refused, got {result:?}"
+        );
     }
 }

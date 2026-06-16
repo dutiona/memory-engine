@@ -49,12 +49,34 @@ pub enum ConflictError {
     #[error("dump target resolves to the live database file")]
     DumpTargetIsLiveDatabase,
 
+    /// A dump was directed at a path that already exists and is a directory.
+    /// `VACUUM INTO` writes a file, and the engine refuses to unlink a directory
+    /// to make room — surfacing the mistake as a clear conflict instead of an
+    /// opaque "is a directory" I/O failure (see the trusted-path contract on
+    /// [`dump_sqlite`](crate::inspect::dump::dump_sqlite)).
+    #[error("dump target is an existing directory")]
+    DumpTargetIsDirectory,
+
     /// A consumer-supplied trait implementation (e.g. a
     /// [`ConflictArbiter`](crate::traits::ConflictArbiter) or other injected
     /// provider) reported a failure that the engine surfaces as a conflict. The
     /// string carries the consumer's message.
     #[error("{0}")]
     Arbitration(String),
+
+    /// An ingested document exceeded the engine's per-field ingest size bound:
+    /// an event `payload`, a fact's `metadata` (JSON), or a fact's `content`
+    /// (string). The bound caps per-row memory and serialization CPU on hostile
+    /// or runaway input. `kind` names the offending field and `limit` is the
+    /// ceiling; `size` is the offending byte length — exact for string fields,
+    /// but a lower bound for JSON fields, whose measurement aborts early once
+    /// it passes the limit.
+    #[error("{kind} is {size} bytes, exceeding the {limit}-byte ingest limit")]
+    PayloadTooLarge {
+        kind: &'static str,
+        size: usize,
+        limit: usize,
+    },
 }
 
 /// A failure originating from the reranking stage of a query.

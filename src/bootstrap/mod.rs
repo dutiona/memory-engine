@@ -217,6 +217,17 @@ fn bootstrap_within_savepoint(
         let facts = extractor.extract(candidate, &outcome)?;
 
         for fact in &facts {
+            // Session files are third-party input: an extracted fact whose
+            // content/metadata exceeds the ingest bound is skipped (best-effort,
+            // mirroring the malformed-line policy) rather than aborting the whole
+            // import. Checked before the costly embed (issue #572 / L10).
+            if let Err(e) = crate::limits::check_str_size(&fact.content, "fact content")
+                .and_then(|()| crate::limits::check_json_size(&fact.metadata, "fact metadata"))
+            {
+                tracing::warn!(error = %e, "skipping oversized bootstrap fact");
+                continue;
+            }
+
             let embedding = embedder.embed(&fact.content)?;
             let effective_created = candidate.timestamp;
 

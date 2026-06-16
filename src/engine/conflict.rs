@@ -26,6 +26,11 @@ impl MemoryEngine {
         old_id: i64,
         new_fact: &NewFact,
     ) -> Result<ConflictResolution> {
+        // The candidate fact is persisted verbatim on an Add/Update decision, so
+        // it is a consumer ingest path and must respect the same size bound as
+        // `add_fact` (issue #572 / L10).
+        crate::limits::check_new_fact(new_fact)?;
+
         #[cfg(feature = "ann")]
         let embedding = new_fact.embedding.clone();
         let resolution = {

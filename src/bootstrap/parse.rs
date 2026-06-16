@@ -3,6 +3,8 @@
 //! Provides types and functions for deserializing raw JSONL lines into
 //! [`SessionEntry`] values and extracting structured content blocks.
 
+use std::io::{BufRead, Read};
+
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -95,34 +97,137 @@ pub enum ContentBlock {
 // Functions
 // ---------------------------------------------------------------------------
 
+/// Maximum bytes buffered for a single JSONL line.
+///
+/// `BufRead::lines()` grows one `String` per line with no ceiling, so a hostile
+/// (or corrupt) file containing a single newline-free run would force an
+/// allocation proportional to its size — an unbounded-memory `DoS` on otherwise
+/// best-effort parsing. Any logical line longer than this cap is drained and
+/// skipped as malformed rather than buffered (see [`parse_session_file`]).
+///
+/// 8 MiB is generously above any legitimate Claude Code session line (whole
+/// tool outputs and message payloads sit well under it) while bounding the
+/// worst-case working set to a constant.
+pub const MAX_JSONL_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Outcome of reading one logical line under a byte cap.
+enum BoundedLine {
+    /// A complete line within the cap, trailing `\n` stripped.
+    Line(Vec<u8>),
+    /// The line exceeded the cap; its bytes were drained to the next newline
+    /// (or EOF) and discarded. Counts as malformed.
+    Oversized,
+    /// End of input.
+    Eof,
+}
+
+/// Read one logical line, buffering at most `cap` bytes.
+///
+/// On an oversized line the excess is drained via `fill_buf`/`consume` so memory
+/// stays flat and the *next* read resynchronizes at the following newline,
+/// rather than emitting a cascade of fragment "lines".
+fn read_bounded_line(
+    reader: &mut impl std::io::BufRead,
+    cap: usize,
+) -> std::io::Result<BoundedLine> {
+    let mut buf = Vec::new();
+    // Read at most cap+1 bytes or until a newline, whichever comes first.
+    // `saturating_add` guards the (unreachable for our 8 MiB cap) usize::MAX case.
+    let n = reader
+        .by_ref()
+        .take((cap as u64).saturating_add(1))
+        .read_until(b'\n', &mut buf)?;
+    if n == 0 {
+        return Ok(BoundedLine::Eof);
+    }
+    // Only `\n` is stripped here; a trailing `\r` (CRLF) is left in `buf` and
+    // removed downstream by `line.trim()` before JSON parsing.
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        return Ok(BoundedLine::Line(buf));
+    }
+    // No newline seen. Either a final unterminated line within the cap, or a
+    // line longer than the cap (we stopped one byte past it).
+    if buf.len() <= cap {
+        return Ok(BoundedLine::Line(buf));
+    }
+    // Oversized: drain the remainder of this line, discarding in place.
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            break; // EOF mid-line
+        }
+        if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+            reader.consume(pos + 1); // consume through the newline
+            break;
+        }
+        let len = chunk.len();
+        reader.consume(len);
+    }
+    Ok(BoundedLine::Oversized)
+}
+
 /// Parse a JSONL file into a sequence of [`SessionEntry`] values.
 ///
 /// Malformed lines are skipped with a `tracing::warn`; this function never
-/// fails so callers always get a best-effort result.
+/// fails so callers always get a best-effort result. Lines longer than
+/// [`MAX_JSONL_LINE_BYTES`] are skipped (counted as malformed) to bound memory
+/// on hostile or corrupt input.
 ///
 /// Returns `(entries, malformed_count)` where `malformed_count` is the number
-/// of non-empty lines that failed to parse.
+/// of non-empty lines that failed to parse (including oversized ones).
 pub fn parse_session_file(reader: impl std::io::BufRead) -> (Vec<SessionEntry>, usize) {
+    parse_session_file_capped(reader, MAX_JSONL_LINE_BYTES)
+}
+
+/// [`parse_session_file`] with an explicit per-line byte cap (test seam).
+fn parse_session_file_capped(
+    mut reader: impl std::io::BufRead,
+    cap: usize,
+) -> (Vec<SessionEntry>, usize) {
     let mut entries = Vec::new();
     let mut malformed = 0;
-    for (idx, line) in reader.lines().enumerate() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(line = idx + 1, error = %e, "failed to read line");
+    let mut line_no = 0usize;
+    loop {
+        match read_bounded_line(&mut reader, cap) {
+            Ok(BoundedLine::Eof) => break,
+            Ok(BoundedLine::Oversized) => {
+                line_no += 1;
+                tracing::warn!(
+                    line = line_no,
+                    cap,
+                    "skipping oversized JSONL line (exceeds per-line byte cap)"
+                );
                 malformed += 1;
-                continue;
             }
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<SessionEntry>(trimmed) {
-            Ok(entry) => entries.push(entry),
+            Ok(BoundedLine::Line(bytes)) => {
+                line_no += 1;
+                let line = match std::str::from_utf8(&bytes) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(line = line_no, error = %e, "skipping non-UTF8 JSONL line");
+                        malformed += 1;
+                        continue;
+                    }
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<SessionEntry>(trimmed) {
+                    Ok(entry) => entries.push(entry),
+                    Err(e) => {
+                        tracing::warn!(line = line_no, error = %e, "skipping malformed JSONL line");
+                        malformed += 1;
+                    }
+                }
+            }
             Err(e) => {
-                tracing::warn!(line = idx + 1, error = %e, "skipping malformed JSONL line");
+                // A read error is typically persistent (bad descriptor); stop to
+                // avoid a busy loop and return the best-effort result so far.
+                tracing::warn!(line = line_no + 1, error = %e, "failed to read line; stopping");
                 malformed += 1;
+                break;
             }
         }
     }
@@ -218,6 +323,44 @@ mod tests {
         let reader = BufReader::new(b"" as &[u8]);
         let (entries, _malformed) = parse_session_file(reader);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_skips_oversized_line_and_resyncs() {
+        // A line longer than the cap is drained and skipped; the *next* line
+        // must still parse (proving the drain resynchronized at the newline
+        // rather than emitting a cascade of fragment lines).
+        let big = "x".repeat(200); // no embedded newline, far over the cap
+        let input = format!("{big}\n{{\"type\":\"user\"}}\n");
+        let (entries, malformed) = parse_session_file_capped(input.as_bytes(), 64);
+        assert_eq!(
+            entries.len(),
+            1,
+            "valid line after oversized must still parse"
+        );
+        assert_eq!(entries[0].entry_type, EntryType::User);
+        assert_eq!(malformed, 1, "the oversized line counts once as malformed");
+    }
+
+    #[test]
+    fn parse_line_at_cap_boundary_parses() {
+        // A valid line whose length is exactly the cap must parse normally —
+        // the cap is inclusive of legitimate lines, exclusive of overflow.
+        let line = r#"{"type":"user"}"#;
+        assert_eq!(line.len(), 15);
+        let (entries, malformed) = parse_session_file_capped(line.as_bytes(), 15);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(malformed, 0);
+    }
+
+    #[test]
+    fn parse_oversized_unterminated_at_eof() {
+        // An oversized final line with no trailing newline drains to EOF and is
+        // counted once; the parser terminates rather than looping.
+        let big = "y".repeat(100);
+        let (entries, malformed) = parse_session_file_capped(big.as_bytes(), 16);
+        assert!(entries.is_empty());
+        assert_eq!(malformed, 1);
     }
 
     #[test]
