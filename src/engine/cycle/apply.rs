@@ -16,6 +16,7 @@ use rusqlite::Connection;
 
 use crate::engine::MemoryEngine;
 use crate::error::{CycleError, MemoryError, Result};
+use crate::graph::EdgeData;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
@@ -79,6 +80,11 @@ impl MemoryEngine {
         // (fact_id, embedding) pairs to notify HNSW about after commit.
         #[cfg(feature = "ann")]
         let mut to_index: Vec<(i64, Vec<f32>)> = Vec::new();
+        // Facts expired this cycle (Quarantine/Supersede) — for post-commit HNSW
+        // tombstoning and in-memory graph cleanup.
+        let mut expired_ids: Vec<i64> = Vec::new();
+        // (new_id, old_id, edge_id) supersede edges — to mirror into the in-memory graph.
+        let mut supersede_edges: Vec<(i64, i64, i64)> = Vec::new();
 
         for delta in &report.deltas {
             match delta {
@@ -110,6 +116,7 @@ impl MemoryEngine {
                             "quarantine": { "reason": reason, "at": now.to_rfc3339() }
                         }),
                     )?;
+                    expired_ids.push(*fact_id);
                     result.quarantined += 1;
                 }
                 CycleDelta::Promote {
@@ -155,7 +162,7 @@ impl MemoryEngine {
                     let store = FactStore::new(&tx, self.embed_dim);
                     let new_fact = store.get(*new_id)?;
                     store.expire(*old_id, now)?;
-                    EdgeStore::new(&tx).insert(&NewEdge {
+                    let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
                         source_fact_id: *new_id,
                         target_fact_id: *old_id,
                         relation_type: SUPERSEDES_RELATION.to_owned(),
@@ -164,6 +171,8 @@ impl MemoryEngine {
                         t_expired: None,
                         scope_id: new_fact.scope_id,
                     })?;
+                    expired_ids.push(*old_id);
+                    supersede_edges.push((*new_id, *old_id, edge_id));
                     result.superseded += 1;
                 }
             }
@@ -185,14 +194,41 @@ impl MemoryEngine {
         Self::append_cycle_history(&tx, &report.metadata)?;
 
         tx.commit().map_err(MemoryError::Database)?;
-        drop(conn); // release the write lock before notifying HNSW
+        drop(conn); // release the write lock before side-effect notifications
+
+        // Mirror supersede edges into the in-memory graph (other edge-mutating paths
+        // — conflict resolution, co-session linking — keep it in sync the same way).
+        // Removing the expired fact's stale edges + adding the supersedes link matches
+        // `conflict::temporal`'s post-commit pattern.
+        if !supersede_edges.is_empty() {
+            let mut graph = self.graph.write();
+            for (new_id, old_id, edge_id) in &supersede_edges {
+                graph.remove_edges_by_fact(*old_id);
+                graph.add_edge(
+                    *new_id,
+                    *old_id,
+                    EdgeData {
+                        edge_id: *edge_id,
+                        relation_type: SUPERSEDES_RELATION.to_owned(),
+                        weight: 1.0,
+                    },
+                );
+            }
+        }
 
         #[cfg(feature = "ann")]
         if let Some(ref hnsw) = self.hnsw_strategy {
             for (id, emb) in to_index {
                 hnsw.notify_insert(id, &emb);
             }
+            // Tombstone expired (quarantined/superseded) facts so the index does not
+            // waste candidate slots on rows that retrieval filters out anyway.
+            for id in &expired_ids {
+                hnsw.notify_expire(*id);
+            }
         }
+        #[cfg(not(feature = "ann"))]
+        let _ = &expired_ids;
 
         Ok(result)
     }
@@ -211,6 +247,27 @@ impl MemoryEngine {
                 Err(e) => Err(e),
             }
         };
+
+        // Deltas apply sequentially, so validation must model state *evolution* across
+        // the report — not just the pre-apply snapshot. We track facts expired earlier
+        // in this same report so a later delta cannot re-target an already-(in-report-)
+        // expired fact (which would otherwise fail mid-apply with an untyped `NotFound`,
+        // or — for `AdjustScore`, whose store path has no `t_expired` guard — silently
+        // mutate an expired row).
+        let mut expired_in_report: std::collections::HashSet<i64> =
+            std::collections::HashSet::new();
+        // A fact is "expired" for validation if it was already expired in the store OR
+        // expired earlier in this report. Free fn (not a closure) so it does not hold a
+        // borrow on `expired_in_report` across the later `.insert()` calls.
+        fn ensure_active(
+            f: &crate::types::Fact,
+            expired_in_report: &std::collections::HashSet<i64>,
+        ) -> Result<()> {
+            if f.t_expired.is_some() || expired_in_report.contains(&f.id) {
+                return Err(MemoryError::Cycle(CycleError::AlreadyExpired(f.id)));
+            }
+            Ok(())
+        }
 
         for delta in &report.deltas {
             match delta {
@@ -233,27 +290,36 @@ impl MemoryEngine {
                         }));
                     }
                     let f = require_fact(*fact_id, CycleError::UnknownFact(*fact_id))?;
-                    if f.t_expired.is_some() {
-                        return Err(MemoryError::Cycle(CycleError::AlreadyExpired(*fact_id)));
-                    }
+                    ensure_active(&f, &expired_in_report)?;
                 }
                 CycleDelta::Quarantine { fact_id, .. } => {
                     let f = require_fact(*fact_id, CycleError::UnknownFact(*fact_id))?;
-                    if f.t_expired.is_some() {
-                        return Err(MemoryError::Cycle(CycleError::AlreadyExpired(*fact_id)));
-                    }
+                    ensure_active(&f, &expired_in_report)?;
+                    expired_in_report.insert(*fact_id);
                 }
-                CycleDelta::Promote { fact_id, .. } | CycleDelta::TagOutcome { fact_id, .. } => {
+                CycleDelta::Promote { fact_id, .. } => {
+                    let f = require_fact(*fact_id, CycleError::UnknownFact(*fact_id))?;
+                    ensure_active(&f, &expired_in_report)?; // cannot promote a fact expired earlier in the report
+                }
+                CycleDelta::TagOutcome { fact_id, .. } => {
+                    // Outcome signals may be recorded on active OR expired facts
+                    // (matching `record_outcome`), so no active-state check here.
                     require_fact(*fact_id, CycleError::UnknownFact(*fact_id))?;
                 }
                 CycleDelta::Supersede { old_id, new_id } => {
                     let old = require_fact(*old_id, CycleError::SupersedeMissing(*old_id))?;
-                    if old.t_expired.is_some() {
-                        return Err(MemoryError::Cycle(CycleError::AlreadyExpired(*old_id)));
-                    }
-                    require_fact(*new_id, CycleError::SupersedeMissing(*new_id))?;
+                    ensure_active(&old, &expired_in_report)?;
+                    let new = require_fact(*new_id, CycleError::SupersedeMissing(*new_id))?;
+                    ensure_active(&new, &expired_in_report)?; // the superseding fact must itself be live
+                    expired_in_report.insert(*old_id);
                 }
             }
+        }
+
+        // `processed_ids` are stamped with the dream-cycle marker during apply; an
+        // unknown id there would otherwise abort mid-apply with an untyped `NotFound`.
+        for id in &report.metadata.processed_ids {
+            require_fact(*id, CycleError::UnknownFact(*id))?;
         }
         Ok(())
     }
@@ -647,5 +713,92 @@ mod tests {
             .apply_cycle_report(&report(vec![CycleDelta::AddFact(nf)], vec![]))
             .unwrap_err();
         assert!(matches!(err, MemoryError::EmbeddingDimension { .. }));
+    }
+
+    #[test]
+    fn duplicate_in_report_expiry_is_rejected_with_typed_error() {
+        // Two quarantines of the same fact: validation models the in-report state, so
+        // the second is a typed AlreadyExpired (not a raw NotFound mid-apply), and the
+        // store is left untouched (the fact stays active).
+        let engine = engine();
+        let id = add(&engine, "f");
+        let err = engine
+            .apply_cycle_report(&report(
+                vec![
+                    CycleDelta::Quarantine {
+                        fact_id: id,
+                        reason: "first".into(),
+                    },
+                    CycleDelta::Quarantine {
+                        fact_id: id,
+                        reason: "second".into(),
+                    },
+                ],
+                vec![id],
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Cycle(CycleError::AlreadyExpired(_))
+        ));
+        // Untouched: still active.
+        let f = engine
+            .with_read(|conn| FactStore::new(conn, DIM).get(id))
+            .unwrap();
+        assert!(
+            f.t_expired.is_none(),
+            "rejected report must not expire the fact"
+        );
+    }
+
+    #[test]
+    fn adjust_after_quarantine_in_same_report_is_rejected() {
+        // AdjustScore on a fact quarantined earlier in the SAME report must be rejected
+        // in validation — otherwise update_importance (no t_expired guard) would
+        // silently mutate an expired row.
+        let engine = engine();
+        let id = add(&engine, "f");
+        let err = engine
+            .apply_cycle_report(&report(
+                vec![
+                    CycleDelta::Quarantine {
+                        fact_id: id,
+                        reason: "x".into(),
+                    },
+                    CycleDelta::AdjustScore {
+                        fact_id: id,
+                        adjustment: 2,
+                    },
+                ],
+                vec![id],
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Cycle(CycleError::AlreadyExpired(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_processed_id_is_rejected_in_preflight() {
+        // A bogus processed_id would otherwise fail mid-apply with a raw NotFound;
+        // pre-flight validation rejects it with a typed CycleError and changes nothing.
+        let engine = engine();
+        let id = add(&engine, "f");
+        let before = importance_of(&engine, id);
+        let err = engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::AdjustScore {
+                    fact_id: id,
+                    adjustment: 1,
+                }],
+                vec![id, 999_999], // 999_999 does not exist
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Cycle(CycleError::UnknownFact(999_999))
+        ));
+        assert!((importance_of(&engine, id) - before).abs() < 1e-9);
     }
 }

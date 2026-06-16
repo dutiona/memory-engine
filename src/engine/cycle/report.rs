@@ -91,9 +91,10 @@ pub enum CycleDelta {
     /// Record an outcome signal for a fact (an `OutcomeSignal` event).
     TagOutcome { fact_id: FactId, outcome: Outcome },
     /// Mark `old_id` superseded by `new_id`: expire `old_id` + create a
-    /// `"supersedes"` graph edge `new_id → old_id`. `new_id` must already exist
-    /// **or** be produced by an [`CycleDelta::AddFact`] earlier in the report
-    /// (resolved to the inserted id at apply time).
+    /// `"supersedes"` graph edge `new_id → old_id`. **Both facts must already exist**
+    /// (the applier resolves them by id). A forward reference to a fact added by an
+    /// [`CycleDelta::AddFact`] in the same report is not supported — its id is not
+    /// knowable until insert.
     Supersede { old_id: FactId, new_id: FactId },
 }
 
@@ -101,7 +102,11 @@ pub enum CycleDelta {
 /// the engine persists into config so the next cycle's `prior_reports` can see it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CycleMetadata {
-    /// Monotonic cycle sequence number (engine-assigned).
+    /// Cycle sequence number, assigned by the producer (the default impl derives it
+    /// as `max(prior_reports.cycle_id) + 1`). Monotonic for sequentially-applied
+    /// cycles; two reports produced from the same context before either is applied
+    /// may share an id (the dream-cycle marker still makes the second apply a near
+    /// no-op).
     pub cycle_id: u64,
     /// When the cycle ran.
     pub ran_at: DateTime<Utc>,

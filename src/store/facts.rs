@@ -960,10 +960,13 @@ impl<'a> FactStore<'a> {
         }
 
         let where_clause = conditions.join(" AND ");
+        // `, id ASC` is a deterministic tiebreaker: `importance_score` values tie often
+        // (e.g. after decay), and SQLite leaves tie order otherwise unspecified. A stable
+        // order makes downstream DBSCAN clustering reproducible across DB states.
         let sql = format!(
             "SELECT {FACT_COLUMNS} FROM facts
              WHERE {where_clause}
-             ORDER BY importance_score DESC"
+             ORDER BY importance_score DESC, id ASC"
         );
 
         let mut stmt = self.conn.prepare(&sql)?;

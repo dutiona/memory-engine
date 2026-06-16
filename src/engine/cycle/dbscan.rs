@@ -11,10 +11,13 @@
 use crate::search::vector::cosine_similarity;
 use crate::types::FactId;
 
-/// Upper bound on points fed to DBSCAN in one call (mirrors the consolidation
-/// clustering cap). Above this the O(N²) neighbour scan is skipped with a warning,
-/// since the cycle operates on a bounded time window anyway.
-const MAX_DBSCAN_POINTS: usize = 50_000;
+/// Upper bound on points fed to DBSCAN in one call. Above this the O(N²) pairwise
+/// cosine neighbour scan is skipped with a warning. Set well below the consolidation
+/// clustering cap (50k) because DBSCAN's per-pair cost (full cosine over the embedding)
+/// is heavier than single-linkage greedy clustering, and the cycle runs per `FactType`
+/// over a bounded time window — so a 10k ceiling bounds worst-case CPU without
+/// realistically truncating a window.
+const MAX_DBSCAN_POINTS: usize = 10_000;
 
 const UNVISITED: i32 = -2;
 const NOISE: i32 = -1;

@@ -111,6 +111,9 @@ fn percentile(values: &[f64], p: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
+    // Defensive clamp: a consumer-supplied `DreamCycleConfig.promotion_percentile`
+    // is not guaranteed validated, and an out-of-range value would index wrongly.
+    let p = p.clamp(0.0, 1.0);
     let mut v = values.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     #[allow(
@@ -180,12 +183,15 @@ impl DreamCycle for DefaultDreamCycle {
                 .map(|f| (f.id, f.embedding.as_slice()))
                 .collect();
             for cluster in dbscan(&points, EPS, MIN_PTS) {
-                // Representative = highest-importance member (medoid proxy).
+                // Representative = highest-importance member (medoid proxy), ties broken
+                // by smallest fact id so the choice is deterministic regardless of the
+                // input's tie ordering.
                 let Some(&medoid) = cluster.iter().max_by(|a, b| {
                     by_id[a]
                         .importance
                         .partial_cmp(&by_id[b].importance)
                         .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| b.cmp(a)) // smaller id wins the tie
                 }) else {
                     continue;
                 };
