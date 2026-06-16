@@ -225,7 +225,7 @@ impl MemoryEngine {
     ) -> Result<Self> {
         // 1. Validate embed_dim (must happen first — ensures schema is ready).
         if pool.is_read_only() {
-            let conn = pool.read();
+            let conn = pool.read()?;
             Self::validate_embed_dim(&conn, embed_dim)?;
         } else {
             let conn = pool.write();
@@ -251,7 +251,7 @@ impl MemoryEngine {
 
         // 3. Full rebuild from SQLite (current behavior).
         let (graph, scope_tree) = {
-            let conn = pool.read();
+            let conn = pool.read()?;
             let graph = MemoryGraph::load_from_db(&conn)?;
             let scope_tree = ScopeTree::load(&conn)?;
             drop(conn);
@@ -262,7 +262,7 @@ impl MemoryEngine {
         #[cfg(feature = "ann")]
         let hnsw_strategy = if let Some(ref cfg) = search_config {
             if cfg.ann_threshold < usize::MAX {
-                let conn = pool.read();
+                let conn = pool.read()?;
                 Some(crate::search::ann::HnswStrategy::build_from_db(
                     &conn, embed_dim,
                 )?)
@@ -308,7 +308,7 @@ impl MemoryEngine {
             return Ok(None);
         };
 
-        let conn = pool.read();
+        let conn = pool.read()?;
         let current_fp = snapshot::read_fingerprint(&conn)?;
         drop(conn);
 
@@ -328,7 +328,7 @@ impl MemoryEngine {
             (Some(cfg), None) if cfg.ann_threshold < usize::MAX => {
                 // Snapshot was created without HNSW data (e.g. non-ann build),
                 // but current config requires ANN. Fall back to DB rebuild.
-                let conn = pool.read();
+                let conn = pool.read()?;
                 Some(crate::search::ann::HnswStrategy::build_from_db(
                     &conn, embed_dim,
                 )?)
@@ -454,7 +454,7 @@ impl MemoryEngine {
             return Ok(false);
         }
 
-        let conn = self.pool.read();
+        let conn = self.pool.read()?;
         let fingerprint = snapshot::read_fingerprint(&conn)?;
 
         #[cfg(feature = "ann")]
@@ -493,7 +493,7 @@ impl MemoryEngine {
     where
         F: FnOnce(&Connection) -> Result<R>,
     {
-        let conn = self.pool.read();
+        let conn = self.pool.read()?;
         f(&conn)
     }
 
