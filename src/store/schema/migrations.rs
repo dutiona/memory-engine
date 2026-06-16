@@ -1,4 +1,4 @@
-//! Per-version migration functions for the SQLite schema.
+//! Per-version migration functions for the `SQLite` schema.
 //!
 //! Each function applies the DDL delta that advances the schema from version N
 //! to N+1. Functions are registered in the `MIGRATIONS` slice in `mod.rs` and

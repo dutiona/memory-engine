@@ -1880,8 +1880,11 @@ CREATE TABLE IF NOT EXISTS config (
     /// triggers, virtual tables) produced by `init_schema` at `CURRENT_SCHEMA_VERSION`
     /// is byte-identical to a pinned golden string.
     ///
-    /// This is the refactoring oracle: if any migration is moved incorrectly and
-    /// the produced DDL changes, this test fails immediately.
+    /// **Scope**: This test only exercises the fresh-DB init path (DDL constants
+    /// in `mod.rs`). It does NOT exercise any `migrate_v*` function in
+    /// `migrations.rs`. For a migration-chain oracle see
+    /// `schema_ddl_migration_chain_snapshot` and
+    /// `migration_chain_ddl_differs_from_init_known_artifact`.
     #[test]
     fn schema_ddl_snapshot_is_stable() {
         let conn = open_memory().unwrap();
@@ -2033,6 +2036,76 @@ CREATE TRIGGER facts_fts_au AFTER UPDATE ON facts BEGIN INSERT INTO facts_fts(fa
         assert_eq!(
             actual, expected,
             "schema DDL changed — if this is intentional, bump CURRENT_SCHEMA_VERSION and update this golden"
+        );
+    }
+
+    /// Migration-chain equivalence oracle: verifies that the full schema DDL
+    /// produced by running the COMPLETE v1→`CURRENT_SCHEMA_VERSION` migration
+    /// chain through the real [`migrate`] dispatcher is stable against a pinned
+    /// golden snapshot.
+    ///
+    /// This is the primary oracle for [`migrations::migrate_v*`] correctness:
+    /// a defect in any moved migration function changes the DDL and breaks this
+    /// test. Unlike `schema_ddl_snapshot_is_stable` (which only exercises
+    /// `init_schema`), this test directly exercises every `migrate_v*` function
+    /// registered in `MIGRATIONS`.
+    ///
+    /// **Note on init-vs-migrated divergence**: The golden here intentionally
+    /// differs from the `schema_ddl_snapshot_is_stable` golden. `SQLite`'s
+    /// `ALTER TABLE ADD COLUMN` does not rewrite the `sql` column in
+    /// `sqlite_master`, so tables rebuilt at v3 and extended at v3→v4 and
+    /// v5→v6 show only their v3-era column set in `CREATE TABLE` DDL. This is a
+    /// known structural artifact of the migration path, not a bug; see
+    /// `migration_chain_ddl_differs_from_init_known_artifact` for a pinned
+    /// assertion of this difference.
+    #[test]
+    fn schema_ddl_migration_chain_snapshot() {
+        let conn = open_memory().unwrap();
+        // Start from v1 — the oldest supported schema.
+        init_schema_v1(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some(CURRENT_SCHEMA_VERSION.to_string()),
+            "migration chain must reach CURRENT_SCHEMA_VERSION"
+        );
+        let actual = deterministic_schema_dump(&conn);
+        insta::assert_snapshot!("schema_v11_migration_chain", actual);
+    }
+
+    /// Documents and asserts the known structural difference between the
+    /// fresh-init DDL and the migration-chain DDL.
+    ///
+    /// Because `ALTER TABLE ADD COLUMN` (used in migrations v3→v4, v4→v5,
+    /// v5→v6) does not modify the `sql` column in `sqlite_master`, a v1→v11
+    /// migrated database produces different DDL text than a direct `init_schema`
+    /// call, even though both databases are functionally equivalent (same
+    /// columns, same constraints, same indexes).
+    ///
+    /// This test pins the fact that the two paths DIFFER, preventing a false
+    /// future "equality" assertion that would hide a real migration regression.
+    /// It fails if the known divergence unexpectedly disappears (which could
+    /// indicate either a fix or a masked bug).
+    #[test]
+    fn migration_chain_ddl_differs_from_init_known_artifact() {
+        let init_conn = open_memory().unwrap();
+        init_schema(&init_conn).unwrap();
+        let init_ddl = deterministic_schema_dump(&init_conn);
+
+        let migrated_conn = open_memory().unwrap();
+        init_schema_v1(&migrated_conn).unwrap();
+        migrate(&migrated_conn, None).unwrap();
+        let migrated_ddl = deterministic_schema_dump(&migrated_conn);
+
+        // The two DDL strings must differ: ALTER TABLE ADD COLUMN leaves behind
+        // truncated CREATE TABLE SQL for tables that were rebuilt at v3 and later
+        // extended. This is intentional: we pin the divergence here so that any
+        // unexpected convergence (or unexpected further divergence) is caught.
+        assert_ne!(
+            init_ddl, migrated_ddl,
+            "init_schema and migration-chain DDL unexpectedly converged; \
+             if this is intentional (e.g. all migrations now use full table rebuilds), \
+             update this test and promote schema_ddl_migration_chain_snapshot as the shared golden"
         );
     }
 
