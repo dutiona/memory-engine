@@ -7,7 +7,11 @@ use memory_engine::MemoryEngine;
 /// Opens a transient read-only connection and reads the `embed_dim` key.
 /// Distinct from the import path's snapshot-header reader (see
 /// `peek_embed_dim_from_snapshot` in `commands::import`).
-fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
+///
+/// Exposed so the `consolidate` command can size the LLM backend's HTTP embedder to
+/// the database's embedding dimension. (`db` is a private module, so this is not part
+/// of any public API.)
+pub fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
     anyhow::ensure!(
         path.is_file(),
         "database not found (or is a directory): {}",

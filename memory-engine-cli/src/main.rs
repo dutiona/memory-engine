@@ -58,6 +58,8 @@ enum Commands {
     Dump(commands::dump::DumpArgs),
     /// Add a fact to the database with pre-computed embedding
     AddFact(commands::add_fact::AddFactArgs),
+    /// Run a dream cycle with a selectable backend (dream-cycle or llm)
+    Consolidate(commands::consolidate::ConsolidateArgs),
     /// Ingest facts from a JSONL file via an embedding API
     BatchIngest(commands::batch_ingest::BatchIngestArgs),
     /// Import historical memory from session `.jsonl` and/or native `.md` dirs
@@ -99,6 +101,9 @@ fn main() -> ExitCode {
         }
         Commands::AddFact(ref args) => {
             commands::add_fact::run(&cli.db, args, cli.format).map(|()| ExitCode::SUCCESS)
+        }
+        Commands::Consolidate(ref args) => {
+            commands::consolidate::run(&cli.db, args, cli.format).map(|()| ExitCode::SUCCESS)
         }
         Commands::BatchIngest(ref args) => {
             commands::batch_ingest::run(&cli.db, args, cli.format).map(|()| ExitCode::SUCCESS)
