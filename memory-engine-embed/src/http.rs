@@ -9,11 +9,25 @@ use memory_engine::traits::EmbeddingProvider;
 ///
 /// Uses `reqwest::blocking::Client` because the engine's `EmbeddingProvider` trait is sync.
 ///
+/// # Asymmetric embedding (TEI / Qwen)
+///
+/// Models like `Qwen3-Embedding` are **asymmetric**: queries take an instruction
+/// prefix, documents do not. Opt in via the chainable builders, which keep [`new`](Self::new)
+/// backward-compatible (symmetric providers ignore them):
+///
+/// - [`with_query_instruction`](Self::with_query_instruction): prepended by `embed_query*`,
+///   never by the document `embed*` path.
+/// - [`with_mrl_dim`](Self::with_mrl_dim): Matryoshka truncation — every returned vector is
+///   sliced to `mrl_dim` and L2-renormalized, so `expected_dim` stays the *native* model
+///   dimension while the engine stores (and [`fingerprint`](EmbeddingProvider::fingerprint)
+///   reports) the truncated `mrl_dim`.
+///
 /// # Examples
 ///
 /// ```no_run
 /// use memory_engine_embed::HttpEmbeddingProvider;
 ///
+/// // Symmetric (unchanged): document == query semantics.
 /// let provider = HttpEmbeddingProvider::new(
 ///     "http://localhost:11434/v1/embeddings".to_string(),
 ///     "nomic-embed-text".to_string(),
@@ -23,6 +37,20 @@ use memory_engine::traits::EmbeddingProvider;
 ///     30,
 /// )
 /// .expect("failed to build HTTP client");
+///
+/// // Asymmetric Qwen via TEI: native 1024-dim, MRL-truncated to 256, query-prefixed.
+/// let qwen = HttpEmbeddingProvider::new(
+///     "http://localhost:8080/v1/embeddings".to_string(),
+///     "Qwen/Qwen3-Embedding-0.6B".to_string(),
+///     "tei".to_string(),
+///     None,
+///     1024,
+///     30,
+/// )
+/// .expect("failed to build HTTP client")
+/// .with_query_instruction(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION)
+/// .with_mrl_dim(256)
+/// .expect("mrl_dim must be within the native dimension");
 /// ```
 pub struct HttpEmbeddingProvider {
     client: reqwest::blocking::Client,
@@ -30,7 +58,13 @@ pub struct HttpEmbeddingProvider {
     model: String,
     provider: String,
     api_key: Option<String>,
+    /// Native model dimension — the length validated against the raw HTTP response.
+    /// When `mrl_dim` is set, the stored/reported dimension is `mrl_dim`, not this.
     expected_dim: usize,
+    /// Query-only instruction prefix (asymmetric models). `None` = symmetric.
+    query_instruction: Option<String>,
+    /// Matryoshka truncation target. `None` = no truncation (store the native vector).
+    mrl_dim: Option<usize>,
 }
 
 impl HttpEmbeddingProvider {
@@ -63,7 +97,97 @@ impl HttpEmbeddingProvider {
             provider,
             api_key,
             expected_dim,
+            query_instruction: None,
+            mrl_dim: None,
         })
+    }
+
+    /// Default query instruction for `Qwen3-Embedding` asymmetric retrieval.
+    ///
+    /// Qwen prepends this to **queries only**; documents are embedded prefix-free.
+    /// Consumers (MCP/CLI config) use this as the default when none is supplied.
+    pub const DEFAULT_QUERY_INSTRUCTION: &'static str =
+        "Instruct: Given a search query, retrieve relevant memory facts.\nQuery: ";
+
+    /// Set the query-only instruction prefix (asymmetric models like Qwen).
+    ///
+    /// `embed_query` / `embed_query_batch` prepend it; the document `embed` /
+    /// `embed_batch` path is unaffected. Chainable; defaults to `None` (symmetric).
+    #[must_use]
+    pub fn with_query_instruction(mut self, instruction: impl Into<String>) -> Self {
+        self.query_instruction = Some(instruction.into());
+        self
+    }
+
+    /// Enable Matryoshka (MRL) truncation: each returned vector is sliced to `mrl_dim`
+    /// and L2-renormalized to unit length.
+    ///
+    /// `expected_dim` (the constructor argument) remains the **native** dimension the
+    /// server returns and is validated against the raw response; `mrl_dim` is the
+    /// stored/reported dimension after truncation. Chainable; defaults to `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `mrl_dim` is `0` or greater than `expected_dim`. Because the
+    /// raw response is validated to be exactly `expected_dim` long *before* truncation,
+    /// `mrl_dim > expected_dim` is a deterministic configuration contradiction that
+    /// could never truncate successfully — so it is rejected here at build time rather
+    /// than failing every `embed` call at runtime. The non-degenerate-norm check still
+    /// happens at embed time (it depends on the live response values, not the config).
+    pub fn with_mrl_dim(mut self, mrl_dim: usize) -> Result<Self, MemoryError> {
+        if mrl_dim == 0 || mrl_dim > self.expected_dim {
+            return Err(MemoryError::Internal(format!(
+                "invalid mrl_dim {mrl_dim}: must be in 1..={} (the native expected_dim)",
+                self.expected_dim
+            )));
+        }
+        self.mrl_dim = Some(mrl_dim);
+        Ok(self)
+    }
+
+    /// Truncate `emb` in place to its first `target` components and renormalize to unit
+    /// L2 length (Matryoshka representation learning), reusing the input buffer.
+    ///
+    /// The L2 norm is accumulated in `f64` to avoid `f32` overflow-to-`inf` or
+    /// underflow-to-`0` false positives on extreme-magnitude prefixes before the
+    /// non-finite/zero guard runs.
+    ///
+    /// # Errors
+    ///
+    /// - `target > emb.len()` — the truncation target exceeds the vector the server returned.
+    /// - the truncated prefix has a zero or non-finite L2 norm — renormalization would
+    ///   produce NaN/Inf, so the vector is rejected rather than silently corrupted.
+    #[allow(clippy::cast_possible_truncation)] // deliberate f64-norm → f32-storage narrowing
+    fn mrl_truncate(mut emb: Vec<f32>, target: usize) -> Result<Vec<f32>, MemoryError> {
+        if target > emb.len() {
+            return Err(MemoryError::Internal(format!(
+                "mrl_dim {target} exceeds embedding dimension {}",
+                emb.len()
+            )));
+        }
+        emb.truncate(target);
+        let norm = emb
+            .iter()
+            .map(|&x| f64::from(x) * f64::from(x))
+            .sum::<f64>()
+            .sqrt();
+        if !norm.is_finite() || norm == 0.0 {
+            return Err(MemoryError::Internal(
+                "mrl truncation: prefix has zero or non-finite L2 norm; cannot renormalize".into(),
+            ));
+        }
+        for x in &mut emb {
+            *x = (f64::from(*x) / norm) as f32;
+        }
+        Ok(emb)
+    }
+
+    /// Apply MRL truncation if configured; otherwise pass the vector through unchanged.
+    fn maybe_truncate(&self, emb: Vec<f32>) -> Result<Vec<f32>, MemoryError> {
+        match self.mrl_dim {
+            Some(target) => Self::mrl_truncate(emb, target),
+            None => Ok(emb),
+        }
     }
 
     /// Parse `OpenAI` batch response: `data` array with `index` + `embedding` fields.
@@ -221,7 +345,9 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 
         self.validate_embedding(&embedding, None)?;
 
-        Ok(embedding)
+        // Validate the raw response against the native dim, THEN truncate (MRL): the
+        // stored vector is the renormalized prefix when mrl_dim is set.
+        self.maybe_truncate(embedding)
     }
 
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
@@ -283,16 +409,58 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             )));
         };
 
-        // Validate all dimensions and NaN/Inf
+        // Validate all dimensions and NaN/Inf against the native dim, THEN truncate (MRL).
         for (i, emb) in embeddings.iter().enumerate() {
             self.validate_embedding(emb, Some(i))?;
         }
 
-        Ok(embeddings)
+        embeddings
+            .into_iter()
+            .map(|emb| self.maybe_truncate(emb))
+            .collect()
     }
 
+    // A match on the Option reads clearer than a nested `map_or_else` closure pair here
+    // (same rationale as the response-format dispatch in `embed`).
+    #[allow(clippy::option_if_let_else)]
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
+        // Asymmetric: prepend the query instruction (if any), then embed as usual.
+        // Documents never see the prefix.
+        match &self.query_instruction {
+            Some(prefix) => self.embed(&format!("{prefix}{text}")),
+            None => self.embed(text),
+        }
+    }
+
+    #[allow(clippy::option_if_let_else)]
+    fn embed_query_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
+        match &self.query_instruction {
+            Some(prefix) => {
+                let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
+                let refs: Vec<&str> = prefixed.iter().map(String::as_str).collect();
+                self.embed_batch(&refs)
+            }
+            None => self.embed_batch(texts),
+        }
+    }
+
+    #[allow(clippy::option_if_let_else)]
     fn fingerprint(&self) -> EmbeddingFingerprint {
-        EmbeddingFingerprint::new(self.model.clone(), self.provider.clone(), self.expected_dim)
+        // `dim` is the stored (post-MRL) dimension; `matryoshka_base_dim` records the
+        // native dim only when truncation is active.
+        match self.mrl_dim {
+            Some(stored_dim) => EmbeddingFingerprint::with_matryoshka(
+                self.model.clone(),
+                self.provider.clone(),
+                stored_dim,
+                self.expected_dim,
+            ),
+            None => EmbeddingFingerprint::new(
+                self.model.clone(),
+                self.provider.clone(),
+                self.expected_dim,
+            ),
+        }
     }
 }
 
@@ -559,5 +727,127 @@ mod tests {
             provider.fingerprint(),
             EmbeddingFingerprint::new("qwen3-0.6b", "tei", 1024)
         );
+    }
+
+    // --- #617: MRL truncation + asymmetric fingerprint ---
+
+    fn tei_provider(expected_dim: usize) -> HttpEmbeddingProvider {
+        HttpEmbeddingProvider::new(
+            "http://127.0.0.1:0/v1/embeddings".to_string(),
+            "Qwen/Qwen3-Embedding-0.6B".to_string(),
+            "tei".to_string(),
+            None,
+            expected_dim,
+            5,
+        )
+        .expect("client build should not fail")
+    }
+
+    #[test]
+    fn mrl_truncate_slices_and_renormalizes_to_unit_l2() {
+        // [3, 4, 99, 99] truncated to 2 -> [3, 4], L2 norm 5 -> [0.6, 0.8].
+        let out = HttpEmbeddingProvider::mrl_truncate(vec![3.0, 4.0, 99.0, 99.0], 2).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - 0.6).abs() < 1e-6, "got {}", out[0]);
+        assert!((out[1] - 0.8).abs() < 1e-6, "got {}", out[1]);
+        let norm = out.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-6,
+            "renormalized norm should be 1, got {norm}"
+        );
+    }
+
+    #[test]
+    fn mrl_truncate_target_equal_to_len_is_pure_renormalize() {
+        let out = HttpEmbeddingProvider::mrl_truncate(vec![3.0, 4.0], 2).unwrap();
+        // 0.6/0.8 are not exactly representable in f32; compare with an epsilon.
+        assert!((out[0] - 0.6).abs() < 1e-6, "got {}", out[0]);
+        assert!((out[1] - 0.8).abs() < 1e-6, "got {}", out[1]);
+    }
+
+    #[test]
+    fn mrl_truncate_target_exceeds_len_errors() {
+        let err = HttpEmbeddingProvider::mrl_truncate(vec![1.0, 2.0], 4).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("mrl_dim 4 exceeds embedding dimension 2"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn mrl_truncate_zero_norm_prefix_errors() {
+        // The first two components are zero -> truncated prefix norm is 0 -> reject
+        // rather than divide-by-zero into NaN.
+        let err = HttpEmbeddingProvider::mrl_truncate(vec![0.0, 0.0, 1.0], 2).unwrap_err();
+        assert!(
+            err.to_string().contains("zero or non-finite L2 norm"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn fingerprint_with_mrl_reports_matryoshka_base_dim() {
+        // expected_dim is the NATIVE dim; mrl_dim is the stored/reported dim.
+        let provider = tei_provider(1024).with_mrl_dim(256).unwrap();
+        let fp = provider.fingerprint();
+        assert_eq!(fp.dim, 256, "stored dim should be the truncated mrl_dim");
+        assert_eq!(
+            fp.matryoshka_base_dim,
+            Some(1024),
+            "base dim should be the native expected_dim"
+        );
+        assert_eq!(fp.model, "Qwen/Qwen3-Embedding-0.6B");
+        assert_eq!(fp.provider, "tei");
+        assert_eq!(fp.element_type, "float32");
+    }
+
+    #[test]
+    fn fingerprint_without_mrl_has_no_base_dim() {
+        let fp = tei_provider(1024).fingerprint();
+        assert_eq!(fp.dim, 1024);
+        assert_eq!(fp.matryoshka_base_dim, None);
+    }
+
+    #[test]
+    fn with_mrl_dim_rejects_target_exceeding_native_dim() {
+        // mrl_dim > expected_dim is a deterministic config contradiction (the raw
+        // response is validated to be exactly expected_dim long): reject at build time.
+        // `.err()` avoids `unwrap_err`, which would require the provider (Ok type) to
+        // impl Debug — deliberately not derived, since it holds an api_key.
+        let err = tei_provider(256)
+            .with_mrl_dim(1024)
+            .err()
+            .expect("mrl_dim > native dim must be rejected");
+        assert!(
+            err.to_string().contains("invalid mrl_dim 1024"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn with_mrl_dim_rejects_zero() {
+        let err = tei_provider(1024)
+            .with_mrl_dim(0)
+            .err()
+            .expect("mrl_dim 0 must be rejected");
+        assert!(
+            err.to_string().contains("invalid mrl_dim 0"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn with_mrl_dim_accepts_target_equal_to_native_dim() {
+        // mrl_dim == expected_dim is valid (pure renormalize, no real truncation).
+        let provider = tei_provider(1024).with_mrl_dim(1024).unwrap();
+        assert_eq!(provider.fingerprint().dim, 1024);
+        assert_eq!(provider.fingerprint().matryoshka_base_dim, Some(1024));
+    }
+
+    #[test]
+    fn default_query_instruction_is_query_only_prefix() {
+        assert!(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION.starts_with("Instruct:"));
+        assert!(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION.contains("Query: "));
     }
 }
