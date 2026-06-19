@@ -1,26 +1,55 @@
-//! Backend lifecycle: migrations, schema version, capability probe.
+//! Backend lifecycle: migrations, schema version, read-only validation, the
+//! capability probe, and the embedding-fingerprint identity surface.
 //!
-//! P1 skeleton — expanded in P5 with `migrate`, `validate_schema_version`, and
-//! the embedding-fingerprint identity surface. *Constructing* a backend (open
-//! flags, pool URL, init DDL, `VACUUM INTO` backup) is backend-specific and stays
-//! off this shared port.
+//! *Constructing* a backend (open flags, pool URL, init DDL, the `VACUUM INTO`
+//! backup, generic config K/V) is backend-specific and stays **off** this shared
+//! port. The embedding-fingerprint methods *are* on the port: they are live engine
+//! behavior (open/write/promotion read & write the fingerprint), so omitting them
+//! would force the engine to reach through to `SQLite`.
 
 use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::storage::capabilities::BackendCapabilities;
+use crate::types::EmbeddingFingerprint;
 
-/// Backend lifecycle the engine drives post-open. Mixes one **synchronous**
-/// method (`capabilities` — fixed at open, not a per-call round-trip) with the
-/// async lifecycle ones; legal under `#[async_trait]`.
+/// Backend lifecycle the engine drives post-open.
+///
+/// Mixes one **synchronous** method (`capabilities` — fixed at open, not a
+/// per-call round-trip) with the async lifecycle ones; legal under
+/// `#[async_trait]`.
+///
+/// # Errors
+/// Async methods return [`MemoryError::Storage`](crate::error::MemoryError::Storage)
+/// on a backend failure, or [`MemoryError::Migration`](crate::error::MemoryError::Migration)
+/// for a migration/compatibility failure, or
+/// [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+/// from the fingerprint guard.
 #[async_trait]
 pub trait SchemaManager: Send + Sync {
+    /// Run all pending migrations to the current schema version. Idempotent at HEAD.
+    async fn migrate(&self) -> Result<()>;
     /// The schema version currently recorded in the store.
-    ///
-    /// # Errors
-    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend failure.
     async fn schema_version(&self) -> Result<u32>;
-
+    /// Read-only compatibility check (the read-only open path): validate epoch +
+    /// version + config-table presence **without** writing. Errs if the store needs
+    /// migration but cannot be written.
+    async fn validate_schema_version(&self) -> Result<()>;
     /// Probe backend capabilities. **Synchronous** — capabilities are fixed at open.
     fn capabilities(&self) -> BackendCapabilities;
+
+    // --- embedding-fingerprint identity (transcribes `store::embedding_meta`) ---
+    /// Load the persisted embedding fingerprint, if any.
+    async fn load_embedding_fingerprint(&self) -> Result<Option<EmbeddingFingerprint>>;
+    /// Persist (overwrite) the embedding fingerprint.
+    async fn store_embedding_fingerprint(&self, fp: &EmbeddingFingerprint) -> Result<()>;
+    /// Record `candidate` if none is stored yet; otherwise return the stored one.
+    /// Validates `candidate.dim == expected_dim`.
+    async fn record_embedding_fingerprint_if_absent(
+        &self,
+        candidate: &EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<EmbeddingFingerprint>;
+    /// Require a fingerprint to be present (the open-time identity guard).
+    async fn require_embedding_fingerprint_present(&self) -> Result<()>;
 }
