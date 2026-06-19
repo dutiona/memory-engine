@@ -694,7 +694,9 @@ async fn sole_input(server: &MockServer) -> Value {
     let reqs = server.received_requests().await.expect("recording enabled");
     assert_eq!(reqs.len(), 1, "expected exactly one embedding request");
     let body: Value = serde_json::from_slice(&reqs[0].body).expect("request body is JSON");
-    body.get("input").cloned().expect("request has an 'input' field")
+    body.get("input")
+        .cloned()
+        .expect("request has an 'input' field")
 }
 
 #[tokio::test]
