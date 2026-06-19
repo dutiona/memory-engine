@@ -85,6 +85,7 @@ pub mod engine;
 pub mod error;
 pub mod inspect;
 pub mod search;
+pub mod storage;
 pub mod traits;
 pub mod types;
 
