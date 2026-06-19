@@ -59,28 +59,26 @@ pub trait EmbeddingProvider: Send + Sync {
 
     /// Compute embedding vectors for multiple **query** strings in a single call.
     ///
-    /// The default delegates to [`embed_batch`](Self::embed_batch) (document
-    /// semantics) — **not** a private loop over [`embed_query`](Self::embed_query) —
-    /// so a provider that overrides only `embed_batch` for a single-round-trip API
-    /// still gets one batched call for queries. Asymmetric providers override this to
-    /// apply the query prefix per element.
+    /// The default loops [`embed_query`](Self::embed_query) sequentially — mirroring
+    /// how [`embed_batch`](Self::embed_batch) loops [`embed`](Self::embed). This makes
+    /// the default **correct by construction**: an asymmetric provider that overrides
+    /// only `embed_query` (e.g. to prepend a query instruction prefix) automatically
+    /// gets prefixed batch queries too, with no silent document-space leak.
+    ///
+    /// Providers with a native batch API (e.g. `OpenAI`/TEI `/v1/embeddings`) should
+    /// override this for a single HTTP round-trip — correctness is the default;
+    /// batch efficiency is the opt-in.
     ///
     /// # Contract
     ///
     /// The returned `Vec` **must** have the same length as `texts`. Each element
     /// corresponds positionally to the input query at that index.
     ///
-    /// **If you override [`embed_query`](Self::embed_query) to apply asymmetric query
-    /// handling (e.g. an instruction prefix), you MUST also override this method.**
-    /// The default routes through [`embed_batch`](Self::embed_batch) — *document*
-    /// semantics — so leaving it at default while overriding the single-query path
-    /// silently produces unprefixed batch-query embeddings (wrong vector space).
-    ///
     /// # Errors
     ///
     /// Returns an error if any embedding computation fails.
     fn embed_query_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        self.embed_batch(texts)
+        texts.iter().map(|t| self.embed_query(t)).collect()
     }
 
     /// Declare this provider's [`EmbeddingFingerprint`] — the identity of the vector
@@ -871,36 +869,40 @@ mod tests {
 
     #[test]
     #[allow(clippy::cast_precision_loss)] // test data, precision irrelevant
-    fn embed_query_batch_default_routes_through_embed_batch() {
-        // The default `embed_query_batch` must delegate to `embed_batch` (the
-        // overridable batch seam), NOT loop `embed` itself. This guarantees an
-        // asymmetric provider that overrides only `embed_batch` (e.g. a single-
-        // HTTP-round-trip TEI provider) still gets a single batch call for queries.
-        struct BatchCounter {
-            batch_calls: std::sync::atomic::AtomicUsize,
+    fn embed_query_batch_default_loops_embed_query() {
+        // The default `embed_query_batch` must loop `embed_query` (the asymmetric
+        // singular seam), NOT delegate to `embed_batch`. This guarantees that an
+        // asymmetric provider overriding only `embed_query` (a query prefix) still
+        // gets prefixed batch queries — correctness by default, no silent leak into
+        // document space. Batch efficiency is the explicit opt-in (override this).
+        struct QueryCounter {
+            query_calls: std::sync::atomic::AtomicUsize,
         }
-        impl EmbeddingProvider for BatchCounter {
-            fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
-                Ok(vec![0.0])
+        impl EmbeddingProvider for QueryCounter {
+            fn embed(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+                Ok(vec![text.len() as f32])
             }
-            fn embed_batch(&self, texts: &[&str]) -> crate::error::Result<Vec<Vec<f32>>> {
-                self.batch_calls
+            fn embed_query(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+                self.query_calls
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+                // Simulate a query prefix: documents would NOT see this.
+                self.embed(&format!("Q:{text}"))
             }
             fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
                 crate::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
-        let p = BatchCounter {
-            batch_calls: std::sync::atomic::AtomicUsize::new(0),
+        let p = QueryCounter {
+            query_calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let out = p.embed_query_batch(&["a", "bb", "ccc"]).unwrap();
-        assert_eq!(out, vec![vec![1.0], vec![2.0], vec![3.0]]);
+        // Each element carries the "Q:" prefix length offset (+2), proving the
+        // default routed through the overridden `embed_query`, not `embed`/`embed_batch`.
+        assert_eq!(out, vec![vec![3.0], vec![4.0], vec![5.0]]);
         assert_eq!(
-            p.batch_calls.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "embed_query_batch must route through embed_batch exactly once"
+            p.query_calls.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "embed_query_batch default must call embed_query once per input"
         );
     }
 

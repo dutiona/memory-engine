@@ -116,7 +116,7 @@ pub trait EmbeddingProvider: Send + Sync {
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> { /* default loop */ }
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> { self.embed(text) }          // NEW
     fn embed_query_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {              // NEW
-        self.embed_batch(texts)
+        texts.iter().map(|t| self.embed_query(t)).collect()                            // loop embed_query
     }
     fn fingerprint(&self) -> EmbeddingFingerprint;                                       // NEW
 }
@@ -126,6 +126,14 @@ Defaults make `embed_query` degrade to document semantics, so symmetric provider
 (`Mock`, `Hash`, `Passthrough`) are unaffected. **The core never embeds a query** — query
 embedding happens only at the consumer layer (MCP/CLI), because `MemoryQuery` takes a
 pre-computed vector. So the core's document-only call sites need no change.
+
+**`embed_query_batch` defaults to looping `embed_query`, not delegating to `embed_batch`**
+(corrected from an earlier draft during #616 review). This mirrors how `embed_batch` loops
+`embed`, and makes the default **correct by construction**: a provider that overrides only
+`embed_query` (a query prefix) still gets prefixed batch queries, with no silent leak into
+document space — the exact silent-mismatch failure this epic exists to prevent. Native-batch
+providers (TEI) override `embed_query_batch` for a single round-trip: correctness is the
+default, batch efficiency is the opt-in.
 
 ### 5. Provider extension — TEI/Qwen (`area:retrieval`)
 
