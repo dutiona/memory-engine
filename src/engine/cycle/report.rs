@@ -96,6 +96,27 @@ pub enum CycleDelta {
     /// [`CycleDelta::AddFact`] in the same report is not supported — its id is not
     /// knowable until insert.
     Supersede { old_id: FactId, new_id: FactId },
+    /// Atomically merge `sources` into a freshly-synthesized `new_fact`.
+    ///
+    /// The merge primitive for an LLM consolidation backend (#554): inserts
+    /// `new_fact`, then for **each** source expires it and creates a `"supersedes"`
+    /// graph edge `new_fact_id → source`, plus a single `lineage` record mapping the
+    /// synthetic to all its sources — all in the one apply transaction.
+    ///
+    /// This exists because the merge cannot be expressed as `AddFact + Supersede` in
+    /// one report: `Supersede`'s `new_id` must already exist, but the synthetic's id
+    /// is not knowable until its insert runs. It is **not** `AddFact + Quarantine`
+    /// either — `Quarantine` creates no supersession edge and no lineage, orphaning the
+    /// summary from the sources it replaces (the knowledge-base contradiction-resolution
+    /// depends on those edges).
+    ///
+    /// `sources` must be non-empty; every source must exist and be active at apply
+    /// time. The synthetic's id is reported in [`ApplyResult::synthesized_fact_ids`]
+    /// and is dream-marked in the same transaction (invariant M).
+    Synthesize {
+        sources: Vec<FactId>,
+        new_fact: NewFact,
+    },
 }
 
 /// Bookkeeping for one cycle. The `CycleMetadata` (not the full delta log) is what
@@ -179,8 +200,15 @@ pub struct ApplyResult {
     pub promoted: usize,
     pub outcomes_tagged: usize,
     pub superseded: usize,
+    /// Number of [`CycleDelta::Synthesize`] merges applied.
+    pub synthesized: usize,
     /// Ids of facts created by [`CycleDelta::AddFact`], in delta order.
     pub new_fact_ids: Vec<FactId>,
+    /// Ids of the synthetic merge facts created by [`CycleDelta::Synthesize`], in
+    /// delta order. Each is dream-marked in the apply transaction (invariant M, #209)
+    /// — like [`Self::new_fact_ids`] and [`Self::promoted_fact_ids`] — so the cycle's
+    /// own merge output never looks like a fresh caller write to the #209 cursor.
+    pub synthesized_fact_ids: Vec<FactId>,
     /// Ids of the pinned wisdom facts created by [`CycleDelta::Promote`], in delta order.
     ///
     /// Captured so the apply pass can dream-mark the cycle's *own* promoted outputs
@@ -284,6 +312,26 @@ mod tests {
                 CycleDelta::Supersede {
                     old_id: 5,
                     new_id: 6,
+                },
+                CycleDelta::Synthesize {
+                    sources: vec![7, 8],
+                    new_fact: NewFact {
+                        content: "merged".into(),
+                        content_hash: String::new(),
+                        embedding: vec![0.3, 0.4],
+                        fact_type: crate::types::FactType::Semantic,
+                        t_created: tw().start,
+                        t_expired: None,
+                        t_valid: None,
+                        t_invalid: None,
+                        source_event_id: None,
+                        importance: 0.5,
+                        access_count: 0,
+                        last_accessed: tw().start,
+                        metadata: serde_json::json!({}),
+                        scope_id: 1,
+                        is_pinned: false,
+                    },
                 },
             ],
             identity: IdentityOutput::empty(),

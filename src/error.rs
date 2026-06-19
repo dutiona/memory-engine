@@ -325,6 +325,13 @@ pub enum CycleError {
     #[error("fact {0} is already expired")]
     AlreadyExpired(crate::types::FactId),
 
+    /// A `Synthesize` delta carried an empty `sources` list. A merge with no sources
+    /// is degenerate — it would expire nothing and orphan a summary with empty
+    /// lineage; use [`CycleDelta::AddFact`](crate::engine::cycle::CycleDelta::AddFact)
+    /// to insert a standalone fact instead.
+    #[error("synthesize delta has no sources (use AddFact for a standalone fact)")]
+    SynthesizeNoSources,
+
     /// A cycle reported selecting facts (`facts_selected > 0`) but left
     /// `processed_ids` empty — a `DreamCycle` impl violating the
     /// [`processed_ids` contract](crate::traits::DreamCycle::run). Those facts would

@@ -20,8 +20,11 @@ use crate::graph::EdgeData;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
+use crate::store::lineage::LineageStore;
 use crate::store::schema::{get_config, set_config};
-use crate::types::{EventType, NewEdge, NewEvent, PromoteRequest};
+use crate::types::{
+    EventType, NewEdge, NewEvent, NewLineageRecord, PromoteRequest, PromotionProvenance,
+};
 
 #[cfg(feature = "ann")]
 use crate::search::strategy::VectorSearchStrategy;
@@ -89,6 +92,10 @@ impl MemoryEngine {
         // dream-marked (invariant M, #209) or they re-enter the next cycle / trip the
         // caller-write cursor. (`old_id` is expired, so it self-excludes.)
         let mut supersede_new_ids: Vec<i64> = Vec::new();
+        // Synthetic merge facts created by a Synthesize — like Supersede survivors they
+        // are active cycle *outputs* and must be dream-marked (invariant M). Their
+        // expired sources self-exclude.
+        let mut synthesize_new_ids: Vec<i64> = Vec::new();
 
         for delta in &report.deltas {
             match delta {
@@ -182,12 +189,64 @@ impl MemoryEngine {
                     supersede_new_ids.push(*new_id);
                     result.superseded += 1;
                 }
+                CycleDelta::Synthesize { sources, new_fact } => {
+                    // 1. Insert the synthetic summary (id not knowable until now — the
+                    //    reason this can't be AddFact + Supersede in one report).
+                    let store = FactStore::new(&tx, self.embed_dim);
+                    let synth_id = store.insert(new_fact)?;
+                    // 2. Expire each source and link synthetic -> source with a
+                    //    "supersedes" edge (mirrors the Supersede arm). The edge is
+                    //    scoped to the synthetic, the surviving fact.
+                    for src in sources {
+                        store.expire(*src, now)?;
+                        let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
+                            source_fact_id: synth_id,
+                            target_fact_id: *src,
+                            relation_type: SUPERSEDES_RELATION.to_owned(),
+                            weight: 1.0,
+                            t_created: now,
+                            t_expired: None,
+                            scope_id: new_fact.scope_id,
+                        })?;
+                        expired_ids.push(*src);
+                        supersede_edges.push((synth_id, *src, edge_id));
+                    }
+                    // 3. One lineage row maps the synthetic to all its sources, so the
+                    //    knowledge-base can trace the merge (parity with promotion's
+                    //    provenance chain). `representative_ids` is capped at the first
+                    //    few per its quick-review contract; lineage holds the full set.
+                    let provenance = PromotionProvenance {
+                        source_count: u32::try_from(sources.len()).unwrap_or(u32::MAX),
+                        session_count: 0,
+                        date_range_start: new_fact.t_created,
+                        date_range_end: new_fact.t_created,
+                        confidence: 1.0,
+                        method_version: "synthesize-v1".to_owned(),
+                        representative_ids: sources.iter().take(5).copied().collect(),
+                        lineage_id: 0,
+                    };
+                    LineageStore::new(&tx).insert(
+                        &NewLineageRecord {
+                            wisdom_fact_id: synth_id,
+                            source_fact_ids: sources.clone(),
+                        },
+                        &provenance,
+                    )?;
+                    // 4. Bookkeeping: the synthetic is an active output → dream-mark it
+                    //    (invariant M); report it for observability.
+                    synthesize_new_ids.push(synth_id);
+                    result.synthesized_fact_ids.push(synth_id);
+                    result.synthesized += 1;
+                    #[cfg(feature = "ann")]
+                    to_index.push((synth_id, new_fact.embedding.clone()));
+                }
             }
         }
 
         // Invariant M (#209): dream-mark not just the cycle's *inputs* (`processed_ids`)
         // but every fact the cycle *creates or leaves active* — AddFact synthetics,
-        // promoted wisdom, and Supersede survivors. Otherwise those facts look like a
+        // promoted wisdom, Supersede survivors, and Synthesize merge facts. Otherwise
+        // those facts look like a
         // fresh caller write to the #209 cursor (and re-enter the next cycle's input).
         // Every id here is provably present in this transaction (fresh insert or a
         // validate_report-checked live fact), so `merge_metadata` cannot hit NotFound.
@@ -195,6 +254,7 @@ impl MemoryEngine {
         to_mark.extend(&result.new_fact_ids);
         to_mark.extend(&result.promoted_fact_ids);
         to_mark.extend(&supersede_new_ids);
+        to_mark.extend(&synthesize_new_ids);
         to_mark.sort_unstable();
         to_mark.dedup();
         if !to_mark.is_empty() {
@@ -251,6 +311,25 @@ impl MemoryEngine {
         Ok(result)
     }
 
+    /// Validate a freshly-constructed [`NewFact`] carried by an `AddFact` or
+    /// `Synthesize` delta against the same guards the trusted `add_fact` ingest path
+    /// enforces. A report can be client-supplied (via `memory_apply_cycle_report`) or
+    /// LLM-derived (an `LlmDreamCycle` synthesizing a merge summary, #554), so an
+    /// out-of-range `importance` (no column CHECK → poisons Ebbinghaus decay globally)
+    /// or an oversized `content`/`metadata` must be rejected pre-apply, not persisted.
+    fn validate_new_fact(&self, nf: &crate::types::NewFact) -> Result<()> {
+        if nf.embedding.len() != self.embed_dim {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: self.embed_dim,
+                actual: nf.embedding.len(),
+            });
+        }
+        Self::validate_importance(Some(nf.importance))?;
+        crate::limits::check_str_size(&nf.content, "fact content")?;
+        crate::limits::check_json_size(&nf.metadata, "fact metadata")?;
+        Ok(())
+    }
+
     /// Read-only pre-apply validation of every delta. Returns the first failure;
     /// runs on the already-held write connection (no separate read guard, which
     /// would deadlock on an in-memory engine).
@@ -293,23 +372,7 @@ impl MemoryEngine {
 
         for delta in &report.deltas {
             match delta {
-                CycleDelta::AddFact(nf) => {
-                    if nf.embedding.len() != self.embed_dim {
-                        return Err(MemoryError::EmbeddingDimension {
-                            expected: self.embed_dim,
-                            actual: nf.embedding.len(),
-                        });
-                    }
-                    // Parity with the trusted `add_fact` ingest path: a report can be
-                    // client-supplied (via the `memory_apply_cycle_report` MCP tool), so
-                    // an `AddFact` delta must clear the same importance/payload guards.
-                    // Without this, a hostile report could write an out-of-range
-                    // `importance` (no column CHECK → poisons Ebbinghaus decay globally)
-                    // or an oversized `content`/`metadata` that ordinary ingest forbids.
-                    Self::validate_importance(Some(nf.importance))?;
-                    crate::limits::check_str_size(&nf.content, "fact content")?;
-                    crate::limits::check_json_size(&nf.metadata, "fact metadata")?;
-                }
+                CycleDelta::AddFact(nf) => self.validate_new_fact(nf)?,
                 CycleDelta::AdjustScore {
                     fact_id,
                     adjustment,
@@ -343,6 +406,21 @@ impl MemoryEngine {
                     let new = require_fact(*new_id, CycleError::SupersedeMissing(*new_id))?;
                     ensure_active(&new, &expired_in_report)?; // the superseding fact must itself be live
                     expired_in_report.insert(*old_id);
+                }
+                CycleDelta::Synthesize { sources, new_fact } => {
+                    self.validate_new_fact(new_fact)?;
+                    if sources.is_empty() {
+                        return Err(MemoryError::Cycle(CycleError::SynthesizeNoSources));
+                    }
+                    // Every source must exist and still be active; expiring an
+                    // already-expired (or earlier-in-report-expired) source would
+                    // clobber its original `t_expired`. Record each as expired so a
+                    // later delta cannot re-target it.
+                    for src in sources {
+                        let f = require_fact(*src, CycleError::UnknownFact(*src))?;
+                        ensure_active(&f, &expired_in_report)?;
+                        expired_in_report.insert(*src);
+                    }
                 }
             }
         }
@@ -633,6 +711,255 @@ mod tests {
                 .iter()
                 .any(|e| e.relation_type == "supersedes" && e.target_fact_id == old),
             "expected a supersedes edge new -> old"
+        );
+    }
+
+    /// A `NewFact` with `t_created` inside the cycle window, used to assemble a
+    /// `Synthesize` delta. Helper to keep the merge tests focused on behavior.
+    fn synthetic(content: &str) -> NewFact {
+        NewFact {
+            content: content.into(),
+            content_hash: String::new(),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            fact_type: FactType::Semantic,
+            t_created: "2026-06-16T00:30:00Z".parse().unwrap(),
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: "2026-06-16T00:30:00Z".parse().unwrap(),
+            metadata: serde_json::json!({}),
+            scope_id: 1,
+            is_pinned: false,
+        }
+    }
+
+    /// The A1b merge primitive (happy path): a `Synthesize` report inserts the summary
+    /// fact, expires **every** source, creates a `"supersedes"` edge `synthetic → src`
+    /// for each, and records one `lineage` row mapping the synthetic to all sources.
+    #[test]
+    fn synthesize_inserts_summary_expires_sources_and_creates_edges_and_lineage() {
+        let engine = engine();
+        let s1 = add(&engine, "source one");
+        let s2 = add(&engine, "source two");
+        let res = engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Synthesize {
+                    sources: vec![s1, s2],
+                    new_fact: synthetic("merged summary"),
+                }],
+                vec![s1, s2],
+            ))
+            .unwrap();
+
+        assert_eq!(res.synthesized, 1, "one Synthesize delta applied");
+        assert_eq!(
+            res.synthesized_fact_ids.len(),
+            1,
+            "one synthetic id reported"
+        );
+        let synth_id = res.synthesized_fact_ids[0];
+
+        // The synthetic exists and is active; both sources are expired.
+        let (synth, f1, f2) = engine
+            .with_read(|conn| {
+                let s = FactStore::new(conn, DIM);
+                Ok((s.get(synth_id)?, s.get(s1)?, s.get(s2)?))
+            })
+            .unwrap();
+        assert_eq!(synth.content, "merged summary");
+        assert!(synth.t_expired.is_none(), "synthetic is active");
+        assert!(f1.t_expired.is_some(), "source one expired");
+        assert!(f2.t_expired.is_some(), "source two expired");
+
+        // A "supersedes" edge synthetic -> src exists for each source.
+        let edges = engine
+            .with_read(|conn| {
+                crate::store::edges::EdgeStore::new(conn).list_active_by_source(synth_id)
+            })
+            .unwrap();
+        for src in [s1, s2] {
+            assert!(
+                edges
+                    .iter()
+                    .any(|e| e.relation_type == "supersedes" && e.target_fact_id == src),
+                "expected a supersedes edge synthetic -> {src}"
+            );
+        }
+
+        // One lineage row maps the synthetic to all its sources (errors if absent).
+        let (lineage, _prov) = engine
+            .with_read(|conn| {
+                crate::store::lineage::LineageStore::new(conn).get_by_wisdom_fact(synth_id)
+            })
+            .unwrap();
+        assert_eq!(lineage.wisdom_fact_id, synth_id);
+        assert_eq!(lineage.source_fact_ids, vec![s1, s2]);
+    }
+
+    /// Invariant M for Synthesize: the synthetic is dream-marked and its sources are
+    /// expired, so neither re-enters the next cycle's input and the synthetic does not
+    /// look like a fresh caller write to the #209 cursor.
+    #[test]
+    fn synthesize_outputs_dream_marked_and_excluded_next_cycle_invariant_m() {
+        let engine = engine();
+        let s1 = add(&engine, "src a");
+        let s2 = add(&engine, "src b");
+        let res = engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Synthesize {
+                    sources: vec![s1, s2],
+                    new_fact: synthetic("merged"),
+                }],
+                vec![s1, s2],
+            ))
+            .unwrap();
+        let synth_id = res.synthesized_fact_ids[0];
+
+        // The synthetic carries the dream_cycle marker.
+        let marked = engine
+            .with_read(|conn| {
+                Ok(FactStore::new(conn, DIM)
+                    .get(synth_id)?
+                    .metadata
+                    .get("dream_cycle")
+                    .is_some())
+            })
+            .unwrap();
+        assert!(marked, "synthetic merge fact must be dream-marked");
+
+        // The crisp invariant: nothing the cycle produced looks like a caller write
+        // (synthetic marked; both sources expired, so not active-unpinned-unmarked).
+        let max_caller = engine
+            .with_read(|conn| FactStore::new(conn, DIM).max_caller_written_fact_id())
+            .unwrap();
+        assert_eq!(
+            max_caller, None,
+            "synthetic must not look like a caller write; sources are expired"
+        );
+
+        // The in-window synthetic is not re-selected as undreamt input next cycle.
+        let w = meta(vec![]).time_window;
+        let undreamt = engine
+            .with_read(|conn| {
+                FactStore::new(conn, DIM).list_undreamt_in_period(w.start, w.end, &[], None)
+            })
+            .unwrap();
+        assert!(
+            !undreamt.iter().any(|f| f.id == synth_id),
+            "synthetic must be excluded from the next cycle's input"
+        );
+    }
+
+    /// A `Synthesize` with no sources is degenerate (use `AddFact`): rejected pre-apply,
+    /// nothing written.
+    #[test]
+    fn synthesize_requires_at_least_one_source() {
+        let engine = engine();
+        let err = engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Synthesize {
+                    sources: vec![],
+                    new_fact: synthetic("orphan"),
+                }],
+                vec![],
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Cycle(CycleError::SynthesizeNoSources)
+        ));
+        assert_eq!(
+            engine.statistics().unwrap().facts.total,
+            0,
+            "rejected report must not insert the synthetic"
+        );
+    }
+
+    /// A nonexistent source id is a typed `UnknownFact` (not a raw mid-apply `NotFound`),
+    /// and the whole report is rejected: the valid sibling source stays active.
+    #[test]
+    fn synthesize_missing_source_rejected() {
+        let engine = engine();
+        let s1 = add(&engine, "real source");
+        let err = engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Synthesize {
+                    sources: vec![s1, 999_999],
+                    new_fact: synthetic("merged"),
+                }],
+                vec![s1],
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Cycle(CycleError::UnknownFact(999_999))
+        ));
+        let f = engine
+            .with_read(|conn| FactStore::new(conn, DIM).get(s1))
+            .unwrap();
+        assert!(
+            f.t_expired.is_none(),
+            "rejected report must not expire the valid source"
+        );
+    }
+
+    /// Merging an already-expired source is rejected (it would clobber the source's
+    /// original `t_expired`).
+    #[test]
+    fn synthesize_expired_source_rejected() {
+        let engine = engine();
+        let s1 = add(&engine, "expire me first");
+        engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Quarantine {
+                    fact_id: s1,
+                    reason: "x".into(),
+                }],
+                vec![s1],
+            ))
+            .unwrap();
+        let err = engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Synthesize {
+                    sources: vec![s1],
+                    new_fact: synthetic("merged"),
+                }],
+                vec![],
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Cycle(CycleError::AlreadyExpired(_))
+        ));
+    }
+
+    /// A wrong-dimension synthetic embedding is rejected pre-apply (parity with
+    /// `AddFact`), so no source is expired.
+    #[test]
+    fn synthesize_wrong_dimension_rejected() {
+        let engine = engine();
+        let s1 = add(&engine, "source");
+        let mut nf = synthetic("merged");
+        nf.embedding = vec![0.1; 8]; // != DIM
+        let err = engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Synthesize {
+                    sources: vec![s1],
+                    new_fact: nf,
+                }],
+                vec![s1],
+            ))
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::EmbeddingDimension { .. }));
+        let f = engine
+            .with_read(|conn| FactStore::new(conn, DIM).get(s1))
+            .unwrap();
+        assert!(
+            f.t_expired.is_none(),
+            "rejected report must not expire the source"
         );
     }
 
