@@ -314,6 +314,15 @@ fn noop_bootstrap_then_real_write_records_real_embedder() {
             None,
         )
         .unwrap();
+    // The store must be left UNSTAMPED by the no-op run (the crux of #643): this is
+    // what lets the first real writer below establish the identity.
+    assert!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap()
+            .is_none(),
+        "no-op bootstrap must leave the store unstamped"
+    );
     // First real write with embedder B establishes the identity.
     let req = AddFactRequest {
         content: "real".into(),
@@ -356,6 +365,89 @@ fn bootstrap_creating_facts_stamps_identity() {
             .unwrap(),
         Some(MockEmbedder { dim: DIM }.fingerprint()),
         "a fact-creating bootstrap records the embedder's fingerprint"
+    );
+}
+
+#[test]
+fn noop_bootstrap_directory_does_not_stamp_identity() {
+    // #643 names all three bootstrap wrappers. `bootstrap_directory` stamps each
+    // session inside its own savepoint; an empty directory processes no session, so
+    // the store must be left unstamped.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let report = engine
+        .bootstrap_directory(
+            dir.path(),
+            &MockEmbedder { dim: DIM },
+            &crate::KeywordExtractor,
+            &crate::BootstrapConfig::default(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(report.facts_created, 0, "empty directory creates no facts");
+    assert!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap()
+            .is_none(),
+        "a fact-less directory bootstrap must not stamp the embedding identity"
+    );
+}
+
+#[test]
+fn bootstrap_directory_creating_facts_stamps_identity() {
+    // Positive guard for the multi-file path: a directory with a fact-producing
+    // session records the embedder identity (inside that session's savepoint).
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("session.jsonl"),
+        include_str!("../../tests/fixtures/success_session.jsonl"),
+    )
+    .unwrap();
+    let report = engine
+        .bootstrap_directory(
+            dir.path(),
+            &MockEmbedder { dim: DIM },
+            &crate::KeywordExtractor,
+            &crate::BootstrapConfig::default(),
+            None,
+        )
+        .unwrap();
+    assert!(report.facts_created > 0, "fixture should create facts");
+    assert_eq!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap(),
+        Some(MockEmbedder { dim: DIM }.fingerprint()),
+        "a fact-creating directory bootstrap records the embedder's fingerprint"
+    );
+}
+
+#[test]
+fn memory_directory_stamps_identity_even_when_empty() {
+    // The deliberately RETAINED meta-first path (#643): `bootstrap_memory_directory`
+    // is autocommit-per-file, so it stamps BEFORE the first file for crash safety.
+    // An empty directory therefore still stamps — the harmless no-op stamp the other
+    // paths shed, kept here as the crash-safe choice. Pinning it guards against a
+    // future refactor that "consistently" defers this path and reopens the
+    // orphan-vector window.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    engine
+        .bootstrap_memory_directory(
+            dir.path(),
+            &MockEmbedder { dim: DIM },
+            &crate::BootstrapConfig::default(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap(),
+        Some(MockEmbedder { dim: DIM }.fingerprint()),
+        "memory-directory import is meta-first: it stamps even with no files"
     );
 }
 
