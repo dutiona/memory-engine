@@ -136,23 +136,13 @@ impl DreamCycle for LlmDreamCycle<'_> {
                 .fold(0.0_f64, f64::max);
             // The engine stays LLM-free: the backend embeds its own summary text.
             let embedding = self.embedder.embed(&group.summary)?;
-            let new_fact = NewFact {
-                content: group.summary.clone(),
-                content_hash: String::new(), // FactStore::insert computes blake3
-                embedding,
-                fact_type: FactType::Semantic, // a consolidated pattern
-                t_created: now,
-                t_expired: None,
-                t_valid: None,
-                t_invalid: None,
-                source_event_id: None,
-                importance,
-                access_count: 0,
-                last_accessed: now,
-                metadata: serde_json::json!({}),
-                scope_id,
-                is_pinned: false,
-            };
+            // A consolidated pattern. The builder defaults the remaining fields
+            // (empty metadata, `is_pinned = false`, `last_accessed = t_created`).
+            let new_fact = NewFact::builder(group.summary.clone(), embedding, FactType::Semantic)
+                .t_created(now)
+                .importance(importance)
+                .scope_id(scope_id)
+                .build();
             // Claim the sources only now that the group is actually emitted, so a
             // skipped (cross-scope) group does not lock its ids away from later groups.
             consumed.extend(sources.iter().copied());
