@@ -78,14 +78,20 @@ const fn default_summary_timeout() -> u64 {
     120
 }
 
-/// Probe `embed_dim` from an existing database by reading the config table.
+/// Probe the embedding dimension from an existing database.
 ///
-/// Mirrors the pattern from `memory-engine-cli/src/db.rs`.
+/// Reads the persisted identity from the `embedding_meta` config row (#613,
+/// ADR 0015) and extracts its `dim`, falling back to the legacy bare `embed_dim`
+/// key for pre-#613 databases. Mirrors `peek_embed_dim_from_db` in
+/// `memory-engine-cli/src/db.rs`.
 ///
 /// # Errors
 ///
-/// Returns an error if the database doesn't exist or has no `embed_dim` config.
+/// Returns an error if the database doesn't exist, has no recorded embedding
+/// identity yet (nothing embedded), or the stored value is malformed.
 pub fn probe_embed_dim(db_path: &Path) -> Result<usize, String> {
+    use rusqlite::OptionalExtension;
+
     if !db_path.is_file() {
         return Err(format!(
             "database path is not a file or does not exist: {}",
@@ -98,17 +104,41 @@ pub fn probe_embed_dim(db_path: &Path) -> Result<usize, String> {
     )
     .map_err(|e| format!("cannot open database: {e}"))?;
 
-    let dim_str: String = conn
+    // Preferred: the embedding_meta identity tuple records `dim` (#613).
+    let meta_raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'embedding_meta'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("config query failed: {e}"))?;
+    if let Some(raw) = meta_raw {
+        let meta: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("corrupt embedding_meta in config table: {e}"))?;
+        let dim = meta
+            .get("dim")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "embedding_meta is missing a numeric 'dim' field".to_owned())?;
+        return usize::try_from(dim).map_err(|_| "embedding_meta 'dim' out of range".to_owned());
+    }
+
+    // Legacy fallback: a pre-#613 database carried a bare `embed_dim` key.
+    let legacy: Option<String> = conn
         .query_row(
             "SELECT value FROM config WHERE key = 'embed_dim'",
             [],
             |row| row.get(0),
         )
-        .map_err(|_| "database has no embed_dim in config table".to_owned())?;
+        .optional()
+        .map_err(|e| format!("config query failed: {e}"))?;
+    if let Some(dim_str) = legacy {
+        return dim_str
+            .parse::<usize>()
+            .map_err(|e| format!("invalid embed_dim value '{dim_str}': {e}"));
+    }
 
-    dim_str
-        .parse::<usize>()
-        .map_err(|e| format!("invalid embed_dim value '{dim_str}': {e}"))
+    Err("database has no embedding identity yet (nothing has been embedded)".to_owned())
 }
 
 #[cfg(test)]

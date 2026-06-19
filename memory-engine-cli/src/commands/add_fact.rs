@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use clap::ValueEnum;
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
-use crate::db::open_engine_writable;
+use crate::db::open_engine_writable_with_dim;
 use crate::embedding::PassthroughEmbedder;
 use crate::output::{self, OutputFormat, parse_datetime};
 
@@ -113,7 +113,11 @@ pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Resul
         None => None,
     };
 
-    let engine = open_engine_writable(db)?;
+    // Derive the engine dimension from the supplied embedding rather than peeking
+    // the database: this works on a freshly-created, never-embedded store (which
+    // has no recorded dimension under #613). If the store was previously embedded
+    // at a different dimension, the engine's open path rejects the mismatch.
+    let engine = open_engine_writable_with_dim(db, embedding.len())?;
     let fact_type: FactType = args.fact_type.into();
 
     let req = AddFactRequest {

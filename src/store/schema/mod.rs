@@ -7,7 +7,7 @@ use crate::error::{MemoryError, MigrationError, Result};
 mod migrations;
 
 /// Current schema version. Bump when adding migrations.
-pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+pub const CURRENT_SCHEMA_VERSION: u32 = 12;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -182,6 +182,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrations::migrate_v8_to_v9, false),
     (migrations::migrate_v9_to_v10, false),
     (migrations::migrate_v10_to_v11, false),
+    (migrations::migrate_v11_to_v12, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -1083,11 +1084,56 @@ CREATE TABLE IF NOT EXISTS config (
     }
 
     #[test]
-    fn config_no_default_embed_dim() {
+    fn config_no_default_embedding_meta() {
+        // A fresh v12 DB has neither the legacy `embed_dim` key nor an
+        // `embedding_meta` tuple — identity is established on the first embedding
+        // write (#613, ADR 0015 §2), not at schema init.
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
-        let dim = get_config(&conn, "embed_dim").unwrap();
-        assert!(dim.is_none());
+        assert!(get_config(&conn, "embed_dim").unwrap().is_none());
+        assert!(
+            crate::store::embedding_meta::load(&conn).unwrap().is_none(),
+            "fresh DB must have no embedding_meta"
+        );
+    }
+
+    #[test]
+    fn migrate_v11_to_v12_drops_embed_dim() {
+        // The migration deletes the legacy `embed_dim` config key. A fresh v12 DB
+        // has no such key, so the DELETE would be vacuous — we must INJECT an
+        // `embed_dim` row and roll `schema_version` back to 11 to actually exercise
+        // the migration step (review MEDIUM-1).
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        set_config(&conn, "embed_dim", "768").unwrap();
+        set_config(&conn, "schema_version", "11").unwrap();
+        assert_eq!(
+            get_config(&conn, "embed_dim").unwrap().as_deref(),
+            Some("768")
+        );
+
+        migrate(&conn, None).unwrap();
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some("12"),
+            "schema_version bumped to 12"
+        );
+        assert!(
+            get_config(&conn, "embed_dim").unwrap().is_none(),
+            "legacy embed_dim key dropped"
+        );
+        assert!(
+            crate::store::embedding_meta::load(&conn).unwrap().is_none(),
+            "no backfill: embedding_meta stays absent until first embed"
+        );
+
+        // Idempotent: re-running migrate from v12 is a no-op and does not error.
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some("12")
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::store::schema::{get_config, set_config};
 use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
 use crate::store::upcaster::UpcasterRegistry;
-use crate::traits::Reranker;
+use crate::traits::{EmbeddingProvider, Reranker};
 use crate::types::{ConsolidationLevel, Fact};
 
 mod activity;
@@ -227,10 +227,10 @@ impl MemoryEngine {
         // 1. Validate embed_dim (must happen first — ensures schema is ready).
         if pool.is_read_only() {
             let conn = pool.read()?;
-            Self::validate_embed_dim(&conn, embed_dim)?;
+            Self::validate_embed_dim_against_meta(&conn, embed_dim)?;
         } else {
             let conn = pool.write();
-            Self::validate_or_set_embed_dim(&conn, embed_dim)?;
+            Self::validate_embed_dim_against_meta(&conn, embed_dim)?;
         }
 
         // 2. Try snapshot fast path (file-backed engines only).
@@ -386,44 +386,60 @@ impl MemoryEngine {
         false
     }
 
-    fn validate_or_set_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
-        if let Some(stored) = get_config(conn, "embed_dim")? {
-            let stored_dim: usize = stored.parse().map_err(|_| {
-                MigrationError::Incompatible(format!("invalid stored embed_dim: {stored}"))
-            })?;
-            if stored_dim != embed_dim {
+    /// Validate the configured `embed_dim` against the persisted embedding identity
+    /// — read-only, never writes. Shared by the read-write and read-only open paths.
+    ///
+    /// If an `embedding_meta` tuple is recorded (#613), its `dim` MUST equal the
+    /// runtime `embed_dim` from `EngineConfig`. If none is recorded yet (a fresh
+    /// store, or one that has only ingested events and never embedded a fact), this
+    /// is a no-op: the identity is established lazily on the first embedding write
+    /// (ADR 0015 §2), not at open — open holds no `EmbeddingProvider` and so cannot
+    /// write it. A read-only open of an un-embedded store is therefore `Ok`: an
+    /// empty store has no identity to disagree with, and the runtime dimension always
+    /// comes from `EngineConfig`.
+    fn validate_embed_dim_against_meta(conn: &Connection, embed_dim: usize) -> Result<()> {
+        if let Some(fp) = crate::store::embedding_meta::load(conn)? {
+            if fp.dim != embed_dim {
                 return Err(MigrationError::EmbedDimMismatch {
-                    stored: stored_dim,
+                    stored: fp.dim,
                     requested: embed_dim,
                 }
                 .into());
             }
-        } else {
-            set_config(conn, "embed_dim", &embed_dim.to_string())?;
         }
         Ok(())
     }
 
-    /// Validate stored `embed_dim` matches requested — read-only, never writes.
-    fn validate_embed_dim(conn: &Connection, embed_dim: usize) -> Result<()> {
-        if let Some(stored) = get_config(conn, "embed_dim")? {
-            let stored_dim: usize = stored.parse().map_err(|_| {
-                MigrationError::Incompatible(format!("invalid stored embed_dim: {stored}"))
-            })?;
-            if stored_dim != embed_dim {
-                return Err(MigrationError::EmbedDimMismatch {
-                    stored: stored_dim,
-                    requested: embed_dim,
-                }
-                .into());
-            }
-            Ok(())
-        } else {
-            Err(MigrationError::Incompatible(
-                "embed_dim not set in database; open in read-write mode first".to_string(),
-            )
-            .into())
-        }
+    /// Record the embedding identity on the first embedding write (#613, ADR 0015 §2).
+    ///
+    /// Idempotent and cheap after the first call: [`embedding_meta::record_if_absent`]
+    /// returns the stored tuple without writing once an identity exists. Every code
+    /// path that embeds-then-persists (ingest, batch ingest) calls this **before**
+    /// inserting the derived vector, under the same write transaction, so the store's
+    /// identity is never older than its first vector.
+    ///
+    /// Free-function persist paths that hold no `&self` (consolidation, bootstrap)
+    /// call [`embedding_meta::record_if_absent`] directly with their `embed_dim`; this
+    /// method is the thin `&self` convenience for the engine's own ingest methods.
+    ///
+    /// **This is the seam #614 extends** — enforcement is added inside
+    /// `record_if_absent`; this method's call sites do not change when it lands.
+    ///
+    /// [`embedding_meta::record_if_absent`]: crate::store::embedding_meta::record_if_absent
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`embedding_meta::record_if_absent`] errors, including
+    /// `MemoryError::EmbeddingDimension` when the provider's declared `dim` disagrees
+    /// with this engine's vector dimension.
+    pub(crate) fn record_embedding_identity(
+        &self,
+        conn: &Connection,
+        embedder: &dyn EmbeddingProvider,
+    ) -> Result<()> {
+        let fp = embedder.fingerprint();
+        crate::store::embedding_meta::record_if_absent(conn, &fp, self.embed_dim)?;
+        Ok(())
     }
 
     /// Whether this engine was opened in read-only mode.

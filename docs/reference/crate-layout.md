@@ -56,6 +56,7 @@ memory_engine (lib.rs)
 : SQLite persistence layer. Sub-modules handle distinct tables:
 
 - `store::schema` -- DDL, migrations, `get_config`/`set_config`.
+- `store::embedding_meta` -- typed persistence of the canonical `EmbeddingFingerprint` identity tuple (`load`/`store`/`record_if_absent`); single owner of the on-disk encoding (ADR 0015), recorded on the first embedding write. The degenerate single-space case of the Knowledge layer's multi-space registry; Wave 2 (#622) generalizes it here.
 - `store::events` -- `EventStore` (insert, get).
 - `store::facts` -- `FactStore` (insert, get, list_active, expire, update importance).
 - `store::summaries` -- `SummaryStore` (insert, list by level).

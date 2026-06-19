@@ -248,6 +248,23 @@ fn add_fact_temporal_inconsistency() {
 #[test]
 fn add_fact_embedding_dimension_mismatch() {
     let (_dir, db_path) = create_empty_db();
+    // Under #613 the dimension is established on the first embedding write, not at
+    // DB creation. First establish dim=4 with a valid embedding...
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "add-fact",
+            "--content",
+            "seed",
+            "--fact-type",
+            "semantic",
+            "--embedding",
+            EMBEDDING_JSON, // 4-dim
+        ])
+        .assert()
+        .success();
+    // ...then a 2-dim embedding disagrees with the recorded identity → rejected.
     cli()
         .args([
             "--db",
@@ -258,7 +275,7 @@ fn add_fact_embedding_dimension_mismatch() {
             "--fact-type",
             "semantic",
             "--embedding",
-            "[0.1, 0.2]", // 2-dim, DB expects 4
+            "[0.1, 0.2]", // 2-dim, store is dim 4
         ])
         .assert()
         .failure()

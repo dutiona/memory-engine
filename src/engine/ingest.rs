@@ -160,7 +160,20 @@ impl MemoryEngine {
                 is_pinned,
             };
 
-            FactStore::new(&conn, self.embed_dim).insert(&new_fact)?
+            // Atomic first-write: record the embedding identity (#613, ADR 0015 §2)
+            // and insert the fact in one transaction, so a vector is never committed
+            // without its identity (the #614 silent-corruption landmine). `add_fact`
+            // was previously a bare autocommit insert; a second autocommit statement
+            // for the identity would let a crash between them orphan the vector.
+            // Scope creation above stays autocommit (unchanged): an orphan scope on
+            // rollback is a pre-existing, benign outcome, and the scope row + its
+            // scope_tree cache entry commit together, independent of the fact — so no
+            // cache desync is introduced.
+            let tx = conn.unchecked_transaction()?;
+            self.record_embedding_identity(&tx, embedder)?;
+            let id = FactStore::new(&tx, self.embed_dim).insert(&new_fact)?;
+            tx.commit()?;
+            id
         }; // DB lock released = committed
 
         #[cfg(feature = "ann")]
@@ -331,6 +344,11 @@ impl MemoryEngine {
             let result = (|| -> Result<(Vec<i64>, Vec<i64>)> {
                 let scope_store = ScopeStore::new(&conn);
                 let store = FactStore::new(&conn, self.embed_dim);
+
+                // Record the embedding identity on first write (#613), inside the
+                // savepoint so it commits atomically with the batch (write-once;
+                // a no-op on every subsequent batch).
+                self.record_embedding_identity(&conn, embedder)?;
 
                 // Resolve scopes INSIDE the savepoint so they roll back on error.
                 let (scope_ids, scope_ids_to_cache) =

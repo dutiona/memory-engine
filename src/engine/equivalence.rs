@@ -172,10 +172,24 @@ fn equiv_embed_dim_mismatch_is_migration_error() {
     use crate::error::MemoryError;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dim.db");
-    let _ = MemoryEngine::builder(768)
-        .path(path.clone())
-        .build()
-        .unwrap();
+    {
+        let engine = MemoryEngine::builder(768)
+            .path(path.clone())
+            .build()
+            .unwrap();
+        // The embedding identity (incl. dim) is recorded on the first embedding
+        // write (#613), not at open. Seed it via the config facade to pin dim=768
+        // without standing up an embedder in this builder-equivalence module.
+        engine
+            .set_config(
+                "embedding_meta",
+                &serde_json::to_string(&crate::types::EmbeddingFingerprint::new(
+                    "mock", "test", 768,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+    }
     let err = MemoryEngine::builder(384).path(path).build().unwrap_err();
     assert!(
         matches!(err, MemoryError::Migration(_)),

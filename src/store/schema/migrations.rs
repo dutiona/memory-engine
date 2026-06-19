@@ -342,3 +342,19 @@ pub(super) fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);")?;
     Ok(())
 }
+
+/// Replace the bare `embed_dim` config key with the `embedding_meta` identity
+/// tuple (issue #613, ADR 0015).
+///
+/// No DDL change — the identity is a `config` row written on the first embedding
+/// write, not a column. No data migration: the engine had no users at the v11→v12
+/// boundary, so any pre-existing `embed_dim` is **dropped** rather than upgraded
+/// (we lack `model`/`provider` to synthesize a full, *correct* tuple — a fabricated
+/// `model:"unknown"` would be a wrong identity that #614 would then hard-reject on
+/// every subsequent write). The identity is re-established on the next embedding
+/// write. The `DELETE` is idempotent (a no-op on a fresh v12 DB that never had the
+/// key), and runs inside the migration framework's per-step transaction.
+pub(super) fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
+    conn.execute_batch("DELETE FROM config WHERE key = 'embed_dim';")?;
+    Ok(())
+}
