@@ -69,6 +69,54 @@ timeout_secs = 60
 }
 
 #[test]
+fn embedding_provider_defaults_to_ollama() {
+    // A legacy config without `provider` still parses; defaults to "ollama" so the
+    // fingerprint reflects the historical hardcoded backend. (#618)
+    let toml_str = r#"
+[engine]
+db_path = "/tmp/test.db"
+embed_dim = 384
+
+[embedding]
+endpoint = "http://localhost:11434/v1/embeddings"
+model = "nomic-embed-text"
+dimensions = 384
+"#;
+    let config: McpConfig = toml::from_str(toml_str).unwrap();
+    let emb = config.embedding.unwrap();
+    assert_eq!(emb.provider, "ollama");
+    assert_eq!(emb.query_instruction, None);
+    assert_eq!(emb.mrl_dim, None);
+}
+
+#[test]
+fn embedding_asymmetric_tei_qwen_config_parses() {
+    // Full asymmetric TEI/Qwen config: explicit provider, query_instruction, mrl_dim. (#618)
+    let toml_str = r#"
+[engine]
+db_path = "/tmp/test.db"
+embed_dim = 256
+
+[embedding]
+endpoint = "http://localhost:8080/v1/embeddings"
+model = "Qwen/Qwen3-Embedding-0.6B"
+provider = "tei"
+dimensions = 1024
+query_instruction = "Instruct: retrieve\nQuery: "
+mrl_dim = 256
+"#;
+    let config: McpConfig = toml::from_str(toml_str).unwrap();
+    let emb = config.embedding.unwrap();
+    assert_eq!(emb.provider, "tei");
+    assert_eq!(emb.dimensions, 1024); // native
+    assert_eq!(emb.mrl_dim, Some(256)); // stored (== engine embed_dim)
+    assert_eq!(
+        emb.query_instruction.as_deref(),
+        Some("Instruct: retrieve\nQuery: ")
+    );
+}
+
+#[test]
 fn unknown_field_rejected() {
     let toml_str = r#"
 [engine]
@@ -145,7 +193,10 @@ fn embedding_field_merge_cli_over_toml() {
         endpoint: "http://toml-host:11434/v1/embeddings".into(),
         model: "toml-model".into(),
         api_key: None,
+        provider: "ollama".into(),
         dimensions: 384,
+        query_instruction: None,
+        mrl_dim: None,
         timeout_secs: 30,
     };
 

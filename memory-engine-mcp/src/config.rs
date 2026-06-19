@@ -44,8 +44,31 @@ pub struct EmbeddingSection {
     /// API key (optional — for authenticated endpoints).
     pub api_key: Option<String>,
 
-    /// Expected embedding dimensions. Used to validate responses.
+    /// Operator-declared serving backend (`"ollama"`, `"tei"`, `"openai"`). Cannot be
+    /// sniffed from the endpoint (Ollama and TEI both speak `/v1/embeddings`); it feeds
+    /// the [`EmbeddingFingerprint`](memory_engine::EmbeddingFingerprint) identity, so it
+    /// must reflect the real backend. Defaults to `"ollama"` for back-compat.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+
+    /// Expected embedding dimensions. This is the **native** dimension the model emits
+    /// and the provider validates raw responses against. With Matryoshka truncation
+    /// ([`mrl_dim`](Self::mrl_dim)), the engine stores the *truncated* `mrl_dim` while
+    /// this stays the native (pre-truncation) length.
     pub dimensions: usize,
+
+    /// Optional query-only instruction prefix for asymmetric models (e.g. Qwen). Applied
+    /// by the query path (`embed_query`); the document path (`add_fact`/`embed`) is never
+    /// prefixed. `None` = symmetric (no prefix).
+    #[serde(default)]
+    pub query_instruction: Option<String>,
+
+    /// Optional Matryoshka (MRL) truncation target. When set, each returned vector is
+    /// sliced to `mrl_dim` and L2-renormalized. Must equal the engine `embed_dim` (the
+    /// engine stores post-truncation vectors) and be `<= dimensions`. `None` = no
+    /// truncation (store the native vector).
+    #[serde(default)]
+    pub mrl_dim: Option<usize>,
 
     /// HTTP timeout in seconds. Default: 30.
     #[serde(default = "default_timeout")]
@@ -68,6 +91,10 @@ pub struct SummarySection {
     /// HTTP timeout in seconds. Default: 120 (LLM inference is slower than embedding).
     #[serde(default = "default_summary_timeout")]
     pub timeout_secs: u64,
+}
+
+fn default_provider() -> String {
+    "ollama".to_string()
 }
 
 const fn default_timeout() -> u64 {

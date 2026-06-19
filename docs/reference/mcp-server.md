@@ -46,12 +46,33 @@ embed_dim = 384  # Optional — probed from existing DB if omitted
 [embedding]
 endpoint = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-api_key = "sk-..."  # Optional — for authenticated endpoints
-dimensions = 384
+api_key = "sk-..."   # Optional — for authenticated endpoints
+provider = "ollama"  # Serving backend: ollama | tei | openai (default: ollama). Feeds the fingerprint.
+dimensions = 384     # Native model dimension (validated against the raw response)
 timeout_secs = 30
 ```
 
-CLI flags override TOML values field-by-field (e.g., `--embed-api-key` overrides `api_key` in TOML while keeping `endpoint` and `model` from TOML).
+CLI flags override TOML values field-by-field (e.g., `--embed-api-key` overrides `api_key` in TOML while keeping `endpoint` and `model` from TOML; `--embed-provider` overrides `provider`).
+
+#### Asymmetric models (TEI / Qwen)
+
+Models like `Qwen/Qwen3-Embedding-0.6B` take a query-only instruction prefix and support Matryoshka (MRL) truncation. The MCP query path uses `embed_query` (prefix applied); `memory_add_fact` embeds documents prefix-free.
+
+```toml
+[engine]
+db_path = "/path/to/memory.db"
+embed_dim = 256       # The STORED dimension — must equal mrl_dim below
+
+[embedding]
+endpoint = "http://localhost:8080/v1/embeddings"
+model = "Qwen/Qwen3-Embedding-0.6B"
+provider = "tei"
+dimensions = 1024     # NATIVE dim the model emits (validated against the raw response)
+query_instruction = "Instruct: Given a search query, retrieve relevant memory facts.\nQuery: "
+mrl_dim = 256         # Truncate + L2-renormalize to this; must equal engine embed_dim
+```
+
+`mrl_dim` is the stored (post-truncation) dimension and **must equal** the engine's `embed_dim` — the server rejects a mismatch at startup. `dimensions` stays the native pre-truncation length.
 
 ### Claude Code Integration
 
