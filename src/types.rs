@@ -293,6 +293,38 @@ pub struct NewLineageRecord {
     pub source_fact_ids: Vec<i64>,
 }
 
+/// One proposed merge: a set of source facts an
+/// [`LlmDreamCycle`](crate::engine::cycle) should collapse into a single
+/// synthesized `summary`.
+///
+/// The output of a [`DeltaProposer`](crate::traits::DeltaProposer), it is a raw
+/// **proposal** — deliberately a plain DTO with no enforced invariants. It crosses
+/// the HTTP boundary (an LLM backend deserializes it from model JSON), so rejecting a
+/// malformed group at parse time would deny the cycle the chance to clamp it. The
+/// `LlmDreamCycle` (A2) is responsible for clamping `source_ids` to the fed window
+/// and dropping degenerate groups before turning each into a
+/// [`CycleDelta::Synthesize`](crate::engine::cycle::CycleDelta::Synthesize) (which
+/// itself enforces a non-empty, all-active source set at apply time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeGroup {
+    /// Ids of the facts to merge (the proposer's raw choice; not yet window-clamped).
+    pub source_ids: Vec<FactId>,
+    /// The synthesized summary text that replaces the sources. The backend embeds
+    /// this itself (the engine stays LLM-free).
+    pub summary: String,
+}
+
+/// A consolidation backend's proposal: the merge groups it wants applied.
+///
+/// Returned by [`DeltaProposer::propose`](crate::traits::DeltaProposer::propose). An
+/// empty `merges` (the proposer found nothing to consolidate) is a valid state, not an
+/// error — the cycle turns it into a no-op report. v1 carries only merges; future
+/// proposal kinds (e.g. promotions) are additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ConsolidationProposal {
+    pub merges: Vec<MergeGroup>,
+}
+
 /// Complete lineage row for snapshot dump/restore.
 ///
 /// Combines the `LineageRecord` fields with the full `PromotionProvenance`
@@ -1265,5 +1297,44 @@ mod tests {
         let json = serde_json::to_string(&rec).unwrap();
         let back: LineageRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(rec, back);
+    }
+
+    /// `ConsolidationProposal` crosses the HTTP boundary (A3 deserializes it from an
+    /// LLM's JSON), so its wire shape must be stable: a top-level `merges` array of
+    /// `{ source_ids, summary }` objects.
+    #[test]
+    fn consolidation_proposal_round_trip_json() {
+        let proposal = ConsolidationProposal {
+            merges: vec![
+                MergeGroup {
+                    source_ids: vec![1, 2, 3],
+                    summary: "user prefers terse, code-first answers".into(),
+                },
+                MergeGroup {
+                    source_ids: vec![7],
+                    summary: "singleton group is structurally legal".into(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&proposal).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["merges"][0]["source_ids"], serde_json::json!([1, 2, 3]));
+        assert_eq!(
+            v["merges"][0]["summary"],
+            "user prefers terse, code-first answers"
+        );
+        let back: ConsolidationProposal = serde_json::from_str(&json).unwrap();
+        assert_eq!(proposal, back);
+    }
+
+    /// An empty proposal (the LLM found nothing to merge) is a valid, representable
+    /// state — not an error. A2's `LlmDreamCycle` turns it into a no-op report.
+    #[test]
+    fn consolidation_proposal_empty_is_representable() {
+        let empty = ConsolidationProposal { merges: vec![] };
+        let json = serde_json::to_string(&empty).unwrap();
+        let back: ConsolidationProposal = serde_json::from_str(&json).unwrap();
+        assert_eq!(empty, back);
+        assert!(back.merges.is_empty());
     }
 }
