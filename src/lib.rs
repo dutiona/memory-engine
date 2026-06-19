@@ -121,7 +121,8 @@ pub use types::*;
 pub use engine::cognitive::{DreamContext, INSIGHT_MARKER_KEY};
 pub use engine::cycle::{
     ApplyResult, CycleAnomaly, CycleContext, CycleDelta, CycleMetadata, CycleOutcome, CycleReport,
-    DefaultDreamCycle, IMPORTANCE_STEP, IdentityOutput, MAX_ADJUSTMENT, SkipReason, TimeWindow,
+    DefaultDreamCycle, IMPORTANCE_STEP, IdentityOutput, LlmDreamCycle, MAX_ADJUSTMENT, SkipReason,
+    TimeWindow,
 };
 
 #[cfg(test)]
