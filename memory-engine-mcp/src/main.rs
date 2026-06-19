@@ -32,7 +32,8 @@ struct Cli {
     #[arg(long, env = "MEMORY_MCP_EMBED_API_KEY")]
     embed_api_key: Option<String>,
 
-    /// Embedding serving backend (`ollama`, `tei`, `openai`) — feeds the fingerprint.
+    /// Embedding serving backend (e.g. `ollama`, `tei`, `openai`) — operator-declared,
+    /// feeds the fingerprint. Free-form; unrecognized values warn but are accepted.
     #[arg(long, env = "MEMORY_MCP_EMBED_PROVIDER")]
     embed_provider: Option<String>,
 
@@ -100,6 +101,10 @@ async fn main() -> Result<(), BoxError> {
 ///
 /// CLI flags override TOML values (endpoint, model, `api_key`) when provided,
 /// enabling operators to inject runtime secrets via env/CLI.
+/// Recognized embedding backends. `provider` is free-form (it feeds the fingerprint),
+/// but a value outside this set warns at startup to catch typos.
+const KNOWN_PROVIDERS: [&str; 3] = ["ollama", "tei", "openai"];
+
 fn build_embedder(
     cli: &Cli,
     mcp_config: &config::McpConfig,
@@ -135,14 +140,25 @@ fn build_embedder(
         return Ok(None);
     };
 
-    // `expected_dim` is the NATIVE dim the model emits (validated against the raw
-    // response). Without MRL it equals the engine's stored `embed_dim`. With MRL the
-    // provider truncates to `mrl_dim`, so the native dim comes from the config's
-    // `dimensions` field while the engine stores (and probes) the truncated `mrl_dim`.
-    let native_dim = match mrl_dim {
-        Some(_) => base.map_or(embed_dim, |b| b.dimensions),
-        None => embed_dim,
-    };
+    // `native_dim` is the dimension the model emits — what the provider validates the
+    // raw HTTP response against. With MRL the provider truncates to `mrl_dim`, so the
+    // native dim comes from the config's `dimensions`; without MRL native == stored ==
+    // `embed_dim`. Always read `dimensions` (falling back to `embed_dim` only on the
+    // CLI-only path with no `[embedding]` section) so a `dimensions != embed_dim`
+    // misconfig surfaces at startup instead of failing cryptically on the first embed.
+    let native_dim = base.map_or(embed_dim, |b| b.dimensions);
+
+    // `provider` is stamped verbatim into the persisted fingerprint (#614), like the
+    // equally free-form `model`. We don't hard-restrict it — custom OpenAI-compatible
+    // backends are valid — but warn on an unrecognized value to catch typos before they
+    // bake a bogus identity into a fresh store.
+    if !KNOWN_PROVIDERS.contains(&provider.as_str()) {
+        tracing::warn!(
+            provider = %provider,
+            "embedding provider is not one of {KNOWN_PROVIDERS:?}; it is stamped into the \
+             persisted embedding fingerprint as-is — check for a typo"
+        );
+    }
 
     let mut provider =
         embedding::HttpEmbeddingProvider::new(url, mdl, provider, api_key, native_dim, timeout)
@@ -165,6 +181,14 @@ fn build_embedder(
         provider = provider
             .with_mrl_dim(target)
             .map_err(|e| format!("invalid embedding.mrl_dim: {e}"))?;
+    } else if native_dim != embed_dim {
+        // No truncation: the native dim the provider validates against must equal the
+        // engine's stored dim. An unequal pair is a misconfiguration — surface it now.
+        return Err(format!(
+            "embedding.dimensions ({native_dim}) must equal the engine embed_dim ({embed_dim}) \
+             when MRL is disabled (native and stored dimensions are identical without truncation)"
+        )
+        .into());
     }
 
     Ok(Some(Arc::new(provider)))

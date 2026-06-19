@@ -47,7 +47,7 @@ embed_dim = 384  # Optional — probed from existing DB if omitted
 endpoint = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
 api_key = "sk-..."   # Optional — for authenticated endpoints
-provider = "ollama"  # Serving backend: ollama | tei | openai (default: ollama). Feeds the fingerprint.
+provider = "ollama"  # Serving backend, e.g. ollama | tei | openai (default: ollama). Free-form; feeds the fingerprint.
 dimensions = 384     # Native model dimension (validated against the raw response)
 timeout_secs = 30
 ```

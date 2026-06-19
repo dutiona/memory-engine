@@ -44,10 +44,11 @@ pub struct EmbeddingSection {
     /// API key (optional — for authenticated endpoints).
     pub api_key: Option<String>,
 
-    /// Operator-declared serving backend (`"ollama"`, `"tei"`, `"openai"`). Cannot be
-    /// sniffed from the endpoint (Ollama and TEI both speak `/v1/embeddings`); it feeds
+    /// Operator-declared serving backend (e.g. `"ollama"`, `"tei"`, `"openai"`). Cannot
+    /// be sniffed from the endpoint (Ollama and TEI both speak `/v1/embeddings`); it feeds
     /// the [`EmbeddingFingerprint`](memory_engine::EmbeddingFingerprint) identity, so it
-    /// must reflect the real backend. Defaults to `"ollama"` for back-compat.
+    /// must reflect the real backend. Free-form (like `model`); unrecognized values warn
+    /// at startup but are accepted. Defaults to `"ollama"` for back-compat.
     #[serde(default = "default_provider")]
     pub provider: String,
 
