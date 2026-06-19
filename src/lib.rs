@@ -116,8 +116,8 @@ pub use store::UpcasterRegistry;
 pub use store::schema::CURRENT_SCHEMA_VERSION;
 pub use traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
-    DreamCycle, EmbeddingProvider, ForgetPolicy, InsightStream, PersistenceClassifier, PruneStats,
-    Reranker, SummaryGenerator,
+    DeltaProposer, DreamCycle, EmbeddingProvider, ForgetPolicy, InsightStream,
+    PersistenceClassifier, PruneStats, Reranker, SummaryGenerator,
 };
 pub use types::*;
 
@@ -125,7 +125,8 @@ pub use types::*;
 pub use engine::cognitive::{DreamContext, INSIGHT_MARKER_KEY};
 pub use engine::cycle::{
     ApplyResult, CycleAnomaly, CycleContext, CycleDelta, CycleMetadata, CycleOutcome, CycleReport,
-    DefaultDreamCycle, IMPORTANCE_STEP, IdentityOutput, MAX_ADJUSTMENT, SkipReason, TimeWindow,
+    DefaultDreamCycle, IMPORTANCE_STEP, IdentityOutput, LlmDreamCycle, MAX_ADJUSTMENT, SkipReason,
+    TimeWindow,
 };
 
 #[cfg(test)]
@@ -142,6 +143,7 @@ mod tests {
         fn _accepts_reranker(_: &dyn crate::Reranker) {}
         fn _accepts_insight_stream(_: &dyn crate::InsightStream) {}
         fn _accepts_dream_cycle(_: &dyn crate::DreamCycle) {}
+        fn _accepts_delta_proposer(_: &dyn crate::DeltaProposer) {}
 
         // trait types
         let _ = std::mem::size_of::<crate::CrudDecision>();
@@ -150,6 +152,8 @@ mod tests {
         let _ = std::mem::size_of::<crate::PruneStats>();
         let _ = std::mem::size_of::<crate::ConflictResolution>();
         let _ = std::mem::size_of::<crate::ForgetPolicy>();
+        let _ = std::mem::size_of::<crate::ConsolidationProposal>();
+        let _ = std::mem::size_of::<crate::MergeGroup>();
 
         // core types
         let _ = std::mem::size_of::<crate::FactType>();

@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::search::hybrid::SearchResult;
-use crate::types::{EmbeddingFingerprint, Fact};
+use crate::types::{ConsolidationProposal, EmbeddingFingerprint, Fact};
 
 // --- Phase 1: Embedding provider (fully used) ---
 
@@ -71,6 +71,37 @@ pub trait SummaryGenerator: Send + Sync {
     ///
     /// Returns an error if summarization fails.
     fn summarize(&self, facts: &[Fact]) -> Result<String>;
+}
+
+/// Trait for proposing how to consolidate a window of facts (#554).
+///
+/// This is the seam that makes the consolidation backend **pluggable**: an
+/// `LlmDreamCycle` (a [`DreamCycle`] impl) delegates the "what to merge" decision to
+/// a `DeltaProposer`, while the shipped [`DefaultDreamCycle`](crate::DefaultDreamCycle)
+/// makes that decision deterministically in pure Rust. Choosing a backend is choosing
+/// a `&dyn DreamCycle`; choosing *this* trait's impl selects the LLM that drives one.
+///
+/// The proposer returns **ids + summary text only** — it does not embed and does not
+/// touch the store. The owning `LlmDreamCycle` clamps each group's `source_ids` to the
+/// window it fed, embeds the summary via its own [`EmbeddingProvider`], and emits a
+/// [`CycleDelta::Synthesize`](crate::engine::cycle::CycleDelta::Synthesize). This keeps
+/// the engine LLM-free and the proposer side-effect-free.
+///
+/// Requires `Send + Sync`: like the other consumer providers, a proposer is shared
+/// across the engine's worker threads. The method is **synchronous** — an HTTP impl
+/// uses a blocking client (mirroring [`EmbeddingProvider`]), so async does not leak
+/// into the [`DreamCycle`] contract.
+pub trait DeltaProposer: Send + Sync {
+    /// Propose merge groups over `window` (the candidate facts to consolidate),
+    /// given `prior_wisdom` (already-promoted wisdom facts) as retrieve-before-reflect
+    /// context so the proposer can avoid re-deriving existing wisdom.
+    ///
+    /// An empty proposal (nothing worth merging) is a valid, non-error result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the proposer fails (e.g. an LLM call or a parse failure).
+    fn propose(&self, window: &[Fact], prior_wisdom: &[Fact]) -> Result<ConsolidationProposal>;
 }
 
 /// Trait for arbitrating conflicts between contradicting facts (Phase 2).

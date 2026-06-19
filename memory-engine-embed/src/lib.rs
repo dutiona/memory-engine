@@ -20,6 +20,12 @@
 //! .expect("failed to build HTTP client");
 //! ```
 
+//! This crate also provides [`HttpDeltaProposer`], an HTTP
+//! [`memory_engine::traits::DeltaProposer`] for the pluggable consolidation backend
+//! (#554), driving an Ollama `/api/generate` endpoint to propose fact merges.
+
 mod http;
+mod proposer;
 
 pub use http::HttpEmbeddingProvider;
+pub use proposer::{HttpDeltaProposer, ProposerStats};

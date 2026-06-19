@@ -9,10 +9,12 @@ mod apply;
 mod context;
 mod dbscan;
 mod default_impl;
+mod llm_impl;
 mod report;
 
 pub use context::CycleContext;
 pub use default_impl::DefaultDreamCycle;
+pub use llm_impl::LlmDreamCycle;
 pub use report::{
     ApplyResult, CycleAnomaly, CycleDelta, CycleMetadata, CycleOutcome, CycleReport,
     IMPORTANCE_STEP, IdentityOutput, MAX_ADJUSTMENT, SkipReason, TimeWindow,
