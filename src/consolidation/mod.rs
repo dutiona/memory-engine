@@ -84,13 +84,6 @@ pub fn consolidate(
 
     let tx = conn.unchecked_transaction()?;
 
-    // Record the embedding identity on first write (#613, ADR 0015 §2), inside the
-    // transaction so it commits atomically with any summary vectors. Consolidation
-    // embeds summary text via `embedder` into the same vector space, so it is a
-    // legitimate first-write path; `record_if_absent` is a no-op once an identity
-    // exists (the usual case — facts were ingested before consolidation runs).
-    crate::store::embedding_meta::record_if_absent(&tx, &embedder.fingerprint(), embed_dim)?;
-
     let (duplicates_removed, expired_ids) =
         local_dedup(&tx, embed_dim, config.dedup_threshold, last, now)?;
 
@@ -101,6 +94,19 @@ pub fn consolidate(
     let clusters_created =
         cluster_fusion(&tx, generator, embedder, embed_dim, config.min_cluster_size)?;
     let global_summaries = global_integration(&tx, generator, embedder, embed_dim)?;
+
+    // Record the embedding identity on first write (#613, ADR 0015 §2) — but only
+    // once a summary vector has actually been written (#643). `local_dedup` only
+    // expires rows; `cluster_fusion`/`global_integration` are the sole vector
+    // writers here, so gating on their counts defers the stamp past a vector-less
+    // run (dedup-only, or a no-op on a sparse store). Done inside `tx`, so the
+    // identity still commits atomically with the summaries it describes. A no-op
+    // run leaves the store unstamped, so a later real first write with a different
+    // embedder establishes the true identity instead of inheriting a stale one
+    // (the #614-enforcement landmine).
+    if clusters_created > 0 || global_summaries > 0 {
+        crate::store::embedding_meta::record_if_absent(&tx, &embedder.fingerprint(), embed_dim)?;
+    }
 
     // Only advance the watermark if dedup actually ran. When skipped, facts
     // ingested during the over-cap period must be retried on the next run.
@@ -265,6 +271,64 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn dedup_only_consolidation_does_not_stamp_identity() {
+        // #643: a consolidation pass that writes NO summary vector (here a dedup-only
+        // run — three near-duplicates collapse to a lone survivor that cannot form a
+        // cluster) must not record the embedding identity. Stamping on a vector-less
+        // run lets a later real first write with a *different* embedder inherit the
+        // stale identity — precisely the #614-era staleness this deferral averts.
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        seed_cluster(&conn);
+
+        let (stats, _) =
+            consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        // No cluster/global summary is produced, so no summary vector is written.
+        assert_eq!(stats.clusters_created, 0);
+        assert_eq!(stats.global_summaries, 0);
+
+        assert!(
+            crate::store::embedding_meta::load(&conn).unwrap().is_none(),
+            "a vector-less consolidation must not stamp the embedding identity"
+        );
+
+        // The harm averted: a later real first writer with a DIFFERENT embedder now
+        // wins, instead of inheriting the no-op run's identity under #614 enforcement.
+        let other = crate::types::EmbeddingFingerprint::new("other-model", "other-provider", DIM);
+        let recorded = crate::store::embedding_meta::record_if_absent(&conn, &other, DIM).unwrap();
+        assert_eq!(
+            recorded, other,
+            "the first real writer wins after a no-op consolidation"
+        );
+    }
+
+    #[test]
+    fn summary_writing_consolidation_stamps_identity() {
+        // Mirror of the above: a pass that DOES write summary vectors records the
+        // identity atomically, inside the same transaction.
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // A single-linkage chain (see `cluster_and_global_summaries_created`) that
+        // forms one cluster and one global summary without any near-duplicate expiry.
+        insert_fact(&conn, "a", vec![1.0, 0.0, 0.0, 0.0], 0.5);
+        insert_fact(&conn, "b", vec![0.8829, 0.4695, 0.0, 0.0], 0.5);
+        insert_fact(&conn, "c", vec![0.5592, 0.829, 0.0, 0.0], 0.5);
+
+        let (stats, _) =
+            consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        assert!(
+            stats.clusters_created > 0 || stats.global_summaries > 0,
+            "this fixture must write at least one summary vector"
+        );
+
+        assert_eq!(
+            crate::store::embedding_meta::load(&conn).unwrap(),
+            Some(MockEmbedder.fingerprint()),
+            "a summary-writing consolidation records the embedder's fingerprint"
         );
     }
 

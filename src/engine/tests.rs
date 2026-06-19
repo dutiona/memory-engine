@@ -262,6 +262,104 @@ fn first_add_fact_records_embedding_meta() {
 }
 
 #[test]
+fn noop_bootstrap_does_not_stamp_identity() {
+    // #643: bootstrapping a session that creates zero facts (here an empty reader)
+    // must NOT record the embedding identity. Previously the engine stamped before
+    // the inner import ran, so a no-op bootstrap permanently fixed the identity even
+    // though no vector was written.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let report = engine
+        .bootstrap_session(
+            std::io::Cursor::new(""),
+            &MockEmbedder { dim: DIM },
+            &crate::KeywordExtractor,
+            &crate::BootstrapConfig::default(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(report.facts_created, 0, "empty session creates no facts");
+    assert!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap()
+            .is_none(),
+        "a fact-less bootstrap must not stamp the embedding identity"
+    );
+}
+
+#[test]
+fn noop_bootstrap_then_real_write_records_real_embedder() {
+    // #643 (the #614-era harm): a no-op bootstrap with embedder A must not shadow a
+    // later real first write with a different embedder B — B is the true identity.
+    struct EmbedderB {
+        dim: usize,
+    }
+    impl EmbeddingProvider for EmbedderB {
+        fn embed(&self, _t: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.7; self.dim])
+        }
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("model-b", "provider-b", self.dim)
+        }
+    }
+
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    // No-op bootstrap with embedder A (MockEmbedder): zero facts ⇒ no stamp.
+    engine
+        .bootstrap_session(
+            std::io::Cursor::new(""),
+            &MockEmbedder { dim: DIM },
+            &crate::KeywordExtractor,
+            &crate::BootstrapConfig::default(),
+            None,
+        )
+        .unwrap();
+    // First real write with embedder B establishes the identity.
+    let req = AddFactRequest {
+        content: "real".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+    engine
+        .add_fact(&req, &EmbedderB { dim: DIM }, None)
+        .unwrap();
+    assert_eq!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap(),
+        Some(EmbedderB { dim: DIM }.fingerprint()),
+        "the real first writer's identity must win, not the no-op bootstrap's"
+    );
+}
+
+#[test]
+fn bootstrap_creating_facts_stamps_identity() {
+    // Positive guard: a bootstrap that DOES create facts records the embedder
+    // identity (atomically, inside the session savepoint).
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let fixture = include_str!("../../tests/fixtures/success_session.jsonl");
+    let report = engine
+        .bootstrap_session(
+            std::io::Cursor::new(fixture),
+            &MockEmbedder { dim: DIM },
+            &crate::KeywordExtractor,
+            &crate::BootstrapConfig::default(),
+            None,
+        )
+        .unwrap();
+    assert!(report.facts_created > 0, "fixture should create facts");
+    assert_eq!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap(),
+        Some(MockEmbedder { dim: DIM }.fingerprint()),
+        "a fact-creating bootstrap records the embedder's fingerprint"
+    );
+}
+
+#[test]
 fn read_only_open_of_unstamped_db_is_ok() {
     // D6 behavior change: previously a read-only open of a DB with no persisted
     // dim errored ("open read-write first"). Now identity is written on first
