@@ -79,6 +79,20 @@ impl MemoryEngine {
         let tx = conn
             .unchecked_transaction()
             .map_err(MemoryError::Database)?;
+
+        // #613 — `AddFact` / `Synthesize` insert PRE-COMPUTED-embedding facts with no
+        // live `EmbeddingProvider`, so they cannot stamp the store's identity. Reject
+        // them against an un-stamped store (a `Promote` delta self-guards in
+        // `promote_in_conn`). Normally a no-op: a populated store applying a cycle
+        // already has a recorded identity.
+        if report
+            .deltas
+            .iter()
+            .any(|d| matches!(d, CycleDelta::AddFact(_) | CycleDelta::Synthesize { .. }))
+        {
+            crate::store::embedding_meta::require_present(&tx)?;
+        }
+
         let mut result = ApplyResult::default();
         // (fact_id, embedding) pairs to notify HNSW about after commit.
         #[cfg(feature = "ann")]
@@ -486,7 +500,21 @@ mod tests {
     }
 
     fn engine() -> MemoryEngine {
-        MemoryEngine::builder(DIM).build().unwrap()
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        // Stamp the embedding identity so apply tests can apply pre-computed-vector
+        // deltas (AddFact/Synthesize) — #613 requires a recorded identity for those.
+        // This mirrors production, where facts (and thus the identity) exist before a
+        // cycle runs. Same fingerprint FixedEmbed records, so a later `add()` is a no-op.
+        engine
+            .set_config(
+                "embedding_meta",
+                &serde_json::to_string(&crate::types::EmbeddingFingerprint::new(
+                    "mock", "test", DIM,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        engine
     }
 
     fn add(engine: &MemoryEngine, content: &str) -> i64 {
@@ -528,6 +556,38 @@ mod tests {
             identity: IdentityOutput::empty(),
             metadata: meta(processed),
         }
+    }
+
+    #[test]
+    fn apply_add_fact_into_unstamped_store_is_rejected() {
+        // #613 guard: AddFact carries a pre-computed vector with no live embedder, so
+        // it cannot stamp identity. Applying it to a store with no recorded identity is
+        // rejected. Uses a raw builder, bypassing the identity-seeding `engine()` helper.
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let nf = NewFact {
+            content: "derived pattern".into(),
+            content_hash: String::new(),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            fact_type: FactType::Semantic,
+            t_created: "2026-06-16T00:30:00Z".parse().unwrap(),
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: "2026-06-16T00:30:00Z".parse().unwrap(),
+            metadata: serde_json::json!({}),
+            scope_id: 1,
+            is_pinned: false,
+        };
+        let err = engine
+            .apply_cycle_report(&report(vec![CycleDelta::AddFact(nf)], vec![]))
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Internal(ref m) if m.contains("no embedding identity")),
+            "expected the identity guard error, got: {err:?}"
+        );
     }
 
     fn stub_provenance() -> PromotionProvenance {

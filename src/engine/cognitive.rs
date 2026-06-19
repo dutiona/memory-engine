@@ -391,17 +391,11 @@ impl MemoryEngine {
 
         // #613/#615 — promotion identity guard. `promote` is public and inserts a
         // fact from a PRE-COMPUTED `req.embedding` with no live `EmbeddingProvider`,
-        // so it can be the literal first write on a fresh store. #613 cannot stamp the
-        // identity here (no fingerprint to read; declaring a `model` for a pre-computed
-        // vector is #615). Reject promotion into a store that has no recorded identity
-        // yet — otherwise this path would commit a vector with no `embedding_meta`, the
-        // #614 silent-corruption landmine. Invisible in normal use: any prior
-        // add_fact/bootstrap/consolidate has already stamped the store's identity.
-        if crate::store::embedding_meta::load(conn)?.is_none() {
-            return Err(MemoryError::Internal(
-                "cannot promote into a store with no embedding identity; write a fact first".into(),
-            ));
-        }
+        // so it can be the literal first write on a fresh store. Reject promotion into
+        // a store with no recorded identity (shared with the cycle AddFact/Synthesize
+        // guard); invisible in normal use, where a prior real embedding write already
+        // stamped the store.
+        crate::store::embedding_meta::require_present(conn)?;
 
         // Ensure metadata is an object (normalize non-objects to avoid silent provenance loss)
         let mut metadata = match req.metadata.clone() {

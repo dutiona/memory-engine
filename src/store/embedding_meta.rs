@@ -105,6 +105,30 @@ pub fn record_if_absent(
     Ok(candidate.clone())
 }
 
+/// Require that a store has a recorded embedding identity before a
+/// **pre-computed-embedding** write (one with no live `EmbeddingProvider` to
+/// fingerprint — `promote`, or a cycle `AddFact`/`Synthesize` delta).
+///
+/// Such a write cannot establish the identity itself (#613 has no fingerprint to
+/// record; declaring a model for a pre-computed vector is #615), so committing it
+/// against an un-stamped store would leave a vector with no `embedding_meta` — the
+/// #614 silent-corruption landmine. Reject it instead; the store must first be
+/// stamped by a real embedding write (`add_fact`/bootstrap/consolidate).
+///
+/// # Errors
+///
+/// Returns `MemoryError::Internal` when no identity is recorded.
+pub fn require_present(conn: &Connection) -> Result<()> {
+    if load(conn)?.is_none() {
+        return Err(MemoryError::Internal(
+            "cannot write a pre-computed embedding to a store with no embedding identity; \
+             write a fact first"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
