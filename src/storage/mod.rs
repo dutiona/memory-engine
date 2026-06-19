@@ -20,10 +20,12 @@
 
 pub mod backend;
 pub mod capabilities;
+pub mod filter;
 pub mod graph;
 pub mod schema;
 
 pub use backend::StorageBackend;
-pub use capabilities::BackendCapabilities;
+pub use capabilities::{BackendCapabilities, LexicalRanker};
+pub use filter::{FactFilter, MetadataPredicate, TemporalFilter};
 pub use graph::FactGraph;
 pub use schema::SchemaManager;

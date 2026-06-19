@@ -54,7 +54,11 @@ mod tests {
                 Ok(0)
             }
             fn capabilities(&self) -> BackendCapabilities {
-                BackendCapabilities
+                BackendCapabilities {
+                    lexical_ranker: crate::storage::LexicalRanker::Bm25,
+                    server_side_vector: false,
+                    true_idf: true,
+                }
             }
         }
 
