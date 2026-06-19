@@ -69,20 +69,20 @@ fn run_consolidate(db: &Path, extra: &[&str]) -> Value {
 }
 
 #[test]
-fn dream_cycle_backend_runs_on_the_second_guarded_invocation() {
+fn dream_cycle_backend_drains_and_runs_in_one_invocation() {
     let (_dir, db) = create_db();
 
-    // First invocation: the #209 guard sees fresh caller writes and defers.
-    let first = run_consolidate(&db, &["--backend", "dream-cycle"]);
-    assert_eq!(first["backend"], "dream-cycle");
-    assert_eq!(first["outcome"], "skipped");
-
-    // Second (quiet) invocation: the cycle runs and applies.
-    let second = run_consolidate(&db, &["--backend", "dream-cycle"]);
-    assert_eq!(second["outcome"], "ran");
-    assert!(second["applied"].is_object(), "applied result present");
+    // The #209 guard defers the first guarded call (fresh caller writes), but the CLI
+    // drains the deferral internally, so a single `consolidate` invocation runs+applies.
+    let res = run_consolidate(&db, &["--backend", "dream-cycle"]);
+    assert_eq!(res["backend"], "dream-cycle");
+    assert_eq!(
+        res["outcome"], "ran",
+        "drain loop runs in one invocation: {res}"
+    );
+    assert!(res["applied"].is_object(), "applied result present");
     assert!(
-        second["llm"].is_null(),
+        res["llm"].is_null(),
         "dream-cycle backend reports no LLM stats"
     );
 }
@@ -143,7 +143,9 @@ async fn llm_backend_synthesizes_via_wiremock_end_to_end() {
     let embed_url = format!("{}/v1/embeddings", server.uri());
     let db_str = db.to_str().unwrap().to_owned();
 
-    let second = tokio::task::spawn_blocking(move || {
+    // A single invocation: the CLI drains the #209 deferral, then runs the LLM backend
+    // end-to-end. The deferred attempt never calls the LLM, so exactly one LLM call.
+    let res = tokio::task::spawn_blocking(move || {
         let extra = [
             "--backend",
             "llm",
@@ -156,21 +158,81 @@ async fn llm_backend_synthesizes_via_wiremock_end_to_end() {
             "--embed-model",
             "nomic-embed-text",
         ];
-        // First invocation defers (the #209 guard) and never calls the LLM.
-        let _first = run_consolidate(Path::new(&db_str), &extra);
-        // Second invocation runs the LLM backend end-to-end.
         run_consolidate(Path::new(&db_str), &extra)
     })
     .await
     .expect("join");
 
-    assert_eq!(second["backend"], "llm");
-    assert_eq!(second["outcome"], "ran");
+    assert_eq!(res["backend"], "llm");
+    assert_eq!(res["outcome"], "ran", "{res}");
     assert_eq!(
-        second["applied"]["synthesized"], 1,
-        "one merge group → one Synthesize: {second}"
+        res["applied"]["synthesized"], 1,
+        "one merge group → one Synthesize: {res}"
     );
-    assert_eq!(second["llm"]["llm_calls"], 1);
-    assert_eq!(second["llm"]["eval_count"], 40);
-    assert_eq!(second["llm"]["prompt_eval_count"], 15);
+    assert_eq!(res["llm"]["llm_calls"], 1);
+    assert_eq!(res["llm"]["eval_count"], 40);
+    assert_eq!(res["llm"]["prompt_eval_count"], 15);
+}
+
+#[tokio::test]
+async fn consolidate_failure_emits_json_and_exits_nonzero() {
+    // A consolidate-step failure (here: the embedder returns the wrong dimension) must
+    // still print the machine-readable JSON (outcome "failed" + error) on stdout AND
+    // exit non-zero — the benchmark's fail-loud contract (never a fake 0).
+    let (_dir, db) = create_db();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "response": r#"{"merges":[{"source_ids":[1,2],"summary":"m"}]}"#,
+            "done": true, "eval_count": 10, "prompt_eval_count": 5
+        })))
+        .mount(&server)
+        .await;
+    // Wrong dimension (6 != DB's 4) → the embed call fails inside the cycle run.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+        })))
+        .mount(&server)
+        .await;
+    let llm_url = format!("{}/api/generate", server.uri());
+    let embed_url = format!("{}/v1/embeddings", server.uri());
+    let db_str = db.to_str().unwrap().to_owned();
+
+    let out = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("memory-engine-cli")
+            .unwrap()
+            .args([
+                "--db",
+                &db_str,
+                "--format",
+                "json",
+                "consolidate",
+                "--backend",
+                "llm",
+                "--llm-url",
+                &llm_url,
+                "--llm-model",
+                "m",
+                "--embed-url",
+                &embed_url,
+                "--embed-model",
+                "e",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        !out.status.success(),
+        "a consolidate-step failure must exit non-zero"
+    );
+    let json: Value =
+        serde_json::from_slice(&out.stdout).expect("JSON still emitted on stdout despite failure");
+    assert_eq!(json["outcome"], "failed", "got: {json}");
+    assert!(!json["error"].is_null(), "error detail present: {json}");
 }

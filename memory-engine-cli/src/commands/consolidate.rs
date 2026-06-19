@@ -15,11 +15,35 @@ use std::time::Instant;
 
 use anyhow::Context;
 use clap::ValueEnum;
-use memory_engine::{CycleOutcome, DefaultDreamCycle, LlmDreamCycle};
+use memory_engine::{
+    CycleOutcome, DefaultDreamCycle, DreamCycle, LlmDreamCycle, MemoryEngine, SkipReason,
+};
 use memory_engine_embed::{HttpDeltaProposer, HttpEmbeddingProvider};
 
 use crate::db::{open_engine_writable, peek_embed_dim_from_db};
 use crate::output::OutputFormat;
+
+/// Upper bound on #209 drain retries. `consolidate` is a manual force-consolidate, so a
+/// deferral from a stale caller-write cursor should be drained (the first guarded call
+/// advances the cursor; the next runs). Bounded so a genuinely concurrent writer cannot
+/// spin forever — after this many deferrals we report the skip honestly.
+const MAX_DRAIN_ATTEMPTS: u32 = 8;
+
+/// Run a cycle through the #209 guard, draining transient caller-write deferrals.
+fn run_with_drain(engine: &MemoryEngine, cycle: &dyn DreamCycle) -> anyhow::Result<CycleOutcome> {
+    let mut outcome = engine.run_dream_cycle_guarded(cycle)?;
+    let mut attempts = 1;
+    while attempts < MAX_DRAIN_ATTEMPTS {
+        match outcome {
+            CycleOutcome::Skipped(SkipReason::CallerWroteFacts { .. }) => {
+                outcome = engine.run_dream_cycle_guarded(cycle)?;
+                attempts += 1;
+            }
+            _ => break,
+        }
+    }
+    Ok(outcome)
+}
 
 /// Which consolidation backend to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -69,13 +93,16 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
     let engine = open_engine_writable(db)?;
     let start = Instant::now();
 
-    // Run the selected backend through the #209 guard. The LLM backend's proposer +
-    // embedder are borrowed by the cycle, so build them in a scope that outlives the
-    // run; capture the proposer's token stats before it drops.
-    let (outcome, llm_stats) = match args.backend {
+    // Run the selected backend through the #209 guard (draining deferrals). The LLM
+    // backend's proposer + embedder are borrowed by the cycle, so build them in a scope
+    // that outlives the run; the proposer's token stats are captured regardless of
+    // outcome (a failed run still burned LLM calls — fail-loud accounting). Setup errors
+    // (missing flags, client build) fail BEFORE any JSON; the consolidate work's own
+    // errors (cycle run + apply) are reported IN the JSON below.
+    let (run_result, llm_stats): (anyhow::Result<CycleOutcome>, Option<_>) = match args.backend {
         BackendArg::DreamCycle => {
             let cycle = DefaultDreamCycle::with_defaults();
-            (engine.run_dream_cycle_guarded(&cycle)?, None)
+            (run_with_drain(&engine, &cycle), None)
         }
         BackendArg::Llm => {
             let llm_url = require(args.llm_url.as_ref(), "--llm-url")?;
@@ -98,23 +125,39 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
                 args.timeout_secs,
             )?;
             let cycle = LlmDreamCycle::new(&proposer, &embedder);
-            let outcome = engine.run_dream_cycle_guarded(&cycle)?;
-            (outcome, Some(proposer.stats()))
+            let result = run_with_drain(&engine, &cycle);
+            (result, Some(proposer.stats()))
         }
     };
 
-    // Apply the report if the cycle ran; a skip is a deferral, not a failure.
-    let (outcome_label, applied, skip_reason) = match &outcome {
-        CycleOutcome::Ran(report) => {
-            let result = engine.apply_cycle_report(report)?;
-            (
-                "ran",
-                Some(serde_json::to_value(&result)?),
-                serde_json::Value::Null,
-            )
+    // Resolve the outcome. Any error during the consolidate step (cycle run OR apply) is
+    // reported IN the JSON (outcome "failed" + error) AND as a non-zero exit — so the
+    // benchmark's machine-readable contract holds while the run still fails loud (never a
+    // fake 0).
+    let mut outcome_label = "skipped";
+    let mut applied = serde_json::Value::Null;
+    let mut skip_reason = serde_json::Value::Null;
+    let mut error_json = serde_json::Value::Null;
+    let mut failed = false;
+    match run_result {
+        Ok(CycleOutcome::Ran(report)) => match engine.apply_cycle_report(&report) {
+            Ok(result) => {
+                outcome_label = "ran";
+                applied = serde_json::to_value(&result)?;
+            }
+            Err(e) => {
+                outcome_label = "failed";
+                error_json = serde_json::Value::String(format!("{e:#}"));
+                failed = true;
+            }
+        },
+        Ok(CycleOutcome::Skipped(reason)) => skip_reason = serde_json::to_value(reason)?,
+        Err(e) => {
+            outcome_label = "failed";
+            error_json = serde_json::Value::String(format!("{e:#}"));
+            failed = true;
         }
-        CycleOutcome::Skipped(reason) => ("skipped", None, serde_json::to_value(reason)?),
-    };
+    }
     let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let backend_label = match args.backend {
@@ -133,6 +176,7 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
         "outcome": outcome_label,
         "skip_reason": skip_reason,
         "applied": applied,
+        "error": error_json,
         "elapsed_ms": elapsed_ms,
         "llm": llm_json,
     });
@@ -147,5 +191,10 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
         }
     }
 
+    // Fail loud AFTER emitting the JSON: the report (with outcome "failed" + error) is
+    // on stdout for the harness, and a non-zero exit signals the run is invalid.
+    if failed {
+        anyhow::bail!("consolidate: the consolidation step failed (see JSON `error` field)");
+    }
     Ok(())
 }

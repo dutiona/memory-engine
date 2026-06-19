@@ -47,6 +47,46 @@ async fn propose_round_trip_returns_proposal_and_captures_token_stats() {
 }
 
 #[tokio::test]
+async fn propose_records_call_and_tokens_even_when_merge_json_is_malformed() {
+    // A 200 response whose inner merge JSON is broken still cost a real LLM call and
+    // tokens — the benchmark must see them, so stats are recorded before the parse.
+    let server = MockServer::start().await;
+    let response_body = serde_json::json!({
+        "model": "gemma4:26b",
+        "response": "not valid json {{{",
+        "done": true,
+        "eval_count": 25,
+        "prompt_eval_count": 8,
+    });
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+        .mount(&server)
+        .await;
+    let url = format!("{}/api/generate", server.uri());
+
+    let stats = tokio::task::spawn_blocking(move || {
+        let proposer =
+            HttpDeltaProposer::new(url, "gemma4:26b".to_string(), None, 10).expect("client build");
+        let err = proposer.propose(&[], &[]);
+        assert!(
+            err.is_err(),
+            "malformed merge JSON must surface as an error"
+        );
+        proposer.stats()
+    })
+    .await
+    .expect("join");
+
+    assert_eq!(
+        stats.llm_calls, 1,
+        "the call is counted despite the parse failure"
+    );
+    assert_eq!(stats.eval_count, 25);
+    assert_eq!(stats.prompt_eval_count, 8);
+}
+
+#[tokio::test]
 async fn propose_surfaces_http_error_status() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

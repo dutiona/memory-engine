@@ -94,21 +94,37 @@ impl DreamCycle for LlmDreamCycle<'_> {
 
         let now = Utc::now();
         let mut deltas: Vec<CycleDelta> = Vec::new();
+        // A source may be merged at most once across the whole report. Claiming each
+        // source globally (not just within a group) is load-bearing: two groups naming
+        // the same id would emit two `Synthesize` deltas, and the second would fail
+        // apply with `AlreadyExpired`, roll back the whole report, leave nothing
+        // dream-marked, and — because the proposer is deterministic at temperature 0 —
+        // livelock on the same window forever (#641).
+        let mut consumed: HashSet<FactId> = HashSet::new();
         for group in &proposal.merges {
             // Clamp every proposed id to the fed window (dropping out-of-window /
-            // hallucinated ids) and de-duplicate, preserving first-seen order. The
-            // engine's validate_report checks existence/active but NOT window
-            // membership, so this clamp is what stops an LLM acting on facts it was
-            // never shown. A group left with no in-window source is skipped (emitting
-            // an empty Synthesize would fail validation).
-            let mut seen = HashSet::new();
+            // hallucinated ids) and to ids not already claimed by an earlier emitted
+            // group, de-duplicating within the group. validate_report checks
+            // existence/active but NOT window membership, so this clamp is what stops
+            // an LLM acting on facts it was never shown.
+            let mut local_seen = HashSet::new();
             let sources: Vec<FactId> = group
                 .source_ids
                 .iter()
                 .copied()
-                .filter(|id| by_id.contains_key(id) && seen.insert(*id))
+                .filter(|id| {
+                    by_id.contains_key(id) && !consumed.contains(id) && local_seen.insert(*id)
+                })
                 .collect();
             if sources.is_empty() {
+                continue;
+            }
+            // The window spans all scopes, so the synthetic must inherit its sources'
+            // scope rather than default to root — else a child-scope merge would leak
+            // into root and widen retrieval visibility. A group whose sources straddle
+            // scopes is skipped: merging across an isolation boundary is never valid.
+            let scope_id = by_id[&sources[0]].scope_id;
+            if sources.iter().any(|id| by_id[id].scope_id != scope_id) {
                 continue;
             }
             // A merge inherits the strongest importance of its sources so consolidating
@@ -134,9 +150,12 @@ impl DreamCycle for LlmDreamCycle<'_> {
                 access_count: 0,
                 last_accessed: now,
                 metadata: serde_json::json!({}),
-                scope_id: 1, // root scope (v1)
+                scope_id,
                 is_pinned: false,
             };
+            // Claim the sources only now that the group is actually emitted, so a
+            // skipped (cross-scope) group does not lock its ids away from later groups.
+            consumed.extend(sources.iter().copied());
             deltas.push(CycleDelta::Synthesize { sources, new_fact });
         }
 
@@ -200,14 +219,25 @@ mod tests {
     }
 
     fn add(engine: &MemoryEngine, content: &str) -> FactId {
+        add_scoped(engine, content, None)
+    }
+
+    fn add_scoped(engine: &MemoryEngine, content: &str, scope: Option<&str>) -> FactId {
         let req = AddFactRequest {
             content: content.into(),
             fact_type: FactType::Semantic,
             source_event_id: None,
-            scope: None,
+            scope: scope.map(str::to_owned),
             opts: None,
         };
         engine.add_fact(&req, &FixedEmbed(DIM), None).unwrap()
+    }
+
+    fn scope_of(engine: &MemoryEngine, id: FactId) -> i64 {
+        engine
+            .with_read(|conn| FactStore::new(conn, DIM).get(id))
+            .unwrap()
+            .scope_id
     }
 
     fn merge(source_ids: Vec<FactId>, summary: &str) -> MergeGroup {
@@ -391,6 +421,72 @@ mod tests {
         assert_eq!(
             second.metadata.cycle_id, 1,
             "cycle_id advances off prior_reports"
+        );
+    }
+
+    /// A proposer that names the same source in two groups must not emit two
+    /// Synthesize deltas for it — the second collides at apply with `AlreadyExpired`,
+    /// rolling back the whole report and livelocking the deterministic LLM (#641
+    /// BLOCKER, flagged by both reviewers). Cross-group dedup claims each source once.
+    #[test]
+    fn run_dedups_sources_across_merge_groups() {
+        let engine = engine();
+        let s1 = add(&engine, "a");
+        let s2 = add(&engine, "b");
+        let s3 = add(&engine, "c");
+        let proposer = FakeProposer {
+            merges: vec![merge(vec![s1, s2], "g1"), merge(vec![s2, s3], "g2")],
+        };
+        let llm = LlmDreamCycle::new(&proposer, &FixedEmbed(DIM));
+
+        let report = engine.run_dream_cycle(&llm).unwrap();
+        // s2 is claimed by g1; g2 keeps only s3.
+        assert_eq!(synth_sources(&report), vec![vec![s1, s2], vec![s3]]);
+        // The report applies cleanly — no AlreadyExpired rollback.
+        let res = engine.apply_cycle_report(&report).unwrap();
+        assert_eq!(res.synthesized, 2);
+    }
+
+    /// The window spans all scopes, so a synthetic must inherit its sources' scope
+    /// rather than hard-code root — else a child-scope merge leaks into root and
+    /// widens retrieval visibility. A group whose sources span scopes is skipped
+    /// (no cross-scope merge). (#641 HIGH.)
+    #[test]
+    fn run_inherits_source_scope_and_skips_cross_scope_groups() {
+        let engine = engine();
+        let root1 = add_scoped(&engine, "root a", None);
+        let root2 = add_scoped(&engine, "root b", None);
+        let child1 = add_scoped(&engine, "child a", Some("proj"));
+        let child2 = add_scoped(&engine, "child b", Some("proj"));
+        let child_scope = scope_of(&engine, child1);
+        assert_ne!(child_scope, 1, "child facts are in a non-root scope");
+
+        let proposer = FakeProposer {
+            merges: vec![
+                merge(vec![root1, child1], "cross-scope"), // spans scopes → skipped
+                merge(vec![child1, child2], "child merge"), // same child scope → emit
+                merge(vec![root1, root2], "root merge"),   // same root scope → emit
+            ],
+        };
+        let llm = LlmDreamCycle::new(&proposer, &FixedEmbed(DIM));
+
+        let report = engine.run_dream_cycle(&llm).unwrap();
+        assert_eq!(
+            synth_sources(&report),
+            vec![vec![child1, child2], vec![root1, root2]],
+            "cross-scope group dropped; same-scope groups kept"
+        );
+        let res = engine.apply_cycle_report(&report).unwrap();
+        assert_eq!(res.synthesized_fact_ids.len(), 2);
+        assert_eq!(
+            scope_of(&engine, res.synthesized_fact_ids[0]),
+            child_scope,
+            "child synthetic stays in the child scope"
+        );
+        assert_eq!(
+            scope_of(&engine, res.synthesized_fact_ids[1]),
+            1,
+            "root synthetic stays at root"
         );
     }
 }

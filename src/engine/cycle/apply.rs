@@ -196,8 +196,19 @@ impl MemoryEngine {
                     let synth_id = store.insert(new_fact)?;
                     // 2. Expire each source and link synthetic -> source with a
                     //    "supersedes" edge (mirrors the Supersede arm). The edge is
-                    //    scoped to the synthetic, the surviving fact.
-                    for src in sources {
+                    //    scoped to the synthetic, the surviving fact. While here, track
+                    //    the sources' creation span for the provenance date range.
+                    let mut range_start = new_fact.t_created;
+                    let mut range_end = new_fact.t_created;
+                    for (i, src) in sources.iter().enumerate() {
+                        let src_fact = store.get(*src)?;
+                        if i == 0 {
+                            range_start = src_fact.t_created;
+                            range_end = src_fact.t_created;
+                        } else {
+                            range_start = range_start.min(src_fact.t_created);
+                            range_end = range_end.max(src_fact.t_created);
+                        }
                         store.expire(*src, now)?;
                         let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
                             source_fact_id: synth_id,
@@ -213,13 +224,16 @@ impl MemoryEngine {
                     }
                     // 3. One lineage row maps the synthetic to all its sources, so the
                     //    knowledge-base can trace the merge (parity with promotion's
-                    //    provenance chain). `representative_ids` is capped at the first
-                    //    few per its quick-review contract; lineage holds the full set.
+                    //    provenance chain). The date range spans the **sources'** real
+                    //    creation times (not the cycle instant), so downstream provenance
+                    //    consumers see the period the merge actually covers.
+                    //    `representative_ids` is capped at the first few per its
+                    //    quick-review contract; lineage holds the full set.
                     let provenance = PromotionProvenance {
                         source_count: u32::try_from(sources.len()).unwrap_or(u32::MAX),
                         session_count: 0,
-                        date_range_start: new_fact.t_created,
-                        date_range_end: new_fact.t_created,
+                        date_range_start: range_start,
+                        date_range_end: range_end,
                         confidence: 1.0,
                         method_version: "synthesize-v1".to_owned(),
                         representative_ids: sources.iter().take(5).copied().collect(),
@@ -961,6 +975,73 @@ mod tests {
             f.t_expired.is_none(),
             "rejected report must not expire the source"
         );
+    }
+
+    /// The lineage provenance date range must span the SOURCES' real creation times,
+    /// not the synthetic's creation instant — else downstream consumers think the merge
+    /// covers only the cycle moment (#641, Codex). Proof: a synthetic stamped with a
+    /// far-future `t_created` still yields a provenance range bounded by its sources.
+    #[test]
+    fn synthesize_lineage_provenance_spans_sources_not_synthetic_instant() {
+        let engine = engine();
+        let s1 = add(&engine, "src one"); // t_created ~ now
+        let s2 = add(&engine, "src two");
+        let mut nf = synthetic("merged");
+        nf.t_created = "2099-01-01T00:00:00Z".parse().unwrap(); // sentinel far from sources
+        let res = engine
+            .apply_cycle_report(&report(
+                vec![CycleDelta::Synthesize {
+                    sources: vec![s1, s2],
+                    new_fact: nf,
+                }],
+                vec![s1, s2],
+            ))
+            .unwrap();
+        let synth = res.synthesized_fact_ids[0];
+        let (_lineage, prov) = engine
+            .with_read(|conn| {
+                crate::store::lineage::LineageStore::new(conn).get_by_wisdom_fact(synth)
+            })
+            .unwrap();
+        let sentinel = "2099-01-01T00:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        assert!(
+            prov.date_range_end < sentinel,
+            "provenance range must come from the sources, not the synthetic instant"
+        );
+        assert!(prov.date_range_start <= prov.date_range_end);
+    }
+
+    /// Two `Synthesize` deltas naming the same source are rejected at apply: the first
+    /// expires it, the second sees it (in-report) expired → `AlreadyExpired`, rolling the
+    /// whole report back. This is the invariant that makes `LlmDreamCycle`'s cross-group
+    /// dedup load-bearing (#641).
+    #[test]
+    fn synthesize_duplicate_source_across_deltas_is_rejected() {
+        let engine = engine();
+        let s1 = add(&engine, "a");
+        let s2 = add(&engine, "b");
+        let s3 = add(&engine, "c");
+        let err = engine
+            .apply_cycle_report(&report(
+                vec![
+                    CycleDelta::Synthesize {
+                        sources: vec![s1, s2],
+                        new_fact: synthetic("g1"),
+                    },
+                    CycleDelta::Synthesize {
+                        sources: vec![s2, s3], // s2 reused
+                        new_fact: synthetic("g2"),
+                    },
+                ],
+                vec![s1, s2, s3],
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::Cycle(CycleError::AlreadyExpired(_))
+        ));
     }
 
     #[test]

@@ -126,30 +126,15 @@ impl HttpDeltaProposer {
         })
     }
 
-    /// Parse an Ollama `/api/generate` response envelope into a proposal + token
-    /// counts. The model's answer lives in the top-level `response` string (itself
-    /// JSON, because we requested `format: "json"`). Token counts default to 0 when
-    /// absent so a server that omits them degrades gracefully (no fake non-zero).
+    /// Extract `(eval_count, prompt_eval_count)` from the envelope, defaulting to 0
+    /// when absent (a server that omits them degrades gracefully — no fake non-zero).
     ///
-    /// The envelope shape is endpoint-specific; an `OpenAI` `usage`-style endpoint is a
-    /// drop-in swap of this one function.
-    fn parse_response(
-        body: &serde_json::Value,
-    ) -> Result<(ConsolidationProposal, u64, u64), MemoryError> {
-        let response = body
-            .get("response")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                MemoryError::Internal(
-                    "proposer response missing 'response' string field".to_owned(),
-                )
-            })?;
-        let proposal: ConsolidationProposal = serde_json::from_str(response).map_err(|e| {
-            let preview: String = response.chars().take(500).collect();
-            MemoryError::Internal(format!(
-                "proposer returned malformed merge JSON ({e}): {preview}"
-            ))
-        })?;
+    /// Separate from [`parse_proposal`](Self::parse_proposal) so the caller can record
+    /// the tokens a call actually burned **even when the inner merge JSON is malformed**
+    /// — otherwise the Track B benchmark would undercount exactly the failure paths
+    /// that matter. The envelope shape is endpoint-specific; an `OpenAI` `usage`-style
+    /// endpoint is a drop-in swap of this function.
+    fn extract_usage(body: &serde_json::Value) -> (u64, u64) {
         let eval = body
             .get("eval_count")
             .and_then(serde_json::Value::as_u64)
@@ -158,8 +143,44 @@ impl HttpDeltaProposer {
             .get("prompt_eval_count")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        Ok((proposal, eval, prompt_eval))
+        (eval, prompt_eval)
     }
+
+    /// Parse the proposal out of the envelope's top-level `response` string (itself
+    /// JSON, because we requested `format: "json"`). Some models wrap their JSON in a
+    /// markdown code fence despite JSON mode, so the fence is stripped before parsing.
+    fn parse_proposal(body: &serde_json::Value) -> Result<ConsolidationProposal, MemoryError> {
+        let response = body
+            .get("response")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                MemoryError::Internal(
+                    "proposer response missing 'response' string field".to_owned(),
+                )
+            })?;
+        let cleaned = strip_code_fence(response);
+        serde_json::from_str(cleaned).map_err(|e| {
+            let preview: String = cleaned.chars().take(500).collect();
+            MemoryError::Internal(format!(
+                "proposer returned malformed merge JSON ({e}): {preview}"
+            ))
+        })
+    }
+}
+
+/// Strip a wrapping markdown code fence (```` ```json `` … `` ``` ````) if present,
+/// returning the inner text trimmed; otherwise return the input trimmed. Defensive
+/// against models that fence their output despite Ollama's `format: "json"`.
+fn strip_code_fence(s: &str) -> &str {
+    let t = s.trim();
+    let Some(after_open) = t.strip_prefix("```") else {
+        return t;
+    };
+    // Drop an optional language tag on the opening fence's line (e.g. ```json).
+    let body = after_open
+        .split_once('\n')
+        .map_or(after_open, |(_lang, rest)| rest);
+    body.strip_suffix("```").map_or(t, str::trim)
 }
 
 impl DeltaProposer for HttpDeltaProposer {
@@ -189,12 +210,16 @@ impl DeltaProposer for HttpDeltaProposer {
             .json()
             .map_err(|e| MemoryError::Internal(format!("proposer response parse error: {e}")))?;
 
-        let (proposal, eval, prompt_eval) = Self::parse_response(&envelope)?;
+        // Record the call + tokens it burned BEFORE parsing the merge JSON: a 200 with
+        // malformed merge JSON still cost a real LLM call, and the benchmark must see
+        // it. `parse_proposal` may then fail without losing that accounting.
+        let (eval, prompt_eval) = Self::extract_usage(&envelope);
         self.llm_calls.fetch_add(1, Ordering::Relaxed);
         self.eval_count.fetch_add(eval, Ordering::Relaxed);
         self.prompt_eval_count
             .fetch_add(prompt_eval, Ordering::Relaxed);
-        Ok(proposal)
+
+        Self::parse_proposal(&envelope)
     }
 }
 
@@ -251,45 +276,61 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_extracts_merges_and_token_counts() {
+    fn parse_proposal_extracts_merges() {
         let env = envelope(
             r#"{"merges":[{"source_ids":[1,2],"summary":"merged a+b"}]}"#,
             42,
             17,
         );
-        let (proposal, eval, prompt_eval) = HttpDeltaProposer::parse_response(&env).unwrap();
+        let proposal = HttpDeltaProposer::parse_proposal(&env).unwrap();
         assert_eq!(proposal.merges.len(), 1);
         assert_eq!(proposal.merges[0].source_ids, vec![1, 2]);
         assert_eq!(proposal.merges[0].summary, "merged a+b");
-        assert_eq!((eval, prompt_eval), (42, 17));
     }
 
     #[test]
-    fn parse_response_empty_merges_is_ok() {
+    fn extract_usage_reads_token_counts() {
+        let env = envelope(r#"{"merges":[]}"#, 42, 17);
+        assert_eq!(HttpDeltaProposer::extract_usage(&env), (42, 17));
+    }
+
+    #[test]
+    fn parse_proposal_empty_merges_is_ok() {
         let env = envelope(r#"{"merges":[]}"#, 5, 9);
-        let (proposal, _, _) = HttpDeltaProposer::parse_response(&env).unwrap();
+        let proposal = HttpDeltaProposer::parse_proposal(&env).unwrap();
         assert!(proposal.merges.is_empty());
     }
 
     #[test]
-    fn parse_response_malformed_inner_json_errors() {
+    fn parse_proposal_strips_markdown_code_fence() {
+        // Some models fence their JSON despite `format: "json"`.
+        let env = envelope(
+            "```json\n{\"merges\":[{\"source_ids\":[3],\"summary\":\"s\"}]}\n```",
+            1,
+            1,
+        );
+        let proposal = HttpDeltaProposer::parse_proposal(&env).unwrap();
+        assert_eq!(proposal.merges[0].source_ids, vec![3]);
+    }
+
+    #[test]
+    fn parse_proposal_malformed_inner_json_errors() {
         let env = envelope("not valid json {{{", 1, 1);
-        let err = HttpDeltaProposer::parse_response(&env).unwrap_err();
+        let err = HttpDeltaProposer::parse_proposal(&env).unwrap_err();
         assert!(err.to_string().contains("malformed"), "got: {err}");
     }
 
     #[test]
-    fn parse_response_missing_response_field_errors() {
+    fn parse_proposal_missing_response_field_errors() {
         let env = serde_json::json!({ "done": true, "eval_count": 1 });
-        let err = HttpDeltaProposer::parse_response(&env).unwrap_err();
+        let err = HttpDeltaProposer::parse_proposal(&env).unwrap_err();
         assert!(err.to_string().contains("response"), "got: {err}");
     }
 
     #[test]
-    fn parse_response_missing_token_counts_default_to_zero() {
+    fn extract_usage_missing_counts_default_to_zero() {
         let env = serde_json::json!({ "response": r#"{"merges":[]}"#, "done": true });
-        let (_, eval, prompt_eval) = HttpDeltaProposer::parse_response(&env).unwrap();
-        assert_eq!((eval, prompt_eval), (0, 0));
+        assert_eq!(HttpDeltaProposer::extract_usage(&env), (0, 0));
     }
 
     #[test]
