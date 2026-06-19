@@ -414,6 +414,20 @@ fn bootstrap_within_savepoint(
         }
     }
 
+    // Stamp the embedding identity on first write (#613, ADR 0015 §2) — but only once
+    // a fact vector has actually been written (#643). Done here, at the tail of the
+    // savepoint, so the identity commits atomically with the facts it describes (the
+    // outer RELEASE/ROLLBACK covers it). `insert_or_reinforce` only writes a new
+    // vector when it *creates* a row, so `facts_created` is the precise gate: a
+    // session that parses to zero episodes, or only reinforces existing facts, writes
+    // no new vector and leaves the store unstamped — letting a later real first write
+    // with a different embedder establish the true identity (the #614-enforcement
+    // landmine this averts). The `embedder.fingerprint()` and `embed_dim` are the same
+    // values the engine's `record_embedding_identity` seam would have used.
+    if report.facts_created > 0 {
+        crate::store::embedding_meta::record_if_absent(conn, &embedder.fingerprint(), embed_dim)?;
+    }
+
     Ok(())
 }
 

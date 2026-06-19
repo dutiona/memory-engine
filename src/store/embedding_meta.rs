@@ -7,8 +7,15 @@
 //! `EmbeddingFingerprint` values — never the JSON layout or the config key.
 //!
 //! The identity is established **lazily on the first embedding write** (ADR 0015
-//! §2): [`record_if_absent`] is called by every embed-then-persist path before it
-//! inserts a vector, so the store's identity is never older than its first vector.
+//! §2): [`record_if_absent`] is called by every embed-then-persist path *as a vector
+//! is written*, so the store's identity is never older than — and never recorded
+//! without — its first vector. The transactional paths (`add_fact`, `add_facts_batch`,
+//! `consolidate`, the bootstrap-session savepoint) record inside the same
+//! transaction, gated on a vector actually being committed (#643), so a no-op run
+//! leaves the store unstamped. The autocommit-per-file `bootstrap_memory_directory`
+//! path is the deliberate exception: it records meta-first (before the first file)
+//! because, lacking a wrapping transaction, deferral would expose an orphan-vector
+//! crash window — it trades a harmless no-op stamp for crash safety.
 //! Mismatch *enforcement* (rejecting a differing model) is **#614** — it switches
 //! the [`record_if_absent`] present-branch from "return stored" to "compare and
 //! reject". The call sites do not change when that lands.

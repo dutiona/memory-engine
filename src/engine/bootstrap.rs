@@ -52,10 +52,9 @@ impl MemoryEngine {
     ) -> Result<crate::bootstrap::BootstrapReport> {
         let conn = self.write_conn()?;
         let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
-        // Stamp the embedding identity on first write (#613), before the inner
-        // import. The inner savepoint commits facts atomically; meta-first ordering
-        // keeps a crash benign (identity declared, no facts).
-        self.record_embedding_identity(&conn, embedder)?;
+        // The embedding identity is stamped (#613) inside the session savepoint, gated
+        // on a fact actually being written (#643) — see `bootstrap_within_savepoint`.
+        // A no-op session (zero extracted facts) therefore leaves the store unstamped.
         crate::bootstrap::bootstrap_session_inner(
             &conn,
             self.embed_dim,
@@ -93,8 +92,10 @@ impl MemoryEngine {
     ) -> Result<crate::bootstrap::BootstrapReport> {
         let conn = self.write_conn()?;
         let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
-        // Stamp the embedding identity on first write (#613), before the inner import.
-        self.record_embedding_identity(&conn, embedder)?;
+        // Each session is stamped (#613) inside its own savepoint, gated on a fact
+        // being written (#643) — see `bootstrap_within_savepoint`. This preserves
+        // per-session independence (each commits its identity atomically with its
+        // facts) and leaves an empty/no-op directory unstamped.
         crate::bootstrap::bootstrap_directory_inner(
             &conn,
             self.embed_dim,
@@ -139,10 +140,14 @@ impl MemoryEngine {
     ) -> Result<crate::bootstrap::BootstrapReport> {
         let conn = self.write_conn()?;
         let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
-        // Stamp the embedding identity on first write (#613). This path is
-        // autocommit-per-file (no wrapping savepoint), so meta-first ordering here is
-        // what keeps it crash-safe (Codex review BLOCKER): identity is recorded before
-        // any file's fact, so no vector is ever committed without its identity.
+        // Stamp the embedding identity on first write (#613) — and, unlike the
+        // savepoint paths above, this one MUST stay meta-first (#643). It is
+        // autocommit-per-file (no wrapping savepoint), so each file commits its
+        // vector independently; deferring the stamp until after a vector is written
+        // would reopen the orphan-vector crash window (a vector committed before its
+        // identity). Recording before the first file keeps a crash benign: identity
+        // declared, possibly no facts — the same harmless no-op-stamp #643 removes
+        // from the deferrable paths, retained here because it is the crash-safe choice.
         self.record_embedding_identity(&conn, embedder)?;
         crate::bootstrap::memory_dir::bootstrap_memory_directory_inner(
             &conn,
