@@ -37,6 +37,50 @@ pub trait EmbeddingProvider: Send + Sync {
         texts.iter().map(|t| self.embed(t)).collect()
     }
 
+    /// Compute an embedding vector for a **query** string.
+    ///
+    /// Asymmetric models (e.g. `Qwen3-Embedding` via TEI) prepend a query-only
+    /// instruction prefix here, while [`embed`](Self::embed) (documents) stays
+    /// prefix-free. The default delegates to [`embed`](Self::embed), so symmetric
+    /// providers (`Mock`, `Hash`, `Passthrough`) need no change and queries embed
+    /// identically to documents.
+    ///
+    /// The **core never calls this** — [`MemoryQuery`](crate::MemoryQuery) carries a
+    /// pre-computed vector, so query embedding happens only at the consumer layer
+    /// (MCP/CLI). The method lives on the provider trait so that consumer layer has a
+    /// single place to express the asymmetry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding computation fails.
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed(text)
+    }
+
+    /// Compute embedding vectors for multiple **query** strings in a single call.
+    ///
+    /// The default loops [`embed_query`](Self::embed_query) sequentially — mirroring
+    /// how [`embed_batch`](Self::embed_batch) loops [`embed`](Self::embed). This makes
+    /// the default **correct by construction**: an asymmetric provider that overrides
+    /// only `embed_query` (e.g. to prepend a query instruction prefix) automatically
+    /// gets prefixed batch queries too, with no silent document-space leak.
+    ///
+    /// Providers with a native batch API (e.g. `OpenAI`/TEI `/v1/embeddings`) should
+    /// override this for a single HTTP round-trip — correctness is the default;
+    /// batch efficiency is the opt-in.
+    ///
+    /// # Contract
+    ///
+    /// The returned `Vec` **must** have the same length as `texts`. Each element
+    /// corresponds positionally to the input query at that index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any embedding computation fails.
+    fn embed_query_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed_query(t)).collect()
+    }
+
     /// Declare this provider's [`EmbeddingFingerprint`] — the identity of the vector
     /// space it produces (`model`, `provider`, `dim`, ...).
     ///
@@ -800,6 +844,90 @@ mod tests {
             }
         }
         assert!(Failing.embed_batch(&["a"]).is_err());
+    }
+
+    // --- EmbeddingProvider::embed_query / embed_query_batch defaults (#616) ---
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // test data, precision irrelevant
+    fn embed_query_default_delegates_to_embed() {
+        // A symmetric provider leaves both query methods at their defaults, so a
+        // query embeds identically to a document — Mock/Hash/Passthrough are
+        // unaffected by the asymmetric trait extension.
+        struct Symmetric;
+        impl EmbeddingProvider for Symmetric {
+            fn embed(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+                Ok(vec![text.len() as f32])
+            }
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            }
+        }
+        let p = Symmetric;
+        assert_eq!(p.embed_query("hello").unwrap(), p.embed("hello").unwrap());
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // test data, precision irrelevant
+    fn embed_query_batch_default_loops_embed_query() {
+        // The default `embed_query_batch` must loop `embed_query` (the asymmetric
+        // singular seam), NOT delegate to `embed_batch`. This guarantees that an
+        // asymmetric provider overriding only `embed_query` (a query prefix) still
+        // gets prefixed batch queries — correctness by default, no silent leak into
+        // document space. Batch efficiency is the explicit opt-in (override this).
+        struct QueryCounter {
+            query_calls: std::sync::atomic::AtomicUsize,
+        }
+        impl EmbeddingProvider for QueryCounter {
+            fn embed(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+                Ok(vec![text.len() as f32])
+            }
+            fn embed_query(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+                self.query_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Simulate a query prefix: documents would NOT see this.
+                self.embed(&format!("Q:{text}"))
+            }
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            }
+        }
+        let p = QueryCounter {
+            query_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let out = p.embed_query_batch(&["a", "bb", "ccc"]).unwrap();
+        // Each element carries the "Q:" prefix length offset (+2), proving the
+        // default routed through the overridden `embed_query`, not `embed`/`embed_batch`.
+        assert_eq!(out, vec![vec![3.0], vec![4.0], vec![5.0]]);
+        assert_eq!(
+            p.query_calls.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "embed_query_batch default must call embed_query once per input"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // test data, precision irrelevant
+    fn embed_query_override_does_not_affect_documents() {
+        // An asymmetric provider overrides the query path (here: prefix the text)
+        // while documents stay on the prefix-free `embed`. Proves the two paths are
+        // independently dispatchable through the trait object (vtable).
+        struct Asymmetric;
+        impl EmbeddingProvider for Asymmetric {
+            fn embed(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+                Ok(vec![text.len() as f32])
+            }
+            fn embed_query(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+                // Simulate a query instruction prefix lengthening the input.
+                self.embed(&format!("Q:{text}"))
+            }
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            }
+        }
+        let p: &dyn EmbeddingProvider = &Asymmetric;
+        assert_eq!(p.embed("hi").unwrap(), vec![2.0]);
+        assert_eq!(p.embed_query("hi").unwrap(), vec![4.0]); // "Q:hi" → len 4
     }
 
     // --- PersistenceClassifier default ---
