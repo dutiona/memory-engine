@@ -136,7 +136,8 @@ async fn mrl_truncation_end_to_end() {
             5,
         )
         .unwrap()
-        .with_mrl_dim(2);
+        .with_mrl_dim(2)
+        .unwrap();
         p.embed("doc").unwrap()
     })
     .await
@@ -165,7 +166,8 @@ async fn embed_query_applies_both_prefix_and_mrl() {
         )
         .unwrap()
         .with_query_instruction("Instruct: ")
-        .with_mrl_dim(2);
+        .with_mrl_dim(2)
+        .unwrap();
         p.embed_query("find this").unwrap()
     })
     .await
@@ -176,6 +178,8 @@ async fn embed_query_applies_both_prefix_and_mrl() {
         sole_request_input(&server).await,
         json!("Instruct: find this")
     );
-    // ...and the response was MRL-truncated + renormalized.
-    assert_eq!(out, vec![0.6, 0.8]);
+    // ...and the response was MRL-truncated + renormalized ([3,4] -> [0.6, 0.8]).
+    assert_eq!(out.len(), 2);
+    assert!((out[0] - 0.6).abs() < 1e-6, "got {}", out[0]);
+    assert!((out[1] - 0.8).abs() < 1e-6, "got {}", out[1]);
 }

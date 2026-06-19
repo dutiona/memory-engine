@@ -49,7 +49,8 @@ use memory_engine::traits::EmbeddingProvider;
 /// )
 /// .expect("failed to build HTTP client")
 /// .with_query_instruction(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION)
-/// .with_mrl_dim(256);
+/// .with_mrl_dim(256)
+/// .expect("mrl_dim must be within the native dimension");
 /// ```
 pub struct HttpEmbeddingProvider {
     client: reqwest::blocking::Client,
@@ -125,47 +126,66 @@ impl HttpEmbeddingProvider {
     /// server returns and is validated against the raw response; `mrl_dim` is the
     /// stored/reported dimension after truncation. Chainable; defaults to `None`.
     ///
-    /// Truncation correctness (`mrl_dim <= response length`, non-degenerate norm) is
-    /// enforced at embed time, not here — the authoritative length is the live server
-    /// response, not the `expected_dim` hint.
-    #[must_use]
-    pub const fn with_mrl_dim(mut self, mrl_dim: usize) -> Self {
+    /// # Errors
+    ///
+    /// Returns an error if `mrl_dim` is `0` or greater than `expected_dim`. Because the
+    /// raw response is validated to be exactly `expected_dim` long *before* truncation,
+    /// `mrl_dim > expected_dim` is a deterministic configuration contradiction that
+    /// could never truncate successfully — so it is rejected here at build time rather
+    /// than failing every `embed` call at runtime. The non-degenerate-norm check still
+    /// happens at embed time (it depends on the live response values, not the config).
+    pub fn with_mrl_dim(mut self, mrl_dim: usize) -> Result<Self, MemoryError> {
+        if mrl_dim == 0 || mrl_dim > self.expected_dim {
+            return Err(MemoryError::Internal(format!(
+                "invalid mrl_dim {mrl_dim}: must be in 1..={} (the native expected_dim)",
+                self.expected_dim
+            )));
+        }
         self.mrl_dim = Some(mrl_dim);
-        self
+        Ok(self)
     }
 
-    /// Truncate `emb` to its first `target` components and renormalize to unit L2 length
-    /// (Matryoshka representation learning).
+    /// Truncate `emb` in place to its first `target` components and renormalize to unit
+    /// L2 length (Matryoshka representation learning), reusing the input buffer.
+    ///
+    /// The L2 norm is accumulated in `f64` to avoid `f32` overflow-to-`inf` or
+    /// underflow-to-`0` false positives on extreme-magnitude prefixes before the
+    /// non-finite/zero guard runs.
     ///
     /// # Errors
     ///
     /// - `target > emb.len()` — the truncation target exceeds the vector the server returned.
     /// - the truncated prefix has a zero or non-finite L2 norm — renormalization would
     ///   produce NaN/Inf, so the vector is rejected rather than silently corrupted.
-    fn mrl_truncate(emb: &[f32], target: usize) -> Result<Vec<f32>, MemoryError> {
+    #[allow(clippy::cast_possible_truncation)] // deliberate f64-norm → f32-storage narrowing
+    fn mrl_truncate(mut emb: Vec<f32>, target: usize) -> Result<Vec<f32>, MemoryError> {
         if target > emb.len() {
             return Err(MemoryError::Internal(format!(
                 "mrl_dim {target} exceeds embedding dimension {}",
                 emb.len()
             )));
         }
-        let mut truncated: Vec<f32> = emb[..target].to_vec();
-        let norm = truncated.iter().map(|x| x * x).sum::<f32>().sqrt();
+        emb.truncate(target);
+        let norm = emb
+            .iter()
+            .map(|&x| f64::from(x) * f64::from(x))
+            .sum::<f64>()
+            .sqrt();
         if !norm.is_finite() || norm == 0.0 {
             return Err(MemoryError::Internal(
                 "mrl truncation: prefix has zero or non-finite L2 norm; cannot renormalize".into(),
             ));
         }
-        for x in &mut truncated {
-            *x /= norm;
+        for x in &mut emb {
+            *x = (f64::from(*x) / norm) as f32;
         }
-        Ok(truncated)
+        Ok(emb)
     }
 
     /// Apply MRL truncation if configured; otherwise pass the vector through unchanged.
     fn maybe_truncate(&self, emb: Vec<f32>) -> Result<Vec<f32>, MemoryError> {
         match self.mrl_dim {
-            Some(target) => Self::mrl_truncate(&emb, target),
+            Some(target) => Self::mrl_truncate(emb, target),
             None => Ok(emb),
         }
     }
@@ -726,7 +746,7 @@ mod tests {
     #[test]
     fn mrl_truncate_slices_and_renormalizes_to_unit_l2() {
         // [3, 4, 99, 99] truncated to 2 -> [3, 4], L2 norm 5 -> [0.6, 0.8].
-        let out = HttpEmbeddingProvider::mrl_truncate(&[3.0, 4.0, 99.0, 99.0], 2).unwrap();
+        let out = HttpEmbeddingProvider::mrl_truncate(vec![3.0, 4.0, 99.0, 99.0], 2).unwrap();
         assert_eq!(out.len(), 2);
         assert!((out[0] - 0.6).abs() < 1e-6, "got {}", out[0]);
         assert!((out[1] - 0.8).abs() < 1e-6, "got {}", out[1]);
@@ -739,13 +759,15 @@ mod tests {
 
     #[test]
     fn mrl_truncate_target_equal_to_len_is_pure_renormalize() {
-        let out = HttpEmbeddingProvider::mrl_truncate(&[3.0, 4.0], 2).unwrap();
-        assert_eq!(out, vec![0.6, 0.8]);
+        let out = HttpEmbeddingProvider::mrl_truncate(vec![3.0, 4.0], 2).unwrap();
+        // 0.6/0.8 are not exactly representable in f32; compare with an epsilon.
+        assert!((out[0] - 0.6).abs() < 1e-6, "got {}", out[0]);
+        assert!((out[1] - 0.8).abs() < 1e-6, "got {}", out[1]);
     }
 
     #[test]
     fn mrl_truncate_target_exceeds_len_errors() {
-        let err = HttpEmbeddingProvider::mrl_truncate(&[1.0, 2.0], 4).unwrap_err();
+        let err = HttpEmbeddingProvider::mrl_truncate(vec![1.0, 2.0], 4).unwrap_err();
         assert!(
             err.to_string()
                 .contains("mrl_dim 4 exceeds embedding dimension 2"),
@@ -757,7 +779,7 @@ mod tests {
     fn mrl_truncate_zero_norm_prefix_errors() {
         // The first two components are zero -> truncated prefix norm is 0 -> reject
         // rather than divide-by-zero into NaN.
-        let err = HttpEmbeddingProvider::mrl_truncate(&[0.0, 0.0, 1.0], 2).unwrap_err();
+        let err = HttpEmbeddingProvider::mrl_truncate(vec![0.0, 0.0, 1.0], 2).unwrap_err();
         assert!(
             err.to_string().contains("zero or non-finite L2 norm"),
             "error: {err}"
@@ -767,7 +789,7 @@ mod tests {
     #[test]
     fn fingerprint_with_mrl_reports_matryoshka_base_dim() {
         // expected_dim is the NATIVE dim; mrl_dim is the stored/reported dim.
-        let provider = tei_provider(1024).with_mrl_dim(256);
+        let provider = tei_provider(1024).with_mrl_dim(256).unwrap();
         let fp = provider.fingerprint();
         assert_eq!(fp.dim, 256, "stored dim should be the truncated mrl_dim");
         assert_eq!(
@@ -785,6 +807,42 @@ mod tests {
         let fp = tei_provider(1024).fingerprint();
         assert_eq!(fp.dim, 1024);
         assert_eq!(fp.matryoshka_base_dim, None);
+    }
+
+    #[test]
+    fn with_mrl_dim_rejects_target_exceeding_native_dim() {
+        // mrl_dim > expected_dim is a deterministic config contradiction (the raw
+        // response is validated to be exactly expected_dim long): reject at build time.
+        // `.err()` avoids `unwrap_err`, which would require the provider (Ok type) to
+        // impl Debug — deliberately not derived, since it holds an api_key.
+        let err = tei_provider(256)
+            .with_mrl_dim(1024)
+            .err()
+            .expect("mrl_dim > native dim must be rejected");
+        assert!(
+            err.to_string().contains("invalid mrl_dim 1024"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn with_mrl_dim_rejects_zero() {
+        let err = tei_provider(1024)
+            .with_mrl_dim(0)
+            .err()
+            .expect("mrl_dim 0 must be rejected");
+        assert!(
+            err.to_string().contains("invalid mrl_dim 0"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn with_mrl_dim_accepts_target_equal_to_native_dim() {
+        // mrl_dim == expected_dim is valid (pure renormalize, no real truncation).
+        let provider = tei_provider(1024).with_mrl_dim(1024).unwrap();
+        assert_eq!(provider.fingerprint().dim, 1024);
+        assert_eq!(provider.fingerprint().matryoshka_base_dim, Some(1024));
     }
 
     #[test]
