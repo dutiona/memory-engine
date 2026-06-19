@@ -52,6 +52,10 @@ impl MemoryEngine {
     ) -> Result<crate::bootstrap::BootstrapReport> {
         let conn = self.write_conn()?;
         let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
+        // Stamp the embedding identity on first write (#613), before the inner
+        // import. The inner savepoint commits facts atomically; meta-first ordering
+        // keeps a crash benign (identity declared, no facts).
+        self.record_embedding_identity(&conn, embedder)?;
         crate::bootstrap::bootstrap_session_inner(
             &conn,
             self.embed_dim,
@@ -89,6 +93,8 @@ impl MemoryEngine {
     ) -> Result<crate::bootstrap::BootstrapReport> {
         let conn = self.write_conn()?;
         let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
+        // Stamp the embedding identity on first write (#613), before the inner import.
+        self.record_embedding_identity(&conn, embedder)?;
         crate::bootstrap::bootstrap_directory_inner(
             &conn,
             self.embed_dim,
@@ -133,6 +139,11 @@ impl MemoryEngine {
     ) -> Result<crate::bootstrap::BootstrapReport> {
         let conn = self.write_conn()?;
         let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
+        // Stamp the embedding identity on first write (#613). This path is
+        // autocommit-per-file (no wrapping savepoint), so meta-first ordering here is
+        // what keeps it crash-safe (Codex review BLOCKER): identity is recorded before
+        // any file's fact, so no vector is ever committed without its identity.
+        self.record_embedding_identity(&conn, embedder)?;
         crate::bootstrap::memory_dir::bootstrap_memory_directory_inner(
             &conn,
             self.embed_dim,

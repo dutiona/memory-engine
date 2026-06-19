@@ -172,21 +172,113 @@ fn embed_dim_validation_rejects_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.db");
 
-    // First open with dim=768
+    // First open with dim=768 and write a fact: the embedding identity (incl. dim)
+    // is recorded on the FIRST embedding write (#613, ADR 0015 §2), not at open.
     {
-        let _engine = MemoryEngine::builder(768)
+        let engine = MemoryEngine::builder(768)
             .path(db_path.clone())
             .build()
             .unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "seed".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                &MockEmbedder { dim: 768 },
+                None,
+            )
+            .unwrap();
     }
 
-    // Second open with dim=384 should fail
+    // Second open with dim=384 should fail (recorded identity dim=768 != 384).
     let err = MemoryEngine::builder(384)
         .path(db_path)
         .build()
         .unwrap_err();
     assert!(matches!(err, MemoryError::Migration(_)));
     assert!(err.to_string().contains("mismatch"));
+}
+
+#[test]
+fn first_add_fact_records_embedding_meta() {
+    // A second embedder with a DIFFERENT fingerprint, to prove write-once below.
+    struct OtherEmbedder {
+        dim: usize,
+    }
+    impl EmbeddingProvider for OtherEmbedder {
+        fn embed(&self, _t: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.7; self.dim])
+        }
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("other-model", "other-provider", self.dim)
+        }
+    }
+
+    // The embedding identity is established on the FIRST embedding write (#613,
+    // ADR 0015 §2) and is write-once thereafter.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    assert!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap()
+            .is_none(),
+        "no identity before any write"
+    );
+
+    let expected = MockEmbedder { dim: DIM }.fingerprint();
+    let req = |c: &str| AddFactRequest {
+        content: c.into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+    engine
+        .add_fact(&req("a"), &MockEmbedder { dim: DIM }, None)
+        .unwrap();
+    assert_eq!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap(),
+        Some(expected.clone()),
+        "first write records the embedder's fingerprint"
+    );
+
+    // Write-once: a second add with a DIFFERENT fingerprint leaves it unchanged.
+    engine
+        .add_fact(&req("b"), &OtherEmbedder { dim: DIM }, None)
+        .unwrap();
+    assert_eq!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap(),
+        Some(expected),
+        "identity is write-once; a differing later fingerprint does not overwrite it"
+    );
+}
+
+#[test]
+fn read_only_open_of_unstamped_db_is_ok() {
+    // D6 behavior change: previously a read-only open of a DB with no persisted
+    // dim errored ("open read-write first"). Now identity is written on first
+    // embed, so read-only-opening an un-embedded store is Ok — there is nothing to
+    // validate, and the runtime dim always comes from EngineConfig.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ro_unstamped.db");
+    {
+        // Open read-write, never write a fact ⇒ no embedding_meta recorded.
+        let _e = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    }
+    let engine = MemoryEngine::builder(DIM)
+        .path(&path)
+        .read_only(true)
+        .build()
+        .unwrap();
+    assert!(engine.pool.is_read_only());
 }
 
 #[test]
@@ -3507,7 +3599,21 @@ fn builder_embed_dim_mismatch_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dim.db");
     {
-        let _engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+        let engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+        // Identity (incl. dim) is recorded on the first embedding write (#613).
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "seed".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                &MockEmbedder { dim: DIM },
+                None,
+            )
+            .unwrap();
     }
     // Re-opening with a different embed_dim must fail (parity with `open`).
     let err = MemoryEngine::builder(DIM + 1)

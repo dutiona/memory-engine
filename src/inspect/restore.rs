@@ -640,9 +640,16 @@ mod tests {
             .unwrap();
         assert_eq!(root_label, "root");
 
-        // Verify config imported (embed_dim should be present).
-        let embed_dim_cfg = get_config(&conn, "embed_dim").unwrap();
-        assert_eq!(embed_dim_cfg, Some("4".to_string()));
+        // Verify the embedding identity (#613) round-trips through dump→restore via
+        // the generic config-copy loop (embedding_meta is a config row, not in
+        // MANAGED_CONFIG_KEYS). The bare `embed_dim` key no longer exists.
+        assert!(get_config(&conn, "embed_dim").unwrap().is_none());
+        let meta = crate::store::embedding_meta::load(&conn).unwrap();
+        assert_eq!(
+            meta.map(|fp| fp.dim),
+            Some(4),
+            "embedding_meta dim survives restore"
+        );
     }
 
     #[test]

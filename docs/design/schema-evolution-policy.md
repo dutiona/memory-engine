@@ -72,6 +72,22 @@ Each migration runs inside a transaction. On failure, the transaction rolls back
 8. Run `cargo test` — the insta snapshot test will fail with a pending snapshot. Review and accept the new snapshot.
 9. Verify all property-based migration tests still pass (they exercise the full chain).
 
+### Config-Only Migrations (no DDL delta)
+
+Some migrations change only `config` rows, not table/index/trigger DDL — e.g. **v11→v12**
+(#613, ADR 0015), which replaces the bare `embed_dim` config key with the richer
+`embedding_meta` identity tuple (`DELETE FROM config WHERE key = 'embed_dim'`; the tuple is
+written lazily on the first embedding write, so no backfill). For these:
+
+- Steps 4–5 (live DDL constants, frozen DDL snapshot) are **N/A** — the table shape is
+  unchanged, so `TABLES_VM_DDL` would be byte-identical to the prior version.
+- **The DDL snapshot does NOT guard a config-only migration.** `deterministic_schema_dump`
+  projects only `sqlite_master` (DDL); config rows are invisible to it, and the DDL is
+  identical across the bump. The dedicated migration test (e.g.
+  `migrate_v11_to_v12_drops_embed_dim`) is therefore the **load-bearing guard** — it must
+  inject the legacy config row before migrating so the change is exercised non-vacuously
+  ("snapshot green ≠ migration correct").
+
 ## Event Envelope Versioning
 
 Events in the append-only log carry a per-event-type revision via the `event_revision` column.

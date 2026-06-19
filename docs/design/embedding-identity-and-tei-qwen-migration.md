@@ -81,6 +81,13 @@ panic, never silent).
 
 ### 1. Embedding identity fingerprint (`area:core`, `area:storage`)
 
+> **Status: delivered.** The type + trait method landed in #612 (`EmbeddingFingerprint` +
+> `EmbeddingProvider::fingerprint()`). The persistence landed in **#613** (schema v11→v12):
+> the `store::embedding_meta` typed boundary (`load`/`store`/`record_if_absent`) records the
+> tuple on the first embedding write, the open path validates dim against it, and the bare
+> `embed_dim` config key is dropped. Mismatch **enforcement** remains #614 (the seam
+> `record_if_absent` extends).
+
 - New `EmbeddingFingerprint { model, provider, dim, matryoshka_base_dim, element_type }`.
 - New trait method `EmbeddingProvider::fingerprint(&self) -> EmbeddingFingerprint` so
   providers declare their identity.

@@ -84,6 +84,13 @@ pub fn consolidate(
 
     let tx = conn.unchecked_transaction()?;
 
+    // Record the embedding identity on first write (#613, ADR 0015 §2), inside the
+    // transaction so it commits atomically with any summary vectors. Consolidation
+    // embeds summary text via `embedder` into the same vector space, so it is a
+    // legitimate first-write path; `record_if_absent` is a no-op once an identity
+    // exists (the usual case — facts were ingested before consolidation runs).
+    crate::store::embedding_meta::record_if_absent(&tx, &embedder.fingerprint(), embed_dim)?;
+
     let (duplicates_removed, expired_ids) =
         local_dedup(&tx, embed_dim, config.dedup_threshold, last, now)?;
 

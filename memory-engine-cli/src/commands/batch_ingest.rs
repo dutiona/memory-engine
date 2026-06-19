@@ -9,7 +9,7 @@ use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 use memory_engine_embed::HttpEmbeddingProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::db::open_engine_writable;
+use crate::db::{open_engine_writable, open_engine_writable_with_dim};
 use crate::output::{OutputFormat, print_json};
 
 // ---------------------------------------------------------------------------
@@ -312,6 +312,11 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
         MemoryEngine::builder(embed_dim)
             .path(db.to_path_buf())
             .build()?
+    } else if let Some(dim) = args.embed_dim {
+        // Existing DB: accept an explicit --embed-dim so a never-embedded store (no
+        // recorded identity yet under #613) is still writable. The engine's open path
+        // rejects a mismatch against any recorded identity.
+        open_engine_writable_with_dim(db, dim)?
     } else {
         open_engine_writable(db)?
     };

@@ -190,10 +190,20 @@ fn probe_embed_dim_from_existing_db() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
-    // Create a real database with known embed_dim
+    // Create a real database with a known dimension. Under #613 the dimension is
+    // recorded on the first embedding write, so seed the identity directly.
     let engine = MemoryEngine::builder(384)
         .path(db_path.clone())
         .build()
+        .unwrap();
+    engine
+        .set_config(
+            "embedding_meta",
+            &serde_json::to_string(&memory_engine::EmbeddingFingerprint::new(
+                "test", "test", 384,
+            ))
+            .unwrap(),
+        )
         .unwrap();
     drop(engine);
 
@@ -216,6 +226,15 @@ fn probe_embed_dim_different_dimensions() {
     let engine = MemoryEngine::builder(768)
         .path(db_path.clone())
         .build()
+        .unwrap();
+    engine
+        .set_config(
+            "embedding_meta",
+            &serde_json::to_string(&memory_engine::EmbeddingFingerprint::new(
+                "test", "test", 768,
+            ))
+            .unwrap(),
+        )
         .unwrap();
     drop(engine);
 

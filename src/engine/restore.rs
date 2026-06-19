@@ -2,7 +2,6 @@ use std::path::Path;
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::pool::ConnectionPool;
-use crate::store::schema::get_config;
 use crate::store::upcaster::UpcasterRegistry;
 
 use super::{EngineConfig, MemoryEngine};
@@ -130,24 +129,27 @@ impl MemoryEngine {
             e
         };
 
-        // Probe the copied DB for embed_dim validation.
+        // Probe the copied DB for embedding-identity dim validation (#613).
         let probe = crate::store::schema::open_connection(&config.path.to_string_lossy())
             .map_err(cleanup)?;
-        let db_dim: usize = get_config(&probe, "embed_dim")
-            .map_err(cleanup)?
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| {
-                let _ = std::fs::remove_file(&config.path);
-                MemoryError::Internal("backup has no embed_dim in config".into())
-            })?;
+        let db_meta = crate::store::embedding_meta::load(&probe).map_err(cleanup)?;
         drop(probe);
 
-        if config.embed_dim != db_dim {
-            let _ = std::fs::remove_file(&config.path);
-            return Err(MemoryError::EmbeddingDimension {
-                expected: config.embed_dim,
-                actual: db_dim,
-            });
+        // A backup that recorded an identity must agree on dimension. A backup with
+        // no identity yet (never embedded) is valid and skips the check — the identity
+        // is re-established on its first embedding write. Legacy v11 backups carried a
+        // bare `embed_dim` and no `embedding_meta`, so they would also skip the check;
+        // this is acceptable because there are no users and no pre-existing v11 backups
+        // (ADR 0015 §"No data migration"), and a v11 backup would need the v11→v12
+        // migration on open regardless.
+        if let Some(fp) = db_meta {
+            if config.embed_dim != fp.dim {
+                let _ = std::fs::remove_file(&config.path);
+                return Err(MemoryError::EmbeddingDimension {
+                    expected: config.embed_dim,
+                    actual: fp.dim,
+                });
+            }
         }
 
         Self::open_from_config(config, None).inspect_err(|_| {
