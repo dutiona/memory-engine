@@ -725,7 +725,10 @@ fn handle_query(
             if let Some(emb) = pre_emb {
                 query = query.embedding(emb);
             } else if let Some(emb_provider) = embedder {
-                let emb = emb_provider.embed(&text).map_err(to_mcp_error)?;
+                // Query path uses embed_query, applying the asymmetric instruction prefix
+                // for models like Qwen (#618). add_fact stays on the document `embed`: it
+                // passes the provider to engine.add_fact, which calls embed() internally.
+                let emb = emb_provider.embed_query(&text).map_err(to_mcp_error)?;
                 query = query.embedding(emb);
             } else if let Some(mode) = explicit_mode {
                 // User explicitly asked for vector/hybrid but no embedder available

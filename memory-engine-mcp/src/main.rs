@@ -32,6 +32,11 @@ struct Cli {
     #[arg(long, env = "MEMORY_MCP_EMBED_API_KEY")]
     embed_api_key: Option<String>,
 
+    /// Embedding serving backend (e.g. `ollama`, `tei`, `openai`) — operator-declared,
+    /// feeds the fingerprint. Free-form; unrecognized values warn but are accepted.
+    #[arg(long, env = "MEMORY_MCP_EMBED_PROVIDER")]
+    embed_provider: Option<String>,
+
     /// Summary / chat-completions endpoint URL (for consolidation).
     #[arg(long, env = "MEMORY_MCP_SUMMARY_URL")]
     summary_url: Option<String>,
@@ -96,6 +101,10 @@ async fn main() -> Result<(), BoxError> {
 ///
 /// CLI flags override TOML values (endpoint, model, `api_key`) when provided,
 /// enabling operators to inject runtime secrets via env/CLI.
+/// Recognized embedding backends. `provider` is free-form (it feeds the fingerprint),
+/// but a value outside this set warns at startup to catch typos.
+const KNOWN_PROVIDERS: [&str; 3] = ["ollama", "tei", "openai"];
+
 fn build_embedder(
     cli: &Cli,
     mcp_config: &config::McpConfig,
@@ -116,25 +125,73 @@ fn build_embedder(
         .embed_api_key
         .clone()
         .or_else(|| base.and_then(|b| b.api_key.clone()));
+    // `provider` feeds the fingerprint (#614); source it from CLI > TOML, defaulting to
+    // "ollama" (also EmbeddingSection's serde default) for the CLI-only / legacy path.
+    let provider = cli
+        .embed_provider
+        .clone()
+        .or_else(|| base.map(|b| b.provider.clone()))
+        .unwrap_or_else(|| "ollama".to_string());
     let timeout = base.map_or(30, |b| b.timeout_secs);
+    let query_instruction = base.and_then(|b| b.query_instruction.clone());
+    let mrl_dim = base.and_then(|b| b.mrl_dim);
 
-    match (endpoint, model) {
-        (Some(url), Some(mdl)) => Ok(Some(Arc::new(
-            // TODO(#618): `provider` is hardcoded; source it from config/CLI so the
-            // fingerprint reflects the real backend. Per ADR 0015 ordering, #618 must
-            // land before #614 turns mismatch enforcement on (else it checks a constant).
-            embedding::HttpEmbeddingProvider::new(
-                url,
-                mdl,
-                "ollama".to_string(),
-                api_key,
-                embed_dim,
-                timeout,
-            )
-            .map_err(|e| format!("failed to create embedding provider: {e}"))?,
-        ))),
-        _ => Ok(None),
+    let (Some(url), Some(mdl)) = (endpoint, model) else {
+        return Ok(None);
+    };
+
+    // `native_dim` is the dimension the model emits — what the provider validates the
+    // raw HTTP response against. With MRL the provider truncates to `mrl_dim`, so the
+    // native dim comes from the config's `dimensions`; without MRL native == stored ==
+    // `embed_dim`. Always read `dimensions` (falling back to `embed_dim` only on the
+    // CLI-only path with no `[embedding]` section) so a `dimensions != embed_dim`
+    // misconfig surfaces at startup instead of failing cryptically on the first embed.
+    let native_dim = base.map_or(embed_dim, |b| b.dimensions);
+
+    // `provider` is stamped verbatim into the persisted fingerprint (#614), like the
+    // equally free-form `model`. We don't hard-restrict it — custom OpenAI-compatible
+    // backends are valid — but warn on an unrecognized value to catch typos before they
+    // bake a bogus identity into a fresh store.
+    if !KNOWN_PROVIDERS.contains(&provider.as_str()) {
+        tracing::warn!(
+            provider = %provider,
+            "embedding provider is not one of {KNOWN_PROVIDERS:?}; it is stamped into the \
+             persisted embedding fingerprint as-is — check for a typo"
+        );
     }
+
+    let mut provider =
+        embedding::HttpEmbeddingProvider::new(url, mdl, provider, api_key, native_dim, timeout)
+            .map_err(|e| format!("failed to create embedding provider: {e}"))?;
+
+    if let Some(instruction) = query_instruction {
+        provider = provider.with_query_instruction(instruction);
+    }
+    if let Some(target) = mrl_dim {
+        // The engine stores post-truncation vectors, so the MRL target MUST equal the
+        // engine's `embed_dim`; otherwise the engine would reject every truncated vector.
+        // Fail loudly here at startup rather than on the first embed call.
+        if target != embed_dim {
+            return Err(format!(
+                "embedding.mrl_dim ({target}) must equal the engine embed_dim ({embed_dim}): \
+                 the engine stores post-truncation vectors"
+            )
+            .into());
+        }
+        provider = provider
+            .with_mrl_dim(target)
+            .map_err(|e| format!("invalid embedding.mrl_dim: {e}"))?;
+    } else if native_dim != embed_dim {
+        // No truncation: the native dim the provider validates against must equal the
+        // engine's stored dim. An unequal pair is a misconfiguration — surface it now.
+        return Err(format!(
+            "embedding.dimensions ({native_dim}) must equal the engine embed_dim ({embed_dim}) \
+             when MRL is disabled (native and stored dimensions are identical without truncation)"
+        )
+        .into());
+    }
+
+    Ok(Some(Arc::new(provider)))
 }
 
 /// Load configuration from TOML file with CLI overrides.

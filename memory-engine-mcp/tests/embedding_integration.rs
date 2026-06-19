@@ -683,3 +683,104 @@ async fn query_hybrid_with_http_embedder() {
     .unwrap();
     assert!(body["count"].as_u64().unwrap() >= 1);
 }
+
+// ---------------------------------------------------------------------------
+// Asymmetric query path (#618): memory_query uses embed_query (prefix applied),
+// memory_add_fact stays on the document embed (no prefix).
+// ---------------------------------------------------------------------------
+
+/// Parse the JSON `input` field of the single request the mock server received.
+async fn sole_input(server: &MockServer) -> Value {
+    let reqs = server.received_requests().await.expect("recording enabled");
+    assert_eq!(reqs.len(), 1, "expected exactly one embedding request");
+    let body: Value = serde_json::from_slice(&reqs[0].body).expect("request body is JSON");
+    body.get("input")
+        .cloned()
+        .expect("request has an 'input' field")
+}
+
+#[tokio::test]
+async fn query_path_applies_query_instruction_prefix() {
+    let server = MockServer::start().await;
+    let emb = make_embedding(DIM);
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "index": 0, "embedding": emb }]
+        })))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let provider = HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "Qwen/Qwen3-Embedding-0.6B".into(),
+            "tei".to_string(),
+            None,
+            DIM,
+            5,
+        )
+        .unwrap()
+        .with_query_instruction("Q-PREFIX: ");
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        // A vector-mode query with text forces server-side query embedding.
+        let _ = tools::dispatch(
+            "memory_query",
+            args(json!({ "text": "search terms", "mode": "vector" })),
+            &engine,
+            Some(&provider),
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        );
+    })
+    .await
+    .unwrap();
+
+    // The query embedding request must carry the instruction prefix.
+    assert_eq!(sole_input(&server).await, json!("Q-PREFIX: search terms"));
+}
+
+#[tokio::test]
+async fn add_fact_path_does_not_apply_query_instruction() {
+    let server = MockServer::start().await;
+    let emb = make_embedding(DIM);
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "index": 0, "embedding": emb }]
+        })))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let provider = HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "Qwen/Qwen3-Embedding-0.6B".into(),
+            "tei".to_string(),
+            None,
+            DIM,
+            5,
+        )
+        .unwrap()
+        .with_query_instruction("Q-PREFIX: ");
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        // add_fact embeds the document via engine.add_fact -> embed (no prefix).
+        let _ = tools::dispatch(
+            "memory_add_fact",
+            args(json!({ "content": "document text" })),
+            &engine,
+            Some(&provider),
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        );
+    })
+    .await
+    .unwrap();
+
+    // Documents are embedded prefix-free even when a query instruction is configured.
+    assert_eq!(sole_input(&server).await, json!("document text"));
+}
