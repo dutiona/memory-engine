@@ -64,6 +64,13 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
 
         MemoryError::Lineage(msg) => ErrorData::resource_not_found(format!("lineage: {msg}"), None),
 
+        // Explicit, greppable mapping for the storage seam. Output-equivalent to
+        // the wildcard below (re-prefixing the inner `StorageError`, which has no
+        // prefix of its own, reproduces the `Storage` Display's "storage error: "
+        // — no double prefix). The typed arm documents the mapping and guards
+        // against a future wildcard change silently degrading it.
+        MemoryError::Storage(e) => ErrorData::internal_error(format!("storage error: {e}"), None),
+
         // `MemoryError` is `#[non_exhaustive]`: future variants map to a
         // generic internal error until handled explicitly above.
         other => ErrorData::internal_error(other.to_string(), None),
@@ -139,6 +146,15 @@ mod tests {
         let mcp = to_mcp_error(err);
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(mcp.message.contains("cycle error"));
+    }
+
+    #[test]
+    fn storage_maps_to_internal() {
+        use memory_engine::error::StorageError;
+        let err = MemoryError::Storage(StorageError::Backend("boom".into()));
+        let mcp = to_mcp_error(err);
+        assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(mcp.message.contains("storage error"));
     }
 
     #[test]
