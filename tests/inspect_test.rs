@@ -4,6 +4,7 @@
 //! No direct store access — edges are generated via `consolidate()` or `resolve_conflict()`.
 
 use chrono::{Duration, Utc};
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::inspect::types::*;
@@ -16,6 +17,9 @@ struct TestEmbed;
 impl EmbeddingProvider for TestEmbed {
     fn embed(&self, _text: &str) -> Result<Vec<f32>> {
         Ok(vec![0.25; DIM])
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", DIM)
     }
 }
 

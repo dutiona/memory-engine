@@ -2,6 +2,7 @@
 
 use chrono::{Duration, Utc};
 use memory_engine::ArchivePolicy;
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::MemoryQuery;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
@@ -29,6 +30,9 @@ impl EmbeddingProvider for TestEmbedder {
             }
         }
         Ok(embedding)
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", DIM)
     }
 }
 

@@ -24,6 +24,9 @@ fn create_test_db() -> (TempDir, PathBuf) {
         fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
             Ok(vec![0.1, 0.2, 0.3, 0.4])
         }
+        fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+            memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
+        }
     }
 
     engine
@@ -134,6 +137,9 @@ fn stats_plain_includes_max_depth_and_page_count() {
     impl memory_engine::EmbeddingProvider for FakeEmbed {
         fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
             Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
+        fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+            memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
         }
     }
 
@@ -252,6 +258,9 @@ fn create_temporal_db() -> (TempDir, PathBuf) {
     impl memory_engine::EmbeddingProvider for FakeEmbed {
         fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
             Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
+        fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+            memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
         }
     }
 

@@ -10,6 +10,9 @@ impl memory_engine::EmbeddingProvider for ZeroEmbedder {
     fn embed(&self, _text: &str) -> memory_engine::error::Result<Vec<f32>> {
         Ok(vec![0.0; self.0])
     }
+    fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+        memory_engine::EmbeddingFingerprint::new("mock", "test", self.0)
+    }
 }
 
 const DIM: usize = 4;

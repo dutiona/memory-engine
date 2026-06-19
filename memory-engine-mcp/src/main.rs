@@ -120,8 +120,18 @@ fn build_embedder(
 
     match (endpoint, model) {
         (Some(url), Some(mdl)) => Ok(Some(Arc::new(
-            embedding::HttpEmbeddingProvider::new(url, mdl, api_key, embed_dim, timeout)
-                .map_err(|e| format!("failed to create embedding provider: {e}"))?,
+            // TODO(#618): `provider` is hardcoded; source it from config/CLI so the
+            // fingerprint reflects the real backend. Per ADR 0015 ordering, #618 must
+            // land before #614 turns mismatch enforcement on (else it checks a constant).
+            embedding::HttpEmbeddingProvider::new(
+                url,
+                mdl,
+                "ollama".to_string(),
+                api_key,
+                embed_dim,
+                timeout,
+            )
+            .map_err(|e| format!("failed to create embedding provider: {e}"))?,
         ))),
         _ => Ok(None),
     }

@@ -59,6 +59,9 @@ const METHOD_VERSION: &str = "llm-proposer-v1";
 /// struct MyEmbedder;
 /// impl EmbeddingProvider for MyEmbedder {
 ///     fn embed(&self, _text: &str) -> Result<Vec<f32>> { Ok(vec![0.0; 8]) }
+///     fn fingerprint(&self) -> memory_engine::types::EmbeddingFingerprint {
+///         memory_engine::types::EmbeddingFingerprint::new("my-model", "my-provider", 8)
+///     }
 /// }
 ///
 /// let proposer = MyProposer;
@@ -189,6 +192,9 @@ mod tests {
     impl EmbeddingProvider for FixedEmbed {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![0.1; self.0])
+        }
+        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+            crate::types::EmbeddingFingerprint::new("mock", "test", self.0)
         }
     }
 

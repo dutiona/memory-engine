@@ -6,7 +6,10 @@ use crate::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, ForgetPolicy,
     PersistenceClassifier, SummaryGenerator,
 };
-use crate::types::{AddFactOptions, AddFactRequest, EventType, Fact, FactType, NewEvent, NewFact};
+use crate::types::{
+    AddFactOptions, AddFactRequest, EmbeddingFingerprint, EventType, Fact, FactType, NewEvent,
+    NewFact,
+};
 
 const DIM: usize = 4;
 
@@ -17,6 +20,10 @@ struct MockEmbedder {
 impl EmbeddingProvider for MockEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>> {
         Ok(vec![0.5; self.dim])
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", self.dim)
     }
 }
 
@@ -2850,6 +2857,10 @@ fn embed_batch_default_impl_loops_embed() {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![0.1; self.dim])
         }
+
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("mock", "test", self.dim)
+        }
     }
 
     let embedder = CountingEmbedder {
@@ -2993,6 +3004,9 @@ fn add_facts_batch_rejects_embedding_count_mismatch() {
             // Always return exactly 1 embedding regardless of input
             Ok(vec![vec![0.5; DIM]])
         }
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("mock", "test", DIM)
+        }
     }
 
     let engine = MemoryEngine::builder(DIM).build().unwrap();
@@ -3038,6 +3052,9 @@ fn add_facts_batch_rollback_on_insert_failure() {
                 *last = vec![0.5; DIM + 1]; // wrong dim
             }
             Ok(results)
+        }
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("mock", "test", DIM)
         }
     }
 

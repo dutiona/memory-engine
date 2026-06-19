@@ -479,6 +479,10 @@ mod tests {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {
             Ok(vec![0.1, 0.2, 0.3, 0.4])
         }
+
+        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+            crate::types::EmbeddingFingerprint::new("mock", "test", 4)
+        }
     }
 
     fn engine() -> MemoryEngine {

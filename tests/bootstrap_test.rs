@@ -4,7 +4,8 @@ use std::io::Cursor;
 
 use chrono::Utc;
 use memory_engine::{
-    BootstrapConfig, EmbeddingProvider, KeywordExtractor, MemoryEngine, MemoryError,
+    BootstrapConfig, EmbeddingFingerprint, EmbeddingProvider, KeywordExtractor, MemoryEngine,
+    MemoryError,
 };
 
 /// Dummy embedder for testing — returns a fixed-length zero vector.
@@ -13,6 +14,9 @@ struct TestEmbedder;
 impl EmbeddingProvider for TestEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
         Ok(vec![0.0; 4])
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 4)
     }
 }
 

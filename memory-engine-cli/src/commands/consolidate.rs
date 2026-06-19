@@ -120,6 +120,7 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
             let embedder = HttpEmbeddingProvider::new(
                 embed_url.to_owned(),
                 embed_model.to_owned(),
+                "ollama".to_owned(), // TODO(#618): provider should come from config/CLI
                 None,
                 dim,
                 args.timeout_secs,

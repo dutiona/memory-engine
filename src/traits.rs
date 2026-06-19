@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::search::hybrid::SearchResult;
-use crate::types::{ConsolidationProposal, Fact};
+use crate::types::{ConsolidationProposal, EmbeddingFingerprint, Fact};
 
 // --- Phase 1: Embedding provider (fully used) ---
 
@@ -36,6 +36,18 @@ pub trait EmbeddingProvider: Send + Sync {
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         texts.iter().map(|t| self.embed(t)).collect()
     }
+
+    /// Declare this provider's [`EmbeddingFingerprint`] — the identity of the vector
+    /// space it produces (`model`, `provider`, `dim`, ...).
+    ///
+    /// **No default impl, by design.** A placeholder fingerprint would let the
+    /// mismatch guard (issue #614) compare two placeholders, find them equal, and
+    /// admit incompatible vector spaces — the exact silent corruption this identity
+    /// exists to prevent. Every provider declares its real identity.
+    ///
+    /// The returned identity describes the **document** vector space this provider
+    /// writes, and must stay congruent with what the provider actually computes.
+    fn fingerprint(&self) -> EmbeddingFingerprint;
 }
 
 // --- Phase 2 placeholder traits and types ---
@@ -677,8 +689,14 @@ mod tests {
             fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
                 Ok(vec![0.0])
             }
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            }
         }
-        let _: &dyn EmbeddingProvider = &Dummy;
+        let provider: &dyn EmbeddingProvider = &Dummy;
+        // fingerprint() must be callable through the trait object (vtable) — guards
+        // against the new required method accidentally breaking object-safety.
+        assert_eq!(provider.fingerprint().dim, 1);
     }
 
     #[test]
@@ -741,6 +759,9 @@ mod tests {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(vec![1.0, 2.0])
             }
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                crate::types::EmbeddingFingerprint::new("mock", "test", 2)
+            }
         }
         let c = Counter(std::sync::atomic::AtomicUsize::new(0));
         let results = c.embed_batch(&["a", "b", "c"]).unwrap();
@@ -758,6 +779,9 @@ mod tests {
             fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
                 Ok(vec![0.0])
             }
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            }
         }
         assert!(Dummy.embed_batch(&[]).unwrap().is_empty());
     }
@@ -770,6 +794,9 @@ mod tests {
                 Err(crate::error::MemoryError::Conflict(
                     crate::error::ConflictError::Arbitration("boom".into()),
                 ))
+            }
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
         assert!(Failing.embed_batch(&["a"]).is_err());

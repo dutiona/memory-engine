@@ -1,3 +1,4 @@
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
 
@@ -25,5 +26,11 @@ impl EmbeddingProvider for PassthroughEmbedder {
             )));
         }
         Ok(vec![self.embedding.clone()])
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        // TODO(#615): pre-computed embedding has no declared model identity; sentinel
+        // names the hole #615 will enforce against.
+        EmbeddingFingerprint::new("precomputed", "passthrough", self.embedding.len())
     }
 }

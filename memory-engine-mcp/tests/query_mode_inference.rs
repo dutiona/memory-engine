@@ -37,6 +37,10 @@ impl EmbeddingProvider for TestEmbedder {
         }
         Ok(embedding)
     }
+
+    fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+        memory_engine::EmbeddingFingerprint::new("mock", "test", self.dim)
+    }
 }
 
 fn make_engine() -> MemoryEngine {

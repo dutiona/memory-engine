@@ -20,6 +20,9 @@ impl memory_engine::EmbeddingProvider for FakeEmbed {
     fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
         Ok(vec![0.1, 0.2, 0.3, 0.4])
     }
+    fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+        memory_engine::EmbeddingFingerprint::new("mock", "test", DIM)
+    }
 }
 
 /// Create a DB with three undreamt facts (ids 1, 2, 3) at embedding dim 4.

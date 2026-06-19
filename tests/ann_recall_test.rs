@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::search::SearchConfig;
 use memory_engine::search::hybrid::{SearchMode, SearchQuery};
@@ -32,6 +33,9 @@ impl EmbeddingProvider for Blake3Embedder {
                 (f32::from(byte) / 255.0).mul_add(2.0, -1.0)
             })
             .collect())
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", DIM)
     }
 }
 

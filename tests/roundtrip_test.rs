@@ -1,4 +1,5 @@
 use chrono::Utc;
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::search::hybrid::{MatchType, SearchMode, SearchQuery};
@@ -30,6 +31,9 @@ impl EmbeddingProvider for TestEmbedder {
             }
         }
         Ok(embedding)
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", self.dim)
     }
 }
 

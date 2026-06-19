@@ -12,6 +12,7 @@
 //! let provider = HttpEmbeddingProvider::new(
 //!     "http://localhost:11434/v1/embeddings".to_string(),
 //!     "nomic-embed-text".to_string(),
+//!     "ollama".to_string(),   // serving backend (operator-declared)
 //!     None,   // no API key needed for local Ollama
 //!     768,    // expected embedding dimension
 //!     30,     // HTTP timeout in seconds

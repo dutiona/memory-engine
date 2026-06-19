@@ -30,7 +30,8 @@
 //!
 //! ```
 //! use memory_engine::{
-//!     AddFactRequest, EmbeddingProvider, FactType, MemoryEngine, MemoryError, MemoryQuery,
+//!     AddFactRequest, EmbeddingFingerprint, EmbeddingProvider, FactType, MemoryEngine, MemoryError,
+//!     MemoryQuery,
 //! };
 //!
 //! // A deterministic, dependency-free embedder: hash each byte into a fixed-dim
@@ -45,6 +46,9 @@
 //!             v[b as usize % self.dim] += 1.0;
 //!         }
 //!         Ok(v)
+//!     }
+//!     fn fingerprint(&self) -> EmbeddingFingerprint {
+//!         EmbeddingFingerprint::new("mock", "test", self.dim)
 //!     }
 //! }
 //!

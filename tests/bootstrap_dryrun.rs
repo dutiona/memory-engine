@@ -19,7 +19,8 @@ use std::sync::Mutex;
 use chrono::{DateTime, Datelike, Utc};
 use memory_engine::traits::PersistenceClassifier;
 use memory_engine::{
-    BootstrapConfig, EmbeddingProvider, Fact, KeywordExtractor, MemoryEngine, MemoryError,
+    BootstrapConfig, EmbeddingFingerprint, EmbeddingProvider, Fact, KeywordExtractor, MemoryEngine,
+    MemoryError,
 };
 
 /// Zero-vector embedder (dim 4) — retrieval is irrelevant to this audit.
@@ -27,6 +28,9 @@ struct TestEmbedder;
 impl EmbeddingProvider for TestEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
         Ok(vec![0.0; 4])
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 4)
     }
 }
 

@@ -1,5 +1,6 @@
 pub use memory_engine_embed::HttpEmbeddingProvider;
 
+use memory_engine::EmbeddingFingerprint;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
 
@@ -31,6 +32,13 @@ impl EmbeddingProvider for PassthroughEmbedder {
             )));
         }
         Ok(vec![self.embedding.clone()])
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        // TODO(#615): a pre-computed embedding carries no real model identity. The
+        // sentinel names the hole #615 will enforce against — the caller must declare
+        // the `model` its vector came from so it can be checked against the store.
+        EmbeddingFingerprint::new("precomputed", "passthrough", self.embedding.len())
     }
 }
 
@@ -66,5 +74,14 @@ mod tests {
                 .to_string()
                 .contains("cannot batch-embed 2 texts")
         );
+    }
+
+    #[test]
+    fn passthrough_fingerprint_is_sentinel_with_real_dim() {
+        let provider = PassthroughEmbedder::new(vec![0.1, 0.2, 0.3]);
+        let fp = provider.fingerprint();
+        assert_eq!(fp.model, "precomputed");
+        assert_eq!(fp.provider, "passthrough");
+        assert_eq!(fp.dim, 3);
     }
 }
