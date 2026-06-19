@@ -82,14 +82,15 @@ This is **deferral, not mutual exclusion** — concurrent guarded calls can both
 
 ## The delta vocabulary
 
-| Delta                                 | Effect on apply                                                                                                                                                     |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AddFact(NewFact)`                    | Insert a derived fact.                                                                                                                                              |
-| `AdjustScore { fact_id, adjustment }` | `importance += adjustment * IMPORTANCE_STEP`, clamped `[0,1]` (±2 quanta/cycle, cumulative). Targets the **base** `importance`, not the decayed `importance_score`. |
-| `Quarantine { fact_id, reason }`      | Soft-expire (`t_expired`) + a `quarantine` metadata marker. Removed from retrieval, kept for mining; reported as `ExpiredReason::Quarantined`.                      |
-| `Promote { fact_id, provenance }`     | Create a pinned wisdom fact + lineage, reusing the promotion pipeline.                                                                                              |
-| `TagOutcome { fact_id, outcome }`     | Append an `OutcomeSignal` event.                                                                                                                                    |
-| `Supersede { old_id, new_id }`        | Expire `old_id` + a `"supersedes"` graph edge `new_id → old_id`. Both facts must pre-exist.                                                                         |
+| Delta                                 | Effect on apply                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AddFact(NewFact)`                    | Insert a derived fact.                                                                                                                                                                                                                                                                                                                                                    |
+| `AdjustScore { fact_id, adjustment }` | `importance += adjustment * IMPORTANCE_STEP`, clamped `[0,1]` (±2 quanta/cycle, cumulative). Targets the **base** `importance`, not the decayed `importance_score`.                                                                                                                                                                                                       |
+| `Quarantine { fact_id, reason }`      | Soft-expire (`t_expired`) + a `quarantine` metadata marker. Removed from retrieval, kept for mining; reported as `ExpiredReason::Quarantined`.                                                                                                                                                                                                                            |
+| `Promote { fact_id, provenance }`     | Create a pinned wisdom fact + lineage, reusing the promotion pipeline.                                                                                                                                                                                                                                                                                                    |
+| `TagOutcome { fact_id, outcome }`     | Append an `OutcomeSignal` event.                                                                                                                                                                                                                                                                                                                                          |
+| `Supersede { old_id, new_id }`        | Expire `old_id` + a `"supersedes"` graph edge `new_id → old_id`. Both facts must pre-exist.                                                                                                                                                                                                                                                                               |
+| `Synthesize { sources, new_fact }`    | Atomically merge: insert `new_fact`, then for **each** source expire it + a `"supersedes"` edge `new_fact → source`, plus one `lineage` row. Sources must be non-empty + active. The merge primitive an LLM backend emits (it cannot be `AddFact + Supersede` — the synthetic's id is not knowable until insert — nor `AddFact + Quarantine`, which orphans the lineage). |
 
 `apply_cycle_report` validates the whole report against a pre-apply snapshot, then
 applies every delta in a single transaction — a malformed delta leaves the store
@@ -126,5 +127,38 @@ cycle (it mutates the store, which would break the producer's purity); schedule 
 separate operator step. Identity computation (ANCHORS/CORE/PREDICTIONS) is #57; abstract
 pattern extraction (R9), hierarchical composition (R13), and content-based correction
 detection are #578.
+
+## Pluggable backends: `LlmDreamCycle` (#554)
+
+The consolidation backend is **pluggable and opt-in**. Because `run_dream_cycle_guarded`
+takes `&dyn DreamCycle`, "which backend" is simply "which `DreamCycle` implementation" —
+no core signature changes. The shipped `DefaultDreamCycle` (above) decides deterministically
+in pure Rust; `LlmDreamCycle` delegates the _what to merge_ decision to an LLM.
+
+`LlmDreamCycle` holds two injected consumer traits and keeps the engine LLM-free:
+
+- a **`DeltaProposer`** — `propose(window, prior_wisdom) -> ConsolidationProposal`, returning
+  merge groups (`source_ids` + `summary` text) and **nothing else**: it does not embed and
+  does not touch the store. The HTTP implementation (`memory-engine-embed`'s
+  `HttpDeltaProposer`) drives Ollama `/api/generate` in JSON mode at temperature 0.
+- an **`EmbeddingProvider`** — the backend embeds its own summary text, so the engine never
+  embeds on a backend's behalf (`apply_cycle_report` validates the embedding's dimension but
+  does not compute it).
+
+`run` then mirrors `DefaultDreamCycle`'s loop — select the undreamt window, decide, emit a
+delta `CycleReport` — turning each merge group into a `Synthesize` delta. Three rails make an
+untrusted proposer safe:
+
+1. **Window clamp.** Every proposed `source_id` is filtered to the ids actually in the fed
+   window (`validate_report` checks existence/active but _not_ window membership), so an LLM
+   cannot act on facts it was never shown. A group left with no in-window source is dropped.
+2. **`processed_ids` = the whole window**, never the proposer's output, so a forgetful
+   proposer cannot leave a fact un-dream-marked and livelock the #209 guard.
+3. **Apply-time validation.** Each `Synthesize` still clears `validate_report` and applies in
+   the one all-or-nothing transaction.
+
+A merge inherits the **max importance** of its sources, so consolidating high-value facts does
+not yield a trivially-forgettable summary. The CLI `consolidate --backend {dream-cycle|llm}`
+subcommand wires either backend end-to-end (see the [CLI reference](../reference/cli-inspector.md)).
 
 See also: [consolidation pipeline](consolidation.md), [bi-temporal semantics](bi-temporal-semantics.md).

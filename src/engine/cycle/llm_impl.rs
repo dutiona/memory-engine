@@ -38,6 +38,35 @@ const METHOD_VERSION: &str = "llm-proposer-v1";
 /// Holds borrowed references to the proposer and the embedder (both `Send + Sync`);
 /// construct one per `run_dream_cycle` call. See the [module docs](self) for the
 /// safety rails.
+///
+/// # Injecting the backend
+///
+/// The proposer and embedder are consumer-supplied; the engine never embeds or calls
+/// an LLM on their behalf. Wire them in, then hand the cycle to
+/// [`run_dream_cycle_guarded`](crate::MemoryEngine::run_dream_cycle_guarded):
+///
+/// ```
+/// use memory_engine::{DeltaProposer, EmbeddingProvider, LlmDreamCycle};
+/// use memory_engine::error::Result;
+/// use memory_engine::types::{ConsolidationProposal, Fact};
+///
+/// struct MyProposer; // e.g. memory-engine-embed's HttpDeltaProposer
+/// impl DeltaProposer for MyProposer {
+///     fn propose(&self, _window: &[Fact], _prior: &[Fact]) -> Result<ConsolidationProposal> {
+///         Ok(ConsolidationProposal::default()) // nothing to merge
+///     }
+/// }
+/// struct MyEmbedder;
+/// impl EmbeddingProvider for MyEmbedder {
+///     fn embed(&self, _text: &str) -> Result<Vec<f32>> { Ok(vec![0.0; 8]) }
+/// }
+///
+/// let proposer = MyProposer;
+/// let embedder = MyEmbedder;
+/// let backend = LlmDreamCycle::new(&proposer, &embedder);
+/// // engine.run_dream_cycle_guarded(&backend)?  — then apply_cycle_report(...)
+/// let _ = &backend;
+/// ```
 pub struct LlmDreamCycle<'a> {
     proposer: &'a dyn DeltaProposer,
     embedder: &'a dyn EmbeddingProvider,

@@ -157,6 +157,44 @@ memory-engine-cli --format json dump all    # single JSON object: {"facts": [...
 
 Lists active facts and/or events to stdout. Useful for quick debugging. `--format json dump all` emits a single valid JSON document.
 
+#### `consolidate --backend {dream-cycle|llm}` — Run a Dream Cycle
+
+```bash
+# Deterministic, zero-LLM backend (default)
+memory-engine-cli --format json consolidate --backend dream-cycle
+
+# LLM backend (Ollama): the proposer decides merges, the embedder embeds summaries
+memory-engine-cli --format json consolidate \
+  --backend llm \
+  --llm-url http://localhost:11434/api/generate --llm-model gemma4:26b \
+  --embed-url http://localhost:11434/v1/embeddings --embed-model nomic-embed-text
+```
+
+Opens the database **writable**, runs the chosen consolidation backend through the
+#209 caller-write guard (`run_dream_cycle_guarded`), applies the resulting report, and
+prints a machine-readable JSON result:
+
+```json
+{
+  "backend": "llm",
+  "outcome": "ran", // or "skipped" (the guard deferred this run)
+  "skip_reason": null,
+  "applied": {
+    "synthesized": 1,
+    "promoted": 0,
+    "...": "the ApplyResult deltas"
+  },
+  "elapsed_ms": 812,
+  "llm": { "llm_calls": 1, "eval_count": 40, "prompt_eval_count": 15 } // null for dream-cycle
+}
+```
+
+The `--backend llm` path requires all four `--llm-*` / `--embed-*` flags (the LLM backend
+embeds its own summaries). Because of the #209 guard, the first invocation after a write
+**defers** (`"outcome": "skipped"`); a subsequent quiet invocation runs. This is the
+subprocess seam the efficiency×quality benchmark drives — see
+[Dream Cycle: pluggable backends](../advanced/dream-cycle.md#pluggable-backends-llmdreamcycle-554).
+
 ### Output Formats
 
 | Format  | Flag             | Use Case                              |
@@ -167,7 +205,7 @@ Lists active facts and/or events to stdout. Useful for quick debugging. `--forma
 
 ### Architecture
 
-The CLI is a workspace member crate (`memory-engine-cli/`) with no LLM dependencies. Each subcommand is a thin module in `src/commands/` that:
+The CLI is a workspace member crate (`memory-engine-cli/`). Its inspection commands have no LLM dependencies; only the optional `consolidate --backend llm` path pulls in `memory-engine-embed` for the HTTP proposer + embedder. Each subcommand is a thin module in `src/commands/` that:
 
 1. Opens the engine via `db::open_engine()` (probes `embed_dim` from config table)
 2. Calls the library's inspection API
