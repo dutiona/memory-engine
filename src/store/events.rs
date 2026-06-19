@@ -5,19 +5,10 @@ use crate::error::{MemoryError, Result};
 use crate::store::upcaster::UpcasterRegistry;
 use crate::types::{Event, EventType, NewEvent};
 
-/// Filter for querying events.
-#[derive(Debug, Clone, Default)]
-pub struct EventFilter {
-    pub since: Option<DateTime<Utc>>,
-    pub until: Option<DateTime<Utc>>,
-    pub session_id: Option<String>,
-    pub event_type: Option<EventType>,
-    pub source: Option<String>,
-    pub limit: Option<usize>,
-    pub id_min: Option<i64>,
-    pub id_max: Option<i64>,
-    pub order_by_id: bool,
-}
+// `EventFilter` relocated to `crate::types` (#629 — the dialect-free storage port
+// must not reference a type living inside the SQLite store). Shim preserves the
+// original `crate::store::events::EventFilter` path.
+pub use crate::types::EventFilter;
 
 /// Store for the append-only event log.
 pub struct EventStore<'a> {

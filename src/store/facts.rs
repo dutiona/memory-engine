@@ -30,23 +30,11 @@ const FACT_COLUMNS: &str = "id, content, content_hash, embedding, fact_type, \
 /// [`row_to_scoring_row`].
 const SCORING_COLUMNS: &str = "id, fact_type, last_accessed, access_count, importance, is_pinned";
 
-/// A lightweight projection of a fact carrying only the fields the forgetting
-/// pass reads when scoring importance.
-///
-/// Prune evaluates **every** active fact (importance is a global, full-scan
-/// computation), so materializing full [`Fact`] rows made the prune working set
-/// scale with corpus size × embedding dimension × content length. This
-/// projection bounds it to a handful of scalar fields per fact while preserving
-/// exact full-scan semantics. See [`FactStore::list_active_scoring`].
-#[derive(Debug, Clone)]
-pub struct FactScoringRow {
-    pub id: i64,
-    pub fact_type: FactType,
-    pub last_accessed: DateTime<Utc>,
-    pub access_count: i64,
-    pub importance: f64,
-    pub is_pinned: bool,
-}
+// `FactScoringRow` and `SessionFact` relocated to `crate::types` (#629 — the
+// dialect-free storage port must not reference types living inside the SQLite
+// store). Shims preserve the original `crate::store::facts::{FactScoringRow,
+// SessionFact}` paths (e.g. `forgetting::policy` keeps its import + trait impl).
+pub use crate::types::{FactScoringRow, SessionFact};
 
 #[allow(
     clippy::trivially_copy_pass_by_ref,
@@ -1146,13 +1134,6 @@ impl<'a> FactStore<'a> {
         let deleted = self.conn.execute(&sql, params.as_slice())?;
         Ok(deleted)
     }
-}
-
-/// Lightweight fact info for session-based edge creation.
-/// Avoids deserializing embeddings — only carries the fact id needed for pairwise edge wiring.
-#[derive(Debug, Clone)]
-pub struct SessionFact {
-    pub id: i64,
 }
 
 fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fact> {
