@@ -282,10 +282,19 @@ fn verify_embedding_identity_enforces_match() {
     }
 
     let engine = MemoryEngine::builder(DIM).build().unwrap();
-    // Fresh store has no identity yet -> any provider is compatible.
+    // Fresh store has no identity yet -> any same-dim provider is compatible.
     engine
         .verify_embedding_identity(&MockEmbedder { dim: DIM })
-        .expect("fresh store compatible with any provider");
+        .expect("fresh store compatible with any same-dim provider");
+    // ...but a wrong-dim provider still fails fast on a fresh store (would otherwise
+    // fail on every later write/query).
+    let dim_err = engine
+        .verify_embedding_identity(&MockEmbedder { dim: DIM + 1 })
+        .expect_err("wrong-dim provider must fail the eager check on a fresh store");
+    assert!(
+        matches!(dim_err, MemoryError::EmbeddingDimension { .. }),
+        "expected EmbeddingDimension, got {dim_err:?}"
+    );
 
     // Stamp the identity via a real embedding write.
     let req = AddFactRequest {

@@ -449,18 +449,27 @@ impl MemoryEngine {
     /// vector, so the engine cannot fingerprint-check per query. This one-shot check
     /// catches a misconfigured provider — one whose vector space differs from the one
     /// the store was built with — **before** any query silently returns
-    /// wrong-vector-space results. A fresh store with no recorded identity is compatible
-    /// with any provider (nothing to disagree with).
+    /// wrong-vector-space results. On a **fresh** store (no recorded identity) there is
+    /// no model to disagree with, but the provider's `dim` must still match this engine's
+    /// configured dimension — otherwise every subsequent write/query would fail on
+    /// `EmbeddingDimension`, so we fail fast here too (mirroring `record_if_absent`).
     ///
     /// This is read-only and does not establish the identity (that happens lazily on the
     /// first embedding *write*, via [`record_embedding_identity`](Self::record_embedding_identity)).
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::EmbeddingModelMismatch`] if the provider's fingerprint
+    /// Returns [`MemoryError::EmbeddingDimension`] if the provider's dimension differs
+    /// from this engine's, or [`MemoryError::EmbeddingModelMismatch`] if its fingerprint
     /// disagrees with the store's recorded identity.
     pub fn verify_embedding_identity(&self, provider: &dyn EmbeddingProvider) -> Result<()> {
         let candidate = provider.fingerprint();
+        if candidate.dim != self.embed_dim {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: self.embed_dim,
+                actual: candidate.dim,
+            });
+        }
         self.with_read(|conn| crate::store::embedding_meta::check_compatible(conn, &candidate))
     }
 
