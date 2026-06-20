@@ -28,28 +28,40 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
             ))
         })?;
 
-    let mut hasher = blake3::Hasher::new();
-    let hashing_writer = HashingWriter {
-        inner: file,
-        hasher: &mut hasher,
-    };
-    let mut encoder = zstd::Encoder::new(hashing_writer, 3)
-        .map_err(|e| ArchiveError::Codec(format!("failed to create zstd encoder: {e}")))?;
-    serde_json::to_writer(&mut encoder, pak)?;
-    encoder
-        .finish()
-        .map_err(|e| ArchiveError::Codec(format!("failed to finalize zstd stream: {e}")))?;
+    // The temp file now exists. Any failure while serializing/compressing or
+    // renaming must remove it, or a failed archive leaves an orphan `.pak.tmp`
+    // on disk (CWE-459) — the temp-file analogue of the committed-`.pak` orphan
+    // the caller guards against. Run the fallible work in a closure and clean up
+    // on `Err`.
+    let write_result: Result<String> = (|| {
+        let mut hasher = blake3::Hasher::new();
+        let hashing_writer = HashingWriter {
+            inner: file,
+            hasher: &mut hasher,
+        };
+        let mut encoder = zstd::Encoder::new(hashing_writer, 3)
+            .map_err(|e| ArchiveError::Codec(format!("failed to create zstd encoder: {e}")))?;
+        serde_json::to_writer(&mut encoder, pak)?;
+        encoder
+            .finish()
+            .map_err(|e| ArchiveError::Codec(format!("failed to finalize zstd stream: {e}")))?;
 
-    let hash = hasher.finalize().to_hex().to_string();
+        let hash = hasher.finalize().to_hex().to_string();
 
-    fs::rename(&tmp_path, path).map_err(|e| {
-        ArchiveError::Io(format!(
-            "failed to rename {} -> {}: {e}",
-            tmp_path.display(),
-            path.display()
-        ))
-    })?;
-    Ok(hash)
+        fs::rename(&tmp_path, path).map_err(|e| {
+            ArchiveError::Io(format!(
+                "failed to rename {} -> {}: {e}",
+                tmp_path.display(),
+                path.display()
+            ))
+        })?;
+        Ok(hash)
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
 }
 
 /// Read and decompress a `.pak` file. Caps at 4 GiB decompressed.

@@ -289,11 +289,14 @@ impl<'a> EdgeStore<'a> {
             return Ok(Vec::new());
         }
         let ids_json = serde_json::to_string(fact_ids)?;
+        // Parse the JSON id array exactly once via a CTE, then reuse it for both
+        // endpoint predicates (vs. evaluating json_each(?1) twice).
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
+            "WITH ids(value) AS (SELECT value FROM json_each(?1))
+             SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges
-             WHERE source_fact_id IN (SELECT value FROM json_each(?1))
-               AND target_fact_id IN (SELECT value FROM json_each(?1))
+             WHERE source_fact_id IN (SELECT value FROM ids)
+               AND target_fact_id IN (SELECT value FROM ids)
              ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![ids_json], row_to_edge)?;
