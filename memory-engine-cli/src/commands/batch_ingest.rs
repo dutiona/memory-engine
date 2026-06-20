@@ -184,6 +184,23 @@ fn print_summary(summary: &IngestSummary, format: OutputFormat) -> anyhow::Resul
 /// realistic fact-as-JSON record while still bounding the worst case.
 const MAX_LINE_BYTES: u64 = 8 << 20; // 8 MiB
 
+/// Ingest facts from a byte stream of newline-delimited JSON (JSONL) records.
+///
+/// Each line must deserialize as a JSONL fact record. Malformed lines, lines
+/// that fail validation, and lines exceeding [`MAX_LINE_BYTES`] are skipped
+/// (counted in `total_skipped`) rather than aborting the run. Valid records are
+/// embedded and inserted in transactions of `batch_size`; a batch the engine
+/// rejects is counted as skipped plus one `failed_batches`, and ingestion
+/// continues. Progress is reported on stderr unless `format` is JSON.
+///
+/// `default_scope` is applied to records that omit a `scope` field; a per-record
+/// `scope` in the JSONL always takes precedence.
+///
+/// # Errors
+///
+/// Returns an error when the call ingested zero facts while at least one line was
+/// skipped — i.e. every parseable record failed validation or batching. A
+/// wholesale failure is surfaced rather than reported as a successful no-op.
 pub fn ingest_from_reader(
     engine: &MemoryEngine,
     reader: impl Read,
