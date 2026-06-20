@@ -692,12 +692,8 @@ mod tests {
     /// the `consolidate` delegation arm.
     struct MockGen;
     impl SummaryGenerator for MockGen {
-        fn summarize(&self, facts: &[Fact]) -> Result<String> {
-            Ok(facts
-                .iter()
-                .map(|f| f.content.as_str())
-                .collect::<Vec<_>>()
-                .join("; "))
+        fn summarize(&self, items: &[crate::traits::SummarizableContent<'_>]) -> Result<String> {
+            Ok(items.iter().map(|c| c.text).collect::<Vec<_>>().join("; "))
         }
     }
 
