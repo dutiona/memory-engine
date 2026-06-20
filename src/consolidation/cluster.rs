@@ -2,7 +2,6 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::search::vector::cosine_similarity;
-use crate::store::facts::FactStore;
 use crate::store::summaries::SummaryStore;
 use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
 use crate::types::{ConsolidationLevel, Fact, NewSummary};
@@ -28,22 +27,20 @@ use crate::types::{ConsolidationLevel, Fact, NewSummary};
 /// Returns `MemoryError::Serialization` on JSON serialization failure.
 pub fn cluster_fusion(
     conn: &Connection,
+    facts: &[&Fact],
     generator: &dyn SummaryGenerator,
     embedder: &dyn EmbeddingProvider,
     embed_dim: usize,
     min_cluster_size: usize,
     cluster_threshold: f32,
 ) -> Result<usize> {
-    // Safety cap lifted to the shared `super::MAX_FACTS_FOR_CLUSTERING` (#345) so
-    // the dedup and cluster caps live in one place with their divergent skip
-    // policies documented side by side. Checked BEFORE deleting existing summaries
-    // to avoid wiping them without producing replacements.
-    let fact_store = FactStore::new(conn, embed_dim);
-    let active_facts = fact_store.list_active(None)?;
-
-    if active_facts.len() > super::MAX_FACTS_FOR_CLUSTERING {
+    // `facts` is the post-dedup active set, loaded once by the caller and shared
+    // with the dedup pass (#389). Safety cap (`super::MAX_FACTS_FOR_CLUSTERING`,
+    // #345) checked BEFORE deleting existing summaries so we never wipe them
+    // without producing replacements.
+    if facts.len() > super::MAX_FACTS_FOR_CLUSTERING {
         tracing::warn!(
-            count = active_facts.len(),
+            count = facts.len(),
             max = super::MAX_FACTS_FOR_CLUSTERING,
             "clustering skipped: too many active facts for O(N^2) comparison"
         );
@@ -56,7 +53,7 @@ pub fn cluster_fusion(
     summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
 
     // Greedy single-linkage clustering
-    let clusters = greedy_cluster(&active_facts, cluster_threshold);
+    let clusters = greedy_cluster(facts, cluster_threshold);
 
     let mut clusters_created = 0;
     for cluster in &clusters {
@@ -64,15 +61,13 @@ pub fn cluster_fusion(
             continue;
         }
 
-        let cluster_facts: Vec<Fact> = cluster
-            .iter()
-            .map(|&idx| active_facts[idx].clone())
-            .collect();
-        let source_ids: Vec<i64> = cluster_facts.iter().map(|f| f.id).collect();
+        // #679: index directly into the borrowed `facts` — no per-member `Fact`
+        // clone (the cluster pass previously cloned every member into a `Vec<Fact>`).
+        let source_ids: Vec<i64> = cluster.iter().map(|&idx| facts[idx].id).collect();
 
-        let items: Vec<SummarizableContent<'_>> = cluster_facts
+        let items: Vec<SummarizableContent<'_>> = cluster
             .iter()
-            .map(|f| SummarizableContent::new(&f.content, &f.embedding))
+            .map(|&idx| SummarizableContent::new(&facts[idx].content, &facts[idx].embedding))
             .collect();
         let (summary_text, summary_embedding) =
             super::summarize_and_embed(generator, embedder, &items, embed_dim)?;
@@ -82,8 +77,8 @@ pub fn cluster_fusion(
         let scope_id = {
             let mut scope_counts: std::collections::HashMap<i64, usize> =
                 std::collections::HashMap::new();
-            for fact in &cluster_facts {
-                *scope_counts.entry(fact.scope_id).or_default() += 1;
+            for &idx in cluster {
+                *scope_counts.entry(facts[idx].scope_id).or_default() += 1;
             }
             scope_counts
                 .into_iter()
@@ -110,7 +105,7 @@ pub fn cluster_fusion(
 ///
 /// For each unassigned fact, find all facts with cosine similarity > threshold.
 /// Group them into a cluster.
-fn greedy_cluster(facts: &[Fact], threshold: f32) -> Vec<Vec<usize>> {
+fn greedy_cluster(facts: &[&Fact], threshold: f32) -> Vec<Vec<usize>> {
     let n = facts.len();
     let mut assigned = vec![false; n];
     let mut clusters = Vec::new();
@@ -151,8 +146,32 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
     use crate::types::{FactType, NewFact};
+
+    /// Load the active facts and run `cluster_fusion` over borrowed references —
+    /// the orchestrator now owns the single load (#389), so tests mirror that here.
+    fn cluster(
+        conn: &Connection,
+        generator: &dyn SummaryGenerator,
+        embedder: &dyn EmbeddingProvider,
+        dim: usize,
+        min_cluster_size: usize,
+        cluster_threshold: f32,
+    ) -> Result<usize> {
+        let active = FactStore::new(conn, dim).list_active(None)?;
+        let refs: Vec<&Fact> = active.iter().collect();
+        cluster_fusion(
+            conn,
+            &refs,
+            generator,
+            embedder,
+            dim,
+            min_cluster_size,
+            cluster_threshold,
+        )
+    }
 
     /// Mock generator that concatenates fact contents.
     struct MockGenerator;
@@ -219,7 +238,7 @@ mod tests {
 
         let mock_gen = MockGenerator;
         let mock_embed = MockEmbedder { embed_dim: dim };
-        let clusters = cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
+        let clusters = cluster(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
         assert_eq!(clusters, 2);
 
         let summaries = SummaryStore::new(&conn, dim)
@@ -240,7 +259,7 @@ mod tests {
 
         let mock_gen = MockGenerator;
         let mock_embed = MockEmbedder { embed_dim: dim };
-        let clusters = cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
+        let clusters = cluster(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
         assert_eq!(clusters, 0);
     }
 
@@ -256,7 +275,7 @@ mod tests {
 
         let mock_gen = MockGenerator;
         let mock_embed = MockEmbedder { embed_dim: dim };
-        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
+        cluster(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
 
         let summaries = SummaryStore::new(&conn, dim)
             .list_by_level(&ConsolidationLevel::Cluster)
@@ -280,8 +299,8 @@ mod tests {
         let mock_embed = MockEmbedder { embed_dim: dim };
 
         // Run twice — should have exactly the same result
-        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
-        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
+        cluster(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
+        cluster(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
 
         let summaries = SummaryStore::new(&conn, dim)
             .list_by_level(&ConsolidationLevel::Cluster)
@@ -305,7 +324,7 @@ mod tests {
         init_schema(&loose).unwrap();
         insert_fact(&loose, dim, "a", a.clone());
         insert_fact(&loose, dim, "b", b.clone());
-        let made = cluster_fusion(
+        let made = cluster(
             &loose,
             &MockGenerator,
             &MockEmbedder { embed_dim: dim },
@@ -321,7 +340,7 @@ mod tests {
         init_schema(&strict).unwrap();
         insert_fact(&strict, dim, "a", a);
         insert_fact(&strict, dim, "b", b);
-        let made = cluster_fusion(
+        let made = cluster(
             &strict,
             &MockGenerator,
             &MockEmbedder { embed_dim: dim },

@@ -19,6 +19,7 @@ use crate::traits::{
     ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummarizableContent,
     SummaryGenerator,
 };
+use crate::types::Fact;
 
 /// Safety cap for the O(N·M) [`local_dedup`] pass. Beyond this many active facts
 /// the pass is **skipped and the consolidation watermark is NOT advanced**, so the
@@ -136,6 +137,11 @@ fn consolidate_with_caps(
 
     let tx = conn.unchecked_transaction()?;
 
+    // #389: load the active set ONCE and share it across the dedup and cluster
+    // passes, instead of each pass re-querying the store (and re-deserializing
+    // every embedding BLOB — ~147 MB for 50k×768-dim, previously paid twice).
+    let active_facts = crate::store::facts::FactStore::new(&tx, embed_dim).list_active(None)?;
+
     // The dedup-skip state is carried in the return type ([`DedupOutcome`]), not an
     // in-band `usize::MAX` sentinel (#272). A `Skipped` pass contributes no
     // removals and leaves the watermark unadvanced so the over-cap facts are
@@ -143,6 +149,7 @@ fn consolidate_with_caps(
     let (duplicates_removed, expired_ids, dedup_skipped) = match local_dedup(
         &tx,
         embed_dim,
+        &active_facts,
         config.dedup_threshold,
         max_dedup_facts,
         last,
@@ -155,8 +162,19 @@ fn consolidate_with_caps(
         DedupOutcome::Skipped { .. } => (0, Vec::new(), true),
     };
 
+    // Cluster operates on the post-dedup survivors: the loaded facts minus the ones
+    // dedup just expired (no re-query, borrowed so no clone — #679/#389). On the
+    // dedup-skip path `expired_ids` is empty, so this is the full loaded set, which
+    // `cluster_fusion`'s own cap then skips (the two caps are equal).
+    let expired_set: std::collections::HashSet<i64> = expired_ids.iter().copied().collect();
+    let survivors: Vec<&Fact> = active_facts
+        .iter()
+        .filter(|f| !expired_set.contains(&f.id))
+        .collect();
+
     let clusters_created = cluster_fusion(
         &tx,
+        &survivors,
         generator,
         embedder,
         embed_dim,
