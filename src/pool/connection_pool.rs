@@ -20,6 +20,44 @@ use crate::store::schema::{
 /// to surface a genuine leak.
 const DEFAULT_READ_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Validate a caller-supplied `read_pool_size` for a file-backed pool.
+///
+/// Enforces the lower bound (`>= 1`): a file-backed pool needs at least one
+/// read connection, and `0` is *not* an implicit in-memory request — see
+/// [`BackendMode`] (#340/#356). Returns the validated value so callers can use
+/// it directly.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Pool`] if `read_pool_size == 0`.
+fn validate_read_pool_size(read_pool_size: usize) -> Result<usize> {
+    if read_pool_size == 0 {
+        return Err(MemoryError::Pool(
+            "read_pool_size must be >= 1 for a file-backed pool; use \
+             ConnectionPool::open_memory for an in-memory database"
+                .to_string(),
+        ));
+    }
+    Ok(read_pool_size)
+}
+
+/// Storage backend a [`ConnectionPool`] is wired to.
+///
+/// This replaces the previous `read_pool_size == 0` sentinel (#356): a zero
+/// read-pool size used to *imply* in-memory mode, which conflated the two
+/// orthogonal facts ("is this in-memory?" vs "how many read connections?") and
+/// let a file-backed `open(.., 0, ..)` silently route every read through the
+/// write connection (#340). The discriminant is now an explicit variant the
+/// read path matches on, so the two modes can never be confused.
+enum BackendMode {
+    /// File-backed: `read_pool_size` pooled read connections (always `>= 1`,
+    /// enforced at construction) plus the exclusive write connection.
+    FileBacked { read_pool_size: usize },
+    /// In-memory: a single shared connection serves both reads and writes
+    /// (reads are serialized through the write `Mutex`).
+    InMemory,
+}
+
 /// A connection pool with N read connections and 1 write connection.
 ///
 /// `SQLite` WAL supports concurrent readers with a single writer.
@@ -33,7 +71,10 @@ pub struct ConnectionPool {
     path: Option<PathBuf>,
     #[allow(dead_code)] // complete pool API — used after #108 engine split
     embed_dim: usize,
-    read_pool_size: usize,
+    /// Which backend this pool drives. The canonical discriminant for the
+    /// in-memory vs file-backed read dispatch (replaces the old
+    /// `read_pool_size == 0` sentinel — see [`BackendMode`]).
+    mode: BackendMode,
     read_only: bool,
     /// Bound on the wait for a read connection in [`Self::read`]. Defaults to
     /// [`DEFAULT_READ_ACQUIRE_TIMEOUT`]; exposed as a field so a future
@@ -64,12 +105,22 @@ impl Drop for ReadGuard<'_> {
     }
 }
 
-/// RAII guard for in-memory mode: wraps write connection `MutexGuard`.
-pub struct WriteAsReadGuard<'a> {
+/// RAII read guard for in-memory mode: a *serialized* read through the shared
+/// write connection's `MutexGuard`.
+///
+/// The name reflects the semantics, not a capability (#357): in-memory mode has
+/// no separate read-only connection, so a "read" simply locks the single
+/// read-write `write_conn`. The wrapped [`Connection`] is therefore fully
+/// writable and carries **no** `PRAGMA query_only = ON` — unlike the file-backed
+/// read connections, which are opened read-only at the `SQLite` level. The guard
+/// is named `SerializedReadGuard` (not the misleading `WriteAsReadGuard`) so
+/// callers do not mistake it for a read-only handle; the read path holds the
+/// write `Mutex`, which is what serializes concurrent in-memory reads.
+pub struct SerializedReadGuard<'a> {
     guard: MutexGuard<'a, Connection>,
 }
 
-impl std::ops::Deref for WriteAsReadGuard<'_> {
+impl std::ops::Deref for SerializedReadGuard<'_> {
     type Target = Connection;
     fn deref(&self) -> &Connection {
         &self.guard
@@ -79,7 +130,9 @@ impl std::ops::Deref for WriteAsReadGuard<'_> {
 /// Enum over read guard types — file-backed (pooled) vs in-memory (write conn).
 pub enum ReadConn<'a> {
     Pooled(ReadGuard<'a>),
-    InMemory(WriteAsReadGuard<'a>),
+    /// In-memory read: the write connection reused under serialization. The
+    /// inner connection is writable and has no `query_only` PRAGMA (#357).
+    InMemory(SerializedReadGuard<'a>),
 }
 
 impl std::ops::Deref for ReadConn<'_> {
@@ -100,6 +153,11 @@ impl ConnectionPool {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::Pool` if `read_pool_size` is `0`: a file-backed
+    /// pool needs at least one read connection, and `0` is *not* a covert
+    /// request for in-memory mode (use [`open_memory`](Self::open_memory) for
+    /// that). Accepting it would yield a file-backed pool that serializes every
+    /// read through the write connection (#340/#356).
     /// Returns `MemoryError::Database` if any connection or schema setup fails.
     /// Returns `MemoryError::Migration` if the schema version cannot be determined
     /// or the stored version is newer than the compiled-in maximum.
@@ -111,6 +169,8 @@ impl ConnectionPool {
         read_pool_size: usize,
         backup_dir: Option<&Path>,
     ) -> Result<Self> {
+        let read_pool_size = validate_read_pool_size(read_pool_size)?;
+
         let path_str = path.to_string_lossy();
         let write_conn = open_connection(&path_str)?;
         init_schema(&write_conn)?;
@@ -130,7 +190,7 @@ impl ConnectionPool {
             read_available: Condvar::new(),
             path: Some(path.to_path_buf()),
             embed_dim,
-            read_pool_size,
+            mode: BackendMode::FileBacked { read_pool_size },
             read_only: false,
             read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
         })
@@ -151,7 +211,7 @@ impl ConnectionPool {
             read_available: Condvar::new(),
             path: None,
             embed_dim,
-            read_pool_size: 0,
+            mode: BackendMode::InMemory,
             read_only: false,
             read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
         })
@@ -168,12 +228,17 @@ impl ConnectionPool {
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::Pool` if `read_pool_size` is `0` (same footgun as
+    /// [`open`](Self::open) — a file-backed pool needs at least one read
+    /// connection; #340/#356).
     /// Returns `MemoryError::Database` if any connection or pragma setup fails.
     /// Returns `MemoryError::Migration` if the file does not exist, the schema
     /// is uninitialized, or the schema needs migration.
     /// Returns `MemoryError::UnsupportedEpoch` if the DB epoch is from the future.
     pub fn open_read_only(path: &Path, embed_dim: usize, read_pool_size: usize) -> Result<Self> {
         use crate::store::schema::validate_schema_version;
+
+        let read_pool_size = validate_read_pool_size(read_pool_size)?;
 
         // Reject nonexistent or non-file paths before SQLite can act
         if !path.is_file() {
@@ -201,7 +266,7 @@ impl ConnectionPool {
             read_available: Condvar::new(),
             path: Some(path.to_path_buf()),
             embed_dim,
-            read_pool_size,
+            mode: BackendMode::FileBacked { read_pool_size },
             read_only: true,
             read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
         })
@@ -223,11 +288,20 @@ impl ConnectionPool {
     /// within `read_acquire_timeout` — turning a previously-unbounded hang
     /// (e.g. a leaked or deadlocked guard) into an observable failure.
     pub fn read(&self) -> Result<ReadConn<'_>> {
-        if self.read_pool_size == 0 {
-            // In-memory mode: use write connection for reads (serialized)
-            let guard = self.write_conn.lock();
-            return Ok(ReadConn::InMemory(WriteAsReadGuard { guard }));
-        }
+        // Dispatch on the canonical backend discriminant, never on a derived
+        // count (#340/#356). In-memory mode has no pooled read connections, so
+        // a read serializes through the single shared write connection.
+        let read_pool_size = match self.mode {
+            BackendMode::InMemory => {
+                // NOTE: in-memory mode locks the write connection here. The
+                // parking_lot `Mutex` is non-reentrant, so a thread that holds
+                // a `write()` guard MUST NOT call `read()` on the same thread —
+                // doing so self-deadlocks. See `read`/`write` doc comments.
+                let guard = self.write_conn.lock();
+                return Ok(ReadConn::InMemory(SerializedReadGuard { guard }));
+            }
+            BackendMode::FileBacked { read_pool_size } => read_pool_size,
+        };
 
         let mut conns = self.read_conns.lock();
         // Pre-compute an absolute deadline so the total wait is strictly
@@ -248,8 +322,8 @@ impl ConnectionPool {
                 && conns.is_empty()
             {
                 return Err(MemoryError::Pool(format!(
-                    "read pool acquire timed out after {:?} (all {} connections checked out)",
-                    self.read_acquire_timeout, self.read_pool_size
+                    "read pool acquire timed out after {:?} (all {read_pool_size} connections checked out)",
+                    self.read_acquire_timeout
                 )));
             }
         }
@@ -296,10 +370,17 @@ impl ConnectionPool {
 
     /// Number of read connections in the pool. Used by the construction
     /// equivalence harness to prove the builder preserves the old default of 4.
+    ///
+    /// In-memory pools report `0` (they have no pooled read connections — reads
+    /// serialize through the write connection), preserving the observable the
+    /// equivalence snapshots pin.
     #[must_use]
     #[allow(dead_code)] // observed only by the equivalence test harness
     pub(crate) const fn read_pool_size(&self) -> usize {
-        self.read_pool_size
+        match self.mode {
+            BackendMode::InMemory => 0,
+            BackendMode::FileBacked { read_pool_size } => read_pool_size,
+        }
     }
 
     /// Database file path, if file-backed. `None` for in-memory.
@@ -433,6 +514,48 @@ mod tests {
     fn pool_not_read_only_by_default() {
         let pool = ConnectionPool::open_memory(4).unwrap();
         assert!(!pool.is_read_only());
+    }
+
+    /// A file-backed `open()` with `read_pool_size == 0` must be rejected, not
+    /// silently produce a pool that serializes every read through the write
+    /// connection (#340 conflation footgun, #356 sentinel removal). The
+    /// in-memory discriminant is `BackendMode::InMemory`, never a zero read
+    /// pool on a file-backed pool.
+    #[test]
+    fn pool_open_rejects_zero_read_pool_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        // `ConnectionPool` is not `Debug`, so match instead of `unwrap_err()`.
+        assert!(matches!(
+            ConnectionPool::open(&db_path, 4, 0, None),
+            Err(MemoryError::Pool(_))
+        ));
+    }
+
+    /// `open_read_only()` with `read_pool_size == 0` is the same footgun and
+    /// must be rejected identically (#340/#356).
+    #[test]
+    fn pool_open_read_only_rejects_zero_read_pool_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        // Create a valid DB first so the read-only open reaches the size check.
+        let rw = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
+        drop(rw);
+
+        assert!(matches!(
+            ConnectionPool::open_read_only(&db_path, 4, 0),
+            Err(MemoryError::Pool(_))
+        ));
+    }
+
+    /// In-memory pools report `read_pool_size() == 0` (the construction
+    /// equivalence harness pins this); the `BackendMode` enum must preserve that
+    /// observable.
+    #[test]
+    fn pool_in_memory_reports_zero_read_pool_size() {
+        let pool = ConnectionPool::open_memory(4).unwrap();
+        assert_eq!(pool.read_pool_size(), 0);
+        assert!(!pool.is_file_backed());
     }
 
     #[test]
