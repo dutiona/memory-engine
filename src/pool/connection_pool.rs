@@ -440,7 +440,18 @@ impl ConnectionPool {
         }))
     }
 
-    /// Lock the write connection.
+    /// Lock the write connection **unconditionally**, bypassing the
+    /// `read_only` guard.
+    ///
+    /// `pub(crate)` by design (#416): on a read-only pool this hands out the
+    /// `write_conn` with no `read_only` check, so a write attempt would surface
+    /// a raw `SQLite` error instead of the typed [`MemoryError::ReadOnly`].
+    /// Restricting visibility keeps that footgun off the public API — external
+    /// callers must go through [`try_write`](Self::try_write) (or the engine's
+    /// `write_conn` helper), which enforces the guard. Internal callers use this
+    /// only on pools known to be writable (restore/init paths). A read-only pool
+    /// additionally sets `query_only`/`SQLITE_OPEN_READ_ONLY`, so this is
+    /// defense-in-depth, not a live vulnerability.
     ///
     /// # In-memory reentrancy hazard (#278)
     ///
@@ -450,7 +461,7 @@ impl ConnectionPool {
     /// self-deadlocks (in release it hangs forever; in debug a reentrancy
     /// assertion fires). File-backed pools are unaffected (reads come from a
     /// separate pool).
-    pub fn write(&self) -> WriteGuard<'_> {
+    pub(crate) fn write(&self) -> WriteGuard<'_> {
         self.make_write_guard(self.write_conn.lock())
     }
 
