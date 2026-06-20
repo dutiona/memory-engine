@@ -239,6 +239,113 @@ fn query_no_results() {
         .stdout(predicate::str::contains("No results"));
 }
 
+// --- query: filter flags (#430) ---
+
+#[test]
+fn query_filter_fact_type() {
+    let (_dir, db_path) = create_test_db();
+    // "Rust is fast" is Procedural: it passes --fact-type procedural …
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "query",
+            "Rust",
+            "--fact-type",
+            "procedural",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust"));
+    // … but --fact-type semantic filters it out, leaving no FTS match.
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "query",
+            "Rust",
+            "--fact-type",
+            "semantic",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No results"));
+}
+
+#[test]
+fn query_filter_fact_type_unknown_is_rejected() {
+    let (_dir, db_path) = create_test_db();
+    // After #270 the fact type is a clap ValueEnum, so an unknown value is
+    // rejected at parse time rather than via an anyhow bail in the command body.
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "query",
+            "x",
+            "--fact-type",
+            "unknown",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("invalid value").and(predicate::str::contains("procedural")),
+        );
+}
+
+#[test]
+fn query_filter_pinned_only_excludes_unpinned() {
+    let (_dir, db_path) = create_test_db();
+    // The seeded facts are not pinned, so --pinned-only filters them all out.
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "query",
+            "blue sky",
+            "--pinned-only",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No results"));
+}
+
+#[test]
+fn query_filter_min_importance_excludes_below_threshold() {
+    let (_dir, db_path) = create_test_db();
+    // Seeded facts use the default importance (0.5), below the 0.99 threshold.
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "query",
+            "blue sky",
+            "--min-importance",
+            "0.99",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No results"));
+}
+
+#[test]
+fn query_filter_scope_subtree_excludes_other_scopes() {
+    let (_dir, db_path) = create_test_db();
+    // Seeded facts live at the root scope; a subtree filter excludes them.
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "query",
+            "blue sky",
+            "--scope",
+            "project/sub",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No results"));
+}
+
 // --- query: --valid-at temporal filtering ---
 
 /// Create a test database with facts that have explicit `t_valid` / `t_invalid`
