@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use parking_lot::{MutexGuard, RwLock};
+use parking_lot::RwLock;
 use rusqlite::Connection;
 
 use crate::error::{MemoryError, MigrationError, RerankerError, Result};
@@ -574,7 +574,7 @@ impl MemoryEngine {
     /// multiple operations (e.g., DB mutation + cache update).
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    fn write_conn(&self) -> Result<MutexGuard<'_, Connection>> {
+    fn write_conn(&self) -> Result<crate::pool::WriteGuard<'_>> {
         self.pool.try_write()
     }
 

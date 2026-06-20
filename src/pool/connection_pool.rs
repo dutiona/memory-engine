@@ -83,6 +83,64 @@ pub struct ConnectionPool {
     read_acquire_timeout: Duration,
 }
 
+// Debug-only, per-thread set of pool addresses on which *this* thread currently
+// holds the write guard. Used to detect the in-memory reentrant deadlock (#278)
+// without false positives: the marker is keyed by pool identity AND is
+// thread-local, so legitimate cross-thread write/read contention never trips it,
+// and a write guard on one pool does not implicate reads on another. Compiled
+// out entirely in release builds.
+#[cfg(debug_assertions)]
+thread_local! {
+    static WRITE_HELD: std::cell::RefCell<std::collections::HashSet<usize>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// RAII guard for the write connection.
+///
+/// Wraps the underlying `MutexGuard` and `Deref`s to [`Connection`]
+/// transparently, so callers use it exactly like the raw guard. In debug builds
+/// it additionally records that the current thread holds this pool's write lock
+/// (and clears that record on drop) so [`ConnectionPool::read`] can assert
+/// against the in-memory reentrant deadlock (#278). In release builds it is a
+/// zero-overhead newtype around the `MutexGuard`.
+pub struct WriteGuard<'a> {
+    guard: MutexGuard<'a, Connection>,
+    /// Pool identity, used only by the debug reentrancy detector.
+    #[cfg(debug_assertions)]
+    pool_addr: usize,
+}
+
+impl std::ops::Deref for WriteGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for WriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.guard
+    }
+}
+
+impl std::fmt::Debug for WriteGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Delegate to the inner `Connection` so `Result<WriteGuard, _>` keeps
+        // the `Debug` bound the previous `MutexGuard<Connection>` return type
+        // satisfied (e.g. `.unwrap_err()` in tests).
+        f.debug_tuple("WriteGuard").field(&*self.guard).finish()
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for WriteGuard<'_> {
+    fn drop(&mut self) {
+        WRITE_HELD.with(|held| {
+            held.borrow_mut().remove(&self.pool_addr);
+        });
+    }
+}
+
 /// RAII guard that returns a read connection to the pool on drop.
 pub struct ReadGuard<'a> {
     conn: Option<Connection>,
@@ -282,6 +340,16 @@ impl ConnectionPool {
     /// The happy path (a connection available immediately) returns without
     /// waiting and never errors.
     ///
+    /// # In-memory reentrancy hazard (#278)
+    ///
+    /// In in-memory mode this locks the **same** `Mutex` as
+    /// [`write`](Self::write)/[`try_write`](Self::try_write). The
+    /// `parking_lot::Mutex` is non-reentrant, so calling `read()` on the same
+    /// thread that already holds a write guard self-deadlocks (a release-build
+    /// hang; a debug-build reentrancy panic). Always drop the write guard before
+    /// reading on an in-memory pool. File-backed pools are immune (reads use a
+    /// separate connection pool).
+    ///
     /// # Errors
     ///
     /// Returns [`MemoryError::Pool`] if no read connection becomes available
@@ -293,10 +361,23 @@ impl ConnectionPool {
         // a read serializes through the single shared write connection.
         let read_pool_size = match self.mode {
             BackendMode::InMemory => {
-                // NOTE: in-memory mode locks the write connection here. The
-                // parking_lot `Mutex` is non-reentrant, so a thread that holds
+                // In-memory mode locks the write connection here. The
+                // `parking_lot::Mutex` is non-reentrant, so a thread that holds
                 // a `write()` guard MUST NOT call `read()` on the same thread —
-                // doing so self-deadlocks. See `read`/`write` doc comments.
+                // doing so self-deadlocks (#278). Catch the violation at dev
+                // time with a per-pool, per-thread marker before the blocking
+                // `lock()` would hang forever; compiled out in release.
+                #[cfg(debug_assertions)]
+                {
+                    let pool_addr = std::ptr::from_ref::<Self>(self) as usize;
+                    let held = WRITE_HELD.with(|h| h.borrow().contains(&pool_addr));
+                    assert!(
+                        !held,
+                        "reentrant deadlock: read() called on an in-memory pool while this \
+                         thread holds its write() guard — read() locks the same non-reentrant \
+                         Mutex (#278)"
+                    );
+                }
                 let guard = self.write_conn.lock();
                 return Ok(ReadConn::InMemory(SerializedReadGuard { guard }));
             }
@@ -335,18 +416,49 @@ impl ConnectionPool {
     }
 
     /// Lock the write connection.
-    pub fn write(&self) -> MutexGuard<'_, Connection> {
-        self.write_conn.lock()
+    ///
+    /// # In-memory reentrancy hazard (#278)
+    ///
+    /// In in-memory mode [`read`](Self::read) locks this same connection. The
+    /// `parking_lot::Mutex` is **non-reentrant**, so a thread that holds the
+    /// guard returned here MUST NOT call `read()` on the same thread — doing so
+    /// self-deadlocks (in release it hangs forever; in debug a reentrancy
+    /// assertion fires). File-backed pools are unaffected (reads come from a
+    /// separate pool).
+    pub fn write(&self) -> WriteGuard<'_> {
+        self.make_write_guard(self.write_conn.lock())
     }
 
     /// Attempt to lock the write connection.
     ///
     /// Returns `MemoryError::ReadOnly` if the pool was opened read-only.
-    pub fn try_write(&self) -> Result<MutexGuard<'_, Connection>> {
+    ///
+    /// The same in-memory reentrancy hazard as [`write`](Self::write) applies:
+    /// never call [`read`](Self::read) on the same thread while holding the
+    /// returned guard on an in-memory pool.
+    pub fn try_write(&self) -> Result<WriteGuard<'_>> {
         if self.read_only {
             return Err(MemoryError::ReadOnly);
         }
-        Ok(self.write_conn.lock())
+        Ok(self.make_write_guard(self.write_conn.lock()))
+    }
+
+    /// Wrap a freshly-acquired write `MutexGuard` in a [`WriteGuard`], recording
+    /// (in debug builds only) that this thread now holds this pool's write lock
+    /// so [`read`](Self::read) can detect the in-memory reentrant deadlock.
+    fn make_write_guard<'a>(&self, guard: MutexGuard<'a, Connection>) -> WriteGuard<'a> {
+        #[cfg(debug_assertions)]
+        {
+            let pool_addr = std::ptr::from_ref::<Self>(self) as usize;
+            WRITE_HELD.with(|held| {
+                held.borrow_mut().insert(pool_addr);
+            });
+            WriteGuard { guard, pool_addr }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            WriteGuard { guard }
+        }
     }
 
     /// Whether this pool was opened in read-only mode.
@@ -556,6 +668,51 @@ mod tests {
         let pool = ConnectionPool::open_memory(4).unwrap();
         assert_eq!(pool.read_pool_size(), 0);
         assert!(!pool.is_file_backed());
+    }
+
+    /// In in-memory mode, `read()` locks the (non-reentrant) write `Mutex`, so
+    /// holding a `write()` guard and calling `read()` on the same thread would
+    /// self-deadlock. A debug-only assertion turns that latent hang into an
+    /// immediate, observable panic at dev time (#278). The guard is per-pool and
+    /// per-thread, so legitimate cross-thread contention does not trip it.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "reentrant")]
+    fn pool_in_memory_read_while_holding_write_panics_in_debug() {
+        let pool = ConnectionPool::open_memory(4).unwrap();
+        let _w = pool.write();
+        // Same-thread reentrant read: must trip the debug reentrancy guard
+        // before it can block forever on the non-reentrant Mutex.
+        let _r = pool.read();
+    }
+
+    /// A held write guard on one pool must NOT make a same-thread read on a
+    /// *different* in-memory pool panic — the reentrancy detector is scoped per
+    /// pool, not per thread (#278). Guards soundness against false positives.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn pool_in_memory_read_other_pool_while_holding_write_is_ok() {
+        let pool_a = ConnectionPool::open_memory(4).unwrap();
+        let pool_b = ConnectionPool::open_memory(4).unwrap();
+        let _wa = pool_a.write();
+        // Reading pool_b while holding pool_a's write guard is safe. Assert
+        // inline so the significant-Drop `Ok` guard isn't bound to a local.
+        assert!(pool_b.read().is_ok());
+    }
+
+    /// After the write guard is dropped, the same thread may read the in-memory
+    /// pool again — the per-thread/per-pool marker is cleared on guard drop, so
+    /// the detector does not leave a stale "held" state (#278).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn pool_in_memory_read_after_write_dropped_is_ok() {
+        let pool = ConnectionPool::open_memory(4).unwrap();
+        {
+            let _w = pool.write();
+        }
+        // Assert inline so the significant-Drop `Ok` guard isn't bound to a
+        // local (matches the other read-acquire tests in this module).
+        assert!(pool.read().is_ok());
     }
 
     #[test]
