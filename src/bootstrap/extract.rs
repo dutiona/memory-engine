@@ -75,7 +75,11 @@ impl SessionExtractor for KeywordExtractor {
 
         let mut metadata = serde_json::json!({
             "session_id": episode.session_id,
-            "category": format!("{:?}", episode.category),
+            // Stable lowercase kebab form (#334) — schema-independent of the Rust
+            // variant name and consistent with the `session_outcome` convention
+            // set just below. Avoid the previous `format!("{:?}", ...)` Debug repr,
+            // which emitted capitalized strings and would silently change on rename.
+            "category": episode.category.as_str(),
             "matched_keywords": episode.matched_keywords,
         });
 
@@ -179,6 +183,34 @@ mod tests {
         assert_eq!(facts[0].fact_type, FactType::Episodic);
         assert!((facts[0].importance - 0.4).abs() < f64::EPSILON);
         assert_eq!(facts[0].metadata["session_outcome"], "failure");
+    }
+
+    #[test]
+    fn category_metadata_is_lowercase_and_roundtrips() {
+        // #334: the stored `category` must be lowercase (matching the adjacent
+        // `session_outcome` "failure"/"success"/"indeterminate" convention),
+        // schema-stable, and independent of the Rust variant name. Each variant
+        // serializes to its kebab string and parses back to the same variant.
+        for (cat, expected) in [
+            (EpisodeCategory::Bug, "bug"),
+            (EpisodeCategory::Decision, "decision"),
+            (EpisodeCategory::Convention, "convention"),
+            (EpisodeCategory::Learning, "learning"),
+        ] {
+            let ep = make_episode(cat, "x", "y");
+            let ext = KeywordExtractor;
+            let facts = ext.extract(&ep, &SessionOutcome::Success).unwrap();
+            let stored = facts[0].metadata["category"].as_str().unwrap();
+            assert_eq!(
+                stored, expected,
+                "category must be the lowercase kebab form"
+            );
+            assert_eq!(
+                stored.parse::<EpisodeCategory>(),
+                Ok(cat),
+                "stored category string must round-trip back to its variant"
+            );
+        }
     }
 
     #[test]

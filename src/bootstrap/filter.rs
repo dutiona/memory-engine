@@ -44,6 +44,42 @@ pub enum EpisodeCategory {
     Learning,
 }
 
+impl EpisodeCategory {
+    /// Stable lowercase string stored in fact metadata (the `category` key).
+    ///
+    /// This is the persisted on-wire form and must not change — it aligns with
+    /// the adjacent `session_outcome` convention (`"failure"`/`"success"`/…)
+    /// and decouples the stored schema from the Rust variant names, so a variant
+    /// rename can no longer silently alter stored data (#334). Round-trips via
+    /// [`EpisodeCategory::from_str`].
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bug => "bug",
+            Self::Decision => "decision",
+            Self::Convention => "convention",
+            Self::Learning => "learning",
+        }
+    }
+}
+
+impl std::str::FromStr for EpisodeCategory {
+    type Err = ();
+
+    /// Parse the stored [`EpisodeCategory::as_str`] form back into a variant.
+    ///
+    /// Returns `Err(())` for any unrecognized string.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "bug" => Ok(Self::Bug),
+            "decision" => Ok(Self::Decision),
+            "convention" => Ok(Self::Convention),
+            "learning" => Ok(Self::Learning),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A candidate episode extracted by the rule-based pre-filter.
 #[derive(Debug, Clone)]
 pub struct CandidateEpisode {
