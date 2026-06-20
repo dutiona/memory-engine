@@ -109,7 +109,15 @@ pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionE
 pub use engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, PromoteAction};
 pub use engine::builder::{File, InMemory, MemoryEngineBuilder};
 pub use engine::{EngineConfig, MemoryEngine};
-pub use error::*;
+// Explicit re-export of the full `error` public surface (the umbrella
+// `MemoryError` + the `Result` alias + each typed sub-enum). Enumerated rather
+// than glob-imported so the crate-root API is auditable and a new public error
+// type must be added here deliberately. The `reexports_are_accessible` smoke
+// test guards the list.
+pub use error::{
+    ArchiveError, ConflictError, CycleError, MemoryError, MigrationError, RerankerError, Result,
+    StorageError,
+};
 pub use inspect::types as inspect_types;
 pub use resume::{ResumeConfig, ResumeContext};
 pub use search::{MemoryQuery, QueryDiagnostics, QueryResponse};
@@ -120,7 +128,21 @@ pub use traits::{
     DeltaProposer, DreamCycle, EmbeddingProvider, ForgetPolicy, InsightStream,
     PersistenceClassifier, PruneStats, Reranker, SummarizableContent, SummaryGenerator,
 };
-pub use types::*;
+// Explicit re-export of the full `types` public surface, enumerated for the
+// same reason as `error` above: a transparent, audit-able crate-root API where
+// adding a public type is a deliberate edit, not an implicit consequence of a
+// glob. Kept in source order; the `reexports_are_accessible` smoke test guards
+// a representative subset, and `cargo build --workspace --all-features` proves
+// the whole list still satisfies every downstream consumer.
+pub use types::{
+    Activity, ActivityStatus, AddFactOptions, AddFactRequest, ConsolidationLevel,
+    ConsolidationProposal, DreamCycleConfig, Edge, EmbeddingFingerprint, Event, EventFilter,
+    EventType, Fact, FactId, FactScoringRow, FactType, Insight, LineageId, LineageRecord,
+    LineageSnapshotEntry, MergeGroup, NewActivity, NewEdge, NewEvent, NewFact, NewFactBuilder,
+    NewLineageRecord, NewSummary, Outcome, OutcomeCounts, ParseActivityStatusError, ProjectContext,
+    PromoteRequest, PromotionProvenance, PromotionResult, RecordActivityRequest,
+    RecordActivityResult, ScopeNode, ScopeQuery, SessionCheckpoint, SessionFact, Summary,
+};
 
 // Storage port — tight flat re-export of the umbrella + cross-cutting types only.
 // The six bounded traits (FactGraph, EventLog, …) are the internal port surface
@@ -157,6 +179,8 @@ mod tests {
         fn _accepts_delta_proposer(_: &dyn crate::DeltaProposer) {}
         // storage port umbrella (bounded traits stay at `crate::storage::*`)
         fn _accepts_storage_backend(_: &dyn crate::StorageBackend) {}
+        // `Result` alias is part of the hand-enumerated `error` re-export.
+        fn _accepts_result(_: crate::Result<()>) {}
 
         // `SummaryGenerator`'s parameter type must be reachable from the same
         // crate-root namespace as the trait it appears in (#273).
@@ -177,6 +201,18 @@ mod tests {
         let _ = std::mem::size_of::<crate::Fact>();
         let _ = std::mem::size_of::<crate::EngineConfig>();
         let _ = std::mem::size_of::<crate::MemoryEngine>();
+
+        // error surface — the typed sub-enums + umbrella + Result alias are now
+        // hand-enumerated re-exports (no glob), so assert each is reachable at the
+        // crate root. A removal from that list fails to compile here.
+        let _ = std::mem::size_of::<crate::MemoryError>();
+        let _ = std::mem::size_of::<crate::ConflictError>();
+        let _ = std::mem::size_of::<crate::RerankerError>();
+        let _ = std::mem::size_of::<crate::ArchiveError>();
+        let _ = std::mem::size_of::<crate::MigrationError>();
+        let _ = std::mem::size_of::<crate::CycleError>();
+        // StorageError asserted in the storage-port block below; the `Result`
+        // alias is asserted by `_accepts_result` above.
 
         // storage port cross-cutting types (flat-re-exported; the six bounded
         // traits stay reachable as `crate::storage::FactGraph`, asserted above).

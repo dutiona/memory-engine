@@ -10,6 +10,17 @@ use crate::types::FactType;
 ///
 /// Consumers supply tool-name patterns for ignore and promote rules.
 /// The engine applies these generically — no built-in tool-name knowledge.
+///
+/// # Pattern normalization invariant
+///
+/// `ignore_patterns` and `promote_patterns` are stored **already lowercased**.
+/// Matching is case-insensitive substring, and `apply_filter` is called once
+/// per tool-activity event (a hot path); normalizing at construction means the
+/// per-call comparison never has to allocate a lowercased copy of each pattern.
+/// The fields are private to keep that invariant unbreakable — build via
+/// [`ActivityFilterConfig::new`] / [`ActivityFilterConfig::default`], read via
+/// [`ActivityFilterConfig::ignore_patterns`] /
+/// [`ActivityFilterConfig::promote_patterns`].
 #[derive(Debug, Clone)]
 pub struct ActivityFilterConfig {
     /// Dedup window in seconds. Activities with the same
@@ -17,13 +28,13 @@ pub struct ActivityFilterConfig {
     /// window are collapsed. Default: 300 (5 minutes).
     pub dedup_window_secs: i64,
 
-    /// Tool name patterns to drop before storage.
+    /// Tool name patterns to drop before storage (stored lowercased).
     /// Matching is case-insensitive substring.
-    pub ignore_patterns: Vec<String>,
+    ignore_patterns: Vec<String>,
 
     /// Tool name patterns that auto-promote to facts when newly inserted
-    /// (not when deduplicated).
-    pub promote_patterns: Vec<String>,
+    /// (not when deduplicated; stored lowercased).
+    promote_patterns: Vec<String>,
 }
 
 impl Default for ActivityFilterConfig {
@@ -33,6 +44,44 @@ impl Default for ActivityFilterConfig {
             ignore_patterns: Vec::new(),
             promote_patterns: Vec::new(),
         }
+    }
+}
+
+impl ActivityFilterConfig {
+    /// Construct a config, normalizing all patterns to lowercase up front.
+    ///
+    /// This is the only way to populate the pattern lists, so the
+    /// "patterns are lowercase" invariant always holds — `apply_filter` can
+    /// then substring-match without allocating per call.
+    #[must_use]
+    pub fn new(
+        dedup_window_secs: i64,
+        ignore_patterns: impl IntoIterator<Item = impl Into<String>>,
+        promote_patterns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            dedup_window_secs,
+            ignore_patterns: ignore_patterns
+                .into_iter()
+                .map(|p| Into::<String>::into(p).to_lowercase())
+                .collect(),
+            promote_patterns: promote_patterns
+                .into_iter()
+                .map(|p| Into::<String>::into(p).to_lowercase())
+                .collect(),
+        }
+    }
+
+    /// The (already-lowercased) ignore patterns.
+    #[must_use]
+    pub fn ignore_patterns(&self) -> &[String] {
+        &self.ignore_patterns
+    }
+
+    /// The (already-lowercased) promote patterns.
+    #[must_use]
+    pub fn promote_patterns(&self) -> &[String] {
+        &self.promote_patterns
     }
 }
 
@@ -70,16 +119,17 @@ pub fn apply_filter(
 ) -> ActivityFilterDecision {
     let tool_lower = tool_name.to_lowercase();
 
-    // Ignore check (case-insensitive substring match).
+    // Ignore check (case-insensitive substring match). Patterns are stored
+    // pre-lowercased (see `ActivityFilterConfig`), so no per-call allocation.
     for pattern in &config.ignore_patterns {
-        if tool_lower.contains(&pattern.to_lowercase()) {
+        if tool_lower.contains(pattern.as_str()) {
             return ActivityFilterDecision::Ignore;
         }
     }
 
-    // Promote check (case-insensitive substring match).
+    // Promote check (case-insensitive substring match; patterns pre-lowercased).
     for pattern in &config.promote_patterns {
-        if tool_lower.contains(&pattern.to_lowercase()) {
+        if tool_lower.contains(pattern.as_str()) {
             let content = format_promote_content(tool_name, result);
             return ActivityFilterDecision::Promote(PromoteAction {
                 fact_content: content,
@@ -119,17 +169,11 @@ mod tests {
     use super::*;
 
     fn config_with_ignore(patterns: &[&str]) -> ActivityFilterConfig {
-        ActivityFilterConfig {
-            ignore_patterns: patterns.iter().map(|s| (*s).to_string()).collect(),
-            ..Default::default()
-        }
+        ActivityFilterConfig::new(300, patterns.iter().copied(), [] as [&str; 0])
     }
 
     fn config_with_promote(patterns: &[&str]) -> ActivityFilterConfig {
-        ActivityFilterConfig {
-            promote_patterns: patterns.iter().map(|s| (*s).to_string()).collect(),
-            ..Default::default()
-        }
+        ActivityFilterConfig::new(300, [] as [&str; 0], patterns.iter().copied())
     }
 
     #[test]
@@ -188,13 +232,27 @@ mod tests {
 
     #[test]
     fn ignore_takes_precedence_over_promote() {
-        let config = ActivityFilterConfig {
-            ignore_patterns: vec!["lint".into()],
-            promote_patterns: vec!["lint".into()],
-            ..Default::default()
-        };
+        let config = ActivityFilterConfig::new(300, ["lint".to_string()], ["lint".to_string()]);
         assert_eq!(
             apply_filter("lint_check", &serde_json::json!({}), None, &config),
+            ActivityFilterDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn new_normalizes_patterns_to_lowercase() {
+        // The constructor must lowercase patterns up front so the hot-path
+        // `apply_filter` never has to re-allocate a lowercased copy per call.
+        let config = ActivityFilterConfig::new(
+            300,
+            ["Format".to_string(), "LINT".to_string()],
+            ["Git_Commit".to_string()],
+        );
+        assert_eq!(config.ignore_patterns(), ["format", "lint"]);
+        assert_eq!(config.promote_patterns(), ["git_commit"]);
+        // Mixed-case patterns still match mixed-case tool names.
+        assert_eq!(
+            apply_filter("FormatCode", &serde_json::json!({}), None, &config),
             ActivityFilterDecision::Ignore
         );
     }

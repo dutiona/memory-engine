@@ -869,4 +869,65 @@ mod tests {
         ));
         assert_eq!(err.to_string(), "storage error: boom");
     }
+
+    #[test]
+    fn unsupported_epoch_display() {
+        // Highest-risk variant: the format string interpolates two numeric
+        // fields. A future rename of `db_epoch`/`supported_epoch` would silently
+        // break the message without this assertion. Pin the exact rendering.
+        let err = MemoryError::UnsupportedEpoch {
+            db_epoch: 3,
+            supported_epoch: 2,
+        };
+        assert_eq!(
+            err.to_string(),
+            "unsupported storage epoch: database is epoch 3, this library supports epoch 2"
+        );
+    }
+
+    #[test]
+    fn not_implemented_display() {
+        // String-carrying variant: message surfaced under the `not implemented: `
+        // prefix.
+        let err = MemoryError::NotImplemented("zstd compression is feature-gated".into());
+        assert_eq!(
+            err.to_string(),
+            "not implemented: zstd compression is feature-gated"
+        );
+    }
+
+    #[test]
+    fn pool_display() {
+        // String-carrying variant: message surfaced under the `connection pool
+        // error: ` prefix.
+        let err = MemoryError::Pool("read connection acquire timed out".into());
+        assert_eq!(
+            err.to_string(),
+            "connection pool error: read connection acquire timed out"
+        );
+    }
+
+    #[test]
+    fn internal_display() {
+        // String-carrying variant: message surfaced under the `internal error: `
+        // prefix.
+        let err = MemoryError::Internal("scope cache out of sync with store".into());
+        assert_eq!(
+            err.to_string(),
+            "internal error: scope cache out of sync with store"
+        );
+    }
+
+    #[test]
+    fn from_io_error() {
+        // `#[from] std::io::Error`: `?`/`.into()` converts to `MemoryError::Io`,
+        // and Display renders under the `I/O error: ` prefix (carrying the inner
+        // io::Error message verbatim).
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let err: MemoryError = io_err.into();
+        assert!(matches!(err, MemoryError::Io(_)));
+        let s = err.to_string();
+        assert!(s.starts_with("I/O error: "), "{s}");
+        assert!(s.contains("gone"), "{s}");
+    }
 }
