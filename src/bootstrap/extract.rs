@@ -267,6 +267,55 @@ mod tests {
         assert!(facts[0].content.len() <= 2003);
     }
 
+    mod proptest_build_content {
+        use proptest::prelude::*;
+
+        use super::super::build_content;
+        use crate::bootstrap::filter::{CandidateEpisode, ConversationTurn, EpisodeCategory};
+        use chrono::Utc;
+
+        /// Build a one-turn episode from arbitrary user/assistant text.
+        fn episode(user: String, assistant: String) -> CandidateEpisode {
+            CandidateEpisode {
+                category: EpisodeCategory::Bug,
+                turns: vec![ConversationTurn {
+                    timestamp: Utc::now(),
+                    user_text: user,
+                    assistant_text: assistant,
+                    tool_calls: vec![],
+                    uuid: "t".into(),
+                }],
+                matched_keywords: vec![],
+                session_id: "s".into(),
+                timestamp: Utc::now(),
+            }
+        }
+
+        proptest! {
+            // #425: the manual char-boundary walk-back in build_content must never
+            // cut a multi-byte codepoint or overrun the MAX_LEN + "..." bound, for
+            // ANY UTF-8 input. The strategy spans the full Unicode range up to
+            // 4-byte codepoints (`\u{10FFFF}`), so a multi-byte char can straddle
+            // the 2000-byte truncation point — the case ASCII-only tests cannot hit.
+            #[test]
+            fn truncated_content_is_valid_utf8_and_bounded(
+                user in "[\u{0}-\u{10FFFF}]{0,1500}",
+                assistant in "[\u{0}-\u{10FFFF}]{0,1500}",
+            ) {
+                let content = build_content(&episode(user, assistant));
+                // String is always valid UTF-8; assert the end is a char boundary
+                // (it always is for a String, but documents the invariant) and that
+                // the output never exceeds MAX_LEN (2000) + "..." (3 bytes).
+                prop_assert!(content.is_char_boundary(content.len()));
+                prop_assert!(
+                    content.len() <= 2003,
+                    "content too long: {} bytes",
+                    content.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn custom_extractor() {
         /// A mock extractor that always returns an empty vec.
