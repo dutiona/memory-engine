@@ -682,6 +682,47 @@ mod tests {
         }
     }
 
+    /// Convenience: a freshly built `Arc<dyn EmbeddingProvider>` for the tests
+    /// that pass an embedder to a delegated async method.
+    fn embedder() -> Arc<dyn EmbeddingProvider + Send + Sync> {
+        Arc::new(MockEmbedder { dim: DIM })
+    }
+
+    /// Minimal summary generator: concatenates fact contents. Used to exercise
+    /// the `consolidate` delegation arm.
+    struct MockGen;
+    impl SummaryGenerator for MockGen {
+        fn summarize(&self, items: &[crate::traits::SummarizableContent<'_>]) -> Result<String> {
+            Ok(items.iter().map(|c| c.text).collect::<Vec<_>>().join("; "))
+        }
+    }
+
+    /// Arbiter that always returns a fixed decision. Used to drive
+    /// `resolve_conflict` deterministically across the `spawn_blocking` boundary.
+    struct FixedArbiter {
+        decision: crate::traits::CrudDecision,
+    }
+    impl ConflictArbiter for FixedArbiter {
+        fn arbitrate(&self, _: &Fact, _: &Fact) -> Result<crate::traits::CrudDecision> {
+            Ok(self.decision)
+        }
+    }
+
+    /// Build a simple `NewEvent` for the `ingest` delegation tests.
+    fn make_event() -> NewEvent {
+        NewEvent {
+            timestamp: Utc::now(),
+            event_type: crate::types::EventType::Interaction,
+            payload: serde_json::json!({"msg": "hello"}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
+        }
+    }
+
     #[tokio::test]
     async fn async_add_fact_and_query() {
         let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
@@ -934,5 +975,355 @@ mod tests {
                 "expected MemoryError::Pool from delegate_blocking! instance arm, got: {other:?}"
             ),
         }
+    }
+
+    // --- Issue #308: delegation coverage for the spawn_blocking shim ---
+    //
+    // The async wrapper's only value-add is dispatching each sync method onto
+    // `tokio::task::spawn_blocking`. The original suite covered add_fact / query
+    // / graph / list_due / pin / config plus the two join-error oracles, leaving
+    // the bulk of the delegated surface (ingest, execute_query, consolidate,
+    // forget, resolve_conflict, statistics, the inspection readers, scheduling,
+    // session linking, snapshotting, and the trivial getters) with no async
+    // test. Each test below asserts the async method round-trips to its sync
+    // counterpart across the spawn_blocking boundary — the result is observed
+    // through a *second* async hop where possible, so a broken delegation (wrong
+    // method, dropped argument, or a closure that never runs) fails the oracle.
+
+    #[tokio::test]
+    async fn async_ingest_appends_event() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        let id = engine.ingest(make_event()).await.unwrap();
+        assert_eq!(id, 1, "first ingested event gets id 1");
+        // A second ingest advances the id — proves the write actually committed.
+        let id2 = engine.ingest(make_event()).await.unwrap();
+        assert_eq!(id2, 2);
+    }
+
+    #[tokio::test]
+    async fn async_add_facts_batch_round_trip() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        let reqs = vec![
+            AddFactRequest {
+                content: "batch fact one".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            AddFactRequest {
+                content: "batch fact two".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+        ];
+        let ids = engine
+            .add_facts_batch(reqs, embedder(), None)
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+        let active = engine.list_active_facts(None).await.unwrap();
+        assert_eq!(active.len(), 2, "both batch facts persisted");
+    }
+
+    #[tokio::test]
+    async fn async_execute_query_returns_active_facts() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        engine
+            .add_fact(
+                AddFactRequest {
+                    content: "composed query fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                embedder(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let resp = engine
+            .execute_query(crate::search::query::MemoryQuery::new())
+            .await
+            .unwrap();
+        assert_eq!(resp.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_consolidate_dedups_duplicates() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        // Two facts with identical (constant) embeddings → cosine 1.0 → dedup.
+        for content in ["duplicate alpha", "duplicate beta"] {
+            engine
+                .add_fact(
+                    AddFactRequest {
+                        content: content.into(),
+                        fact_type: FactType::Semantic,
+                        source_event_id: None,
+                        scope: None,
+                        opts: None,
+                    },
+                    embedder(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let config = ConsolidationConfig::builder()
+            .dedup_threshold(0.90)
+            .min_cluster_size(10) // high so no clusters form; isolate dedup
+            .build();
+        let generator: Arc<dyn SummaryGenerator + Send + Sync> = Arc::new(MockGen);
+        let stats = engine
+            .consolidate(generator, embedder(), config)
+            .await
+            .unwrap();
+        assert_eq!(stats.duplicates_removed, 1);
+        assert_eq!(engine.list_active_facts(None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_forget_prunes_and_rejects_invalid_policy() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        // Backdate the fact 200 days so Ebbinghaus decay drives its computed
+        // importance below the threshold (Episodic decays by design). A fresh
+        // fact would survive — this mirrors the sync `forget_prunes_stale_facts`
+        // setup, exercising real pruning through the shim rather than a no-op.
+        let old_time = Utc::now() - chrono::Duration::days(200);
+        engine
+            .add_fact(
+                AddFactRequest {
+                    content: "forgettable".into(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(AddFactOptions {
+                        importance: Some(0.01),
+                        t_created: Some(old_time),
+                        last_accessed: Some(old_time),
+                        ..Default::default()
+                    }),
+                },
+                embedder(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Valid policy prunes the low-importance fact.
+        let policy = ForgetPolicy {
+            min_importance: 0.3,
+            ..ForgetPolicy::default()
+        };
+        let stats = engine.forget(policy).await.unwrap();
+        assert_eq!(stats.facts_expired, 1);
+
+        // Invalid policy surfaces an error through the shim (not a panic/hang).
+        let bad = ForgetPolicy {
+            half_life_days: 0.0,
+            ..ForgetPolicy::default()
+        };
+        assert!(engine.forget(bad).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn async_resolve_conflict_expires_old_fact() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        let old_id = engine
+            .add_fact(
+                AddFactRequest {
+                    content: "outdated belief".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                embedder(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let arbiter: Arc<dyn ConflictArbiter + Send + Sync> = Arc::new(FixedArbiter {
+            decision: crate::traits::CrudDecision::Update,
+        });
+        let new_fact = NewFact::builder("updated belief", vec![0.5; DIM], FactType::Semantic)
+            .content_hash("h_updated")
+            .build();
+        let resolution = engine
+            .resolve_conflict(arbiter, old_id, new_fact)
+            .await
+            .unwrap();
+        // An Update resolution supersedes the old fact with a new one.
+        assert_eq!(resolution.decision, crate::traits::CrudDecision::Update);
+        assert_eq!(resolution.old_fact_id, old_id);
+        assert!(
+            resolution.new_fact_id.is_some(),
+            "Update must create a superseding fact"
+        );
+        // Old fact is soft-deleted (expired); a new active fact replaces it.
+        assert!(engine.get_fact(old_id).await.unwrap().t_expired.is_some());
+    }
+
+    #[tokio::test]
+    async fn async_statistics_counts_facts() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        engine
+            .add_fact(
+                AddFactRequest {
+                    content: "counted".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                embedder(),
+                None,
+            )
+            .await
+            .unwrap();
+        let stats = engine.statistics().await.unwrap();
+        assert_eq!(stats.facts.active, 1);
+    }
+
+    #[tokio::test]
+    async fn async_list_summaries_empty() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        let summaries = engine
+            .list_summaries(ConsolidationLevel::Global)
+            .await
+            .unwrap();
+        assert!(summaries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn async_resume_context_surfaces_pinned() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        engine
+            .add_fact(
+                AddFactRequest {
+                    content: "pinned identity".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(AddFactOptions {
+                        pinned: Some(true),
+                        importance: Some(0.95),
+                        ..Default::default()
+                    }),
+                },
+                embedder(),
+                None,
+            )
+            .await
+            .unwrap();
+        let ctx = engine
+            .resume_context(ResumeConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(ctx.pinned.len(), 1);
+        assert!(ctx.pinned[0].is_pinned);
+    }
+
+    #[tokio::test]
+    async fn async_link_session_facts_creates_edges() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        // Two facts sharing a session via their source events.
+        for content in ["session fact a", "session fact b"] {
+            let mut event = make_event();
+            event.session_id = Some("s1".into());
+            let event_id = engine.ingest(event).await.unwrap();
+            engine
+                .add_fact(
+                    AddFactRequest {
+                        content: content.into(),
+                        fact_type: FactType::Semantic,
+                        source_event_id: Some(event_id),
+                        scope: None,
+                        opts: None,
+                    },
+                    embedder(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let created = engine.link_session_facts("s1".into(), None).await.unwrap();
+        assert_eq!(created, 2, "A→B and B→A co-session edges");
+    }
+
+    #[tokio::test]
+    async fn async_next_due_time_none_when_no_future_facts() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        assert!(engine.next_due_time(None).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn async_replay_events_returns_ingested() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        engine.ingest(make_event()).await.unwrap();
+        let filter = crate::inspect::ReplayFilter::default();
+        let events = engine.replay_events(&filter).await.unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_explain_and_history_for_fact() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        let id = engine
+            .add_fact(
+                AddFactRequest {
+                    content: "explainable fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                embedder(),
+                None,
+            )
+            .await
+            .unwrap();
+        let explanation = engine.explain_fact(id).await.unwrap();
+        assert_eq!(explanation.fact_id, id);
+        let history = engine.fact_history(id).await.unwrap();
+        assert_eq!(history.fact_id, id);
+        // Missing fact surfaces NotFound through the shim.
+        assert!(matches!(
+            engine.explain_fact(999_999).await,
+            Err(MemoryError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn async_write_snapshot_in_memory_is_noop() {
+        // In-memory engines have no sidecar path, so write_snapshot returns
+        // Ok(false) — the point is the delegation runs without panicking.
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        assert!(!engine.write_snapshot().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn async_getters_reflect_inner_engine() {
+        let engine = AsyncMemoryEngine::open_memory(DIM).await.unwrap();
+        assert_eq!(engine.embed_dim(), DIM);
+        assert!(!engine.is_file_backed());
+        assert!(engine.reranker_name().is_none());
+    }
+
+    #[tokio::test]
+    async fn async_open_file_backed_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("async_open.db");
+        let config = EngineConfig::new(db_path, DIM);
+        let engine = AsyncMemoryEngine::open(config).await.unwrap();
+        assert!(engine.is_file_backed());
+        let id = engine.ingest(make_event()).await.unwrap();
+        assert_eq!(id, 1);
     }
 }
