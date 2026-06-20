@@ -28,9 +28,9 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::{
-    ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
+    ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummarizableContent, SummaryGenerator,
 };
-use memory_engine::types::{AddFactOptions, AddFactRequest, Fact, FactType};
+use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
 const DIM: usize = 128;
 
@@ -67,12 +67,8 @@ impl EmbeddingProvider for ConstEmbedder {
 struct ConcatSummaryGenerator;
 
 impl SummaryGenerator for ConcatSummaryGenerator {
-    fn summarize(&self, facts: &[Fact]) -> memory_engine::error::Result<String> {
-        let summary: String = facts
-            .iter()
-            .map(|f| f.content.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> memory_engine::error::Result<String> {
+        let summary: String = items.iter().map(|i| i.text).collect::<Vec<_>>().join("; ");
         Ok(summary)
     }
 }

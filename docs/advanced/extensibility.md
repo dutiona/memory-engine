@@ -56,11 +56,11 @@ Called during consolidation (cluster fusion and global integration) to produce t
 
 ```rust
 pub trait SummaryGenerator {
-    fn summarize(&self, facts: &[Fact]) -> Result<String>;
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String>;
 }
 ```
 
-The `summarize` method receives a slice of related facts (a cluster or the set of cluster summaries) and returns a textual summary. Embedding of that summary is **not** the generator's job: the `EmbeddingProvider` passed alongside the generator into `consolidate()` embeds it, so summaries share the fact vector space. (A redundant `SummaryGenerator::embed` was removed; it merely duplicated `EmbeddingProvider::embed`.)
+The `summarize` method receives a slice of [`SummarizableContent`] — a minimal borrowed view of each item's `text` and that text's `embedding` — covering both consolidation passes (a cluster of facts, or the set of cluster summaries) without fabricating throwaway `Fact` structs (#273). A plain text summarizer reads only `item.text`; `item.embedding` is there for embedding-aware merging. Embedding of the produced summary is **not** the generator's job: the `EmbeddingProvider` passed alongside the generator into `consolidate()` embeds it, so summaries share the fact/summary vector space. (A redundant `SummaryGenerator::embed` was removed; it merely duplicated `EmbeddingProvider::embed`.)
 
 Implementation example:
 
@@ -71,10 +71,10 @@ struct LlmSummarizer {
 }
 
 impl SummaryGenerator for LlmSummarizer {
-    fn summarize(&self, facts: &[Fact]) -> Result<String> {
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String> {
         let prompt = format!(
-            "Summarize these facts concisely:\n{}",
-            facts.iter().map(|f| f.content.as_str()).collect::<Vec<_>>().join("\n")
+            "Summarize these concisely:\n{}",
+            items.iter().map(|i| i.text).collect::<Vec<_>>().join("\n")
         );
         // Call LLM API...
         Ok(summary)

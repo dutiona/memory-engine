@@ -2,8 +2,8 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::store::summaries::SummaryStore;
-use crate::traits::{EmbeddingProvider, SummaryGenerator};
-use crate::types::{ConsolidationLevel, Fact, NewSummary};
+use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
+use crate::types::{ConsolidationLevel, NewSummary};
 
 /// Global integration pass.
 ///
@@ -35,33 +35,15 @@ pub fn global_integration(
         return Ok(0);
     }
 
-    // Convert summaries to Fact-like structs for the SummaryGenerator trait
-    let pseudo_facts: Vec<Fact> = cluster_summaries
+    // Summarize the cluster summaries directly — borrow each summary's text and
+    // embedding, with no throwaway `Fact` structs and no clones (#273, #495).
+    let items: Vec<SummarizableContent<'_>> = cluster_summaries
         .iter()
-        .map(|s| Fact {
-            id: s.id,
-            content: s.content.clone(),
-            content_hash: String::new(),
-            embedding: s.embedding.clone(),
-            fact_type: crate::types::FactType::Semantic,
-            t_created: s.created_at,
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            scope_id: s.scope_id,
-            importance: 1.0,
-            access_count: 0,
-            last_accessed: s.created_at,
-            metadata: serde_json::json!({}),
-            is_pinned: false,
-            importance_score: Fact::UNSCORED_IMPORTANCE,
-            surfaced_at: None,
-        })
+        .map(|s| SummarizableContent::new(&s.content, &s.embedding))
         .collect();
 
     let (global_text, global_embedding) =
-        super::summarize_and_embed(generator, embedder, &pseudo_facts, embed_dim)?;
+        super::summarize_and_embed(generator, embedder, &items, embed_dim)?;
 
     // Collect all source fact ids from all cluster summaries.
     // Pre-size to avoid repeated reallocations: flat_map has no upper-bound hint.
@@ -100,12 +82,8 @@ mod tests {
     struct MockGenerator;
 
     impl SummaryGenerator for MockGenerator {
-        fn summarize(&self, facts: &[Fact]) -> Result<String> {
-            Ok(facts
-                .iter()
-                .map(|f| f.content.as_str())
-                .collect::<Vec<_>>()
-                .join(" | "))
+        fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String> {
+            Ok(items.iter().map(|i| i.text).collect::<Vec<_>>().join(" | "))
         }
     }
 

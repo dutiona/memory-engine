@@ -4,7 +4,7 @@ use crate::search::hybrid::{SearchMode, SearchQuery};
 use crate::search::query::MemoryQuery;
 use crate::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, ForgetPolicy,
-    PersistenceClassifier, SummaryGenerator,
+    PersistenceClassifier, SummarizableContent, SummaryGenerator,
 };
 use crate::types::{
     AddFactOptions, AddFactRequest, EmbeddingFingerprint, EventType, Fact, FactType, NewEvent,
@@ -29,12 +29,8 @@ impl EmbeddingProvider for MockEmbedder {
 
 struct MockGen;
 impl SummaryGenerator for MockGen {
-    fn summarize(&self, facts: &[Fact]) -> Result<String> {
-        Ok(facts
-            .iter()
-            .map(|f| f.content.as_str())
-            .collect::<Vec<_>>()
-            .join("; "))
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String> {
+        Ok(items.iter().map(|i| i.text).collect::<Vec<_>>().join("; "))
     }
 }
 

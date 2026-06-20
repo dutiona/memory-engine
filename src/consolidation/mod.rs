@@ -15,8 +15,10 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::store::schema::{get_config, set_config};
-use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
-use crate::types::Fact;
+use crate::traits::{
+    ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummarizableContent,
+    SummaryGenerator,
+};
 
 /// Safety cap for the O(N·M) [`local_dedup`] pass. Beyond this many active facts
 /// the pass is **skipped and the consolidation watermark is NOT advanced**, so the
@@ -35,7 +37,7 @@ const MAX_FACTS_FOR_DEDUP: usize = 50_000;
 /// separately so the policies cannot drift silently (#345).
 const MAX_FACTS_FOR_CLUSTERING: usize = 50_000;
 
-/// Summarize a slice of facts and embed the resulting summary text, validating
+/// Summarize a slice of items and embed the resulting summary text, validating
 /// the embedding dimension. Shared by cluster fusion and global integration so
 /// the summarize → embed → dimension-check sequence cannot diverge (issue #116:
 /// embedding now flows through the injected `EmbeddingProvider`).
@@ -47,10 +49,10 @@ const MAX_FACTS_FOR_CLUSTERING: usize = 50_000;
 pub fn summarize_and_embed(
     generator: &dyn SummaryGenerator,
     embedder: &dyn EmbeddingProvider,
-    facts: &[Fact],
+    items: &[SummarizableContent<'_>],
     embed_dim: usize,
 ) -> Result<(String, Vec<f32>)> {
-    let text = generator.summarize(facts)?;
+    let text = generator.summarize(items)?;
     let embedding = embedder.embed(&text)?;
     if embedding.len() != embed_dim {
         return Err(crate::error::MemoryError::EmbeddingDimension {
@@ -210,12 +212,8 @@ mod tests {
     struct MockGenerator;
 
     impl SummaryGenerator for MockGenerator {
-        fn summarize(&self, facts: &[Fact]) -> Result<String> {
-            Ok(facts
-                .iter()
-                .map(|f| f.content.as_str())
-                .collect::<Vec<_>>()
-                .join(" + "))
+        fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String> {
+            Ok(items.iter().map(|i| i.text).collect::<Vec<_>>().join(" + "))
         }
     }
 
@@ -224,7 +222,7 @@ mod tests {
     struct FailingGenerator;
 
     impl SummaryGenerator for FailingGenerator {
-        fn summarize(&self, _facts: &[Fact]) -> Result<String> {
+        fn summarize(&self, _items: &[SummarizableContent<'_>]) -> Result<String> {
             Err(crate::error::MemoryError::Internal("summarize boom".into()))
         }
     }

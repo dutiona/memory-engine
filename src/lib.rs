@@ -118,7 +118,7 @@ pub use store::schema::CURRENT_SCHEMA_VERSION;
 pub use traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
     DeltaProposer, DreamCycle, EmbeddingProvider, ForgetPolicy, InsightStream,
-    PersistenceClassifier, PruneStats, Reranker, SummaryGenerator,
+    PersistenceClassifier, PruneStats, Reranker, SummarizableContent, SummaryGenerator,
 };
 pub use types::*;
 
@@ -157,6 +157,10 @@ mod tests {
         fn _accepts_delta_proposer(_: &dyn crate::DeltaProposer) {}
         // storage port umbrella (bounded traits stay at `crate::storage::*`)
         fn _accepts_storage_backend(_: &dyn crate::StorageBackend) {}
+
+        // `SummaryGenerator`'s parameter type must be reachable from the same
+        // crate-root namespace as the trait it appears in (#273).
+        fn _uses_summarizable_content(_: crate::SummarizableContent<'_>) {}
 
         // trait types
         let _ = std::mem::size_of::<crate::CrudDecision>();
