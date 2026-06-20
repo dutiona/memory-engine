@@ -33,6 +33,9 @@ pub trait SessionStore: Send + Sync {
         session_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<Activity>>;
+    /// Recent activities in `scope_ids`, most-recent first. `scope_ids` empty =
+    /// **no results** (an empty result set, NOT "all scopes" — unlike most
+    /// `FactGraph` `&[i64]` methods; the #632 conformance suite pins this).
     async fn list_recent_activities_by_scope(
         &self,
         scope_ids: &[i64],

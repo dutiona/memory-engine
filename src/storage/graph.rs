@@ -27,6 +27,25 @@ use crate::types::{
 /// params / [`crate::storage::FactFilter`], results are domain types from
 /// [`crate::types`].
 ///
+/// # Scope filtering (`scope_ids` — read the contract, it is non-uniform)
+/// The `scope_ids: &[i64]` parameter has a **method-dependent empty-slice
+/// meaning** inherited from the concrete store surface, and a backend MUST
+/// preserve it exactly (the #632 conformance suite pins it):
+/// - **Empty slice = ALL scopes** (filter disabled): [`list_pinned_facts`](Self::list_pinned_facts),
+///   [`list_due_facts`](Self::list_due_facts), [`next_due_time`](Self::next_due_time),
+///   [`list_facts_by_importance_score`](Self::list_facts_by_importance_score),
+///   [`list_active_facts_by_session`](Self::list_active_facts_by_session),
+///   [`list_active_facts_in_period`](Self::list_active_facts_in_period),
+///   [`list_undreamt_facts_in_period`](Self::list_undreamt_facts_in_period).
+/// - **Empty slice = NO scopes** (empty result): [`list_facts_by_scopes_importance`](Self::list_facts_by_scopes_importance),
+///   [`list_facts_by_scopes_recent`](Self::list_facts_by_scopes_recent),
+///   [`list_active_facts_by_metadata_key_recent`](Self::list_active_facts_by_metadata_key_recent).
+///
+/// [`list_dormant_facts`](Self::list_dormant_facts) makes the choice explicit in
+/// the type (`Option<&[i64]>`: `None` = all scopes). A future API-hardening pass
+/// may unify this (e.g. a `ScopeSelector` type) — tracked separately; A1 mirrors
+/// the existing contract verbatim.
+///
 /// # Errors
 /// Every method returns [`MemoryError::Storage`](crate::error::MemoryError::Storage)
 /// wrapping a [`StorageError`](crate::error::StorageError) on a backend failure,
@@ -107,6 +126,15 @@ pub trait FactGraph: Send + Sync {
         limit: usize,
         exclude_ids: &HashSet<i64>,
     ) -> Result<Vec<Fact>>;
+    /// List active facts in `scope_ids` whose metadata has top-level `marker_key`
+    /// (non-null), most-recent first. `scope_ids` empty = **no scopes** (see the
+    /// trait-level scope-filtering contract).
+    ///
+    /// **Precondition (security):** `marker_key` MUST be a non-empty
+    /// `[A-Za-z0-9_]+` identifier — it is interpolated into the backend's JSON
+    /// path, so a backend MUST reject anything else with
+    /// [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) rather than
+    /// build the query (the seam preserves the `SQLite` impl's injection guard).
     async fn list_active_facts_by_metadata_key_recent(
         &self,
         scope_ids: &[i64],

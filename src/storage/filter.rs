@@ -20,11 +20,13 @@ use crate::types::FactType;
 pub struct FactFilter {
     /// Restrict to a single fact type; `None` = any type.
     pub fact_type: Option<FactType>,
-    /// Restrict to facts in these scope ids; `None` = any scope.
-    /// (`SQLite`: `scope_id IN (SELECT value FROM json_each(?))`.)
+    /// Restrict to facts in these scope ids. `None` = no scope constraint;
+    /// `Some(empty)` = **matches nothing** (NOT "all scopes" — distinct from the
+    /// `FactGraph` `&[i64]` convention). A backend MUST NOT normalize `Some(empty)`
+    /// to "no filter". (`SQLite`: `scope_id IN (SELECT value FROM json_each(?))`.)
     pub scope_ids: Option<Vec<i64>>,
-    /// Restrict to these fact ids; `None` = no id constraint.
-    /// (`SQLite`: `id IN (json_each(?))`.)
+    /// Restrict to these fact ids. `None` = no id constraint; `Some(empty)` =
+    /// **matches nothing**. (`SQLite`: `id IN (json_each(?))`.)
     pub ids: Option<Vec<i64>>,
     /// Bi-temporal visibility constraint. Defaults to [`TemporalFilter::Active`].
     pub temporal: TemporalFilter,
