@@ -7,7 +7,7 @@ mod dedup;
 mod global;
 
 pub use cluster::cluster_fusion;
-pub use dedup::local_dedup;
+pub use dedup::{DedupOutcome, local_dedup};
 pub use global::global_integration;
 
 use chrono::{DateTime, Utc};
@@ -17,6 +17,23 @@ use crate::error::Result;
 use crate::store::schema::{get_config, set_config};
 use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
 use crate::types::Fact;
+
+/// Safety cap for the O(N·M) [`local_dedup`] pass. Beyond this many active facts
+/// the pass is **skipped and the consolidation watermark is NOT advanced**, so the
+/// skipped facts are retried on a later run once the corpus shrinks
+/// ([`DedupOutcome::Skipped`]).
+const MAX_FACTS_FOR_DEDUP: usize = 50_000;
+
+/// Safety cap for the O(N²) [`cluster_fusion`] pass. Beyond this many active facts
+/// clustering is **silently skipped, preserving any existing cluster summaries**
+/// (the cap is checked before they would be deleted).
+///
+/// Deliberate policy difference from [`MAX_FACTS_FOR_DEDUP`]: a dedup skip blocks
+/// the watermark so the deferred work is retried, whereas a cluster skip is a
+/// no-op that simply keeps the prior summaries until the corpus is tractable
+/// again. The two caps share a value today but are named and documented
+/// separately so the policies cannot drift silently (#345).
+const MAX_FACTS_FOR_CLUSTERING: usize = 50_000;
 
 /// Summarize a slice of facts and embed the resulting summary text, validating
 /// the embedding dimension. Shared by cluster fusion and global integration so
@@ -73,6 +90,32 @@ pub fn consolidate(
     embed_dim: usize,
     config: &ConsolidationConfig,
 ) -> Result<(ConsolidationStats, Vec<i64>)> {
+    consolidate_with_caps(
+        conn,
+        generator,
+        embedder,
+        embed_dim,
+        config,
+        MAX_FACTS_FOR_DEDUP,
+    )
+}
+
+/// Cap-injecting core of [`consolidate`]. The public entry point passes the
+/// production [`MAX_FACTS_FOR_DEDUP`]; tests pass a small `max_dedup_facts` to
+/// exercise the dedup-skip / watermark-suppression path without a 50 000-fact
+/// corpus.
+///
+/// # Errors
+///
+/// Same as [`consolidate`].
+fn consolidate_with_caps(
+    conn: &Connection,
+    generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
+    embed_dim: usize,
+    config: &ConsolidationConfig,
+    max_dedup_facts: usize,
+) -> Result<(ConsolidationStats, Vec<i64>)> {
     let last = get_config(conn, "last_consolidated_at")?
         .map(|s| DateTime::parse_from_rfc3339(&s))
         .transpose()
@@ -84,12 +127,24 @@ pub fn consolidate(
 
     let tx = conn.unchecked_transaction()?;
 
-    let (duplicates_removed, expired_ids) =
-        local_dedup(&tx, embed_dim, config.dedup_threshold, last, now)?;
-
-    // usize::MAX is a sentinel from local_dedup meaning "skipped due to safety cap".
-    let dedup_skipped = duplicates_removed == usize::MAX;
-    let duplicates_removed = if dedup_skipped { 0 } else { duplicates_removed };
+    // The dedup-skip state is carried in the return type ([`DedupOutcome`]), not an
+    // in-band `usize::MAX` sentinel (#272). A `Skipped` pass contributes no
+    // removals and leaves the watermark unadvanced so the over-cap facts are
+    // retried on the next run.
+    let (duplicates_removed, expired_ids, dedup_skipped) = match local_dedup(
+        &tx,
+        embed_dim,
+        config.dedup_threshold,
+        max_dedup_facts,
+        last,
+        now,
+    )? {
+        DedupOutcome::Ran {
+            removed,
+            expired_ids,
+        } => (removed, expired_ids, false),
+        DedupOutcome::Skipped { .. } => (0, Vec::new(), true),
+    };
 
     let clusters_created =
         cluster_fusion(&tx, generator, embedder, embed_dim, config.min_cluster_size)?;
@@ -472,5 +527,61 @@ mod tests {
 
         // An empty run is still a successful run: the watermark advances.
         assert!(get_config(&conn, "last_consolidated_at").unwrap().is_some());
+    }
+
+    /// #439 / #306: when dedup is skipped (corpus over the cap), the orchestrator
+    /// must NOT advance `last_consolidated_at`, so the over-cap facts are retried on
+    /// the next run. Driven through `consolidate_with_caps` with a tiny dedup cap so
+    /// the skip path is reachable without a 50 000-fact corpus. The cluster pass
+    /// (separate, much larger cap) still runs — only the dedup-driven watermark
+    /// advance is suppressed.
+    #[test]
+    fn watermark_not_advanced_when_dedup_skipped() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        seed_cluster(&conn); // 3 near-duplicates
+
+        assert!(
+            get_config(&conn, "last_consolidated_at").unwrap().is_none(),
+            "precondition: no watermark before the run"
+        );
+
+        // Dedup cap of 1 vs a 3-fact corpus → dedup is skipped.
+        let (stats, expired) = consolidate_with_caps(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &default_config(),
+            1,
+        )
+        .unwrap();
+
+        // Skipped dedup contributes no removals and expires nothing...
+        assert_eq!(stats.duplicates_removed, 0, "skipped dedup removes nothing");
+        assert!(expired.is_empty());
+
+        // ...but only the dedup-driven watermark advance is suppressed: the rest of
+        // the pipeline proceeds, so the 3 surviving near-duplicates still cluster
+        // and globalize.
+        assert_eq!(
+            stats.clusters_created, 1,
+            "cluster pass still runs when dedup is skipped"
+        );
+        assert_eq!(
+            stats.global_summaries, 1,
+            "global pass still runs when dedup is skipped"
+        );
+        assert_eq!(
+            FactStore::new(&conn, DIM).list_active(None).unwrap().len(),
+            3,
+            "no fact is expired when dedup is skipped"
+        );
+
+        // ...and crucially the watermark is held so the skipped facts are retried.
+        assert!(
+            get_config(&conn, "last_consolidated_at").unwrap().is_none(),
+            "watermark must NOT advance when dedup is skipped (over cap)"
+        );
     }
 }
