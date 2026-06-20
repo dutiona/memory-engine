@@ -166,6 +166,12 @@ fn consolidate_with_caps(
     // dedup just expired (no re-query, borrowed so no clone — #679/#389). On the
     // dedup-skip path `expired_ids` is empty, so this is the full loaded set, which
     // `cluster_fusion`'s own cap then skips (the two caps are equal).
+    //
+    // These survivors carry the PRE-dedup `importance`/`importance_score` — dedup
+    // mutates those columns in the DB but not the in-memory `Fact`s. Inert today:
+    // `cluster_fusion` reads only `id`/`content`/`embedding`/`scope_id`. A future
+    // cluster pass that reads importance would need a re-read (or #264's running-max
+    // treatment) here.
     let expired_set: std::collections::HashSet<i64> = expired_ids.iter().copied().collect();
     let survivors: Vec<&Fact> = active_facts
         .iter()
