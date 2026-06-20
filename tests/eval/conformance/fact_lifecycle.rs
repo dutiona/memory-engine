@@ -62,10 +62,10 @@ fn dedup_consolidation_expires_one_duplicate() {
     assert!(engine.get_fact(id1).unwrap().t_expired.is_none());
     assert!(engine.get_fact(id2).unwrap().t_expired.is_none());
 
-    let config = ConsolidationConfig {
-        dedup_threshold: 1.0,  // exact match only
-        min_cluster_size: 100, // prevent cluster pass from running
-    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(1.0) // exact match only
+        .min_cluster_size(100) // prevent cluster pass from running
+        .build();
 
     let stats = engine
         .consolidate(&generator, &TestEmbedder, &config)

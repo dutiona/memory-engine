@@ -7,16 +7,15 @@ use crate::store::summaries::SummaryStore;
 use crate::traits::{EmbeddingProvider, SummaryGenerator};
 use crate::types::{ConsolidationLevel, Fact, NewSummary};
 
-/// Cluster threshold for grouping related facts (lower than dedup threshold).
-const CLUSTER_SIMILARITY_THRESHOLD: f32 = 0.85;
-
 /// Cluster fusion pass.
 ///
 /// Clears prior cluster-level summaries before creating new ones (idempotent).
-/// Groups active facts by similarity (greedy single-linkage clustering).
-/// For each cluster >= `min_cluster_size`, calls `SummaryGenerator` to create a
-/// summary, then `EmbeddingProvider` to embed it into the fact vector space.
-/// Stores summaries via `SummaryStore` with `level=Cluster`.
+/// Groups active facts by similarity (greedy single-linkage clustering) at
+/// `cluster_threshold` (cosine; lower than the dedup threshold so clustering is
+/// looser than dedup). For each cluster >= `min_cluster_size`, calls
+/// `SummaryGenerator` to create a summary, then `EmbeddingProvider` to embed it
+/// into the fact vector space. Stores summaries via `SummaryStore` with
+/// `level=Cluster`.
 ///
 /// Returns number of clusters created.
 ///
@@ -33,6 +32,7 @@ pub fn cluster_fusion(
     embedder: &dyn EmbeddingProvider,
     embed_dim: usize,
     min_cluster_size: usize,
+    cluster_threshold: f32,
 ) -> Result<usize> {
     // Safety cap lifted to the shared `super::MAX_FACTS_FOR_CLUSTERING` (#345) so
     // the dedup and cluster caps live in one place with their divergent skip
@@ -56,7 +56,7 @@ pub fn cluster_fusion(
     summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
 
     // Greedy single-linkage clustering
-    let clusters = greedy_cluster(&active_facts, CLUSTER_SIMILARITY_THRESHOLD);
+    let clusters = greedy_cluster(&active_facts, cluster_threshold);
 
     let mut clusters_created = 0;
     for cluster in &clusters {
@@ -219,7 +219,7 @@ mod tests {
 
         let mock_gen = MockGenerator;
         let mock_embed = MockEmbedder { embed_dim: dim };
-        let clusters = cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 3).unwrap();
+        let clusters = cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
         assert_eq!(clusters, 2);
 
         let summaries = SummaryStore::new(&conn, dim)
@@ -240,7 +240,7 @@ mod tests {
 
         let mock_gen = MockGenerator;
         let mock_embed = MockEmbedder { embed_dim: dim };
-        let clusters = cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 3).unwrap();
+        let clusters = cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
         assert_eq!(clusters, 0);
     }
 
@@ -256,7 +256,7 @@ mod tests {
 
         let mock_gen = MockGenerator;
         let mock_embed = MockEmbedder { embed_dim: dim };
-        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2).unwrap();
+        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
 
         let summaries = SummaryStore::new(&conn, dim)
             .list_by_level(&ConsolidationLevel::Cluster)
@@ -280,12 +280,59 @@ mod tests {
         let mock_embed = MockEmbedder { embed_dim: dim };
 
         // Run twice — should have exactly the same result
-        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2).unwrap();
-        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2).unwrap();
+        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
+        cluster_fusion(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
 
         let summaries = SummaryStore::new(&conn, dim)
             .list_by_level(&ConsolidationLevel::Cluster)
             .unwrap();
         assert_eq!(summaries.len(), 1); // not 2 — idempotent
+    }
+
+    /// #344: the injected `cluster_threshold` actually drives clustering. Two facts
+    /// at cosine ≈ 0.92 cluster together under a loose threshold (0.85) but split
+    /// into separate singletons under a strict one (0.95) — so a loose run yields a
+    /// 2-fact cluster (1 summary) while a strict run yields none.
+    #[test]
+    fn cluster_threshold_is_honored() {
+        let dim = 4;
+        // a · b = 0.92 (unit vectors) → between 0.85 (loose) and 0.95 (strict).
+        let a = vec![1.0, 0.0, 0.0, 0.0];
+        let b = vec![0.92, 0.3923, 0.0, 0.0];
+
+        // Loose threshold 0.85: the pair is similar enough → one cluster of 2.
+        let loose = open_memory().unwrap();
+        init_schema(&loose).unwrap();
+        insert_fact(&loose, dim, "a", a.clone());
+        insert_fact(&loose, dim, "b", b.clone());
+        let made = cluster_fusion(
+            &loose,
+            &MockGenerator,
+            &MockEmbedder { embed_dim: dim },
+            dim,
+            2,
+            0.85,
+        )
+        .unwrap();
+        assert_eq!(made, 1, "0.92-similar pair clusters under a 0.85 threshold");
+
+        // Strict threshold 0.95: the same pair is NOT similar enough → no cluster.
+        let strict = open_memory().unwrap();
+        init_schema(&strict).unwrap();
+        insert_fact(&strict, dim, "a", a);
+        insert_fact(&strict, dim, "b", b);
+        let made = cluster_fusion(
+            &strict,
+            &MockGenerator,
+            &MockEmbedder { embed_dim: dim },
+            dim,
+            2,
+            0.95,
+        )
+        .unwrap();
+        assert_eq!(
+            made, 0,
+            "the same pair does NOT cluster under a 0.95 threshold"
+        );
     }
 }

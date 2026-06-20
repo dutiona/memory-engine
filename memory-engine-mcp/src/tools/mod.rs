@@ -203,6 +203,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "dedup_threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Cosine similarity threshold for deduplication (default: 0.92)" },
+                    "cluster_threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Cosine similarity threshold for clustering related facts; looser than dedup (default: 0.85)" },
                     "min_cluster_size": { "type": "integer", "minimum": 2, "description": "Minimum facts to form a cluster (default: 3)" }
                 }
             }),
@@ -1127,6 +1128,17 @@ fn handle_consolidate(
         .into());
     }
 
+    // Clustering threshold is configurable symmetrically with dedup (#344); looser
+    // than dedup by default. Same f64→f32 narrowing rationale as above.
+    #[allow(clippy::cast_possible_truncation)]
+    let cluster_threshold = get_f64(args, "cluster_threshold").unwrap_or(0.85) as f32;
+    if !(0.0..=1.0).contains(&cluster_threshold) {
+        return Err(ValidationError::Other(format!(
+            "cluster_threshold must be in [0.0, 1.0], got {cluster_threshold}"
+        ))
+        .into());
+    }
+
     let min_cluster_size = get_usize(args, "min_cluster_size").unwrap_or(3);
     if min_cluster_size < 2 {
         return Err(ValidationError::Other(format!(
@@ -1135,10 +1147,11 @@ fn handle_consolidate(
         .into());
     }
 
-    let config = ConsolidationConfig {
-        dedup_threshold,
-        min_cluster_size,
-    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(dedup_threshold)
+        .cluster_threshold(cluster_threshold)
+        .min_cluster_size(min_cluster_size)
+        .build();
 
     let stats = engine
         .consolidate(generator, embedder, &config)

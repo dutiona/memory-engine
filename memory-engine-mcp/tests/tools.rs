@@ -226,6 +226,18 @@ fn test_consolidate_validation() {
     );
     assert!(result.is_err());
 
+    // cluster_threshold out of range (#344)
+    let result = tools::dispatch(
+        "memory_consolidate",
+        args(&[("cluster_threshold", json!(2.0))]),
+        &engine,
+        None,
+        None,
+        3,
+        &memory_engine::ActivityFilterConfig::default(),
+    );
+    assert!(result.is_err());
+
     // min_cluster_size too small
     let result = tools::dispatch(
         "memory_consolidate",

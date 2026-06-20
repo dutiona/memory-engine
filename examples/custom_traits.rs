@@ -132,10 +132,10 @@ fn main() -> Result<(), MemoryError> {
     let stats = engine.consolidate(
         &summarizer,
         &embedder,
-        &ConsolidationConfig {
-            dedup_threshold: 0.99, // high threshold to catch near-exact duplicates
-            min_cluster_size: 2,
-        },
+        &ConsolidationConfig::builder()
+            .dedup_threshold(0.99) // high threshold to catch near-exact duplicates
+            .min_cluster_size(2)
+            .build(),
     )?;
     println!(
         "\nConsolidation: {} duplicates removed, {} clusters, {} global summaries",

@@ -315,7 +315,14 @@ pub trait DreamCycle {
 }
 
 /// Configuration for the consolidation process (Phase 2).
+///
+/// `#[non_exhaustive]` (#344): construct it from outside the crate via
+/// [`ConsolidationConfig::builder`] or [`ConsolidationConfig::default`], not a
+/// struct literal — so adding a future tuning field never breaks downstream call
+/// sites. Defaults are the research-backed values (dedup 0.90, cluster 0.85,
+/// `min_cluster_size` 2).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ConsolidationConfig {
     /// Minimum cosine similarity for two facts to be treated as duplicates.
     ///
@@ -324,25 +331,40 @@ pub struct ConsolidationConfig {
     /// `1.0` deduplicates only exact duplicates (identical embeddings), lower
     /// values fold in progressively looser near-duplicates.
     pub dedup_threshold: f32,
+    /// Cosine-similarity threshold for grouping related facts into a cluster
+    /// (single-linkage). Lower than `dedup_threshold`: clustering is looser than
+    /// dedup. Previously a hard-coded `CLUSTER_SIMILARITY_THRESHOLD` constant (#344).
+    pub cluster_threshold: f32,
     /// Minimum number of facts a similarity group must contain to be summarized
     /// into a cluster. Must be ≥ 2 — a single-fact "cluster" is not a cluster.
     pub min_cluster_size: usize,
 }
 
 impl Default for ConsolidationConfig {
-    /// Canonical defaults: `dedup_threshold = 0.90`, `min_cluster_size = 2`.
+    /// Canonical defaults: `dedup_threshold = 0.90`, `cluster_threshold = 0.85`,
+    /// `min_cluster_size = 2`.
     ///
     /// Hand-written rather than derived: a derived `Default` would yield
     /// `0.0` / `0`, and `min_cluster_size = 0` fails [`validate`](Self::validate).
     fn default() -> Self {
         Self {
             dedup_threshold: 0.90,
+            cluster_threshold: 0.85,
             min_cluster_size: 2,
         }
     }
 }
 
 impl ConsolidationConfig {
+    /// Start building a config from the [defaults](ConsolidationConfig::default).
+    ///
+    /// Preferred construction path now that the struct is `#[non_exhaustive]`;
+    /// only override the fields you care about.
+    #[must_use]
+    pub fn builder() -> ConsolidationConfigBuilder {
+        ConsolidationConfigBuilder(Self::default())
+    }
+
     /// Validate configuration parameters.
     ///
     /// Enforced at the consolidation entry point
@@ -351,9 +373,9 @@ impl ConsolidationConfig {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Conflict` if `dedup_threshold` is not a finite
-    /// value in `[0.0, 1.0]` (it is a cosine-similarity gate), or if
-    /// `min_cluster_size < 2` (a cluster requires at least two members to be
+    /// Returns `MemoryError::Conflict` if `dedup_threshold` or `cluster_threshold`
+    /// is not a finite value in `[0.0, 1.0]` (each is a cosine-similarity gate), or
+    /// if `min_cluster_size < 2` (a cluster requires at least two members to be
     /// fused into a summary; see [`crate::consolidation`]).
     pub fn validate(&self) -> Result<()> {
         use crate::error::{ConflictError, MemoryError};
@@ -363,6 +385,14 @@ impl ConsolidationConfig {
                 format!(
                     "dedup_threshold must be a finite value in [0.0, 1.0], got {}",
                     self.dedup_threshold
+                ),
+            )));
+        }
+        if !self.cluster_threshold.is_finite() || !(0.0..=1.0).contains(&self.cluster_threshold) {
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!(
+                    "cluster_threshold must be a finite value in [0.0, 1.0], got {}",
+                    self.cluster_threshold
                 ),
             )));
         }
@@ -376,6 +406,43 @@ impl ConsolidationConfig {
             )));
         }
         Ok(())
+    }
+}
+
+/// Builder for [`ConsolidationConfig`].
+///
+/// Exists because the config is `#[non_exhaustive]` and so cannot be built with a
+/// struct literal (or functional-update) from another crate. New config fields get
+/// a setter here without breaking any existing call site (#344).
+#[derive(Debug, Clone)]
+pub struct ConsolidationConfigBuilder(ConsolidationConfig);
+
+impl ConsolidationConfigBuilder {
+    /// Set the dedup near-duplicate cosine threshold.
+    #[must_use]
+    pub const fn dedup_threshold(mut self, value: f32) -> Self {
+        self.0.dedup_threshold = value;
+        self
+    }
+
+    /// Set the cluster single-linkage cosine threshold.
+    #[must_use]
+    pub const fn cluster_threshold(mut self, value: f32) -> Self {
+        self.0.cluster_threshold = value;
+        self
+    }
+
+    /// Set the minimum cluster size that earns a summary.
+    #[must_use]
+    pub const fn min_cluster_size(mut self, value: usize) -> Self {
+        self.0.min_cluster_size = value;
+        self
+    }
+
+    /// Finalize the configuration.
+    #[must_use]
+    pub const fn build(self) -> ConsolidationConfig {
+        self.0
     }
 }
 

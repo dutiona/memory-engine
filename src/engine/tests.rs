@@ -618,10 +618,10 @@ fn consolidate_deduplicates_similar_facts() {
         &make_new_fact("fact alpha copy", vec![0.99, 0.01, 0.0, 0.0]),
     );
 
-    let config = ConsolidationConfig {
-        dedup_threshold: 0.90,
-        min_cluster_size: 10, // high threshold so no clusters form
-    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.90)
+        .min_cluster_size(10) // high threshold so no clusters form
+        .build();
     let stats = engine
         .consolidate(&MockGen, &MockEmbedder { dim: DIM }, &config)
         .unwrap();
@@ -643,10 +643,10 @@ fn consolidate_is_idempotent() {
         &make_new_fact("unique B", vec![0.0, 1.0, 0.0, 0.0]),
     );
 
-    let config = ConsolidationConfig {
-        dedup_threshold: 0.92,
-        min_cluster_size: 10,
-    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.92)
+        .min_cluster_size(10)
+        .build();
 
     let _stats1 = engine
         .consolidate(&MockGen, &MockEmbedder { dim: DIM }, &config)
