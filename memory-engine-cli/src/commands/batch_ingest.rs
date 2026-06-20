@@ -201,10 +201,13 @@ pub fn ingest_from_reader(
             Ok(0) => break, // EOF
             Ok(n) => n,
             Err(e) => {
+                // A read error on the byte stream is terminal — retrying would
+                // spin on a persistent error (CWE-835). Stop and flush whatever
+                // was already batched, consistent with the skip_until-error path.
                 line_no += 1;
-                eprintln!("warning: line {line_no}: read error: {e}");
+                eprintln!("warning: line {line_no}: read error, stopping: {e}");
                 total_skipped += 1;
-                continue;
+                break;
             }
         };
         line_no += 1;
@@ -883,5 +886,75 @@ not valid json
         ])| {
             let _ = ingest_from_reader(&engine, data.as_slice(), &CapEmbed, 8, None, OutputFormat::Json);
         });
+    }
+
+    #[test]
+    fn persistent_read_error_breaks_instead_of_looping() {
+        // CWE-835 (#664): a reader that errors on every read must make the ingest
+        // loop BREAK (a byte-stream read error is terminal), not `continue` and
+        // spin forever. The reader panics if polled more than a few times, so a
+        // regression to the looping behaviour fails the test instead of hanging it.
+        struct AlwaysErr {
+            reads: usize,
+        }
+        impl std::io::Read for AlwaysErr {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                assert!(
+                    self.reads < 3,
+                    "ingest looped on a persistent read error instead of breaking"
+                );
+                self.reads += 1;
+                Err(std::io::Error::other("simulated persistent read error"))
+            }
+        }
+
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        // 0 ingested + 1 skipped → the all-bad bail; the point is it RETURNS.
+        let err = ingest_from_reader(
+            &engine,
+            AlwaysErr { reads: 0 },
+            &CapEmbed,
+            8,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no facts ingested"), "got: {err}");
+    }
+
+    #[test]
+    fn read_error_after_a_valid_line_still_flushes_it() {
+        // The `break` must not discard records read BEFORE the terminal read error:
+        // the partial batch is flushed on the way out. A reader that yields one
+        // valid JSONL line and then errors must still ingest that line.
+        struct LineThenErr {
+            remaining: &'static [u8],
+        }
+        impl std::io::Read for LineThenErr {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.remaining.is_empty() {
+                    return Err(std::io::Error::other("read error after the line"));
+                }
+                let n = self.remaining.len().min(buf.len());
+                buf[..n].copy_from_slice(&self.remaining[..n]);
+                self.remaining = &self.remaining[n..];
+                Ok(n)
+            }
+        }
+
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let reader = LineThenErr {
+            remaining: b"{\"content\":\"ok\",\"fact_type\":\"semantic\"}\n",
+        };
+        let summary =
+            ingest_from_reader(&engine, reader, &CapEmbed, 8, None, OutputFormat::Json).unwrap();
+        assert_eq!(
+            summary.total_ingested, 1,
+            "the valid line must still be flushed"
+        );
+        assert_eq!(
+            summary.total_skipped, 1,
+            "the terminal read error counts as 1"
+        );
     }
 }
