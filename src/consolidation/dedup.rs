@@ -56,7 +56,11 @@ pub enum DedupOutcome {
 /// fact. Deterministic tie-break: on equal importance, the newer fact (higher id) is
 /// expired. A `threshold` of 1.0 therefore merges only exact duplicates.
 ///
-/// When the active corpus exceeds `max_facts` the O(N*M) pairwise comparison is
+/// `active_facts` is the current active set, loaded once by the caller and shared
+/// with the cluster pass (#389) — `local_dedup` reads it for comparison and writes
+/// expirations through `conn`, but does not re-query the store.
+///
+/// When `active_facts.len()` exceeds `max_facts` the O(N*M) pairwise comparison is
 /// skipped and [`DedupOutcome::Skipped`] is returned (the orchestrator then leaves
 /// the watermark unadvanced); otherwise [`DedupOutcome::Ran`] carries the removed
 /// count and the expired ids. The cap is injected so callers own the policy and
@@ -69,6 +73,7 @@ pub enum DedupOutcome {
 pub fn local_dedup(
     conn: &Connection,
     embed_dim: usize,
+    active_facts: &[Fact],
     threshold: f32,
     max_facts: usize,
     since: Option<DateTime<Utc>>,
@@ -76,7 +81,6 @@ pub fn local_dedup(
 ) -> Result<DedupOutcome> {
     let fact_store = FactStore::new(conn, embed_dim);
     let edge_store = EdgeStore::new(conn);
-    let active_facts = fact_store.list_active(None)?;
 
     if active_facts.len() > max_facts {
         tracing::warn!(
@@ -115,7 +119,7 @@ pub fn local_dedup(
             continue; // pinned facts are never dedup candidates
         }
 
-        for candidate in &active_facts {
+        for candidate in active_facts {
             if candidate.id == new_fact.id
                 || expired_ids.contains(&candidate.id)
                 || candidate.is_pinned
@@ -261,6 +265,20 @@ mod tests {
         (conn, 4)
     }
 
+    /// Load the active facts and run `local_dedup` over them — the orchestrator now
+    /// owns the single load (#389), so tests mirror that here.
+    fn dedup(
+        conn: &Connection,
+        dim: usize,
+        threshold: f32,
+        max_facts: usize,
+        since: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Result<DedupOutcome> {
+        let active = FactStore::new(conn, dim).list_active(None)?;
+        local_dedup(conn, dim, &active, threshold, max_facts, since, now)
+    }
+
     fn insert_fact(
         conn: &Connection,
         embed_dim: usize,
@@ -297,7 +315,7 @@ mod tests {
         insert_fact(&conn, dim, "fact A", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "fact B", vec![0.99, 0.01, 0.0, 0.0], 0.3);
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 1);
@@ -326,7 +344,7 @@ mod tests {
         insert_fact(&conn, dim, "identical A", emb.clone(), 0.7);
         insert_fact(&conn, dim, "identical B", emb, 0.3);
 
-        let (removed, _) = local_dedup(&conn, dim, 1.0, NO_CAP, None, Utc::now())
+        let (removed, _) = dedup(&conn, dim, 1.0, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 1, "threshold 1.0 must dedup exact duplicates");
@@ -345,7 +363,7 @@ mod tests {
         insert_fact(&conn, dim, "fact X", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "fact Y", vec![0.0, 1.0, 0.0, 0.0], 0.5);
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 0);
@@ -404,7 +422,7 @@ mod tests {
 
         // Only compare facts created since `old_time + 1 day`
         let since = old_time + Duration::days(1);
-        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, Some(since), Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, Some(since), Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 1); // new duplicate should be expired against old
@@ -426,7 +444,7 @@ mod tests {
             0.8,
         );
 
-        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
 
@@ -443,7 +461,7 @@ mod tests {
         insert_fact(&conn, dim, "older fact", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "newer fact", vec![0.99, 0.01, 0.0, 0.0], 0.5);
 
-        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
 
@@ -504,7 +522,7 @@ mod tests {
             false,
         );
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
         // Neither should be deduped because one is pinned
@@ -528,7 +546,7 @@ mod tests {
             true,
         );
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 0);
@@ -549,7 +567,7 @@ mod tests {
         store.update_importance_score(1, 0.8).unwrap(); // low imp fact gets higher score
         store.update_importance_score(2, 0.4).unwrap(); // high imp fact gets lower score
 
-        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
 
@@ -592,7 +610,7 @@ mod tests {
         store.update_importance_score(b, 0.8).unwrap(); // the true maximum
         store.update_importance_score(c, 0.5).unwrap();
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 2, "B and C both collapse onto A");
@@ -635,7 +653,7 @@ mod tests {
         store.update_importance_score(b, 0.1).unwrap();
         store.update_importance_score(a, 0.1).unwrap();
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 2, "L collapses onto B, then B onto A");
@@ -655,7 +673,7 @@ mod tests {
     fn empty_db_dedup_is_noop() {
         let (conn, dim) = setup();
         // No facts in the DB — dedup must return (0, []) without error.
-        let (removed, expired) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+        let (removed, expired) = dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 0);
@@ -677,7 +695,7 @@ mod tests {
         insert_fact(&conn, dim, "dup B", vec![0.99, 0.01, 0.0, 0.0], 0.5);
 
         // ...but a cap of 1 (corpus is 2) trips the safety skip.
-        let outcome = local_dedup(&conn, dim, 0.90, 1, None, Utc::now()).unwrap();
+        let outcome = dedup(&conn, dim, 0.90, 1, None, Utc::now()).unwrap();
         assert_eq!(
             outcome,
             DedupOutcome::Skipped { active_count: 2 },
@@ -698,7 +716,7 @@ mod tests {
         insert_fact(&conn, dim, "dup B", vec![0.99, 0.01, 0.0, 0.0], 0.5);
 
         // corpus len == cap (2 == 2): NOT over cap → runs and collapses the pair.
-        let (removed, _) = local_dedup(&conn, dim, 0.90, 2, None, Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, 2, None, Utc::now())
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 1, "a corpus exactly at the cap must run, not skip");
