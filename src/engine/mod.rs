@@ -830,3 +830,171 @@ impl Drop for MemoryEngine {
         }
     }
 }
+
+/// Property-based coverage for the pure bi-temporal filter helpers (#450).
+///
+/// `passes_temporal_cutoff` and `fact_overlaps_period` encode interval
+/// containment / overlap algebra — exactly the place `<` vs `<=` off-by-one
+/// errors hide and example tests routinely miss. These proptests pin the
+/// helpers to their algebraic spec and to monotonicity laws. Placed at the
+/// end of the file so no non-test items follow a `#[cfg(test)]` module
+/// (`clippy::items_after_test_module`).
+#[cfg(test)]
+mod proptest_temporal {
+    use chrono::{DateTime, Utc};
+    use proptest::prelude::*;
+
+    use super::{fact_overlaps_period, passes_temporal_cutoff};
+    use crate::types::{Fact, FactType};
+
+    /// Build a `Fact` carrying only the valid-time fields the helpers read;
+    /// every other field is an inert placeholder.
+    fn make_fact(t_valid: Option<DateTime<Utc>>, t_invalid: Option<DateTime<Utc>>) -> Fact {
+        Fact {
+            id: 1,
+            content: String::new(),
+            content_hash: String::new(),
+            embedding: vec![],
+            fact_type: FactType::Semantic,
+            t_created: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            t_expired: None,
+            t_valid,
+            t_invalid,
+            source_event_id: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            metadata: serde_json::Value::Null,
+            scope_id: 1,
+            is_pinned: false,
+            importance_score: 0.0,
+            surfaced_at: None,
+        }
+    }
+
+    prop_compose! {
+        /// Timestamps as whole seconds in a wide but always-valid range, so
+        /// `from_timestamp` never returns `None`.
+        fn arb_ts()(s in 0i64..=4_000_000_000) -> DateTime<Utc> {
+            DateTime::<Utc>::from_timestamp(s, 0).unwrap()
+        }
+    }
+
+    /// Reference spec for `passes_temporal_cutoff`, written independently of the
+    /// implementation so the proptest is a genuine cross-check, not a tautology.
+    fn spec_passes(
+        t_valid: Option<DateTime<Utc>>,
+        t_invalid: Option<DateTime<Utc>>,
+        cutoff: DateTime<Utc>,
+    ) -> bool {
+        let valid_ok = t_valid.is_none_or(|tv| tv <= cutoff);
+        let invalid_ok = t_invalid.is_none_or(|ti| ti > cutoff);
+        valid_ok && invalid_ok
+    }
+
+    /// Reference spec for `fact_overlaps_period`.
+    fn spec_overlaps(
+        t_valid: Option<DateTime<Utc>>,
+        t_invalid: Option<DateTime<Utc>>,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> bool {
+        t_valid.is_none_or(|tv| tv < end) && t_invalid.is_none_or(|ti| ti > start)
+    }
+
+    proptest! {
+        /// The helper agrees with its independent spec for all inputs (catches
+        /// any `<`/`<=`/`>`/`>=` off-by-one regression).
+        #[test]
+        fn cutoff_matches_spec(
+            t_valid in proptest::option::of(arb_ts()),
+            t_invalid in proptest::option::of(arb_ts()),
+            cutoff in arb_ts(),
+        ) {
+            let fact = make_fact(t_valid, t_invalid);
+            prop_assert_eq!(
+                passes_temporal_cutoff(&fact, cutoff),
+                spec_passes(t_valid, t_invalid, cutoff)
+            );
+        }
+
+        /// With `t_invalid` unbounded, passing is monotone in `cutoff`: once a
+        /// fact is valid at `cutoff` it stays valid at every later instant.
+        #[test]
+        fn cutoff_monotone_when_open_ended(
+            t_valid in proptest::option::of(arb_ts()),
+            cutoff in arb_ts(),
+            delta in 0i64..=1_000_000,
+        ) {
+            let fact = make_fact(t_valid, None);
+            let later = DateTime::<Utc>::from_timestamp(cutoff.timestamp() + delta, 0).unwrap();
+            if passes_temporal_cutoff(&fact, cutoff) {
+                prop_assert!(passes_temporal_cutoff(&fact, later));
+            }
+        }
+
+        /// A fact whose validity starts strictly after `cutoff` never passes.
+        #[test]
+        fn cutoff_rejects_future_t_valid(
+            cutoff in arb_ts(),
+            delta in 1i64..=1_000_000,
+            t_invalid in proptest::option::of(arb_ts()),
+        ) {
+            let t_valid = DateTime::<Utc>::from_timestamp(cutoff.timestamp() + delta, 0).unwrap();
+            let fact = make_fact(Some(t_valid), t_invalid);
+            prop_assert!(!passes_temporal_cutoff(&fact, cutoff));
+        }
+
+        /// The helper agrees with its independent spec for all inputs.
+        #[test]
+        fn overlap_matches_spec(
+            t_valid in proptest::option::of(arb_ts()),
+            t_invalid in proptest::option::of(arb_ts()),
+            a in arb_ts(),
+            b in arb_ts(),
+        ) {
+            // Normalize to a non-empty half-open window [start, end).
+            let (start, end) = if a < b { (a, b) } else { (b, a) };
+            prop_assume!(start < end);
+            let fact = make_fact(t_valid, t_invalid);
+            prop_assert_eq!(
+                fact_overlaps_period(&fact, start, end),
+                spec_overlaps(t_valid, t_invalid, start, end)
+            );
+        }
+
+        /// Overlap is monotone under window widening: if a fact overlaps
+        /// `[start, end)` it overlaps any superset window `[start', end')` with
+        /// `start' <= start` and `end' >= end`.
+        #[test]
+        fn overlap_monotone_under_widening(
+            t_valid in proptest::option::of(arb_ts()),
+            t_invalid in proptest::option::of(arb_ts()),
+            a in arb_ts(),
+            b in arb_ts(),
+            grow_left in 0i64..=1_000_000,
+            grow_right in 0i64..=1_000_000,
+        ) {
+            let (start, end) = if a < b { (a, b) } else { (b, a) };
+            prop_assume!(start < end);
+            let fact = make_fact(t_valid, t_invalid);
+            if fact_overlaps_period(&fact, start, end) {
+                let wider_start =
+                    DateTime::<Utc>::from_timestamp(start.timestamp() - grow_left, 0).unwrap();
+                let wider_end =
+                    DateTime::<Utc>::from_timestamp(end.timestamp() + grow_right, 0).unwrap();
+                prop_assert!(fact_overlaps_period(&fact, wider_start, wider_end));
+            }
+        }
+
+        /// A fact unbounded on both valid-time ends overlaps every non-empty
+        /// window.
+        #[test]
+        fn unbounded_fact_overlaps_everything(a in arb_ts(), b in arb_ts()) {
+            let (start, end) = if a < b { (a, b) } else { (b, a) };
+            prop_assume!(start < end);
+            let fact = make_fact(None, None);
+            prop_assert!(fact_overlaps_period(&fact, start, end));
+        }
+    }
+}

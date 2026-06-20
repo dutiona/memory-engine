@@ -31,6 +31,84 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Size of the blake3 checksum appended to the file.
 const BLAKE3_LEN: usize = 32;
 
+/// Hard upper bound on the on-disk size of a `.snapshot` sidecar (512 MiB).
+///
+/// Bounds the wholesale `fs::read` of an oversized or tampered sidecar
+/// (CWE-400, resource exhaustion via large on-disk file). `load_from_file`
+/// slurps the entire file into a `Vec<u8>` before parsing; rejecting on
+/// `fs::metadata` first caps that read at this many bytes regardless of what
+/// the file claims to contain.
+///
+/// This does **not** defend against in-band `MessagePack` length prefixes:
+/// `rmp_serde` reports the declared `SeqAccess::size_hint`, but serde's `Vec`
+/// deserializer routes every preallocation through `size_hint::cautious`, which
+/// caps `with_capacity` at 1 MiB worth of elements (`MAX_PREALLOC_BYTES`) and
+/// then grows the vector incrementally as real elements are decoded. A small
+/// crafted file therefore cannot force a multi-gigabyte allocation — it simply
+/// errors out of input long before that — so no per-entry-length `DoS` exists for
+/// this guard to mitigate. The complementary integrity defense is the per-entry
+/// embedding-dimension check in `load_from_file` (runs *after* deserialization).
+///
+/// The blake3 checksum is *unkeyed* — a corruption check, not an authenticity
+/// control — so an actor able to write the sidecar (local tamper /
+/// shared-data-dir threat) can still produce a checksum-passing file; the size
+/// cap and the dim check are what bound the blast radius of such a file. Tune to
+/// the expected corpus; a real snapshot is dominated by HNSW embeddings.
+const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Outcome of the pre-read size gate in [`load_from_file`].
+///
+/// Separating this from the read makes the short-circuit observable in tests
+/// (a `cap` parameter lets a test prove the over-cap branch fires *before* any
+/// `fs::read`, without materializing a half-gigabyte file).
+#[derive(Debug, PartialEq, Eq)]
+enum SizeGate {
+    /// File is within the cap (or its size is unknown but acceptable); proceed
+    /// to read it.
+    Proceed,
+    /// File exceeds the cap, or its metadata could not be read; abort before
+    /// reading and fall back to a full rebuild.
+    Reject,
+}
+
+/// Decide, from filesystem metadata alone, whether a sidecar is small enough to
+/// read into memory. Rejects over-cap files *before* `fs::read` so a crafted or
+/// tampered large file cannot drive a wholesale slurp into a `Vec<u8>`.
+///
+/// `cap` is a parameter (not the hardcoded const) purely so tests can exercise
+/// the gate against a small real file with a small cap — deleting the size check
+/// here is then an observable test failure, not just a slower path.
+fn size_gate(path: &Path, cap: u64) -> SizeGate {
+    match fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            // A directory's `len()` is small and platform-dependent, so it would
+            // otherwise slip past the size check and fail later with a generic
+            // read error. Reject non-regular-files up front with a clear warning.
+            tracing::warn!(
+                path = %path.display(),
+                "snapshot path is not a regular file, discarding"
+            );
+            SizeGate::Reject
+        }
+        Ok(meta) if meta.len() > cap => {
+            tracing::warn!(
+                path = %path.display(),
+                size = meta.len(),
+                cap,
+                "snapshot exceeds size cap, discarding"
+            );
+            SizeGate::Reject
+        }
+        Ok(_) => SizeGate::Proceed,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %path.display(), error = %e, "snapshot metadata failed");
+            }
+            SizeGate::Reject
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot types (decoupled from internal representations)
 // ---------------------------------------------------------------------------
@@ -204,6 +282,16 @@ pub fn write_to_file(
 /// mismatch, checksum failure, `embed_dim` mismatch). Never errors — all
 /// failures are logged and treated as "snapshot unavailable".
 pub fn load_from_file(path: &Path, embed_dim: usize) -> Option<(SnapshotHeader, SnapshotPayload)> {
+    // Size guard BEFORE reading the file into memory: an oversized or tampered
+    // sidecar must not be slurped wholesale into a Vec<u8> (see
+    // MAX_SNAPSHOT_BYTES). This bounds the on-disk read only; in-band length
+    // prefixes are already bounded by serde's cautious preallocation cap. blake3
+    // is unkeyed and so is not an authenticity gate. On metadata failure (other
+    // than NotFound) we discard and fall back to a full rebuild.
+    if size_gate(path, MAX_SNAPSHOT_BYTES) == SizeGate::Reject {
+        return None;
+    }
+
     let data = match fs::read(path) {
         Ok(d) => d,
         Err(e) => {
@@ -278,6 +366,26 @@ pub fn load_from_file(path: &Path, embed_dim: usize) -> Option<(SnapshotHeader, 
             return None;
         }
     };
+
+    // 4. Post-validate per-entry embedding dimensions. The header `embed_dim`
+    //    check above only guards the declared dimension, not the actual vectors
+    //    inside each `HnswEntry`. A corrupt/tampered payload could carry a
+    //    wrong-length embedding that the header still claims is `embed_dim`;
+    //    feeding that into the HNSW rebuild would be a latent dimension bug.
+    if let Some(bad) = payload
+        .hnsw
+        .as_ref()
+        .and_then(|hnsw| hnsw.entries.iter().find(|e| e.embedding.len() != embed_dim))
+    {
+        tracing::warn!(
+            path = %path.display(),
+            fact_id = bad.fact_id,
+            entry_dim = bad.embedding.len(),
+            expected = embed_dim,
+            "snapshot HNSW entry embedding dimension mismatch, discarding"
+        );
+        return None;
+    }
 
     Some((header, payload))
 }
@@ -496,6 +604,152 @@ mod tests {
     }
 
     #[test]
+    fn size_gate_rejects_over_cap_before_read() {
+        // Security (#411): the size gate must REJECT a file larger than the cap
+        // *before* `fs::read`, so a crafted/corrupt file cannot force a
+        // wholesale slurp into memory. This is the load-bearing short-circuit —
+        // and it is what makes deleting the size check an observable failure
+        // (the outcome `None` alone is not, since content checks also reject
+        // garbage; see `oversized_sparse_file_still_returns_none`).
+        //
+        // We use a SMALL real file with a SMALL cap to exercise the exact
+        // over-cap branch with zero large allocations: write a few KiB, set the
+        // cap below it, and assert Reject. A complementary small cap above the
+        // file size yields Proceed, pinning the boundary on a real path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.db.snapshot");
+        fs::write(&path, vec![0u8; 4096]).unwrap();
+
+        // File (4096 B) over a 1024 B cap → the gate rejects before any read.
+        assert_eq!(size_gate(&path, 1024), SizeGate::Reject);
+        // File (4096 B) under an 8192 B cap → the gate lets the read proceed.
+        assert_eq!(size_gate(&path, 8192), SizeGate::Proceed);
+        // Missing file → reject (NotFound is silent; still a reject).
+        assert_eq!(
+            size_gate(&dir.path().join("absent.snapshot"), 8192),
+            SizeGate::Reject
+        );
+        // A directory (metadata succeeds, small len) must be rejected as a
+        // non-regular-file before the size check, not slip through to fs::read.
+        assert_eq!(size_gate(dir.path(), 8192), SizeGate::Reject);
+    }
+
+    #[test]
+    fn oversized_sparse_file_still_returns_none() {
+        // Companion to `size_gate_rejects_over_cap_before_read`: the public
+        // entry point returns None for a file whose metadata exceeds the real
+        // cap. A sparse file (set_len) reports the logical size without
+        // consuming disk blocks, so we exercise the actual MAX_SNAPSHOT_BYTES
+        // without writing 512 MiB. NOTE: this pins only the OUTCOME (None) — the
+        // short-circuit-before-read property is pinned by the `size_gate` unit
+        // test above, because an all-zero file is also rejected on the content
+        // path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.db.snapshot");
+        let f = fs::File::create(&path).unwrap();
+        f.set_len(MAX_SNAPSHOT_BYTES + 1).unwrap();
+        drop(f);
+
+        assert!(load_from_file(&path, 128).is_none());
+    }
+
+    #[test]
+    fn size_cap_boundary_is_exclusive() {
+        // The cap boundary is `>` not `>=`: a file exactly at the cap passes the
+        // size gate so a legitimately large corpus at the limit still loads,
+        // while one byte over is rejected. Pinned on a real path via `size_gate`
+        // with a SMALL cap — a small file straddles a small cap with zero large
+        // allocations, instead of materializing a half-gigabyte file (a
+        // `set_len` + `load_from_file` would `fs::read` 512 MiB of zeros for zero
+        // extra coverage, risking OOM under cargo's parallel test harness).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boundary.db.snapshot");
+        let cap: usize = 4096;
+        fs::write(&path, vec![0u8; cap]).unwrap();
+        // Exactly at the cap → proceed (boundary is exclusive).
+        assert_eq!(size_gate(&path, cap as u64), SizeGate::Proceed);
+
+        // One byte over the cap → reject.
+        fs::write(&path, vec![0u8; cap + 1]).unwrap();
+        assert_eq!(size_gate(&path, cap as u64), SizeGate::Reject);
+    }
+
+    #[test]
+    fn mismatched_entry_embedding_dim_returns_none() {
+        // Security/integrity (#411): the header `embed_dim` check does not
+        // validate per-entry embedding lengths. A payload whose HnswEntry
+        // carries a wrong-dimension vector (corruption or tamper) must be
+        // rejected rather than fed into the index rebuild.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_dim.db.snapshot");
+
+        let header = SnapshotHeader {
+            format_version: FORMAT_VERSION,
+            fingerprint: DbFingerprint {
+                max_fact_id: 0,
+                active_fact_count: 0,
+                max_edge_id: 0,
+                active_edge_count: 0,
+                max_scope_id: 1,
+                scope_count: 1,
+            },
+            embed_dim: 4,
+            engine_version: "test".into(),
+        };
+        let payload = SnapshotPayload {
+            graph: GraphSnapshot { edges: vec![] },
+            scope_tree: ScopeTreeSnapshot { nodes: vec![] },
+            hnsw: Some(HnswSnapshot {
+                entries: vec![HnswEntry {
+                    fact_id: 1,
+                    // 3 components, but embed_dim is 4 → mismatch.
+                    embedding: vec![0.1, 0.2, 0.3],
+                }],
+            }),
+        };
+
+        write_to_file(&header, &payload, &path).unwrap();
+        assert!(load_from_file(&path, 4).is_none());
+    }
+
+    #[test]
+    fn matching_entry_embedding_dim_loads() {
+        // Counterpart to the mismatch test: a payload whose entry embedding
+        // matches `embed_dim` loads successfully (the validation does not
+        // reject well-formed data).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("good_dim.db.snapshot");
+
+        let header = SnapshotHeader {
+            format_version: FORMAT_VERSION,
+            fingerprint: DbFingerprint {
+                max_fact_id: 0,
+                active_fact_count: 0,
+                max_edge_id: 0,
+                active_edge_count: 0,
+                max_scope_id: 1,
+                scope_count: 1,
+            },
+            embed_dim: 4,
+            engine_version: "test".into(),
+        };
+        let payload = SnapshotPayload {
+            graph: GraphSnapshot { edges: vec![] },
+            scope_tree: ScopeTreeSnapshot { nodes: vec![] },
+            hnsw: Some(HnswSnapshot {
+                entries: vec![HnswEntry {
+                    fact_id: 1,
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                }],
+            }),
+        };
+
+        write_to_file(&header, &payload, &path).unwrap();
+        let (_, p) = load_from_file(&path, 4).expect("matching dim should load");
+        assert_eq!(p.hnsw.unwrap().entries.len(), 1);
+    }
+
+    #[test]
     fn named_msgpack_handles_missing_hnsw_field() {
         // Simulate a payload serialized WITHOUT the hnsw field (non-ann build).
         // The named MessagePack + #[serde(default)] should handle this.
@@ -514,5 +768,190 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&minimal).unwrap();
         let full: SnapshotPayload = rmp_serde::from_slice(&bytes).unwrap();
         assert!(full.hnsw.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Property-based coverage (#451)
+    //
+    // The example tests above exercise the happy path and each individual
+    // reject branch. These proptests stress the `write_to_file` →
+    // `load_from_file` pipeline (two MessagePack serializations + a u32 LE
+    // header length + a blake3 integrity check) over arbitrary field values —
+    // including i64 boundaries (MIN/MAX) and random collection counts — and
+    // assert the integrity-protected region rejects any single-byte mutation.
+    // -----------------------------------------------------------------------
+    mod proptest_roundtrip {
+        // Bit-exact equality is the whole point of a serde roundtrip test: a
+        // faithfully written then loaded `f32`/`f64` must be identical. We
+        // exclude NaN in the strategies, so `==` is well-defined here.
+        #![allow(clippy::float_cmp)]
+
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Embedding dimensions kept small to keep generated payloads cheap;
+        /// the dimension is the only field both serialized into the header and
+        /// cross-checked against each `HnswEntry`, so it is the interesting one.
+        const DIM_RANGE: std::ops::RangeInclusive<usize> = 1..=8;
+
+        prop_compose! {
+            fn arb_fingerprint()(
+                max_fact_id in any::<i64>(),
+                active_fact_count in any::<i64>(),
+                max_edge_id in any::<i64>(),
+                active_edge_count in any::<i64>(),
+                max_scope_id in any::<i64>(),
+                scope_count in any::<i64>(),
+            ) -> DbFingerprint {
+                DbFingerprint {
+                    max_fact_id,
+                    active_fact_count,
+                    max_edge_id,
+                    active_edge_count,
+                    max_scope_id,
+                    scope_count,
+                }
+            }
+        }
+
+        prop_compose! {
+            fn arb_edge()(
+                edge_id in any::<i64>(),
+                source in any::<i64>(),
+                target in any::<i64>(),
+                relation_type in ".*",
+                weight in proptest::num::f64::NORMAL | proptest::num::f64::ZERO,
+            ) -> GraphEdgeSnapshot {
+                GraphEdgeSnapshot { edge_id, source, target, relation_type, weight }
+            }
+        }
+
+        prop_compose! {
+            fn arb_node()(
+                id in any::<i64>(),
+                parent_id in proptest::option::of(any::<i64>()),
+                label in ".*",
+                depth in any::<i64>(),
+            ) -> ScopeNode {
+                ScopeNode { id, parent_id, label, depth }
+            }
+        }
+
+        prop_compose! {
+            fn arb_entry(dim: usize)(
+                fact_id in any::<i64>(),
+                embedding in prop::collection::vec(
+                    proptest::num::f32::NORMAL | proptest::num::f32::ZERO,
+                    dim..=dim,
+                ),
+            ) -> HnswEntry {
+                HnswEntry { fact_id, embedding }
+            }
+        }
+
+        prop_compose! {
+            /// Generate a self-consistent `(header, payload)` pair: the header's
+            /// `embed_dim` and every HNSW entry's embedding length agree, so a
+            /// faithful roundtrip is expected to succeed.
+            fn arb_snapshot()(
+                dim in DIM_RANGE,
+            )(
+                dim in Just(dim),
+                fingerprint in arb_fingerprint(),
+                engine_version in ".*",
+                edges in prop::collection::vec(arb_edge(), 0..6),
+                nodes in prop::collection::vec(arb_node(), 0..6),
+                hnsw in proptest::option::of(
+                    prop::collection::vec(arb_entry(dim), 0..6),
+                ),
+            ) -> (SnapshotHeader, SnapshotPayload, usize) {
+                let header = SnapshotHeader {
+                    format_version: FORMAT_VERSION,
+                    fingerprint,
+                    embed_dim: dim,
+                    engine_version,
+                };
+                let payload = SnapshotPayload {
+                    graph: GraphSnapshot { edges },
+                    scope_tree: ScopeTreeSnapshot { nodes },
+                    hnsw: hnsw.map(|entries| HnswSnapshot { entries }),
+                };
+                (header, payload, dim)
+            }
+        }
+
+        proptest! {
+            /// A faithfully written snapshot roundtrips to identical data for
+            /// arbitrary field values (including i64::MIN/MAX and random counts).
+            #[test]
+            fn write_load_roundtrip((header, payload, dim) in arb_snapshot()) {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("rt.db.snapshot");
+
+                write_to_file(&header, &payload, &path).unwrap();
+                let (h, p) = load_from_file(&path, dim)
+                    .expect("faithful roundtrip must load");
+
+                prop_assert_eq!(h.format_version, header.format_version);
+                prop_assert_eq!(h.embed_dim, header.embed_dim);
+                prop_assert_eq!(h.fingerprint, header.fingerprint);
+                prop_assert_eq!(&h.engine_version, &header.engine_version);
+
+                prop_assert_eq!(p.graph.edges.len(), payload.graph.edges.len());
+                for (a, b) in p.graph.edges.iter().zip(payload.graph.edges.iter()) {
+                    prop_assert_eq!(a.edge_id, b.edge_id);
+                    prop_assert_eq!(a.source, b.source);
+                    prop_assert_eq!(a.target, b.target);
+                    prop_assert_eq!(&a.relation_type, &b.relation_type);
+                    prop_assert_eq!(a.weight, b.weight);
+                }
+
+                prop_assert_eq!(p.scope_tree.nodes, payload.scope_tree.nodes);
+
+                match (&p.hnsw, &payload.hnsw) {
+                    (Some(got), Some(want)) => {
+                        prop_assert_eq!(got.entries.len(), want.entries.len());
+                        for (a, b) in got.entries.iter().zip(want.entries.iter()) {
+                            prop_assert_eq!(a.fact_id, b.fact_id);
+                            prop_assert_eq!(&a.embedding, &b.embedding);
+                        }
+                    }
+                    (None, None) => {}
+                    _ => prop_assert!(false, "hnsw presence mismatch"),
+                }
+            }
+
+            /// Any single-byte mutation inside the blake3-covered region
+            /// (payload bytes + the trailing 32-byte checksum) must be rejected.
+            /// The header region is intentionally NOT integrity-protected
+            /// (the format hashes the payload only), so it is excluded here.
+            #[test]
+            fn bit_flip_in_protected_region_rejected(
+                (header, payload, dim) in arb_snapshot(),
+                flip_bit in 0u8..8,
+                pos in any::<usize>(),
+            ) {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("flip.db.snapshot");
+                write_to_file(&header, &payload, &path).unwrap();
+
+                let mut bytes = fs::read(&path).unwrap();
+                let header_len =
+                    u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+                let protected_start = 4 + header_len; // first payload byte
+                let protected_len = bytes.len() - protected_start;
+                prop_assume!(protected_len > 0);
+
+                // Map `pos` into the protected region [protected_start, len).
+                let offset = protected_start + (pos % protected_len);
+                bytes[offset] ^= 1u8 << flip_bit;
+                fs::write(&path, &bytes).unwrap();
+
+                prop_assert!(
+                    load_from_file(&path, dim).is_none(),
+                    "single-byte mutation in the payload/checksum region must reject"
+                );
+            }
+        }
     }
 }
