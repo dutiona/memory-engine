@@ -44,6 +44,8 @@ mod consolidation;
 mod convert;
 mod event_log;
 mod graph;
+#[cfg(test)]
+mod realization;
 mod schema;
 mod search_index;
 mod session;
