@@ -80,6 +80,16 @@ enum SizeGate {
 /// here is then an observable test failure, not just a slower path.
 fn size_gate(path: &Path, cap: u64) -> SizeGate {
     match fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            // A directory's `len()` is small and platform-dependent, so it would
+            // otherwise slip past the size check and fail later with a generic
+            // read error. Reject non-regular-files up front with a clear warning.
+            tracing::warn!(
+                path = %path.display(),
+                "snapshot path is not a regular file, discarding"
+            );
+            SizeGate::Reject
+        }
         Ok(meta) if meta.len() > cap => {
             tracing::warn!(
                 path = %path.display(),
@@ -619,6 +629,9 @@ mod tests {
             size_gate(&dir.path().join("absent.snapshot"), 8192),
             SizeGate::Reject
         );
+        // A directory (metadata succeeds, small len) must be rejected as a
+        // non-regular-file before the size check, not slip through to fs::read.
+        assert_eq!(size_gate(dir.path(), 8192), SizeGate::Reject);
     }
 
     #[test]
