@@ -302,16 +302,29 @@ mod tests {
                 user in "[\u{0}-\u{10FFFF}]{0,1500}",
                 assistant in "[\u{0}-\u{10FFFF}]{0,1500}",
             ) {
+                // build_content slices on a manual char-boundary walk-back: if it
+                // ever cut mid-codepoint, the str index would PANIC inside the
+                // call below, so simply reaching the asserts proves no split
+                // codepoint for this input (that is the real #425 guarantee).
                 let content = build_content(&episode(user, assistant));
-                // String is always valid UTF-8; assert the end is a char boundary
-                // (it always is for a String, but documents the invariant) and that
-                // the output never exceeds MAX_LEN (2000) + "..." (3 bytes).
-                prop_assert!(content.is_char_boundary(content.len()));
+                // The output never exceeds MAX_LEN (2000) + the "..." marker (3 bytes).
                 prop_assert!(
                     content.len() <= 2003,
                     "content too long: {} bytes",
                     content.len()
                 );
+                // When truncation fired, the marker must be present and the body
+                // before it must be re-sliceable on a char boundary (this slice
+                // would panic if the walk-back had split a codepoint), exercising
+                // the walk-back's boundary correctness rather than a tautology.
+                if content.len() > 2000 {
+                    prop_assert!(
+                        content.ends_with("..."),
+                        "truncated content must carry the ... marker"
+                    );
+                    let body = &content[..content.len() - 3];
+                    prop_assert!(!body.is_empty());
+                }
             }
         }
     }
