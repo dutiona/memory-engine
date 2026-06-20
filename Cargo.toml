@@ -19,7 +19,7 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 async-trait = "0.1"
-rusqlite = { version = "0.34", features = ["bundled-full"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
 blake3 = "1"
 rmp-serde = "1"
 tempfile = "3"
