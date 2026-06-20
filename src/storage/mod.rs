@@ -35,6 +35,8 @@ pub mod graph;
 pub mod schema;
 pub mod search_index;
 pub mod session;
+#[cfg(feature = "async")]
+pub mod sqlite;
 
 pub use backend::StorageBackend;
 pub use capabilities::{BackendCapabilities, LexicalRanker};
@@ -47,3 +49,5 @@ pub use graph::FactGraph;
 pub use schema::SchemaManager;
 pub use search_index::SearchIndex;
 pub use session::SessionStore;
+#[cfg(feature = "async")]
+pub use sqlite::SqliteBackend;

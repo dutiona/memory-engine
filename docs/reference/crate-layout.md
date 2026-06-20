@@ -9,8 +9,9 @@ memory_engine (lib.rs)
   +-- error         Error enum and Result alias
   +-- traits        Consumer-implemented traits and policy types
   +-- storage/      Persistence PORT (StorageBackend trait family) — infra abstraction
+  |     +-- sqlite/  SqliteBackend: the SQLite impl of the port (cfg async)
   +-- search/       Hybrid retrieval pipeline
-  +-- store/        SQLite persistence layer (the de-facto SqliteBackend impl)
+  +-- store/        SQLite persistence layer (the SQL SqliteBackend delegates to)
   +-- graph         In-memory knowledge graph
   +-- consolidation Three-pass consolidation pipeline
   +-- forgetting    Ebbinghaus decay and importance scoring
@@ -47,7 +48,7 @@ memory_engine (lib.rs)
   Also defines `ForgetPolicy` (Ebbinghaus parameters and signal weights), `ConsolidationConfig`, `ConsolidationStats`, `PruneStats`, `ConflictResolution`, and `CrudDecision`.
 
 `storage`
-: The persistence **port** (infrastructure abstraction) — deliberately distinct from `traits` (consumer capability injection). Defines the `StorageBackend` umbrella supertrait over six bounded-context traits — `FactGraph`, `EventLog`, `SearchIndex`, `ConsolidationStore`, `SessionStore`, `SchemaManager` — plus the feature-gated `ColdStorage` (held separately, not a supertrait bound). Cross-cutting types: the closed `FactFilter` (with `TemporalFilter` / `MetadataPredicate`), the dialect-free `BackendCapabilities` / `LexicalRanker` tier signal, and `StorageError` (driver-opaque, in `error`). All traits are `async_trait`/`Send + Sync`; `SearchIndex` returns ranked `(id, f64)` pairs (RRF fuses by rank engine-side). The `store/` + `search/` modules are the de-facto SQLite implementation that a `SqliteBackend` will sit behind.
+: The persistence **port** (infrastructure abstraction) — deliberately distinct from `traits` (consumer capability injection). Defines the `StorageBackend` umbrella supertrait over six bounded-context traits — `FactGraph`, `EventLog`, `SearchIndex`, `ConsolidationStore`, `SessionStore`, `SchemaManager` — plus the feature-gated `ColdStorage` (held separately, not a supertrait bound). Cross-cutting types: the closed `FactFilter` (with `TemporalFilter` / `MetadataPredicate`), the dialect-free `BackendCapabilities` / `LexicalRanker` tier signal, and `StorageError` (driver-opaque, in `error`). All traits are `async_trait`/`Send + Sync`; `SearchIndex` returns ranked `(id, f64)` pairs (RRF fuses by rank engine-side). The concrete implementation lives in **`storage/sqlite/`** (`SqliteBackend`, feature `async`): one file per bounded trait, each a thin delegation over two private primitives — `block_read` / `block_write` (sync `rusqlite` wrapped in `spawn_blocking`) — plus a `for_each_streamed` bridge (cap-1 `tokio::sync::mpsc`) for the streaming methods. It **delegates** to the `store/` + `search/` SQL verbatim (it does not absorb it — `#634`'s `PgBackend` reuses none of those bodies). The seam confines `rusqlite` below it: a driver `Database` error is remapped to driver-opaque `StorageError::Backend`. The engine is wired to `Arc<dyn StorageBackend>` separately (#631).
 
 `search`
 : Hybrid search pipeline combining three retrieval modes:
