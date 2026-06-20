@@ -81,6 +81,17 @@ async fn main() -> Result<(), BoxError> {
     // Use the resolved embed_dim (from DB probe or config), not the TOML value.
     let embedder = build_embedder(&cli, &mcp_config, embed_dim)?;
 
+    // 4b. Eager embedding-identity check (#614, §Design.2). The query path embeds at
+    // this layer and hands the engine a pre-computed vector, so the engine can't
+    // fingerprint-check per query — verify once at startup that the configured provider
+    // matches the store's recorded identity, and refuse to serve on a mismatch rather
+    // than silently returning wrong-vector-space query results.
+    if let Some(provider) = embedder.as_deref() {
+        engine
+            .verify_embedding_identity(provider)
+            .map_err(|e| format!("embedding identity check failed: {e}"))?;
+    }
+
     // 5. Initialize summary generator (optional — text only; embedding is done
     //    by the embedder, injected separately into consolidation per #116)
     let summary_gen = build_summary_generator(&cli, &mcp_config)?

@@ -16,9 +16,11 @@
 //! path is the deliberate exception: it records meta-first (before the first file)
 //! because, lacking a wrapping transaction, deferral would expose an orphan-vector
 //! crash window — it trades a harmless no-op stamp for crash safety.
-//! Mismatch *enforcement* (rejecting a differing model) is **#614** — it switches
-//! the [`record_if_absent`] present-branch from "return stored" to "compare and
-//! reject". The call sites do not change when that lands.
+//! Mismatch *enforcement* (rejecting a differing model) is **#614**: the
+//! [`record_if_absent`] present-branch compares `candidate == stored` and returns
+//! [`MemoryError::EmbeddingModelMismatch`] on any difference; [`check_compatible`] is
+//! the read-only counterpart used for the eager fail-fast check at consumer startup.
+//! The write-path call sites did not change when this landed.
 
 use rusqlite::Connection;
 
@@ -85,21 +87,25 @@ pub fn store(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
 /// the vector, lifted to the identity tuple. It is **not** model-identity
 /// enforcement (#614).
 ///
-/// **This is the seam #614 extends**: it will switch the "already recorded" branch
-/// from *return stored* to *compare `candidate == stored`, else
-/// `Err(EmbeddingModelMismatch)`*. Returning the authoritative stored tuple (not
-/// `()`) is deliberate so the caller and #614 share one value to reason about.
+/// When an identity is already recorded, `candidate` must **equal** it or this returns
+/// [`MemoryError::EmbeddingModelMismatch`] (#614) — mixing two models' vectors in one
+/// space silently corrupts retrieval. On a match, the stored tuple is returned
+/// unchanged. Returning the authoritative stored tuple (not `()`) lets the caller
+/// reason about the established identity.
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::EmbeddingDimension` if `candidate.dim != expected_dim`
-/// (nothing is persisted), or any [`load`] / [`store`] error.
+/// Returns [`MemoryError::EmbeddingModelMismatch`] if an identity is recorded and
+/// `candidate` differs from it; `MemoryError::EmbeddingDimension` if no identity is
+/// recorded and `candidate.dim != expected_dim` (nothing is persisted); or any
+/// [`load`] / [`store`] error.
 pub fn record_if_absent(
     conn: &Connection,
     candidate: &EmbeddingFingerprint,
     expected_dim: usize,
 ) -> Result<EmbeddingFingerprint> {
     if let Some(stored) = load(conn)? {
+        ensure_match(&stored, candidate)?;
         return Ok(stored);
     }
     if candidate.dim != expected_dim {
@@ -110,6 +116,39 @@ pub fn record_if_absent(
     }
     store(conn, candidate)?;
     Ok(candidate.clone())
+}
+
+/// Verify a candidate identity is compatible with the store's recorded one, without
+/// writing. Returns `Ok(())` on a fresh store (no identity yet — nothing to disagree
+/// with) or when `candidate` equals the stored tuple.
+///
+/// This is the read-only counterpart to [`record_if_absent`], used for the **eager
+/// fail-fast check** at consumer startup (#614, §Design.2): the query path embeds at
+/// the consumer and hands the engine a pre-computed vector, so the engine cannot
+/// fingerprint-check per query — this check catches a misconfigured provider once,
+/// before any query silently returns wrong-vector-space results.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::EmbeddingModelMismatch`] if an identity is recorded and
+/// `candidate` differs from it, or any [`load`] error.
+pub fn check_compatible(conn: &Connection, candidate: &EmbeddingFingerprint) -> Result<()> {
+    load(conn)?.map_or_else(|| Ok(()), |stored| ensure_match(&stored, candidate))
+}
+
+/// Reject a `candidate` that differs from the `stored` identity (#614).
+///
+/// Equality is field-by-field over the whole tuple (`EmbeddingFingerprint: Eq`), so a
+/// difference in *any* identity field — `model`, `provider`, `dim`,
+/// `matryoshka_base_dim`, or `element_type` — is a mismatch.
+fn ensure_match(stored: &EmbeddingFingerprint, candidate: &EmbeddingFingerprint) -> Result<()> {
+    if stored == candidate {
+        return Ok(());
+    }
+    Err(MemoryError::EmbeddingModelMismatch {
+        expected: Box::new(stored.clone()),
+        actual: Box::new(candidate.clone()),
+    })
 }
 
 /// Require that a store has a recorded embedding identity before a
@@ -173,16 +212,61 @@ mod tests {
     }
 
     #[test]
-    fn record_if_absent_returns_stored_when_present() {
-        // The #614-seam contract: today "stored wins"; #614 will make a differing
-        // candidate an error. This test is *extended*, not rewritten, when #614 lands.
+    fn record_if_absent_returns_stored_when_candidate_matches() {
+        // Idempotent re-record with the SAME identity returns the stored tuple.
+        let conn = fresh_conn();
+        let a = EmbeddingFingerprint::new("model-a", "tei", 8);
+        store(&conn, &a).expect("store a");
+        let returned = record_if_absent(&conn, &a, 8).expect("record matching");
+        assert_eq!(returned, a);
+        assert_eq!(load(&conn).expect("load"), Some(a));
+    }
+
+    #[test]
+    fn record_if_absent_rejects_model_mismatch() {
+        // #614 enforcement: a DIFFERENT identity at the same dim is hard-rejected,
+        // and the stored identity is left untouched.
         let conn = fresh_conn();
         let a = EmbeddingFingerprint::new("model-a", "tei", 8);
         let b = EmbeddingFingerprint::new("model-b", "ollama", 8);
         store(&conn, &a).expect("store a");
-        let returned = record_if_absent(&conn, &b, 8).expect("record b");
-        assert_eq!(returned, a, "stored tuple wins, candidate ignored");
-        assert_eq!(load(&conn).expect("load"), Some(a));
+        let err = record_if_absent(&conn, &b, 8).expect_err("model mismatch must error");
+        match err {
+            MemoryError::EmbeddingModelMismatch { expected, actual } => {
+                assert_eq!(*expected, a, "expected = authoritative stored identity");
+                assert_eq!(*actual, b, "actual = differing candidate");
+            }
+            other => panic!("expected EmbeddingModelMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            load(&conn).expect("load"),
+            Some(a),
+            "stored identity unchanged"
+        );
+    }
+
+    #[test]
+    fn check_compatible_ok_on_fresh_store() {
+        // No identity recorded yet -> nothing to disagree with.
+        let conn = fresh_conn();
+        let fp = EmbeddingFingerprint::new("model-a", "tei", 8);
+        check_compatible(&conn, &fp).expect("fresh store is compatible with anything");
+    }
+
+    #[test]
+    fn check_compatible_ok_on_match_err_on_differ() {
+        let conn = fresh_conn();
+        let a = EmbeddingFingerprint::new("model-a", "tei", 8);
+        store(&conn, &a).expect("store a");
+        // Same identity -> Ok (no write, read-only check).
+        check_compatible(&conn, &a).expect("matching identity is compatible");
+        // Differ in matryoshka_base_dim only -> still a mismatch (full-tuple equality).
+        let mrl = EmbeddingFingerprint::with_matryoshka("model-a", "tei", 8, 16);
+        let err = check_compatible(&conn, &mrl).expect_err("differing tuple must error");
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "expected EmbeddingModelMismatch, got {err:?}"
+        );
     }
 
     #[test]

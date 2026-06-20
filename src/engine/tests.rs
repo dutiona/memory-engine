@@ -205,7 +205,7 @@ fn embed_dim_validation_rejects_mismatch() {
 
 #[test]
 fn first_add_fact_records_embedding_meta() {
-    // A second embedder with a DIFFERENT fingerprint, to prove write-once below.
+    // A second embedder with a DIFFERENT fingerprint, to prove mismatch rejection below.
     struct OtherEmbedder {
         dim: usize,
     }
@@ -219,7 +219,7 @@ fn first_add_fact_records_embedding_meta() {
     }
 
     // The embedding identity is established on the FIRST embedding write (#613,
-    // ADR 0015 §2) and is write-once thereafter.
+    // ADR 0015 §2); a later differing fingerprint is rejected, not overwritten (#614).
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     assert!(
         engine
@@ -248,16 +248,67 @@ fn first_add_fact_records_embedding_meta() {
         "first write records the embedder's fingerprint"
     );
 
-    // Write-once: a second add with a DIFFERENT fingerprint leaves it unchanged.
-    engine
+    // #614 enforcement: a second add with a DIFFERENT fingerprint is hard-rejected
+    // (not silently ignored), and the stored identity is left untouched.
+    let err = engine
         .add_fact(&req("b"), &OtherEmbedder { dim: DIM }, None)
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+        "a differing later fingerprint must be rejected, got {err:?}"
+    );
     assert_eq!(
         engine
             .with_read(crate::store::embedding_meta::load)
             .unwrap(),
         Some(expected),
-        "identity is write-once; a differing later fingerprint does not overwrite it"
+        "stored identity is unchanged after a rejected mismatched write"
+    );
+}
+
+#[test]
+fn verify_embedding_identity_enforces_match() {
+    // The eager fail-fast check (#614, §Design.2) consumed by MCP startup.
+    struct OtherEmbedder {
+        dim: usize,
+    }
+    impl EmbeddingProvider for OtherEmbedder {
+        fn embed(&self, _t: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.7; self.dim])
+        }
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("other-model", "other-provider", self.dim)
+        }
+    }
+
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    // Fresh store has no identity yet -> any provider is compatible.
+    engine
+        .verify_embedding_identity(&MockEmbedder { dim: DIM })
+        .expect("fresh store compatible with any provider");
+
+    // Stamp the identity via a real embedding write.
+    let req = AddFactRequest {
+        content: "a".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+    engine
+        .add_fact(&req, &MockEmbedder { dim: DIM }, None)
+        .unwrap();
+
+    // Matching provider -> Ok; differing provider -> EmbeddingModelMismatch.
+    engine
+        .verify_embedding_identity(&MockEmbedder { dim: DIM })
+        .expect("matching provider passes the eager check");
+    let err = engine
+        .verify_embedding_identity(&OtherEmbedder { dim: DIM })
+        .expect_err("differing provider must fail the eager check");
+    assert!(
+        matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+        "expected EmbeddingModelMismatch, got {err:?}"
     );
 }
 

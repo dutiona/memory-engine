@@ -74,7 +74,9 @@ mrl_dim = 256         # Truncate + L2-renormalize to this; must equal engine emb
 
 `mrl_dim` is the stored (post-truncation) dimension and **must equal** the engine's `embed_dim` — the server rejects a mismatch at startup. `dimensions` stays the native pre-truncation length.
 
-### Claude Code Integration
+#### Embedding-identity check (fail-fast)
+
+On startup the server verifies the configured provider's identity (`model`, `provider`, `dim`, MRL, element type) against the one the store was created with, and **refuses to start on a mismatch** (#614). This prevents the silent-corruption case where a different model — even at the same dimension — embeds queries into an incompatible vector space. A fresh store with nothing embedded yet has no recorded identity and accepts any provider; the identity is stamped on the first embedding write.
 
 Add to `.claude/settings.json`:
 

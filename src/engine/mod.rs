@@ -442,6 +442,28 @@ impl MemoryEngine {
         Ok(())
     }
 
+    /// Verify a provider's identity matches the store's recorded embedding identity —
+    /// a fail-fast check for consumer startup (#614, §Design.2).
+    ///
+    /// The query path embeds at the consumer layer and hands the engine a *pre-computed*
+    /// vector, so the engine cannot fingerprint-check per query. This one-shot check
+    /// catches a misconfigured provider — one whose vector space differs from the one
+    /// the store was built with — **before** any query silently returns
+    /// wrong-vector-space results. A fresh store with no recorded identity is compatible
+    /// with any provider (nothing to disagree with).
+    ///
+    /// This is read-only and does not establish the identity (that happens lazily on the
+    /// first embedding *write*, via [`record_embedding_identity`](Self::record_embedding_identity)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::EmbeddingModelMismatch`] if the provider's fingerprint
+    /// disagrees with the store's recorded identity.
+    pub fn verify_embedding_identity(&self, provider: &dyn EmbeddingProvider) -> Result<()> {
+        let candidate = provider.fingerprint();
+        self.with_read(|conn| crate::store::embedding_meta::check_compatible(conn, &candidate))
+    }
+
     /// Whether this engine was opened in read-only mode.
     #[must_use]
     pub const fn is_read_only(&self) -> bool {

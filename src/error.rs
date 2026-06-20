@@ -402,6 +402,23 @@ pub enum MemoryError {
     #[error("invalid embedding dimension: expected {expected}, got {actual}")]
     EmbeddingDimension { expected: usize, actual: usize },
 
+    /// The embedding provider's identity does not match the one the store was created
+    /// with (#614, ADR 0015). Vector *dimension* alone is insufficient identity: two
+    /// different models at the same dimension occupy incompatible vector spaces, so
+    /// silently mixing them corrupts retrieval — the worst RAG failure mode. This is a
+    /// hard error, never a panic and never a silent default.
+    ///
+    /// `expected` is the store's recorded identity (authoritative); `actual` is the
+    /// current provider's fingerprint. Boxed to keep [`MemoryError`] small.
+    #[error(
+        "embedding model mismatch: store was created with {expected:?}, \
+         but the provider reports {actual:?}"
+    )]
+    EmbeddingModelMismatch {
+        expected: Box<crate::types::EmbeddingFingerprint>,
+        actual: Box<crate::types::EmbeddingFingerprint>,
+    },
+
     /// A precondition or input-validation conflict; see [`ConflictError`] for the
     /// specific cause (incompatible query options, out-of-range parameters,
     /// malformed scope labels, restore/dump preconditions, or a consumer-trait
