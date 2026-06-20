@@ -319,6 +319,7 @@ mod tests {
         let bad = ConsolidationConfig {
             dedup_threshold: 0.90,
             min_cluster_size: 0,
+            ..Default::default()
         };
         let err = consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &bad).unwrap_err();
         assert!(

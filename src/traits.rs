@@ -915,6 +915,34 @@ mod tests {
         }
     }
 
+    // --- ConsolidationConfig::validate(): cluster_threshold ∈ [0, 1] (#344) ---
+
+    #[test]
+    fn validate_rejects_cluster_threshold_out_of_range() {
+        for val in [1.01_f32, -0.01_f32] {
+            let c = ConsolidationConfig {
+                cluster_threshold: val,
+                ..Default::default()
+            };
+            let err = c.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("cluster_threshold"),
+                "cluster_threshold={val} should reject; error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_cluster_threshold() {
+        for val in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let c = ConsolidationConfig {
+                cluster_threshold: val,
+                ..Default::default()
+            };
+            assert!(c.validate().is_err(), "{val} should be rejected");
+        }
+    }
+
     // --- ConsolidationConfig::validate(): min_cluster_size >= 2 ---
 
     #[test]
