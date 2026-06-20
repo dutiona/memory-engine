@@ -23,10 +23,15 @@ ignore = []
 
 # --- License compliance ------------------------------------------------------------
 [licenses]
-# Allow-list derived from the actual all-features dependency graph (all permissive).
-# OR-expressions resolve to one of these; AND-clauses and standalone licenses are
-# all covered. No copyleft is required: the lone LGPL-2.1-or-later appears only
-# inside an `OR MIT/Apache-2.0` expression, so it resolves to a permissive license.
+# Allow-list of every permissive license present in the all-features graph. No
+# copyleft is required: the lone LGPL-2.1-or-later appears only inside an
+# `OR MIT/Apache-2.0` expression, so it resolves to a permissive license.
+# Note: `cargo deny check` may emit a non-fatal "license-not-encountered" warning
+# for ISC / BSD-3-Clause. They ARE in the graph (ring/untrusted/rustls-webpki carry
+# ISC; subtle/encoding_rs carry BSD-3-Clause) but enter via `OR`-expressions that
+# resolve to MIT first, so cargo-deny never has to *match* them. They are kept so
+# the gate stays robust if a feature/target shift brings their `AND`/standalone
+# forms (e.g. ring's `Apache-2.0 AND ISC`) into the matched set.
 allow = [
     "MIT",
     "Apache-2.0",

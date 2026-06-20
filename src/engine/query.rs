@@ -294,7 +294,8 @@ impl MemoryEngine {
         results.truncate(limit);
         diagnostics.results_returned = results.len();
 
-        // Expired-facts probe (opt-in, FTS-only).
+        // Expired-facts probe (opt-in, FTS-only). Vector-only queries leave
+        // `expired_matches` as None (documented limitation).
         if query.include_expired_probe
             && let Some(text) = &query.text
         {
@@ -304,7 +305,6 @@ impl MemoryEngine {
             })?;
             diagnostics.expired_matches = Some(expired_count);
         }
-        // Vector-only queries: expired_matches stays None (documented limitation).
 
         // Archive fallback (opt-in, best-effort).
         #[cfg(feature = "archive")]
