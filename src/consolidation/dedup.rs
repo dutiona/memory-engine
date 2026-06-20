@@ -7,6 +7,31 @@ use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::types::Fact;
 
+/// Outcome of a [`local_dedup`] pass.
+///
+/// Replaces the former `(usize, Vec<i64>)` return whose `usize::MAX` first element
+/// was an in-band "skipped" sentinel (#272): that magic value collided with any
+/// legitimate count `>= usize::MAX - 1` and forced the orchestrator to decode it
+/// before use. The skip state now lives in the type, so the over-cap case can be
+/// asserted directly and can never be mistaken for a real count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DedupOutcome {
+    /// The pass ran to completion.
+    Ran {
+        /// Number of near-duplicate facts expired.
+        removed: usize,
+        /// Ids of the expired facts (so the caller can update vector indexes).
+        expired_ids: Vec<i64>,
+    },
+    /// The pass was skipped because the active corpus exceeded the `max_facts`
+    /// safety cap. The orchestrator must NOT advance the consolidation watermark,
+    /// so the skipped facts are retried once the corpus shrinks.
+    Skipped {
+        /// Number of active facts that tripped the cap.
+        active_count: usize,
+    },
+}
+
 /// Local deduplication pass.
 ///
 /// Compares facts created since `since` (or all if `None`) against all active facts.
@@ -14,12 +39,11 @@ use crate::types::Fact;
 /// fact. Deterministic tie-break: on equal importance, the newer fact (higher id) is
 /// expired.
 ///
-/// Returns `(count, expired_ids)`: the number of duplicates removed and the
-/// ids of the facts that were expired (so the caller can update vector
-/// indexes). As a sentinel, when the active corpus exceeds the internal
-/// `MAX_DEDUP_FACTS` cap the pass is skipped and the count is `usize::MAX`
-/// with an empty id list, signaling the orchestrator NOT to advance the
-/// consolidation watermark.
+/// When the active corpus exceeds `max_facts` the O(N*M) pairwise comparison is
+/// skipped and [`DedupOutcome::Skipped`] is returned (the orchestrator then leaves
+/// the watermark unadvanced); otherwise [`DedupOutcome::Ran`] carries the removed
+/// count and the expired ids. The cap is injected so callers own the policy and
+/// tests can exercise the skip path without a 50 000-fact corpus.
 ///
 /// # Errors
 ///
@@ -29,27 +53,24 @@ pub fn local_dedup(
     conn: &Connection,
     embed_dim: usize,
     threshold: f32,
+    max_facts: usize,
     since: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> Result<(usize, Vec<i64>)> {
-    /// Maximum number of active facts for dedup. Beyond this, the O(N*M)
-    /// pairwise comparison becomes impractical. Skip with a warning.
-    const MAX_DEDUP_FACTS: usize = 50_000;
-
+) -> Result<DedupOutcome> {
     let fact_store = FactStore::new(conn, embed_dim);
     let edge_store = EdgeStore::new(conn);
     let active_facts = fact_store.list_active(None)?;
 
-    if active_facts.len() > MAX_DEDUP_FACTS {
+    if active_facts.len() > max_facts {
         tracing::warn!(
             count = active_facts.len(),
-            max = MAX_DEDUP_FACTS,
+            max = max_facts,
             "dedup skipped: too many active facts for O(N*M) comparison; \
              watermark will NOT advance so skipped facts are retried when corpus shrinks"
         );
-        // Return sentinel value usize::MAX to signal "skipped" to the orchestrator.
-        // The orchestrator must NOT advance last_consolidated_at in this case.
-        return Ok((usize::MAX, vec![]));
+        return Ok(DedupOutcome::Skipped {
+            active_count: active_facts.len(),
+        });
     }
 
     // Split into "new" (to compare) and "all active" (to compare against)
@@ -119,7 +140,10 @@ pub fn local_dedup(
     }
 
     let expired_vec: Vec<i64> = expired_ids.into_iter().collect();
-    Ok((duplicates_removed, expired_vec))
+    Ok(DedupOutcome::Ran {
+        removed: duplicates_removed,
+        expired_ids: expired_vec,
+    })
 }
 
 /// Inherit the higher importance values from `loser` into `survivor`.
@@ -183,6 +207,28 @@ mod tests {
     use crate::store::schema::{init_schema, open_memory};
     use crate::types::{FactType, NewFact};
 
+    /// A cap so large the safety check never fires — for tests not exercising the
+    /// over-cap skip path. (`usize::MAX` is now just a big number, no longer the
+    /// "skipped" sentinel it used to be — that's the whole point of #272.)
+    const NO_CAP: usize = usize::MAX;
+
+    impl DedupOutcome {
+        /// Assert the pass ran and return `(removed, expired_ids)`.
+        fn expect_ran(self) -> (usize, Vec<i64>) {
+            match self {
+                Self::Ran {
+                    removed,
+                    expired_ids,
+                } => (removed, expired_ids),
+                Self::Skipped { active_count } => {
+                    panic!(
+                        "expected DedupOutcome::Ran, got Skipped {{ active_count: {active_count} }}"
+                    )
+                }
+            }
+        }
+    }
+
     fn setup() -> (Connection, usize) {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
@@ -225,7 +271,9 @@ mod tests {
         insert_fact(&conn, dim, "fact A", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "fact B", vec![0.99, 0.01, 0.0, 0.0], 0.3);
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
         assert_eq!(removed, 1);
 
         // Lower importance (B) should be expired
@@ -242,7 +290,9 @@ mod tests {
         insert_fact(&conn, dim, "fact X", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "fact Y", vec![0.0, 1.0, 0.0, 0.0], 0.5);
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
         assert_eq!(removed, 0);
 
         let store = FactStore::new(&conn, dim);
@@ -299,7 +349,9 @@ mod tests {
 
         // Only compare facts created since `old_time + 1 day`
         let since = old_time + Duration::days(1);
-        let (removed, _) = local_dedup(&conn, dim, 0.90, Some(since), Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, Some(since), Utc::now())
+            .unwrap()
+            .expect_ran();
         assert_eq!(removed, 1); // new duplicate should be expired against old
 
         let active = store.list_active(None).unwrap();
@@ -319,7 +371,7 @@ mod tests {
             0.8,
         );
 
-        local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now()).unwrap();
 
         let store = FactStore::new(&conn, dim);
         let active = store.list_active(None).unwrap();
@@ -334,7 +386,7 @@ mod tests {
         insert_fact(&conn, dim, "older fact", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "newer fact", vec![0.99, 0.01, 0.0, 0.0], 0.5);
 
-        local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now()).unwrap();
 
         let store = FactStore::new(&conn, dim);
         let active = store.list_active(None).unwrap();
@@ -393,7 +445,9 @@ mod tests {
             false,
         );
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
         // Neither should be deduped because one is pinned
         assert_eq!(removed, 0);
 
@@ -415,7 +469,9 @@ mod tests {
             true,
         );
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
         assert_eq!(removed, 0);
 
         let store = FactStore::new(&conn, dim);
@@ -434,7 +490,7 @@ mod tests {
         store.update_importance_score(1, 0.8).unwrap(); // low imp fact gets higher score
         store.update_importance_score(2, 0.4).unwrap(); // high imp fact gets lower score
 
-        local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now()).unwrap();
 
         let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
@@ -475,7 +531,9 @@ mod tests {
         store.update_importance_score(b, 0.8).unwrap(); // the true maximum
         store.update_importance_score(c, 0.5).unwrap();
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
         assert_eq!(removed, 2, "B and C both collapse onto A");
 
         let active = store.list_active(None).unwrap();
@@ -516,7 +574,9 @@ mod tests {
         store.update_importance_score(b, 0.1).unwrap();
         store.update_importance_score(a, 0.1).unwrap();
 
-        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, _) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
         assert_eq!(removed, 2, "L collapses onto B, then B onto A");
 
         let active = store.list_active(None).unwrap();
@@ -534,11 +594,37 @@ mod tests {
     fn empty_db_dedup_is_noop() {
         let (conn, dim) = setup();
         // No facts in the DB — dedup must return (0, []) without error.
-        let (removed, expired) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        let (removed, expired) = local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
         assert_eq!(removed, 0);
         assert!(expired.is_empty());
 
         let store = FactStore::new(&conn, dim);
         assert!(store.list_active(None).unwrap().is_empty());
+    }
+
+    /// #272/#345/#142: when the active corpus exceeds the injected cap, the pass
+    /// returns `DedupOutcome::Skipped { active_count }` instead of the old
+    /// `usize::MAX` magic value — assertable directly, and no facts are touched.
+    /// The injected cap is what makes this testable without a 50 000-fact corpus.
+    #[test]
+    fn over_cap_returns_skipped_without_expiring() {
+        let (conn, dim) = setup();
+        // Two near-duplicates that WOULD collapse under the normal path...
+        insert_fact(&conn, dim, "dup A", vec![1.0, 0.0, 0.0, 0.0], 0.5);
+        insert_fact(&conn, dim, "dup B", vec![0.99, 0.01, 0.0, 0.0], 0.5);
+
+        // ...but a cap of 1 (corpus is 2) trips the safety skip.
+        let outcome = local_dedup(&conn, dim, 0.90, 1, None, Utc::now()).unwrap();
+        assert_eq!(
+            outcome,
+            DedupOutcome::Skipped { active_count: 2 },
+            "over-cap dedup must report Skipped with the tripping count, not run"
+        );
+
+        // Skipped means untouched: both facts remain active.
+        let store = FactStore::new(&conn, dim);
+        assert_eq!(store.list_active(None).unwrap().len(), 2);
     }
 }

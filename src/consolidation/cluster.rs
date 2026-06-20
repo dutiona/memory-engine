@@ -34,19 +34,17 @@ pub fn cluster_fusion(
     embed_dim: usize,
     min_cluster_size: usize,
 ) -> Result<usize> {
-    /// Maximum number of active facts for clustering. Beyond this, the O(N^2)
-    /// greedy clustering becomes impractical. Skip with a warning.
-    /// Checked BEFORE deleting existing summaries to avoid wiping them
-    /// without producing replacements.
-    const MAX_CLUSTER_FACTS: usize = 50_000;
-
+    // Safety cap lifted to the shared `super::MAX_FACTS_FOR_CLUSTERING` (#345) so
+    // the dedup and cluster caps live in one place with their divergent skip
+    // policies documented side by side. Checked BEFORE deleting existing summaries
+    // to avoid wiping them without producing replacements.
     let fact_store = FactStore::new(conn, embed_dim);
     let active_facts = fact_store.list_active(None)?;
 
-    if active_facts.len() > MAX_CLUSTER_FACTS {
+    if active_facts.len() > super::MAX_FACTS_FOR_CLUSTERING {
         tracing::warn!(
             count = active_facts.len(),
-            max = MAX_CLUSTER_FACTS,
+            max = super::MAX_FACTS_FOR_CLUSTERING,
             "clustering skipped: too many active facts for O(N^2) comparison"
         );
         return Ok(0);
