@@ -4,7 +4,7 @@
 //! then applies rule-based keyword matching to surface [`CandidateEpisode`]s worth
 //! promoting to long-term memory.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
@@ -131,11 +131,48 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
     let mut used: HashSet<&str> = HashSet::new();
     let mut turns: Vec<ConversationTurn> = Vec::new();
 
-    // --- UUID-linked pairing ---
     // Separate user entries that are tool results (carry tool_use_result)
     // from user entries that are genuine prompts.
     let is_tool_result = |e: &SessionEntry| -> bool { e.tool_use_result.is_some() };
 
+    // --- Pre-index for O(n) pairing (#406) ---
+    // Two indices over the attacker-controlled `relevant` slice, each built in a
+    // single O(n) pass, replace the per-user linear scans that made the original
+    // reconstruction O(n^2) (an algorithmic-complexity DoS amplifier).
+    //
+    // `assistant_by_parent`: parent_uuid -> the FIRST assistant carrying it (slice
+    // order preserved via `entry`/`or_insert`), matching the old `.find()` which
+    // returned the first such assistant. The `used` check stays at the call site.
+    //
+    // `tool_results_by_parent`: parent_uuid -> the tool-result user entries that
+    // follow an assistant, in slice order — the O(1) replacement for the
+    // per-call full scan in `collect_tool_result_entries`.
+    let mut assistant_by_parent: HashMap<&str, &SessionEntry> = HashMap::new();
+    let mut tool_results_by_parent: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
+    for entry in &relevant {
+        match entry.entry_type {
+            EntryType::Assistant => {
+                if let Some(parent) = entry.parent_uuid.as_deref()
+                    && !parent.is_empty()
+                {
+                    assistant_by_parent.entry(parent).or_insert(entry);
+                }
+            }
+            EntryType::User if is_tool_result(entry) => {
+                if let Some(parent) = entry.parent_uuid.as_deref()
+                    && !parent.is_empty()
+                {
+                    tool_results_by_parent
+                        .entry(parent)
+                        .or_default()
+                        .push(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // --- UUID-linked pairing ---
     for entry in &relevant {
         if !matches!(entry.entry_type, EntryType::User) || is_tool_result(entry) {
             continue;
@@ -147,18 +184,16 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
             continue;
         }
 
-        // Find assistant reply whose parent_uuid matches this user's uuid.
-        let assistant = relevant.iter().find(|a| {
-            matches!(a.entry_type, EntryType::Assistant)
-                && a.parent_uuid
-                    .as_deref()
-                    .is_some_and(|p| !p.is_empty() && p == user_uuid)
-                && a.uuid.as_deref().is_some_and(|u| !used.contains(u))
-        });
+        // O(1) lookup of the assistant whose parent_uuid matches this user's uuid;
+        // re-apply the `used` guard the old `.find()` carried inline.
+        let assistant = assistant_by_parent
+            .get(user_uuid.as_str())
+            .copied()
+            .filter(|a| a.uuid.as_deref().is_some_and(|u| !used.contains(u)));
 
         if let Some(assistant) = assistant {
             // Collect tool-result user entries that follow this assistant.
-            let tool_results = collect_tool_result_entries(&relevant, assistant);
+            let tool_results = collect_tool_result_entries(&tool_results_by_parent, assistant);
             turns.push(build_turn(entry, assistant, &tool_results));
             used.insert(user_uuid.as_str());
             if let Some(ref a_uuid) = assistant.uuid {
@@ -194,7 +229,7 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
                 });
 
             if let Some(assistant) = assistant {
-                let tool_results = collect_tool_result_entries(&relevant, assistant);
+                let tool_results = collect_tool_result_entries(&tool_results_by_parent, assistant);
                 turns.push(build_turn(entry, assistant, &tool_results));
                 used.insert(entry_uuid);
                 if let Some(ref a_uuid) = assistant.uuid {
@@ -248,25 +283,25 @@ fn build_turn(
     }
 }
 
-/// Collect user entries that carry `tool_use_result` and whose `parent_uuid`
-/// points to the given assistant entry. These are the tool-result rows that
-/// follow an assistant's `tool_use` blocks in Claude Code JSONL.
+/// Look up the user entries that carry `tool_use_result` and whose `parent_uuid`
+/// points to the given assistant entry — the tool-result rows that follow an
+/// assistant's `tool_use` blocks in Claude Code JSONL.
+///
+/// O(1) lookup into the `tool_results_by_parent` index built once by
+/// [`reconstruct_turns`] (#406), replacing the former per-call O(n) scan. Slice
+/// order within each group is preserved by the index, so positional pairing in
+/// [`extract_tool_calls`] is unchanged.
 fn collect_tool_result_entries<'a>(
-    all: &[&'a SessionEntry],
+    tool_results_by_parent: &HashMap<&str, Vec<&'a SessionEntry>>,
     assistant: &SessionEntry,
 ) -> Vec<&'a SessionEntry> {
     let Some(ref assistant_uuid) = assistant.uuid else {
         return Vec::new();
     };
-    all.iter()
-        .filter(|e| {
-            e.tool_use_result.is_some()
-                && e.parent_uuid
-                    .as_deref()
-                    .is_some_and(|p| p == assistant_uuid)
-        })
-        .copied()
-        .collect()
+    tool_results_by_parent
+        .get(assistant_uuid.as_str())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Extract plain text from an entry's message content blocks.
@@ -700,6 +735,45 @@ mod tests {
         let turns = reconstruct_turns(&entries);
         assert_eq!(turns.len(), 1);
         assert!(!turns[0].tool_calls[0].interrupted);
+    }
+
+    #[test]
+    fn reconstruct_pairs_multiple_tool_results_in_order() {
+        // #406 regression guard: the O(n) `tool_results_by_parent` index must
+        // preserve slice order WITHIN a parent group, so two tool-result rows
+        // pair POSITIONALLY with the assistant's two tool_use blocks (1st→1st,
+        // 2nd→2nd). A HashMap that lost intra-group order would mis-pair them.
+        let assistant = SessionEntry {
+            entry_type: EntryType::Assistant,
+            session_id: Some("sess-1".into()),
+            timestamp: ts(101).map(|t| t.to_rfc3339()),
+            uuid: opt("a1"),
+            parent_uuid: opt("u1"),
+            cwd: None,
+            git_branch: None,
+            message: Some(MessagePayload {
+                role: Some("assistant".into()),
+                content: Some(json!([
+                    {"type": "tool_use", "name": "Bash", "input": {"cmd": "first"}},
+                    {"type": "tool_use", "name": "Read", "input": {"path": "second"}}
+                ])),
+            }),
+            tool_use_result: None,
+            data: None,
+        };
+        let entries = vec![
+            user_entry("u1", "", "do two things", 100),
+            assistant,
+            user_with_tool_result("u2", "a1", "", Some("out-first"), None, false, 102),
+            user_with_tool_result("u3", "a1", "", Some("out-second"), None, false, 103),
+        ];
+        let turns = reconstruct_turns(&entries);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].tool_calls.len(), 2);
+        assert_eq!(turns[0].tool_calls[0].tool_name, "Bash");
+        assert_eq!(turns[0].tool_calls[0].stdout.as_deref(), Some("out-first"));
+        assert_eq!(turns[0].tool_calls[1].tool_name, "Read");
+        assert_eq!(turns[0].tool_calls[1].stdout.as_deref(), Some("out-second"));
     }
 
     // -- keyword_prefilter tests --
