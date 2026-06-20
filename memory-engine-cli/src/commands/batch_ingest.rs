@@ -6,9 +6,9 @@ use chrono::{DateTime, Utc};
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
-use memory_engine_embed::HttpEmbeddingProvider;
 use serde::{Deserialize, Serialize};
 
+use crate::commands::embedding_args::EmbeddingArgs;
 use crate::db::{open_engine_writable, open_engine_writable_with_dim};
 use crate::output::{OutputFormat, print_json};
 
@@ -22,25 +22,14 @@ pub struct BatchIngestArgs {
     #[arg(long)]
     file: PathBuf,
 
-    /// OpenAI-compatible embedding endpoint URL (e.g. `http://localhost:11434/v1/embeddings`)
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_URL")]
-    embed_url: String,
-
-    /// Embedding model name
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_MODEL")]
-    embed_model: String,
-
-    /// Bearer API key for the embedding endpoint
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY")]
-    embed_api_key: Option<String>,
+    /// Embedding provider config (shared with query/bootstrap; #619). `--embed-url` +
+    /// `--embed-model` are required here. Documents are embedded via `embed_batch`.
+    #[command(flatten)]
+    embed: EmbeddingArgs,
 
     /// Facts per transaction batch (default: 100)
     #[arg(long, default_value = "100")]
     batch_size: usize,
-
-    /// HTTP timeout in seconds for embedding calls
-    #[arg(long, default_value = "30")]
-    embed_timeout: u64,
 
     /// Create a new database (requires --embed-dim)
     #[arg(long)]
@@ -399,16 +388,8 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
         open_engine_writable(db)?
     };
 
-    // Build embedding provider
-    let embedder = HttpEmbeddingProvider::new(
-        args.embed_url.clone(),
-        args.embed_model.clone(),
-        "ollama".to_string(), // TODO(#618): provider should come from config/CLI
-        args.embed_api_key.clone(),
-        engine.embed_dim(),
-        args.embed_timeout,
-    )
-    .map_err(|e| anyhow::anyhow!("failed to create embedding provider: {e}"))?;
+    // Build embedding provider (shared config — provider/MRL identity per #619).
+    let embedder = args.embed.build_required(engine.embed_dim())?;
 
     // Open input — bind stdin before locking to extend lifetime
     let stdin = std::io::stdin();

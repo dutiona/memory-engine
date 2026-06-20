@@ -16,8 +16,8 @@ use memory_engine::bootstrap::{
     BootstrapConfig, BootstrapReport, KeywordExtractor, load_secret_denylist,
 };
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine_embed::HttpEmbeddingProvider;
 
+use crate::commands::embedding_args::EmbeddingArgs;
 use crate::db::{open_engine_writable, open_engine_writable_with_dim};
 use crate::output::{OutputFormat, print_json};
 
@@ -35,21 +35,10 @@ pub struct BootstrapArgs {
     #[arg(long)]
     memory_dir: Option<PathBuf>,
 
-    /// OpenAI-compatible embedding endpoint URL (e.g. `http://localhost:11434/v1/embeddings`)
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_URL")]
-    embed_url: String,
-
-    /// Embedding model name
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_MODEL")]
-    embed_model: String,
-
-    /// Bearer API key for the embedding endpoint
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY")]
-    embed_api_key: Option<String>,
-
-    /// HTTP timeout in seconds for embedding calls
-    #[arg(long, default_value = "30")]
-    embed_timeout: u64,
+    /// Embedding provider config (shared with query/batch-ingest; #619). `--embed-url` +
+    /// `--embed-model` are required here. Documents are embedded via `embed` / `embed_batch`.
+    #[command(flatten)]
+    embed: EmbeddingArgs,
 
     /// Default scope path for all imported facts
     #[arg(long)]
@@ -190,16 +179,8 @@ pub fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Res
         open_engine_writable(db)?
     };
 
-    // Embedding provider (Ollama / any OpenAI-compatible endpoint).
-    let embedder = HttpEmbeddingProvider::new(
-        args.embed_url.clone(),
-        args.embed_model.clone(),
-        "ollama".to_string(), // TODO(#618): provider should come from config/CLI
-        args.embed_api_key.clone(),
-        engine.embed_dim(),
-        args.embed_timeout,
-    )
-    .map_err(|e| anyhow::anyhow!("failed to create embedding provider: {e}"))?;
+    // Embedding provider (shared config — provider/MRL identity per #619).
+    let embedder = args.embed.build_required(engine.embed_dim())?;
 
     // Author-seeded denylist (#51). Loud about how many literals loaded so an
     // unset env var (→ signatures-only) is never silently mistaken for "active".

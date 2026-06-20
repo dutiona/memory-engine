@@ -18,8 +18,9 @@ use clap::ValueEnum;
 use memory_engine::{
     CycleOutcome, DefaultDreamCycle, DreamCycle, LlmDreamCycle, MemoryEngine, SkipReason,
 };
-use memory_engine_embed::{HttpDeltaProposer, HttpEmbeddingProvider};
+use memory_engine_embed::HttpDeltaProposer;
 
+use crate::commands::embedding_args::EmbeddingArgs;
 use crate::db::{open_engine_writable, peek_embed_dim_from_db};
 use crate::output::OutputFormat;
 
@@ -68,16 +69,14 @@ pub struct ConsolidateArgs {
     #[arg(long)]
     llm_model: Option<String>,
 
-    /// Embedding endpoint URL — the LLM backend embeds its own summaries
-    /// (required for `--backend llm`).
-    #[arg(long)]
-    embed_url: Option<String>,
+    /// Embedding provider config — the LLM backend embeds its own summaries via this
+    /// (shared with query/ingest; #619). `--embed-url` + `--embed-model` are required for
+    /// `--backend llm`. Summaries are documents → embedded with `embed`, not `embed_query`.
+    #[command(flatten)]
+    embed: EmbeddingArgs,
 
-    /// Embedding model name (required for `--backend llm`).
-    #[arg(long)]
-    embed_model: Option<String>,
-
-    /// HTTP timeout (seconds) for the LLM and embedding calls.
+    /// HTTP timeout (seconds) for the LLM `/api/generate` calls (the embedder uses
+    /// `--embed-timeout`).
     #[arg(long, default_value_t = 120)]
     timeout_secs: u64,
 }
@@ -107,8 +106,6 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
         BackendArg::Llm => {
             let llm_url = require(args.llm_url.as_ref(), "--llm-url")?;
             let llm_model = require(args.llm_model.as_ref(), "--llm-model")?;
-            let embed_url = require(args.embed_url.as_ref(), "--embed-url")?;
-            let embed_model = require(args.embed_model.as_ref(), "--embed-model")?;
             let dim = peek_embed_dim_from_db(db)?;
 
             let proposer = HttpDeltaProposer::new(
@@ -117,14 +114,9 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
                 None,
                 args.timeout_secs,
             )?;
-            let embedder = HttpEmbeddingProvider::new(
-                embed_url.to_owned(),
-                embed_model.to_owned(),
-                "ollama".to_owned(), // TODO(#618): provider should come from config/CLI
-                None,
-                dim,
-                args.timeout_secs,
-            )?;
+            // Summary embedder: shared config (provider/MRL identity per #619). Required
+            // for the LLM backend — errors if --embed-url/--embed-model are absent.
+            let embedder = args.embed.build_required(dim)?;
             let cycle = LlmDreamCycle::new(&proposer, &embedder);
             let result = run_with_drain(&engine, &cycle);
             (result, Some(proposer.stats()))
