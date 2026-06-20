@@ -108,4 +108,24 @@ mod tests {
         assert!(parse_datetime("not-a-date").is_err());
         assert!(parse_datetime("2026-13-01T00:00:00Z").is_err());
     }
+
+    /// Property: for any string and bound, `truncate_str` never panics and never
+    /// returns more than `max_chars` characters (the documented contract, incl.
+    /// the `max_chars < 3` boundary). The input is arbitrary Unicode — multi-byte
+    /// chars, newlines, control chars — since the function's whole point is
+    /// multi-byte-UTF-8 safety.
+    #[test]
+    fn truncate_str_respects_max_chars() {
+        use proptest::prelude::*;
+        let arbitrary_unicode =
+            proptest::collection::vec(any::<char>(), 0..200).prop_map(String::from_iter);
+        proptest!(|(s in arbitrary_unicode, max in 0usize..64)| {
+            let out = truncate_str(&s, max);
+            prop_assert!(
+                out.chars().count() <= max,
+                "got {} chars for max {max}",
+                out.chars().count()
+            );
+        });
+    }
 }
