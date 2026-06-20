@@ -1382,6 +1382,112 @@ fn resume_does_not_stamp_invalidated_pinned_due_fact() {
     );
 }
 
+// --- Issue #474: resume_context scope ancestor-chain filtering ---
+
+/// `resume_context` with `scope_path = Some(<existing child>)` must scope the
+/// `recent` and `high_importance` tiers to the resolved scope's ancestor chain
+/// (`tree.ancestors(id)` = `[child, …parents, root]`), excluding facts from a
+/// *sibling* scope that is not on that chain.
+///
+/// Every prior resume test passes `scope_path = None` (root only) or a
+/// nonexistent path (`NotFound` short-circuit), so the success branch at
+/// `engine/resume.rs` — `resolve_path` → `ancestors(id)` → a non-root
+/// `scope_ids` slice into `list_by_importance_score` / `list_by_scopes_recent`
+/// — was never exercised. This test creates two sibling scopes under a common
+/// parent, populates both, resumes from one, and asserts the sibling's facts
+/// are absent from both scope-filtered tiers.
+///
+/// **Discrimination**: if `ancestors(id)` were replaced by `subtree(id)`,
+/// `[root]`, or an over-broad set that leaked the sibling scope, the
+/// `does_not_contain` assertions on the `beta`/sibling facts would fail. With
+/// `scope_path = None` (the only previously-tested path) the slice is always
+/// `[root]` and a child/sibling distinction can never arise.
+#[test]
+fn resume_with_existing_scope_path_excludes_sibling_scope() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder = MockEmbedder { dim: DIM };
+
+    // Two sibling scopes under a common parent: project/alpha and project/beta.
+    let alpha_id = engine.ensure_scope_path("project/alpha").unwrap();
+    let beta_id = engine.ensure_scope_path("project/beta").unwrap();
+    assert_ne!(alpha_id, beta_id, "siblings must be distinct scopes");
+
+    // Helper: add a non-pinned fact at a given scope path with a chosen
+    // importance (which materializes importance_score 1:1 at insert time).
+    let add = |scope: &str, content: &str, importance: f64| {
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: content.into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: Some(scope.into()),
+                    opts: Some(AddFactOptions {
+                        importance: Some(importance),
+                        ..Default::default()
+                    }),
+                },
+                &embedder,
+                None,
+            )
+            .unwrap()
+    };
+
+    // recent-tier facts (low importance, below the 0.7 high-importance floor).
+    add("project/alpha", "alpha recent note", 0.1);
+    add("project/beta", "beta recent note", 0.1);
+    // high-importance-tier facts (importance_score >= 0.7).
+    add("project/alpha", "alpha critical decision", 0.9);
+    add("project/beta", "beta critical decision", 0.9);
+
+    let config = ResumeConfig {
+        scope_path: Some("project/alpha".into()),
+        ..ResumeConfig::default()
+    };
+    let ctx = engine.resume_context(&config).unwrap();
+
+    let recent_contents: Vec<&str> = ctx.recent.iter().map(|f| f.content.as_str()).collect();
+    let high_contents: Vec<&str> = ctx
+        .high_importance
+        .iter()
+        .map(|f| f.content.as_str())
+        .collect();
+
+    // alpha (resolved scope, on its own ancestor chain) is present.
+    assert!(
+        recent_contents.contains(&"alpha recent note"),
+        "alpha-scope recent fact must surface, got recent={recent_contents:?}"
+    );
+    assert!(
+        high_contents.contains(&"alpha critical decision"),
+        "alpha-scope high-importance fact must surface, got high={high_contents:?}"
+    );
+
+    // beta (sibling, NOT on alpha's ancestor chain) is excluded from both
+    // scope-filtered tiers.
+    assert!(
+        !recent_contents.contains(&"beta recent note"),
+        "sibling-scope recent fact must be excluded, got recent={recent_contents:?}"
+    );
+    assert!(
+        !high_contents.contains(&"beta critical decision"),
+        "sibling-scope high-importance fact must be excluded, got high={high_contents:?}"
+    );
+
+    // Cross-tier safety net: no fact from the sibling scope appears anywhere in
+    // the non-pinned tiers (the sibling's scope_id must never enter the chain).
+    let sibling_leak = ctx
+        .high_importance
+        .iter()
+        .chain(ctx.due.iter())
+        .chain(ctx.recent.iter())
+        .any(|f| f.scope_id == beta_id);
+    assert!(
+        !sibling_leak,
+        "no sibling-scope fact may leak into any tier"
+    );
+}
+
 // --- Phase 3b / T6: SearchConfig in EngineConfig ---
 
 #[test]
