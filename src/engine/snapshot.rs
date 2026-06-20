@@ -687,4 +687,189 @@ mod tests {
         let full: SnapshotPayload = rmp_serde::from_slice(&bytes).unwrap();
         assert!(full.hnsw.is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // Property-based coverage (#451)
+    //
+    // The example tests above exercise the happy path and each individual
+    // reject branch. These proptests stress the `write_to_file` →
+    // `load_from_file` pipeline (two MessagePack serializations + a u32 LE
+    // header length + a blake3 integrity check) over arbitrary field values —
+    // including i64 boundaries (MIN/MAX) and random collection counts — and
+    // assert the integrity-protected region rejects any single-byte mutation.
+    // -----------------------------------------------------------------------
+    mod proptest_roundtrip {
+        // Bit-exact equality is the whole point of a serde roundtrip test: a
+        // faithfully written then loaded `f32`/`f64` must be identical. We
+        // exclude NaN in the strategies, so `==` is well-defined here.
+        #![allow(clippy::float_cmp)]
+
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Embedding dimensions kept small to keep generated payloads cheap;
+        /// the dimension is the only field both serialized into the header and
+        /// cross-checked against each `HnswEntry`, so it is the interesting one.
+        const DIM_RANGE: std::ops::RangeInclusive<usize> = 1..=8;
+
+        prop_compose! {
+            fn arb_fingerprint()(
+                max_fact_id in any::<i64>(),
+                active_fact_count in any::<i64>(),
+                max_edge_id in any::<i64>(),
+                active_edge_count in any::<i64>(),
+                max_scope_id in any::<i64>(),
+                scope_count in any::<i64>(),
+            ) -> DbFingerprint {
+                DbFingerprint {
+                    max_fact_id,
+                    active_fact_count,
+                    max_edge_id,
+                    active_edge_count,
+                    max_scope_id,
+                    scope_count,
+                }
+            }
+        }
+
+        prop_compose! {
+            fn arb_edge()(
+                edge_id in any::<i64>(),
+                source in any::<i64>(),
+                target in any::<i64>(),
+                relation_type in ".*",
+                weight in proptest::num::f64::NORMAL | proptest::num::f64::ZERO,
+            ) -> GraphEdgeSnapshot {
+                GraphEdgeSnapshot { edge_id, source, target, relation_type, weight }
+            }
+        }
+
+        prop_compose! {
+            fn arb_node()(
+                id in any::<i64>(),
+                parent_id in proptest::option::of(any::<i64>()),
+                label in ".*",
+                depth in any::<i64>(),
+            ) -> ScopeNode {
+                ScopeNode { id, parent_id, label, depth }
+            }
+        }
+
+        prop_compose! {
+            fn arb_entry(dim: usize)(
+                fact_id in any::<i64>(),
+                embedding in prop::collection::vec(
+                    proptest::num::f32::NORMAL | proptest::num::f32::ZERO,
+                    dim..=dim,
+                ),
+            ) -> HnswEntry {
+                HnswEntry { fact_id, embedding }
+            }
+        }
+
+        prop_compose! {
+            /// Generate a self-consistent `(header, payload)` pair: the header's
+            /// `embed_dim` and every HNSW entry's embedding length agree, so a
+            /// faithful roundtrip is expected to succeed.
+            fn arb_snapshot()(
+                dim in DIM_RANGE,
+            )(
+                dim in Just(dim),
+                fingerprint in arb_fingerprint(),
+                engine_version in ".*",
+                edges in prop::collection::vec(arb_edge(), 0..6),
+                nodes in prop::collection::vec(arb_node(), 0..6),
+                hnsw in proptest::option::of(
+                    prop::collection::vec(arb_entry(dim), 0..6),
+                ),
+            ) -> (SnapshotHeader, SnapshotPayload, usize) {
+                let header = SnapshotHeader {
+                    format_version: FORMAT_VERSION,
+                    fingerprint,
+                    embed_dim: dim,
+                    engine_version,
+                };
+                let payload = SnapshotPayload {
+                    graph: GraphSnapshot { edges },
+                    scope_tree: ScopeTreeSnapshot { nodes },
+                    hnsw: hnsw.map(|entries| HnswSnapshot { entries }),
+                };
+                (header, payload, dim)
+            }
+        }
+
+        proptest! {
+            /// A faithfully written snapshot roundtrips to identical data for
+            /// arbitrary field values (including i64::MIN/MAX and random counts).
+            #[test]
+            fn write_load_roundtrip((header, payload, dim) in arb_snapshot()) {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("rt.db.snapshot");
+
+                write_to_file(&header, &payload, &path).unwrap();
+                let (h, p) = load_from_file(&path, dim)
+                    .expect("faithful roundtrip must load");
+
+                prop_assert_eq!(h.format_version, header.format_version);
+                prop_assert_eq!(h.embed_dim, header.embed_dim);
+                prop_assert_eq!(h.fingerprint, header.fingerprint);
+                prop_assert_eq!(&h.engine_version, &header.engine_version);
+
+                prop_assert_eq!(p.graph.edges.len(), payload.graph.edges.len());
+                for (a, b) in p.graph.edges.iter().zip(payload.graph.edges.iter()) {
+                    prop_assert_eq!(a.edge_id, b.edge_id);
+                    prop_assert_eq!(a.source, b.source);
+                    prop_assert_eq!(a.target, b.target);
+                    prop_assert_eq!(&a.relation_type, &b.relation_type);
+                    prop_assert_eq!(a.weight, b.weight);
+                }
+
+                prop_assert_eq!(p.scope_tree.nodes, payload.scope_tree.nodes);
+
+                match (&p.hnsw, &payload.hnsw) {
+                    (Some(got), Some(want)) => {
+                        prop_assert_eq!(got.entries.len(), want.entries.len());
+                        for (a, b) in got.entries.iter().zip(want.entries.iter()) {
+                            prop_assert_eq!(a.fact_id, b.fact_id);
+                            prop_assert_eq!(&a.embedding, &b.embedding);
+                        }
+                    }
+                    (None, None) => {}
+                    _ => prop_assert!(false, "hnsw presence mismatch"),
+                }
+            }
+
+            /// Any single-byte mutation inside the blake3-covered region
+            /// (payload bytes + the trailing 32-byte checksum) must be rejected.
+            /// The header region is intentionally NOT integrity-protected
+            /// (the format hashes the payload only), so it is excluded here.
+            #[test]
+            fn bit_flip_in_protected_region_rejected(
+                (header, payload, dim) in arb_snapshot(),
+                flip_bit in 0u8..8,
+                pos in any::<usize>(),
+            ) {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("flip.db.snapshot");
+                write_to_file(&header, &payload, &path).unwrap();
+
+                let mut bytes = fs::read(&path).unwrap();
+                let header_len =
+                    u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+                let protected_start = 4 + header_len; // first payload byte
+                let protected_len = bytes.len() - protected_start;
+                prop_assume!(protected_len > 0);
+
+                // Map `pos` into the protected region [protected_start, len).
+                let offset = protected_start + (pos % protected_len);
+                bytes[offset] ^= 1u8 << flip_bit;
+                fs::write(&path, &bytes).unwrap();
+
+                prop_assert!(
+                    load_from_file(&path, dim).is_none(),
+                    "single-byte mutation in the payload/checksum region must reject"
+                );
+            }
+        }
+    }
 }
