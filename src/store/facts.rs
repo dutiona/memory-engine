@@ -262,10 +262,12 @@ impl<'a> FactStore<'a> {
         Ok(out)
     }
 
-    /// List active facts (`t_expired IS NULL`), optionally limited.
+    /// List active facts (`t_expired IS NULL`), optionally limited, in ascending
+    /// `id` (insertion) order (#495).
     ///
     /// When `limit` is `Some(n)`, a SQL `LIMIT n` clause is pushed into the
-    /// query so that at most `n` rows are materialized. `None` returns all.
+    /// query so that at most `n` rows are materialized — the `n` **oldest** active
+    /// facts, since results are ordered by `id`. `None` returns all.
     ///
     /// # Errors
     ///
@@ -273,7 +275,11 @@ impl<'a> FactStore<'a> {
     pub fn list_active(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
         let base = format!("SELECT {FACT_COLUMNS} FROM facts WHERE t_expired IS NULL");
         let limit_i64: i64 = limit.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
-        let sql = format!("{base} LIMIT ?1");
+        // ORDER BY id (#495): deterministic iteration order across SQLite versions,
+        // vacuums, and query plans. Consolidation's greedy dedup/cluster passes are
+        // order-sensitive, so a stable insertion (rowid) order makes their output
+        // reproducible rather than dependent on the storage engine's scan choice.
+        let sql = format!("{base} ORDER BY id LIMIT ?1");
         let mut stmt = self.conn.prepare(&sql)?;
         let dim = self.embed_dim;
         let rows = stmt.query_map(params![limit_i64], |row| row_to_fact(row, dim))?;

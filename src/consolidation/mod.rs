@@ -178,6 +178,9 @@ fn consolidate_with_caps(
         .filter(|f| !expired_set.contains(&f.id))
         .collect();
 
+    // #495: thread the single run-level `now` through both summary-writing passes
+    // so all summaries from one consolidation share a created_at, instead of each
+    // pass calling `Utc::now()` independently.
     let clusters_created = cluster_fusion(
         &tx,
         &survivors,
@@ -186,8 +189,9 @@ fn consolidate_with_caps(
         embed_dim,
         config.min_cluster_size,
         config.cluster_threshold,
+        now,
     )?;
-    let global_summaries = global_integration(&tx, generator, embedder, embed_dim)?;
+    let global_summaries = global_integration(&tx, generator, embedder, embed_dim, now)?;
 
     // Record the embedding identity on first write (#613, ADR 0015 §2) — but only
     // once a summary vector has actually been written (#643). `local_dedup` only

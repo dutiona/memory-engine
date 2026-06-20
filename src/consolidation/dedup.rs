@@ -139,14 +139,12 @@ pub fn local_dedup(
             // duplicates without folding in genuinely distinct facts.
             if similarity >= threshold - DEDUP_SIMILARITY_EPSILON {
                 // Expire the lower-importance fact. Tie-break: higher id (newer) expires.
-                let expire_id = if new_fact.importance < candidate.importance {
-                    new_fact.id
-                } else if new_fact.importance > candidate.importance {
-                    candidate.id
-                } else {
-                    // Equal importance: expire the newer one (higher id)
-                    new_fact.id.max(candidate.id)
-                };
+                let expire_id = choose_expiry(
+                    new_fact.importance,
+                    new_fact.id,
+                    candidate.importance,
+                    candidate.id,
+                );
 
                 fact_store.expire(expire_id, now)?;
                 edge_store.expire_by_fact(expire_id, now)?;
@@ -176,7 +174,23 @@ pub fn local_dedup(
     })
 }
 
-/// Inherit the higher importance values from `loser` into `survivor`.
+/// Choose which of two near-duplicate facts to expire: the **lower-importance**
+/// one, breaking ties (equal importance) by expiring the **newer** (higher id).
+///
+/// Pure and total over distinct ids — extracted from the dedup loop so the
+/// tie-break rule is property-testable in isolation (#495).
+fn choose_expiry(a_importance: f64, a_id: i64, b_importance: f64, b_id: i64) -> i64 {
+    if a_importance < b_importance {
+        a_id
+    } else if a_importance > b_importance {
+        b_id
+    } else {
+        // Equal importance: expire the newer one (higher id).
+        a_id.max(b_id)
+    }
+}
+
+/// Inherit the higher importance values from the loser into the survivor.
 ///
 /// Called after a dedup merge to ensure the surviving fact retains the maximum
 /// base `importance` and `importance_score` across the merged pair — and,
@@ -375,7 +389,11 @@ mod tests {
     #[test]
     fn only_compares_new_facts_against_active() {
         let (conn, dim) = setup();
-        let old_time = Utc::now() - Duration::days(10);
+        // #495: derive every timestamp from a single captured `base` so the test is
+        // deterministic — no race between independent `Utc::now()` calls for the
+        // fixture, the `since` filter, and the dedup clock.
+        let base = Utc::now();
+        let old_time = base - Duration::days(10);
 
         // Insert an "old" fact
         let store = FactStore::new(&conn, dim);
@@ -399,14 +417,37 @@ mod tests {
             })
             .unwrap();
 
-        // Insert a "new" near-duplicate
+        // Insert a SECOND old fact that is a near-duplicate of "old fact". Both
+        // predate `since`, so the filter must keep them from being compared against
+        // each other — this is what makes the test diverge from a no-filter run.
+        store
+            .insert(&NewFact {
+                content: "old dup".into(),
+                content_hash: "h_old2".into(),
+                embedding: vec![0.999, 0.001, 0.0, 0.0],
+                fact_type: FactType::Semantic,
+                t_created: old_time,
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                scope_id: 1,
+                importance: 0.5,
+                access_count: 0,
+                last_accessed: old_time,
+                metadata: serde_json::json!({}),
+                is_pinned: false,
+            })
+            .unwrap();
+
+        // Insert a "new" near-duplicate (lower importance, so it expires when driven).
         store
             .insert(&NewFact {
                 content: "new duplicate".into(),
                 content_hash: "h_new".into(),
                 embedding: vec![0.99, 0.01, 0.0, 0.0],
                 fact_type: FactType::Semantic,
-                t_created: Utc::now(),
+                t_created: base,
                 t_expired: None,
                 t_valid: None,
                 t_invalid: None,
@@ -414,22 +455,36 @@ mod tests {
                 scope_id: 1,
                 importance: 0.3,
                 access_count: 0,
-                last_accessed: Utc::now(),
+                last_accessed: base,
                 metadata: serde_json::json!({}),
                 is_pinned: false,
             })
             .unwrap();
 
-        // Only compare facts created since `old_time + 1 day`
+        // Only facts created since `old_time + 1 day` DRIVE comparisons — i.e. just
+        // the new one. It compares against all active and is expired against "old
+        // fact" (lower importance). Crucially, the two OLD near-duplicates are never
+        // compared against each other (neither drives), so both survive. Without the
+        // since-filter, "old fact" would drive and expire "old dup" too (removed=2,
+        // one survivor) — so this fixture's result genuinely depends on the filter.
         let since = old_time + Duration::days(1);
-        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, Some(since), Utc::now())
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, Some(since), base)
             .unwrap()
             .expect_ran();
-        assert_eq!(removed, 1); // new duplicate should be expired against old
+        assert_eq!(
+            removed, 1,
+            "only the new duplicate is expired (it alone drives)"
+        );
 
         let active = store.list_active(None).unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].content, "old fact"); // old survives (higher importance wins)
+        let mut survivors: Vec<&str> = active.iter().map(|f| f.content.as_str()).collect();
+        survivors.sort_unstable();
+        assert_eq!(
+            survivors,
+            vec!["old dup", "old fact"],
+            "both pre-`since` near-duplicates survive — the filter kept them from \
+             driving a comparison against each other"
+        );
     }
 
     #[test]
@@ -619,9 +674,8 @@ mod tests {
         assert_eq!(active.len(), 1);
         // Pin the collapse topology: A is the survivor. The 0.8-vs-0.5 regression
         // value is order-sensitive — it assumes the merge order A→B then A→C, which
-        // holds because `local_dedup` scans `list_active` in rowid (insertion) order.
-        // That ordering is not yet guaranteed by the query (no ORDER BY — #495); when
-        // that lands this coupling becomes a contract rather than an SQLite default.
+        // now holds as a contract: `list_active` is `ORDER BY id` (#495), so it scans
+        // in rowid (insertion) order rather than relying on an implicit SQLite default.
         assert_eq!(active[0].id, a);
         assert_eq!(active[0].content, "A");
         assert!(
@@ -720,5 +774,40 @@ mod tests {
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 1, "a corpus exactly at the cap must run, not skip");
+    }
+
+    // --- #495: property-based coverage of the dedup tie-break (`choose_expiry`) ---
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// For distinct importances, the lower-importance fact is always expired
+        /// (the survivor keeps the higher importance).
+        #[test]
+        fn choose_expiry_expires_lower_importance(
+            a_imp in 0.0f64..=1.0,
+            a_id in 1i64..10_000,
+            b_imp in 0.0f64..=1.0,
+            b_id in 1i64..10_000,
+        ) {
+            prop_assume!(a_id != b_id);
+            // Meaningfully distinct importances so the `<`/`>` branch is unambiguous.
+            prop_assume!((a_imp - b_imp).abs() > 1e-9);
+            let expired = choose_expiry(a_imp, a_id, b_imp, b_id);
+            let lower_id = if a_imp < b_imp { a_id } else { b_id };
+            prop_assert_eq!(expired, lower_id);
+        }
+
+        /// On equal importance, the newer (higher id) fact is expired — the
+        /// deterministic tie-break.
+        #[test]
+        fn choose_expiry_tie_breaks_to_higher_id(
+            imp in 0.0f64..=1.0,
+            a_id in 1i64..10_000,
+            b_id in 1i64..10_000,
+        ) {
+            prop_assume!(a_id != b_id);
+            prop_assert_eq!(choose_expiry(imp, a_id, imp, b_id), a_id.max(b_id));
+        }
     }
 }

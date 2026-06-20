@@ -24,6 +24,7 @@ pub fn global_integration(
     generator: &dyn SummaryGenerator,
     embedder: &dyn EmbeddingProvider,
     embed_dim: usize,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<usize> {
     let summary_store = SummaryStore::new(conn, embed_dim);
 
@@ -65,7 +66,7 @@ pub fn global_integration(
         level: ConsolidationLevel::Global,
         source_fact_ids: all_source_ids,
         scope_id: 1,
-        created_at: chrono::Utc::now(),
+        created_at: now,
     })?;
 
     Ok(1)
@@ -125,7 +126,8 @@ mod tests {
 
         let mock_gen = MockGenerator;
         let mock_embed = MockEmbedder { embed_dim: dim };
-        let count = global_integration(&conn, &mock_gen, &mock_embed, dim).unwrap();
+        let count =
+            global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();
         assert_eq!(count, 1);
 
         let global = store.list_by_level(&ConsolidationLevel::Global).unwrap();
@@ -146,7 +148,8 @@ mod tests {
 
         let mock_gen = MockGenerator;
         let mock_embed = MockEmbedder { embed_dim: dim };
-        let count = global_integration(&conn, &mock_gen, &mock_embed, dim).unwrap();
+        let count =
+            global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -172,8 +175,8 @@ mod tests {
         let mock_embed = MockEmbedder { embed_dim: dim };
 
         // Run twice
-        global_integration(&conn, &mock_gen, &mock_embed, dim).unwrap();
-        global_integration(&conn, &mock_gen, &mock_embed, dim).unwrap();
+        global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();
+        global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();
 
         let global = store.list_by_level(&ConsolidationLevel::Global).unwrap();
         assert_eq!(global.len(), 1); // Not 2

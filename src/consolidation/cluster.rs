@@ -25,6 +25,10 @@ use crate::types::{ConsolidationLevel, Fact, NewSummary};
 /// Returns `MemoryError::EmbeddingDimension` if the embedder returns an embedding
 /// whose length does not match `embed_dim`.
 /// Returns `MemoryError::Serialization` on JSON serialization failure.
+// Interim arity: the run-level `now` (#495) pushed this to 8 params. Wave 5b's
+// read→compute→write restructure collapses these passes behind a plan type, which
+// removes the bloat; allow until then rather than introduce a throwaway params struct.
+#[allow(clippy::too_many_arguments)]
 pub fn cluster_fusion(
     conn: &Connection,
     facts: &[&Fact],
@@ -33,6 +37,7 @@ pub fn cluster_fusion(
     embed_dim: usize,
     min_cluster_size: usize,
     cluster_threshold: f32,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<usize> {
     // `facts` is the post-dedup active set, loaded once by the caller and shared
     // with the dedup pass (#389). Safety cap (`super::MAX_FACTS_FOR_CLUSTERING`,
@@ -92,7 +97,7 @@ pub fn cluster_fusion(
             level: ConsolidationLevel::Cluster,
             source_fact_ids: source_ids,
             scope_id,
-            created_at: chrono::Utc::now(),
+            created_at: now,
         })?;
 
         clusters_created += 1;
@@ -170,6 +175,7 @@ mod tests {
             dim,
             min_cluster_size,
             cluster_threshold,
+            Utc::now(),
         )
     }
 
