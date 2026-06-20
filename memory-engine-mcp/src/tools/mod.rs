@@ -634,19 +634,19 @@ fn handle_add_fact(
 
     // Validate importance range
     let importance = get_f64(args, "importance");
-    if let Some(imp) = importance {
-        if !(0.0..=1.0).contains(&imp) {
-            return Err(ValidationError::ImportanceOutOfRange(imp).into());
-        }
+    if let Some(imp) = importance
+        && !(0.0..=1.0).contains(&imp)
+    {
+        return Err(ValidationError::ImportanceOutOfRange(imp).into());
     }
 
     // Validate temporal consistency
     let t_valid = get_datetime(args, "t_valid")?;
     let t_invalid = get_datetime(args, "t_invalid")?;
-    if let (Some(tv), Some(ti)) = (t_valid, t_invalid) {
-        if tv >= ti {
-            return Err(ValidationError::TemporalInconsistency.into());
-        }
+    if let (Some(tv), Some(ti)) = (t_valid, t_invalid)
+        && tv >= ti
+    {
+        return Err(ValidationError::TemporalInconsistency.into());
     }
 
     let pinned = get_bool(args, "pinned");
@@ -655,14 +655,14 @@ fn handle_add_fact(
     // Pre-computed embedding or server-side embedding
     let pre_computed = parse_embedding(args)?;
 
-    if let Some(ref emb) = pre_computed {
-        if emb.len() != embed_dim {
-            return Err(ValidationError::EmbeddingDimension {
-                expected: embed_dim,
-                actual: emb.len(),
-            }
-            .into());
+    if let Some(ref emb) = pre_computed
+        && emb.len() != embed_dim
+    {
+        return Err(ValidationError::EmbeddingDimension {
+            expected: embed_dim,
+            actual: emb.len(),
         }
+        .into());
     }
 
     let req = AddFactRequest {
@@ -952,11 +952,11 @@ fn handle_flush_insights(
         let scope = get_str(obj, "scope");
         let importance = get_f64(obj, "importance");
 
-        if let Some(imp) = importance {
-            if !(0.0..=1.0).contains(&imp) {
-                failed.push(json!({ "index": i, "error": format!("importance must be in [0.0, 1.0], got {imp}") }));
-                continue;
-            }
+        if let Some(imp) = importance
+            && !(0.0..=1.0).contains(&imp)
+        {
+            failed.push(json!({ "index": i, "error": format!("importance must be in [0.0, 1.0], got {imp}") }));
+            continue;
         }
 
         // Metadata must be absent/null or an object — a present non-object (e.g.
@@ -1264,10 +1264,10 @@ fn handle_replay_events(
 
     // Ordering validation: when both bounds are provided, since must not exceed until.
     // Either bound may be omitted independently (open-ended range).
-    if let (Some(s), Some(u)) = (since, until) {
-        if s > u {
-            return Err(ErrorData::invalid_params("since must be <= until", None));
-        }
+    if let (Some(s), Some(u)) = (since, until)
+        && s > u
+    {
+        return Err(ErrorData::invalid_params("since must be <= until", None));
     }
 
     let id_start = get_i64(args, "id_range_start");
