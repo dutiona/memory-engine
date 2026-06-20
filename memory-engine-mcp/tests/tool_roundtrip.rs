@@ -245,6 +245,32 @@ fn add_fact_precomputed_without_model_rejected() {
 }
 
 #[test]
+fn add_fact_precomputed_non_string_element_type_rejected() {
+    // #615: a present-but-malformed element_type must be rejected, not silently
+    // defaulted to "float32" (which would let it slip past the identity check).
+    let engine = make_engine();
+    let result = tools::dispatch(
+        "memory_add_fact",
+        args(json!({
+            "content": "bad element_type",
+            "embedding": vec![0.1; DIM],
+            "model": "m",
+            "provider": "p",
+            "element_type": 123,
+        })),
+        &engine,
+        None,
+        None,
+        DIM,
+        &memory_engine::ActivityFilterConfig::default(),
+    );
+    assert!(
+        result.is_err(),
+        "a non-string element_type must be rejected as invalid params"
+    );
+}
+
+#[test]
 fn add_fact_precomputed_model_mismatch_rejected() {
     // #615: first precomputed add records the declared identity; a later add declaring a
     // DIFFERENT model (same dim) is hard-rejected, closing the foreign-vector hole.

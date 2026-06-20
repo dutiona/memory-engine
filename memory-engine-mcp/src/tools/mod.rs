@@ -570,11 +570,24 @@ fn parse_declared_fingerprint(
                 })?,
         ),
     };
+    // A present-but-non-string `element_type` is rejected, not silently ignored — a
+    // malformed value must not fall back to the "float32" default and slip past the
+    // full-tuple identity check (consistent with matryoshka_base_dim's rejection).
+    let element_type = match args.get("element_type") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return Err(ErrorData::invalid_params(
+                "element_type must be a string (e.g. \"float32\")",
+                None,
+            ));
+        }
+    };
     let mut fp = match matryoshka_base_dim {
         Some(base) => EmbeddingFingerprint::with_matryoshka(model, provider, dim, base),
         None => EmbeddingFingerprint::new(model, provider, dim),
     };
-    if let Some(element_type) = get_str(args, "element_type") {
+    if let Some(element_type) = element_type {
         fp.element_type = element_type;
     }
     Ok(fp)
