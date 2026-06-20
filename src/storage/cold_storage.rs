@@ -40,4 +40,38 @@ pub trait ColdStorage: Send + Sync {
     async fn list_archive_manifest(&self) -> Result<Vec<ArchiveManifestEntry>>;
     /// Delete a manifest entry by id; returns `true` if it existed.
     async fn delete_archive_manifest(&self, id: i64) -> Result<bool>;
+
+    // -------------------------------------------------------------------------
+    // Stage A atomic port method (Fork B, §3 of the #631 plan)
+    // -------------------------------------------------------------------------
+
+    /// Single write transaction: manifest insert + hard-delete edges (by fact ids)
+    /// + hard-delete facts — atomic, crash-safe.
+    ///
+    /// This is the verbatim body of `engine/archive.rs:238–279` moved below the
+    /// seam. The `.pak` file I/O stays engine-side; this method only commits the
+    /// database side of the archive operation.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
+    ///
+    /// If this method returns `Err`, the caller is responsible for removing the
+    /// already-written `.pak` file (the CWE-459 orphan guard, preserved from the
+    /// original `commit_archive`).
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_archive_atomic(
+        &self,
+        pak_filename: &str,
+        created_at: DateTime<Utc>,
+        fact_count: i64,
+        edge_count: i64,
+        fact_id_min: i64,
+        fact_id_max: i64,
+        t_created_min: DateTime<Utc>,
+        t_created_max: DateTime<Utc>,
+        pak_size_bytes: i64,
+        blake3_hash: &str,
+        fact_ids: &[i64],
+    ) -> Result<()>;
 }

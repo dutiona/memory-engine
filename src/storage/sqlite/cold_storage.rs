@@ -61,6 +61,67 @@ impl ColdStorage for SqliteBackend {
         self.block_write(move |c| ArchiveManifestStore::new(c).delete(id))
             .await
     }
+
+    // -------------------------------------------------------------------------
+    // Stage A atomic port method
+    // -------------------------------------------------------------------------
+
+    // ATOMIC WRITE — manifest insert + hard-delete edges + hard-delete facts,
+    // verbatim body of engine/archive.rs:238-279 moved below the seam.
+    #[allow(clippy::cast_possible_wrap, clippy::too_many_arguments)]
+    async fn commit_archive_atomic(
+        &self,
+        pak_filename: &str,
+        created_at: DateTime<Utc>,
+        fact_count: i64,
+        edge_count: i64,
+        fact_id_min: i64,
+        fact_id_max: i64,
+        t_created_min: DateTime<Utc>,
+        t_created_max: DateTime<Utc>,
+        pak_size_bytes: i64,
+        blake3_hash: &str,
+        fact_ids: &[i64],
+    ) -> Result<()> {
+        use crate::error::ArchiveError;
+        use crate::store::edges::EdgeStore;
+        use crate::store::facts::FactStore;
+
+        let pak_filename = pak_filename.to_owned();
+        let blake3_hash = blake3_hash.to_owned();
+        let fact_ids = fact_ids.to_vec();
+        let dim = self.embed_dim;
+        self.block_write(move |conn| {
+            // Verbatim body of engine/archive.rs:253-279: one transaction wrapping
+            // manifest insert + FK-safe edge delete + fact hard-delete.
+            let tx = conn.unchecked_transaction().map_err(|e| {
+                ArchiveError::Transaction(format!("failed to begin transaction: {e}"))
+            })?;
+
+            ArchiveManifestStore::new(&tx).insert(
+                &pak_filename,
+                created_at,
+                fact_count,
+                edge_count,
+                fact_id_min,
+                fact_id_max,
+                t_created_min,
+                t_created_max,
+                pak_size_bytes,
+                &blake3_hash,
+            )?;
+
+            // Delete edges first (FK safety), then facts.
+            EdgeStore::new(&tx).hard_delete_by_facts(&fact_ids)?;
+            FactStore::new(&tx, dim).hard_delete_ids(&fact_ids)?;
+
+            tx.commit().map_err(|e| {
+                ArchiveError::Transaction(format!("failed to commit archive transaction: {e}"))
+            })?;
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[cfg(test)]

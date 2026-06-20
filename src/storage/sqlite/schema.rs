@@ -94,6 +94,24 @@ impl SchemaManager for SqliteBackend {
     async fn require_embedding_fingerprint_present(&self) -> Result<()> {
         self.block_read(embedding_meta::require_present).await
     }
+
+    // -------------------------------------------------------------------------
+    // Stage A config accessors
+    // -------------------------------------------------------------------------
+
+    // READ
+    async fn get_config(&self, key: &str) -> Result<Option<String>> {
+        let key = key.to_owned();
+        self.block_read(move |c| get_config(c, &key)).await
+    }
+
+    // WRITE
+    async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        let key = key.to_owned();
+        let value = value.to_owned();
+        self.block_write(move |c| crate::store::schema::set_config(c, &key, &value))
+            .await
+    }
 }
 
 #[cfg(test)]
