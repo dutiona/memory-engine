@@ -806,14 +806,18 @@ fn record_outcome_nonexistent_fact_fails() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("error"));
+        // MemoryError::NotFound renders as "not found: fact 9999" — pin the
+        // failure cause, not just any line containing "error".
+        .stderr(predicate::str::contains("not found"));
 }
 
 #[test]
-fn outcome_counts_json_format_contains_positive_field() {
+fn outcome_counts_json_reflects_recorded_positive() {
     let (_dir, db_path) = create_test_db();
     let db = db_path.to_str().unwrap();
-    // Record one outcome so the counts query has something to inspect.
+    // Record a *positive* outcome so the asserted value ties to the recorded
+    // signal (the `positive` key is emitted unconditionally; asserting the value
+    // proves record-outcome actually incremented it).
     cli()
         .args([
             "--db",
@@ -822,7 +826,7 @@ fn outcome_counts_json_format_contains_positive_field() {
             "--fact-id",
             "2",
             "--outcome",
-            "neutral",
+            "positive",
         ])
         .assert()
         .success();
@@ -838,7 +842,7 @@ fn outcome_counts_json_format_contains_positive_field() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"positive\""));
+        .stdout(predicate::str::contains("\"positive\": 1"));
 }
 
 // --- dump all + dump JSON (#428) ---

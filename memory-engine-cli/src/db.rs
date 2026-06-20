@@ -178,9 +178,13 @@ mod tests {
     fn peek_embed_dim_from_db_non_sqlite_file_returns_error() {
         let mut tmp = NamedTempFile::new().unwrap();
         tmp.write_all(b"this is not a sqlite database\n").unwrap();
-        // Either fails because it's not a valid SQLite file or has no config table.
-        let result = peek_embed_dim_from_db(tmp.path());
-        assert!(result.is_err(), "expected Err for non-SQLite file");
+        // A non-SQLite file opens lazily, then the config-table query fails with
+        // the rusqlite "not a database" error — pin that, not just any Err.
+        let err = peek_embed_dim_from_db(tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("not a database"),
+            "expected 'not a database', got: {err}"
+        );
     }
 
     #[test]
@@ -220,8 +224,12 @@ mod tests {
     fn peek_schema_version_from_db_non_sqlite_file_returns_error() {
         let mut tmp = NamedTempFile::new().unwrap();
         tmp.write_all(b"not a real database\n").unwrap();
-        let result = peek_schema_version_from_db(tmp.path());
-        assert!(result.is_err(), "expected Err for non-SQLite file");
+        // Wrapped as "… is this a memory-engine database? (… not a database …)".
+        let err = peek_schema_version_from_db(tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("not a database"),
+            "expected 'not a database', got: {err}"
+        );
     }
 
     #[test]
