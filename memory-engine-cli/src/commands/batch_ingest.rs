@@ -199,8 +199,9 @@ const MAX_LINE_BYTES: u64 = 8 << 20; // 8 MiB
 /// # Errors
 ///
 /// Returns an error when the call ingested zero facts while at least one line was
-/// skipped — i.e. every parseable record failed validation or batching. A
-/// wholesale failure is surfaced rather than reported as a successful no-op.
+/// skipped for any reason (parse error, validation failure, oversized line, read
+/// error, or batch rejection). A wholesale failure is surfaced rather than
+/// reported as a successful no-op.
 pub fn ingest_from_reader(
     engine: &MemoryEngine,
     reader: impl Read,
@@ -239,8 +240,13 @@ pub fn ingest_from_reader(
         if n as u64 > MAX_LINE_BYTES {
             eprintln!("warning: line {line_no}: exceeds {MAX_LINE_BYTES} bytes, skipping");
             total_skipped += 1;
-            // Resync to the next record without buffering the rest of the line.
-            if let Err(e) = buf.skip_until(b'\n') {
+            // Resync to the next record — but ONLY if read_line stopped at the byte
+            // cap mid-line (no terminator captured). If the line already ends in
+            // '\n', read_line consumed the whole record including its terminator, so
+            // skipping again would swallow the *following* record.
+            if !line.ends_with('\n')
+                && let Err(e) = buf.skip_until(b'\n')
+            {
                 eprintln!("warning: line {line_no}: read error while skipping: {e}");
                 break;
             }
@@ -727,9 +733,9 @@ not valid json
         )
         .unwrap();
         assert_eq!(summary.total_ingested, 1, "only the normal record ingests");
-        assert!(
-            summary.total_skipped >= 1,
-            "the oversized line must be skipped"
+        assert_eq!(
+            summary.total_skipped, 1,
+            "exactly the oversized line is skipped"
         );
     }
 
@@ -753,9 +759,44 @@ not valid json
         )
         .unwrap();
         assert_eq!(summary.total_ingested, 1, "the valid first record ingests");
-        assert!(
-            summary.total_skipped >= 1,
-            "the oversized final line is skipped"
+        assert_eq!(
+            summary.total_skipped, 1,
+            "exactly the oversized final line is skipped"
+        );
+    }
+
+    #[test]
+    fn cap_sized_line_does_not_eat_following_record() {
+        // Regression for the resync off-by-one: a line whose bytes (incl. its '\n')
+        // total exactly MAX_LINE_BYTES + 1 is read in full — read_line consumes the
+        // terminating '\n' — yet n > MAX flags it oversized. An unconditional
+        // skip_until would then drain the *next* line. The record after a cap-sized
+        // line must survive.
+        const OVERHEAD: usize = "{\"content\":\"\",\"fact_type\":\"semantic\"}".len();
+        let cap = usize::try_from(MAX_LINE_BYTES).unwrap();
+        let pad = "x".repeat(cap - OVERHEAD);
+        let cap_line = format!("{{\"content\":\"{pad}\",\"fact_type\":\"semantic\"}}");
+        assert_eq!(
+            cap_line.len(),
+            cap,
+            "cap_line must be exactly MAX_LINE_BYTES"
+        );
+
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let input =
+            format!("{cap_line}\n{{\"content\":\"survivor\",\"fact_type\":\"semantic\"}}\n");
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(
+            summary.total_ingested, 1,
+            "the record after a cap-sized line must not be swallowed by resync"
         );
     }
 
