@@ -205,7 +205,7 @@ fn embed_dim_validation_rejects_mismatch() {
 
 #[test]
 fn first_add_fact_records_embedding_meta() {
-    // A second embedder with a DIFFERENT fingerprint, to prove write-once below.
+    // A second embedder with a DIFFERENT fingerprint, to prove mismatch rejection below.
     struct OtherEmbedder {
         dim: usize,
     }
@@ -219,7 +219,7 @@ fn first_add_fact_records_embedding_meta() {
     }
 
     // The embedding identity is established on the FIRST embedding write (#613,
-    // ADR 0015 §2) and is write-once thereafter.
+    // ADR 0015 §2); a later differing fingerprint is rejected, not overwritten (#614).
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     assert!(
         engine
@@ -248,16 +248,118 @@ fn first_add_fact_records_embedding_meta() {
         "first write records the embedder's fingerprint"
     );
 
-    // Write-once: a second add with a DIFFERENT fingerprint leaves it unchanged.
-    engine
+    // #614 enforcement: a second add with a DIFFERENT fingerprint is hard-rejected
+    // (not silently ignored), and the stored identity is left untouched.
+    let err = engine
         .add_fact(&req("b"), &OtherEmbedder { dim: DIM }, None)
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+        "a differing later fingerprint must be rejected, got {err:?}"
+    );
     assert_eq!(
         engine
             .with_read(crate::store::embedding_meta::load)
             .unwrap(),
         Some(expected),
-        "identity is write-once; a differing later fingerprint does not overwrite it"
+        "stored identity is unchanged after a rejected mismatched write"
+    );
+}
+
+#[test]
+fn verify_embedding_identity_enforces_match() {
+    // The eager fail-fast check (#614, §Design.2) consumed by MCP startup.
+    struct OtherEmbedder {
+        dim: usize,
+    }
+    impl EmbeddingProvider for OtherEmbedder {
+        fn embed(&self, _t: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.7; self.dim])
+        }
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("other-model", "other-provider", self.dim)
+        }
+    }
+
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    // Fresh store has no identity yet -> any same-dim provider is compatible.
+    engine
+        .verify_embedding_identity(&MockEmbedder { dim: DIM })
+        .expect("fresh store compatible with any same-dim provider");
+    // ...but a wrong-dim provider still fails fast on a fresh store (would otherwise
+    // fail on every later write/query).
+    let dim_err = engine
+        .verify_embedding_identity(&MockEmbedder { dim: DIM + 1 })
+        .expect_err("wrong-dim provider must fail the eager check on a fresh store");
+    assert!(
+        matches!(dim_err, MemoryError::EmbeddingDimension { .. }),
+        "expected EmbeddingDimension, got {dim_err:?}"
+    );
+
+    // Stamp the identity via a real embedding write.
+    let req = AddFactRequest {
+        content: "a".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+    engine
+        .add_fact(&req, &MockEmbedder { dim: DIM }, None)
+        .unwrap();
+
+    // Matching provider -> Ok; differing provider -> EmbeddingModelMismatch.
+    engine
+        .verify_embedding_identity(&MockEmbedder { dim: DIM })
+        .expect("matching provider passes the eager check");
+    let err = engine
+        .verify_embedding_identity(&OtherEmbedder { dim: DIM })
+        .expect_err("differing provider must fail the eager check");
+    assert!(
+        matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+        "expected EmbeddingModelMismatch, got {err:?}"
+    );
+}
+
+#[test]
+fn add_fact_precomputed_requires_present_identity() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let req = AddFactRequest {
+        content: "p".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+
+    // Fresh store: a pre-computed write cannot establish identity -> rejected
+    // (consistent with promote / cycle AddFact). The error is the require_present guard.
+    let err = engine
+        .add_fact_precomputed(&req, vec![0.5; DIM], None)
+        .expect_err("precomputed add on a fresh store must require an identity");
+    assert!(
+        matches!(err, MemoryError::Internal(_)),
+        "expected require_present Internal error, got {err:?}"
+    );
+
+    // Stamp the identity via a real embedder, then a pre-computed add succeeds — with NO
+    // model comparison, so the passthrough-style sentinel can't trigger a false mismatch
+    // (the #614 regression). This is the documented memory_add_fact precomputed workflow.
+    engine
+        .add_fact(&req, &MockEmbedder { dim: DIM }, None)
+        .unwrap();
+    let id = engine
+        .add_fact_precomputed(&req, vec![0.6; DIM], None)
+        .expect("precomputed add into a stamped store succeeds");
+    assert!(id > 0);
+
+    // Dimension is still enforced on the pre-computed vector.
+    let dim_err = engine
+        .add_fact_precomputed(&req, vec![0.6; DIM + 3], None)
+        .expect_err("wrong-dimension precomputed vector must be rejected");
+    assert!(
+        matches!(dim_err, MemoryError::EmbeddingDimension { .. }),
+        "expected EmbeddingDimension, got {dim_err:?}"
     );
 }
 

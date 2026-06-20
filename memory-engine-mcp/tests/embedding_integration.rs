@@ -639,7 +639,6 @@ async fn query_hybrid_with_http_embedder() {
         .await;
 
     let uri = server.uri();
-    let emb_clone = emb;
     let body = tokio::task::spawn_blocking(move || {
         let provider = HttpEmbeddingProvider::new(
             format!("{uri}/v1/embeddings"),
@@ -652,15 +651,13 @@ async fn query_hybrid_with_http_embedder() {
         .unwrap();
         let engine = MemoryEngine::builder(DIM).build().unwrap();
 
-        // Add a fact with pre-computed embedding (no provider needed)
+        // Add a fact via the HTTP embedder — a real-embedder write that also stamps the
+        // store's embedding identity (so the subsequent query has an identity to match).
         tools::dispatch(
             "memory_add_fact",
-            args(json!({
-                "content": "Tokio async runtime",
-                "embedding": emb_clone,
-            })),
+            args(json!({ "content": "Tokio async runtime" })),
             &engine,
-            None,
+            Some(&provider),
             None,
             DIM,
             &memory_engine::ActivityFilterConfig::default(),
