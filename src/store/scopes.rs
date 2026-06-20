@@ -58,6 +58,15 @@ impl<'a> ScopeStore<'a> {
     }
 
     /// Insert a scope under a parent. Returns the created node.
+    ///
+    /// **Does not validate the label.** Unlike [`Self::ensure_path`], this
+    /// low-level method inserts `label` verbatim — callers are responsible for
+    /// ensuring it is non-empty, contains no `/`, has no leading/trailing
+    /// whitespace, and is at most [`crate::scope::MAX_SEGMENT_LEN`] bytes (the
+    /// rules enforced by [`crate::scope::validate_segment`]). Storing a malformed
+    /// label here can break round-tripping through
+    /// [`crate::scope::ScopeTree::resolve_path`]. Prefer [`Self::ensure_path`]
+    /// for a validated, idempotent alternative.
     pub fn insert(&self, parent_id: i64, label: &str, depth: i64) -> Result<ScopeNode> {
         self.conn.execute(
             "INSERT INTO scopes (parent_id, label, depth) VALUES (?1, ?2, ?3)",
