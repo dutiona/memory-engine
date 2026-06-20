@@ -43,7 +43,7 @@ cargo deny check                      # supply-chain gate (advisories/licenses/b
 
 The workspace contains 4 crates: `memory-engine` (core), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. The CLI, MCP, and embed crates consume the core's public API — changes to error variants, type definitions, or trait signatures can break them silently if only the root crate is checked.
 
-**Supply-chain gate** — `deny.toml` at the repo root configures [`cargo-deny`](https://embarkstudios.github.io/cargo-deny/) and runs as the `cargo-deny` CI job. It fails on RustSec security advisories (against the full all-features graph) and on disallowed licenses or non-crates.io sources; duplicate transitive versions are surfaced as non-blocking warnings. Install locally with `cargo install cargo-deny --locked`. Note: the MSRV is **Rust 1.88** (raised from 1.85 to take `time` 0.3.47, which patches RUSTSEC-2026-0009).
+**Supply-chain gate** — `deny.toml` at the repo root configures [`cargo-deny`](https://embarkstudios.github.io/cargo-deny/) and runs as the `cargo-deny` CI job. It fails on RustSec security advisories (against the full all-features graph) and on disallowed licenses or non-crates.io sources; duplicate transitive versions are surfaced as non-blocking warnings. Install locally with `cargo install cargo-deny --locked`. Note: the MSRV is **Rust 1.88**, required by the workspace's own use of **let-chains** (a 1.88 language feature). It was originally raised from 1.85 to take `time` 0.3.47 (RUSTSEC-2026-0009); that dependency has since been dropped (rusqlite narrowed to `bundled`), but the let-chain usage keeps the floor at 1.88.
 
 ## Architecture
 
