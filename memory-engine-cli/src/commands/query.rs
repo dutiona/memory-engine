@@ -7,6 +7,7 @@ use memory_engine::traits::EmbeddingProvider;
 use tabled::{Table, Tabled};
 
 use crate::commands::embedding_args::EmbeddingArgs;
+use crate::commands::types::CliFactType;
 use crate::db::open_engine;
 use crate::output::{self, OutputFormat, parse_datetime, truncate_str};
 
@@ -23,9 +24,9 @@ pub struct QueryArgs {
     #[arg(long)]
     scope: Option<String>,
 
-    /// Filter by fact type (episodic, semantic, procedural)
-    #[arg(long)]
-    fact_type: Option<String>,
+    /// Filter by fact type (episodic, semantic, procedural; case-insensitive)
+    #[arg(long, value_enum, ignore_case = true)]
+    fact_type: Option<CliFactType>,
 
     /// Minimum importance score
     #[arg(long)]
@@ -88,16 +89,8 @@ pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<
         query = query.min_importance_score(score);
     }
 
-    if let Some(ft) = &args.fact_type {
-        let fact_type = match ft.to_lowercase().as_str() {
-            "episodic" => memory_engine::FactType::Episodic,
-            "semantic" => memory_engine::FactType::Semantic,
-            "procedural" => memory_engine::FactType::Procedural,
-            other => anyhow::bail!(
-                "unknown fact type: {other} (expected: episodic, semantic, procedural)"
-            ),
-        };
-        query = query.fact_type(fact_type);
+    if let Some(ft) = args.fact_type {
+        query = query.fact_type(ft.into());
     }
 
     if args.pinned_only {

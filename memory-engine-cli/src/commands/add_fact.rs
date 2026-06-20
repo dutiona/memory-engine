@@ -1,30 +1,12 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use clap::ValueEnum;
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
+use crate::commands::types::CliFactType;
 use crate::db::open_engine_writable_with_dim;
 use crate::embedding::PassthroughEmbedder;
 use crate::output::{self, OutputFormat, parse_datetime};
-
-/// Fact type for CLI argument parsing.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum FactTypeArg {
-    Episodic,
-    Semantic,
-    Procedural,
-}
-
-impl From<FactTypeArg> for FactType {
-    fn from(arg: FactTypeArg) -> Self {
-        match arg {
-            FactTypeArg::Episodic => Self::Episodic,
-            FactTypeArg::Semantic => Self::Semantic,
-            FactTypeArg::Procedural => Self::Procedural,
-        }
-    }
-}
 
 #[derive(clap::Args)]
 pub struct AddFactArgs {
@@ -34,7 +16,7 @@ pub struct AddFactArgs {
 
     /// Fact type
     #[arg(long, value_enum)]
-    fact_type: FactTypeArg,
+    fact_type: CliFactType,
 
     /// Pre-computed embedding as a JSON array of floats (e.g., "[0.1, 0.2, 0.3]")
     #[arg(long)]

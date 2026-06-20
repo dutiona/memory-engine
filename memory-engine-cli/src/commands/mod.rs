@@ -14,3 +14,4 @@ pub mod query;
 pub mod record_outcome;
 pub mod schema;
 pub mod stats;
+pub mod types;
