@@ -1,7 +1,7 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, ToSql, params_from_iter};
 
 use crate::error::Result;
-use crate::search::serialize_scope_ids;
+use crate::search::{FilterSql, serialize_scope_ids};
 use crate::store::facts::fact_type_to_str;
 use crate::types::FactType;
 
@@ -22,6 +22,10 @@ pub struct FtsResult {
 /// - `fact_type` restricts results to a single fact type when `Some`.
 /// - `scope_ids` restricts results to the given scope ids when `Some`.
 ///
+/// This is the verbatim active-only wrapper over [`fts_search_filtered`] used by
+/// the engine's hybrid path; richer `FactFilter` dimensions are translated by the
+/// backend (#684).
+///
 /// FTS5 syntax errors (e.g., unbalanced quotes) return an empty vec
 /// rather than propagating an error.
 ///
@@ -35,34 +39,60 @@ pub fn fts_search(
     fact_type: Option<&FactType>,
     scope_ids: Option<&[i64]>,
 ) -> Result<Vec<FtsResult>> {
-    let mut stmt = conn.prepare(
+    let filter = FilterSql::active("f.", fact_type, scope_ids)?;
+    fts_search_filtered(conn, query, limit, &filter)
+}
+
+/// Search the FTS5 index, applying a pre-rendered [`FilterSql`] fragment.
+///
+/// The single source of the BM25 query: the verbatim [`fts_search`] supplies an
+/// active-only fragment, while the backend supplies the full `temporal`/`ids`/
+/// `pinned`/`metadata` translation (#684). The fragment's `?` placeholders bind
+/// between the `MATCH` query and the trailing `LIMIT`, so the parameter order is
+/// `[query, ..filter, limit]`.
+///
+/// FTS5 syntax errors (e.g., unbalanced quotes) return an empty vec rather than
+/// propagating an error.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` for non-FTS5 database errors.
+pub fn fts_search_filtered(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    filter: &FilterSql,
+) -> Result<Vec<FtsResult>> {
+    let sql = format!(
         "SELECT f.id, bm25(facts_fts) AS score \
          FROM facts_fts \
          JOIN facts AS f ON f.id = facts_fts.rowid \
-         WHERE facts_fts MATCH ?1 \
-           AND f.t_expired IS NULL \
-           AND (?2 IS NULL OR f.fact_type = ?2) \
-           AND (?3 IS NULL OR f.scope_id IN (SELECT value FROM json_each(?3))) \
-         ORDER BY score LIMIT ?4",
-    )?;
+         WHERE facts_fts MATCH ? \
+           AND {} \
+         ORDER BY score LIMIT ?",
+        filter.where_clause
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
-    let fact_type_str: Option<&str> = fact_type.map(fact_type_to_str);
-    let scope_ids_json = serialize_scope_ids(scope_ids)?;
+    // Param order mirrors the `?` order in the SQL above: MATCH query first, then
+    // the filter fragment's binds, then LIMIT.
+    let query_param: Box<dyn ToSql> = Box::new(query.to_string());
+    let limit_param: Box<dyn ToSql> = Box::new(limit_i64);
+    let bound = std::iter::once(query_param.as_ref())
+        .chain(filter.bind_refs())
+        .chain(std::iter::once(limit_param.as_ref()));
 
     // FTS5 syntax errors surface at query_map execution time, not at prepare time.
     // They are indistinguishable from other rusqlite::Error variants at the type level,
     // so we catch all errors here. This is intentional: the only realistic failure mode
     // for a parameterized MATCH query is malformed FTS5 syntax from the caller.
-    let rows = match stmt.query_map(
-        rusqlite::params![query, fact_type_str, scope_ids_json, limit_i64],
-        |row| {
-            Ok(FtsResult {
-                fact_id: row.get(0)?,
-                score: row.get(1)?,
-            })
-        },
-    ) {
+    let rows = match stmt.query_map(params_from_iter(bound), |row| {
+        Ok(FtsResult {
+            fact_id: row.get(0)?,
+            score: row.get(1)?,
+        })
+    }) {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!("FTS5 query failed (likely syntax error): {e}");

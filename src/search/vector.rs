@@ -1,9 +1,8 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params_from_iter};
 
 use crate::error::Result;
-use crate::search::serialize_scope_ids;
+use crate::search::FilterSql;
 use crate::store::deserialize_embedding;
-use crate::store::facts::fact_type_to_str;
 use crate::types::FactType;
 
 /// A single vector search result with fact id and cosine similarity score.
@@ -73,6 +72,29 @@ pub fn vector_search(
     fact_type: Option<&FactType>,
     scope_ids: Option<&[i64]>,
 ) -> Result<Vec<VectorResult>> {
+    let filter = FilterSql::active("", fact_type, scope_ids)?;
+    vector_search_filtered(conn, query_embedding, embed_dim, limit, &filter)
+}
+
+/// Brute-force vector similarity search applying a pre-rendered [`FilterSql`].
+///
+/// The single source of the brute-force scan: the verbatim [`vector_search`]
+/// supplies an active-only fragment, while the backend supplies the full
+/// `temporal`/`ids`/`pinned`/`metadata` translation (#684). The fragment's bare
+/// (un-aliased) column references match this query's single-table `FROM facts`.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on query failure, or
+/// `MemoryError::EmbeddingDimension` if a stored (or the query) embedding has the
+/// wrong size.
+pub fn vector_search_filtered(
+    conn: &Connection,
+    query_embedding: &[f32],
+    embed_dim: usize,
+    limit: usize,
+    filter: &FilterSql,
+) -> Result<Vec<VectorResult>> {
     if query_embedding.len() != embed_dim {
         return Err(crate::error::MemoryError::EmbeddingDimension {
             expected: embed_dim,
@@ -80,17 +102,13 @@ pub fn vector_search(
         });
     }
 
-    let ft_str: Option<&str> = fact_type.map(fact_type_to_str);
-    let scope_json = serialize_scope_ids(scope_ids)?;
+    let sql = format!(
+        "SELECT id, embedding FROM facts WHERE {}",
+        filter.where_clause
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, embedding FROM facts
-         WHERE t_expired IS NULL
-           AND (?1 IS NULL OR fact_type = ?1)
-           AND (?2 IS NULL OR scope_id IN (SELECT value FROM json_each(?2)))",
-    )?;
-
-    let rows = stmt.query_map(params![ft_str, scope_json], |row| {
+    let rows = stmt.query_map(params_from_iter(filter.bind_refs()), |row| {
         let id: i64 = row.get(0)?;
         let blob: Vec<u8> = row.get(1)?;
         Ok((id, blob))
