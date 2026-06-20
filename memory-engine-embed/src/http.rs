@@ -400,6 +400,30 @@ impl HttpEmbeddingProvider {
 }
 
 impl EmbeddingProvider for HttpEmbeddingProvider {
+    /// Embed a single text via one HTTP POST to the configured endpoint.
+    ///
+    /// Auto-detects the response format:
+    /// - `OpenAI`: `{ "data": [{ "embedding": [...] }] }` (first item used)
+    /// - Ollama: `{ "embeddings": [[...]] }` (first row used)
+    /// - Direct: `{ "embedding": [...] }`
+    ///
+    /// When [`with_mrl_dim`](Self::with_mrl_dim) is configured, the returned
+    /// vector is the L2-renormalized `mrl_dim`-length prefix of the validated
+    /// native response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] if:
+    /// - the HTTP request cannot be sent;
+    /// - the server returns a non-2xx status (status and capped body included);
+    /// - the response body exceeds the 32 MiB size cap;
+    /// - the body is not valid JSON, or matches no recognised format;
+    /// - the returned vector contains `NaN` or infinite values;
+    /// - MRL truncation is configured and the truncated prefix has a zero or
+    ///   non-finite L2 norm.
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`] if the (pre-truncation) vector
+    /// length does not match the native `expected_dim` supplied at construction.
     fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
         let body = self.send_request(&serde_json::json!({
             "model": &self.model,
