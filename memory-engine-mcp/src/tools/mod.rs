@@ -1112,34 +1112,38 @@ fn handle_flush_insights(
 /// size floor) are unit-testable directly: the handler short-circuits on a missing
 /// provider *before* it would run, so an integration test with no providers can
 /// never reach this validation (#344 review).
-fn parse_consolidate_config(
-    args: &Map<String, Value>,
-) -> Result<ConsolidationConfig, ValidationError> {
-    // f64→f32 narrowing is intentional: thresholds are similarity scores in [0,1],
-    // well within f32's exact range.
+fn parse_consolidate_config(args: &Map<String, Value>) -> Result<ConsolidationConfig, ErrorData> {
+    // `require_f64_if_present` rejects a present-but-wrong-type value (e.g.
+    // `"0.95"`) instead of silently falling back to the default — `get_f64` would
+    // return None on a type mismatch and hide the bad input. f64→f32 narrowing is
+    // intentional: thresholds are similarity scores in [0,1], within f32's range.
     #[allow(clippy::cast_possible_truncation)]
-    let dedup_threshold = get_f64(args, "dedup_threshold").unwrap_or(0.92) as f32;
+    let dedup_threshold = require_f64_if_present(args, "dedup_threshold")?.unwrap_or(0.92) as f32;
     if !(0.0..=1.0).contains(&dedup_threshold) {
-        return Err(ValidationError::Other(format!(
-            "dedup_threshold must be in [0.0, 1.0], got {dedup_threshold}"
-        )));
+        return Err(ErrorData::invalid_params(
+            format!("dedup_threshold must be in [0.0, 1.0], got {dedup_threshold}"),
+            None,
+        ));
     }
 
     // Clustering threshold is configurable symmetrically with dedup (#344); looser
-    // than dedup by default. Same narrowing rationale as above.
+    // than dedup by default.
     #[allow(clippy::cast_possible_truncation)]
-    let cluster_threshold = get_f64(args, "cluster_threshold").unwrap_or(0.85) as f32;
+    let cluster_threshold =
+        require_f64_if_present(args, "cluster_threshold")?.unwrap_or(0.85) as f32;
     if !(0.0..=1.0).contains(&cluster_threshold) {
-        return Err(ValidationError::Other(format!(
-            "cluster_threshold must be in [0.0, 1.0], got {cluster_threshold}"
-        )));
+        return Err(ErrorData::invalid_params(
+            format!("cluster_threshold must be in [0.0, 1.0], got {cluster_threshold}"),
+            None,
+        ));
     }
 
     let min_cluster_size = get_usize(args, "min_cluster_size").unwrap_or(3);
     if min_cluster_size < 2 {
-        return Err(ValidationError::Other(format!(
-            "min_cluster_size must be >= 2, got {min_cluster_size}"
-        )));
+        return Err(ErrorData::invalid_params(
+            format!("min_cluster_size must be >= 2, got {min_cluster_size}"),
+            None,
+        ));
     }
 
     Ok(ConsolidationConfig::builder()
@@ -1758,9 +1762,10 @@ mod tests {
         let err =
             parse_consolidate_config(&cfg_args(&[("dedup_threshold", json!(2.0))])).unwrap_err();
         assert!(
-            err.to_string()
+            err.message
                 .contains("dedup_threshold must be in [0.0, 1.0]"),
-            "{err}"
+            "{}",
+            err.message
         );
     }
 
@@ -1770,9 +1775,10 @@ mod tests {
         let err =
             parse_consolidate_config(&cfg_args(&[("cluster_threshold", json!(2.0))])).unwrap_err();
         assert!(
-            err.to_string()
+            err.message
                 .contains("cluster_threshold must be in [0.0, 1.0]"),
-            "{err}"
+            "{}",
+            err.message
         );
     }
 
@@ -1781,8 +1787,22 @@ mod tests {
         let err =
             parse_consolidate_config(&cfg_args(&[("min_cluster_size", json!(1))])).unwrap_err();
         assert!(
-            err.to_string().contains("min_cluster_size must be >= 2"),
-            "{err}"
+            err.message.contains("min_cluster_size must be >= 2"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_consolidate_config_rejects_wrong_type_threshold() {
+        // A present-but-wrong-type value must be REJECTED, not silently defaulted
+        // (gemini + codex review): `"0.95"` (string) is not a number.
+        let err = parse_consolidate_config(&cfg_args(&[("cluster_threshold", json!("0.95"))]))
+            .unwrap_err();
+        assert!(
+            err.message.contains("cluster_threshold must be a number"),
+            "{}",
+            err.message
         );
     }
 
