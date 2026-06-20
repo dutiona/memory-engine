@@ -322,3 +322,36 @@ git --no-pager diff --stat main -- . ':(exclude)docs/plans'
 ```
 
 ```
+
+---
+
+## Post-Implementation Audit
+
+Per-DoD-item status (implemented across commits `c5e7e38`..`959455c`, rebased onto main `c5d6499`):
+
+| # | DoD item | Status |
+|---|---|---|
+| 1 | `async-trait` dep; Cargo.lock updated | ✅ Implemented (Cargo.lock gitignored — lib crate — updated locally) |
+| 2 | `src/storage/{mod,filter,capabilities,graph,event_log,search_index,consolidation,session,schema,backend}.rs` + `cold_storage.rs` (cfg archive); `StorageError` in `error.rs` | ✅ Implemented |
+| 3 | Every surveyed method → exactly one trait method (coverage checklist) | ✅ Implemented — count-verified 49/7/13/10 exact; checklist in `backend.rs` |
+| 4 | `MemoryError::Storage(#[from])` + MCP typed arm + test + prefix test | ✅ Implemented |
+| 5 | All leaf `_assert_obj_safe` + ColdStorage (cfg) + umbrella + `Arc<dyn>` + blanket impl | ✅ Implemented |
+| 6 | Concrete-type unit tests pass | ✅ Implemented (StorageError, FactFilter builder, TemporalFilter, MetadataPredicate, BackendCapabilities) |
+| 7 | EventFilter/FactScoringRow/SessionFact relocated + shims; baseline green | ✅ Implemented |
+| 8 | Tight crate-root re-exports; `reexports_are_accessible` extended | ✅ Implemented |
+| 9 | `crate-layout.md` lists `src/storage/` | ✅ Implemented |
+| 10 | Full workspace gate green (default + all-features + fmt + doc); in-lane diff | ✅ Implemented (1218 default / 1246 all-features, 0 failures; in-lane diff confirmed post-rebase) |
+| 11 | PR reviewed (`/super-review`), re-gated post-rebase, squash-merged | ⏳ Pending (super-review + merge ahead) |
+| 12 | Zero backend impl / engine wiring / conformance; ADR → #640 | ✅ Implemented (in-lane diff proves no impls) |
+
+### Modifications / deviations (1 of 12 ≈ 8%, well under the 30% arbitration threshold)
+
+- **[Modified — intent preserved] Callability test scope.** The plan sketched the awaited-call proof through `Arc<dyn StorageBackend>`. Implemented through `&dyn SearchIndex` (a bounded trait, 3 methods) instead. **Rationale:** constructing a full `Arc<dyn StorageBackend>` value requires a ~90-method impl — that is #630's `SqliteBackend`, exercised by the #632 conformance suite; pulling it forward is the scope creep this A1 rejects. The *intent* (prove async-method-through-`dyn` is callable under `#[async_trait]`'s Send bound — Codex's BLOCKER) is fully met; the umbrella's object-safety is proven by the free-function `&dyn StorageBackend` assert. Noted in `backend.rs`.
+- **[Corrected] `insert_scope`/`find_scope_by_label` `parent_id`.** Used the real `parent_id: i64` (verified against `scopes.rs`), not the plan sketch's `Option<i64>` — faithful transcription, not a divergence.
+
+### Mid-flight event
+- **Rebased onto main `c5d6499`** (#644–#647 merged during the session). Re-audited the `embedding_meta` transcription: the 4 public signatures (`load`/`store`/`record_if_absent`/`require_present`) were unchanged by #645 (it deferred *when* stamping happens, not the signatures), so `SchemaManager`'s fingerprint methods stayed faithful. Re-gated clean post-rebase.
+
+### Collateral (filed/noted separately, not folded in)
+- 31 **pre-existing** `cargo doc` intra-doc-link warnings (e.g. `engine/outcome.rs` `MemoryError::NotFound`, bootstrap `SessionExtractor`/`KeywordExtractor`) — unrelated to #629; surfaced for a separate `docs` cleanup, not fixed here.
+- `ColdStorage::insert_archive_manifest` 10-arg signature mirrors the verbatim manifest row — a `NewArchiveManifest` struct refactor is a candidate `type:refactor` follow-up under #628.
