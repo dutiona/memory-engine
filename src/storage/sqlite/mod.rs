@@ -38,10 +38,15 @@ use crate::error::{MemoryError, Result, StorageError};
 use crate::pool::ConnectionPool;
 use crate::store::upcaster::UpcasterRegistry;
 
+#[cfg(all(feature = "async", feature = "archive"))]
+mod cold_storage;
+mod consolidation;
 mod convert;
 mod event_log;
 mod graph;
+mod schema;
 mod search_index;
+mod session;
 
 /// The default, in-process `SQLite` implementation of [`StorageBackend`](crate::storage::StorageBackend).
 ///
