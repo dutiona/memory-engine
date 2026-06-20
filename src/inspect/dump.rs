@@ -39,7 +39,13 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    // Scalar header fields
+    // Scalar header fields.
+    //
+    // INVARIANT: `embed_dim` MUST stay among these leading scalar fields, before
+    // the streamed collections below. `memory-engine-cli`'s `import` peeks it from
+    // the head of the snapshot under a small byte cap (`peek_embed_dim_from_reader`)
+    // to auto-detect the dimension; moving `embed_dim` after `facts`/`edges`/… would
+    // push it past that cap and silently break auto-detection on large snapshots.
     write!(
         writer,
         r#"{{"schema_version":{schema_version},"storage_epoch":{storage_epoch},"embed_dim":{embed_dim}"#

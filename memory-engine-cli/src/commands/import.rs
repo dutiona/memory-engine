@@ -42,13 +42,14 @@ pub fn run(db: &Path, args: &ImportArgs) -> anyhow::Result<()> {
 /// Maximum number of bytes scanned while looking for the snapshot's `embed_dim`.
 ///
 /// In a well-formed snapshot `embed_dim` is the third field — it follows the
-/// small `schema_version` and `storage_epoch` integers (see
-/// `inspect::dump::stream_snapshot`), so it always lies within the first few
-/// dozen bytes. This deliberately generous cap bounds the scan against an
+/// small `schema_version` (`u32`) and `storage_epoch` (`u16`) integers (see
+/// `inspect::dump::stream_snapshot`), so its value always ends within ~80 bytes
+/// of the start. 64 KiB is therefore ~800× the real worst case (ample headroom
+/// for any future header growth) while still hard-bounding the scan against an
 /// adversarial snapshot that omits `embed_dim` or buries it behind a huge
-/// leading field, turning a would-be unbounded allocation (CWE-400 / CWE-770)
+/// leading field — turning a would-be unbounded allocation (CWE-400 / CWE-770)
 /// into a bounded read.
-const MAX_HEADER_BYTES: u64 = 1 << 20; // 1 MiB
+const MAX_HEADER_BYTES: u64 = 64 << 10; // 64 KiB
 
 /// Peek at a JSON snapshot file's header to extract `embed_dim` without
 /// loading the whole snapshot.
@@ -77,9 +78,10 @@ fn peek_embed_dim_from_reader(reader: impl std::io::Read) -> anyhow::Result<usiz
 
     // The sink captures `embed_dim` into `found` and stops reading the moment it
     // is seen, so the bulk of the snapshot is never parsed. Because the object is
-    // abandoned mid-stream, `deserialize_map` then reports a trailing-comma /
-    // trailing-character error from its closing-brace check — that error is
-    // *expected* and is ignored once we already hold the value. The underlying
+    // abandoned mid-stream, `deserialize_map`'s closing-brace check then fails on
+    // whatever follows the value — a trailing comma, the next key, EOF, or pure
+    // garbage; ANY post-value error from the abandoned map traversal. That error
+    // is *expected* and is ignored once we already hold the value. The underlying
     // parse error is only surfaced when `embed_dim` was never reached: a missing
     // field, malformed leading bytes, or a field buried past the byte cap.
     let mut found: Option<usize> = None;
@@ -194,5 +196,65 @@ mod tests {
         let snapshot = format!("{VALID_HEADER_PREFIX}\"facts\":[{huge_tail}0]}}");
         let dim = peek_embed_dim_from_reader(snapshot.as_bytes()).unwrap();
         assert_eq!(dim, 384);
+    }
+
+    // --- adversarial invariants (locked in from the security/serde review) ---
+
+    #[test]
+    fn deep_nesting_before_embed_dim_does_not_overflow() {
+        // A deeply-nested value *before* `embed_dim` must not blow the stack: the
+        // skip path (`IgnoredAny`) is iterative in serde_json, and the byte cap
+        // bounds the depth anyway. The header is rejected (it never reaches
+        // `embed_dim` within the cap), but the point is it returns rather than
+        // crashing with SIGSEGV.
+        let snapshot = format!("{{\"a\":{}", "[".repeat(200_000));
+        let result = peek_embed_dim_from_reader(snapshot.as_bytes());
+        assert!(result.is_err(), "got {result:?}");
+    }
+
+    #[test]
+    fn truncated_multibyte_char_does_not_panic() {
+        // The byte cap truncates at an arbitrary byte boundary, possibly mid
+        // multi-byte UTF-8 sequence. Parsing must error gracefully, never panic.
+        // A long key padded with a multi-byte char ('é' = 2 bytes) crosses the cap.
+        let cap = usize::try_from(MAX_HEADER_BYTES).unwrap();
+        let padded_key = "é".repeat(cap); // 2 bytes/char ⇒ > cap, cut lands mid-char
+        let snapshot = format!("{{\"{padded_key}\":1,\"embed_dim\":4}}");
+        let result = peek_embed_dim_from_reader(snapshot.as_bytes());
+        assert!(result.is_err(), "got {result:?}");
+    }
+
+    #[test]
+    fn non_object_top_level_errors() {
+        // Arrays, scalars, and null are not snapshot objects — each must error
+        // cleanly (no panic, `found` stays None).
+        for input in ["[1,2,3]", "5", "null", "\"x\""] {
+            let result = peek_embed_dim_from_reader(input.as_bytes());
+            assert!(result.is_err(), "{input:?} should error, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_embed_dim_value_is_surfaced_not_masked() {
+        // If `embed_dim` is present but its value is not a valid usize, the parse
+        // error must propagate (the `?` fires before `found` is written), not be
+        // swallowed by the ignore-trailing-error path.
+        for bad in [r#""abc""#, "-1", "1.5"] {
+            let snapshot = format!(r#"{{"embed_dim":{bad}}}"#);
+            let result = peek_embed_dim_from_reader(snapshot.as_bytes());
+            assert!(
+                result.is_err(),
+                "embed_dim={bad} should error, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_embed_dim_wins_on_duplicate_keys() {
+        // Early-return means the first `embed_dim` is taken and the rest of the
+        // object is never read — so a duplicate key cannot change the result.
+        let snapshot = r#"{"embed_dim":4,"embed_dim":8}"#;
+        let dim = peek_embed_dim_from_reader(snapshot.as_bytes()).unwrap();
+        assert_eq!(dim, 4);
     }
 }
