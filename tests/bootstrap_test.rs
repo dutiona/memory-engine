@@ -369,6 +369,69 @@ fn bootstrap_with_scope() {
 }
 
 #[test]
+fn bootstrap_pins_facts_when_classifier_returns_true() {
+    // #301: the PersistenceClassifier branch in store_extracted_fact builds a
+    // temporary Fact, calls should_pin, and sets new_fact.is_pinned. Integration
+    // coverage existed only for should_pin == false (the dryrun recorder), so the
+    // is_pinned == true PROPAGATION into a stored bootstrap row was untested.
+    // Drive both poles and assert the stored flag follows the classifier.
+    use memory_engine::Fact;
+    use memory_engine::traits::PersistenceClassifier;
+
+    struct AlwaysPin;
+    impl PersistenceClassifier for AlwaysPin {
+        fn should_pin(&self, _fact: &Fact) -> bool {
+            true
+        }
+    }
+    struct NeverPin;
+    impl PersistenceClassifier for NeverPin {
+        fn should_pin(&self, _fact: &Fact) -> bool {
+            false
+        }
+    }
+
+    let extractor = KeywordExtractor;
+
+    // AlwaysPin: every bootstrapped fact must land pinned.
+    let engine_pin = engine();
+    let report_pin = engine_pin
+        .bootstrap_session(
+            Cursor::new(success_fixture()),
+            &TestEmbedder,
+            &extractor,
+            &BootstrapConfig::default(),
+            Some(&AlwaysPin),
+        )
+        .unwrap();
+    assert!(report_pin.facts_created > 0, "fixture should create facts");
+    let pinned = engine_pin.list_active_facts(None).unwrap();
+    assert_eq!(pinned.len(), report_pin.facts_created);
+    assert!(
+        pinned.iter().all(|f| f.is_pinned),
+        "AlwaysPin classifier must propagate is_pinned == true to every stored fact"
+    );
+
+    // NeverPin baseline: the flag is toggled by the classifier, not always true.
+    let engine_unpin = engine();
+    let report_unpin = engine_unpin
+        .bootstrap_session(
+            Cursor::new(success_fixture()),
+            &TestEmbedder,
+            &extractor,
+            &BootstrapConfig::default(),
+            Some(&NeverPin),
+        )
+        .unwrap();
+    assert!(report_unpin.facts_created > 0);
+    let unpinned = engine_unpin.list_active_facts(None).unwrap();
+    assert!(
+        unpinned.iter().all(|f| !f.is_pinned),
+        "NeverPin classifier must leave every stored fact unpinned"
+    );
+}
+
+#[test]
 fn bootstrap_max_entries_caps_parsed_entries() {
     // #293 residual: a session of many small, individually-valid lines must be
     // truncated at the per-stream entry-count cap surfaced on BootstrapConfig,
