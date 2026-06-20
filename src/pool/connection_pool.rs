@@ -20,16 +20,35 @@ use crate::store::schema::{
 /// to surface a genuine leak.
 const DEFAULT_READ_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Upper bound on a file-backed pool's `read_pool_size`.
+///
+/// Each pooled read connection is a real OS file descriptor and an `SQLite`
+/// connection object, so the size flows from caller-supplied config straight
+/// into `Vec::with_capacity` + a connection-open loop. Without a ceiling an
+/// excessive value (e.g. `usize::MAX`, or millions) over-allocates and exhausts
+/// the process FD table before any useful work (#415, CWE-770/789). 256 is far
+/// above any realistic read-concurrency need for an in-process embedded library
+/// (default is 4) yet bounds the worst case. The value is consumer-controlled,
+/// not network-attacker-controlled, which bounds the severity — but enforcing
+/// the invariant at the pool boundary makes it hold regardless of caller.
+const MAX_READ_POOL: usize = 256;
+
 /// Validate a caller-supplied `read_pool_size` for a file-backed pool.
 ///
-/// Enforces the lower bound (`>= 1`): a file-backed pool needs at least one
-/// read connection, and `0` is *not* an implicit in-memory request — see
-/// [`BackendMode`] (#340/#356). Returns the validated value so callers can use
-/// it directly.
+/// Enforces both bounds:
+/// - lower (`>= 1`): a file-backed pool needs at least one read connection, and
+///   `0` is *not* an implicit in-memory request — see [`BackendMode`]
+///   (#340/#356);
+/// - upper (`<= MAX_READ_POOL`): reject (rather than silently clamp) an
+///   excessive value before it can exhaust file descriptors / over-allocate, so
+///   the misconfiguration is surfaced not hidden (#415).
+///
+/// Returns the validated value so callers can use it directly.
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Pool`] if `read_pool_size == 0`.
+/// Returns [`MemoryError::Pool`] if `read_pool_size == 0` or
+/// `read_pool_size > MAX_READ_POOL`.
 fn validate_read_pool_size(read_pool_size: usize) -> Result<usize> {
     if read_pool_size == 0 {
         return Err(MemoryError::Pool(
@@ -37,6 +56,12 @@ fn validate_read_pool_size(read_pool_size: usize) -> Result<usize> {
              ConnectionPool::open_memory for an in-memory database"
                 .to_string(),
         ));
+    }
+    if read_pool_size > MAX_READ_POOL {
+        return Err(MemoryError::Pool(format!(
+            "read_pool_size {read_pool_size} exceeds the maximum of {MAX_READ_POOL}; \
+             each read connection is a real file descriptor"
+        )));
     }
     Ok(read_pool_size)
 }
@@ -640,6 +665,44 @@ mod tests {
         // `ConnectionPool` is not `Debug`, so match instead of `unwrap_err()`.
         assert!(matches!(
             ConnectionPool::open(&db_path, 4, 0, None),
+            Err(MemoryError::Pool(_))
+        ));
+    }
+
+    /// A `read_pool_size` above [`MAX_READ_POOL`] must be rejected, not
+    /// attempted: each connection is a real OS file descriptor, so an
+    /// excessive value would exhaust the FD table / over-allocate before any
+    /// useful work (#415, CWE-770/789). Rejecting (vs silently clamping)
+    /// surfaces the misconfiguration instead of hiding it.
+    #[test]
+    fn pool_open_rejects_oversized_read_pool_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        assert!(matches!(
+            ConnectionPool::open(&db_path, 4, MAX_READ_POOL + 1, None),
+            Err(MemoryError::Pool(_))
+        ));
+    }
+
+    /// `read_pool_size == MAX_READ_POOL` (the boundary) is accepted; only
+    /// strictly-greater values are rejected (#415).
+    #[test]
+    fn pool_open_accepts_read_pool_size_at_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = ConnectionPool::open(&db_path, 4, MAX_READ_POOL, None).unwrap();
+        assert_eq!(pool.read_pool_size(), MAX_READ_POOL);
+    }
+
+    /// `open_read_only()` enforces the same upper bound as `open()` (#415).
+    #[test]
+    fn pool_open_read_only_rejects_oversized_read_pool_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let rw = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
+        drop(rw);
+        assert!(matches!(
+            ConnectionPool::open_read_only(&db_path, 4, MAX_READ_POOL + 1),
             Err(MemoryError::Pool(_))
         ));
     }
