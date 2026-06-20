@@ -354,4 +354,258 @@ mod tests {
             "the same pair does NOT cluster under a 0.95 threshold"
         );
     }
+
+    // --- #440: direct unit tests for the private `greedy_cluster` ---
+
+    /// Build an in-memory `Fact` with a given id/scope/embedding. `greedy_cluster`
+    /// only reads `embedding`; the cluster pass also reads `id`/`scope_id`.
+    fn mk_fact(id: i64, scope_id: i64, embedding: Vec<f32>) -> Fact {
+        Fact {
+            id,
+            content: format!("f{id}"),
+            content_hash: String::new(),
+            embedding,
+            fact_type: FactType::Semantic,
+            t_created: Utc::now(),
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            scope_id,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: Utc::now(),
+            metadata: serde_json::json!({}),
+            is_pinned: false,
+            importance_score: Fact::UNSCORED_IMPORTANCE,
+            surfaced_at: None,
+        }
+    }
+
+    #[test]
+    fn greedy_cluster_empty_input() {
+        assert!(greedy_cluster(&[], 0.85).is_empty());
+    }
+
+    #[test]
+    fn greedy_cluster_single_element() {
+        let a = mk_fact(1, 1, vec![1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(greedy_cluster(&[&a], 0.85), vec![vec![0]]);
+    }
+
+    #[test]
+    fn greedy_cluster_threshold_zero_groups_all_positively_correlated() {
+        // All vectors share the +x direction → every pairwise cosine > 0, so a
+        // threshold of 0.0 collapses them into a single cluster.
+        let a = mk_fact(1, 1, vec![1.0, 0.0, 0.0, 0.0]);
+        let b = mk_fact(2, 1, vec![0.9, 0.1, 0.0, 0.0]);
+        let c = mk_fact(3, 1, vec![0.8, 0.2, 0.0, 0.0]);
+        let clusters = greedy_cluster(&[&a, &b, &c], 0.0);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].len(), 3);
+    }
+
+    #[test]
+    fn greedy_cluster_threshold_one_yields_singletons() {
+        // The predicate is strict `sim > threshold`; cosine maxes at 1.0, so even
+        // identical embeddings (cos == 1.0) are NOT > 1.0 → every fact is its own
+        // singleton.
+        let a = mk_fact(1, 1, vec![1.0, 0.0, 0.0, 0.0]);
+        let b = mk_fact(2, 1, vec![1.0, 0.0, 0.0, 0.0]); // identical to a
+        let c = mk_fact(3, 1, vec![0.0, 1.0, 0.0, 0.0]);
+        let clusters = greedy_cluster(&[&a, &b, &c], 1.0);
+        assert_eq!(clusters.len(), 3, "threshold 1.0 → all singletons");
+        assert!(clusters.iter().all(|c| c.len() == 1));
+    }
+
+    #[test]
+    fn greedy_cluster_transitive_single_linkage_chain() {
+        // A~B and B~C but A≁C: single-linkage transitively merges all three via B.
+        // Near-unit vectors at 0°, 30°, 60° in the xy-plane (cosine normalizes):
+        //   cos(A,B) = cos(B,C) = cos30 ≈ 0.866; cos(A,C) = cos60 = 0.5.
+        // At threshold 0.8: A~B, B~C pass; A~C fails — yet C joins A's cluster via B.
+        let a = mk_fact(1, 1, vec![1.0, 0.0, 0.0, 0.0]);
+        let b = mk_fact(2, 1, vec![0.866, 0.5, 0.0, 0.0]);
+        let c = mk_fact(3, 1, vec![0.5, 0.866, 0.0, 0.0]);
+        let clusters = greedy_cluster(&[&a, &b, &c], 0.8);
+        assert_eq!(
+            clusters.len(),
+            1,
+            "single-linkage chains A-B-C into one cluster"
+        );
+        assert_eq!(clusters[0].len(), 3);
+    }
+
+    // --- #441: majority-vote scope_id selection (with deterministic tie-break) ---
+
+    fn insert_fact_scoped(
+        conn: &Connection,
+        dim: usize,
+        content: &str,
+        embedding: Vec<f32>,
+        scope_id: i64,
+    ) -> i64 {
+        let store = FactStore::new(conn, dim);
+        store
+            .insert(&NewFact {
+                content: content.into(),
+                content_hash: blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string(),
+                embedding,
+                fact_type: FactType::Semantic,
+                t_created: Utc::now(),
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                scope_id,
+                importance: 0.5,
+                access_count: 0,
+                last_accessed: Utc::now(),
+                metadata: serde_json::json!({}),
+                is_pinned: false,
+            })
+            .unwrap()
+    }
+
+    /// Create a scope with an explicit id under the root (1) so facts may reference
+    /// it — `scope_id` is a FK into `scopes`.
+    fn create_scope(conn: &Connection, id: i64, label: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (?1, 1, ?2, 1)",
+            rusqlite::params![id, label],
+        )
+        .unwrap();
+    }
+
+    /// Near-identical embedding (all facts cluster) with a per-fact nudge so they
+    /// stay distinct rows; cosine stays well above any test threshold.
+    fn near(i: usize) -> Vec<f32> {
+        // u16→f32 is a lossless `From` (avoids the usize→f32 precision-loss lint).
+        let e = f32::from(u16::try_from(i).unwrap()) * 0.001;
+        vec![1.0, e, 0.0, 0.0]
+    }
+
+    fn single_cluster_scope(conn: &Connection, dim: usize) -> i64 {
+        cluster(
+            conn,
+            &MockGenerator,
+            &MockEmbedder { embed_dim: dim },
+            dim,
+            2,
+            0.85,
+        )
+        .unwrap();
+        let summaries = SummaryStore::new(conn, dim)
+            .list_by_level(&ConsolidationLevel::Cluster)
+            .unwrap();
+        assert_eq!(summaries.len(), 1, "fixture must form exactly one cluster");
+        summaries[0].scope_id
+    }
+
+    #[test]
+    fn scope_id_is_the_majority_vote() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let dim = 4;
+        create_scope(&conn, 10, "ten");
+        create_scope(&conn, 20, "twenty");
+        // 3 facts in scope 10, 2 in scope 20 → majority scope 10 wins.
+        for i in 0..3 {
+            insert_fact_scoped(&conn, dim, &format!("a{i}"), near(i), 10);
+        }
+        for i in 3..5 {
+            insert_fact_scoped(&conn, dim, &format!("b{i}"), near(i), 20);
+        }
+        assert_eq!(single_cluster_scope(&conn, dim), 10);
+    }
+
+    #[test]
+    fn scope_id_tie_break_picks_lowest() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let dim = 4;
+        create_scope(&conn, 10, "ten");
+        create_scope(&conn, 5, "five");
+        // 2 facts in scope 10, 2 in scope 5 → tie → lowest scope_id (5) wins.
+        for i in 0..2 {
+            insert_fact_scoped(&conn, dim, &format!("a{i}"), near(i), 10);
+        }
+        for i in 2..4 {
+            insert_fact_scoped(&conn, dim, &format!("b{i}"), near(i), 5);
+        }
+        assert_eq!(single_cluster_scope(&conn, dim), 5);
+    }
+
+    // --- #442: property-based invariants for `greedy_cluster` ---
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// `greedy_cluster` invariants, for any embeddings and any threshold:
+        /// 1. **Partition** — every input index 0..n lands in exactly one cluster
+        ///    (no index dropped or duplicated).
+        /// 2. **Within-cluster connectivity** — in any cluster of size ≥ 2, every
+        ///    member is cosine-similar (> threshold) to at least one other member,
+        ///    which single-linkage guarantees (each non-seed joined via a neighbor,
+        ///    and the seed connects to whoever joined first). This catches a
+        ///    member landing in the *wrong* group, which the partition check alone
+        ///    cannot.
+        ///
+        /// A zero embedding yields cosine 0.0 (the implementation guards the
+        /// zero-norm denominator — it is NOT NaN); `0.0 > t` is false for all
+        /// t in [0,1], so zero vectors stay singletons — still a valid partition.
+        #[test]
+        fn greedy_cluster_invariants(
+            embs in proptest::collection::vec(
+                proptest::collection::vec(-1.0f32..=1.0, 4),
+                1..=12,
+            ),
+            threshold in 0.0f32..=1.0,
+        ) {
+            let facts: Vec<Fact> = embs
+                .iter()
+                .enumerate()
+                .map(|(i, e)| mk_fact(i64::try_from(i).unwrap(), 1, e.clone()))
+                .collect();
+            let refs: Vec<&Fact> = facts.iter().collect();
+            let clusters = greedy_cluster(&refs, threshold);
+
+            // (1) partition
+            let mut seen: Vec<usize> = clusters.iter().flatten().copied().collect();
+            seen.sort_unstable();
+            prop_assert_eq!(seen, (0..facts.len()).collect::<Vec<usize>>());
+
+            // (2) within-cluster connectivity (single-linkage)
+            for c in &clusters {
+                if c.len() < 2 {
+                    continue;
+                }
+                for &m in c {
+                    let connected = c.iter().any(|&o| {
+                        o != m
+                            && cosine_similarity(&facts[m].embedding, &facts[o].embedding) > threshold
+                    });
+                    prop_assert!(connected, "member {m} has no in-cluster neighbor > threshold");
+                }
+            }
+        }
+    }
+
+    /// Deterministic companions to the connectivity proptest: a zero vector (cosine
+    /// 0.0 via the denom guard, never NaN) stays a singleton even at threshold 0.0,
+    /// and two anti-parallel vectors (cosine −1) never group at threshold 0.0.
+    #[test]
+    fn greedy_cluster_zero_and_anticorrelated_stay_singletons() {
+        let zero = mk_fact(1, 1, vec![0.0, 0.0, 0.0, 0.0]);
+        let pos = mk_fact(2, 1, vec![1.0, 0.0, 0.0, 0.0]);
+        let neg = mk_fact(3, 1, vec![-1.0, 0.0, 0.0, 0.0]);
+        let clusters = greedy_cluster(&[&zero, &pos, &neg], 0.0);
+        // pos·neg = -1 (< 0), pos·zero = neg·zero = 0.0 — none exceed 0.0.
+        assert_eq!(
+            clusters.len(),
+            3,
+            "no pair exceeds threshold 0.0 → three singletons"
+        );
+        assert!(clusters.iter().all(|c| c.len() == 1));
+    }
 }
