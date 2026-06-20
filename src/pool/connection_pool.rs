@@ -650,6 +650,38 @@ mod tests {
         assert!(matches!(err, MemoryError::ReadOnly));
     }
 
+    /// Companion to [`pool_read_only_write_returns_error`]: `write()`
+    /// **intentionally** bypasses the `read_only` guard that `try_write()`
+    /// enforces. It is infallible — it locks the underlying connection without
+    /// erroring or panicking even on a read-only pool — and is `pub(crate)` so
+    /// only internal code (operating on pools known to be writable) can reach
+    /// it (#416/#472). User-facing writes must go through `try_write()`. This
+    /// test pins that contract so a future change to `write()` (e.g. adding a
+    /// guard, or repurposing it) is a deliberate, reviewed decision rather than
+    /// a silent behavior shift. The underlying `SQLite` connection still refuses
+    /// actual mutations (`SQLITE_OPEN_READ_ONLY`), so the bypass cannot corrupt
+    /// a read-only database — it only changes *which* layer reports the refusal.
+    #[test]
+    fn pool_read_only_write_bypasses_guard_infallibly() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let rw = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
+        drop(rw);
+
+        let pool = ConnectionPool::open_read_only(&db_path, 4, 2).unwrap();
+        assert!(pool.is_read_only());
+
+        // `write()` does NOT check `read_only`: it locks and returns a guard
+        // without error or panic. A read query through it still works (the
+        // connection is open); only a *write* statement would be refused by
+        // SQLite at execution time, which is the point of using `try_write()`
+        // for user-facing operations.
+        let w = pool.write();
+        let v = get_config(&w, "schema_version").unwrap();
+        assert!(v.is_some());
+        drop(w);
+    }
+
     #[test]
     fn pool_open_read_only_nonexistent_file_fails() {
         let dir = tempfile::tempdir().unwrap();
