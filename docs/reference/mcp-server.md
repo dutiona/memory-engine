@@ -142,7 +142,7 @@ The server requires an OpenAI-compatible embedding endpoint for `memory_add_fact
 - **OpenAI**: `https://api.openai.com/v1/embeddings`
 - Any endpoint returning `{ "data": [{ "embedding": [...] }] }` or `{ "embeddings": [[...]] }`
 
-For `memory_add_fact`, callers can bypass server-side embedding by passing a pre-computed `embedding` array.
+For `memory_add_fact` (and `memory_query`), callers can bypass server-side embedding by passing a pre-computed `embedding` array. A pre-computed embedding **must declare its identity** (#615): the required `model` + `provider`, plus optional `matryoshka_base_dim` and `element_type`. On `memory_add_fact` the declared identity is recorded on a fresh store (so a precomputed-only workflow can bootstrap) or checked against the stored identity on a populated one; on `memory_query` it is checked against the store. A declaration that disagrees with the store's identity is hard-rejected — a vector from a different model can no longer be slipped into the store's vector space (closing the same-dimension foreign-vector hole).
 
 ### Pre-Compaction Flush
 

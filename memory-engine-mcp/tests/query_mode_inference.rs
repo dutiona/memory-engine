@@ -156,6 +156,8 @@ fn explicit_vector_with_precomputed_embedding_succeeds() {
             "text": "Rust",
             "mode": "vector",
             "embedding": emb,
+            "model": "mock",
+            "provider": "test",
         })),
         &engine,
         None,
@@ -203,6 +205,8 @@ fn explicit_hybrid_with_precomputed_embedding_succeeds() {
             "text": "Rust",
             "mode": "hybrid",
             "embedding": emb,
+            "model": "mock",
+            "provider": "test",
         })),
         &engine,
         None,
@@ -248,7 +252,7 @@ fn inferred_mode_embedding_only_works() {
     // No mode + no text + embedding → engine should infer vector search
     let result = tools::dispatch(
         "memory_query",
-        args(json!({ "embedding": emb })),
+        args(json!({ "embedding": emb, "model": "mock", "provider": "test" })),
         &engine,
         None,
         None,

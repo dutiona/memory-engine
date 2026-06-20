@@ -57,25 +57,6 @@ const fn make_embedder() -> TestEmbedder {
     TestEmbedder { dim: DIM }
 }
 
-/// Stamp the store's embedding identity via a real-embedder write. A fresh store has
-/// no identity, and #614 makes a precomputed `memory_add_fact` require a present one
-/// (it cannot establish identity from a sentinel). Mirrors `query_with_precomputed_embedding`.
-fn stamp_identity(engine: &MemoryEngine) {
-    engine
-        .add_fact(
-            &AddFactRequest {
-                content: "identity-seed".into(),
-                fact_type: memory_engine::types::FactType::Semantic,
-                source_event_id: None,
-                scope: None,
-                opts: None,
-            },
-            &make_embedder(),
-            None,
-        )
-        .expect("stamp embedding identity");
-}
-
 fn args(pairs: Value) -> Map<String, Value> {
     match pairs {
         Value::Object(m) => m,
@@ -191,13 +172,16 @@ fn ingest_missing_required_field() {
 #[test]
 fn add_fact_with_precomputed_embedding() {
     let engine = make_engine();
-    stamp_identity(&engine);
     let emb = vec![0.1; DIM];
+    // #615: a precomputed embedding declares its model; on a fresh store the declared
+    // identity is recorded (no prior server-side embed needed).
     let result = tools::dispatch(
         "memory_add_fact",
         args(json!({
             "content": "Rust is a systems language",
             "embedding": emb,
+            "model": "declared-model",
+            "provider": "tei",
         })),
         &engine,
         None,
@@ -212,7 +196,6 @@ fn add_fact_with_precomputed_embedding() {
 #[test]
 fn add_fact_all_options() {
     let engine = make_engine();
-    stamp_identity(&engine);
     let emb = vec![0.2; DIM];
     let result = tools::dispatch(
         "memory_add_fact",
@@ -226,6 +209,8 @@ fn add_fact_all_options() {
             "t_valid": "2025-01-01T00:00:00Z",
             "t_invalid": "2026-01-01T00:00:00Z",
             "embedding": emb,
+            "model": "declared-model",
+            "provider": "tei",
         })),
         &engine,
         None,
@@ -235,6 +220,106 @@ fn add_fact_all_options() {
     );
     let body = unwrap_ok(result);
     assert!(body["fact_id"].as_i64().unwrap() > 0);
+}
+
+#[test]
+fn add_fact_precomputed_without_model_rejected() {
+    // #615: a precomputed embedding MUST declare its model — bare embedding is rejected.
+    let engine = make_engine();
+    let result = tools::dispatch(
+        "memory_add_fact",
+        args(json!({
+            "content": "no declared model",
+            "embedding": vec![0.1; DIM],
+        })),
+        &engine,
+        None,
+        None,
+        DIM,
+        &memory_engine::ActivityFilterConfig::default(),
+    );
+    assert!(
+        result.is_err(),
+        "precomputed embedding without `model` must be rejected"
+    );
+}
+
+#[test]
+fn add_fact_precomputed_model_mismatch_rejected() {
+    // #615: first precomputed add records the declared identity; a later add declaring a
+    // DIFFERENT model (same dim) is hard-rejected, closing the foreign-vector hole.
+    let engine = make_engine();
+    let common = |model: &str| {
+        json!({
+            "content": "fact",
+            "embedding": vec![0.1; DIM],
+            "model": model,
+            "provider": "tei",
+        })
+    };
+    let filter = memory_engine::ActivityFilterConfig::default();
+    unwrap_ok(tools::dispatch(
+        "memory_add_fact",
+        args(common("model-a")),
+        &engine,
+        None,
+        None,
+        DIM,
+        &filter,
+    ));
+    let mismatch = tools::dispatch(
+        "memory_add_fact",
+        args(common("model-b")),
+        &engine,
+        None,
+        None,
+        DIM,
+        &filter,
+    );
+    assert!(
+        mismatch.is_err(),
+        "a differing declared model must be rejected"
+    );
+}
+
+#[test]
+fn query_precomputed_model_mismatch_rejected() {
+    // #615: a precomputed query embedding declaring a model that disagrees with the store
+    // is rejected before retrieval (would otherwise query a foreign vector space).
+    let engine = make_engine();
+    let embedder = make_embedder(); // fingerprint = mock/test
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "seed".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            &embedder,
+            None,
+        )
+        .unwrap();
+    let result = tools::dispatch(
+        "memory_query",
+        args(json!({
+            "text": "x",
+            "mode": "hybrid",
+            "embedding": vec![0.1; DIM],
+            "model": "wrong-model",
+            "provider": "tei",
+        })),
+        &engine,
+        None,
+        None,
+        DIM,
+        &memory_engine::ActivityFilterConfig::default(),
+    );
+    assert!(
+        result.is_err(),
+        "query with a mismatched declared model must be rejected"
+    );
 }
 
 #[test]
@@ -392,6 +477,9 @@ fn query_with_precomputed_embedding() {
             "text": "memory",
             "mode": "hybrid",
             "embedding": query_emb,
+            // #615: declared model must match the store identity (TestEmbedder = mock/test).
+            "model": "mock",
+            "provider": "test",
         })),
         &engine,
         None,

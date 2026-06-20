@@ -322,7 +322,7 @@ fn verify_embedding_identity_enforces_match() {
 }
 
 #[test]
-fn add_fact_precomputed_requires_present_identity() {
+fn add_fact_precomputed_records_or_compares_declared_identity() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let req = AddFactRequest {
         content: "p".into(),
@@ -331,31 +331,44 @@ fn add_fact_precomputed_requires_present_identity() {
         scope: None,
         opts: None,
     };
+    let declared = EmbeddingFingerprint::new("declared-model", "tei", DIM);
 
-    // Fresh store: a pre-computed write cannot establish identity -> rejected
-    // (consistent with promote / cycle AddFact). The error is the require_present guard.
-    let err = engine
-        .add_fact_precomputed(&req, vec![0.5; DIM], None)
-        .expect_err("precomputed add on a fresh store must require an identity");
-    assert!(
-        matches!(err, MemoryError::Internal(_)),
-        "expected require_present Internal error, got {err:?}"
+    // Fresh store: the declared identity is RECORDED (a precomputed-only workflow can
+    // bootstrap, #615) — no live embedder needed.
+    let id = engine
+        .add_fact_precomputed(&req, vec![0.5; DIM], &declared, None)
+        .expect("precomputed add with a declared model records identity on a fresh store");
+    assert!(id > 0);
+    assert_eq!(
+        engine
+            .with_read(crate::store::embedding_meta::load)
+            .unwrap(),
+        Some(declared.clone()),
+        "the declared fingerprint becomes the store identity"
     );
 
-    // Stamp the identity via a real embedder, then a pre-computed add succeeds — with NO
-    // model comparison, so the passthrough-style sentinel can't trigger a false mismatch
-    // (the #614 regression). This is the documented memory_add_fact precomputed workflow.
+    // Matching declared identity -> accepted.
     engine
-        .add_fact(&req, &MockEmbedder { dim: DIM }, None)
-        .unwrap();
-    let id = engine
-        .add_fact_precomputed(&req, vec![0.6; DIM], None)
-        .expect("precomputed add into a stamped store succeeds");
-    assert!(id > 0);
+        .add_fact_precomputed(&req, vec![0.6; DIM], &declared, None)
+        .expect("matching declared identity is accepted");
 
-    // Dimension is still enforced on the pre-computed vector.
-    let dim_err = engine
-        .add_fact_precomputed(&req, vec![0.6; DIM + 3], None)
+    // Differing declared identity (same dim) -> hard mismatch, closing the foreign-vector hole.
+    let foreign = EmbeddingFingerprint::new("other-model", "ollama", DIM);
+    let mismatch = engine
+        .add_fact_precomputed(&req, vec![0.7; DIM], &foreign, None)
+        .expect_err("a differing declared model must be rejected");
+    assert!(
+        matches!(mismatch, MemoryError::EmbeddingModelMismatch { .. }),
+        "expected EmbeddingModelMismatch, got {mismatch:?}"
+    );
+
+    // Wrong dimension on a FRESH store -> the absent-branch dim guard fires
+    // (declared.dim must equal the engine dim before it can be recorded). On a stamped
+    // store a wrong dim would instead surface as a full-tuple mismatch (dim is one field).
+    let fresh = MemoryEngine::builder(DIM).build().unwrap();
+    let wrong_dim = EmbeddingFingerprint::new("declared-model", "tei", DIM + 3);
+    let dim_err = fresh
+        .add_fact_precomputed(&req, vec![0.6; DIM + 3], &wrong_dim, None)
         .expect_err("wrong-dimension precomputed vector must be rejected");
     assert!(
         matches!(dim_err, MemoryError::EmbeddingDimension { .. }),
