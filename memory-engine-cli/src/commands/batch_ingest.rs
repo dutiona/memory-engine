@@ -224,7 +224,7 @@ pub fn ingest_from_reader(
         // Cap each line read so a single oversized or unterminated record cannot
         // force an unbounded `String` allocation (CWE-400/770/789). Reading
         // `MAX_LINE_BYTES + 1` lets us detect a line that ran past the cap.
-        let n = match (&mut buf).take(MAX_LINE_BYTES + 1).read_line(&mut line) {
+        let n = match buf.by_ref().take(MAX_LINE_BYTES + 1).read_line(&mut line) {
             Ok(0) => break, // EOF
             Ok(n) => n,
             Err(e) => {
@@ -730,6 +730,32 @@ not valid json
         assert!(
             summary.total_skipped >= 1,
             "the oversized line must be skipped"
+        );
+    }
+
+    #[test]
+    fn oversized_unterminated_final_line_at_eof() {
+        // An oversized line that is also the LAST line and has no trailing newline
+        // must be skipped cleanly: skip_until hits EOF and returns Ok, the loop
+        // ends, and the earlier valid record is unaffected. Guards against a hang
+        // or panic on the EOF-mid-skip path.
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let huge = "x".repeat(9 * 1024 * 1024); // > MAX_LINE_BYTES, no closing brace, no \n
+        let input =
+            format!("{{\"content\":\"ok\",\"fact_type\":\"semantic\"}}\n{{\"content\":\"{huge}");
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(summary.total_ingested, 1, "the valid first record ingests");
+        assert!(
+            summary.total_skipped >= 1,
+            "the oversized final line is skipped"
         );
     }
 
