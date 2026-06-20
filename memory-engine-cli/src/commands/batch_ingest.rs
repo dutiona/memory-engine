@@ -5,10 +5,11 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
+use memory_engine::types::{AddFactOptions, AddFactRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::embedding_args::EmbeddingArgs;
+use crate::commands::types::CliFactType;
 use crate::db::{open_engine_writable, open_engine_writable_with_dim};
 use crate::output::{OutputFormat, print_json};
 
@@ -49,27 +50,9 @@ pub struct BatchIngestArgs {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum JsonlFactType {
-    Episodic,
-    Semantic,
-    Procedural,
-}
-
-impl From<JsonlFactType> for FactType {
-    fn from(jft: JsonlFactType) -> Self {
-        match jft {
-            JsonlFactType::Episodic => Self::Episodic,
-            JsonlFactType::Semantic => Self::Semantic,
-            JsonlFactType::Procedural => Self::Procedural,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
 struct JsonlFact {
     content: String,
-    fact_type: JsonlFactType,
+    fact_type: CliFactType,
     #[serde(default)]
     source_event_id: Option<i64>,
     #[serde(default)]
@@ -432,15 +415,15 @@ mod tests {
     fn jsonl_fact_deserialize_lowercase() {
         let line = r#"{"content":"hello","fact_type":"episodic"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        assert!(matches!(fact.fact_type, JsonlFactType::Episodic));
+        assert!(matches!(fact.fact_type, CliFactType::Episodic));
 
         let line = r#"{"content":"hello","fact_type":"semantic"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        assert!(matches!(fact.fact_type, JsonlFactType::Semantic));
+        assert!(matches!(fact.fact_type, CliFactType::Semantic));
 
         let line = r#"{"content":"hello","fact_type":"procedural"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        assert!(matches!(fact.fact_type, JsonlFactType::Procedural));
+        assert!(matches!(fact.fact_type, CliFactType::Procedural));
     }
 
     #[test]
@@ -468,7 +451,7 @@ mod tests {
         }"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
         assert_eq!(fact.content, "User moved to Istanbul");
-        assert!(matches!(fact.fact_type, JsonlFactType::Episodic));
+        assert!(matches!(fact.fact_type, CliFactType::Episodic));
         assert_eq!(fact.importance, Some(0.7));
         assert!(fact.t_valid.is_some());
         assert!(fact.t_invalid.is_some());
@@ -489,7 +472,7 @@ mod tests {
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
         let req = jsonl_to_request(fact, None);
         assert_eq!(req.content, "test");
-        assert_eq!(req.fact_type, FactType::Semantic);
+        assert_eq!(req.fact_type, memory_engine::types::FactType::Semantic);
         let opts = req.opts.unwrap();
         assert_eq!(opts.importance, Some(0.8));
         assert!(opts.t_valid.is_some());
@@ -499,7 +482,7 @@ mod tests {
     fn validate_importance_out_of_range() {
         let fact = JsonlFact {
             content: "test".into(),
-            fact_type: JsonlFactType::Semantic,
+            fact_type: CliFactType::Semantic,
             source_event_id: None,
             scope: None,
             importance: Some(1.5),
@@ -519,7 +502,7 @@ mod tests {
         let t2 = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let fact = JsonlFact {
             content: "test".into(),
-            fact_type: JsonlFactType::Semantic,
+            fact_type: CliFactType::Semantic,
             source_event_id: None,
             scope: None,
             importance: None,
@@ -537,7 +520,7 @@ mod tests {
     fn validate_valid_fact_passes() {
         let fact = JsonlFact {
             content: "test".into(),
-            fact_type: JsonlFactType::Semantic,
+            fact_type: CliFactType::Semantic,
             source_event_id: None,
             scope: None,
             importance: Some(0.5),
