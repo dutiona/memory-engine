@@ -244,32 +244,31 @@ fn query_no_results() {
 #[test]
 fn query_filter_fact_type() {
     let (_dir, db_path) = create_test_db();
+    let db = db_path.to_str().unwrap();
     // "Rust is fast" is Procedural: it passes --fact-type procedural …
     cli()
-        .args([
-            "--db",
-            db_path.to_str().unwrap(),
-            "query",
-            "Rust",
-            "--fact-type",
-            "procedural",
-        ])
+        .args(["--db", db, "query", "Rust", "--fact-type", "procedural"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Rust"));
     // … but --fact-type semantic filters it out, leaving no FTS match.
     cli()
-        .args([
-            "--db",
-            db_path.to_str().unwrap(),
-            "query",
-            "Rust",
-            "--fact-type",
-            "semantic",
-        ])
+        .args(["--db", db, "query", "Rust", "--fact-type", "semantic"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No results"));
+    // A second variant end-to-end: episodic matches "Memory engines …".
+    cli()
+        .args(["--db", db, "query", "Memory", "--fact-type", "episodic"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Memory engines"));
+    // Case-insensitive (ignore_case preserves the pre-#270 query behavior).
+    cli()
+        .args(["--db", db, "query", "Rust", "--fact-type", "PROCEDURAL"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust"));
 }
 
 #[test]
@@ -289,22 +288,23 @@ fn query_filter_fact_type_unknown_is_rejected() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("invalid value").and(predicate::str::contains("procedural")),
+            predicate::str::contains("invalid value").and(predicate::str::contains("--fact-type")),
         );
 }
 
 #[test]
 fn query_filter_pinned_only_excludes_unpinned() {
     let (_dir, db_path) = create_test_db();
-    // The seeded facts are not pinned, so --pinned-only filters them all out.
+    let db = db_path.to_str().unwrap();
+    // Baseline: the query returns the fact when the filter is absent …
     cli()
-        .args([
-            "--db",
-            db_path.to_str().unwrap(),
-            "query",
-            "blue sky",
-            "--pinned-only",
-        ])
+        .args(["--db", db, "query", "blue sky"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sky"));
+    // … and the seeded facts are not pinned, so --pinned-only removes it.
+    cli()
+        .args(["--db", db, "query", "blue sky", "--pinned-only"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No results"));
@@ -313,16 +313,15 @@ fn query_filter_pinned_only_excludes_unpinned() {
 #[test]
 fn query_filter_min_importance_excludes_below_threshold() {
     let (_dir, db_path) = create_test_db();
+    let db = db_path.to_str().unwrap();
+    cli()
+        .args(["--db", db, "query", "blue sky"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sky"));
     // Seeded facts use the default importance (0.5), below the 0.99 threshold.
     cli()
-        .args([
-            "--db",
-            db_path.to_str().unwrap(),
-            "query",
-            "blue sky",
-            "--min-importance",
-            "0.99",
-        ])
+        .args(["--db", db, "query", "blue sky", "--min-importance", "0.99"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No results"));
@@ -331,15 +330,42 @@ fn query_filter_min_importance_excludes_below_threshold() {
 #[test]
 fn query_filter_scope_subtree_excludes_other_scopes() {
     let (_dir, db_path) = create_test_db();
+    let db = db_path.to_str().unwrap();
+    cli()
+        .args(["--db", db, "query", "blue sky"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sky"));
     // Seeded facts live at the root scope; a subtree filter excludes them.
+    cli()
+        .args(["--db", db, "query", "blue sky", "--scope", "project/sub"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No results"));
+}
+
+#[test]
+fn query_filter_combined_fact_type_and_min_importance() {
+    let (_dir, db_path) = create_test_db();
+    let db = db_path.to_str().unwrap();
+    // --fact-type procedural alone matches "Rust is fast" …
+    cli()
+        .args(["--db", db, "query", "Rust", "--fact-type", "procedural"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust"));
+    // … adding --min-importance 0.99 removes it, proving the filters AND
+    // together rather than one masking the other.
     cli()
         .args([
             "--db",
-            db_path.to_str().unwrap(),
+            db,
             "query",
-            "blue sky",
-            "--scope",
-            "project/sub",
+            "Rust",
+            "--fact-type",
+            "procedural",
+            "--min-importance",
+            "0.99",
         ])
         .assert()
         .success()

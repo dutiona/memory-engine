@@ -24,8 +24,8 @@ pub struct QueryArgs {
     #[arg(long)]
     scope: Option<String>,
 
-    /// Filter by fact type
-    #[arg(long, value_enum)]
+    /// Filter by fact type (episodic, semantic, procedural; case-insensitive)
+    #[arg(long, value_enum, ignore_case = true)]
     fact_type: Option<CliFactType>,
 
     /// Minimum importance score
