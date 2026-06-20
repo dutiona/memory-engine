@@ -268,11 +268,17 @@ fn dims_to_sql(fp: &EmbeddingFingerprint) -> Result<(i64, Option<i64>)> {
 }
 
 /// Remap a single-active partial-unique-index violation to a diagnosable engine error.
-/// Any other rusqlite error passes through unchanged (→ `MemoryError::Database`).
+/// Any other rusqlite error — including a `name` PRIMARY KEY collision — passes through
+/// unchanged (→ `MemoryError::Database`); only the `UNIQUE` extended code is the
+/// single-active index firing, so we gate on it rather than the generic constraint code.
 fn map_single_active_violation(e: rusqlite::Error) -> MemoryError {
     use rusqlite::ErrorCode;
+    // SQLITE_CONSTRAINT_UNIQUE (2067) — the partial unique index on status='active'.
+    // A PRIMARY KEY collision on `name` is SQLITE_CONSTRAINT_PRIMARYKEY (1555) and must
+    // NOT be mislabeled as a single-active violation.
     if let rusqlite::Error::SqliteFailure(ffi, _) = &e
         && ffi.code == ErrorCode::ConstraintViolation
+        && ffi.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
     {
         return MemoryError::Internal(
             "embedding_spaces single-active invariant violated: attempted a second active \
@@ -377,6 +383,34 @@ mod tests {
                 .fingerprint,
             a,
             "first active row unchanged"
+        );
+    }
+
+    #[test]
+    fn name_pk_collision_is_not_mislabeled_single_active() {
+        // A PRIMARY KEY collision on `name` (not the status='active' partial index) must
+        // surface as a plain Database error, not the "single-active invariant violated"
+        // message — only the UNIQUE extended code is the single-active index firing.
+        let conn = fresh_conn();
+        // A deprecated 'default' row: re-inserting 'default'/active PK-collides on name
+        // without violating the single-active index (no other active row exists).
+        insert_active(
+            &conn,
+            &EmbeddingSpace {
+                name: "default".to_string(),
+                fingerprint: EmbeddingFingerprint::new("m", "tei", 8),
+                status: SpaceStatus::Deprecated,
+            },
+        )
+        .expect("insert deprecated default");
+        let err = insert_active(
+            &conn,
+            &EmbeddingSpace::default_active(EmbeddingFingerprint::new("m", "tei", 8)),
+        )
+        .expect_err("name PK collision must error");
+        assert!(
+            matches!(err, MemoryError::Database(_)),
+            "PK collision must pass through as Database, got {err:?}"
         );
     }
 

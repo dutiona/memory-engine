@@ -691,15 +691,55 @@ mod tests {
             .unwrap();
         assert_eq!(root_label, "root");
 
-        // Verify the embedding identity (#613) round-trips through dump→restore via
-        // the generic config-copy loop (embedding_meta is a config row, not in
-        // MANAGED_CONFIG_KEYS). The bare `embed_dim` key no longer exists.
+        // Verify the embedding identity (#622) round-trips through dump→restore via the
+        // explicit `embedding_spaces` snapshot section + `restore_embedding_spaces` (the
+        // identity now lives in the registry table, not a config row). The bare `embed_dim`
+        // key no longer exists.
         assert!(get_config(&conn, "embed_dim").unwrap().is_none());
         let meta = crate::store::embedding_meta::load(&conn).unwrap();
         assert_eq!(
             meta.map(|fp| fp.dim),
             Some(4),
-            "embedding_meta dim survives restore"
+            "embedding identity dim survives restore"
+        );
+    }
+
+    #[test]
+    fn restore_translates_legacy_embedding_meta_config() {
+        // A pre-#622 dump has no `embedding_spaces` section but carries the identity as a
+        // legacy `embedding_meta` config row. Restore must reconstruct it into the registry
+        // (the back-compat fallback in `restore_embedding_spaces`) — otherwise an old export
+        // restores with no identity (silent retrieval corruption, #614's failure class).
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        let fp = crate::types::EmbeddingFingerprint::with_matryoshka("legacy-model", "tei", 4, 8);
+        let mut config = BTreeMap::new();
+        config.insert(
+            "embedding_meta".to_string(),
+            serde_json::to_string(&fp).unwrap(),
+        );
+        let snapshot = EngineSnapshot {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            storage_epoch: STORAGE_EPOCH,
+            embed_dim: 4,
+            facts: vec![],
+            edges: vec![],
+            summaries: vec![],
+            scopes: vec![],
+            events: vec![],
+            lineage: vec![],
+            embedding_spaces: vec![], // pre-#622 dump: identity is in `config`, not here
+            config,
+        };
+
+        restore_embedding_spaces(&conn, &snapshot).unwrap();
+
+        assert_eq!(
+            crate::store::embedding_meta::load(&conn).unwrap(),
+            Some(fp),
+            "legacy embedding_meta config value reconstructed into the registry"
         );
     }
 
