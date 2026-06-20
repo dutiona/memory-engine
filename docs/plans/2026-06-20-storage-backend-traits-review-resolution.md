@@ -15,3 +15,20 @@ Reviewers: clean-slate subagent (general-purpose), Codex (one-shot, read-only), 
 
 ## Outstanding
 None — all findings resolved; SearchIndex decided (scored `Vec<(i64, f64)>`).
+
+## Code review (post-implementation, on PR #648)
+
+Reviewers: 3 adversarial subagents (transcription-fidelity, object-safety/API, scope/leakage) + agy "Gemini 3.1 Pro (High)" on the actual diff. Codex was in a ~5h rate-limit window (per [[feedback_review_under_budget]], used agy rather than dropping external review).
+
+**Subagents:** all clean. Transcription FAITHFUL (85 methods, counts 49/7/13/10 exact, zero divergences); object-safety sound (Arc<dyn> + async-through-dyn callability proven); scope clean (no driver leak, RRF untouched, in-lane diff). One reviewer surfaced 18 clippy pedantic/nursery warnings the P7 gate had **cached-masked** (lesson: force-recompile clippy before trusting a clean grep).
+
+**agy findings & dispositions:**
+- **[HIGH] `lexical_count_expired` took `&FactFilter` but ignored `temporal`/`ids`/`pinned`/`metadata` (contract trap).** FIXED — reverted to the faithful `fts_count_expired` signature (`fact_type` + `scope_ids` explicit params). My FactFilter "uniformization" was the editorialization that introduced the trap.
+- **[LOW] `vector_search` empty/wrong-length embedding undocumented.** FIXED — documented as an `EmbeddingDimension` error.
+- **[HIGH] `record_embedding_fingerprint_if_absent(expected_dim)` "leaks validation into the port".** DECLINED (kept faithful). It is a 1:1 transcription of `embedding_meta::record_if_absent` (user-frozen "transcribe the full surface" decision). Removing `expected_dim` would force the engine's existing call sites (#631) to change and re-validate — *more* churn + behavior-change risk — to satisfy a separation-of-concerns preference. The dim-check is a documented backend contract #630 wraps verbatim. A future "move validation engine-side" refinement can be a follow-up if desired.
+- **[MEDIUM] `require_embedding_fingerprint_present` is thin engine policy.** DECLINED (kept faithful), same rationale — it transcribes `embedding_meta::require_present`, a real engine call site; keeping it 1:1 minimizes #631 friction.
+
+The two declined items are surfaced to the maintainer (they touch the port-boundary philosophy); both are trivial follow-up changes if the maintainer prefers the cleaner boundary over faithful transcription.
+
+## Clippy gate lesson
+`cargo clippy | grep warning` returns nothing when the build is CACHED (it only re-emits on a fresh compile). Always `touch` the changed files (or `cargo clean -p <crate>`) before trusting a clean clippy grep — the cache masked 18 real warnings in the P7 gate.
