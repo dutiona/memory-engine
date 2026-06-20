@@ -33,22 +33,70 @@ const BLAKE3_LEN: usize = 32;
 
 /// Hard upper bound on the on-disk size of a `.snapshot` sidecar (512 MiB).
 ///
-/// Security guard against allocation denial-of-service (CWE-400/502/789):
-/// `load_from_file` reads the whole file into memory and
-/// `rmp_serde::from_slice` allocates `Vec`s sized by
-/// in-band `MessagePack` array-length prefixes. The blake3 checksum is *unkeyed*
-/// — it is a corruption check, not an authenticity control — so any actor able
-/// to write the sidecar (a local tamper / shared-data-dir threat) can produce a
-/// file that passes the checksum yet declares pathological lengths. Rejecting
-/// before `fs::read` caps the worst case at this many bytes. Tune to the
-/// expected corpus; a real snapshot is dominated by HNSW embeddings.
+/// Bounds the wholesale `fs::read` of an oversized or tampered sidecar
+/// (CWE-400, resource exhaustion via large on-disk file). `load_from_file`
+/// slurps the entire file into a `Vec<u8>` before parsing; rejecting on
+/// `fs::metadata` first caps that read at this many bytes regardless of what
+/// the file claims to contain.
+///
+/// This does **not** defend against in-band `MessagePack` length prefixes:
+/// `rmp_serde` reports the declared `SeqAccess::size_hint`, but serde's `Vec`
+/// deserializer routes every preallocation through `size_hint::cautious`, which
+/// caps `with_capacity` at 1 MiB worth of elements (`MAX_PREALLOC_BYTES`) and
+/// then grows the vector incrementally as real elements are decoded. A small
+/// crafted file therefore cannot force a multi-gigabyte allocation — it simply
+/// errors out of input long before that — so no per-entry-length `DoS` exists for
+/// this guard to mitigate. The complementary integrity defense is the per-entry
+/// embedding-dimension check in `load_from_file` (runs *after* deserialization).
+///
+/// The blake3 checksum is *unkeyed* — a corruption check, not an authenticity
+/// control — so an actor able to write the sidecar (local tamper /
+/// shared-data-dir threat) can still produce a checksum-passing file; the size
+/// cap and the dim check are what bound the blast radius of such a file. Tune to
+/// the expected corpus; a real snapshot is dominated by HNSW embeddings.
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Whether an on-disk size exceeds the [`MAX_SNAPSHOT_BYTES`] cap.
+/// Outcome of the pre-read size gate in [`load_from_file`].
 ///
-/// Boundary is `>` so a file exactly at the cap is still accepted.
-const fn exceeds_size_cap(len: u64) -> bool {
-    len > MAX_SNAPSHOT_BYTES
+/// Separating this from the read makes the short-circuit observable in tests
+/// (a `cap` parameter lets a test prove the over-cap branch fires *before* any
+/// `fs::read`, without materializing a half-gigabyte file).
+#[derive(Debug, PartialEq, Eq)]
+enum SizeGate {
+    /// File is within the cap (or its size is unknown but acceptable); proceed
+    /// to read it.
+    Proceed,
+    /// File exceeds the cap, or its metadata could not be read; abort before
+    /// reading and fall back to a full rebuild.
+    Reject,
+}
+
+/// Decide, from filesystem metadata alone, whether a sidecar is small enough to
+/// read into memory. Rejects over-cap files *before* `fs::read` so a crafted or
+/// tampered large file cannot drive a wholesale slurp into a `Vec<u8>`.
+///
+/// `cap` is a parameter (not the hardcoded const) purely so tests can exercise
+/// the gate against a small real file with a small cap — deleting the size check
+/// here is then an observable test failure, not just a slower path.
+fn size_gate(path: &Path, cap: u64) -> SizeGate {
+    match fs::metadata(path) {
+        Ok(meta) if meta.len() > cap => {
+            tracing::warn!(
+                path = %path.display(),
+                size = meta.len(),
+                cap,
+                "snapshot exceeds size cap, discarding"
+            );
+            SizeGate::Reject
+        }
+        Ok(_) => SizeGate::Proceed,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %path.display(), error = %e, "snapshot metadata failed");
+            }
+            SizeGate::Reject
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,28 +272,14 @@ pub fn write_to_file(
 /// mismatch, checksum failure, `embed_dim` mismatch). Never errors — all
 /// failures are logged and treated as "snapshot unavailable".
 pub fn load_from_file(path: &Path, embed_dim: usize) -> Option<(SnapshotHeader, SnapshotPayload)> {
-    // Size guard BEFORE reading the file into memory: a crafted/corrupt sidecar
-    // must not be slurped wholesale, and its in-band length prefixes must not be
-    // allowed to drive an unbounded `Vec` allocation. blake3 is unkeyed and so
-    // is not an authenticity gate (see MAX_SNAPSHOT_BYTES). On metadata failure
-    // (other than NotFound) we discard and fall back to a full rebuild.
-    match fs::metadata(path) {
-        Ok(meta) if exceeds_size_cap(meta.len()) => {
-            tracing::warn!(
-                path = %path.display(),
-                size = meta.len(),
-                cap = MAX_SNAPSHOT_BYTES,
-                "snapshot exceeds size cap, discarding"
-            );
-            return None;
-        }
-        Ok(_) => {}
-        Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(path = %path.display(), error = %e, "snapshot metadata failed");
-            }
-            return None;
-        }
+    // Size guard BEFORE reading the file into memory: an oversized or tampered
+    // sidecar must not be slurped wholesale into a Vec<u8> (see
+    // MAX_SNAPSHOT_BYTES). This bounds the on-disk read only; in-band length
+    // prefixes are already bounded by serde's cautious preallocation cap. blake3
+    // is unkeyed and so is not an authenticity gate. On metadata failure (other
+    // than NotFound) we discard and fall back to a full rebuild.
+    if size_gate(path, MAX_SNAPSHOT_BYTES) == SizeGate::Reject {
+        return None;
     }
 
     let data = match fs::read(path) {
@@ -558,12 +592,43 @@ mod tests {
     }
 
     #[test]
-    fn oversized_file_returns_none() {
-        // Security (#411): a sidecar larger than MAX_SNAPSHOT_BYTES must be
-        // rejected before `fs::read` so a crafted/corrupt file cannot force a
-        // multi-gigabyte allocation. A sparse file (set_len) reports the
-        // logical size in metadata without consuming disk blocks, so we can
-        // exercise the real cap without writing 512 MiB.
+    fn size_gate_rejects_over_cap_before_read() {
+        // Security (#411): the size gate must REJECT a file larger than the cap
+        // *before* `fs::read`, so a crafted/corrupt file cannot force a
+        // wholesale slurp into memory. This is the load-bearing short-circuit —
+        // and it is what makes deleting the size check an observable failure
+        // (the outcome `None` alone is not, since content checks also reject
+        // garbage; see `oversized_sparse_file_still_returns_none`).
+        //
+        // We use a SMALL real file with a SMALL cap to exercise the exact
+        // over-cap branch with zero large allocations: write a few KiB, set the
+        // cap below it, and assert Reject. A complementary small cap above the
+        // file size yields Proceed, pinning the boundary on a real path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.db.snapshot");
+        fs::write(&path, vec![0u8; 4096]).unwrap();
+
+        // File (4096 B) over a 1024 B cap → the gate rejects before any read.
+        assert_eq!(size_gate(&path, 1024), SizeGate::Reject);
+        // File (4096 B) under an 8192 B cap → the gate lets the read proceed.
+        assert_eq!(size_gate(&path, 8192), SizeGate::Proceed);
+        // Missing file → reject (NotFound is silent; still a reject).
+        assert_eq!(
+            size_gate(&dir.path().join("absent.snapshot"), 8192),
+            SizeGate::Reject
+        );
+    }
+
+    #[test]
+    fn oversized_sparse_file_still_returns_none() {
+        // Companion to `size_gate_rejects_over_cap_before_read`: the public
+        // entry point returns None for a file whose metadata exceeds the real
+        // cap. A sparse file (set_len) reports the logical size without
+        // consuming disk blocks, so we exercise the actual MAX_SNAPSHOT_BYTES
+        // without writing 512 MiB. NOTE: this pins only the OUTCOME (None) — the
+        // short-circuit-before-read property is pinned by the `size_gate` unit
+        // test above, because an all-zero file is also rejected on the content
+        // path.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("huge.db.snapshot");
         let f = fs::File::create(&path).unwrap();
@@ -574,22 +639,24 @@ mod tests {
     }
 
     #[test]
-    fn file_at_size_cap_is_not_rejected_for_size() {
-        // A file exactly at the cap passes the size guard (it then fails later
-        // on content, but NOT on the size check). This pins the boundary as
-        // `>` not `>=` so a legitimately large corpus at the limit still loads.
+    fn size_cap_boundary_is_exclusive() {
+        // The cap boundary is `>` not `>=`: a file exactly at the cap passes the
+        // size gate so a legitimately large corpus at the limit still loads,
+        // while one byte over is rejected. Pinned on a real path via `size_gate`
+        // with a SMALL cap — a small file straddles a small cap with zero large
+        // allocations, instead of materializing a half-gigabyte file (a
+        // `set_len` + `load_from_file` would `fs::read` 512 MiB of zeros for zero
+        // extra coverage, risking OOM under cargo's parallel test harness).
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("at_cap.db.snapshot");
-        let f = fs::File::create(&path).unwrap();
-        f.set_len(MAX_SNAPSHOT_BYTES).unwrap();
-        drop(f);
+        let path = dir.path().join("boundary.db.snapshot");
+        let cap: usize = 4096;
+        fs::write(&path, vec![0u8; cap]).unwrap();
+        // Exactly at the cap → proceed (boundary is exclusive).
+        assert_eq!(size_gate(&path, cap as u64), SizeGate::Proceed);
 
-        // The all-zero sparse content is not a valid snapshot, so this returns
-        // None — but via the content path, having passed the size guard. We
-        // assert the size guard itself does not trip at exactly the cap.
-        assert!(!exceeds_size_cap(MAX_SNAPSHOT_BYTES));
-        assert!(exceeds_size_cap(MAX_SNAPSHOT_BYTES + 1));
-        assert!(load_from_file(&path, 128).is_none());
+        // One byte over the cap → reject.
+        fs::write(&path, vec![0u8; cap + 1]).unwrap();
+        assert_eq!(size_gate(&path, cap as u64), SizeGate::Reject);
     }
 
     #[test]
