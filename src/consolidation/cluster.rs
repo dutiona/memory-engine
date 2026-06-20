@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn greedy_cluster_transitive_single_linkage_chain() {
         // A~B and B~C but A≁C: single-linkage transitively merges all three via B.
-        // Unit vectors at 0°, 30°, 60° in the xy-plane:
+        // Near-unit vectors at 0°, 30°, 60° in the xy-plane (cosine normalizes):
         //   cos(A,B) = cos(B,C) = cos30 ≈ 0.866; cos(A,C) = cos60 = 0.5.
         // At threshold 0.8: A~B, B~C pass; A~C fails — yet C joins A's cluster via B.
         let a = mk_fact(1, 1, vec![1.0, 0.0, 0.0, 0.0]);
@@ -541,11 +541,21 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
-        /// Partition invariant: every input index 0..n lands in exactly one cluster,
-        /// for any embeddings and any threshold. (Implies no index is dropped or
-        /// duplicated.) Zero vectors yield NaN cosine → singletons, still a partition.
+        /// `greedy_cluster` invariants, for any embeddings and any threshold:
+        /// 1. **Partition** — every input index 0..n lands in exactly one cluster
+        ///    (no index dropped or duplicated).
+        /// 2. **Within-cluster connectivity** — in any cluster of size ≥ 2, every
+        ///    member is cosine-similar (> threshold) to at least one other member,
+        ///    which single-linkage guarantees (each non-seed joined via a neighbor,
+        ///    and the seed connects to whoever joined first). This catches a
+        ///    member landing in the *wrong* group, which the partition check alone
+        ///    cannot.
+        ///
+        /// A zero embedding yields cosine 0.0 (the implementation guards the
+        /// zero-norm denominator — it is NOT NaN); `0.0 > t` is false for all
+        /// t in [0,1], so zero vectors stay singletons — still a valid partition.
         #[test]
-        fn greedy_cluster_partitions_all_indices(
+        fn greedy_cluster_invariants(
             embs in proptest::collection::vec(
                 proptest::collection::vec(-1.0f32..=1.0, 4),
                 1..=12,
@@ -560,9 +570,42 @@ mod tests {
             let refs: Vec<&Fact> = facts.iter().collect();
             let clusters = greedy_cluster(&refs, threshold);
 
+            // (1) partition
             let mut seen: Vec<usize> = clusters.iter().flatten().copied().collect();
             seen.sort_unstable();
             prop_assert_eq!(seen, (0..facts.len()).collect::<Vec<usize>>());
+
+            // (2) within-cluster connectivity (single-linkage)
+            for c in &clusters {
+                if c.len() < 2 {
+                    continue;
+                }
+                for &m in c {
+                    let connected = c.iter().any(|&o| {
+                        o != m
+                            && cosine_similarity(&facts[m].embedding, &facts[o].embedding) > threshold
+                    });
+                    prop_assert!(connected, "member {m} has no in-cluster neighbor > threshold");
+                }
+            }
         }
+    }
+
+    /// Deterministic companions to the connectivity proptest: a zero vector (cosine
+    /// 0.0 via the denom guard, never NaN) stays a singleton even at threshold 0.0,
+    /// and two anti-parallel vectors (cosine −1) never group at threshold 0.0.
+    #[test]
+    fn greedy_cluster_zero_and_anticorrelated_stay_singletons() {
+        let zero = mk_fact(1, 1, vec![0.0, 0.0, 0.0, 0.0]);
+        let pos = mk_fact(2, 1, vec![1.0, 0.0, 0.0, 0.0]);
+        let neg = mk_fact(3, 1, vec![-1.0, 0.0, 0.0, 0.0]);
+        let clusters = greedy_cluster(&[&zero, &pos, &neg], 0.0);
+        // pos·neg = -1 (< 0), pos·zero = neg·zero = 0.0 — none exceed 0.0.
+        assert_eq!(
+            clusters.len(),
+            3,
+            "no pair exceeds threshold 0.0 → three singletons"
+        );
+        assert!(clusters.iter().all(|c| c.len() == 1));
     }
 }
