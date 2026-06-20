@@ -206,8 +206,14 @@ impl MemoryEngine {
         let pak_path = archive_dir.join(&pak_filename);
 
         let blake3_hash = write_pak_and_hash(pak, &pak_path)?;
+        // `write_pak_and_hash` has now renamed the `.pak` into place, so it
+        // physically exists. Any failure from here on must remove it, or it
+        // becomes an orphan with no manifest row (CWE-459) — the same guarantee
+        // `commit_archive`'s cleanup gives for the downstream commit step. The
+        // stat below is the only such fallible step before this fn returns.
         let pak_size_bytes = std::fs::metadata(&pak_path)
             .map_err(|e| {
+                let _ = std::fs::remove_file(&pak_path);
                 ArchiveError::Io(format!(
                     "failed to stat pak file {}: {e}",
                     pak_path.display()

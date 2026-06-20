@@ -1151,6 +1151,14 @@ impl<'a> FactStore<'a> {
     /// [`insert_or_reinforce`](Self::insert_or_reinforce) relies on for its
     /// `min`/`max` over `t_created`).
     ///
+    /// **Precondition:** this equivalence holds *iff* `t_expired` is stored as
+    /// the rfc3339 form of a UTC instant (`…+00:00`) — the only form any
+    /// production write path produces. A non-UTC offset or a space-separated
+    /// `datetime('now')` value would break both lexicographic ordering here and
+    /// the rfc3339 parse on the [`list_all`](Self::list_all) read path, so no
+    /// path is robust to it; the SQL filter assumes the same storage invariant
+    /// the rest of the store upholds.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on SQL failure.

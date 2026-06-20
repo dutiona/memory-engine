@@ -280,7 +280,10 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Database` on SQL failure, or
+    /// `MemoryError::Serialization` if the `fact_ids` slice cannot be serialized
+    /// to the JSON array bound into the query (infallible in practice for
+    /// `&[i64]`).
     pub fn list_internal_by_facts(&self, fact_ids: &[i64]) -> Result<Vec<Edge>> {
         if fact_ids.is_empty() {
             return Ok(Vec::new());
