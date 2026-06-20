@@ -2,7 +2,7 @@
 name = "memory-engine-embed"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "HTTP embedding provider for memory-engine — OpenAI and Ollama compatible"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"

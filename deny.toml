@@ -1,0 +1,55 @@
+# cargo-deny configuration — supply-chain gate for the memory-engine workspace.
+#
+# Wired into CI (.github/workflows/ci.yml, job `cargo-deny`) and runnable locally
+# with `cargo deny check`. Closes the super-qa area:build findings:
+#   - #418 (sc/no-advisory-gate): RustSec advisory gate          -> [advisories]
+#   - #492 (sc/dup-deps):         duplicate-version visibility    -> [bans].multiple-versions
+#
+# Schema: cargo-deny 0.19.x (the "2.0" config). In this schema the advisories
+# check denies vulnerabilities/unsound advisories unconditionally; there is no
+# `vulnerability`/`unmaintained` lint-level field — `ignore` is the only knob.
+
+[graph]
+# Check the full feature matrix (async, ann, archive, compress-gzip, compress-zstd),
+# mirroring CI's `--all-features` gates so a vuln behind a feature flag cannot hide.
+all-features = true
+
+# --- Security advisories (RustSec) — the #418 gate ---------------------------------
+[advisories]
+# Keep `ignore` empty so every advisory is actioned, never silently suppressed.
+# RUSTSEC-2026-0009 (time 0.3.45 DoS) was *fixed* — time bumped to 0.3.47, which
+# requires Rust 1.88, so the workspace MSRV was raised accordingly — not ignored.
+ignore = []
+
+# --- License compliance ------------------------------------------------------------
+[licenses]
+# Allow-list derived from the actual all-features dependency graph (all permissive).
+# OR-expressions resolve to one of these; AND-clauses and standalone licenses are
+# all covered. No copyleft is required: the lone LGPL-2.1-or-later appears only
+# inside an `OR MIT/Apache-2.0` expression, so it resolves to a permissive license.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+# --- Duplicate / banned crates — the #492 visibility -------------------------------
+[bans]
+# Duplicate transitive versions (currently getrandom, hashbrown, r-efi) are surfaced
+# as warnings, not failures: they are pulled by third-party crates and are not
+# fixable from this workspace. `warn` keeps them visible without blocking CI.
+multiple-versions = "warn"
+# Reject `version = "*"` requirements — they defeat reproducible, auditable builds.
+wildcards = "deny"
+
+# --- Source registries -------------------------------------------------------------
+[sources]
+# Only crates.io. No git or alternative-registry dependencies are permitted.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
