@@ -8,8 +8,9 @@ memory_engine (lib.rs)
   +-- types         Core data types and enums
   +-- error         Error enum and Result alias
   +-- traits        Consumer-implemented traits and policy types
+  +-- storage/      Persistence PORT (StorageBackend trait family) — infra abstraction
   +-- search/       Hybrid retrieval pipeline
-  +-- store/        SQLite persistence layer
+  +-- store/        SQLite persistence layer (the de-facto SqliteBackend impl)
   +-- graph         In-memory knowledge graph
   +-- consolidation Three-pass consolidation pipeline
   +-- forgetting    Ebbinghaus decay and importance scoring
@@ -44,6 +45,9 @@ memory_engine (lib.rs)
 - `ConflictArbiter` -- decide how to resolve contradicting facts (returns `CrudDecision`).
 - `PersistenceClassifier` -- decide whether a new fact should be pinned (unforgettable). Optional, default returns `false`.
   Also defines `ForgetPolicy` (Ebbinghaus parameters and signal weights), `ConsolidationConfig`, `ConsolidationStats`, `PruneStats`, `ConflictResolution`, and `CrudDecision`.
+
+`storage`
+: The persistence **port** (infrastructure abstraction) — deliberately distinct from `traits` (consumer capability injection). Defines the `StorageBackend` umbrella supertrait over six bounded-context traits — `FactGraph`, `EventLog`, `SearchIndex`, `ConsolidationStore`, `SessionStore`, `SchemaManager` — plus the feature-gated `ColdStorage` (held separately, not a supertrait bound). Cross-cutting types: the closed `FactFilter` (with `TemporalFilter` / `MetadataPredicate`), the dialect-free `BackendCapabilities` / `LexicalRanker` tier signal, and `StorageError` (driver-opaque, in `error`). All traits are `async_trait`/`Send + Sync`; `SearchIndex` returns ranked `(id, f64)` pairs (RRF fuses by rank engine-side). The `store/` + `search/` modules are the de-facto SQLite implementation that a `SqliteBackend` will sit behind.
 
 `search`
 : Hybrid search pipeline combining three retrieval modes:
