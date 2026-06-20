@@ -62,6 +62,14 @@ pub struct SqliteBackend {
     upcaster_registry: Arc<UpcasterRegistry>,
 }
 
+// Build-time witness (not test-gated): `SqliteBackend` must be `Send + Sync` for
+// `Arc<dyn StorageBackend>` and the `#[async_trait]` `Send` futures. A field that
+// breaks this fails `cargo build`, not merely `cargo test`.
+const _: fn() = || {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<SqliteBackend>();
+};
+
 impl SqliteBackend {
     /// Wrap an already-opened pool + upcaster registry. The canonical constructor
     /// `#631` will use where it builds the [`ConnectionPool`] today. `embed_dim` is
@@ -145,7 +153,8 @@ impl SqliteBackend {
     /// `scan` runs on a blocking thread and `blocking_send`s every row into a cap-1
     /// channel; the async side `recv().await`s and invokes `cb`. The cap-1 bound is
     /// backpressure (the scan stalls when the consumer is slow). On an early `cb`
-    /// error the receiver is dropped, the scan's next `blocking_send` fails and it
+    /// error the receiver is dropped, so the scan's next `blocking_send` fails (or
+    /// the scan finishes naturally if the cursor was already exhausted) and it
     /// stops — and the **callback** error is returned in preference to the scan's
     /// resulting send failure. A mid-scan SQL error (no callback error) is surfaced
     /// from the join handle.
@@ -193,13 +202,6 @@ fn stream_consumer_dropped() -> MemoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn _assert_send_sync() {
-        fn f<T: Send + Sync>() {}
-        f::<SqliteBackend>();
-        f::<UpcasterRegistry>();
-        f::<ConnectionPool>();
-    }
 
     /// In-memory backend for tests (`embed_dim` 4).
     pub(super) fn memory_backend() -> SqliteBackend {

@@ -45,8 +45,8 @@ impl<'a> CheckpointStore<'a> {
 
     /// Get a checkpoint by `session_id`.
     ///
-    /// Promoted to unconditional `pub(crate)` so the [`SessionStore`] trait impl
-    /// can call it in non-test builds (#630). Previously `#[cfg(test)]`.
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// impl can call it in non-test builds (#630).
     pub fn get(&self, session_id: &str) -> Result<Option<SessionCheckpoint>> {
         self.conn
             .query_row(
@@ -78,8 +78,8 @@ impl<'a> CheckpointStore<'a> {
 
     /// List recent checkpoints, most recent first.
     ///
-    /// Promoted to unconditional `pub(crate)` so the [`SessionStore`] trait impl
-    /// can call it in non-test builds (#630). Previously `#[cfg(test)]`.
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// impl can call it in non-test builds (#630).
     pub fn list_recent(&self, limit: usize) -> Result<Vec<SessionCheckpoint>> {
         let mut stmt = self
             .conn

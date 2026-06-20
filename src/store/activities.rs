@@ -99,8 +99,8 @@ impl<'a> ActivityStore<'a> {
 
     /// Get an activity by id.
     ///
-    /// Promoted to unconditional `pub(crate)` so the [`SessionStore`] trait impl
-    /// can call it in non-test builds (#630). Previously `#[cfg(test)]`.
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// impl can call it in non-test builds (#630).
     pub fn get(&self, id: i64) -> Result<Activity> {
         self.conn
             .query_row(
@@ -121,8 +121,8 @@ impl<'a> ActivityStore<'a> {
 
     /// List activities for a session, most recent first.
     ///
-    /// Promoted to unconditional `pub(crate)` so the [`SessionStore`] trait impl
-    /// can call it in non-test builds (#630). Previously `#[cfg(test)]`.
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// impl can call it in non-test builds (#630).
     pub fn list_by_session(&self, session_id: &str, limit: Option<usize>) -> Result<Vec<Activity>> {
         let base = "SELECT id, session_id, tool_name, args_hash, args, result_summary,
                         outcome_class, status, occurrence_count, first_seen, last_seen,
@@ -191,8 +191,8 @@ impl<'a> ActivityStore<'a> {
 
     /// Count activities in a session.
     ///
-    /// Promoted to unconditional `pub(crate)` so the [`SessionStore`] trait impl
-    /// can call it in non-test builds (#630). Previously `#[cfg(test)]`.
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// impl can call it in non-test builds (#630).
     pub fn count_by_session(&self, session_id: &str) -> Result<i64> {
         self.conn
             .query_row(
