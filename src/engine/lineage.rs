@@ -1,11 +1,21 @@
 use crate::error::Result;
 use crate::store::lineage::LineageStore;
-use crate::types::{LineageRecord, NewLineageRecord, PromotionProvenance};
+use crate::types::{LineageRecord, PromotionProvenance};
 
 use super::MemoryEngine;
 
 impl MemoryEngine {
     /// Record provenance for a promoted wisdom fact.
+    ///
+    /// **Crate-internal.** This is a bare lineage-row insert with no surrounding
+    /// transaction; exposing it publicly let a consumer write lineage in a
+    /// separate transaction from the wisdom-fact insert (interruptible between
+    /// the two) — undermining the atomicity guarantee that
+    /// [`DreamContext::promote`](crate::engine::cognitive::DreamContext::promote)
+    /// documents. The only sanctioned way to create a wisdom fact + lineage is
+    /// that atomic path (fact insert + lineage insert in one savepoint); this
+    /// primitive stays `pub(crate)` for it and for tests. The insert still
+    /// rejects a missing or expired `wisdom_fact_id` (see [`LineageStore::insert`]).
     ///
     /// Writes to the `lineage` sidecar table via the writer connection.
     /// Returns the auto-assigned `lineage_id`.
@@ -13,10 +23,18 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
+    /// Returns `MemoryError::Lineage` if the wisdom fact is missing or expired,
+    /// or a source fact ID does not exist.
     /// Returns `MemoryError::Database` on insert failure.
-    pub fn record_lineage(
+    ///
+    /// `#[cfg(test)]`: production promotion writes lineage atomically inside
+    /// [`promote_in_conn`](crate::engine::MemoryEngine::promote_in_conn) (one
+    /// savepoint), never through this bare wrapper. It is retained only so the
+    /// engine-level lineage tests can seed records directly.
+    #[cfg(test)]
+    pub(crate) fn record_lineage(
         &self,
-        record: &NewLineageRecord,
+        record: &crate::types::NewLineageRecord,
         provenance: &PromotionProvenance,
     ) -> Result<i64> {
         let conn = self.write_conn()?;

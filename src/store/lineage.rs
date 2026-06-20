@@ -19,20 +19,40 @@ impl<'a> LineageStore<'a> {
     /// Insert a new lineage record with its provenance envelope.
     /// Returns the auto-assigned `lineage_id`.
     ///
-    /// Validates that all `source_fact_ids` reference existing facts before
-    /// inserting. The `provenance.lineage_id` field is not stored in the JSON
-    /// (`skip_serializing`) — the row PK is authoritative.
+    /// Validates that the `wisdom_fact_id` references an **active** (non-expired)
+    /// fact and that all `source_fact_ids` reference existing facts before
+    /// inserting — so a lineage row can never be orphaned against a missing or
+    /// soft-deleted wisdom fact. The `provenance.lineage_id` field is not stored
+    /// in the JSON (`skip_serializing`) — the row PK is authoritative.
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Lineage` if any source fact ID does not exist.
+    /// Returns `MemoryError::Lineage` if the `wisdom_fact_id` does not exist or
+    /// is expired, or if any source fact ID does not exist.
     /// Returns `MemoryError::Database` on insert failure (e.g., duplicate
-    /// `wisdom_fact_id`, FK violation).
+    /// `wisdom_fact_id`).
     pub fn insert(
         &self,
         record: &NewLineageRecord,
         provenance: &PromotionProvenance,
     ) -> Result<i64> {
+        // Validate that the wisdom fact exists and is active (not soft-deleted).
+        // The FK only proves the row exists; an expired (`t_expired IS NOT NULL`)
+        // fact is a tombstone and must not anchor fresh lineage. Doing the check
+        // here turns an opaque FK `Database` error into a clear `Lineage` cause
+        // and additionally rejects the expired case the FK cannot catch.
+        let wisdom_active: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE id = ?1 AND t_expired IS NULL",
+            params![record.wisdom_fact_id],
+            |r| r.get(0),
+        )?;
+        if wisdom_active == 0 {
+            return Err(MemoryError::Lineage(format!(
+                "wisdom fact {} does not exist or is expired; cannot record lineage",
+                record.wisdom_fact_id
+            )));
+        }
+
         // Validate that all distinct source fact IDs exist.
         if !record.source_fact_ids.is_empty() {
             let unique_ids: std::collections::BTreeSet<i64> =
@@ -370,6 +390,44 @@ mod tests {
         let err = store.insert(&new_rec, &test_provenance()).unwrap_err();
         assert!(matches!(err, MemoryError::Lineage(_)));
         assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn insert_rejects_nonexistent_wisdom_fact() {
+        // A lineage row must point at an existing wisdom fact. Without the
+        // up-front check this would surface as an opaque FK `Database` error;
+        // with it, the caller gets a clear `Lineage` error naming the cause.
+        let conn = setup();
+        let store = LineageStore::new(&conn);
+        let new_rec = NewLineageRecord {
+            wisdom_fact_id: 12345, // no such fact
+            source_fact_ids: vec![10, 20],
+        };
+        let err = store.insert(&new_rec, &test_provenance()).unwrap_err();
+        assert!(matches!(err, MemoryError::Lineage(_)), "{err}");
+        assert!(err.to_string().contains("12345"), "{err}");
+    }
+
+    #[test]
+    fn insert_rejects_expired_wisdom_fact() {
+        // The FK only proves the row exists, not that it is active. Recording
+        // lineage against a soft-deleted (expired) wisdom fact would orphan the
+        // provenance against a tombstone — reject it.
+        let conn = setup();
+        // Expire wisdom fact 1.
+        conn.execute(
+            "UPDATE facts SET t_expired = '2026-02-01T00:00:00Z' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let store = LineageStore::new(&conn);
+        let new_rec = NewLineageRecord {
+            wisdom_fact_id: 1,
+            source_fact_ids: vec![10, 20],
+        };
+        let err = store.insert(&new_rec, &test_provenance()).unwrap_err();
+        assert!(matches!(err, MemoryError::Lineage(_)), "{err}");
+        assert!(err.to_string().contains("expired"), "{err}");
     }
 
     #[test]
