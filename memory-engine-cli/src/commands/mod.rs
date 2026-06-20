@@ -3,6 +3,7 @@ pub mod batch_ingest;
 pub mod bootstrap;
 pub mod consolidate;
 pub mod dump;
+pub mod embedding_args;
 pub mod explain;
 pub mod export;
 pub mod import;

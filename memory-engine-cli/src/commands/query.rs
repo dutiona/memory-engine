@@ -3,8 +3,10 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use memory_engine::MemoryQuery;
 use memory_engine::search::hybrid::MatchType;
+use memory_engine::traits::EmbeddingProvider;
 use tabled::{Table, Tabled};
 
+use crate::commands::embedding_args::EmbeddingArgs;
 use crate::db::open_engine;
 use crate::output::{self, OutputFormat, parse_datetime, truncate_str};
 
@@ -38,6 +40,12 @@ pub struct QueryArgs {
     /// `t_valid` <= dt AND (`t_invalid` IS NULL OR `t_invalid` > dt).
     #[arg(long, value_parser = parse_datetime)]
     valid_at: Option<DateTime<Utc>>,
+
+    /// Embedding provider config. When `--embed-url` + `--embed-model` are set, the
+    /// query text is embedded via `embed_query` (asymmetric prefix applied) for
+    /// hybrid FTS + vector search; otherwise the query is FTS-only.
+    #[command(flatten)]
+    embed: EmbeddingArgs,
 }
 
 #[derive(Tabled)]
@@ -98,6 +106,16 @@ pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<
 
     if let Some(dt) = args.valid_at {
         query = query.valid_at(dt);
+    }
+
+    // When an embedder is configured, embed the query text via embed_query (so an
+    // asymmetric model applies its query instruction prefix) for hybrid FTS + vector
+    // search. With no embedder configured the query stays FTS-only (#619, §Design.6).
+    if let Some(provider) = args.embed.build_optional(engine.embed_dim())? {
+        let embedding = provider
+            .embed_query(&args.text)
+            .map_err(|e| anyhow::anyhow!("query embedding failed: {e}"))?;
+        query = query.embedding(embedding);
     }
 
     let response = engine.execute_query(&query)?;

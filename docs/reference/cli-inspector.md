@@ -59,16 +59,21 @@ memory-engine-cli explain 42
 
 Shows why a fact is in its current state: active/expired/pinned/due, scope path, importance breakdown (base vs composite), access count, source event ID, and graph context (degree, component size, neighbor IDs).
 
-#### `query <text>` — Full-Text Search
+#### `query <text>` — Full-Text + (optional) Vector Search
 
 ```bash
+# FTS-only (no embedder configured)
 memory-engine-cli query "database migration"
 memory-engine-cli query "auth" --scope "project/backend" --limit 5
-memory-engine-cli query "pattern" --fact-type semantic --min-importance 0.5
-memory-engine-cli query "critical" --pinned-only
+
+# Hybrid FTS + vector: pass an embedder and the query text is embedded via embed_query
+memory-engine-cli query "how does auth work" \
+  --embed-url http://localhost:8080/v1/embeddings \
+  --embed-model Qwen/Qwen3-Embedding-0.6B --embed-provider tei \
+  --query-instruction "Instruct: Given a search query, retrieve relevant memory facts.\nQuery: "
 ```
 
-FTS5-based text search. No embeddings required (the CLI has no `EmbeddingProvider`). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
+FTS5 text search by default. **When `--embed-url` + `--embed-model` are supplied (#619), the query text is embedded via `embed_query`** (applying an asymmetric model's query-instruction prefix) for hybrid FTS + vector retrieval; with no embedder it stays FTS-only. The embedder flags are shared with `batch-ingest` / `bootstrap` / `consolidate` (`--embed-provider`, `--embed-api-key`, `--query-instruction`, `--mrl-dim`, `--native-dim`, `--embed-timeout`) and the declared `--embed-provider` must match the store's recorded identity (#614). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
 
 #### `export -o <path>` — Export State
 
@@ -215,6 +220,6 @@ The `open_engine()` function sets `backup_dir` adjacent to the database as a saf
 
 ### Known Limitations
 
-- **No vector search in `query`**: The `query` subcommand doesn't use a `EmbeddingProvider`, so only FTS5 text matching works. Vector/hybrid search requires the MCP server. (The `batch-ingest` command does use embeddings for ingestion, but `query` remains text-only.)
+- **`query` is FTS-only without an embedder**: with no `--embed-url`/`--embed-model` the `query` subcommand does FTS5 text matching only. Supplying the embedder flags (#619) enables hybrid FTS + vector search via `embed_query`.
 - **`dump --limit` pushes SQL LIMIT**: `list_active_facts(Some(n))` adds a `LIMIT` clause to avoid materializing the full corpus.
 - **Import schema version**: Export/import roundtrip fails due to schema v6 vs restore v5 mismatch. Tracked in #80.
