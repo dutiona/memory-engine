@@ -579,6 +579,13 @@ impl ConnectionPool {
     /// Wrap a freshly-acquired write `MutexGuard` in a [`WriteGuard`], recording
     /// (in debug builds only) that this thread now holds this pool's write lock
     /// so [`read`](Self::read) can detect the in-memory reentrant deadlock.
+    // In release builds the debug-only marking is compiled out, leaving `&self`
+    // unused and the fn const-eligible; the documented (debug-profile) clippy
+    // gate is clean, so allow these only for the release profile.
+    #[cfg_attr(
+        not(debug_assertions),
+        allow(clippy::unused_self, clippy::missing_const_for_fn)
+    )]
     fn make_write_guard<'a>(&self, guard: MutexGuard<'a, Connection>) -> WriteGuard<'a> {
         #[cfg(debug_assertions)]
         {
