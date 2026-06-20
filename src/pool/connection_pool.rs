@@ -943,4 +943,65 @@ mod tests {
         // inline so the significant-Drop guard isn't bound to a local.
         assert!(pool.read().is_ok());
     }
+
+    /// Cross-thread block-then-wake: thread B blocks on an exhausted 1-conn
+    /// pool, the main thread drops the only checked-out connection (firing
+    /// `notify_one`), and B must then **acquire and use** that connection —
+    /// proving the `Condvar` wakeup wakes a genuinely-blocked waiter that then
+    /// succeeds, not merely that the timeout path returns (#473).
+    ///
+    /// The single-threaded `pool_read_acquire_succeeds_when_connection_returned`
+    /// never blocks (take/drop/reacquire on one thread), and the existing
+    /// multithreaded tests prove only the *timeout* path. This is the missing
+    /// case: a real blocked thread woken by a real return.
+    #[test]
+    fn pool_read_blocks_then_wakes_and_succeeds_across_threads() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
+        // Generous timeout: this test proves the *success-after-wake* path, so
+        // it must never reach the timeout. Default (30s) is ample; keep it.
+
+        // Seed a row so the woken reader can prove its connection is live.
+        {
+            let w = pool.write();
+            crate::store::schema::set_config(&w, "woke", "yes").unwrap();
+        }
+
+        // Hold the only read connection on the main thread: the pool is now
+        // exhausted, so any other reader must block.
+        let held = pool.read().unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+
+        std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                // Signal that thread B is about to block, then block on read().
+                started_tx.send(()).unwrap();
+                // This blocks until `held` is dropped on the main thread; on
+                // wake it must acquire the returned connection and read the row.
+                let r = pool
+                    .read()
+                    .expect("woken reader must acquire, not time out");
+                get_config(&r, "woke").unwrap()
+            });
+
+            // Wait until B has reached the point of blocking, then release the
+            // only connection so B's `Condvar` wait is satisfied by a real
+            // return (notify_one), not a spurious wakeup or the timeout.
+            started_rx.recv().unwrap();
+            // Small settle so B is parked in `wait_until` before we notify.
+            std::thread::sleep(Duration::from_millis(50));
+            drop(held);
+
+            let value = reader.join().expect("reader thread panicked");
+            assert_eq!(
+                value,
+                Some("yes".to_string()),
+                "woken reader read the wrong value through its acquired connection"
+            );
+        });
+    }
 }
