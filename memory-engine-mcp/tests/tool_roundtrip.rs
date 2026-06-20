@@ -57,6 +57,25 @@ const fn make_embedder() -> TestEmbedder {
     TestEmbedder { dim: DIM }
 }
 
+/// Stamp the store's embedding identity via a real-embedder write. A fresh store has
+/// no identity, and #614 makes a precomputed `memory_add_fact` require a present one
+/// (it cannot establish identity from a sentinel). Mirrors `query_with_precomputed_embedding`.
+fn stamp_identity(engine: &MemoryEngine) {
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "identity-seed".into(),
+                fact_type: memory_engine::types::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            &make_embedder(),
+            None,
+        )
+        .expect("stamp embedding identity");
+}
+
 fn args(pairs: Value) -> Map<String, Value> {
     match pairs {
         Value::Object(m) => m,
@@ -172,6 +191,7 @@ fn ingest_missing_required_field() {
 #[test]
 fn add_fact_with_precomputed_embedding() {
     let engine = make_engine();
+    stamp_identity(&engine);
     let emb = vec![0.1; DIM];
     let result = tools::dispatch(
         "memory_add_fact",
@@ -192,6 +212,7 @@ fn add_fact_with_precomputed_embedding() {
 #[test]
 fn add_fact_all_options() {
     let engine = make_engine();
+    stamp_identity(&engine);
     let emb = vec![0.2; DIM];
     let result = tools::dispatch(
         "memory_add_fact",

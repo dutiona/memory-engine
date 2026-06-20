@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use rusqlite::Connection;
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::limits::{check_json_size, check_str_size};
@@ -71,31 +72,86 @@ impl MemoryEngine {
     /// `opts.importance` is set and outside `[0, 1]` (or non-finite); the
     /// request is rejected before any embedding, event, or fact is written.
     /// Returns errors from embedding computation, dimension validation, or DB insert.
-    // `conn` (write lock) is reused by `FactStore::new(&conn).insert(..)` at the
-    // block's return expression; clippy's nursery suggestion to drop it after
-    // scope resolution misses that transitive borrow and would not compile.
-    #[allow(clippy::significant_drop_tightening)]
     pub fn add_fact(
         &self,
         req: &AddFactRequest,
         embedder: &dyn EmbeddingProvider,
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<i64> {
-        let now = Utc::now();
-        // Reject an out-of-range importance BEFORE any work — the opts clone,
-        // embedding, or persisting: no event, no fact, no slow embedding call,
-        // and no (potentially expensive) metadata clone for an invalid request.
+        Self::validate_add_fact_request(req)?;
+        // Embed OUTSIDE the write lock (potentially slow)
+        let embedding = embedder.embed(&req.content)?;
+        // Record the provider's identity on the first embedding write (#613) — which,
+        // under #614, also rejects a fingerprint that disagrees with the stored one.
+        self.insert_fact_with_embedding(req, embedding, classifier, |conn| {
+            self.record_embedding_identity(conn, embedder)
+        })
+    }
+
+    /// Add a fact with a caller-supplied **pre-computed** embedding.
+    ///
+    /// Unlike [`add_fact`](Self::add_fact), this performs no embedding (the vector is
+    /// given) and does **not** record a model identity: a pre-computed vector carries no
+    /// real provider fingerprint (declaring its model is #615). Instead it requires the
+    /// store to **already** have a recorded identity
+    /// ([`require_present`](crate::store::embedding_meta::require_present)) and inserts
+    /// the dim-checked vector into that established space. On a fresh, never-embedded
+    /// store this errors — a pre-computed write cannot establish identity.
+    ///
+    /// This mirrors the `promote` and cycle `AddFact`/`Synthesize` pre-computed paths
+    /// (#613) and is the path the MCP `memory_add_fact` precomputed branch uses, so #614
+    /// enforcement does not compare the caller's vector against a sentinel fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Internal` if the store has no recorded embedding identity,
+    /// `MemoryError::EmbeddingDimension` if the vector length is wrong, or any write
+    /// error.
+    pub fn add_fact_precomputed(
+        &self,
+        req: &AddFactRequest,
+        embedding: Vec<f32>,
+        classifier: Option<&dyn PersistenceClassifier>,
+    ) -> Result<i64> {
+        Self::validate_add_fact_request(req)?;
+        self.insert_fact_with_embedding(req, embedding, classifier, |conn| {
+            crate::store::embedding_meta::require_present(conn)
+        })
+    }
+
+    /// Validate an [`AddFactRequest`] before any expensive work (embedding, metadata
+    /// clone, write). Rejects an out-of-range importance and oversized content/metadata
+    /// (issue #572 / L10) so a hostile or malformed request fails fast and cheap.
+    fn validate_add_fact_request(req: &AddFactRequest) -> Result<()> {
         Self::validate_importance(req.opts.as_ref().and_then(|o| o.importance))?;
-        // Reject oversized content/metadata before any expensive work so a
-        // hostile request fails fast and cheap (issue #572 / L10).
         check_str_size(&req.content, "fact content")?;
         if let Some(metadata) = req.opts.as_ref().and_then(|o| o.metadata.as_ref()) {
             check_json_size(metadata, "fact metadata")?;
         }
+        Ok(())
+    }
+
+    /// Shared body of [`add_fact`](Self::add_fact) and
+    /// [`add_fact_precomputed`](Self::add_fact_precomputed): classify, resolve scope, and
+    /// insert the fact with its (already-obtained) `embedding` in a single write
+    /// transaction. `stamp_identity` runs inside that transaction *before* the insert —
+    /// either recording the provider identity (`add_fact`) or asserting one already
+    /// exists (`add_fact_precomputed`) — so a vector is never committed without an
+    /// established identity (the #614 silent-corruption landmine).
+    // The `conn` write lock is held until the block's end: `tx` borrows it and must
+    // commit before it drops, so clippy's nursery suggestion to drop `conn` right after
+    // `unchecked_transaction()` misses that transitive borrow and would not compile.
+    #[allow(clippy::significant_drop_tightening)]
+    fn insert_fact_with_embedding(
+        &self,
+        req: &AddFactRequest,
+        embedding: Vec<f32>,
+        classifier: Option<&dyn PersistenceClassifier>,
+        stamp_identity: impl FnOnce(&Connection) -> Result<()>,
+    ) -> Result<i64> {
+        let now = Utc::now();
         let opts = req.opts.clone().unwrap_or_default();
 
-        // Embed OUTSIDE the write lock (potentially slow)
-        let embedding = embedder.embed(&req.content)?;
         let base_importance = opts.importance.unwrap_or(0.5);
         let effective_created = opts.t_created.unwrap_or(now);
         let effective_last_accessed = opts.last_accessed.unwrap_or(now);
@@ -160,17 +216,17 @@ impl MemoryEngine {
                 is_pinned,
             };
 
-            // Atomic first-write: record the embedding identity (#613, ADR 0015 §2)
-            // and insert the fact in one transaction, so a vector is never committed
-            // without its identity (the #614 silent-corruption landmine). `add_fact`
-            // was previously a bare autocommit insert; a second autocommit statement
-            // for the identity would let a crash between them orphan the vector.
+            // Atomic first-write: stamp/verify the embedding identity (#613/#614, ADR
+            // 0015 §2) and insert the fact in one transaction, so a vector is never
+            // committed without an established identity (the #614 silent-corruption
+            // landmine). The insert was previously a bare autocommit; a second autocommit
+            // statement for the identity would let a crash between them orphan the vector.
             // Scope creation above stays autocommit (unchanged): an orphan scope on
             // rollback is a pre-existing, benign outcome, and the scope row + its
             // scope_tree cache entry commit together, independent of the fact — so no
             // cache desync is introduced.
             let tx = conn.unchecked_transaction()?;
-            self.record_embedding_identity(&tx, embedder)?;
+            stamp_identity(&tx)?;
             let id = FactStore::new(&tx, self.embed_dim).insert(&new_fact)?;
             tx.commit()?;
             id

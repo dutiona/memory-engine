@@ -313,6 +313,48 @@ fn verify_embedding_identity_enforces_match() {
 }
 
 #[test]
+fn add_fact_precomputed_requires_present_identity() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let req = AddFactRequest {
+        content: "p".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+
+    // Fresh store: a pre-computed write cannot establish identity -> rejected
+    // (consistent with promote / cycle AddFact). The error is the require_present guard.
+    let err = engine
+        .add_fact_precomputed(&req, vec![0.5; DIM], None)
+        .expect_err("precomputed add on a fresh store must require an identity");
+    assert!(
+        matches!(err, MemoryError::Internal(_)),
+        "expected require_present Internal error, got {err:?}"
+    );
+
+    // Stamp the identity via a real embedder, then a pre-computed add succeeds — with NO
+    // model comparison, so the passthrough-style sentinel can't trigger a false mismatch
+    // (the #614 regression). This is the documented memory_add_fact precomputed workflow.
+    engine
+        .add_fact(&req, &MockEmbedder { dim: DIM }, None)
+        .unwrap();
+    let id = engine
+        .add_fact_precomputed(&req, vec![0.6; DIM], None)
+        .expect("precomputed add into a stamped store succeeds");
+    assert!(id > 0);
+
+    // Dimension is still enforced on the pre-computed vector.
+    let dim_err = engine
+        .add_fact_precomputed(&req, vec![0.6; DIM + 3], None)
+        .expect_err("wrong-dimension precomputed vector must be rejected");
+    assert!(
+        matches!(dim_err, MemoryError::EmbeddingDimension { .. }),
+        "expected EmbeddingDimension, got {dim_err:?}"
+    );
+}
+
+#[test]
 fn noop_bootstrap_does_not_stamp_identity() {
     // #643: bootstrapping a session that creates zero facts (here an empty reader)
     // must NOT record the embedding identity. Previously the engine stamped before

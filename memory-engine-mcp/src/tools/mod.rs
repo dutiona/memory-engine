@@ -20,7 +20,7 @@ use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
 use serde_json::{Map, Value, json};
 
 use crate::depth::{self, Depth};
-use crate::embedding::{HttpEmbeddingProvider, PassthroughEmbedder};
+use crate::embedding::HttpEmbeddingProvider;
 use crate::error::{ValidationError, to_mcp_error};
 
 // ---------------------------------------------------------------------------
@@ -681,9 +681,13 @@ fn handle_add_fact(
     };
 
     let fact_id = if let Some(emb) = pre_computed {
-        let passthrough = PassthroughEmbedder::new(emb);
+        // Pre-computed vector: insert into the store's already-established embedding
+        // space without recording a model identity (the caller's vector carries no real
+        // fingerprint until #615 lets it declare a model). add_fact_precomputed requires
+        // the store to already have an identity, so #614 enforcement does not compare the
+        // caller's vector against the passthrough sentinel.
         engine
-            .add_fact(&req, &passthrough, None)
+            .add_fact_precomputed(&req, emb, None)
             .map_err(to_mcp_error)?
     } else {
         let emb = embedder.ok_or(ValidationError::NoEmbeddingProvider)?;
