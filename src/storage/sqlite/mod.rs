@@ -40,6 +40,7 @@ use crate::store::upcaster::UpcasterRegistry;
 
 mod convert;
 mod event_log;
+mod graph;
 mod search_index;
 
 /// The default, in-process `SQLite` implementation of [`StorageBackend`](crate::storage::StorageBackend).
