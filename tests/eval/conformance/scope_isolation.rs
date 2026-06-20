@@ -247,6 +247,57 @@ fn scope_inherited_includes_ancestors_and_descendants_not_unrelated() {
 }
 
 #[test]
+fn empty_scope_string_returns_no_facts_not_everything() {
+    // Caller-level regression for the empty-string fail-open (#360 follow-up).
+    // An empty scope-query string must be treated as a non-existent scope ("no
+    // results"), NOT silently resolved to root. If `resolve_path("")` returned
+    // root, `scope_exact("")` would surface the root scope's facts and, worse,
+    // `scope_subtree("")` would expand to subtree(root) = EVERY fact across
+    // EVERY context — leaking all facts through a blank/defaulted scope field.
+    // This guards the boundary that actually flips (engine/query.rs), which the
+    // tree-level unit tests don't exercise end-to-end.
+    let engine = eval_engine();
+
+    add_scoped_fact(&engine, "Alice fact", FactType::Semantic, "project:alpha");
+    add_scoped_fact(&engine, "Bob fact", FactType::Semantic, "project:beta");
+
+    let exact = engine
+        .execute_query(&MemoryQuery::new().scope_exact(""))
+        .expect("query failed");
+    assert!(
+        exact.results.is_empty(),
+        "empty scope_exact must return zero results, not root facts; got {:?}",
+        exact.results.iter().map(|r| r.fact.id).collect::<Vec<_>>()
+    );
+
+    let subtree = engine
+        .execute_query(&MemoryQuery::new().scope_subtree(""))
+        .expect("query failed");
+    assert!(
+        subtree.results.is_empty(),
+        "empty scope_subtree must NOT leak the whole store (subtree(root)); got {:?}",
+        subtree
+            .results
+            .iter()
+            .map(|r| r.fact.id)
+            .collect::<Vec<_>>()
+    );
+
+    let inherited = engine
+        .execute_query(&MemoryQuery::new().scope_inherited(""))
+        .expect("query failed");
+    assert!(
+        inherited.results.is_empty(),
+        "empty scope_inherited must NOT leak the whole store; got {:?}",
+        inherited
+            .results
+            .iter()
+            .map(|r| r.fact.id)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn scope_exact_does_not_include_parent_facts() {
     let engine = eval_engine();
 

@@ -60,10 +60,13 @@ impl ScopeTree {
 
     /// Resolve a path string to a `scope_id` (read-only, no creation).
     ///
-    /// The empty string `""` and `"/"` both resolve to the root scope. `"/"` is
-    /// the canonical string [`ScopeTree::path_for_id`] renders for the root, so
+    /// The canonical root string `"/"` (the one [`ScopeTree::path_for_id`]
+    /// renders for the root) resolves to the root scope, so
     /// `resolve_path(path_for_id(root))` round-trips rather than returning
-    /// `None` (the representation is invertible).
+    /// `None` (the representation is invertible). The empty string `""` is
+    /// **not** a root synonym — it resolves to `None`, agreeing with the write
+    /// path ([`crate::store::ScopeStore::ensure_path`] rejects `""`) and keeping
+    /// an empty/defaulted scope query from silently meaning "the entire store".
     ///
     /// For any other input, segments are separated by `/`. Returns `None` if any
     /// segment does not exist in the cached tree, or if the path contains an
@@ -78,10 +81,16 @@ impl ScopeTree {
     /// recover the un-padded label — it is defensive, not permissive. Use
     /// `ensure_path` when you need the input itself validated rather than coerced.
     pub fn resolve_path(&self, path: &str) -> Option<i64> {
-        // Root synonyms: the canonical "/" rendered by `path_for_id`, and "" as
-        // the conceptual root. Handled up front so the per-segment loop never
-        // sees the empty inner segment they would otherwise split into.
-        if path.is_empty() || path == "/" {
+        // Root synonym: the canonical "/" rendered by `path_for_id`. Handled up
+        // front so the per-segment loop never sees the two empty segments "/"
+        // would otherwise split into. The empty string "" is deliberately *not*
+        // a root synonym: it stays unresolvable (`None`), matching the write
+        // path where `ScopeStore::ensure_path("")` errors. Resolving "" to root
+        // would make an empty/defaulted scope query mean "the entire store"
+        // (subtree(root) = all facts) — a fail-open hole for a scope-isolation
+        // primitive. `path_for_id` never emits "", so only "/" is needed for the
+        // representation to round-trip.
+        if path == "/" {
             return Some(Self::ROOT_ID);
         }
         let mut current = Self::ROOT_ID; // start at root
@@ -207,8 +216,9 @@ impl ScopeTree {
     /// Returns `"/"` for the root scope. Non-root example: `"user:michael/project:demo"`.
     /// Returns `None` if the ID is not in the tree.
     ///
-    /// **Note:** The root path `"/"` is display-only — it is not a valid input to
-    /// [`ScopeTree::resolve_path`].
+    /// **Note:** The root path `"/"` is accepted by
+    /// [`ScopeTree::resolve_path`] as a root synonym, so the representation
+    /// round-trips: `resolve_path(path_for_id(root)) == Some(root_id())`.
     #[must_use]
     pub fn path_for_id(&self, scope_id: i64) -> Option<String> {
         if !self.nodes.contains_key(&scope_id) {
@@ -418,12 +428,14 @@ mod tests {
     fn resolve_path_root_synonyms() {
         // The root path produced by `path_for_id` ("/") must round-trip back
         // through `resolve_path` (#360 — eliminate the non-invertible
-        // representation). The empty string is also accepted as a root synonym,
-        // matching how `ScopeStore::ensure_path` treats the conceptual root.
+        // representation). The empty string is deliberately NOT a root synonym:
+        // it stays unresolvable, agreeing with the write path
+        // (`ScopeStore::ensure_path("")` errors) and avoiding the fail-open
+        // "empty scope query == the entire store" footgun.
         let tree = setup_tree();
         let root = ScopeTree::root_id();
         assert_eq!(tree.resolve_path("/"), Some(root));
-        assert_eq!(tree.resolve_path(""), Some(root));
+        assert_eq!(tree.resolve_path(""), None);
     }
 
     #[test]
@@ -445,6 +457,31 @@ mod tests {
         assert!(tree.resolve_path("user:michael//project:demo").is_none());
         assert!(tree.resolve_path("/user:michael").is_none());
         assert!(tree.resolve_path("user:michael/").is_none());
+    }
+
+    #[test]
+    fn resolve_query_empty_string_is_no_match_not_everything() {
+        // Guards the dangerous direction at the query boundary: an empty scope
+        // string must NOT resolve to root. If it did, `Subtree("")`/`Inherited("")`
+        // would expand to `subtree(root)` = every scope_id in the store, turning
+        // an empty/defaulted scope query into an unscoped scan over all facts —
+        // a fail-open hole for a scope-isolation primitive. All four variants
+        // must report `None` ("scope doesn't exist → no results"), the same as
+        // any other non-existent path.
+        let tree = setup_tree();
+        assert_eq!(tree.resolve_query(&ScopeQuery::Exact(String::new())), None);
+        assert_eq!(
+            tree.resolve_query(&ScopeQuery::Subtree(String::new())),
+            None
+        );
+        assert_eq!(
+            tree.resolve_query(&ScopeQuery::Ancestors(String::new())),
+            None
+        );
+        assert_eq!(
+            tree.resolve_query(&ScopeQuery::Inherited(String::new())),
+            None
+        );
     }
 
     #[test]
