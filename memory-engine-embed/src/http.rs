@@ -1,6 +1,49 @@
+use std::io::Read;
+
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
+
+/// Maximum embedding-response body the provider will buffer, in bytes (32 MiB).
+///
+/// `reqwest`'s `.json()` / `.text()` buffer the entire body with no length
+/// limit, so a compromised, misconfigured, or adversarial endpoint (e.g. a URL
+/// accidentally pointed at a large page, or a server trickling gigabytes under
+/// the request timeout) could exhaust host memory (CWE-400 / CWE-770). A real
+/// embedding response is at most a few MiB even for large batches of 4096-dim
+/// vectors, so 32 MiB is a generous ceiling. The cap is enforced on the bytes
+/// *actually read* via a bounded reader, not on the (absent or spoofable)
+/// `Content-Length` header.
+const MAX_BODY: u64 = 32 * 1024 * 1024;
+
+/// The three response shapes an OpenAI-compatible embedding endpoint may return,
+/// discriminated by their top-level key.
+///
+/// `#[serde(untagged)]` tries the variants in declaration order and picks the
+/// first whose required field is present; the keys are disjoint, so a well-formed
+/// response matches exactly one. Declaration order preserves the historical
+/// dispatch precedence (`data` > `embeddings` > `embedding`) for the degenerate
+/// case where a server returns more than one key.
+///
+/// The leaf payloads are kept as [`serde_json::Value`] rather than `Vec<f32>` /
+/// `Vec<OpenAiItem>` on purpose: the per-element validation (missing/duplicate
+/// `index`, gaps, unparseable `embedding`) lives in
+/// [`HttpEmbeddingProvider::parse_openai_batch`] /
+/// [`HttpEmbeddingProvider::parse_ollama_batch`], which emit precise per-index
+/// diagnostics. Fully typing the leaves would make `untagged` fall through to the
+/// next variant on a malformed element and surface a generic "did not match any
+/// variant" error instead — a regression in error fidelity. This enum's job is to
+/// centralise *format dispatch*, replacing the duplicated `.get("…")` chains.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum EmbeddingResponse {
+    /// `OpenAI`: `{ "data": [{ "index": 0, "embedding": [...] }, ...] }`.
+    OpenAi { data: Vec<serde_json::Value> },
+    /// Ollama: `{ "embeddings": [[...], ...] }`.
+    Ollama { embeddings: Vec<serde_json::Value> },
+    /// Direct / legacy single: `{ "embedding": [...] }`.
+    Direct { embedding: serde_json::Value },
+}
 
 /// HTTP-based embedding provider calling an OpenAI-compatible `/v1/embeddings` endpoint.
 ///
@@ -75,9 +118,27 @@ impl HttpEmbeddingProvider {
     /// speak `/v1/embeddings` — so it is an explicit argument: it feeds
     /// [`EmbeddingProvider::fingerprint`] and must reflect the real backend.
     ///
+    /// # Parameters
+    ///
+    /// - `endpoint`: Full URL of the `/v1/embeddings`-compatible endpoint.
+    /// - `model`: Model identifier forwarded verbatim in the JSON `"model"` field.
+    /// - `provider`: Operator-declared serving backend (see above); recorded in the
+    ///   [`fingerprint`](EmbeddingProvider::fingerprint), not sent on the wire.
+    /// - `api_key`: If `Some`, sent as a `Bearer` token in the `Authorization` header.
+    /// - `expected_dim`: The **native** dimensionality every raw response vector must
+    ///   have. It is validated on every [`embed`](EmbeddingProvider::embed) /
+    ///   [`embed_batch`](EmbeddingProvider::embed_batch) call, which return
+    ///   [`MemoryError::EmbeddingDimension`] on a mismatch. With
+    ///   [`with_mrl_dim`](Self::with_mrl_dim) set, the *stored* dimension is the
+    ///   truncated `mrl_dim`, but the raw response is still validated against this.
+    /// - `timeout_secs`: Per-request timeout in seconds applied to the blocking HTTP
+    ///   client. (Note: a body trickled under this timeout is still bounded by the
+    ///   32 MiB response size cap.)
+    ///
     /// # Errors
     ///
-    /// Returns an error if the HTTP client cannot be constructed (e.g., TLS init failure).
+    /// Returns [`MemoryError::Internal`] if the underlying `reqwest` blocking client
+    /// cannot be constructed (e.g., TLS init failure).
     pub fn new(
         endpoint: String,
         model: String,
@@ -287,15 +348,22 @@ impl HttpEmbeddingProvider {
         }
         Ok(())
     }
-}
 
-impl EmbeddingProvider for HttpEmbeddingProvider {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
-        let mut req = self.client.post(&self.endpoint).json(&serde_json::json!({
-            "model": &self.model,
-            "input": text,
-        }));
-
+    /// POST `payload` to the configured endpoint and return the parsed JSON body.
+    ///
+    /// Centralises the transport layer shared by every embed path — auth header,
+    /// send, status check, the [`MAX_BODY`] response cap, and JSON parse — so a
+    /// change to any of them (a new error class, a retry, a header) lives in one
+    /// place. Callers supply the request `payload` and interpret the returned
+    /// [`serde_json::Value`] for their response format.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::Internal`] if the request cannot be sent, the server
+    /// returns a non-2xx status (body included, capped), the body exceeds the
+    /// size cap, or the body is not valid JSON.
+    fn send_request(&self, payload: &serde_json::Value) -> Result<serde_json::Value, MemoryError> {
+        let mut req = self.client.post(&self.endpoint).json(payload);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
@@ -306,42 +374,88 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = read_body_capped(resp).map_or_else(
+                |_| String::new(),
+                |b| truncate_on_char_boundary(&String::from_utf8_lossy(&b), 1000),
+            );
             return Err(MemoryError::Internal(format!(
                 "embedding endpoint returned {status}: {body}"
             )));
         }
 
-        let body: serde_json::Value = resp
-            .json()
-            .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))?;
+        let bytes = read_body_capped(resp)?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))
+    }
 
-        // Auto-detect response format:
-        // OpenAI: { "data": [{ "embedding": [...] }] }
-        // Ollama: { "embeddings": [[...]] }
-        // Multi-branch if-let chain is clearer than a nested map_or_else here.
-        #[allow(clippy::option_if_let_else)]
-        let embedding = if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
-            data.first()
-                .and_then(|d| d.get("embedding"))
-                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok())
-        } else if let Some(embeddings) = body.get("embeddings").and_then(|e| e.as_array()) {
-            embeddings
-                .first()
-                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok())
-        } else if let Some(embedding) = body.get("embedding") {
-            // Single embedding format
-            serde_json::from_value::<Vec<f32>>(embedding.clone()).ok()
-        } else {
-            None
-        };
+    /// Classify a parsed response body into one of the known [`EmbeddingResponse`]
+    /// shapes, or `None` if it matches none.
+    ///
+    /// Deserializes by borrowing `body` so the caller keeps it for its own
+    /// (format-specific) "cannot extract" diagnostic.
+    fn classify(body: &serde_json::Value) -> Option<EmbeddingResponse> {
+        use serde::Deserialize as _;
+        EmbeddingResponse::deserialize(body).ok()
+    }
+}
 
-        let embedding = embedding.ok_or_else(|| {
+impl EmbeddingProvider for HttpEmbeddingProvider {
+    /// Embed a single text via one HTTP POST to the configured endpoint.
+    ///
+    /// Auto-detects the response format:
+    /// - `OpenAI`: `{ "data": [{ "embedding": [...] }] }` (first item used)
+    /// - Ollama: `{ "embeddings": [[...]] }` (first row used)
+    /// - Direct: `{ "embedding": [...] }`
+    ///
+    /// When [`with_mrl_dim`](Self::with_mrl_dim) is configured, the returned
+    /// vector is the L2-renormalized `mrl_dim`-length prefix of the validated
+    /// native response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] if:
+    /// - the HTTP request cannot be sent;
+    /// - the server returns a non-2xx status (status and capped body included);
+    /// - the response body exceeds the 32 MiB size cap;
+    /// - the body is not valid JSON, or matches no recognised format;
+    /// - the returned vector contains `NaN` or infinite values;
+    /// - MRL truncation is configured and the truncated prefix has a zero or
+    ///   non-finite L2 norm.
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`] if the (pre-truncation) vector
+    /// length does not match the native `expected_dim` supplied at construction.
+    fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
+        let body = self.send_request(&serde_json::json!({
+            "model": &self.model,
+            "input": text,
+        }))?;
+
+        let no_format = || {
             MemoryError::Internal(format!(
                 "cannot extract embedding from response: {}",
                 serde_json::to_string(&body).unwrap_or_default()
             ))
-        })?;
+        };
+
+        // Dispatch on the typed response shape; the single path takes the first
+        // embedding of whichever array variant matched. A shape that matches no
+        // variant, or a matched-but-unparseable embedding, both surface as the
+        // same "cannot extract" error (preserving the prior behaviour).
+        let embedding = match Self::classify(&body) {
+            Some(EmbeddingResponse::OpenAi { data }) => data
+                .first()
+                .and_then(|d| d.get("embedding"))
+                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok()),
+            Some(EmbeddingResponse::Ollama { embeddings }) => embeddings
+                .first()
+                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok()),
+            Some(EmbeddingResponse::Direct { embedding }) => {
+                serde_json::from_value::<Vec<f32>>(embedding).ok()
+            }
+            None => None,
+        };
+
+        let embedding = embedding.ok_or_else(no_format)?;
 
         self.validate_embedding(&embedding, None)?;
 
@@ -350,63 +464,80 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         self.maybe_truncate(embedding)
     }
 
+    /// Embed multiple texts in a single HTTP POST to the configured endpoint.
+    ///
+    /// Overrides the trait default (which loops [`embed`](Self::embed)) to make
+    /// **one round-trip** for the whole batch — materially cheaper for providers
+    /// with native batch APIs. An empty slice short-circuits to `Ok(vec![])`
+    /// without any HTTP call.
+    ///
+    /// Supports the `OpenAI` batch format (`data[]` with `index` fields, so
+    /// out-of-order responses are reordered by index) and the Ollama batch format
+    /// (`embeddings[]`). The Direct single-embedding format (`embedding`) is
+    /// accepted only when exactly one text was requested. As with
+    /// [`embed`](Self::embed), MRL truncation (if configured) is applied to each
+    /// returned vector after native-dimension validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] if:
+    /// - the HTTP request cannot be sent;
+    /// - the server returns a non-2xx status (status and capped body included);
+    /// - the response body exceeds the 32 MiB size cap;
+    /// - the body is not valid JSON, or matches no recognised batch format;
+    /// - the server returns a different number of embeddings than `texts.len()`,
+    ///   or a `Direct` single embedding when more than one text was requested;
+    /// - an `OpenAI` `data` item is missing/duplicates an `index`, leaves a gap,
+    ///   or carries an unparseable `embedding`;
+    /// - any returned vector contains `NaN` or infinite values;
+    /// - MRL truncation is configured and a truncated prefix has a zero or
+    ///   non-finite L2 norm.
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`] if any (pre-truncation) vector
+    /// length does not match the native `expected_dim` supplied at construction.
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut req = self.client.post(&self.endpoint).json(&serde_json::json!({
+        let body = self.send_request(&serde_json::json!({
             "model": &self.model,
             "input": texts,
-        }));
+        }))?;
 
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-
-        let resp = req
-            .send()
-            .map_err(|e| MemoryError::Internal(format!("embedding HTTP request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().unwrap_or_default();
-            return Err(MemoryError::Internal(format!(
-                "embedding endpoint returned {status}: {body}"
-            )));
-        }
-
-        let body: serde_json::Value = resp
-            .json()
-            .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))?;
-
-        // Auto-detect response format and extract all embeddings:
+        // Dispatch on the typed response shape and extract all embeddings:
         // OpenAI: { "data": [{ "index": 0, "embedding": [...] }, ...] }
         // Ollama: { "embeddings": [[...], [...]] }
-        // Single: { "embedding": [...] } (only when one text was requested)
-        let embeddings = if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
-            Self::parse_openai_batch(data, texts.len())?
-        } else if let Some(arr) = body.get("embeddings").and_then(|e| e.as_array()) {
-            Self::parse_ollama_batch(arr, texts.len())?
-        } else if let Some(embedding) = body.get("embedding") {
-            // Single embedding format (e.g. Ollama's legacy `/api/embeddings`, which
-            // accepts only one prompt). Only valid when exactly one text was requested.
-            if texts.len() != 1 {
+        // Direct: { "embedding": [...] } (only when one text was requested)
+        let embeddings = match Self::classify(&body) {
+            Some(EmbeddingResponse::OpenAi { data }) => {
+                Self::parse_openai_batch(&data, texts.len())?
+            }
+            Some(EmbeddingResponse::Ollama { embeddings }) => {
+                Self::parse_ollama_batch(&embeddings, texts.len())?
+            }
+            Some(EmbeddingResponse::Direct { embedding }) => {
+                // Direct single-embedding format (e.g. Ollama's legacy
+                // `/api/embeddings`, which accepts only one prompt). Only valid
+                // when exactly one text was requested.
+                if texts.len() != 1 {
+                    return Err(MemoryError::Internal(format!(
+                        "batch embedding: server returned a single 'embedding' but {} texts were requested",
+                        texts.len()
+                    )));
+                }
+                let emb = serde_json::from_value::<Vec<f32>>(embedding).map_err(|_| {
+                    MemoryError::Internal("batch embedding: cannot parse single 'embedding'".into())
+                })?;
+                vec![emb]
+            }
+            None => {
+                let body_str = serde_json::to_string(&body).unwrap_or_default();
+                let truncated = truncate_on_char_boundary(&body_str, 1000);
                 return Err(MemoryError::Internal(format!(
-                    "batch embedding: server returned a single 'embedding' but {} texts were requested",
-                    texts.len()
+                    "cannot extract embeddings from batch response: {truncated}"
                 )));
             }
-            let emb = serde_json::from_value::<Vec<f32>>(embedding.clone()).map_err(|_| {
-                MemoryError::Internal("batch embedding: cannot parse single 'embedding'".into())
-            })?;
-            vec![emb]
-        } else {
-            let body_str = serde_json::to_string(&body).unwrap_or_default();
-            let truncated = truncate_on_char_boundary(&body_str, 1000);
-            return Err(MemoryError::Internal(format!(
-                "cannot extract embeddings from batch response: {truncated}"
-            )));
         };
 
         // Validate all dimensions and NaN/Inf against the native dim, THEN truncate (MRL).
@@ -462,6 +593,28 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             ),
         }
     }
+}
+
+/// Read an HTTP response body into memory, refusing to buffer more than
+/// [`MAX_BODY`] bytes.
+///
+/// Reads through [`std::io::Read::take`] so at most `MAX_BODY + 1` bytes are
+/// ever buffered, regardless of what the server claims in `Content-Length` or
+/// how slowly it trickles the body — the `+ 1` byte is the over-limit sentinel.
+/// This is the genuine resource-exhaustion guard: `Content-Length` can be
+/// absent or spoofed, so the cap is enforced on bytes actually read.
+fn read_body_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, MemoryError> {
+    let mut buf = Vec::new();
+    let read = resp
+        .take(MAX_BODY + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| MemoryError::Internal(format!("embedding response read failed: {e}")))?;
+    if read as u64 > MAX_BODY {
+        return Err(MemoryError::Internal(format!(
+            "embedding response too large: exceeds {MAX_BODY}-byte cap"
+        )));
+    }
+    Ok(buf)
 }
 
 /// Truncate `s` to at most `max` bytes for an error message, snapping the cut
@@ -633,6 +786,52 @@ mod tests {
                 .to_string()
                 .contains("expected 3 results, got 1")
         );
+    }
+
+    #[test]
+    fn classify_disambiguates_openai_shape() {
+        let body = serde_json::json!({ "data": [{ "index": 0, "embedding": [0.1, 0.2] }] });
+        assert!(matches!(
+            HttpEmbeddingProvider::classify(&body),
+            Some(EmbeddingResponse::OpenAi { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_disambiguates_ollama_shape() {
+        let body = serde_json::json!({ "embeddings": [[0.1, 0.2], [0.3, 0.4]] });
+        assert!(matches!(
+            HttpEmbeddingProvider::classify(&body),
+            Some(EmbeddingResponse::Ollama { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_disambiguates_direct_shape() {
+        let body = serde_json::json!({ "embedding": [0.1, 0.2] });
+        assert!(matches!(
+            HttpEmbeddingProvider::classify(&body),
+            Some(EmbeddingResponse::Direct { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_prefers_data_over_embedding_when_both_present() {
+        // Historical dispatch precedence: `data` wins over a co-present `embedding`.
+        let body = serde_json::json!({
+            "data": [{ "index": 0, "embedding": [0.1] }],
+            "embedding": [9.9],
+        });
+        assert!(matches!(
+            HttpEmbeddingProvider::classify(&body),
+            Some(EmbeddingResponse::OpenAi { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_returns_none_for_unknown_shape() {
+        let body = serde_json::json!({ "unexpected": "shape" });
+        assert!(HttpEmbeddingProvider::classify(&body).is_none());
     }
 
     #[test]
@@ -849,5 +1048,87 @@ mod tests {
     fn default_query_instruction_is_query_only_prefix() {
         assert!(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION.starts_with("Instruct:"));
         assert!(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION.contains("Query: "));
+    }
+
+    // --- #448: property-based tests for the batch parsers ---
+    mod proptests {
+        use super::HttpEmbeddingProvider;
+        use proptest::prelude::*;
+
+        /// A bounded, recursive arbitrary `serde_json::Value` for panic-safety
+        /// fuzzing. Depth/size are capped so the parsers see deeply nested and
+        /// wrongly-typed trees without unbounded generation cost.
+        fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+            let leaf = prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::Bool),
+                any::<i64>().prop_map(serde_json::Value::from),
+                // Finite f64 only: serde_json cannot represent NaN/Inf as a Number.
+                (-1e6f64..1e6).prop_map(serde_json::Value::from),
+                ".*".prop_map(serde_json::Value::String),
+            ];
+            leaf.prop_recursive(4, 32, 6, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..6).prop_map(serde_json::Value::Array),
+                    prop::collection::vec((".*", inner), 0..6)
+                        .prop_map(|kvs| { serde_json::Value::Object(kvs.into_iter().collect()) }),
+                ]
+            })
+        }
+
+        proptest! {
+            /// For any permutation of indices `0..n` carrying arbitrary embeddings,
+            /// `parse_openai_batch` succeeds and returns them in index order.
+            #[test]
+            fn parse_openai_batch_permutation_returns_index_order(
+                // Shuffle the indices 0..n; each index i carries the marker
+                // embedding [i, i + 0.5] so the reorder is checkable.
+                indices in (1usize..=8).prop_flat_map(|n| {
+                    Just((0..n).collect::<Vec<_>>()).prop_shuffle()
+                })
+            ) {
+                let n = indices.len();
+                let data: Vec<serde_json::Value> = indices
+                    .iter()
+                    .map(|&i| {
+                        // u8 -> f32 is exact (no precision loss); n <= 8 here.
+                        let marker = f32::from(u8::try_from(i).expect("index < 8"));
+                        serde_json::json!({ "index": i, "embedding": [marker, marker + 0.5] })
+                    })
+                    .collect();
+
+                let out = HttpEmbeddingProvider::parse_openai_batch(&data, n)
+                    .expect("a permutation of 0..n must parse");
+                prop_assert_eq!(out.len(), n);
+                for (i, emb) in out.iter().enumerate() {
+                    let marker = f32::from(u8::try_from(i).expect("index < 8"));
+                    prop_assert_eq!(emb, &vec![marker, marker + 0.5]);
+                }
+            }
+
+            /// A non-permutation (a duplicate index, here index 0 twice) must error.
+            #[test]
+            fn parse_openai_batch_rejects_non_permutation(
+                payload in prop::collection::vec(-1e3f32..1e3, 1..4)
+            ) {
+                let data = vec![
+                    serde_json::json!({ "index": 0, "embedding": &payload }),
+                    serde_json::json!({ "index": 0, "embedding": &payload }),
+                ];
+                prop_assert!(HttpEmbeddingProvider::parse_openai_batch(&data, 2).is_err());
+            }
+
+            /// Neither batch parser may panic on arbitrary JSON arrays paired
+            /// with an arbitrary expected count.
+            #[test]
+            fn batch_parsers_never_panic_on_arbitrary_input(
+                items in prop::collection::vec(arb_json(), 0..8),
+                expected in 0usize..10,
+            ) {
+                // Both calls must return (Ok or Err) without panicking.
+                let _ = HttpEmbeddingProvider::parse_openai_batch(&items, expected);
+                let _ = HttpEmbeddingProvider::parse_ollama_batch(&items, expected);
+            }
+        }
     }
 }
