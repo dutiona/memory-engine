@@ -85,6 +85,7 @@ pub mod engine;
 pub mod error;
 pub mod inspect;
 pub mod search;
+pub mod storage;
 pub mod traits;
 pub mod types;
 
@@ -121,6 +122,16 @@ pub use traits::{
 };
 pub use types::*;
 
+// Storage port — tight flat re-export of the umbrella + cross-cutting types only.
+// The six bounded traits (FactGraph, EventLog, …) are the internal port surface
+// backends implement and tests mock; they stay reachable as
+// `memory_engine::storage::FactGraph`, not flat-re-exported, to keep the crate-root
+// namespace honest. (StorageError flat-exports via `pub use error::*` above.)
+pub use storage::{
+    BackendCapabilities, FactFilter, LexicalRanker, MetadataPredicate, StorageBackend,
+    TemporalFilter,
+};
+
 // Phase 5a cognitive pipeline re-exports
 pub use engine::cognitive::{DreamContext, INSIGHT_MARKER_KEY};
 pub use engine::cycle::{
@@ -144,6 +155,8 @@ mod tests {
         fn _accepts_insight_stream(_: &dyn crate::InsightStream) {}
         fn _accepts_dream_cycle(_: &dyn crate::DreamCycle) {}
         fn _accepts_delta_proposer(_: &dyn crate::DeltaProposer) {}
+        // storage port umbrella (bounded traits stay at `crate::storage::*`)
+        fn _accepts_storage_backend(_: &dyn crate::StorageBackend) {}
 
         // trait types
         let _ = std::mem::size_of::<crate::CrudDecision>();
@@ -160,5 +173,14 @@ mod tests {
         let _ = std::mem::size_of::<crate::Fact>();
         let _ = std::mem::size_of::<crate::EngineConfig>();
         let _ = std::mem::size_of::<crate::MemoryEngine>();
+
+        // storage port cross-cutting types (flat-re-exported; the six bounded
+        // traits stay reachable as `crate::storage::FactGraph`, asserted above).
+        let _ = std::mem::size_of::<crate::FactFilter>();
+        let _ = std::mem::size_of::<crate::TemporalFilter>();
+        let _ = std::mem::size_of::<crate::MetadataPredicate>();
+        let _ = std::mem::size_of::<crate::BackendCapabilities>();
+        let _ = std::mem::size_of::<crate::LexicalRanker>();
+        let _ = std::mem::size_of::<crate::StorageError>();
     }
 }

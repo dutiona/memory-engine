@@ -342,6 +342,43 @@ pub enum CycleError {
     MalformedReport { facts_selected: usize },
 }
 
+/// A failure that originates **at the pluggable-storage seam** and cannot be
+/// attributed to one of [`MemoryError`]'s existing typed causes.
+///
+/// This is the typed payload of [`MemoryError::Storage`]. It exists so that driver
+/// errors (`rusqlite::Error`, `tokio_postgres::Error`) are mapped to an opaque
+/// `String` **inside each backend** and never cross the trait seam — the engine
+/// depends on the storage port, not on any SQL driver. Causes that *do* have a
+/// precise `MemoryError` home (migration, pool, (de)serialization, not-found) are
+/// reported through those existing variants, not duplicated here (continues the
+/// #560 "one variant per recoverable cause" arc — the existing
+/// [`Database`](MemoryError::Database) variant stays for `SQLite`-internal use).
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
+/// downstream `match` expressions must include a wildcard (`_`) arm.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum StorageError {
+    /// A backend driver operation failed and has no more-specific `MemoryError`
+    /// home. The string carries the driver's message, mapped in by the backend
+    /// (`rusqlite::Error` / `tokio_postgres::Error` → `String`) so no driver type
+    /// leaks past the seam. Opaque by design: callers cannot recover differently
+    /// per driver.
+    #[error("{0}")]
+    Backend(String),
+
+    /// A required capability is unavailable on the open backend — the
+    /// `LexicalMode::RequireBm25` fail-fast when no BM25 extension is present.
+    /// `needed` names the capability (e.g. `"bm25"`); `backend` names the backend
+    /// that lacks it (e.g. `"postgres-stock"`). Surfaced at *open*, opt-in, never
+    /// silent.
+    #[error("backend `{backend}` lacks required capability `{needed}`")]
+    CapabilityUnavailable {
+        needed: &'static str,
+        backend: &'static str,
+    },
+}
+
 /// Errors returned by the memory engine.
 ///
 /// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
@@ -445,6 +482,13 @@ pub enum MemoryError {
     /// for the specific delta-level cause.
     #[error("cycle error: {0}")]
     Cycle(#[from] CycleError),
+
+    /// A failure at the pluggable-storage seam; see [`StorageError`] for the
+    /// specific cause (an opaque backend-driver error, or a required capability the
+    /// open backend lacks). Driver types never leak here — they are mapped to a
+    /// `String` at the seam.
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.
@@ -777,5 +821,32 @@ mod tests {
             err.to_string(),
             "cycle error: cycle delta references unknown fact 2"
         );
+    }
+
+    #[test]
+    fn storage_error_displays_byte_for_byte() {
+        assert_eq!(
+            StorageError::Backend("disk full".into()).to_string(),
+            "disk full"
+        );
+        assert_eq!(
+            StorageError::CapabilityUnavailable {
+                needed: "bm25",
+                backend: "postgres-stock",
+            }
+            .to_string(),
+            "backend `postgres-stock` lacks required capability `bm25`"
+        );
+    }
+
+    #[test]
+    fn storage_error_from_into_memory_error_with_prefix() {
+        // `?`/`.into()` path + the outer "storage error: " prefix.
+        let err: MemoryError = StorageError::Backend("boom".into()).into();
+        assert!(matches!(
+            err,
+            MemoryError::Storage(StorageError::Backend(_))
+        ));
+        assert_eq!(err.to_string(), "storage error: boom");
     }
 }

@@ -952,6 +952,49 @@ impl EmbeddingFingerprint {
     }
 }
 
+// --- Storage-agnostic projection / filter rows ---
+//
+// These are dialect-free domain rows (a Postgres backend returns them too), so
+// their structural home is `types`, not the SQLite `store` module. Relocated here
+// for #629 (the dialect-free `StorageBackend` port must not reference types that
+// live inside the SQLite store). `pub use` shims in `store::facts` /
+// `store::events` preserve the original paths.
+
+/// Lightweight importance-scoring projection of a fact.
+///
+/// Only the scalar fields the forgetting policy needs, so a full active-set scan
+/// never deserializes embeddings. See `FactGraph::list_active_facts_scoring`.
+#[derive(Debug, Clone)]
+pub struct FactScoringRow {
+    pub id: i64,
+    pub fact_type: FactType,
+    pub last_accessed: DateTime<Utc>,
+    pub access_count: i64,
+    pub importance: f64,
+    pub is_pinned: bool,
+}
+
+/// Lightweight fact info for session-based edge creation. Avoids deserializing
+/// embeddings — only carries the fact id needed for pairwise edge wiring.
+#[derive(Debug, Clone)]
+pub struct SessionFact {
+    pub id: i64,
+}
+
+/// Filter for querying the append-only event log.
+#[derive(Debug, Clone, Default)]
+pub struct EventFilter {
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub session_id: Option<String>,
+    pub event_type: Option<EventType>,
+    pub source: Option<String>,
+    pub limit: Option<usize>,
+    pub id_min: Option<i64>,
+    pub id_max: Option<i64>,
+    pub order_by_id: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
