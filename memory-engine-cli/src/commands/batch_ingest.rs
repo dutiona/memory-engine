@@ -732,4 +732,45 @@ not valid json
             "the oversized line must be skipped"
         );
     }
+
+    #[test]
+    fn mid_stream_flush_with_batch_size_one() {
+        // batch_size=1 forces a flush after every record, exercising the mid-stream
+        // flush path — not just the final partial flush the other tests hit.
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let input = "{\"content\":\"a\",\"fact_type\":\"semantic\"}\n\
+                     {\"content\":\"b\",\"fact_type\":\"episodic\"}\n\
+                     {\"content\":\"c\",\"fact_type\":\"procedural\"}\n";
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            1,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(summary.total_ingested, 3);
+        assert_eq!(summary.total_skipped, 0);
+        assert_eq!(summary.failed_batches, 0);
+    }
+
+    #[test]
+    fn all_bad_lines_returns_error() {
+        // 0 ingested AND >0 skipped → the function bails rather than reporting a
+        // successful no-op. The empty-input test does not hit this (skipped is 0).
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let input = "not json\nalso not json\n";
+        let result = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            100,
+            None,
+            OutputFormat::Json,
+        );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("no facts ingested"), "got: {msg}");
+    }
 }
