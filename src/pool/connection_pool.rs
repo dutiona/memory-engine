@@ -106,18 +106,71 @@ pub struct ConnectionPool {
     /// `EngineConfig::read_acquire_timeout` can be wired in without touching
     /// the acquire path.
     read_acquire_timeout: Duration,
+    /// Test-only deterministic synchronization hook for the block-then-wake
+    /// path. Invoked inside [`Self::read`] while the `read_conns` `Mutex` is held
+    /// and found empty, immediately *before* `wait_until` atomically releases the
+    /// lock and parks. Because the lock is still held when this fires, any other
+    /// thread that subsequently tries to lock `read_conns` (e.g. to return a
+    /// connection) cannot proceed until this thread has parked — turning the
+    /// "is the waiter parked yet?" race into a deterministic lock handoff. `None`
+    /// (and zero-cost) outside tests.
+    #[cfg(test)]
+    on_acquire_park: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 // Debug-only, per-thread set of pool addresses on which *this* thread currently
-// holds the write guard. Used to detect the in-memory reentrant deadlock (#278)
-// without false positives: the marker is keyed by pool identity AND is
-// thread-local, so legitimate cross-thread write/read contention never trips it,
-// and a write guard on one pool does not implicate reads on another. Compiled
-// out entirely in release builds.
+// holds the in-memory write `Mutex` (via a `write()`/`try_write()` guard OR an
+// in-memory `read()` guard — both lock the *same* non-reentrant `write_conn`).
+// Used to detect the in-memory reentrant deadlock (#278) without false
+// positives: the marker is keyed by pool identity AND is thread-local, so
+// legitimate cross-thread write/read contention never trips it, and a guard on
+// one pool does not implicate reads on another. Compiled out entirely in release
+// builds.
+//
+// A `HashSet` cannot represent the same pool held *twice* by one thread, but
+// that can never happen for in-memory pools: holding any guard that locks
+// `write_conn` and acquiring a second guard on the same pool/thread would
+// deadlock on the non-reentrant `Mutex` — exactly the violation the marker
+// catches *before* the second lock. So at most one live marker per pool is
+// possible, and a plain set is sufficient (insert is idempotent, drop removes).
 #[cfg(debug_assertions)]
 thread_local! {
     static WRITE_HELD: std::cell::RefCell<std::collections::HashSet<usize>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Insert this pool's address into the per-thread `WRITE_HELD` marker (debug
+/// only). Both [`WriteGuard`] and the in-memory [`SerializedReadGuard`] register
+/// here because both hold the single non-reentrant `write_conn` `Mutex`.
+#[cfg(debug_assertions)]
+fn mark_write_held(pool_addr: usize) {
+    WRITE_HELD.with(|held| {
+        held.borrow_mut().insert(pool_addr);
+    });
+}
+
+/// Remove this pool's address from the per-thread `WRITE_HELD` marker (debug
+/// only), called from the `Drop` of whichever guard holds `write_conn`.
+#[cfg(debug_assertions)]
+fn unmark_write_held(pool_addr: usize) {
+    WRITE_HELD.with(|held| {
+        held.borrow_mut().remove(&pool_addr);
+    });
+}
+
+/// Assert (debug only) that this thread does not already hold a guard locking
+/// `write_conn` for the given in-memory pool, before a path that would lock it
+/// again and self-deadlock on the non-reentrant `Mutex` (#278).
+#[cfg(debug_assertions)]
+fn assert_not_reentrant(pool_addr: usize) {
+    let held = WRITE_HELD.with(|h| h.borrow().contains(&pool_addr));
+    assert!(
+        !held,
+        "reentrant deadlock: read() called on an in-memory pool while this thread \
+         already holds a guard locking its write connection (a write() guard, or a \
+         prior in-memory read() guard) — read() re-locks the same non-reentrant \
+         Mutex and would hang forever (#278)"
+    );
 }
 
 /// RAII guard for the write connection.
@@ -160,9 +213,7 @@ impl std::fmt::Debug for WriteGuard<'_> {
 #[cfg(debug_assertions)]
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
-        WRITE_HELD.with(|held| {
-            held.borrow_mut().remove(&self.pool_addr);
-        });
+        unmark_write_held(self.pool_addr);
     }
 }
 
@@ -201,12 +252,25 @@ impl Drop for ReadGuard<'_> {
 /// write `Mutex`, which is what serializes concurrent in-memory reads.
 pub struct SerializedReadGuard<'a> {
     guard: MutexGuard<'a, Connection>,
+    /// Pool identity, used only by the debug reentrancy detector. An in-memory
+    /// read holds the same `write_conn` `Mutex` as a write guard, so it registers
+    /// in `WRITE_HELD` too — making the #278 assertion cover read-then-read, not
+    /// just write-then-read.
+    #[cfg(debug_assertions)]
+    pool_addr: usize,
 }
 
 impl std::ops::Deref for SerializedReadGuard<'_> {
     type Target = Connection;
     fn deref(&self) -> &Connection {
         &self.guard
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for SerializedReadGuard<'_> {
+    fn drop(&mut self) {
+        unmark_write_held(self.pool_addr);
     }
 }
 
@@ -241,6 +305,10 @@ impl ConnectionPool {
     /// request for in-memory mode (use [`open_memory`](Self::open_memory) for
     /// that). Accepting it would yield a file-backed pool that serializes every
     /// read through the write connection (#340/#356).
+    /// Returns `MemoryError::Pool` if `read_pool_size` exceeds `MAX_READ_POOL`
+    /// (256): each read connection is a real OS file descriptor, so an excessive
+    /// value is rejected (not clamped) before it can exhaust the FD table /
+    /// over-allocate (#415, CWE-770/789).
     /// Returns `MemoryError::Database` if any connection or schema setup fails.
     /// Returns `MemoryError::Migration` if the schema version cannot be determined
     /// or the stored version is newer than the compiled-in maximum.
@@ -276,6 +344,8 @@ impl ConnectionPool {
             mode: BackendMode::FileBacked { read_pool_size },
             read_only: false,
             read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
+            #[cfg(test)]
+            on_acquire_park: None,
         })
     }
 
@@ -297,6 +367,8 @@ impl ConnectionPool {
             mode: BackendMode::InMemory,
             read_only: false,
             read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
+            #[cfg(test)]
+            on_acquire_park: None,
         })
     }
 
@@ -313,7 +385,9 @@ impl ConnectionPool {
     ///
     /// Returns `MemoryError::Pool` if `read_pool_size` is `0` (same footgun as
     /// [`open`](Self::open) — a file-backed pool needs at least one read
-    /// connection; #340/#356).
+    /// connection; #340/#356), or if it exceeds `MAX_READ_POOL` (256): each read
+    /// connection is a real OS file descriptor, so an oversized value is rejected
+    /// rather than allowed to exhaust the FD table (#415, CWE-770/789).
     /// Returns `MemoryError::Database` if any connection or pragma setup fails.
     /// Returns `MemoryError::Migration` if the file does not exist, the schema
     /// is uninitialized, or the schema needs migration.
@@ -352,6 +426,8 @@ impl ConnectionPool {
             mode: BackendMode::FileBacked { read_pool_size },
             read_only: true,
             read_acquire_timeout: DEFAULT_READ_ACQUIRE_TIMEOUT,
+            #[cfg(test)]
+            on_acquire_park: None,
         })
     }
 
@@ -368,12 +444,16 @@ impl ConnectionPool {
     /// # In-memory reentrancy hazard (#278)
     ///
     /// In in-memory mode this locks the **same** `Mutex` as
-    /// [`write`](Self::write)/[`try_write`](Self::try_write). The
-    /// `parking_lot::Mutex` is non-reentrant, so calling `read()` on the same
-    /// thread that already holds a write guard self-deadlocks (a release-build
-    /// hang; a debug-build reentrancy panic). Always drop the write guard before
-    /// reading on an in-memory pool. File-backed pools are immune (reads use a
-    /// separate connection pool).
+    /// [`write`](Self::write)/[`try_write`](Self::try_write) — and as a *prior*
+    /// in-memory `read()`, since an in-memory read guard
+    /// ([`SerializedReadGuard`]) holds that very `write_conn` lock. The
+    /// `parking_lot::Mutex` is non-reentrant, so calling `read()` on a thread
+    /// that already holds **any** guard locking `write_conn` (a write guard OR an
+    /// earlier in-memory read guard) self-deadlocks (a release-build hang; a
+    /// debug-build reentrancy panic). Drop every such guard before reading again
+    /// on an in-memory pool. File-backed pools are immune — reads use a separate
+    /// connection pool, so neither read-then-read nor write-then-read contends on
+    /// one lock.
     ///
     /// # Errors
     ///
@@ -388,23 +468,28 @@ impl ConnectionPool {
             BackendMode::InMemory => {
                 // In-memory mode locks the write connection here. The
                 // `parking_lot::Mutex` is non-reentrant, so a thread that holds
-                // a `write()` guard MUST NOT call `read()` on the same thread —
-                // doing so self-deadlocks (#278). Catch the violation at dev
+                // ANY guard locking `write_conn` — a `write()`/`try_write()`
+                // guard OR a prior in-memory `read()` guard — MUST NOT call
+                // `read()` again on the same thread: doing so re-locks the same
+                // Mutex and self-deadlocks (#278). Catch the violation at dev
                 // time with a per-pool, per-thread marker before the blocking
                 // `lock()` would hang forever; compiled out in release.
+                //
+                // The in-memory read guard registers in the SAME marker as the
+                // write guard (insert below; removed in its `Drop`), so the
+                // assertion covers read-then-read as well as write-then-read.
                 #[cfg(debug_assertions)]
-                {
-                    let pool_addr = std::ptr::from_ref::<Self>(self) as usize;
-                    let held = WRITE_HELD.with(|h| h.borrow().contains(&pool_addr));
-                    assert!(
-                        !held,
-                        "reentrant deadlock: read() called on an in-memory pool while this \
-                         thread holds its write() guard — read() locks the same non-reentrant \
-                         Mutex (#278)"
-                    );
-                }
+                let pool_addr = std::ptr::from_ref::<Self>(self) as usize;
+                #[cfg(debug_assertions)]
+                assert_not_reentrant(pool_addr);
                 let guard = self.write_conn.lock();
-                return Ok(ReadConn::InMemory(SerializedReadGuard { guard }));
+                #[cfg(debug_assertions)]
+                mark_write_held(pool_addr);
+                return Ok(ReadConn::InMemory(SerializedReadGuard {
+                    guard,
+                    #[cfg(debug_assertions)]
+                    pool_addr,
+                }));
             }
             BackendMode::FileBacked { read_pool_size } => read_pool_size,
         };
@@ -418,6 +503,13 @@ impl ConnectionPool {
         // ceiling across all iterations.
         let deadline = Instant::now() + self.read_acquire_timeout;
         while conns.is_empty() {
+            // Test-only: signal "about to park" while still holding `conns`, so a
+            // returning thread's `read_conns.lock()` blocks until `wait_until`
+            // (below) releases the lock — a deterministic park handoff, no sleep.
+            #[cfg(test)]
+            if let Some(hook) = self.on_acquire_park.as_ref() {
+                hook();
+            }
             // `wait_until` returns once notified, or when `deadline` passes.
             // `timed_out()` distinguishes the two; re-check `is_empty()` to
             // guard against spurious wakeups (notified but raced).
@@ -486,9 +578,7 @@ impl ConnectionPool {
         #[cfg(debug_assertions)]
         {
             let pool_addr = std::ptr::from_ref::<Self>(self) as usize;
-            WRITE_HELD.with(|held| {
-                held.borrow_mut().insert(pool_addr);
-            });
+            mark_write_held(pool_addr);
             WriteGuard { guard, pool_addr }
         }
         #[cfg(not(debug_assertions))]
@@ -792,6 +882,49 @@ mod tests {
         let _r = pool.read();
     }
 
+    /// The reentrancy detector must also catch the **read-then-read** arm: an
+    /// in-memory `read()` guard holds the same non-reentrant `write_conn` lock as
+    /// a write guard, so a second same-thread `read()` self-deadlocks identically
+    /// (#278). Holding a [`SerializedReadGuard`] and calling `read()` again must
+    /// trip the debug assertion before it can hang.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "reentrant")]
+    fn pool_in_memory_read_while_holding_read_panics_in_debug() {
+        let pool = ConnectionPool::open_memory(4).unwrap();
+        let _r1 = pool.read().unwrap();
+        // Same-thread reentrant read while already holding an in-memory read
+        // guard: must trip the debug reentrancy guard before blocking forever.
+        let _r2 = pool.read();
+    }
+
+    /// After an in-memory read guard is dropped, the same thread may read again —
+    /// the `SerializedReadGuard` `Drop` clears the per-thread/per-pool marker, so
+    /// the detector leaves no stale "held" state for the read path either (#278).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn pool_in_memory_read_after_read_dropped_is_ok() {
+        let pool = ConnectionPool::open_memory(4).unwrap();
+        {
+            let _r = pool.read().unwrap();
+        }
+        // Assert inline so the significant-Drop `Ok` guard isn't bound to a
+        // local (matches the other read-acquire tests in this module).
+        assert!(pool.read().is_ok());
+    }
+
+    /// A held in-memory read guard on one pool must NOT make a same-thread read
+    /// on a *different* in-memory pool panic — the read-path marker is scoped per
+    /// pool, not per thread, exactly like the write-path one (#278).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn pool_in_memory_read_other_pool_while_holding_read_is_ok() {
+        let pool_a = ConnectionPool::open_memory(4).unwrap();
+        let pool_b = ConnectionPool::open_memory(4).unwrap();
+        let _ra = pool_a.read().unwrap();
+        assert!(pool_b.read().is_ok());
+    }
+
     /// A held write guard on one pool must NOT make a same-thread read on a
     /// *different* in-memory pool panic — the reentrancy detector is scoped per
     /// pool, not per thread (#278). Guards soundness against false positives.
@@ -954,15 +1087,40 @@ mod tests {
     /// never blocks (take/drop/reacquire on one thread), and the existing
     /// multithreaded tests prove only the *timeout* path. This is the missing
     /// case: a real blocked thread woken by a real return.
+    ///
+    /// **Determinism** (no sleep/timing heuristic): the park is synchronized via
+    /// the `on_acquire_park` hook, which fires inside `read()` *while the
+    /// `read_conns` `Mutex` is still held*, immediately before `wait_until`
+    /// atomically releases it and parks. The main thread waits for that hook to
+    /// run, then calls `drop(held)` — whose `read_conns.lock()` **cannot** acquire
+    /// the lock until B has parked and released it. So the connection is returned
+    /// (and `notify_one` fired) only after B is genuinely blocked on the
+    /// `Condvar`. The old version relied on `sleep(50ms)` to *guess* B had
+    /// parked; if the scheduler delayed B past the window, `drop(held)` returned
+    /// the connection before B's first `is_empty()` check and B never blocked —
+    /// the notify-wake path went unexercised yet the test still passed. This
+    /// version proves the wake path or hangs (timeout-bounded), never green-
+    /// without-proof.
     #[test]
     fn pool_read_blocks_then_wakes_and_succeeds_across_threads() {
-        use std::sync::mpsc;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
+        let mut pool = ConnectionPool::open(&db_path, 4, 1, None).unwrap();
         // Generous timeout: this test proves the *success-after-wake* path, so
         // it must never reach the timeout. Default (30s) is ample; keep it.
+
+        // Deterministic park signal: flipped by the acquire-park hook while B
+        // still holds `read_conns`, just before `wait_until` releases it.
+        let b_parking = Arc::new(AtomicBool::new(false));
+        {
+            let flag = Arc::clone(&b_parking);
+            pool.on_acquire_park = Some(Box::new(move || {
+                flag.store(true, Ordering::SeqCst);
+            }));
+        }
 
         // Seed a row so the woken reader can prove its connection is live.
         {
@@ -974,26 +1132,28 @@ mod tests {
         // exhausted, so any other reader must block.
         let held = pool.read().unwrap();
 
-        let (started_tx, started_rx) = mpsc::channel::<()>();
-
         std::thread::scope(|s| {
             let reader = s.spawn(|| {
-                // Signal that thread B is about to block, then block on read().
-                started_tx.send(()).unwrap();
-                // This blocks until `held` is dropped on the main thread; on
-                // wake it must acquire the returned connection and read the row.
+                // Blocks until `held` is dropped on the main thread; on wake it
+                // must acquire the returned connection and read the seeded row.
                 let r = pool
                     .read()
                     .expect("woken reader must acquire, not time out");
                 get_config(&r, "woke").unwrap()
             });
 
-            // Wait until B has reached the point of blocking, then release the
-            // only connection so B's `Condvar` wait is satisfied by a real
-            // return (notify_one), not a spurious wakeup or the timeout.
-            started_rx.recv().unwrap();
-            // Small settle so B is parked in `wait_until` before we notify.
-            std::thread::sleep(Duration::from_millis(50));
+            // Spin until B has locked `read_conns`, found it empty, and run the
+            // park hook (still holding the lock). After this, B is committed to
+            // `wait_until`; the lock handoff below makes the park-before-notify
+            // ordering deterministic — no sleep needed.
+            while !b_parking.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+
+            // `drop(held)` returns the connection: `read_conns.lock()` inside the
+            // drop blocks until B's `wait_until` releases the lock by parking, so
+            // the push + `notify_one` land only once B is genuinely parked on the
+            // `Condvar`. This wakes a real blocked waiter (not the timeout path).
             drop(held);
 
             let value = reader.join().expect("reader thread panicked");
