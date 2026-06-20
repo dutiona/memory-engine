@@ -68,6 +68,15 @@ impl ScopeTree {
     /// For any other input, segments are separated by `/`. Returns `None` if any
     /// segment does not exist in the cached tree, or if the path contains an
     /// empty *inner* segment (e.g. a leading/trailing `/` or `//`).
+    ///
+    /// **Whitespace:** each segment is trimmed of ASCII whitespace before lookup,
+    /// so `resolve_path(" user:michael")` matches the stored label `user:michael`.
+    /// This diverges from [`crate::store::ScopeStore::ensure_path`], which
+    /// *rejects* a label with surrounding whitespace (`MemoryError::Conflict`).
+    /// The asymmetry is intentional and safe: because `ensure_path` guarantees no
+    /// stored label ever carries surrounding whitespace, the trim here can only
+    /// recover the un-padded label — it is defensive, not permissive. Use
+    /// `ensure_path` when you need the input itself validated rather than coerced.
     pub fn resolve_path(&self, path: &str) -> Option<i64> {
         // Root synonyms: the canonical "/" rendered by `path_for_id`, and "" as
         // the conceptual root. Handled up front so the per-segment loop never
