@@ -849,13 +849,38 @@ not valid json
 
     #[test]
     fn ingest_from_reader_never_panics() {
-        // Fuzz the JSONL ingest path (#433): arbitrary attacker-controlled bytes
-        // (the --file trust boundary) must never panic or hang — only ever
-        // Ok(summary) or an Err (e.g. the all-bad-lines bail). The engine is built
-        // once and reused across cases; ingest_from_reader only appends, so cases
-        // don't interfere.
+        use proptest::prelude::*;
+
+        // Fuzz the JSONL ingest path (#433): the --file argument is the trust
+        // boundary, so no input may panic or hang — only ever Ok(summary) or an Err
+        // (e.g. the all-bad-lines bail). Two strategies are mixed so both the early
+        // parse-reject path AND the deeper machine are exercised:
+        //  - raw arbitrary bytes (mostly hit serde's parse error), and
+        //  - structurally-valid-ish JSONL documents (reach validate_jsonl_fact —
+        //    incl. importance out of [0,1] — jsonl_to_request, batching, and
+        //    flush_batch, since batch_size=8 forces mid-stream flushes).
+        let valid_line = (
+            "[a-z ]{0,40}",
+            prop_oneof!["episodic", "semantic", "procedural"],
+            proptest::option::of(-2.0f64..2.0),
+        )
+            .prop_map(|(content, ft, importance)| {
+                let mut obj = serde_json::json!({ "content": content, "fact_type": ft });
+                if let Some(i) = importance {
+                    obj["importance"] = serde_json::json!(i);
+                }
+                obj.to_string()
+            });
+        let jsonl_doc = proptest::collection::vec(prop_oneof![valid_line, "[^\n]{0,40}"], 0..16)
+            .prop_map(|lines| lines.join("\n").into_bytes());
+
+        // Built once and reused across cases; ingest_from_reader only appends, so
+        // cases cannot interfere.
         let engine = MemoryEngine::builder(4).build().unwrap();
-        proptest::proptest!(|(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096))| {
+        proptest::proptest!(|(data in prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..4096),
+            jsonl_doc,
+        ])| {
             let _ = ingest_from_reader(&engine, data.as_slice(), &CapEmbed, 8, None, OutputFormat::Json);
         });
     }

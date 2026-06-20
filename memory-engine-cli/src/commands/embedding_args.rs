@@ -16,7 +16,10 @@ use memory_engine_embed::HttpEmbeddingProvider;
 /// `embed_url` + `embed_model` are optional at the clap layer (a query with neither is
 /// FTS-only); commands that require an embedder call [`build_required`](Self::build_required),
 /// which errors clearly when they are absent.
-#[derive(clap::Args, Clone, Debug)]
+// No `Debug` derive: this struct holds `embed_api_key` in cleartext, and a
+// derived `Debug` would print it under any `{:?}` / `tracing::debug!(?args)`.
+// (The built `HttpEmbeddingProvider` likewise has no `Debug`.)
+#[derive(clap::Args, Clone)]
 pub struct EmbeddingArgs {
     /// OpenAI-compatible embedding endpoint URL (e.g. `http://localhost:11434/v1/embeddings`).
     #[arg(long, env = "MEMORY_ENGINE_EMBED_URL")]

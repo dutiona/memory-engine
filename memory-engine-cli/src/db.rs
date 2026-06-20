@@ -115,13 +115,16 @@ pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
     Ok(engine)
 }
 
-/// Open a `MemoryEngine` with **write** capability.
+/// Open a `MemoryEngine` with **write** capability, peeking the dimension from
+/// the existing store.
 ///
-/// Needed by every command that mutates the database — `record-outcome`,
-/// `consolidate`, `migrate`, and `export` with `SQLite` format (`VACUUM INTO`).
-/// (`add-fact` and `batch-ingest` derive the dimension from their own input and
-/// use [`open_engine_writable_with_dim`] instead of peeking.) Sets `backup_dir`
-/// next to the database so any schema migration creates a WAL-safe backup first.
+/// Used by every command that mutates a previously-embedded database and does not
+/// already know its embedding dimension — e.g. `record-outcome`, `consolidate`,
+/// `migrate`, `export` with `SQLite` format, and the no-`--embed-dim` branch of
+/// `batch-ingest` / `bootstrap`. Commands that derive the dimension from their own
+/// input (`add-fact`, and `batch-ingest` / `bootstrap` *with* `--embed-dim`) use
+/// [`open_engine_writable_with_dim`] instead. Sets `backup_dir` next to the
+/// database so any schema migration creates a WAL-safe backup first.
 pub fn open_engine_writable(path: &Path) -> anyhow::Result<MemoryEngine> {
     let embed_dim = peek_embed_dim_from_db(path)?;
     open_engine_writable_with_dim(path, embed_dim)
