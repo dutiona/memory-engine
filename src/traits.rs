@@ -839,11 +839,13 @@ mod tests {
 
     #[test]
     fn validate_rejects_infinity_dedup_threshold() {
-        let c = ConsolidationConfig {
-            dedup_threshold: f32::INFINITY,
-            ..Default::default()
-        };
-        assert!(c.validate().is_err());
+        for val in [f32::INFINITY, f32::NEG_INFINITY] {
+            let c = ConsolidationConfig {
+                dedup_threshold: val,
+                ..Default::default()
+            };
+            assert!(c.validate().is_err(), "{val} should be rejected");
+        }
     }
 
     // --- ConsolidationConfig::validate(): min_cluster_size >= 2 ---

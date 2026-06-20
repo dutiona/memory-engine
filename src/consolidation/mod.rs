@@ -297,22 +297,35 @@ mod tests {
     }
 
     #[test]
-    fn consolidate_rejects_invalid_config() {
-        // The entry point validates its config up front — mirroring how `prune()`
-        // rejects an invalid `ForgetPolicy` before touching the store. A
-        // `dedup_threshold` above 1.0 is out of the cosine-similarity range and
-        // would otherwise silently no-op the dedup pass.
+    fn consolidate_rejects_invalid_config_before_mutating() {
+        // The entry point validates its config up front, before touching the store
+        // — mirroring how `prune()` rejects an invalid `ForgetPolicy`.
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
 
+        // Two near-duplicates the dedup pass *would* collapse at threshold 0.90.
+        insert_fact(&conn, "alpha", vec![1.0, 0.0, 0.0, 0.0], 0.9);
+        insert_fact(&conn, "alpha prime", vec![0.99, 0.01, 0.0, 0.0], 0.5);
+
+        // `dedup_threshold` is valid but `min_cluster_size` is not, so the error
+        // must come from validation rather than a pass. If validation did NOT run
+        // first, the valid threshold would have expired one near-duplicate.
         let bad = ConsolidationConfig {
-            dedup_threshold: 1.5,
-            ..ConsolidationConfig::default()
+            dedup_threshold: 0.90,
+            min_cluster_size: 0,
         };
         let err = consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &bad).unwrap_err();
         assert!(
-            err.to_string().contains("dedup_threshold"),
+            err.to_string().contains("min_cluster_size"),
             "error should name the offending parameter, got: {err}"
+        );
+
+        // Nothing expired: validation aborted before the dedup pass ran.
+        let active = FactStore::new(&conn, DIM).list_active(None).unwrap();
+        assert_eq!(
+            active.len(),
+            2,
+            "no fact should be expired when the config is rejected"
         );
     }
 
@@ -621,7 +634,7 @@ mod tests {
             &MockGenerator,
             &MockEmbedder,
             DIM,
-            &default_config(),
+            &ConsolidationConfig::default(),
             1,
         )
         .unwrap();

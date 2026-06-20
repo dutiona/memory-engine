@@ -53,6 +53,14 @@ impl EmbeddingProvider for ClusterableEmbedder {
 /// [`ClusterableEmbedder`]. Each gets a unique `#<i>` suffix so their embeddings
 /// differ but stay ~0.88 similar.
 fn insert_clusterable(engine: &memory_engine::engine::MemoryEngine, n: usize, scope: &str) {
+    // Each fact's perturbation lands at `1 + (i % (DIM - 1))`; two facts whose
+    // indices collide there would get identical embeddings (and be deduplicated,
+    // silently invalidating the cluster assertions). Guard against that.
+    assert!(
+        n < DIM - 1,
+        "n={n} would collide perturbation positions (DIM-1={})",
+        DIM - 1
+    );
     for i in 0..n {
         engine
             .add_fact(
@@ -214,6 +222,11 @@ fn cluster_and_global_summary_scoping() {
         .consolidate(&generator, &ClusterableEmbedder, &config)
         .expect("consolidate failed");
 
+    assert_eq!(
+        stats.duplicates_removed, 0,
+        "distinct facts (cosine ≈ 0.88 < 0.95) must not be deduplicated, got {}",
+        stats.duplicates_removed,
+    );
     assert!(
         stats.clusters_created >= 1,
         "expected >= 1 cluster from 4 related facts, got {}",

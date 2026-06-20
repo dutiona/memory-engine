@@ -92,8 +92,8 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 `ConsolidationConfig` fields:
 
-- `dedup_threshold: f32` -- cosine similarity threshold for dedup (e.g., 0.92).
-- `min_cluster_size: usize` -- minimum facts to form a cluster.
+- `dedup_threshold: f32` -- cosine similarity threshold for dedup, in `[0.0, 1.0]` (default 0.90). Facts with similarity **>=** this value are merged; `1.0` merges only exact duplicates.
+- `min_cluster_size: usize` -- minimum facts to form a cluster (must be `>= 2`; default 2).
 
 ### Forgetting
 
