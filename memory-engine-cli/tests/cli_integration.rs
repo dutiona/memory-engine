@@ -755,3 +755,200 @@ fn import_rejects_existing_db() {
         .failure()
         .stderr(predicate::str::contains("already exists"));
 }
+
+// --- record-outcome + outcome-counts (#304) ---
+
+#[test]
+fn record_outcome_positive_then_outcome_counts_shows_plus1() {
+    let (_dir, db_path) = create_test_db();
+    let db = db_path.to_str().unwrap();
+    // Record a positive outcome for fact 1.
+    cli()
+        .args([
+            "--db",
+            db,
+            "record-outcome",
+            "--fact-id",
+            "1",
+            "--outcome",
+            "positive",
+        ])
+        .assert()
+        .success();
+    // Plain format: "+P -N ~Z"
+    cli()
+        .args([
+            "--db",
+            db,
+            "--format",
+            "plain",
+            "outcome-counts",
+            "--fact-id",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+1"));
+}
+
+#[test]
+fn record_outcome_nonexistent_fact_fails() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "record-outcome",
+            "--fact-id",
+            "9999",
+            "--outcome",
+            "positive",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("error"));
+}
+
+#[test]
+fn outcome_counts_json_format_contains_positive_field() {
+    let (_dir, db_path) = create_test_db();
+    let db = db_path.to_str().unwrap();
+    // Record one outcome so the counts query has something to inspect.
+    cli()
+        .args([
+            "--db",
+            db,
+            "record-outcome",
+            "--fact-id",
+            "2",
+            "--outcome",
+            "neutral",
+        ])
+        .assert()
+        .success();
+    cli()
+        .args([
+            "--db",
+            db,
+            "--format",
+            "json",
+            "outcome-counts",
+            "--fact-id",
+            "2",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"positive\""));
+}
+
+// --- dump all + dump JSON (#428) ---
+
+#[test]
+fn dump_all_json_contains_facts_and_events_keys() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+            "dump",
+            "all",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"facts\""))
+        .stdout(predicate::str::contains("\"events\""));
+}
+
+#[test]
+fn dump_facts_json_contains_fact_content() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+            "dump",
+            "facts",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sky is blue"));
+}
+
+// --- inspect JSON and plain formats (#429) ---
+
+#[test]
+fn inspect_json_format_contains_id_field() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+            "inspect",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"id\""));
+}
+
+#[test]
+fn inspect_plain_format_emits_content() {
+    let (_dir, db_path) = create_test_db();
+    // Plain format for inspect prints the fact content string.
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "plain",
+            "inspect",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("The sky is blue"));
+}
+
+// --- explain JSON and plain formats (#429) ---
+
+#[test]
+fn explain_json_format_contains_fact_id_field() {
+    let (_dir, db_path) = create_test_db();
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+            "explain",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"fact_id\""));
+}
+
+#[test]
+fn explain_plain_format_emits_state_and_scope() {
+    let (_dir, db_path) = create_test_db();
+    // Plain format for explain prints "state: ..." and "scope: ...".
+    cli()
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--format",
+            "plain",
+            "explain",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("state:"))
+        .stdout(predicate::str::contains("scope:"));
+}

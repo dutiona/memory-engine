@@ -150,3 +150,91 @@ pub fn open_engine_writable_with_dim(
     let engine = builder.build()?;
     Ok(engine)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use tempfile::NamedTempFile;
+    use tempfile::TempDir;
+
+    use super::{peek_embed_dim_from_db, peek_schema_version_from_db};
+
+    // --- peek_embed_dim_from_db ---
+
+    #[test]
+    fn peek_embed_dim_from_db_nonexistent_path_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.db");
+        let err = peek_embed_dim_from_db(&missing).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found") || msg.contains("directory"),
+            "expected 'not found' or 'directory' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn peek_embed_dim_from_db_non_sqlite_file_returns_error() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(b"this is not a sqlite database\n").unwrap();
+        // Either fails because it's not a valid SQLite file or has no config table.
+        let result = peek_embed_dim_from_db(tmp.path());
+        assert!(result.is_err(), "expected Err for non-SQLite file");
+    }
+
+    #[test]
+    fn peek_embed_dim_from_db_fresh_engine_no_embedding_returns_error() {
+        // A freshly created engine with no facts yet has no embedding_meta.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("fresh.db");
+        let engine = memory_engine::MemoryEngine::builder(4)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
+        drop(engine);
+
+        let err = peek_embed_dim_from_db(&db_path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no embedding identity") || msg.contains("embed_dim"),
+            "expected 'no embedding identity' or 'embed_dim' in error, got: {msg}"
+        );
+    }
+
+    // --- peek_schema_version_from_db ---
+
+    #[test]
+    fn peek_schema_version_from_db_nonexistent_path_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.db");
+        let err = peek_schema_version_from_db(&missing).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found") || msg.contains("directory"),
+            "expected 'not found' or 'directory' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn peek_schema_version_from_db_non_sqlite_file_returns_error() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(b"not a real database\n").unwrap();
+        let result = peek_schema_version_from_db(tmp.path());
+        assert!(result.is_err(), "expected Err for non-SQLite file");
+    }
+
+    #[test]
+    fn peek_schema_version_from_db_valid_engine_returns_current_version() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let engine = memory_engine::MemoryEngine::builder(4)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
+        drop(engine);
+
+        let version = peek_schema_version_from_db(&db_path).unwrap();
+        assert_eq!(version, memory_engine::CURRENT_SCHEMA_VERSION);
+    }
+}
