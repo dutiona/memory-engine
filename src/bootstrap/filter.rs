@@ -140,14 +140,17 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
     // single O(n) pass, replace the per-user linear scans that made the original
     // reconstruction O(n^2) (an algorithmic-complexity DoS amplifier).
     //
-    // `assistant_by_parent`: parent_uuid -> the FIRST assistant carrying it (slice
-    // order preserved via `entry`/`or_insert`), matching the old `.find()` which
-    // returned the first such assistant. The `used` check stays at the call site.
+    // `assistant_by_parent`: parent_uuid -> ALL assistants carrying it, in slice
+    // order. The lookup picks the first VALID (uuid present) and not-yet-`used`
+    // candidate, exactly matching the old linear `.find()` — keeping a single
+    // entry would drop the turn when the first assistant for a parent is invalid
+    // (uuid-less) or already used, even though a later valid one exists (a
+    // corrupt/partial JSONL case).
     //
     // `tool_results_by_parent`: parent_uuid -> the tool-result user entries that
     // follow an assistant, in slice order — the O(1) replacement for the
     // per-call full scan in `collect_tool_result_entries`.
-    let mut assistant_by_parent: HashMap<&str, &SessionEntry> = HashMap::new();
+    let mut assistant_by_parent: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
     let mut tool_results_by_parent: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
     for entry in &relevant {
         match entry.entry_type {
@@ -155,7 +158,7 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
                 if let Some(parent) = entry.parent_uuid.as_deref()
                     && !parent.is_empty()
                 {
-                    assistant_by_parent.entry(parent).or_insert(entry);
+                    assistant_by_parent.entry(parent).or_default().push(entry);
                 }
             }
             EntryType::User if is_tool_result(entry) => {
@@ -184,12 +187,18 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
             continue;
         }
 
-        // O(1) lookup of the assistant whose parent_uuid matches this user's uuid;
-        // re-apply the `used` guard the old `.find()` carried inline.
+        // Lookup the assistants whose parent_uuid matches this user's uuid and
+        // pick the first valid (uuid present) and not-yet-`used` one — the same
+        // selection the old linear `.find()` made, now scoped to this parent's
+        // (typically singleton) candidate list rather than the whole slice.
         let assistant = assistant_by_parent
             .get(user_uuid.as_str())
-            .copied()
-            .filter(|a| a.uuid.as_deref().is_some_and(|u| !used.contains(u)));
+            .and_then(|cands| {
+                cands
+                    .iter()
+                    .copied()
+                    .find(|a| a.uuid.as_deref().is_some_and(|u| !used.contains(u)))
+            });
 
         if let Some(assistant) = assistant {
             // Collect tool-result user entries that follow this assistant.
@@ -773,6 +782,23 @@ mod tests {
         assert_eq!(turns[0].tool_calls[0].stdout.as_deref(), Some("out-first"));
         assert_eq!(turns[0].tool_calls[1].tool_name, "Read");
         assert_eq!(turns[0].tool_calls[1].stdout.as_deref(), Some("out-second"));
+    }
+
+    /// Regression (#406 index): when the first assistant carrying a `parent_uuid`
+    /// is invalid (uuid-less), the per-parent index must still find a LATER valid
+    /// assistant for the same parent, matching the old linear `.find()`. A single
+    /// first-only index dropped the turn here.
+    #[test]
+    fn parent_index_skips_invalid_assistant_to_later_valid_one() {
+        let entries = vec![
+            user_entry("u1", "", "please fix it", 0),
+            // Invalid assistant for u1 first (no uuid) — must NOT shadow the valid one.
+            assistant_entry("", "u1", "corrupt partial row", 1),
+            assistant_entry("a1", "u1", "the real reply", 2),
+        ];
+        let turns = reconstruct_turns(&entries);
+        assert_eq!(turns.len(), 1, "the valid later assistant must still pair");
+        assert!(turns[0].assistant_text.contains("the real reply"));
     }
 
     // -- keyword_prefilter tests --
