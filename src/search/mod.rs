@@ -2,6 +2,7 @@
 
 #[cfg(feature = "ann")]
 pub mod ann;
+pub mod filter_sql;
 pub mod fts;
 pub mod hybrid;
 pub mod query;
@@ -10,14 +11,15 @@ pub mod vector;
 
 #[cfg(feature = "ann")]
 pub use ann::HnswStrategy;
-pub use fts::{FtsResult, fts_count_expired, fts_search};
+pub use filter_sql::FilterSql;
+pub use fts::{FtsResult, fts_count_expired, fts_search, fts_search_filtered};
 pub use hybrid::{
     MatchType, QueryDiagnostics, QueryResponse, RRF_K, SearchMode, SearchQuery, SearchResult,
     hybrid_search, rrf_merge,
 };
 pub use query::MemoryQuery;
 pub use strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
-pub use vector::{VectorResult, cosine_similarity, vector_search};
+pub use vector::{VectorResult, cosine_similarity, vector_search, vector_search_filtered};
 
 /// Serialize an optional scope-ID slice to a JSON string for use as a SQL
 /// parameter in `json_each(?N)` expressions.
