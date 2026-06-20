@@ -1134,6 +1134,40 @@ impl<'a> FactStore<'a> {
         let deleted = self.conn.execute(&sql, params.as_slice())?;
         Ok(deleted)
     }
+
+    /// List archive candidates: non-pinned facts whose system-time validity has
+    /// expired before `expired_before` (`t_expired IS NOT NULL AND t_expired <
+    /// expired_before`), ordered by id ascending.
+    ///
+    /// This pushes the archive selection predicate into SQL so the engine never
+    /// materializes every fact (and every embedding BLOB) just to discard the
+    /// ones that don't qualify. Equivalent to the prior Rust-side filter
+    /// `!f.is_pinned && f.t_expired.is_some_and(|te| te < expired_before)` over
+    /// `list_all()`.
+    ///
+    /// The `t_expired < ?` comparison is a string comparison on the stored
+    /// rfc3339 timestamps; this is correct because `DateTime::to_rfc3339()` emits
+    /// a lexicographically-ordered encoding (the same invariant
+    /// [`insert_or_reinforce`](Self::insert_or_reinforce) relies on for its
+    /// `min`/`max` over `t_created`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn list_archive_candidates(&self, expired_before: DateTime<Utc>) -> Result<Vec<Fact>> {
+        let cutoff = expired_before.to_rfc3339();
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FACT_COLUMNS} FROM facts
+             WHERE is_pinned = 0
+               AND t_expired IS NOT NULL
+               AND t_expired < ?1
+             ORDER BY id ASC"
+        ))?;
+        let dim = self.embed_dim;
+        let rows = stmt.query_map(params![cutoff], |row| row_to_fact(row, dim))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
 }
 
 fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fact> {
@@ -1348,6 +1382,51 @@ mod tests {
             store.merge_metadata(id, &serde_json::json!("not-an-object")),
             Err(MemoryError::Internal(_))
         ));
+    }
+
+    #[test]
+    fn list_archive_candidates_matches_pinned_and_expiry_predicate() {
+        // Equivalence guard for the SQL-pushdown refactor (#349): the new
+        // `list_archive_candidates` must select exactly the rows the prior
+        // Rust filter did — `!is_pinned && t_expired.is_some_and(|te| te < cutoff)`.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let cutoff = Utc::now();
+
+        // Helper: insert a fact with explicit t_expired and is_pinned values
+        // (both are persisted verbatim by insert()).
+        let insert_expired =
+            |content: &str, embed: f32, expired: Option<DateTime<Utc>>, pinned: bool| {
+                let mut f = make_fact(content, vec![embed; DIM]);
+                f.t_expired = expired;
+                f.is_pinned = pinned;
+                store.insert(&f).unwrap()
+            };
+
+        // (1) expired before cutoff, not pinned → INCLUDED
+        let qualifies = insert_expired("qualifies", 0.1, Some(cutoff - TimeDelta::hours(1)), false);
+        // (2) active (t_expired NULL) → EXCLUDED
+        let _active = insert_expired("active", 0.2, None, false);
+        // (3) expired AFTER cutoff → EXCLUDED
+        let _too_recent =
+            insert_expired("too recent", 0.3, Some(cutoff + TimeDelta::hours(1)), false);
+        // (4) expired before cutoff but PINNED → EXCLUDED
+        let _pinned = insert_expired("pinned", 0.4, Some(cutoff - TimeDelta::hours(1)), true);
+        // (5) a second qualifying fact (higher id) to assert id-ascending order
+        let qualifies2 = insert_expired(
+            "qualifies two",
+            0.5,
+            Some(cutoff - TimeDelta::minutes(30)),
+            false,
+        );
+
+        let candidates = store.list_archive_candidates(cutoff).unwrap();
+        let ids: Vec<i64> = candidates.iter().map(|f| f.id).collect();
+        assert_eq!(
+            ids,
+            vec![qualifies, qualifies2],
+            "only non-pinned facts expired strictly before the cutoff, id-ascending"
+        );
     }
 
     #[test]

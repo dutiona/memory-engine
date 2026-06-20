@@ -4,7 +4,6 @@
 //! records a manifest row, hard-deletes from `SQLite`, and prunes the
 //! in-memory graph — all in a crash-safe sequence.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use chrono::Utc;
@@ -160,24 +159,18 @@ impl MemoryEngine {
     // --- Private helpers ---
 
     /// Select expired, non-pinned facts and their internal edges.
+    ///
+    /// Both predicates are pushed into SQL — `FactStore::list_archive_candidates`
+    /// and `EdgeStore::list_internal_by_facts` — so a large database never
+    /// materializes every fact (with its embedding BLOB) and every edge just to
+    /// discard the rows that don't qualify.
     fn select_archive_candidates(&self, policy: &ArchivePolicy) -> Result<(Vec<Fact>, Vec<Edge>)> {
         let conn = self.pool.read()?;
-        let all_facts = FactStore::new(&conn, self.embed_dim).list_all()?;
-        let candidate_facts: Vec<_> = all_facts
-            .into_iter()
-            .filter(|f| !f.is_pinned && f.t_expired.is_some_and(|te| te < policy.expired_before))
-            .collect();
+        let candidate_facts =
+            FactStore::new(&conn, self.embed_dim).list_archive_candidates(policy.expired_before)?;
 
-        let candidate_ids: HashSet<i64> = candidate_facts.iter().map(|f| f.id).collect();
-
-        let all_edges = EdgeStore::new(&conn).list_all()?;
-        let candidate_edges: Vec<_> = all_edges
-            .into_iter()
-            .filter(|e| {
-                candidate_ids.contains(&e.source_fact_id)
-                    && candidate_ids.contains(&e.target_fact_id)
-            })
-            .collect();
+        let candidate_ids: Vec<i64> = candidate_facts.iter().map(|f| f.id).collect();
+        let candidate_edges = EdgeStore::new(&conn).list_internal_by_facts(&candidate_ids)?;
 
         drop(conn);
         Ok((candidate_facts, candidate_edges))

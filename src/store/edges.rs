@@ -265,6 +265,39 @@ impl<'a> EdgeStore<'a> {
         Ok(edges)
     }
 
+    /// List edges (including expired) where BOTH endpoints are in the given
+    /// fact ID set, ordered by id ascending.
+    ///
+    /// This is the read counterpart of [`Self::hard_delete_by_facts`] — it
+    /// selects exactly the set of edges that archival will remove, pushing the
+    /// "both endpoints internal" predicate into SQL so the engine never loads
+    /// every edge just to discard the ones that straddle the live/archived
+    /// boundary. Equivalent to the prior Rust-side filter
+    /// `candidate_ids.contains(&e.source_fact_id) && candidate_ids.contains(&e.target_fact_id)`
+    /// over `list_all()`.
+    ///
+    /// Returns an empty `Vec` for an empty `fact_ids` slice (no query issued).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn list_internal_by_facts(&self, fact_ids: &[i64]) -> Result<Vec<Edge>> {
+        if fact_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids_json = serde_json::to_string(fact_ids)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
+             FROM edges
+             WHERE source_fact_id IN (SELECT value FROM json_each(?1))
+               AND target_fact_id IN (SELECT value FROM json_each(?1))
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![ids_json], row_to_edge)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Hard-delete edges where BOTH endpoints are in the given fact ID set.
     ///
     /// Used after successful archival to remove edges whose facts have been
@@ -437,6 +470,87 @@ mod tests {
         let active = store.list_active().unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].relation_type, "d");
+    }
+
+    // --- list_internal_by_facts tests ---
+
+    #[test]
+    fn list_internal_by_facts_matches_rust_both_endpoints_filter() {
+        // Equivalence guard for the SQL-pushdown refactor (#349): the new
+        // `list_internal_by_facts` must return exactly the edges the prior
+        // archive-side Rust filter did — `candidate_ids.contains(&e.source) &&
+        // candidate_ids.contains(&e.target)` over `list_all()` — i.e. both
+        // endpoints inside the candidate set.
+        //
+        // facts: 1, 2, 3. Edge f1→f2 is internal to {1,2}; f2→f3 straddles
+        // the live/archived boundary (f3 not in set) and must be excluded.
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        let internal = store.insert(&make_edge(1, 2, "internal")).unwrap();
+        store.insert(&make_edge(2, 3, "cross_boundary")).unwrap();
+
+        // Reference: the prior Rust-side semantics over the full edge list.
+        let set: std::collections::HashSet<i64> = [1, 2].into_iter().collect();
+        let expected: Vec<i64> = store
+            .list_all()
+            .unwrap()
+            .into_iter()
+            .filter(|e| set.contains(&e.source_fact_id) && set.contains(&e.target_fact_id))
+            .map(|e| e.id)
+            .collect();
+
+        let got: Vec<i64> = store
+            .list_internal_by_facts(&[1, 2])
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+
+        assert_eq!(
+            got, expected,
+            "SQL pushdown must match the prior Rust filter"
+        );
+        assert_eq!(got, vec![internal], "only the fully-internal edge");
+    }
+
+    #[test]
+    fn list_internal_by_facts_includes_expired_edges() {
+        // Archival removes edges whose BOTH facts are archived regardless of the
+        // edge's own t_expired (the prior code filtered `list_all()`, which
+        // returns expired edges too — unlike `list_active`). This guards against
+        // a regression that would orphan an expired edge whose endpoints are gone.
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        let active = store.insert(&make_edge(1, 2, "active")).unwrap();
+        let expired = store.insert(&make_edge(2, 1, "expired")).unwrap();
+        store.expire(expired, Utc::now()).unwrap();
+
+        let got: Vec<i64> = store
+            .list_internal_by_facts(&[1, 2])
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+
+        assert_eq!(
+            got,
+            vec![active, expired],
+            "both active and expired internal edges, id-ascending"
+        );
+    }
+
+    #[test]
+    fn list_internal_by_facts_empty_slice_is_noop() {
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+        store.insert(&make_edge(1, 2, "a")).unwrap();
+
+        assert!(
+            store.list_internal_by_facts(&[]).unwrap().is_empty(),
+            "empty fact-id set selects no edges (no query issued)"
+        );
     }
 
     // --- hard_delete_by_facts tests ---
