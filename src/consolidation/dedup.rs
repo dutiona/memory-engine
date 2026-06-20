@@ -115,7 +115,12 @@ pub fn local_dedup(
             }
 
             let similarity = cosine_similarity(&new_fact.embedding, &candidate.embedding);
-            if similarity > threshold {
+            // `>=` (not `>`): two facts are duplicates when they are *at least* as
+            // similar as the threshold. This makes `dedup_threshold = 1.0` mean
+            // "merge exact duplicates" (identical embeddings, cosine 1.0) reliably,
+            // rather than depending on whether f32 rounding pushed the cosine of
+            // identical vectors a few ULPs past 1.0.
+            if similarity >= threshold {
                 // Expire the lower-importance fact. Tie-break: higher id (newer) expires.
                 let expire_id = if new_fact.importance < candidate.importance {
                     new_fact.id
@@ -289,6 +294,28 @@ mod tests {
         let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "fact A");
+    }
+
+    #[test]
+    fn threshold_one_dedups_exact_duplicates() {
+        // `dedup_threshold = 1.0` means "merge exact duplicates" under the `>=`
+        // comparison: identical embeddings have cosine 1.0 (modulo f32 noise), so
+        // one of the pair is expired. This is the most conservative *active* dedup
+        // — only truly identical facts collapse — and it is reliable rather than
+        // dependent on whether f32 rounding pushed the cosine past 1.0.
+        let (conn, dim) = setup();
+        let emb = vec![0.5, 0.5, 0.5, 0.5];
+        insert_fact(&conn, dim, "identical A", emb.clone(), 0.7);
+        insert_fact(&conn, dim, "identical B", emb, 0.3);
+
+        let (removed, _) = local_dedup(&conn, dim, 1.0, None, Utc::now()).unwrap();
+        assert_eq!(removed, 1, "threshold 1.0 must dedup exact duplicates");
+
+        // The lower-importance fact (B) is expired; the survivor is A.
+        let store = FactStore::new(&conn, dim);
+        let active = store.list_active(None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, "identical A");
     }
 
     #[test]

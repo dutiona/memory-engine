@@ -3,14 +3,72 @@
 //! Tests engine-owned consolidation outcomes: dedup removes near-duplicates,
 //! cluster fusion creates summaries, idempotence holds on second pass.
 //!
-//! **Key constraint**: `TestEmbedder` uses blake3 hashing, producing pseudo-random
-//! vectors. Only identical text yields identical embeddings (cosine = 1.0).
-//! Tests use exact-duplicate content to exercise dedup logic deterministically.
+//! **Embedding strategy**: dedup tests use `TestEmbedder` (blake3 hashing) with
+//! exact-duplicate content — identical text yields identical embeddings
+//! (cosine = 1.0), exercising dedup deterministically. Cluster tests use
+//! [`ClusterableEmbedder`] to produce *distinct-but-related* facts (pairwise
+//! cosine ≈ 0.88): clustering groups facts that are similar but not identical,
+//! since identical facts are (correctly) collapsed by the dedup pass first.
 
-use memory_engine::traits::ConsolidationConfig;
-use memory_engine::types::FactType;
+use memory_engine::EmbeddingFingerprint;
+use memory_engine::error::Result;
+use memory_engine::traits::{ConsolidationConfig, EmbeddingProvider};
+use memory_engine::types::{AddFactRequest, FactType};
 
-use crate::helpers::{MockSummaryGenerator, TestEmbedder, add_fact, add_scoped_fact, eval_engine};
+use crate::helpers::{DIM, MockSummaryGenerator, TestEmbedder, add_fact, eval_engine};
+
+/// Embedder producing distinct-but-related vectors for the cluster tests.
+///
+/// Every fact shares a dominant component (position 0) plus a unique orthogonal
+/// perturbation keyed by the trailing `#<n>` in its content. Two distinct facts
+/// then have cosine `1 / (1 + 0.369²) ≈ 0.88` — above the 0.85 cluster threshold
+/// (so they group into one cluster) but below a 0.95 dedup threshold (so they are
+/// not treated as duplicates). This lets cluster tests use realistic distinct
+/// facts; identical facts would be deduplicated before reaching the cluster pass.
+struct ClusterableEmbedder;
+
+impl EmbeddingProvider for ClusterableEmbedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let idx: usize = text
+            .rsplit('#')
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        let mut v = vec![0.0_f32; DIM];
+        v[0] = 1.0;
+        v[1 + (idx % (DIM - 1))] = 0.369;
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in &mut v {
+            *x /= norm;
+        }
+        Ok(v)
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("clusterable", "test", DIM)
+    }
+}
+
+/// Insert `n` distinct-but-clusterable facts under `scope`, embedded by
+/// [`ClusterableEmbedder`]. Each gets a unique `#<i>` suffix so their embeddings
+/// differ but stay ~0.88 similar.
+fn insert_clusterable(engine: &memory_engine::engine::MemoryEngine, n: usize, scope: &str) {
+    for i in 0..n {
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: format!("clusterable fact #{i}"),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: Some(scope.to_string()),
+                    opts: None,
+                },
+                &ClusterableEmbedder,
+                None,
+            )
+            .expect("add_fact failed");
+    }
+}
 
 /// Insert 5 pairs of exact-duplicate facts. Identical text produces identical
 /// blake3 embeddings, giving cosine similarity = 1.0.
@@ -77,27 +135,30 @@ fn dedup_removes_exact_duplicates() {
 fn cluster_fusion_creates_clusters() {
     let engine = eval_engine();
 
-    // Insert 8 facts with identical content so blake3 produces identical
-    // embeddings (cosine = 1.0), guaranteeing clustering at any threshold.
-    // Use scope to verify majority-vote scope propagation.
-    let shared_content = "Rust ownership model and memory safety guarantees";
-    for _ in 0..8 {
-        add_scoped_fact(&engine, shared_content, FactType::Semantic, "project:rust");
-    }
+    // Distinct-but-related facts (pairwise cosine ≈ 0.88, above the 0.85 cluster
+    // threshold) form a single cluster. A 0.95 dedup_threshold leaves them intact
+    // — they are similar but not duplicates. Identical facts would instead be
+    // collapsed by the dedup pass; clustering operates on distinct survivors.
+    insert_clusterable(&engine, 4, "project:rust");
 
     let generator = MockSummaryGenerator;
     let config = ConsolidationConfig {
-        dedup_threshold: 1.01, // above theoretical max: floating-point cosine can exceed 1.0
+        dedup_threshold: 0.95,
         min_cluster_size: 2,
     };
 
     let stats = engine
-        .consolidate(&generator, &TestEmbedder, &config)
+        .consolidate(&generator, &ClusterableEmbedder, &config)
         .expect("consolidate failed");
 
+    assert_eq!(
+        stats.duplicates_removed, 0,
+        "distinct facts (cosine ≈ 0.88 < 0.95) must not be deduplicated, got {}",
+        stats.duplicates_removed,
+    );
     assert!(
         stats.clusters_created >= 1,
-        "expected >= 1 cluster from 8 identical-embedding facts, got {}",
+        "expected >= 1 cluster from 4 related facts, got {}",
         stats.clusters_created,
     );
 }
@@ -137,27 +198,25 @@ fn consolidation_is_idempotent() {
 fn cluster_and_global_summary_scoping() {
     let engine = eval_engine();
 
-    // Insert facts under a shared scope with identical content to guarantee clustering
+    // Distinct-but-related facts under a shared scope cluster (cosine ≈ 0.88 >
+    // 0.85) without being deduplicated (< 0.95); a cluster then yields a global
+    // summary.
     let scope = "project:demo";
-    let shared_content = "Demo project fact about topic alpha";
-    for _ in 0..6 {
-        add_scoped_fact(&engine, shared_content, FactType::Semantic, scope);
-    }
+    insert_clusterable(&engine, 4, scope);
 
     let generator = MockSummaryGenerator;
     let config = ConsolidationConfig {
-        dedup_threshold: 1.01, // above theoretical max: floating-point cosine can exceed 1.0
+        dedup_threshold: 0.95,
         min_cluster_size: 2,
     };
 
     let stats = engine
-        .consolidate(&generator, &TestEmbedder, &config)
+        .consolidate(&generator, &ClusterableEmbedder, &config)
         .expect("consolidate failed");
 
-    // With identical embeddings, a cluster should form
     assert!(
         stats.clusters_created >= 1,
-        "expected >= 1 cluster from 6 identical-embedding facts, got {}",
+        "expected >= 1 cluster from 4 related facts, got {}",
         stats.clusters_created,
     );
 
