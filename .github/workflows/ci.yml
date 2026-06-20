@@ -63,3 +63,32 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  msrv:
+    name: MSRV (verify rust-version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Source the MSRV from the manifest so this job can never drift from the
+      # declared `rust-version`. The value is format-validated before use, which
+      # also neutralises any injection via a fork PR's Cargo.toml.
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          msrv=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"([0-9]+\.[0-9]+(\.[0-9]+)?)".*/\1/')
+          if ! printf '%s' "$msrv" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+            echo "::error::could not parse a valid rust-version from Cargo.toml (got '$msrv')"
+            exit 1
+          fi
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+          echo "Declared MSRV: $msrv"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      # Build the whole workspace on exactly the declared MSRV (default and
+      # all-features) so a dependency bump that raises the effective MSRV fails here.
+      - name: cargo build (MSRV, default features)
+        run: cargo build --workspace
+      - name: cargo build (MSRV, all features)
+        run: cargo build --workspace --all-features
