@@ -141,6 +141,112 @@ fn unscoped_query_returns_all_facts() {
 }
 
 #[test]
+fn scope_ancestors_returns_self_and_parent_facts_not_sibling() {
+    // End-to-end coverage for MemoryQuery::scope_ancestors → ScopeQuery::Ancestors
+    // → ScopeTree::resolve_query dispatch (#322). Ancestors of a leaf are the
+    // leaf itself plus every parent up to root, so a fact at the parent scope
+    // must surface while a sibling-subtree fact must not.
+    let engine = eval_engine();
+
+    engine
+        .ensure_scope_path("user:alice")
+        .expect("ensure alice scope");
+
+    let parent_id = add_scoped_fact(
+        &engine,
+        "Alice parent-scope config",
+        FactType::Semantic,
+        "user:alice",
+    );
+    let child_id = add_scoped_fact(
+        &engine,
+        "Alice child deployment plan",
+        FactType::Semantic,
+        "user:alice/project:x",
+    );
+    let _sibling_id = add_scoped_fact(
+        &engine,
+        "Bob unrelated note",
+        FactType::Semantic,
+        "user:bob",
+    );
+
+    let response = engine
+        .execute_query(&MemoryQuery::new().scope_ancestors("user:alice/project:x"))
+        .expect("query failed");
+
+    let ids: Vec<i64> = response.results.iter().map(|r| r.fact.id).collect();
+    assert!(
+        ids.contains(&child_id),
+        "the queried scope's own fact must appear in an ancestors query"
+    );
+    assert!(
+        ids.contains(&parent_id),
+        "the parent scope's fact must appear in an ancestors query"
+    );
+    assert!(
+        !ids.iter().any(|id| {
+            let f = engine.get_fact(*id).unwrap();
+            f.content.contains("Bob")
+        }),
+        "a sibling-branch fact must NOT appear in an ancestors query; got {ids:?}"
+    );
+}
+
+#[test]
+fn scope_inherited_includes_ancestors_and_descendants_not_unrelated() {
+    // End-to-end coverage for MemoryQuery::scope_inherited → ScopeQuery::Inherited
+    // → ScopeTree::resolve_query dispatch (#322). Inherited context is ancestors
+    // PLUS the subtree of the queried scope, so both a parent fact and a child
+    // fact surface while an unrelated branch does not.
+    let engine = eval_engine();
+
+    engine
+        .ensure_scope_path("user:alice")
+        .expect("ensure alice scope");
+
+    let parent_id = add_scoped_fact(
+        &engine,
+        "Alice parent-scope config",
+        FactType::Semantic,
+        "user:alice",
+    );
+    let child_id = add_scoped_fact(
+        &engine,
+        "Alice child env settings",
+        FactType::Semantic,
+        "user:alice/project:x",
+    );
+    let _other_id = add_scoped_fact(
+        &engine,
+        "Bob unrelated fact",
+        FactType::Semantic,
+        "user:bob",
+    );
+
+    let response = engine
+        .execute_query(&MemoryQuery::new().scope_inherited("user:alice"))
+        .expect("query failed");
+
+    let ids: Vec<i64> = response.results.iter().map(|r| r.fact.id).collect();
+    assert!(
+        ids.contains(&parent_id),
+        "the queried scope's own fact must appear in an inherited query"
+    );
+    assert!(
+        ids.contains(&child_id),
+        "a descendant fact must appear in an inherited query"
+    );
+    assert!(
+        !ids.iter().any(|id| {
+            let f = engine.get_fact(*id).unwrap();
+            f.content.contains("Bob")
+        }),
+        "an unrelated-branch fact must NOT appear in an inherited query; got {ids:?}"
+    );
+}
+
+#[test]
 fn scope_exact_does_not_include_parent_facts() {
     let engine = eval_engine();
 

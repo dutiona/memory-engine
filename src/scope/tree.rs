@@ -344,6 +344,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_query_ancestors() {
+        // `resolve_query` must dispatch `Ancestors` to `ancestors()` (not e.g.
+        // `subtree`). For demo the chain is demo -> user:michael -> root. (#322)
+        let tree = setup_tree();
+        let demo_id = tree.resolve_path("user:michael/project:demo").unwrap();
+        let ids = tree
+            .resolve_query(&ScopeQuery::Ancestors("user:michael/project:demo".into()))
+            .unwrap();
+        // Identical to the primitive — proves the arm routed to `ancestors`.
+        assert_eq!(ids, tree.ancestors(demo_id));
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0], demo_id);
+        assert_eq!(*ids.last().unwrap(), ScopeTree::root_id());
+    }
+
+    #[test]
+    fn resolve_query_inherited() {
+        // `resolve_query` must dispatch `Inherited` to `inherited()`. For
+        // user:michael that is ancestors [user, root] + descendants [demo,
+        // other], deduped to 4 unique ids. (#322)
+        let tree = setup_tree();
+        let user_id = tree.resolve_path("user:michael").unwrap();
+        let ids = tree
+            .resolve_query(&ScopeQuery::Inherited("user:michael".into()))
+            .unwrap();
+        // Identical to the primitive — proves the arm routed to `inherited`.
+        assert_eq!(ids, tree.inherited(user_id));
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 4, "expected user + root + demo + other");
+        assert!(ids.contains(&ScopeTree::root_id()));
+    }
+
+    #[test]
+    fn resolve_query_missing_path_returns_none() {
+        // Every arm short-circuits to None when the path does not resolve, so a
+        // nonexistent scope yields no ids regardless of query kind.
+        let tree = setup_tree();
+        for q in [
+            ScopeQuery::Exact("user:ghost".into()),
+            ScopeQuery::Subtree("user:ghost".into()),
+            ScopeQuery::Ancestors("user:ghost".into()),
+            ScopeQuery::Inherited("user:ghost".into()),
+        ] {
+            assert!(tree.resolve_query(&q).is_none(), "{q:?} should be None");
+        }
+    }
+
+    #[test]
     fn insert_idempotent() {
         let mut tree = setup_tree();
         let node_count_before = tree.nodes.len();
