@@ -39,10 +39,7 @@ pub fn global_integration(
     // embedding, with no throwaway `Fact` structs and no clones (#273, #495).
     let items: Vec<SummarizableContent<'_>> = cluster_summaries
         .iter()
-        .map(|s| SummarizableContent {
-            text: &s.content,
-            embedding: &s.embedding,
-        })
+        .map(|s| SummarizableContent::new(&s.content, &s.embedding))
         .collect();
 
     let (global_text, global_embedding) =

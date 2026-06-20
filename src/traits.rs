@@ -96,21 +96,23 @@ pub trait EmbeddingProvider: Send + Sync {
 
 // --- Phase 2 placeholder traits and types ---
 
-/// Trait for generating summaries from fact clusters (Phase 2).
+/// Trait for generating a textual summary from a set of related items (Phase 2).
 ///
-/// Used by consolidation to merge related facts into higher-level summaries.
+/// Used by consolidation: the cluster-fusion pass summarizes related *facts*, and
+/// the global-integration pass summarizes the resulting *cluster summaries* — both
+/// feed [`SummaryGenerator::summarize`] a slice of [`SummarizableContent`].
 ///
 /// Summaries are embedded by the [`EmbeddingProvider`] passed alongside the
 /// generator into [`consolidate`](crate::engine::MemoryEngine::consolidate), so
-/// summary text shares the same vector space as the facts it summarizes. The
-/// generator only produces text — it never embeds (issue #116: embedding lived
-/// here as a duplicate of [`EmbeddingProvider::embed`]).
+/// summary text shares the fact/summary vector space. The generator only produces
+/// text — it never embeds (issue #116: embedding lived here as a duplicate of
+/// [`EmbeddingProvider::embed`]).
 ///
 /// Requires `Send + Sync`: summary generators are shared across the engine's
 /// worker threads alongside the other consumer providers.
 pub trait SummaryGenerator: Send + Sync {
     /// Generate a textual summary from a slice of items, each carrying its text
-    /// and the embedding of that text.
+    /// and that text's embedding.
     ///
     /// # Errors
     ///
@@ -118,21 +120,34 @@ pub trait SummaryGenerator: Send + Sync {
     fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String>;
 }
 
-/// A minimal, borrowed view of something to summarize: its text and the
-/// embedding of that text in the fact vector space.
+/// A minimal, borrowed view of something to summarize: its `text` and that text's
+/// `embedding` in the shared fact/summary vector space.
 ///
-/// Both the cluster-fusion pass (summarizing facts) and the global-integration
-/// pass (summarizing cluster summaries) feed [`SummaryGenerator::summarize`]
-/// through this type, so neither has to fabricate throwaway `Fact` structs with
-/// phantom field values just to satisfy the trait (#273). It is `Copy` — two
-/// shared references — and borrows its inputs, so no content or embedding is
-/// cloned to build it.
+/// Both consolidation passes feed [`SummaryGenerator::summarize`] through this type
+/// — the cluster pass over facts, the global pass over cluster summaries — so
+/// neither fabricates throwaway `Fact` structs with phantom field values just to
+/// satisfy the trait (#273). It is `Copy` (two shared references) and borrows its
+/// inputs, so building it clones nothing.
+///
+/// `embedding` is provided for summarizers that want embedding-aware merging
+/// (ordering, centroid weighting, dedup hints); a plain text summarizer ignores
+/// it. `#[non_exhaustive]`: build it via [`SummarizableContent::new`] so a future
+/// field (e.g. scope or metadata for richer prompting) won't break callers.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SummarizableContent<'a> {
     /// The text to summarize.
     pub text: &'a str,
-    /// The embedding of `text`, in the same vector space as the facts.
+    /// The embedding of `text`, in the shared fact/summary vector space.
     pub embedding: &'a [f32],
+}
+
+impl<'a> SummarizableContent<'a> {
+    /// Create a summarizable view from borrowed text and its embedding.
+    #[must_use]
+    pub const fn new(text: &'a str, embedding: &'a [f32]) -> Self {
+        Self { text, embedding }
+    }
 }
 
 /// Trait for proposing how to consolidate a window of facts (#554).

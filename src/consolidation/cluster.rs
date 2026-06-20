@@ -72,10 +72,7 @@ pub fn cluster_fusion(
 
         let items: Vec<SummarizableContent<'_>> = cluster_facts
             .iter()
-            .map(|f| SummarizableContent {
-                text: &f.content,
-                embedding: &f.embedding,
-            })
+            .map(|f| SummarizableContent::new(&f.content, &f.embedding))
             .collect();
         let (summary_text, summary_embedding) =
             super::summarize_and_embed(generator, embedder, &items, embed_dim)?;
