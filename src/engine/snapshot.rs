@@ -362,17 +362,19 @@ pub fn load_from_file(path: &Path, embed_dim: usize) -> Option<(SnapshotHeader, 
     //    inside each `HnswEntry`. A corrupt/tampered payload could carry a
     //    wrong-length embedding that the header still claims is `embed_dim`;
     //    feeding that into the HNSW rebuild would be a latent dimension bug.
-    if let Some(hnsw) = &payload.hnsw {
-        if let Some(bad) = hnsw.entries.iter().find(|e| e.embedding.len() != embed_dim) {
-            tracing::warn!(
-                path = %path.display(),
-                fact_id = bad.fact_id,
-                entry_dim = bad.embedding.len(),
-                expected = embed_dim,
-                "snapshot HNSW entry embedding dimension mismatch, discarding"
-            );
-            return None;
-        }
+    if let Some(bad) = payload
+        .hnsw
+        .as_ref()
+        .and_then(|hnsw| hnsw.entries.iter().find(|e| e.embedding.len() != embed_dim))
+    {
+        tracing::warn!(
+            path = %path.display(),
+            fact_id = bad.fact_id,
+            entry_dim = bad.embedding.len(),
+            expected = embed_dim,
+            "snapshot HNSW entry embedding dimension mismatch, discarding"
+        );
+        return None;
     }
 
     Some((header, payload))
