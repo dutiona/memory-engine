@@ -59,12 +59,30 @@ impl ScopeTree {
     }
 
     /// Resolve a path string to a `scope_id` (read-only, no creation).
-    /// Returns `None` if any segment is missing.
+    ///
+    /// The empty string `""` and `"/"` both resolve to the root scope. `"/"` is
+    /// the canonical string [`ScopeTree::path_for_id`] renders for the root, so
+    /// `resolve_path(path_for_id(root))` round-trips rather than returning
+    /// `None` (the representation is invertible).
+    ///
+    /// For any other input, segments are separated by `/`. Returns `None` if any
+    /// segment does not exist in the cached tree, or if the path contains an
+    /// empty *inner* segment (e.g. a leading/trailing `/` or `//`).
     pub fn resolve_path(&self, path: &str) -> Option<i64> {
+        // Root synonyms: the canonical "/" rendered by `path_for_id`, and "" as
+        // the conceptual root. Handled up front so the per-segment loop never
+        // sees the empty inner segment they would otherwise split into.
+        if path.is_empty() || path == "/" {
+            return Some(Self::ROOT_ID);
+        }
         let mut current = Self::ROOT_ID; // start at root
         for segment in path.split('/') {
             let segment = segment.trim();
-            if segment.is_empty() {
+            // Shared structural validation (non-empty, no '/', <= 256 bytes) —
+            // the single source of truth in `crate::scope::validate_segment`,
+            // also used by `ScopeStore::ensure_path` on the write path. Any
+            // failure is indistinguishable from "not found" here, so map to None.
+            if super::validate_segment(segment).is_err() {
                 return None;
             }
             let child_ids = self.children.get(&current)?;
@@ -330,11 +348,44 @@ mod tests {
     #[test]
     fn path_for_id_root_returns_slash() {
         let tree = setup_tree();
-        // Root scope is the display-only "/" path (tree.rs:151-153).
+        // Root scope renders as the canonical "/" path.
         assert_eq!(
             tree.path_for_id(ScopeTree::root_id()),
             Some("/".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_path_root_synonyms() {
+        // The root path produced by `path_for_id` ("/") must round-trip back
+        // through `resolve_path` (#360 — eliminate the non-invertible
+        // representation). The empty string is also accepted as a root synonym,
+        // matching how `ScopeStore::ensure_path` treats the conceptual root.
+        let tree = setup_tree();
+        let root = ScopeTree::root_id();
+        assert_eq!(tree.resolve_path("/"), Some(root));
+        assert_eq!(tree.resolve_path(""), Some(root));
+    }
+
+    #[test]
+    fn path_for_id_root_roundtrips_through_resolve_path() {
+        // The whole point of #360: `resolve_path(path_for_id(root))` resolves
+        // back to root rather than silently returning `None`.
+        let tree = setup_tree();
+        let root = ScopeTree::root_id();
+        let rendered = tree.path_for_id(root).expect("root has a path");
+        assert_eq!(tree.resolve_path(&rendered), Some(root));
+    }
+
+    #[test]
+    fn resolve_path_still_rejects_empty_inner_segment() {
+        // A leading/trailing "/" or "//" still yields an empty *inner* segment
+        // and must remain unresolvable — accepting the root synonym must not
+        // make malformed multi-segment paths resolve.
+        let tree = setup_tree();
+        assert!(tree.resolve_path("user:michael//project:demo").is_none());
+        assert!(tree.resolve_path("/user:michael").is_none());
+        assert!(tree.resolve_path("user:michael/").is_none());
     }
 
     #[test]

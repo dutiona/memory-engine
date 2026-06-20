@@ -72,24 +72,17 @@ impl<'a> ScopeStore<'a> {
         })
     }
 
-    /// Validate a scope label segment.
+    /// Validate a scope label segment (write path).
+    ///
+    /// Applies the shared structural rules from [`crate::scope::validate_segment`]
+    /// (non-empty, no `/`, at most 256 bytes) on the trimmed label, plus the
+    /// write-path-only rule that the label must have no leading/trailing
+    /// whitespace — so that stored labels always round-trip through
+    /// [`crate::scope::ScopeTree::resolve_path`].
     fn validate_label(label: &str) -> Result<()> {
         let trimmed = label.trim();
-        if trimmed.is_empty() {
-            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
-                "scope label must not be empty".into(),
-            )));
-        }
-        if trimmed.contains('/') {
-            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
-                "scope label must not contain '/'".into(),
-            )));
-        }
-        if trimmed.len() > 256 {
-            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
-                "scope label must be at most 256 bytes".into(),
-            )));
-        }
+        crate::scope::validate_segment(trimmed)
+            .map_err(|reason| MemoryError::Conflict(ConflictError::ScopeLabel(reason.into())))?;
         if trimmed != label {
             return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
                 "scope label must not have leading/trailing whitespace".into(),
