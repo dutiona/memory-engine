@@ -12,6 +12,14 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
             None,
         ),
 
+        // A model-identity mismatch is a client-input error: the caller declared (or a
+        // configured provider reports) an identity that disagrees with the store's. Like
+        // EmbeddingDimension it is invalid_params, NOT an internal server fault.
+        MemoryError::EmbeddingModelMismatch { expected, actual } => ErrorData::invalid_params(
+            format!("embedding model mismatch: store identity {expected:?} != declared {actual:?}"),
+            None,
+        ),
+
         MemoryError::Conflict(msg) => ErrorData::invalid_params(format!("conflict: {msg}"), None),
 
         // A dream-cycle report that fails validation/application is a client-input
@@ -130,6 +138,20 @@ mod tests {
         };
         let mcp = to_mcp_error(err);
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn embedding_model_mismatch_maps_to_invalid_params() {
+        // A declared/configured model disagreeing with the store is a client-input
+        // error (#615), not a server fault.
+        use memory_engine::EmbeddingFingerprint;
+        let err = MemoryError::EmbeddingModelMismatch {
+            expected: Box::new(EmbeddingFingerprint::new("a", "tei", 8)),
+            actual: Box::new(EmbeddingFingerprint::new("b", "ollama", 8)),
+        };
+        let mcp = to_mcp_error(err);
+        assert_eq!(mcp.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(mcp.message.contains("model mismatch"));
     }
 
     #[test]
