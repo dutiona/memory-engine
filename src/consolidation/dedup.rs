@@ -10,11 +10,19 @@ use crate::types::Fact;
 /// Outcome of a [`local_dedup`] pass.
 ///
 /// Replaces the former `(usize, Vec<i64>)` return whose `usize::MAX` first element
-/// was an in-band "skipped" sentinel (#272): that magic value collided with any
-/// legitimate count `>= usize::MAX - 1` and forced the orchestrator to decode it
-/// before use. The skip state now lives in the type, so the over-cap case can be
-/// asserted directly and can never be mistaken for a real count.
+/// was an in-band "skipped" sentinel (#272). The flaw was not collision odds — a
+/// real removed-count of `usize::MAX` is physically impossible — but that the
+/// signal was *in-band*: every caller had to know the magic value and decode it
+/// before use, and the value was self-documenting-hostile. The skip state now lives
+/// in the type, so the over-cap case is matched explicitly and can never be read as
+/// a count.
+///
+/// Deliberately **not** `#[non_exhaustive]`: `consolidation` is `pub(crate)`, so
+/// this is crate-internal and matched exhaustively at its single call site (mirrors
+/// the `CycleOutcome` convention). Adding a variant is an in-crate change, not a
+/// semver break.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "a DedupOutcome must be inspected — a Skipped pass must suppress the watermark advance"]
 pub enum DedupOutcome {
     /// The pass ran to completion.
     Ran {
@@ -371,7 +379,9 @@ mod tests {
             0.8,
         );
 
-        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now()).unwrap();
+        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
 
         let store = FactStore::new(&conn, dim);
         let active = store.list_active(None).unwrap();
@@ -386,7 +396,9 @@ mod tests {
         insert_fact(&conn, dim, "older fact", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, dim, "newer fact", vec![0.99, 0.01, 0.0, 0.0], 0.5);
 
-        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now()).unwrap();
+        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
 
         let store = FactStore::new(&conn, dim);
         let active = store.list_active(None).unwrap();
@@ -490,7 +502,9 @@ mod tests {
         store.update_importance_score(1, 0.8).unwrap(); // low imp fact gets higher score
         store.update_importance_score(2, 0.4).unwrap(); // high imp fact gets lower score
 
-        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now()).unwrap();
+        local_dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
 
         let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
@@ -626,5 +640,20 @@ mod tests {
         // Skipped means untouched: both facts remain active.
         let store = FactStore::new(&conn, dim);
         assert_eq!(store.list_active(None).unwrap().len(), 2);
+    }
+
+    /// Boundary: a corpus exactly AT the cap must RUN (the predicate is strict `>`),
+    /// not skip. Guards against a `>` → `>=` off-by-one in the cap check.
+    #[test]
+    fn corpus_at_cap_runs_not_skipped() {
+        let (conn, dim) = setup();
+        insert_fact(&conn, dim, "dup A", vec![1.0, 0.0, 0.0, 0.0], 0.5);
+        insert_fact(&conn, dim, "dup B", vec![0.99, 0.01, 0.0, 0.0], 0.5);
+
+        // corpus len == cap (2 == 2): NOT over cap → runs and collapses the pair.
+        let (removed, _) = local_dedup(&conn, dim, 0.90, 2, None, Utc::now())
+            .unwrap()
+            .expect_ran();
+        assert_eq!(removed, 1, "a corpus exactly at the cap must run, not skip");
     }
 }

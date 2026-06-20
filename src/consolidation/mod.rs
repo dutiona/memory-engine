@@ -560,6 +560,18 @@ mod tests {
         // Skipped dedup contributes no removals and expires nothing...
         assert_eq!(stats.duplicates_removed, 0, "skipped dedup removes nothing");
         assert!(expired.is_empty());
+
+        // ...but only the dedup-driven watermark advance is suppressed: the rest of
+        // the pipeline proceeds, so the 3 surviving near-duplicates still cluster
+        // and globalize.
+        assert_eq!(
+            stats.clusters_created, 1,
+            "cluster pass still runs when dedup is skipped"
+        );
+        assert_eq!(
+            stats.global_summaries, 1,
+            "global pass still runs when dedup is skipped"
+        );
         assert_eq!(
             FactStore::new(&conn, DIM).list_active(None).unwrap().len(),
             3,
