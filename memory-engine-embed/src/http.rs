@@ -16,6 +16,35 @@ use memory_engine::traits::EmbeddingProvider;
 /// `Content-Length` header.
 const MAX_BODY: u64 = 32 * 1024 * 1024;
 
+/// The three response shapes an OpenAI-compatible embedding endpoint may return,
+/// discriminated by their top-level key.
+///
+/// `#[serde(untagged)]` tries the variants in declaration order and picks the
+/// first whose required field is present; the keys are disjoint, so a well-formed
+/// response matches exactly one. Declaration order preserves the historical
+/// dispatch precedence (`data` > `embeddings` > `embedding`) for the degenerate
+/// case where a server returns more than one key.
+///
+/// The leaf payloads are kept as [`serde_json::Value`] rather than `Vec<f32>` /
+/// `Vec<OpenAiItem>` on purpose: the per-element validation (missing/duplicate
+/// `index`, gaps, unparseable `embedding`) lives in
+/// [`HttpEmbeddingProvider::parse_openai_batch`] /
+/// [`HttpEmbeddingProvider::parse_ollama_batch`], which emit precise per-index
+/// diagnostics. Fully typing the leaves would make `untagged` fall through to the
+/// next variant on a malformed element and surface a generic "did not match any
+/// variant" error instead — a regression in error fidelity. This enum's job is to
+/// centralise *format dispatch*, replacing the duplicated `.get("…")` chains.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum EmbeddingResponse {
+    /// `OpenAI`: `{ "data": [{ "index": 0, "embedding": [...] }, ...] }`.
+    OpenAi { data: Vec<serde_json::Value> },
+    /// Ollama: `{ "embeddings": [[...], ...] }`.
+    Ollama { embeddings: Vec<serde_json::Value> },
+    /// Direct / legacy single: `{ "embedding": [...] }`.
+    Direct { embedding: serde_json::Value },
+}
+
 /// HTTP-based embedding provider calling an OpenAI-compatible `/v1/embeddings` endpoint.
 ///
 /// Auto-detects response format: `OpenAI` (`data[].embedding`), Ollama (`embeddings[]`),
@@ -340,6 +369,16 @@ impl HttpEmbeddingProvider {
         serde_json::from_slice(&bytes)
             .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))
     }
+
+    /// Classify a parsed response body into one of the known [`EmbeddingResponse`]
+    /// shapes, or `None` if it matches none.
+    ///
+    /// Deserializes by borrowing `body` so the caller keeps it for its own
+    /// (format-specific) "cannot extract" diagnostic.
+    fn classify(body: &serde_json::Value) -> Option<EmbeddingResponse> {
+        use serde::Deserialize as _;
+        EmbeddingResponse::deserialize(body).ok()
+    }
 }
 
 impl EmbeddingProvider for HttpEmbeddingProvider {
@@ -349,32 +388,32 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             "input": text,
         }))?;
 
-        // Auto-detect response format:
-        // OpenAI: { "data": [{ "embedding": [...] }] }
-        // Ollama: { "embeddings": [[...]] }
-        // Multi-branch if-let chain is clearer than a nested map_or_else here.
-        #[allow(clippy::option_if_let_else)]
-        let embedding = if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
-            data.first()
-                .and_then(|d| d.get("embedding"))
-                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok())
-        } else if let Some(embeddings) = body.get("embeddings").and_then(|e| e.as_array()) {
-            embeddings
-                .first()
-                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok())
-        } else if let Some(embedding) = body.get("embedding") {
-            // Single embedding format
-            serde_json::from_value::<Vec<f32>>(embedding.clone()).ok()
-        } else {
-            None
-        };
-
-        let embedding = embedding.ok_or_else(|| {
+        let no_format = || {
             MemoryError::Internal(format!(
                 "cannot extract embedding from response: {}",
                 serde_json::to_string(&body).unwrap_or_default()
             ))
-        })?;
+        };
+
+        // Dispatch on the typed response shape; the single path takes the first
+        // embedding of whichever array variant matched. A shape that matches no
+        // variant, or a matched-but-unparseable embedding, both surface as the
+        // same "cannot extract" error (preserving the prior behaviour).
+        let embedding = match Self::classify(&body) {
+            Some(EmbeddingResponse::OpenAi { data }) => data
+                .first()
+                .and_then(|d| d.get("embedding"))
+                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok()),
+            Some(EmbeddingResponse::Ollama { embeddings }) => embeddings
+                .first()
+                .and_then(|e| serde_json::from_value::<Vec<f32>>(e.clone()).ok()),
+            Some(EmbeddingResponse::Direct { embedding }) => {
+                serde_json::from_value::<Vec<f32>>(embedding).ok()
+            }
+            None => None,
+        };
+
+        let embedding = embedding.ok_or_else(no_format)?;
 
         self.validate_embedding(&embedding, None)?;
 
@@ -393,33 +432,39 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             "input": texts,
         }))?;
 
-        // Auto-detect response format and extract all embeddings:
+        // Dispatch on the typed response shape and extract all embeddings:
         // OpenAI: { "data": [{ "index": 0, "embedding": [...] }, ...] }
         // Ollama: { "embeddings": [[...], [...]] }
-        // Single: { "embedding": [...] } (only when one text was requested)
-        let embeddings = if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
-            Self::parse_openai_batch(data, texts.len())?
-        } else if let Some(arr) = body.get("embeddings").and_then(|e| e.as_array()) {
-            Self::parse_ollama_batch(arr, texts.len())?
-        } else if let Some(embedding) = body.get("embedding") {
-            // Single embedding format (e.g. Ollama's legacy `/api/embeddings`, which
-            // accepts only one prompt). Only valid when exactly one text was requested.
-            if texts.len() != 1 {
+        // Direct: { "embedding": [...] } (only when one text was requested)
+        let embeddings = match Self::classify(&body) {
+            Some(EmbeddingResponse::OpenAi { data }) => {
+                Self::parse_openai_batch(&data, texts.len())?
+            }
+            Some(EmbeddingResponse::Ollama { embeddings }) => {
+                Self::parse_ollama_batch(&embeddings, texts.len())?
+            }
+            Some(EmbeddingResponse::Direct { embedding }) => {
+                // Direct single-embedding format (e.g. Ollama's legacy
+                // `/api/embeddings`, which accepts only one prompt). Only valid
+                // when exactly one text was requested.
+                if texts.len() != 1 {
+                    return Err(MemoryError::Internal(format!(
+                        "batch embedding: server returned a single 'embedding' but {} texts were requested",
+                        texts.len()
+                    )));
+                }
+                let emb = serde_json::from_value::<Vec<f32>>(embedding).map_err(|_| {
+                    MemoryError::Internal("batch embedding: cannot parse single 'embedding'".into())
+                })?;
+                vec![emb]
+            }
+            None => {
+                let body_str = serde_json::to_string(&body).unwrap_or_default();
+                let truncated = truncate_on_char_boundary(&body_str, 1000);
                 return Err(MemoryError::Internal(format!(
-                    "batch embedding: server returned a single 'embedding' but {} texts were requested",
-                    texts.len()
+                    "cannot extract embeddings from batch response: {truncated}"
                 )));
             }
-            let emb = serde_json::from_value::<Vec<f32>>(embedding.clone()).map_err(|_| {
-                MemoryError::Internal("batch embedding: cannot parse single 'embedding'".into())
-            })?;
-            vec![emb]
-        } else {
-            let body_str = serde_json::to_string(&body).unwrap_or_default();
-            let truncated = truncate_on_char_boundary(&body_str, 1000);
-            return Err(MemoryError::Internal(format!(
-                "cannot extract embeddings from batch response: {truncated}"
-            )));
         };
 
         // Validate all dimensions and NaN/Inf against the native dim, THEN truncate (MRL).
@@ -668,6 +713,52 @@ mod tests {
                 .to_string()
                 .contains("expected 3 results, got 1")
         );
+    }
+
+    #[test]
+    fn classify_disambiguates_openai_shape() {
+        let body = serde_json::json!({ "data": [{ "index": 0, "embedding": [0.1, 0.2] }] });
+        assert!(matches!(
+            HttpEmbeddingProvider::classify(&body),
+            Some(EmbeddingResponse::OpenAi { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_disambiguates_ollama_shape() {
+        let body = serde_json::json!({ "embeddings": [[0.1, 0.2], [0.3, 0.4]] });
+        assert!(matches!(
+            HttpEmbeddingProvider::classify(&body),
+            Some(EmbeddingResponse::Ollama { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_disambiguates_direct_shape() {
+        let body = serde_json::json!({ "embedding": [0.1, 0.2] });
+        assert!(matches!(
+            HttpEmbeddingProvider::classify(&body),
+            Some(EmbeddingResponse::Direct { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_prefers_data_over_embedding_when_both_present() {
+        // Historical dispatch precedence: `data` wins over a co-present `embedding`.
+        let body = serde_json::json!({
+            "data": [{ "index": 0, "embedding": [0.1] }],
+            "embedding": [9.9],
+        });
+        assert!(matches!(
+            HttpEmbeddingProvider::classify(&body),
+            Some(EmbeddingResponse::OpenAi { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_returns_none_for_unknown_shape() {
+        let body = serde_json::json!({ "unexpected": "shape" });
+        assert!(HttpEmbeddingProvider::classify(&body).is_none());
     }
 
     #[test]
