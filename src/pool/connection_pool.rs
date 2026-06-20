@@ -548,12 +548,19 @@ impl ConnectionPool {
     ///
     /// # In-memory reentrancy hazard (#278)
     ///
-    /// In in-memory mode [`read`](Self::read) locks this same connection. The
-    /// `parking_lot::Mutex` is **non-reentrant**, so a thread that holds the
-    /// guard returned here MUST NOT call `read()` on the same thread — doing so
-    /// self-deadlocks (in release it hangs forever; in debug a reentrancy
-    /// assertion fires). File-backed pools are unaffected (reads come from a
-    /// separate pool).
+    /// In in-memory mode [`read`](Self::read) locks this **same** connection —
+    /// the [`SerializedReadGuard`] it returns holds `write_conn`'s lock to
+    /// serialize reads. The `parking_lot::Mutex` is **non-reentrant**, so the
+    /// hazard runs in *both* directions on one thread, and both self-deadlock
+    /// (release: hangs forever; debug: the shared reentrancy marker fires):
+    /// - holding the guard returned here, then calling `read()`; and
+    /// - holding an in-memory `read()` guard, then calling `write()` or
+    ///   [`try_write`](Self::try_write) — the re-lock blocks on `write_conn`
+    ///   (the `try` in `try_write` is the `read_only` check, *not* a `try_lock`,
+    ///   so it blocks rather than failing fast).
+    ///
+    /// Drop every guard locking `write_conn` before re-entering on either side.
+    /// File-backed pools are unaffected (reads come from a separate pool).
     pub(crate) fn write(&self) -> WriteGuard<'_> {
         #[cfg(debug_assertions)]
         assert_not_reentrant(std::ptr::from_ref::<Self>(self) as usize);
@@ -564,9 +571,13 @@ impl ConnectionPool {
     ///
     /// Returns `MemoryError::ReadOnly` if the pool was opened read-only.
     ///
-    /// The same in-memory reentrancy hazard as [`write`](Self::write) applies:
-    /// never call [`read`](Self::read) on the same thread while holding the
-    /// returned guard on an in-memory pool.
+    /// The same in-memory reentrancy hazard as [`write`](Self::write) applies in
+    /// both directions: never call [`read`](Self::read) while holding the guard
+    /// returned here, and never call `try_write()` while already holding an
+    /// in-memory [`read`](Self::read) guard. Either re-locks the non-reentrant
+    /// `write_conn` `Mutex` on the same thread and self-deadlocks — `try_write`
+    /// blocks on `write_conn.lock()` (the `try` only gates `read_only`), it does
+    /// not fail fast. File-backed pools are immune.
     pub fn try_write(&self) -> Result<WriteGuard<'_>> {
         if self.read_only {
             return Err(MemoryError::ReadOnly);
