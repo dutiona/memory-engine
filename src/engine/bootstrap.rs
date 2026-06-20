@@ -55,17 +55,17 @@ impl MemoryEngine {
         // The embedding identity is stamped (#613) inside the session savepoint, gated
         // on a fact actually being written (#643) — see `bootstrap_within_savepoint`.
         // A no-op session (zero extracted facts) therefore leaves the store unstamped.
-        crate::bootstrap::bootstrap_session_inner(
-            &conn,
-            self.embed_dim,
-            &self.upcaster_registry,
-            reader,
+        let ctx = crate::bootstrap::BootstrapContext {
+            conn: &conn,
+            embed_dim: self.embed_dim,
+            upcaster_registry: &self.upcaster_registry,
             embedder,
             extractor,
             config,
             classifier,
             scope_id,
-        )
+        };
+        crate::bootstrap::bootstrap_session_inner(&ctx, reader)
     }
 
     /// Bootstrap all JSONL session logs in a directory.
@@ -96,17 +96,17 @@ impl MemoryEngine {
         // being written (#643) — see `bootstrap_within_savepoint`. This preserves
         // per-session independence (each commits its identity atomically with its
         // facts) and leaves an empty/no-op directory unstamped.
-        crate::bootstrap::bootstrap_directory_inner(
-            &conn,
-            self.embed_dim,
-            &self.upcaster_registry,
-            dir,
+        let ctx = crate::bootstrap::BootstrapContext {
+            conn: &conn,
+            embed_dim: self.embed_dim,
+            upcaster_registry: &self.upcaster_registry,
             embedder,
             extractor,
             config,
             classifier,
             scope_id,
-        )
+        };
+        crate::bootstrap::bootstrap_directory_inner(&ctx, dir)
     }
 
     /// Import native `.md` memory files (recursive) from a directory.

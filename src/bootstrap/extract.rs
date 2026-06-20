@@ -75,7 +75,11 @@ impl SessionExtractor for KeywordExtractor {
 
         let mut metadata = serde_json::json!({
             "session_id": episode.session_id,
-            "category": format!("{:?}", episode.category),
+            // Stable lowercase kebab form (#334) — schema-independent of the Rust
+            // variant name and consistent with the `session_outcome` convention
+            // set just below. Avoid the previous `format!("{:?}", ...)` Debug repr,
+            // which emitted capitalized strings and would silently change on rename.
+            "category": episode.category.as_str(),
             "matched_keywords": episode.matched_keywords,
         });
 
@@ -182,6 +186,34 @@ mod tests {
     }
 
     #[test]
+    fn category_metadata_is_lowercase_and_roundtrips() {
+        // #334: the stored `category` must be lowercase (matching the adjacent
+        // `session_outcome` "failure"/"success"/"indeterminate" convention),
+        // schema-stable, and independent of the Rust variant name. Each variant
+        // serializes to its kebab string and parses back to the same variant.
+        for (cat, expected) in [
+            (EpisodeCategory::Bug, "bug"),
+            (EpisodeCategory::Decision, "decision"),
+            (EpisodeCategory::Convention, "convention"),
+            (EpisodeCategory::Learning, "learning"),
+        ] {
+            let ep = make_episode(cat, "x", "y");
+            let ext = KeywordExtractor;
+            let facts = ext.extract(&ep, &SessionOutcome::Success).unwrap();
+            let stored = facts[0].metadata["category"].as_str().unwrap();
+            assert_eq!(
+                stored, expected,
+                "category must be the lowercase kebab form"
+            );
+            assert_eq!(
+                stored.parse::<EpisodeCategory>(),
+                Ok(cat),
+                "stored category string must round-trip back to its variant"
+            );
+        }
+    }
+
+    #[test]
     fn keyword_extractor_indeterminate_sets_outcome_key() {
         let ep = make_episode(EpisodeCategory::Bug, "investigate", "unclear");
         let ext = KeywordExtractor;
@@ -233,6 +265,68 @@ mod tests {
         // The implementation truncates to MAX_LEN=2000 chars then appends "...",
         // so the total length must be exactly MAX_LEN + 3 = 2003 at most.
         assert!(facts[0].content.len() <= 2003);
+    }
+
+    mod proptest_build_content {
+        use proptest::prelude::*;
+
+        use super::super::build_content;
+        use crate::bootstrap::filter::{CandidateEpisode, ConversationTurn, EpisodeCategory};
+        use chrono::Utc;
+
+        /// Build a one-turn episode from arbitrary user/assistant text.
+        fn episode(user: String, assistant: String) -> CandidateEpisode {
+            CandidateEpisode {
+                category: EpisodeCategory::Bug,
+                turns: vec![ConversationTurn {
+                    timestamp: Utc::now(),
+                    user_text: user,
+                    assistant_text: assistant,
+                    tool_calls: vec![],
+                    uuid: "t".into(),
+                }],
+                matched_keywords: vec![],
+                session_id: "s".into(),
+                timestamp: Utc::now(),
+            }
+        }
+
+        proptest! {
+            // #425: the manual char-boundary walk-back in build_content must never
+            // cut a multi-byte codepoint or overrun the MAX_LEN + "..." bound, for
+            // ANY UTF-8 input. The strategy spans the full Unicode range up to
+            // 4-byte codepoints (`\u{10FFFF}`), so a multi-byte char can straddle
+            // the 2000-byte truncation point — the case ASCII-only tests cannot hit.
+            #[test]
+            fn truncated_content_is_valid_utf8_and_bounded(
+                user in "[\u{0}-\u{10FFFF}]{0,1500}",
+                assistant in "[\u{0}-\u{10FFFF}]{0,1500}",
+            ) {
+                // build_content slices on a manual char-boundary walk-back: if it
+                // ever cut mid-codepoint, the str index would PANIC inside the
+                // call below, so simply reaching the asserts proves no split
+                // codepoint for this input (that is the real #425 guarantee).
+                let content = build_content(&episode(user, assistant));
+                // The output never exceeds MAX_LEN (2000) + the "..." marker (3 bytes).
+                prop_assert!(
+                    content.len() <= 2003,
+                    "content too long: {} bytes",
+                    content.len()
+                );
+                // When truncation fired, the marker must be present and the body
+                // before it must be re-sliceable on a char boundary (this slice
+                // would panic if the walk-back had split a codepoint), exercising
+                // the walk-back's boundary correctness rather than a tautology.
+                if content.len() > 2000 {
+                    prop_assert!(
+                        content.ends_with("..."),
+                        "truncated content must carry the ... marker"
+                    );
+                    let body = &content[..content.len() - 3];
+                    prop_assert!(!body.is_empty());
+                }
+            }
+        }
     }
 
     #[test]

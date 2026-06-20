@@ -110,6 +110,34 @@ pub enum ContentBlock {
 /// worst-case working set to a constant.
 pub const MAX_JSONL_LINE_BYTES: usize = 8 * 1024 * 1024;
 
+/// Default ceiling on total bytes read from one session stream (#293).
+///
+/// The per-line cap ([`MAX_JSONL_LINE_BYTES`]) bounds a single allocation, but a
+/// hostile file of *many* in-bounds lines still streams unboundedly. This caps
+/// the whole stream: the reader is wrapped in `Read::take`, so reading stops
+/// after this many bytes regardless of line structure. Any logical line
+/// straddling the boundary is truncated and, lacking its terminating newline,
+/// is treated as a (final) malformed/oversized line rather than parsed.
+///
+/// 256 MiB is generously above any real Claude Code session file while keeping
+/// the worst-case I/O bounded. Surfaced as [`crate::bootstrap::BootstrapConfig::max_session_bytes`].
+pub const DEFAULT_MAX_SESSION_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Default ceiling on the number of [`SessionEntry`] values retained from one
+/// stream (#293).
+///
+/// Each parsed entry is pushed into an in-memory `Vec`, and every downstream
+/// pass (turn reconstruction, classification, extraction) is at least linear in
+/// the entry count — so an unbounded count is both a memory and a CPU `DoS`.
+/// Once this many entries are collected the parse loop stops with a `warn`,
+/// analogous to the oversized-line skip. The session is processed best-effort on
+/// the retained prefix.
+///
+/// 1,000,000 entries is far beyond any genuine session while bounding the
+/// working set to a constant. Surfaced as
+/// [`crate::bootstrap::BootstrapConfig::max_entries`].
+pub const DEFAULT_MAX_ENTRIES: usize = 1_000_000;
+
 /// Outcome of reading one logical line under a byte cap.
 enum BoundedLine {
     /// A complete line within the cap, trailing `\n` stripped.
@@ -167,28 +195,63 @@ fn read_bounded_line(
     Ok(BoundedLine::Oversized)
 }
 
-/// Parse a JSONL file into a sequence of [`SessionEntry`] values.
+/// Parse a JSONL file into a sequence of [`SessionEntry`] values, under three
+/// independent resource bounds against hostile or corrupt input (#293):
+///
+/// 1. **Per-line** ([`MAX_JSONL_LINE_BYTES`]): a single newline-free run cannot
+///    force an allocation proportional to its size.
+/// 2. **Per-stream** (`max_session_bytes`): the reader is wrapped in
+///    [`std::io::Read::take`], so total bytes read are capped even for a file of
+///    many in-bounds lines. A line straddling the boundary loses its newline and
+///    is counted as a (final) oversized line. `0` = no per-stream limit.
+/// 3. **Per-entry-count** (`max_entries`): parsing stops once this many entries
+///    are retained, so the in-memory `Vec` — and every downstream linear pass —
+///    stays bounded. `0` = no entry-count limit.
+///
+/// Both `0`-sentinels follow the `max_turns` convention (`0` = unbounded); the
+/// real defaults live in [`DEFAULT_MAX_SESSION_BYTES`] / [`DEFAULT_MAX_ENTRIES`].
 ///
 /// Malformed lines are skipped with a `tracing::warn`; this function never
-/// fails so callers always get a best-effort result. Lines longer than
-/// [`MAX_JSONL_LINE_BYTES`] are skipped (counted as malformed) to bound memory
-/// on hostile or corrupt input.
+/// fails so callers always get a best-effort result.
 ///
 /// Returns `(entries, malformed_count)` where `malformed_count` is the number
 /// of non-empty lines that failed to parse (including oversized ones).
-pub fn parse_session_file(reader: impl std::io::BufRead) -> (Vec<SessionEntry>, usize) {
-    parse_session_file_capped(reader, MAX_JSONL_LINE_BYTES)
+pub fn parse_session_file(
+    reader: impl std::io::BufRead,
+    max_session_bytes: u64,
+    max_entries: usize,
+) -> (Vec<SessionEntry>, usize) {
+    // `0` is the "no per-stream limit" sentinel (matching the `max_turns`
+    // convention); map it to the maximum so `Read::take` does not read *nothing*.
+    let stream_cap = if max_session_bytes == 0 {
+        u64::MAX
+    } else {
+        max_session_bytes
+    };
+    // `Read::take` enforces the per-stream byte ceiling; re-buffer because the
+    // `Take` adapter is `Read`, not `BufRead`, and the line reader needs the
+    // latter (`read_until`/`fill_buf`/`consume`).
+    let capped = std::io::BufReader::new(reader.take(stream_cap));
+    parse_session_file_capped(capped, MAX_JSONL_LINE_BYTES, max_entries)
 }
 
-/// [`parse_session_file`] with an explicit per-line byte cap (test seam).
+/// [`parse_session_file`] with explicit per-line and per-entry caps (test seam).
 fn parse_session_file_capped(
     mut reader: impl std::io::BufRead,
     cap: usize,
+    max_entries: usize,
 ) -> (Vec<SessionEntry>, usize) {
     let mut entries = Vec::new();
     let mut malformed = 0;
     let mut line_no = 0usize;
     loop {
+        if max_entries > 0 && entries.len() >= max_entries {
+            tracing::warn!(
+                max_entries,
+                "truncating session: reached entry-count cap (remaining lines discarded)"
+            );
+            break;
+        }
         match read_bounded_line(&mut reader, cap) {
             Ok(BoundedLine::Eof) => break,
             Ok(BoundedLine::Oversized) => {
@@ -318,10 +381,21 @@ mod tests {
     use super::*;
     use std::io::BufReader;
 
+    /// Parse with no per-stream/per-entry caps (per-line cap still applies).
+    /// Keeps the line-level tests focused on their own concern.
+    fn parse_all(reader: impl std::io::BufRead) -> (Vec<SessionEntry>, usize) {
+        parse_session_file(reader, 0, 0)
+    }
+
+    /// Parse with an explicit per-line cap and no entry-count cap.
+    fn parse_capped(reader: impl std::io::BufRead, cap: usize) -> (Vec<SessionEntry>, usize) {
+        parse_session_file_capped(reader, cap, 0)
+    }
+
     #[test]
     fn parse_empty_file() {
         let reader = BufReader::new(b"" as &[u8]);
-        let (entries, _malformed) = parse_session_file(reader);
+        let (entries, _malformed) = parse_all(reader);
         assert!(entries.is_empty());
     }
 
@@ -332,7 +406,7 @@ mod tests {
         // rather than emitting a cascade of fragment lines).
         let big = "x".repeat(200); // no embedded newline, far over the cap
         let input = format!("{big}\n{{\"type\":\"user\"}}\n");
-        let (entries, malformed) = parse_session_file_capped(input.as_bytes(), 64);
+        let (entries, malformed) = parse_capped(input.as_bytes(), 64);
         assert_eq!(
             entries.len(),
             1,
@@ -348,7 +422,7 @@ mod tests {
         // the cap is inclusive of legitimate lines, exclusive of overflow.
         let line = r#"{"type":"user"}"#;
         assert_eq!(line.len(), 15);
-        let (entries, malformed) = parse_session_file_capped(line.as_bytes(), 15);
+        let (entries, malformed) = parse_capped(line.as_bytes(), 15);
         assert_eq!(entries.len(), 1);
         assert_eq!(malformed, 0);
     }
@@ -358,9 +432,81 @@ mod tests {
         // An oversized final line with no trailing newline drains to EOF and is
         // counted once; the parser terminates rather than looping.
         let big = "y".repeat(100);
-        let (entries, malformed) = parse_session_file_capped(big.as_bytes(), 16);
+        let (entries, malformed) = parse_capped(big.as_bytes(), 16);
         assert!(entries.is_empty());
         assert_eq!(malformed, 1);
+    }
+
+    #[test]
+    fn parse_truncates_at_entry_count_cap() {
+        // #293 residual: a flood of small, individually-valid lines must not grow
+        // the entry Vec without bound. With max_entries=3, only the first 3 of
+        // 10 valid lines are retained; the rest are discarded (not parsed), so
+        // downstream linear passes stay bounded.
+        let mut input = String::new();
+        for _ in 0..10 {
+            input.push_str("{\"type\":\"user\"}\n");
+        }
+        let (entries, malformed) =
+            parse_session_file_capped(input.as_bytes(), MAX_JSONL_LINE_BYTES, 3);
+        assert_eq!(
+            entries.len(),
+            3,
+            "entry count must be capped at max_entries"
+        );
+        assert_eq!(
+            malformed, 0,
+            "truncated-away lines are discarded, not counted as malformed"
+        );
+    }
+
+    #[test]
+    fn parse_entry_count_cap_zero_is_unbounded() {
+        // max_entries == 0 disables the entry-count cap: all valid lines parse.
+        let mut input = String::new();
+        for _ in 0..10 {
+            input.push_str("{\"type\":\"user\"}\n");
+        }
+        let (entries, _malformed) =
+            parse_session_file_capped(input.as_bytes(), MAX_JSONL_LINE_BYTES, 0);
+        assert_eq!(entries.len(), 10);
+    }
+
+    #[test]
+    fn parse_truncates_at_session_byte_cap() {
+        // #293 residual: the per-stream byte ceiling (via Read::take) stops the
+        // reader mid-file. Three 15-byte lines + newlines = 48 bytes total; a
+        // 31-byte cap admits the first two whole lines (32 bytes would include
+        // the 2nd newline, but at 31 we stop one byte short, leaving the 2nd
+        // line unterminated → counted as a final oversized/malformed line).
+        let line = "{\"type\":\"user\"}"; // 15 bytes
+        assert_eq!(line.len(), 15);
+        let input = format!("{line}\n{line}\n{line}\n");
+        // Admit exactly the first full line + newline (16 bytes), then 15 bytes
+        // of the second line with no terminating newline.
+        let (entries, _malformed) = parse_session_file(input.as_bytes(), 31, 0);
+        assert_eq!(
+            entries.len(),
+            2,
+            "per-stream cap admits the first whole line plus the unterminated second"
+        );
+    }
+
+    #[test]
+    fn parse_session_byte_cap_zero_is_unbounded() {
+        // max_session_bytes == 0 is the "no per-stream limit" sentinel (matching
+        // the max_turns convention) — it must NOT be passed verbatim to
+        // Read::take, which would read nothing. All valid lines must parse.
+        let mut input = String::new();
+        for _ in 0..5 {
+            input.push_str("{\"type\":\"user\"}\n");
+        }
+        let (entries, _malformed) = parse_session_file(input.as_bytes(), 0, 0);
+        assert_eq!(
+            entries.len(),
+            5,
+            "the 0 sentinel must mean unbounded, not take(0)/read-nothing"
+        );
     }
 
     #[test]
@@ -369,7 +515,7 @@ mod tests {
 {"type":"user","sessionId":"a1b2c3"}
 "#;
         let reader = BufReader::new(input.as_bytes());
-        let (entries, malformed) = parse_session_file(reader);
+        let (entries, malformed) = parse_all(reader);
         assert_eq!(entries.len(), 1);
         assert_eq!(malformed, 1, "one malformed line should be counted");
         assert_eq!(entries[0].entry_type, EntryType::User);
@@ -379,7 +525,7 @@ mod tests {
     fn parse_user_message() {
         let line = r#"{"type":"user","sessionId":"sess-001","timestamp":"2026-03-19T10:00:00Z","uuid":"u1","parentUuid":null,"cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"hello world"}]}}"#;
         let reader = BufReader::new(line.as_bytes());
-        let (entries, _malformed) = parse_session_file(reader);
+        let (entries, _malformed) = parse_all(reader);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::User);
         let msg = entries[0].message.as_ref().unwrap();
@@ -390,7 +536,7 @@ mod tests {
     fn parse_assistant_tool_use() {
         let line = r#"{"type":"assistant","sessionId":"sess-001","timestamp":"2026-03-19T10:01:00Z","uuid":"u2","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#;
         let reader = BufReader::new(line.as_bytes());
-        let (entries, _malformed) = parse_session_file(reader);
+        let (entries, _malformed) = parse_all(reader);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::Assistant);
         let content = entries[0]
@@ -409,7 +555,7 @@ mod tests {
     fn parse_tool_result_entry() {
         let line = r#"{"type":"user","sessionId":"sess-001","uuid":"u3","parentUuid":"u2","toolUseResult":{"stdout":"ok","stderr":"","isError":false}}"#;
         let reader = BufReader::new(line.as_bytes());
-        let (entries, _malformed) = parse_session_file(reader);
+        let (entries, _malformed) = parse_all(reader);
         assert_eq!(entries.len(), 1);
         let result = entries[0].tool_use_result.as_ref().unwrap();
         assert_eq!(result.stdout.as_deref(), Some("ok"));
@@ -420,7 +566,7 @@ mod tests {
     fn parse_progress_entry() {
         let line = r#"{"type":"progress","sessionId":"sess-001","data":{"status":"running"}}"#;
         let reader = BufReader::new(line.as_bytes());
-        let (entries, _malformed) = parse_session_file(reader);
+        let (entries, _malformed) = parse_all(reader);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, EntryType::Progress);
     }

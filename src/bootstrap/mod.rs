@@ -1,7 +1,7 @@
 //! Session log bootstrap: parse Claude Code JSONL session logs into historical memory.
 //!
-//! Pipeline: JSONL → parse → reconstruct turns → classify outcome → keyword pre-filter
-//! → extract facts → ingest marker event + add facts.
+//! Pipeline: JSONL → parse → [idempotency check] → ingest marker event (savepoint anchor)
+//! → reconstruct turns → classify outcome → keyword pre-filter → extract facts → add facts.
 
 pub(crate) mod extract;
 pub(crate) mod filter;
@@ -35,31 +35,52 @@ pub use redact::{
     shannon_entropy,
 };
 
+/// Shared dependencies threaded through the JSONL bootstrap pipeline (#123).
+///
+/// Bundles the engine-level handles and per-run configuration that every stage
+/// of `bootstrap_session_inner` → `bootstrap_within_savepoint` →
+/// `store_extracted_fact` (and the directory driver) needs, so each function
+/// takes the context plus only its own stage-specific arguments instead of a
+/// 9-to-11-parameter list. All members are borrows scoped to one bootstrap call.
+pub(crate) struct BootstrapContext<'a> {
+    /// Open write connection (the caller holds the write lock).
+    pub conn: &'a Connection,
+    /// Embedding dimensionality the [`FactStore`] is opened with.
+    pub embed_dim: usize,
+    /// Event-schema upcaster registry for the marker/event writes.
+    pub upcaster_registry: &'a UpcasterRegistry,
+    /// Consumer-supplied embedder (no LLM/network owned by the engine).
+    pub embedder: &'a dyn EmbeddingProvider,
+    /// Fact extractor (default keyword, or a consumer LLM extractor).
+    pub extractor: &'a dyn SessionExtractor,
+    /// Per-run configuration (scope, caps, redaction, idempotency).
+    pub config: &'a BootstrapConfig,
+    /// Optional auto-pin classifier consulted per created fact.
+    pub classifier: Option<&'a dyn PersistenceClassifier>,
+    /// Resolved scope id facts are ingested into.
+    pub scope_id: i64,
+}
+
 /// Bootstrap one session from a JSONL reader into the memory engine.
 ///
-/// Pipeline: parse → reconstruct turns → classify outcome → keyword pre-filter
-/// → extract facts → ingest marker event + add facts (within a savepoint).
+/// Pipeline: parse → [idempotency check] → ingest marker event (savepoint anchor)
+/// → reconstruct turns → classify outcome → keyword pre-filter → extract facts → add facts.
+/// The marker event is ingested *first* inside the savepoint so it can anchor the
+/// idempotency check; turn reconstruction, classification, and extraction follow.
 ///
 /// # Errors
 ///
 /// Returns errors from the engine (DB, embedding) or extraction failures.
 /// Malformed JSONL lines are skipped with `tracing::warn`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bootstrap_session_inner(
-    conn: &Connection,
-    embed_dim: usize,
-    upcaster_registry: &UpcasterRegistry,
+    ctx: &BootstrapContext<'_>,
     reader: impl BufRead,
-    embedder: &dyn EmbeddingProvider,
-    extractor: &dyn SessionExtractor,
-    config: &BootstrapConfig,
-    classifier: Option<&dyn PersistenceClassifier>,
-    scope_id: i64,
 ) -> Result<BootstrapReport> {
     let mut report = BootstrapReport::default();
 
-    // --- Parse ---
-    let (entries, malformed) = parse::parse_session_file(reader);
+    // --- Parse (bounded against hostile/corrupt input, #293) ---
+    let (entries, malformed) =
+        parse::parse_session_file(reader, ctx.config.max_session_bytes, ctx.config.max_entries);
     report.entries_parsed = entries.len();
     report.entries_malformed = malformed;
 
@@ -75,8 +96,8 @@ pub(crate) fn bootstrap_session_inner(
     }
 
     // --- Idempotency check ---
-    if config.skip_existing {
-        let event_store = EventStore::new(conn, upcaster_registry);
+    if ctx.config.skip_existing {
+        let event_store = EventStore::new(ctx.conn, ctx.upcaster_registry);
         let filter = EventFilter {
             session_id: Some(session_id.clone()),
             source: Some("bootstrap".into()),
@@ -90,25 +111,13 @@ pub(crate) fn bootstrap_session_inner(
     }
 
     // --- Savepoint for crash safety ---
-    conn.execute_batch("SAVEPOINT bootstrap")?;
+    ctx.conn.execute_batch("SAVEPOINT bootstrap")?;
 
-    let result = bootstrap_within_savepoint(
-        conn,
-        embed_dim,
-        upcaster_registry,
-        &entries,
-        &session_id,
-        embedder,
-        extractor,
-        config,
-        classifier,
-        scope_id,
-        &mut report,
-    );
+    let result = bootstrap_within_savepoint(ctx, &entries, &session_id, &mut report);
 
     match result {
         Ok(()) => {
-            conn.execute_batch("RELEASE bootstrap")?;
+            ctx.conn.execute_batch("RELEASE bootstrap")?;
             report.sessions_processed = 1;
             Ok(report)
         }
@@ -116,10 +125,10 @@ pub(crate) fn bootstrap_session_inner(
             // ROLLBACK TO restores the savepoint but keeps it open —
             // we must RELEASE to close it and avoid leaving the writer
             // in an open transaction.
-            if let Err(rb_err) = conn.execute_batch("ROLLBACK TO bootstrap") {
+            if let Err(rb_err) = ctx.conn.execute_batch("ROLLBACK TO bootstrap") {
                 tracing::warn!(error = %rb_err, "savepoint ROLLBACK TO bootstrap failed");
             }
-            if let Err(rel_err) = conn.execute_batch("RELEASE bootstrap") {
+            if let Err(rel_err) = ctx.conn.execute_batch("RELEASE bootstrap") {
                 tracing::warn!(error = %rel_err, "savepoint RELEASE bootstrap (after rollback) failed");
             }
             Err(e)
@@ -189,16 +198,12 @@ fn redact_turns(turns: &mut [ConversationTurn], denylist: &[String]) -> usize {
 /// fact was *reinforced* rather than created. Updates `report`'s
 /// `facts_created`/`facts_reinforced`/`secrets_redacted` and the prewarm tallies
 /// in place. The session-path analogue of `memory_dir::import_one_memory`.
-#[allow(clippy::too_many_arguments)]
 fn store_extracted_fact(
+    ctx: &BootstrapContext<'_>,
     fact_store: &FactStore,
-    embedder: &dyn EmbeddingProvider,
-    config: &BootstrapConfig,
-    classifier: Option<&dyn PersistenceClassifier>,
     fact: &ExtractedFact,
     effective_created: DateTime<Utc>,
     marker_event_id: i64,
-    scope_id: i64,
     report: &mut BootstrapReport,
 ) -> Result<f64> {
     // Defense-in-depth redaction (#45/#51): the turns were already scrubbed
@@ -210,8 +215,9 @@ fn store_extracted_fact(
     // re-scrubs but does not re-count). Disabled only when `config.redact` is
     // false (library/test callers); the CLI has no bypass.
     let mut redactions = 0usize;
-    let content = if config.redact {
-        let (clean, findings) = redact::redact_text_with_denylist(&fact.content, &config.denylist);
+    let content = if ctx.config.redact {
+        let (clean, findings) =
+            redact::redact_text_with_denylist(&fact.content, &ctx.config.denylist);
         redactions += findings.len();
         clean
     } else {
@@ -222,8 +228,8 @@ fn store_extracted_fact(
     // may place turn-derived text in metadata, and the stored row must carry no
     // unredacted secret anywhere (not just in content). Keys are left intact.
     let mut metadata = fact.metadata.clone();
-    if config.redact {
-        redactions += redact::redact_json_strings(&mut metadata, &config.denylist);
+    if ctx.config.redact {
+        redactions += redact::redact_json_strings(&mut metadata, &ctx.config.denylist);
     }
 
     // Session files are third-party input: a fact whose (redacted) content or
@@ -238,9 +244,9 @@ fn store_extracted_fact(
         return Ok(0.0);
     }
 
-    let embedding = embedder.embed(&content)?;
+    let embedding = ctx.embedder.embed(&content)?;
 
-    let is_pinned = classifier.is_some_and(|c| {
+    let is_pinned = ctx.classifier.is_some_and(|c| {
         let temp = crate::types::Fact {
             id: 0,
             content: content.clone(),
@@ -256,7 +262,7 @@ fn store_extracted_fact(
             access_count: 0,
             last_accessed: effective_created,
             metadata: metadata.clone(),
-            scope_id,
+            scope_id: ctx.scope_id,
             is_pinned: false,
             importance_score: fact.importance,
             surfaced_at: None,
@@ -281,7 +287,7 @@ fn store_extracted_fact(
         t_valid: None,
         t_invalid: None,
         source_event_id: Some(marker_event_id),
-        scope_id,
+        scope_id: ctx.scope_id,
         importance: fact.importance,
         access_count: 0,
         last_accessed: effective_created,
@@ -311,22 +317,15 @@ fn store_extracted_fact(
 }
 
 /// Inner pipeline logic running within a savepoint.
-#[allow(clippy::too_many_arguments)]
 fn bootstrap_within_savepoint(
-    conn: &Connection,
-    embed_dim: usize,
-    upcaster_registry: &UpcasterRegistry,
+    ctx: &BootstrapContext<'_>,
     entries: &[parse::SessionEntry],
     session_id: &str,
-    embedder: &dyn EmbeddingProvider,
-    extractor: &dyn SessionExtractor,
-    config: &BootstrapConfig,
-    classifier: Option<&dyn PersistenceClassifier>,
-    scope_id: i64,
     report: &mut BootstrapReport,
 ) -> Result<()> {
     // --- Ingest marker event (idempotency anchor) ---
-    let marker_event_id = ingest_bootstrap_marker(conn, upcaster_registry, session_id, scope_id)?;
+    let marker_event_id =
+        ingest_bootstrap_marker(ctx.conn, ctx.upcaster_registry, session_id, ctx.scope_id)?;
     report.events_ingested = 1;
 
     // --- Reconstruct turns ---
@@ -341,8 +340,8 @@ fn bootstrap_within_savepoint(
     // perturb classification or the keyword pre-filter. Counted here (per
     // session); a redundant re-run is skipped on the bootstrap marker before
     // reaching this point, so the count stays idempotent.
-    if config.redact {
-        report.secrets_redacted += redact_turns(&mut turns, &config.denylist);
+    if ctx.config.redact {
+        report.secrets_redacted += redact_turns(&mut turns, &ctx.config.denylist);
     }
 
     // --- Classify outcome on FULL turns (before truncation) ---
@@ -352,8 +351,13 @@ fn bootstrap_within_savepoint(
 
     // Apply max_turns limit AFTER outcome classification, keeping the TAIL
     // (most recent turns) since they contain resolution evidence.
-    let turns = if config.max_turns > 0 && turns.len() > config.max_turns {
-        turns[turns.len() - config.max_turns..].to_vec()
+    let turns = if ctx.config.max_turns > 0 && turns.len() > ctx.config.max_turns {
+        // Keep the TAIL in place: drain the head prefix rather than cloning the
+        // kept turns via slice + to_vec (each ConversationTurn owns strings/vecs).
+        let mut turns = turns;
+        let drop_head = turns.len() - ctx.config.max_turns;
+        turns.drain(..drop_head);
+        turns
     } else {
         turns
     };
@@ -385,20 +389,17 @@ fn bootstrap_within_savepoint(
     // When the `ann` feature is enabled, bootstrapped facts won't be in the
     // HNSW index until the engine is reopened (index is built from DB at open).
     // This is acceptable for a batch import operation.
-    let fact_store = FactStore::new(conn, embed_dim);
+    let fact_store = FactStore::new(ctx.conn, ctx.embed_dim);
 
     for candidate in &candidates {
-        let facts = extractor.extract(candidate, &outcome)?;
+        let facts = ctx.extractor.extract(candidate, &outcome)?;
         for fact in &facts {
             importance_sum += store_extracted_fact(
+                ctx,
                 &fact_store,
-                embedder,
-                config,
-                classifier,
                 fact,
                 candidate.timestamp,
                 marker_event_id,
-                scope_id,
                 report,
             )?;
         }
@@ -425,7 +426,11 @@ fn bootstrap_within_savepoint(
     // landmine this averts). The `embedder.fingerprint()` and `embed_dim` are the same
     // values the engine's `record_embedding_identity` seam would have used.
     if report.facts_created > 0 {
-        crate::store::embedding_meta::record_if_absent(conn, &embedder.fingerprint(), embed_dim)?;
+        crate::store::embedding_meta::record_if_absent(
+            ctx.conn,
+            &ctx.embedder.fingerprint(),
+            ctx.embed_dim,
+        )?;
     }
 
     Ok(())
@@ -468,17 +473,9 @@ fn collect_jsonl_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io
 ///
 /// Returns `MemoryError::Io` for directory traversal failures.
 /// Individual session failures are logged and skipped (not fatal).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bootstrap_directory_inner(
-    conn: &Connection,
-    embed_dim: usize,
-    upcaster_registry: &UpcasterRegistry,
+    ctx: &BootstrapContext<'_>,
     dir: &Path,
-    embedder: &dyn EmbeddingProvider,
-    extractor: &dyn SessionExtractor,
-    config: &BootstrapConfig,
-    classifier: Option<&dyn PersistenceClassifier>,
-    scope_id: i64,
 ) -> Result<BootstrapReport> {
     let mut aggregate = BootstrapReport::default();
 
@@ -496,17 +493,7 @@ pub(crate) fn bootstrap_directory_inner(
         };
         let reader = std::io::BufReader::new(file);
 
-        match bootstrap_session_inner(
-            conn,
-            embed_dim,
-            upcaster_registry,
-            reader,
-            embedder,
-            extractor,
-            config,
-            classifier,
-            scope_id,
-        ) {
+        match bootstrap_session_inner(ctx, reader) {
             Ok(report) => aggregate.merge(&report),
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skipping session file");
@@ -551,18 +538,18 @@ mod tests {
         let config = BootstrapConfig::default();
         let extractor = extract::KeywordExtractor;
 
-        let report = bootstrap_session_inner(
-            &conn,
-            4,
-            &registry,
-            reader,
-            &NeverCalledEmbedder,
-            &extractor,
-            &config,
-            None,
-            1, // root scope id
-        )
-        .expect("bootstrap_session_inner should succeed");
+        let ctx = BootstrapContext {
+            conn: &conn,
+            embed_dim: 4,
+            upcaster_registry: &registry,
+            embedder: &NeverCalledEmbedder,
+            extractor: &extractor,
+            config: &config,
+            classifier: None,
+            scope_id: 1, // root scope id
+        };
+        let report =
+            bootstrap_session_inner(&ctx, reader).expect("bootstrap_session_inner should succeed");
 
         // Early-exit path: entries parsed but nothing processed.
         assert!(report.entries_parsed > 0, "expected entries to be parsed");

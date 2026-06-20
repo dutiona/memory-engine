@@ -1487,6 +1487,11 @@ fn handle_bootstrap_session(
         skip_existing: get_bool(args, "skip_existing").unwrap_or(true),
         redact: true,
         denylist,
+        // #293 hostile-input caps (max_session_bytes / max_entries): the MCP
+        // bootstrap tool exposes no schema for them, so inherit the library
+        // defaults. This wires the caps into the `memory_bootstrap` tool — the
+        // real untrusted-input entry point — rather than leaving it uncapped.
+        ..BootstrapConfig::default()
     };
 
     let reader = Cursor::new(jsonl_data.into_bytes());

@@ -207,6 +207,11 @@ pub fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Res
         skip_existing: !args.reprocess,
         redact: true, // no bypass in normal CLI operation (#51)
         denylist,
+        // #293 hostile-input caps (max_session_bytes / max_entries): no CLI flag
+        // exposes them, so inherit the library defaults. This is what wires the
+        // caps into the CLI `bootstrap` command — the real untrusted-input entry
+        // point — rather than leaving it uncapped.
+        ..BootstrapConfig::default()
     };
 
     let report = run_bootstrap(
