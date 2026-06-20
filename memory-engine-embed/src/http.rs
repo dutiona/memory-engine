@@ -301,15 +301,22 @@ impl HttpEmbeddingProvider {
         }
         Ok(())
     }
-}
 
-impl EmbeddingProvider for HttpEmbeddingProvider {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
-        let mut req = self.client.post(&self.endpoint).json(&serde_json::json!({
-            "model": &self.model,
-            "input": text,
-        }));
-
+    /// POST `payload` to the configured endpoint and return the parsed JSON body.
+    ///
+    /// Centralises the transport layer shared by every embed path — auth header,
+    /// send, status check, the [`MAX_BODY`] response cap, and JSON parse — so a
+    /// change to any of them (a new error class, a retry, a header) lives in one
+    /// place. Callers supply the request `payload` and interpret the returned
+    /// [`serde_json::Value`] for their response format.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::Internal`] if the request cannot be sent, the server
+    /// returns a non-2xx status (body included, capped), the body exceeds the
+    /// size cap, or the body is not valid JSON.
+    fn send_request(&self, payload: &serde_json::Value) -> Result<serde_json::Value, MemoryError> {
+        let mut req = self.client.post(&self.endpoint).json(payload);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
@@ -330,8 +337,17 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         }
 
         let bytes = read_body_capped(resp)?;
-        let body: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))
+    }
+}
+
+impl EmbeddingProvider for HttpEmbeddingProvider {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
+        let body = self.send_request(&serde_json::json!({
+            "model": &self.model,
+            "input": text,
+        }))?;
 
         // Auto-detect response format:
         // OpenAI: { "data": [{ "embedding": [...] }] }
@@ -372,33 +388,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             return Ok(Vec::new());
         }
 
-        let mut req = self.client.post(&self.endpoint).json(&serde_json::json!({
+        let body = self.send_request(&serde_json::json!({
             "model": &self.model,
             "input": texts,
-        }));
-
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-
-        let resp = req
-            .send()
-            .map_err(|e| MemoryError::Internal(format!("embedding HTTP request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = read_body_capped(resp).map_or_else(
-                |_| String::new(),
-                |b| String::from_utf8_lossy(&b).into_owned(),
-            );
-            return Err(MemoryError::Internal(format!(
-                "embedding endpoint returned {status}: {body}"
-            )));
-        }
-
-        let bytes = read_body_capped(resp)?;
-        let body: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))?;
+        }))?;
 
         // Auto-detect response format and extract all embeddings:
         // OpenAI: { "data": [{ "index": 0, "embedding": [...] }, ...] }
