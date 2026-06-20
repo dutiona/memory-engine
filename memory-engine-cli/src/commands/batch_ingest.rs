@@ -177,6 +177,31 @@ fn print_summary(summary: &IngestSummary, format: OutputFormat) -> anyhow::Resul
 // Core ingestion logic (testable — accepts reader + embedder)
 // ---------------------------------------------------------------------------
 
+/// Maximum bytes read for a single JSONL record. A line longer than this is
+/// skipped (and the reader resynced to the next line) rather than buffered, so a
+/// single unterminated or pathologically long line cannot force an unbounded
+/// `String` allocation (CWE-400 / CWE-770 / CWE-789). 8 MiB is far above any
+/// realistic fact-as-JSON record while still bounding the worst case.
+const MAX_LINE_BYTES: u64 = 8 << 20; // 8 MiB
+
+/// Ingest facts from a byte stream of newline-delimited JSON (JSONL) records.
+///
+/// Each line must deserialize as a JSONL fact record. Malformed lines, lines
+/// that fail validation, and lines exceeding [`MAX_LINE_BYTES`] are skipped
+/// (counted in `total_skipped`) rather than aborting the run. Valid records are
+/// embedded and inserted in transactions of `batch_size`; a batch the engine
+/// rejects is counted as skipped plus one `failed_batches`, and ingestion
+/// continues. Progress is reported on stderr unless `format` is JSON.
+///
+/// `default_scope` is applied to records that omit a `scope` field; a per-record
+/// `scope` in the JSONL always takes precedence.
+///
+/// # Errors
+///
+/// Returns an error when the call ingested zero facts while at least one line was
+/// skipped for any reason (parse error, validation failure, oversized line, read
+/// error, or batch rejection). A wholesale failure is surfaced rather than
+/// reported as a successful no-op.
 pub fn ingest_from_reader(
     engine: &MemoryEngine,
     reader: impl Read,
@@ -186,24 +211,47 @@ pub fn ingest_from_reader(
     format: OutputFormat,
 ) -> anyhow::Result<IngestSummary> {
     let start = Instant::now();
-    let buf = BufReader::new(reader);
+    let mut buf = BufReader::new(reader);
 
     let mut total_ingested: usize = 0;
     let mut total_skipped: usize = 0;
     let mut failed_batches: usize = 0;
     let mut batch: Vec<AddFactRequest> = Vec::with_capacity(batch_size);
     let mut line_no: usize = 0;
+    let mut line = String::new();
 
-    for line_result in buf.lines() {
-        line_no += 1;
-        let line = match line_result {
-            Ok(l) => l,
+    loop {
+        line.clear();
+        // Cap each line read so a single oversized or unterminated record cannot
+        // force an unbounded `String` allocation (CWE-400/770/789). Reading
+        // `MAX_LINE_BYTES + 1` lets us detect a line that ran past the cap.
+        let n = match buf.by_ref().take(MAX_LINE_BYTES + 1).read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
             Err(e) => {
+                line_no += 1;
                 eprintln!("warning: line {line_no}: read error: {e}");
                 total_skipped += 1;
                 continue;
             }
         };
+        line_no += 1;
+
+        if n as u64 > MAX_LINE_BYTES {
+            eprintln!("warning: line {line_no}: exceeds {MAX_LINE_BYTES} bytes, skipping");
+            total_skipped += 1;
+            // Resync to the next record — but ONLY if read_line stopped at the byte
+            // cap mid-line (no terminator captured). If the line already ends in
+            // '\n', read_line consumed the whole record including its terminator, so
+            // skipping again would swallow the *following* record.
+            if !line.ends_with('\n')
+                && let Err(e) = buf.skip_until(b'\n')
+            {
+                eprintln!("warning: line {line_no}: read error while skipping: {e}");
+                break;
+            }
+            continue;
+        }
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -228,36 +276,31 @@ pub fn ingest_from_reader(
         batch.push(jsonl_to_request(fact, default_scope));
 
         if batch.len() >= batch_size {
-            let chunk_size = batch.len();
-            match engine.add_facts_batch(&batch, embedder, None) {
-                Ok(ids) => {
-                    total_ingested += ids.len();
-                    eprint_progress(total_ingested, total_skipped, &start, format);
-                }
-                Err(e) => {
-                    eprintln!("warning: batch at line {line_no}: {e}");
-                    total_skipped += chunk_size;
-                    failed_batches += 1;
-                }
+            let flushed = flush_batch(
+                engine,
+                &mut batch,
+                embedder,
+                &format!("batch at line {line_no}"),
+                &mut total_ingested,
+                &mut total_skipped,
+                &mut failed_batches,
+            );
+            if flushed {
+                eprint_progress(total_ingested, total_skipped, &start, format);
             }
-            batch.clear();
         }
     }
 
-    // Flush remaining partial batch
-    if !batch.is_empty() {
-        let chunk_size = batch.len();
-        match engine.add_facts_batch(&batch, embedder, None) {
-            Ok(ids) => {
-                total_ingested += ids.len();
-            }
-            Err(e) => {
-                eprintln!("warning: final batch: {e}");
-                total_skipped += chunk_size;
-                failed_batches += 1;
-            }
-        }
-    }
+    // Flush remaining partial batch (no-op if empty).
+    flush_batch(
+        engine,
+        &mut batch,
+        embedder,
+        "final batch",
+        &mut total_ingested,
+        &mut total_skipped,
+        &mut failed_batches,
+    );
 
     let summary = IngestSummary {
         total_ingested,
@@ -282,6 +325,41 @@ fn eprint_progress(ingested: usize, skipped: usize, start: &Instant, format: Out
     }
     let elapsed = start.elapsed().as_secs_f64();
     eprint!("\r  ingested: {ingested}  skipped: {skipped}  elapsed: {elapsed:.1}s");
+}
+
+/// Flush the accumulated `batch` to the engine, updating the running counters in
+/// place, and clear it. Returns `true` when the batch was ingested, `false` when
+/// the engine rejected it (the batch is counted as skipped + one failed batch).
+///
+/// `context` is the location phrase used in the failure warning, e.g.
+/// `"batch at line 42"` or `"final batch"`. An empty batch is a no-op.
+fn flush_batch(
+    engine: &MemoryEngine,
+    batch: &mut Vec<AddFactRequest>,
+    embedder: &dyn EmbeddingProvider,
+    context: &str,
+    total_ingested: &mut usize,
+    total_skipped: &mut usize,
+    failed_batches: &mut usize,
+) -> bool {
+    if batch.is_empty() {
+        return true;
+    }
+    let chunk_size = batch.len();
+    let ingested = match engine.add_facts_batch(batch.as_slice(), embedder, None) {
+        Ok(ids) => {
+            *total_ingested += ids.len();
+            true
+        }
+        Err(e) => {
+            eprintln!("warning: {context}: {e}");
+            *total_skipped += chunk_size;
+            *failed_batches += 1;
+            false
+        }
+    };
+    batch.clear();
+    ingested
 }
 
 // ---------------------------------------------------------------------------
@@ -616,5 +694,150 @@ not valid json
         let s = summary.unwrap();
         assert_eq!(s.total_ingested, 0);
         assert_eq!(s.total_skipped, 0);
+    }
+
+    // --- per-line size cap (#408) + flush/error-path coverage (#431, #432) ---
+
+    struct CapEmbed;
+    impl EmbeddingProvider for CapEmbed {
+        fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
+            Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
+        fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+            memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
+        }
+    }
+
+    #[test]
+    fn skips_oversized_line_then_resumes() {
+        // A single record larger than the per-line cap must be dropped at the read
+        // boundary and ingestion must resync to the next record. Without the cap the
+        // giant line is read whole and handed to the engine, whose content-size
+        // limit rejects it; sharing a batch with the valid record, that failure
+        // poisons the whole batch and the call bails (verified RED: "no facts
+        // ingested"). With the cap the oversized line never reaches the engine, so
+        // the valid record ingests cleanly.
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let huge = "x".repeat(9 * 1024 * 1024); // > MAX_LINE_BYTES (8 MiB)
+        let input = format!(
+            "{{\"content\":\"{huge}\",\"fact_type\":\"semantic\"}}\n\
+             {{\"content\":\"ok\",\"fact_type\":\"semantic\"}}\n"
+        );
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(summary.total_ingested, 1, "only the normal record ingests");
+        assert_eq!(
+            summary.total_skipped, 1,
+            "exactly the oversized line is skipped"
+        );
+    }
+
+    #[test]
+    fn oversized_unterminated_final_line_at_eof() {
+        // An oversized line that is also the LAST line and has no trailing newline
+        // must be skipped cleanly: skip_until hits EOF and returns Ok, the loop
+        // ends, and the earlier valid record is unaffected. Guards against a hang
+        // or panic on the EOF-mid-skip path.
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let huge = "x".repeat(9 * 1024 * 1024); // > MAX_LINE_BYTES, no closing brace, no \n
+        let input =
+            format!("{{\"content\":\"ok\",\"fact_type\":\"semantic\"}}\n{{\"content\":\"{huge}");
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(summary.total_ingested, 1, "the valid first record ingests");
+        assert_eq!(
+            summary.total_skipped, 1,
+            "exactly the oversized final line is skipped"
+        );
+    }
+
+    #[test]
+    fn cap_sized_line_does_not_eat_following_record() {
+        // Regression for the resync off-by-one: a line whose bytes (incl. its '\n')
+        // total exactly MAX_LINE_BYTES + 1 is read in full — read_line consumes the
+        // terminating '\n' — yet n > MAX flags it oversized. An unconditional
+        // skip_until would then drain the *next* line. The record after a cap-sized
+        // line must survive.
+        const OVERHEAD: usize = "{\"content\":\"\",\"fact_type\":\"semantic\"}".len();
+        let cap = usize::try_from(MAX_LINE_BYTES).unwrap();
+        let pad = "x".repeat(cap - OVERHEAD);
+        let cap_line = format!("{{\"content\":\"{pad}\",\"fact_type\":\"semantic\"}}");
+        assert_eq!(
+            cap_line.len(),
+            cap,
+            "cap_line must be exactly MAX_LINE_BYTES"
+        );
+
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let input =
+            format!("{cap_line}\n{{\"content\":\"survivor\",\"fact_type\":\"semantic\"}}\n");
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(
+            summary.total_ingested, 1,
+            "the record after a cap-sized line must not be swallowed by resync"
+        );
+    }
+
+    #[test]
+    fn mid_stream_flush_with_batch_size_one() {
+        // batch_size=1 forces a flush after every record, exercising the mid-stream
+        // flush path — not just the final partial flush the other tests hit.
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let input = "{\"content\":\"a\",\"fact_type\":\"semantic\"}\n\
+                     {\"content\":\"b\",\"fact_type\":\"episodic\"}\n\
+                     {\"content\":\"c\",\"fact_type\":\"procedural\"}\n";
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            1,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(summary.total_ingested, 3);
+        assert_eq!(summary.total_skipped, 0);
+        assert_eq!(summary.failed_batches, 0);
+    }
+
+    #[test]
+    fn all_bad_lines_returns_error() {
+        // 0 ingested AND >0 skipped → the function bails rather than reporting a
+        // successful no-op. The empty-input test does not hit this (skipped is 0).
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let input = "not json\nalso not json\n";
+        let result = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            100,
+            None,
+            OutputFormat::Json,
+        );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("no facts ingested"), "got: {msg}");
     }
 }
