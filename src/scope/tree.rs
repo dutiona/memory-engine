@@ -416,6 +416,57 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_roundtrip_preserves_tree() {
+        // `from_snapshot(to_snapshot())` is the crash-recovery path
+        // (engine/mod.rs builds the in-memory tree from a serialized snapshot on
+        // resume). Assert it reconstructs the tree faithfully: a future
+        // `ScopeNode` field left unwired in `from_snapshot` (or a dropped node)
+        // would silently lose scope hierarchy on restore, and this test catches
+        // it. (#323)
+        let tree = setup_tree(); // root -> user:michael -> {project:demo, project:other}
+        let rebuilt = ScopeTree::from_snapshot(&tree.to_snapshot());
+
+        // Same node set.
+        assert_eq!(rebuilt.node_count(), tree.node_count());
+
+        // Path resolution still works on the rebuilt tree.
+        let id = rebuilt
+            .resolve_path("user:michael/project:demo")
+            .expect("path must resolve in the rebuilt tree");
+        assert_eq!(id, tree.resolve_path("user:michael/project:demo").unwrap());
+
+        // Ancestor chain preserved: demo -> user:michael -> root.
+        let ancestors = rebuilt.ancestors(id);
+        assert_eq!(ancestors.len(), 3);
+        assert_eq!(*ancestors.last().unwrap(), ScopeTree::root_id());
+        assert_eq!(ancestors[0], id);
+
+        // path_for_id roundtrip preserved for every node, including siblings.
+        assert_eq!(
+            rebuilt.path_for_id(id).as_deref(),
+            Some("user:michael/project:demo")
+        );
+        let other_id = rebuilt.resolve_path("user:michael/project:other").unwrap();
+        assert_eq!(
+            rebuilt.path_for_id(other_id).as_deref(),
+            Some("user:michael/project:other")
+        );
+
+        // children maps agree node-for-node (the structural index, not just the
+        // node set): every parent resolves to the same descendant set.
+        for &node_id in &[
+            ScopeTree::root_id(),
+            tree.resolve_path("user:michael").unwrap(),
+        ] {
+            let mut a = rebuilt.subtree(node_id);
+            let mut b = tree.subtree(node_id);
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b, "subtree of {node_id} must survive the roundtrip");
+        }
+    }
+
+    #[test]
     fn inherited_non_leaf_dedups_self_once() {
         let tree = setup_tree();
         // user:michael is a NON-leaf: its subtree has 3 nodes (itself + 2
