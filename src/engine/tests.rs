@@ -27,6 +27,68 @@ impl EmbeddingProvider for MockEmbedder {
     }
 }
 
+/// Keyword-driven embedder that maps a small fixed vocabulary to orthogonal
+/// basis vectors in a 4-dimensional space (issue #453).
+///
+/// `MockEmbedder` returns the same constant vector for every input, so every
+/// fact ties on cosine similarity and the vector-ranking path is never
+/// discriminated. This embedder instead projects each known keyword onto a
+/// distinct unit axis:
+///
+/// | keyword | vector        |
+/// | ------- | ------------- |
+/// | `cats`  | `[1, 0, 0, 0]`|
+/// | `dogs`  | `[0, 1, 0, 0]`|
+/// | `birds` | `[0, 0, 1, 0]`|
+/// | `fish`  | `[0, 0, 0, 1]`|
+///
+/// The first keyword found in the (lowercased) text wins; text with no known
+/// keyword embeds to the zero vector (cosine 0 against every axis). Because the
+/// axes are orthonormal, a query embedded as one axis scores cosine `1.0`
+/// against the matching fact and `0.0` against the others — an unambiguous
+/// ranking oracle for the brute-force cosine scan and RRF blending.
+struct DeterministicEmbedder {
+    dim: usize,
+}
+
+impl DeterministicEmbedder {
+    /// The orthogonal vocabulary: keyword → basis axis index.
+    const VOCAB: [(&'static str, usize); 4] = [("cats", 0), ("dogs", 1), ("birds", 2), ("fish", 3)];
+
+    /// Build the basis vector for a single keyword (panics in tests if the
+    /// keyword is outside the vocabulary or the axis exceeds `self.dim`).
+    fn axis(&self, keyword: &str) -> Vec<f32> {
+        let (_, idx) = Self::VOCAB
+            .iter()
+            .find(|(kw, _)| *kw == keyword)
+            .copied()
+            .unwrap_or_else(|| panic!("keyword '{keyword}' not in DeterministicEmbedder vocab"));
+        let mut v = vec![0.0_f32; self.dim];
+        v[idx] = 1.0;
+        v
+    }
+}
+
+impl EmbeddingProvider for DeterministicEmbedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let lower = text.to_ascii_lowercase();
+        let mut v = vec![0.0_f32; self.dim];
+        // First vocabulary keyword present in the text wins.
+        if let Some((_, idx)) = Self::VOCAB
+            .iter()
+            .find(|(kw, _)| lower.contains(kw))
+            .copied()
+        {
+            v[idx] = 1.0;
+        }
+        Ok(v)
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("deterministic", "test", self.dim)
+    }
+}
+
 struct MockGen;
 impl SummaryGenerator for MockGen {
     fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String> {
@@ -161,6 +223,118 @@ fn query_returns_results_after_adding_facts() {
     let results = engine.query(&query).unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0].fact.content.contains("Rust"));
+}
+
+// --- Issue #453: vector ranking discriminated by distinct embeddings ---
+
+/// Vector-only search must rank the semantically-closest fact first when the
+/// embeddings are actually distinct.
+///
+/// `MockEmbedder` returns a constant vector, so every fact ties on cosine and
+/// this ordering is invisible. With [`DeterministicEmbedder`] each keyword maps
+/// to an orthogonal basis axis, so a query embedded as the `cats` axis scores
+/// cosine `1.0` against the cats fact and `0.0` against every other fact — a
+/// strict ordering the brute-force cosine scan must honor.
+///
+/// **Discrimination**: if the vector path stopped ordering by cosine (e.g. an
+/// off-by-one in `select_nth_unstable_by` / `sort_by`, or a sign flip in
+/// `cosine_similarity`), the top result would no longer be the cats fact and
+/// this assertion would fail. With a constant embedder it could never fail.
+#[test]
+fn vector_query_ranks_closest_embedding_first() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder = DeterministicEmbedder { dim: DIM };
+
+    for content in ["cats are independent", "dogs are loyal", "birds can fly"] {
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: content.into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                &embedder,
+                None,
+            )
+            .unwrap();
+    }
+
+    // Query embedded as the "cats" axis — orthogonal to dogs/birds.
+    let results = engine
+        .query(&SearchQuery {
+            text: None,
+            embedding: Some(embedder.axis("cats")),
+            mode: SearchMode::Vector,
+            limit: 10,
+            rerank_depth: None,
+            valid_at: None,
+            fact_type: None,
+            scope: None,
+        })
+        .unwrap();
+
+    assert_eq!(results.len(), 3, "all three facts are vector candidates");
+    assert!(
+        results[0].fact.content.contains("cats"),
+        "closest embedding (cats) must rank first, got: {}",
+        results[0].fact.content
+    );
+    // Cosine 1.0 for the matching axis strictly dominates the 0.0 ties below it.
+    assert!(
+        results[0].score > results[1].score,
+        "cats score ({}) must strictly exceed the next ({})",
+        results[0].score,
+        results[1].score
+    );
+}
+
+/// A second axis confirms the ranking tracks the query, not insertion order:
+/// querying the "dogs" axis surfaces the dogs fact first even though it was
+/// inserted second. A constant embedder would tie all facts and fall back to a
+/// stable/insertion order, masking this.
+#[test]
+fn vector_query_ranking_follows_query_axis() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder = DeterministicEmbedder { dim: DIM };
+
+    for content in ["cats are independent", "dogs are loyal", "fish swim"] {
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: content.into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                &embedder,
+                None,
+            )
+            .unwrap();
+    }
+
+    let results = engine
+        .query(&SearchQuery {
+            text: None,
+            embedding: Some(embedder.axis("dogs")),
+            mode: SearchMode::Vector,
+            limit: 10,
+            rerank_depth: None,
+            valid_at: None,
+            fact_type: None,
+            scope: None,
+        })
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert!(
+        results[0].fact.content.contains("dogs"),
+        "query axis (dogs) must rank the dogs fact first, got: {}",
+        results[0].fact.content
+    );
+    assert!(results[0].score > results[1].score);
 }
 
 #[test]
