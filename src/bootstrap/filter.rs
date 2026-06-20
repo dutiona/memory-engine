@@ -828,6 +828,37 @@ mod tests {
     }
 
     #[test]
+    fn keyword_match_bug_error_in_assistant_with_context() {
+        // #423: the second branch of `check_error_keyword` fires when "error"
+        // appears in assistant text AND a bug-context word (fix/bug/issue) is
+        // also present — with no tool stderr. Previously only the stderr branch
+        // was covered.
+        let turn = make_turn("", "There is an error in the fix, see below.");
+        let episodes = keyword_prefilter(&[turn], "s1");
+        let bug = episodes
+            .iter()
+            .find(|e| e.category == EpisodeCategory::Bug)
+            .expect("assistant 'error' + 'fix' context must produce a Bug episode");
+        assert!(
+            bug.matched_keywords.contains(&"error".to_owned()),
+            "the special-cased 'error' keyword must be recorded"
+        );
+    }
+
+    #[test]
+    fn keyword_no_bug_error_without_context() {
+        // #423 negative: "error" in assistant text with NO bug-context word and
+        // no other bug keyword (root cause/traceback/exception/fix) and no
+        // stderr must NOT classify as Bug — `check_error_keyword` returns false.
+        let turn = make_turn("", "An error occurred during compilation overnight.");
+        let episodes = keyword_prefilter(&[turn], "s1");
+        assert!(
+            !episodes.iter().any(|e| e.category == EpisodeCategory::Bug),
+            "bare 'error' without bug context must not be a Bug episode"
+        );
+    }
+
+    #[test]
     fn keyword_match_decision() {
         let turn = make_turn("which approach?", "I decided to use serde for parsing.");
         let episodes = keyword_prefilter(&[turn], "s1");
