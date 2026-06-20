@@ -630,3 +630,55 @@ fn bootstrap_max_turns_limits_processing() {
         "max_turns=1 produces one fact (the tail turn)"
     );
 }
+
+#[test]
+fn bootstrap_mixed_session_fixture() {
+    // #424: mixed_session.jsonl is the only fixture exercising thinking blocks,
+    // progress-noise filtering, and Decision + Learning + Convention categories in
+    // one session with UUID pairing across progress noise — yet it was referenced
+    // by no test. Lock its behavior end to end.
+    let engine = engine();
+    let extractor = KeywordExtractor;
+    let config = BootstrapConfig::default();
+
+    let report = engine
+        .bootstrap_session(
+            Cursor::new(include_str!("fixtures/mixed_session.jsonl")),
+            &TestEmbedder,
+            &extractor,
+            &config,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(report.sessions_processed, 1);
+    assert!(report.entries_parsed > 0, "fixture entries must parse");
+    // Two genuine user/assistant pairs survive progress-noise filtering.
+    assert_eq!(
+        report.turns_reconstructed, 2,
+        "two turns reconstructed across the progress noise, got {}",
+        report.turns_reconstructed
+    );
+
+    // The categories come from real content keywords ("turns out"/"reason is" →
+    // Learning, "decided"/"went with" → Decision, "always use" → Convention), not
+    // from the thinking block (whose text "Let me look at the existing error
+    // handling patterns" carries no category keyword and seeds no spurious episode).
+    assert!(
+        report.category_counts.decision + report.category_counts.learning > 0,
+        "fixture must yield at least one Decision or Learning episode (d={}, l={})",
+        report.category_counts.decision,
+        report.category_counts.learning
+    );
+
+    // Stored facts must not contain the noise/thinking-only text as standalone
+    // leakage: every created fact traces to a keyword-matched turn.
+    assert!(report.facts_created > 0, "fixture must create facts");
+    let facts = engine.list_active_facts(None).unwrap();
+    assert!(
+        facts
+            .iter()
+            .all(|f| f.content.contains("User:") || f.content.contains("Assistant:")),
+        "every fact's content must come from reconstructed turn text"
+    );
+}
