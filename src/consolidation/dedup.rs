@@ -480,11 +480,52 @@ mod tests {
 
         let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
+        // Pin the collapse topology: A is the survivor. The 0.8-vs-0.5 regression
+        // value is order-sensitive — it assumes the merge order A→B then A→C, which
+        // holds because `local_dedup` scans `list_active` in rowid (insertion) order.
+        // That ordering is not yet guaranteed by the query (no ORDER BY — #495); when
+        // that lands this coupling becomes a contract rather than an SQLite default.
+        assert_eq!(active[0].id, a);
         assert_eq!(active[0].content, "A");
         assert!(
             (active[0].importance_score - 0.8).abs() < f64::EPSILON,
             "survivor must hold the chain-wide max importance_score 0.8, got {} \
              (the stale-read bug overwrites B's 0.8 with C's 0.5)",
+            active[0].importance_score
+        );
+    }
+
+    /// Regression for #264 (loser-side propagation): a fact that absorbs a high
+    /// `importance_score` *as a survivor* and is then itself expired *as a loser*
+    /// must pass the absorbed score on to its final survivor. This exercises the
+    /// `running_scores.get(&loser.id)` branch — the half of the fix the pure-survivor
+    /// chain test above cannot reach.
+    #[test]
+    fn survivor_then_loser_propagates_absorbed_score() {
+        let (conn, dim) = setup();
+        // Near-duplicates with ASCENDING base importance so the expiry rule (expire
+        // the lower-importance fact) makes B survive L, then A survive B:
+        //   L(imp 0.2) loses to B(imp 0.5) → B absorbs L's high score 0.9
+        //   B(imp 0.5) loses to A(imp 0.8) → A must inherit that 0.9 via the map
+        let l = insert_fact(&conn, dim, "L", vec![1.0, 0.0, 0.0, 0.0], 0.2);
+        let b = insert_fact(&conn, dim, "B", vec![0.99, 0.01, 0.0, 0.0], 0.5);
+        let a = insert_fact(&conn, dim, "A", vec![0.98, 0.02, 0.0, 0.0], 0.8);
+
+        let store = FactStore::new(&conn, dim);
+        store.update_importance_score(l, 0.9).unwrap(); // the score that must survive two hops
+        store.update_importance_score(b, 0.1).unwrap();
+        store.update_importance_score(a, 0.1).unwrap();
+
+        let (removed, _) = local_dedup(&conn, dim, 0.90, None, Utc::now()).unwrap();
+        assert_eq!(removed, 2, "L collapses onto B, then B onto A");
+
+        let active = store.list_active(None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, a);
+        assert!(
+            (active[0].importance_score - 0.9).abs() < f64::EPSILON,
+            "final survivor must inherit the score absorbed by an intermediate \
+             survivor (0.9), got {} (stale-read bug reads B's in-memory 0.1)",
             active[0].importance_score
         );
     }
