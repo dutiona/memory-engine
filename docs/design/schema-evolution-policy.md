@@ -88,6 +88,27 @@ written lazily on the first embedding write, so no backfill). For these:
   inject the legacy config row before migrating so the change is exercised non-vacuously
   ("snapshot green ≠ migration correct").
 
+### Data-Folding DDL Migrations (DDL delta **and** a data move)
+
+**v12→v13** (#622, ADR 0015) is the counterpart: it adds the `embedding_spaces` registry
+table (a real DDL delta the snapshots **do** guard) _and_ folds the single `embedding_meta`
+config value into one `active` row, then drops the legacy key. For these:
+
+- Steps 4–5 apply: the table lives in the fresh-init `TABLES_DDL` **and** a frozen snapshot
+  inside `migrate_v12_to_v13`; a `fresh_vs_migrated_*_converge` test (normalized
+  `sqlite_master.sql`, not a raw string compare) asserts the two copies agree.
+- The DDL snapshot (`schema_ddl_snapshot_is_stable`, the insta `schema_v*` snapshots,
+  `all_nine_indexes_created`) guards the table/index shape, but **not the data move** — a
+  green snapshot says nothing about whether a row was lifted. A dedicated round-trip test
+  (`migrate_v12_to_v13_roundtrips_fingerprint`) injects the legacy value, migrates, and
+  asserts the reconstructed identity is bit-identical and the legacy key is gone, plus
+  fresh-store (no fabricated row) and corrupt-value (rolls back, version stays 12) cases.
+- **Identity relocation has a blast radius.** Moving the identity out of `config` broke every
+  consumer that read/wrote it via raw SQL outside the `embedding_meta` facade — dump/restore,
+  the CLI/MCP dim probes, and test seeders. Those were all updated in the same change. When a
+  migration moves data between tables/keys, audit _all_ raw readers/writers of the old
+  location, not just the facade.
+
 ## Event Envelope Versioning
 
 Events in the append-only log carry a per-event-type revision via the `event_revision` column.

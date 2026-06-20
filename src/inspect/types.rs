@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    ConsolidationLevel, Edge, Event, EventType, Fact, LineageSnapshotEntry, ScopeNode, Summary,
+    ConsolidationLevel, Edge, EmbeddingFingerprint, Event, EventType, Fact, LineageSnapshotEntry,
+    ScopeNode, Summary,
 };
 
 // ---------------------------------------------------------------------------
@@ -155,6 +156,24 @@ pub enum DumpFormat {
     Sqlite(PathBuf),
 }
 
+/// One embedding-space registry row in a snapshot (#622).
+///
+/// Carries the `embedding_spaces` table content so the embedding identity survives a
+/// dump→restore. Before #622 the identity was a `config` row (`embedding_meta`) that
+/// round-tripped through the generic config copy; it now lives in its own table, so it is
+/// serialized explicitly here. A pre-#622 snapshot has no `embedding_spaces` field — restore
+/// falls back to translating the legacy `embedding_meta` config value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingSpaceSnapshot {
+    /// Space name (PK); `"default"` for the degenerate single space.
+    pub name: String,
+    /// Lifecycle status TEXT: `active` / `populating` / `deprecated`.
+    pub status: String,
+    /// The canonical identity tuple, flattened to the row's identity columns.
+    #[serde(flatten)]
+    pub fingerprint: EmbeddingFingerprint,
+}
+
 /// Complete snapshot of engine state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineSnapshot {
@@ -170,6 +189,11 @@ pub struct EngineSnapshot {
     /// Absent in pre-v8 snapshots — defaults to empty.
     #[serde(default)]
     pub lineage: Vec<LineageSnapshotEntry>,
+    /// Embedding-space registry rows (#622). Absent in pre-#622 snapshots — defaults to
+    /// empty, and restore then reconstructs the identity from the legacy `embedding_meta`
+    /// config value.
+    #[serde(default)]
+    pub embedding_spaces: Vec<EmbeddingSpaceSnapshot>,
     pub config: BTreeMap<String, String>,
 }
 
@@ -654,6 +678,7 @@ mod tests {
             scopes: vec![sample_scope()],
             events: vec![sample_event()],
             lineage: vec![sample_lineage()],
+            embedding_spaces: vec![],
             config,
         };
         // EngineSnapshot is intentionally not `PartialEq`: `PromotionProvenance`

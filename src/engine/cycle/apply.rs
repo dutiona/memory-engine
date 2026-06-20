@@ -505,15 +505,14 @@ mod tests {
         // deltas (AddFact/Synthesize) — #613 requires a recorded identity for those.
         // This mirrors production, where facts (and thus the identity) exist before a
         // cycle runs. Same fingerprint FixedEmbed records, so a later `add()` is a no-op.
-        engine
-            .set_config(
-                "embedding_meta",
-                &serde_json::to_string(&crate::types::EmbeddingFingerprint::new(
-                    "mock", "test", DIM,
-                ))
-                .unwrap(),
+        {
+            let conn = engine.write_conn().unwrap();
+            crate::store::embedding_meta::store(
+                &conn,
+                &crate::types::EmbeddingFingerprint::new("mock", "test", DIM),
             )
             .unwrap();
+        }
         engine
     }
 

@@ -8,6 +8,7 @@ pub mod archive_manifest;
 pub mod checkpoints;
 pub mod edges;
 pub mod embedding_meta;
+pub mod embedding_spaces;
 pub mod events;
 pub mod facts;
 pub mod lineage;

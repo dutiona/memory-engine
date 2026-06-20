@@ -7,7 +7,7 @@ use crate::error::{MemoryError, MigrationError, Result};
 mod migrations;
 
 /// Current schema version. Bump when adding migrations.
-pub const CURRENT_SCHEMA_VERSION: u32 = 12;
+pub const CURRENT_SCHEMA_VERSION: u32 = 13;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -183,6 +183,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrations::migrate_v9_to_v10, false),
     (migrations::migrate_v10_to_v11, false),
     (migrations::migrate_v11_to_v12, false),
+    (migrations::migrate_v12_to_v13, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -565,6 +566,21 @@ CREATE TABLE IF NOT EXISTS session_checkpoints (
 
 CREATE INDEX IF NOT EXISTS idx_checkpoints_scope
     ON session_checkpoints(scope_path);
+
+CREATE TABLE IF NOT EXISTS embedding_spaces (
+    name                TEXT    PRIMARY KEY,
+    model               TEXT    NOT NULL,
+    provider            TEXT    NOT NULL,
+    dim                 INTEGER NOT NULL,
+    matryoshka_base_dim INTEGER,
+    element_type        TEXT    NOT NULL DEFAULT 'float32',
+    status              TEXT    NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active', 'populating', 'deprecated')),
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_spaces_one_active
+    ON embedding_spaces(status) WHERE status = 'active';
 ";
 
 const SCOPES_DDL: &str = "
@@ -1114,10 +1130,11 @@ CREATE TABLE IF NOT EXISTS config (
 
         migrate(&conn, None).unwrap();
 
+        // Migrating from v11 runs the full chain forward to CURRENT (v11→v12→v13).
         assert_eq!(
-            get_config(&conn, "schema_version").unwrap().as_deref(),
-            Some("12"),
-            "schema_version bumped to 12"
+            get_config(&conn, "schema_version").unwrap(),
+            Some(CURRENT_SCHEMA_VERSION.to_string()),
+            "schema_version bumped to CURRENT"
         );
         assert!(
             get_config(&conn, "embed_dim").unwrap().is_none(),
@@ -1125,14 +1142,146 @@ CREATE TABLE IF NOT EXISTS config (
         );
         assert!(
             crate::store::embedding_meta::load(&conn).unwrap().is_none(),
-            "no backfill: embedding_meta stays absent until first embed"
+            "no backfill: identity stays absent until first embed"
         );
 
-        // Idempotent: re-running migrate from v12 is a no-op and does not error.
+        // Idempotent: re-running migrate from CURRENT is a no-op and does not error.
         migrate(&conn, None).unwrap();
         assert_eq!(
+            get_config(&conn, "schema_version").unwrap(),
+            Some(CURRENT_SCHEMA_VERSION.to_string())
+        );
+    }
+
+    /// Roll a fresh DB back to a simulated v12 state: drop the v13 registry table +
+    /// index and reset `schema_version` to 12 (mirrors how
+    /// `migrate_v11_to_v12_drops_embed_dim` simulates v11). The caller injects the
+    /// legacy `embedding_meta` config value to exercise the lift.
+    fn simulate_v12(conn: &Connection) {
+        init_schema(conn).unwrap();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_embedding_spaces_one_active;
+             DROP TABLE IF EXISTS embedding_spaces;",
+        )
+        .unwrap();
+        set_config(conn, "schema_version", "12").unwrap();
+    }
+
+    #[test]
+    fn migrate_v12_to_v13_roundtrips_fingerprint() {
+        // A v12 DB with a stamped `embedding_meta` identity migrates to exactly one
+        // `default`/`active` registry row carrying the same tuple, and the legacy key
+        // is dropped. Uses an MRL fingerprint so Some(base_dim) + a non-default
+        // element_type are both exercised.
+        let conn = open_memory().unwrap();
+        simulate_v12(&conn);
+        let fp = crate::types::EmbeddingFingerprint::with_matryoshka(
+            "Qwen/Qwen3-Embedding-0.6B",
+            "tei",
+            1024,
+            2048,
+        );
+        set_config(
+            &conn,
+            "embedding_meta",
+            &serde_json::to_string(&fp).unwrap(),
+        )
+        .unwrap();
+
+        migrate(&conn, None).unwrap();
+
+        assert_eq!(
             get_config(&conn, "schema_version").unwrap().as_deref(),
-            Some("12")
+            Some("13"),
+            "schema_version bumped to 13"
+        );
+        // Exactly one active row, columns identical to the stamped tuple.
+        let (name, model, provider, dim, base, elem, status): (
+            String,
+            String,
+            String,
+            i64,
+            Option<i64>,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT name, model, provider, dim, matryoshka_base_dim, element_type, status
+                 FROM embedding_spaces WHERE status = 'active'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(name, "default");
+        assert_eq!(model, fp.model);
+        assert_eq!(provider, fp.provider);
+        assert_eq!(dim, i64::try_from(fp.dim).unwrap());
+        assert_eq!(
+            base,
+            fp.matryoshka_base_dim.map(|d| i64::try_from(d).unwrap())
+        );
+        assert_eq!(elem, fp.element_type);
+        assert_eq!(status, "active");
+        assert!(
+            get_config(&conn, "embedding_meta").unwrap().is_none(),
+            "legacy embedding_meta config key dropped"
+        );
+
+        // Idempotent: re-run is a no-op, still one row, still v13.
+        migrate(&conn, None).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embedding_spaces", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn migrate_v12_to_v13_fresh_store_inserts_nothing() {
+        // A v12 DB that never embedded has no `embedding_meta` value: the registry is
+        // created empty and identity is established lazily on first write (#613).
+        let conn = open_memory().unwrap();
+        simulate_v12(&conn);
+        assert!(get_config(&conn, "embedding_meta").unwrap().is_none());
+
+        migrate(&conn, None).unwrap();
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some("13")
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embedding_spaces", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "no fabricated row on a never-embedded store");
+    }
+
+    #[test]
+    fn migrate_v12_to_v13_rejects_corrupt_legacy_value() {
+        // A present-but-corrupt `embedding_meta` value fails the migration (rolls the
+        // step back) rather than silently discarding a malformed identity.
+        let conn = open_memory().unwrap();
+        simulate_v12(&conn);
+        set_config(&conn, "embedding_meta", "{not json").unwrap();
+
+        let err = migrate(&conn, None).expect_err("corrupt value must fail the migration");
+        assert!(
+            matches!(err, MemoryError::Migration(_)),
+            "expected a migration error, got {err:?}"
+        );
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some("12"),
+            "version stays 12 — the step rolled back"
         );
     }
 
@@ -1164,8 +1313,8 @@ CREATE TABLE IF NOT EXISTS config (
                 |r| r.get(0),
             )
             .unwrap();
-        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11)
-        assert_eq!(count, 27);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13)
+        assert_eq!(count, 28);
     }
 
     // --- Migration framework tests ---
@@ -1956,6 +2105,7 @@ CREATE TABLE IF NOT EXISTS config (
     /// `schema_ddl_migration_chain_snapshot` and
     /// `migration_chain_ddl_differs_from_init_known_artifact`.
     #[test]
+    #[allow(clippy::too_many_lines)] // the body is one pinned golden DDL string literal
     fn schema_ddl_snapshot_is_stable() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
@@ -1994,6 +2144,9 @@ CREATE INDEX idx_edges_source ON edges(source_fact_id);
 
 -- index: idx_edges_target
 CREATE INDEX idx_edges_target ON edges(target_fact_id);
+
+-- index: idx_embedding_spaces_one_active
+CREATE UNIQUE INDEX idx_embedding_spaces_one_active ON embedding_spaces(status) WHERE status = 'active';
 
 -- index: idx_events_origin_seq
 CREATE INDEX idx_events_origin_seq ON events(origin_node_id, sequence_id);
@@ -2057,6 +2210,9 @@ CREATE TABLE config ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
 
 -- table: edges
 CREATE TABLE edges ( id INTEGER PRIMARY KEY AUTOINCREMENT, source_fact_id INTEGER NOT NULL REFERENCES facts(id), target_fact_id INTEGER NOT NULL REFERENCES facts(id), relation_type TEXT NOT NULL, weight REAL NOT NULL DEFAULT 1.0, t_created TEXT NOT NULL, t_expired TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) );
+
+-- table: embedding_spaces
+CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, provider TEXT NOT NULL, dim INTEGER NOT NULL, matryoshka_base_dim INTEGER, element_type TEXT NOT NULL DEFAULT 'float32', status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'populating', 'deprecated')), created_at TEXT NOT NULL DEFAULT (datetime('now')) );
 
 -- table: events
 CREATE TABLE events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1 );
@@ -2664,6 +2820,74 @@ CREATE TRIGGER facts_fts_au AFTER UPDATE ON facts BEGIN INSERT INTO facts_fts(fa
         assert_eq!(
             fresh_cols, migrated_cols,
             "fresh and migrated idx_activities_dedup must be identical"
+        );
+    }
+
+    // --- v12→v13 embedding_spaces convergence + read-only registry read ---
+
+    /// Whitespace-normalized `sqlite_master.sql` for a named object (the same
+    /// normalization `deterministic_schema_dump` uses), so the hand-copied fresh-init
+    /// and frozen-migration DDL literals are compared by structure, not formatting.
+    fn normalized_object_sql(conn: &Connection, name: &str) -> String {
+        let raw: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        raw.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn fresh_vs_migrated_embedding_spaces_converge() {
+        // Fresh-init DDL (TABLES_DDL) and the frozen migration snapshot must produce a
+        // byte-identical table + partial index, so a v12→v13 migrated store and a fresh
+        // v13 store are structurally interchangeable.
+        let fresh = open_memory().unwrap();
+        init_schema(&fresh).unwrap();
+
+        // simulate_v12 drops the fresh table, so migrate() recreates it via the
+        // frozen migrate_v12_to_v13 DDL — exactly the path we want to compare.
+        let migrated = open_memory().unwrap();
+        simulate_v12(&migrated);
+        migrate(&migrated, None).unwrap();
+
+        for obj in ["embedding_spaces", "idx_embedding_spaces_one_active"] {
+            assert_eq!(
+                normalized_object_sql(&fresh, obj),
+                normalized_object_sql(&migrated, obj),
+                "fresh-init and migrated {obj} DDL must converge"
+            );
+        }
+        // The single-active partial index really is partial (WHERE status = 'active').
+        assert!(
+            normalized_object_sql(&fresh, "idx_embedding_spaces_one_active")
+                .contains("WHERE status = 'active'"),
+            "the one-active index must be partial"
+        );
+    }
+
+    #[test]
+    fn read_only_open_reads_registry() {
+        // load() is a pure SELECT, so a read-only open of a v13 store reads the active
+        // identity (no migration, no table creation).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ro.db");
+        let path_str = path.to_str().unwrap();
+        let fp = crate::types::EmbeddingFingerprint::new("model-a", "tei", 8);
+        {
+            let conn = open_connection(path_str).unwrap();
+            init_schema(&conn).unwrap();
+            migrate(&conn, None).unwrap();
+            crate::store::embedding_meta::store(&conn, &fp).unwrap();
+        }
+        let ro = open_connection_read_only(path_str).unwrap();
+        validate_schema_version(&ro).expect("a v13 store validates read-only");
+        assert_eq!(
+            crate::store::embedding_meta::load(&ro).unwrap(),
+            Some(fp),
+            "read-only open reads the registry identity"
         );
     }
 

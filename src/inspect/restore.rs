@@ -18,7 +18,12 @@ use crate::store::serialize_embedding;
 use super::types::EngineSnapshot;
 
 /// Config keys managed by `init_schema`/`migrate` — never imported from snapshots.
-const MANAGED_CONFIG_KEYS: &[&str] = &["schema_version", "storage_epoch"];
+///
+/// `embedding_meta` is the pre-#622 legacy identity key. It no longer exists as a live
+/// config row (the identity moved to the `embedding_spaces` table), so it must not be
+/// copied back into `config`; an old snapshot's value is handled explicitly when restoring
+/// the registry (see the embedding-space restore step).
+const MANAGED_CONFIG_KEYS: &[&str] = &["schema_version", "storage_epoch", "embedding_meta"];
 
 // ---------------------------------------------------------------------------
 // Compression detection
@@ -285,6 +290,44 @@ fn restore_edges(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
     Ok(())
 }
 
+/// Restore the embedding-space registry (#622) from a snapshot.
+///
+/// A current snapshot carries the `embedding_spaces` rows explicitly. A pre-#622 snapshot
+/// has none, so the identity is reconstructed from the legacy `embedding_meta` config value
+/// if present (older exports kept it as a config row).
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Migration`] on a corrupt legacy `embedding_meta` value or an
+/// unrecognized space status, and [`MemoryError::Database`]/[`MemoryError::Internal`] on
+/// insert failure (e.g. a second active space).
+fn restore_embedding_spaces(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
+    if snapshot.embedding_spaces.is_empty() {
+        if let Some(raw) = snapshot.config.get("embedding_meta") {
+            let fp: crate::types::EmbeddingFingerprint =
+                serde_json::from_str(raw).map_err(|e| {
+                    MigrationError::Incompatible(format!(
+                        "corrupt legacy embedding_meta in snapshot: {e}"
+                    ))
+                })?;
+            crate::store::embedding_meta::store(conn, &fp)?;
+        }
+        return Ok(());
+    }
+    for s in &snapshot.embedding_spaces {
+        let status = crate::store::embedding_spaces::SpaceStatus::from_sql(&s.status)?;
+        crate::store::embedding_spaces::insert_active(
+            conn,
+            &crate::store::embedding_spaces::EmbeddingSpace {
+                name: s.name.clone(),
+                fingerprint: s.fingerprint.clone(),
+                status,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Write all snapshot data into a connection within a single transaction.
 ///
 /// Uses explicit IDs to preserve foreign key relationships. The connection
@@ -370,6 +413,9 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
             set_config(&tx, key, value)?;
         }
     }
+
+    // 8b. Restore the embedding-space registry (#622).
+    restore_embedding_spaces(&tx, snapshot)?;
 
     // 9. Reset autoincrement sequences so new inserts don't collide.
     reset_autoincrement(
@@ -498,6 +544,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
+            embedding_spaces: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -516,6 +563,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
+            embedding_spaces: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -534,6 +582,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
+            embedding_spaces: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -558,6 +607,7 @@ mod tests {
             }],
             events: vec![],
             lineage: vec![],
+            embedding_spaces: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -576,6 +626,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
+            embedding_spaces: vec![],
             config: BTreeMap::new(),
         };
         validate_snapshot(&snapshot).unwrap();
@@ -898,6 +949,7 @@ mod tests {
             scopes: vec![],
             events: vec![],
             lineage: vec![],
+            embedding_spaces: vec![],
             config: BTreeMap::new(),
         };
 

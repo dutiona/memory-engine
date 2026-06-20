@@ -1,10 +1,12 @@
 //! Typed persistence for the canonical embedding identity tuple (ADR 0015).
 //!
-//! Single owner of the on-disk encoding: the Memory layer records exactly one
-//! [`EmbeddingFingerprint`], the degenerate single case of the Knowledge layer's
-//! multi-space `embed_spaces` registry. Wave 2 (#622) generalizes this module
-//! (value → table) without changing call sites, which speak only in
-//! `EmbeddingFingerprint` values — never the JSON layout or the config key.
+//! Single-active **facade** over the [`embedding_spaces`](super::embedding_spaces) registry:
+//! the Memory layer records exactly one `active` space — the degenerate single case of the
+//! Knowledge layer's multi-space `embed_spaces` registry. Wave 2 (#622) moved the identity
+//! from a single JSON `config` value into the `embedding_spaces` table; these functions are
+//! unchanged in signature and semantics (the single-active *policy* — write-once, the #614
+//! mismatch check, the dimension guard — lives here; the row CRUD lives in the registry
+//! module). Call sites speak only in `EmbeddingFingerprint` values, never the table.
 //!
 //! The identity is established **lazily on the first embedding write** (ADR 0015
 //! §2): [`record_if_absent`] is called by every embed-then-persist path *as a vector
@@ -24,15 +26,8 @@
 
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, MigrationError, Result};
-use crate::store::schema::{get_config, set_config};
+use crate::error::{MemoryError, Result};
 use crate::types::EmbeddingFingerprint;
-
-/// Config key under which the JSON-encoded identity tuple is stored.
-///
-/// Wave 2 (#622) retires this single-value key for an `embedding_spaces` table;
-/// until then it is the one and only persisted location of the identity.
-pub const EMBEDDING_META_KEY: &str = "embedding_meta";
 
 /// Load the persisted embedding identity, if one has been recorded.
 ///
@@ -41,36 +36,24 @@ pub const EMBEDDING_META_KEY: &str = "embedding_meta";
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure, or
-/// `MemoryError::Migration(MigrationError::Incompatible)` if the value is present
-/// but not valid `EmbeddingFingerprint` JSON — a hard error, never a silent default,
-/// because the stored `dim` drives vector deserialization.
+/// Returns `MemoryError::Database` on query failure, or `MemoryError::Internal` if a stored
+/// dimension/status in the registry is corrupt (never a silent default, because the stored
+/// `dim` drives vector deserialization).
 pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
-    get_config(conn, EMBEDDING_META_KEY)?.map_or_else(
-        || Ok(None),
-        |raw| {
-            serde_json::from_str(&raw).map(Some).map_err(|e| {
-                MigrationError::Incompatible(format!(
-                    "corrupt {EMBEDDING_META_KEY} config value: {e}"
-                ))
-                .into()
-            })
-        },
-    )
+    Ok(super::embedding_spaces::find_active(conn)?.map(|s| s.fingerprint))
 }
 
 /// Unconditionally persist the identity tuple, overwriting any existing value.
 ///
-/// This is the upsert writer used by [`record_if_absent`] (first-write path) and
-/// reserved for restore/import, where the tuple is reconstructed from a snapshot.
+/// Upserts the single `active` registry row. Used by [`record_if_absent`] (first-write
+/// path) and reserved for restore/import, where the tuple is reconstructed from a snapshot.
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Serialization` if encoding fails (cannot happen for a
-/// valid fingerprint) or `MemoryError::Database` on write failure.
+/// Returns `MemoryError::Database` on write failure or `MemoryError::Internal` if a
+/// dimension overflows `i64`.
 pub fn store(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
-    let json = serde_json::to_string(fp)?;
-    set_config(conn, EMBEDDING_META_KEY, &json)
+    super::embedding_spaces::upsert_active_fingerprint(conn, fp)
 }
 
 /// Write-once recording of the identity on the first embedding write.
@@ -301,9 +284,34 @@ mod tests {
     }
 
     #[test]
-    fn load_errors_on_corrupt_json() {
+    fn store_then_load_preserves_matryoshka_and_element_type() {
+        // The registry stores the fingerprint as typed columns; prove the nullable
+        // matryoshka_base_dim and a non-default element_type round-trip (replaces the
+        // JSON round-trip the old single-value encoding relied on).
         let conn = fresh_conn();
-        set_config(&conn, EMBEDDING_META_KEY, "{not json").expect("set raw");
-        assert!(load(&conn).is_err(), "corrupt JSON must be a hard error");
+        let mut fp = EmbeddingFingerprint::with_matryoshka("m", "tei", 768, 1536);
+        fp.element_type = "int8".to_string();
+        store(&conn, &fp).expect("store");
+        assert_eq!(load(&conn).expect("load"), Some(fp));
+    }
+
+    #[test]
+    fn load_none_when_only_deprecated_row() {
+        // The single-active read contract: a store whose only space is `deprecated`
+        // reads like a fresh store (`load` → None). Replaces the old corrupt-config-JSON
+        // test — that encoding no longer exists; the migration's corrupt-value rejection
+        // is covered in `schema::tests::migrate_v12_to_v13_rejects_corrupt_legacy_value`.
+        let conn = fresh_conn();
+        conn.execute(
+            "INSERT INTO embedding_spaces
+                 (name, model, provider, dim, matryoshka_base_dim, element_type, status)
+             VALUES ('retired', 'm', 'tei', 8, NULL, 'float32', 'deprecated')",
+            [],
+        )
+        .expect("insert deprecated row");
+        assert!(
+            load(&conn).expect("load").is_none(),
+            "a deprecated-only store has no active identity"
+        );
     }
 }

@@ -7,6 +7,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::error::{ConflictError, MemoryError, Result};
+use crate::inspect::types::EmbeddingSpaceSnapshot;
 use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
@@ -70,6 +71,20 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
 
     write!(writer, r#","lineage":"#)?;
     stream_for_each(writer, |cb| LineageStore::new(conn).for_each(cb))?;
+
+    // Embedding-space registry (#622): the identity left the `config` table for its own
+    // table, so dump it explicitly or a restore would come up with no identity. Always
+    // small (one active row today).
+    let spaces: Vec<EmbeddingSpaceSnapshot> = crate::store::embedding_spaces::list_spaces(conn)?
+        .into_iter()
+        .map(|s| EmbeddingSpaceSnapshot {
+            name: s.name,
+            status: s.status.as_sql().to_string(),
+            fingerprint: s.fingerprint,
+        })
+        .collect();
+    write!(writer, r#","embedding_spaces":"#)?;
+    serde_json::to_writer(&mut *writer, &spaces)?;
 
     // Config is always small — serialize directly.
     let config = list_config(conn)?;

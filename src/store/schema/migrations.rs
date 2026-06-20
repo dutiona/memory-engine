@@ -10,7 +10,7 @@
 
 use rusqlite::Connection;
 
-use crate::error::Result;
+use crate::error::{MigrationError, Result};
 
 pub(super) fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     // Frozen snapshot of SCOPES_DDL at v2 — do not reference the global constant,
@@ -356,5 +356,86 @@ pub(super) fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
 /// key), and runs inside the migration framework's per-step transaction.
 pub(super) fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
     conn.execute_batch("DELETE FROM config WHERE key = 'embed_dim';")?;
+    Ok(())
+}
+
+/// Decode target for the v12 `embedding_meta` config value.
+///
+/// Deliberately a **migration-local** struct, not `crate::types::EmbeddingFingerprint`:
+/// a future change to the live type's serde shape must not silently alter what this
+/// frozen v12→v13 step means (the module's frozen-snapshot invariant). It mirrors the
+/// v12-era field set #613 persisted under the `embedding_meta` key.
+#[derive(serde::Deserialize)]
+struct V12Fingerprint {
+    model: String,
+    provider: String,
+    dim: u64,
+    #[serde(default)]
+    matryoshka_base_dim: Option<u64>,
+    element_type: String,
+}
+
+/// Generalize the single `embedding_meta` config value into the `embedding_spaces`
+/// registry table (issue #622, ADR 0015 §1 — the degenerate single-space case).
+///
+/// Unlike v11→v12 (which *dropped* `embed_dim` for lack of a full tuple), the v12
+/// `embedding_meta` value is a complete, correct identity, so this migration is
+/// **lossless**: it parses that value — via the same serde path `embedding_meta::load`
+/// used, so a corrupt value fails identically rather than becoming a fabricated row —
+/// and writes it as the single `active` row named `'default'`, then retires the legacy
+/// config key. A store that never embedded has no value: the table is created empty and
+/// the identity is established lazily on the next embedding write (preserves #613). A
+/// corrupt value is a hard error that rolls the step back (version stays 12), never a
+/// fabricated identity. Idempotent: the table uses `IF NOT EXISTS` and the framework
+/// gates the step on `version < target`.
+///
+/// Frozen DDL snapshot — never reference the live `TABLES_DDL` constant in `mod.rs`.
+pub(super) fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS embedding_spaces (
+            name                TEXT    PRIMARY KEY,
+            model               TEXT    NOT NULL,
+            provider            TEXT    NOT NULL,
+            dim                 INTEGER NOT NULL,
+            matryoshka_base_dim INTEGER,
+            element_type        TEXT    NOT NULL DEFAULT 'float32',
+            status              TEXT    NOT NULL DEFAULT 'active'
+                                CHECK(status IN ('active', 'populating', 'deprecated')),
+            created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_spaces_one_active
+            ON embedding_spaces(status) WHERE status = 'active';",
+    )?;
+
+    // Fold a present legacy identity into one active 'default' row. The table was just
+    // created empty in this same step, so a plain INSERT cannot conflict (the version
+    // gate makes the step run-once) — no ON CONFLICT needed.
+    if let Some(raw) = super::get_config(conn, "embedding_meta")? {
+        let fp: V12Fingerprint = serde_json::from_str(&raw).map_err(|e| {
+            MigrationError::Incompatible(format!("corrupt embedding_meta during v12->v13: {e}"))
+        })?;
+        conn.execute(
+            "INSERT INTO embedding_spaces
+                 (name, model, provider, dim, matryoshka_base_dim, element_type, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
+            rusqlite::params![
+                "default",
+                fp.model,
+                fp.provider,
+                i64::try_from(fp.dim).map_err(|_| MigrationError::Incompatible(
+                    "embedding_meta.dim exceeds i64".into()
+                ))?,
+                fp.matryoshka_base_dim
+                    .map(
+                        |d| i64::try_from(d).map_err(|_| MigrationError::Incompatible(
+                            "embedding_meta.matryoshka_base_dim exceeds i64".into()
+                        ))
+                    )
+                    .transpose()?,
+                fp.element_type,
+            ],
+        )?;
+        conn.execute_batch("DELETE FROM config WHERE key = 'embedding_meta';")?;
+    }
     Ok(())
 }
