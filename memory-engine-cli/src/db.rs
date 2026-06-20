@@ -153,9 +153,6 @@ pub fn open_engine_writable_with_dim(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
-    use tempfile::NamedTempFile;
     use tempfile::TempDir;
 
     use super::{peek_embed_dim_from_db, peek_schema_version_from_db};
@@ -176,11 +173,14 @@ mod tests {
 
     #[test]
     fn peek_embed_dim_from_db_non_sqlite_file_returns_error() {
-        let mut tmp = NamedTempFile::new().unwrap();
-        tmp.write_all(b"this is not a sqlite database\n").unwrap();
+        // `std::fs::write` closes the file handle before SQLite opens the path,
+        // avoiding file-locking conflicts on Windows (per gemini review).
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("garbage.db");
+        std::fs::write(&path, b"this is not a sqlite database\n").unwrap();
         // A non-SQLite file opens lazily, then the config-table query fails with
         // the rusqlite "not a database" error — pin that, not just any Err.
-        let err = peek_embed_dim_from_db(tmp.path()).unwrap_err();
+        let err = peek_embed_dim_from_db(&path).unwrap_err();
         assert!(
             err.to_string().contains("not a database"),
             "expected 'not a database', got: {err}"
@@ -222,10 +222,11 @@ mod tests {
 
     #[test]
     fn peek_schema_version_from_db_non_sqlite_file_returns_error() {
-        let mut tmp = NamedTempFile::new().unwrap();
-        tmp.write_all(b"not a real database\n").unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("garbage.db");
+        std::fs::write(&path, b"not a real database\n").unwrap();
         // Wrapped as "… is this a memory-engine database? (… not a database …)".
-        let err = peek_schema_version_from_db(tmp.path()).unwrap_err();
+        let err = peek_schema_version_from_db(&path).unwrap_err();
         assert!(
             err.to_string().contains("not a database"),
             "expected 'not a database', got: {err}"
