@@ -104,7 +104,16 @@ impl EmbeddingArgs {
         model: &str,
         engine_dim: usize,
     ) -> anyhow::Result<HttpEmbeddingProvider> {
-        // Always honour an explicit --native-dim (default: the engine dim) so a stray
+        // MRL truncates a NATIVE-length response down to the stored dim, so the native
+        // dim must be declared explicitly: defaulting it to the (truncated) engine dim
+        // would make the provider validate the raw response against the wrong length and
+        // reject every real embedding. Require --native-dim whenever --mrl-dim is set.
+        anyhow::ensure!(
+            self.mrl_dim.is_none() || self.native_dim.is_some(),
+            "--native-dim is required with --mrl-dim: it is the native dimension the model \
+             returns before truncation (the engine stores the truncated --mrl-dim)"
+        );
+        // Otherwise honour an explicit --native-dim (default: the engine dim) so a stray
         // --native-dim without --mrl-dim surfaces as a mismatch below rather than being
         // silently ignored.
         let native_dim = self.native_dim.unwrap_or(engine_dim);
@@ -201,6 +210,22 @@ mod tests {
         let mut a = args(Some(URL), Some("m"));
         a.native_dim = Some(16); // != engine_dim 8, and no --mrl-dim
         assert!(a.build_optional(8).is_err());
+    }
+
+    #[test]
+    fn mrl_dim_requires_native_dim() {
+        // Without --native-dim, the provider would validate the raw native-length
+        // response against the truncated engine dim and reject every embedding — so
+        // --mrl-dim must be accompanied by --native-dim (fails at build time).
+        let mut a = args(Some(URL), Some("m"));
+        a.mrl_dim = Some(8); // == engine_dim, but native_dim omitted
+        // `.err()` avoids unwrap_err's Debug bound on the Ok type (HttpEmbeddingProvider
+        // deliberately has no Debug — it holds an api_key).
+        let err = a.build_optional(8).err().expect("must error").to_string();
+        assert!(
+            err.contains("--native-dim is required"),
+            "expected a --native-dim requirement error, got: {err}"
+        );
     }
 
     #[test]
