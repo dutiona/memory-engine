@@ -1049,4 +1049,86 @@ mod tests {
         assert!(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION.starts_with("Instruct:"));
         assert!(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION.contains("Query: "));
     }
+
+    // --- #448: property-based tests for the batch parsers ---
+    mod proptests {
+        use super::HttpEmbeddingProvider;
+        use proptest::prelude::*;
+
+        /// A bounded, recursive arbitrary `serde_json::Value` for panic-safety
+        /// fuzzing. Depth/size are capped so the parsers see deeply nested and
+        /// wrongly-typed trees without unbounded generation cost.
+        fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+            let leaf = prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::Bool),
+                any::<i64>().prop_map(serde_json::Value::from),
+                // Finite f64 only: serde_json cannot represent NaN/Inf as a Number.
+                (-1e6f64..1e6).prop_map(serde_json::Value::from),
+                ".*".prop_map(serde_json::Value::String),
+            ];
+            leaf.prop_recursive(4, 32, 6, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..6).prop_map(serde_json::Value::Array),
+                    prop::collection::vec((".*", inner), 0..6)
+                        .prop_map(|kvs| { serde_json::Value::Object(kvs.into_iter().collect()) }),
+                ]
+            })
+        }
+
+        proptest! {
+            /// For any permutation of indices `0..n` carrying arbitrary embeddings,
+            /// `parse_openai_batch` succeeds and returns them in index order.
+            #[test]
+            fn parse_openai_batch_permutation_returns_index_order(
+                // Shuffle the indices 0..n; each index i carries the marker
+                // embedding [i, i + 0.5] so the reorder is checkable.
+                indices in (1usize..=8).prop_flat_map(|n| {
+                    Just((0..n).collect::<Vec<_>>()).prop_shuffle()
+                })
+            ) {
+                let n = indices.len();
+                let data: Vec<serde_json::Value> = indices
+                    .iter()
+                    .map(|&i| {
+                        // u8 -> f32 is exact (no precision loss); n <= 8 here.
+                        let marker = f32::from(u8::try_from(i).expect("index < 8"));
+                        serde_json::json!({ "index": i, "embedding": [marker, marker + 0.5] })
+                    })
+                    .collect();
+
+                let out = HttpEmbeddingProvider::parse_openai_batch(&data, n)
+                    .expect("a permutation of 0..n must parse");
+                prop_assert_eq!(out.len(), n);
+                for (i, emb) in out.iter().enumerate() {
+                    let marker = f32::from(u8::try_from(i).expect("index < 8"));
+                    prop_assert_eq!(emb, &vec![marker, marker + 0.5]);
+                }
+            }
+
+            /// A non-permutation (a duplicate index, here index 0 twice) must error.
+            #[test]
+            fn parse_openai_batch_rejects_non_permutation(
+                payload in prop::collection::vec(-1e3f32..1e3, 1..4)
+            ) {
+                let data = vec![
+                    serde_json::json!({ "index": 0, "embedding": &payload }),
+                    serde_json::json!({ "index": 0, "embedding": &payload }),
+                ];
+                prop_assert!(HttpEmbeddingProvider::parse_openai_batch(&data, 2).is_err());
+            }
+
+            /// Neither batch parser may panic on arbitrary JSON arrays paired
+            /// with an arbitrary expected count.
+            #[test]
+            fn batch_parsers_never_panic_on_arbitrary_input(
+                items in prop::collection::vec(arb_json(), 0..8),
+                expected in 0usize..10,
+            ) {
+                // Both calls must return (Ok or Err) without panicking.
+                let _ = HttpEmbeddingProvider::parse_openai_batch(&items, expected);
+                let _ = HttpEmbeddingProvider::parse_ollama_batch(&items, expected);
+            }
+        }
+    }
 }
