@@ -28,6 +28,39 @@ const fn success_fixture() -> &'static str {
     include_str!("fixtures/success_session.jsonl")
 }
 
+/// Build a UUID-linked multi-turn JSONL session: each `(user, assistant)` pair
+/// becomes one reconstructable turn, chained `userN -> assistantN -> userN+1`,
+/// with one-minute-apart timestamps. Used to exercise `max_turns` truncation,
+/// which keeps the TAIL of the turn list.
+fn multi_turn_session(sid: &str, turns: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    let mut prev_uuid = String::new();
+    for (i, (user, assistant)) in turns.iter().enumerate() {
+        let u_uuid = format!("u{i}");
+        let a_uuid = format!("a{i}");
+        let minute = i; // distinct, monotonically increasing minute per turn
+        let user_entry = serde_json::json!({
+            "type": "user", "sessionId": sid,
+            "timestamp": format!("2024-06-01T10:{minute:02}:00Z"),
+            "uuid": u_uuid,
+            "parentUuid": if prev_uuid.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(prev_uuid.clone()) },
+            "message": {"role": "user", "content": [{"type": "text", "text": user}]}
+        });
+        let asst_entry = serde_json::json!({
+            "type": "assistant", "sessionId": sid,
+            "timestamp": format!("2024-06-01T10:{minute:02}:05Z"),
+            "uuid": a_uuid, "parentUuid": u_uuid,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": assistant}]}
+        });
+        out.push_str(&user_entry.to_string());
+        out.push('\n');
+        out.push_str(&asst_entry.to_string());
+        out.push('\n');
+        prev_uuid = u_uuid;
+    }
+    out
+}
+
 const fn failed_fixture() -> &'static str {
     include_str!("fixtures/failed_session.jsonl")
 }
@@ -412,23 +445,70 @@ fn bootstrap_max_session_bytes_caps_stream() {
 
 #[test]
 fn bootstrap_max_turns_limits_processing() {
-    let engine = engine();
+    // #300: assert the DOWNSTREAM effect of max_turns truncation, not the
+    // pre-truncation `turns_reconstructed` count (which is set before the slice
+    // and so proves nothing). A 3-turn session where every turn carries a bug
+    // keyword yields 3 candidates uncapped; with max_turns=1 only the TAIL turn
+    // survives, so exactly 1 candidate/fact is produced — proving the slice fired.
     let extractor = KeywordExtractor;
-    let config = BootstrapConfig {
-        max_turns: 1,
-        ..Default::default()
-    };
+    let turns: &[(&str, &str)] = &[
+        ("first?", "The root cause was an off-by-one in turn one."),
+        ("second?", "The root cause was a null deref in turn two."),
+        (
+            "third?",
+            "The root cause was a race condition in turn three.",
+        ),
+    ];
 
-    let reader = Cursor::new(success_fixture());
-    let report = engine
-        .bootstrap_session(reader, &TestEmbedder, &extractor, &config, None)
+    // Uncapped baseline.
+    let engine_uncapped = engine();
+    let report_uncapped = engine_uncapped
+        .bootstrap_session(
+            Cursor::new(multi_turn_session("mt-uncapped", turns)),
+            &TestEmbedder,
+            &extractor,
+            &BootstrapConfig::default(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        report_uncapped.turns_reconstructed, 3,
+        "fixture must yield 3 turns"
+    );
+    assert_eq!(
+        report_uncapped.candidates_found, 3,
+        "uncapped: every turn is a Bug candidate"
+    );
+    assert_eq!(report_uncapped.facts_created, 3, "uncapped: 3 facts");
+
+    // Capped to the tail turn only.
+    let engine_capped = engine();
+    let report_capped = engine_capped
+        .bootstrap_session(
+            Cursor::new(multi_turn_session("mt-capped", turns)),
+            &TestEmbedder,
+            &extractor,
+            &BootstrapConfig {
+                max_turns: 1,
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
 
-    assert_eq!(report.sessions_processed, 1);
-    // With max_turns=1, we process at most 1 turn
+    assert_eq!(report_capped.sessions_processed, 1);
     assert!(
-        report.turns_reconstructed <= 1,
-        "should process at most one turn, got {}",
-        report.turns_reconstructed
+        report_capped.candidates_found < report_uncapped.candidates_found,
+        "max_turns must reduce candidates: capped={} uncapped={}",
+        report_capped.candidates_found,
+        report_uncapped.candidates_found
+    );
+    assert_eq!(
+        report_capped.candidates_found, 1,
+        "max_turns=1 keeps exactly the tail turn"
+    );
+    assert_eq!(
+        report_capped.facts_created, 1,
+        "max_turns=1 produces one fact (the tail turn)"
     );
 }
