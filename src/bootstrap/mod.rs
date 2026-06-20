@@ -1,7 +1,7 @@
 //! Session log bootstrap: parse Claude Code JSONL session logs into historical memory.
 //!
-//! Pipeline: JSONL → parse → reconstruct turns → classify outcome → keyword pre-filter
-//! → extract facts → ingest marker event + add facts.
+//! Pipeline: JSONL → parse → [idempotency check] → ingest marker event (savepoint anchor)
+//! → reconstruct turns → classify outcome → keyword pre-filter → extract facts → add facts.
 
 pub(crate) mod extract;
 pub(crate) mod filter;
@@ -37,8 +37,10 @@ pub use redact::{
 
 /// Bootstrap one session from a JSONL reader into the memory engine.
 ///
-/// Pipeline: parse → reconstruct turns → classify outcome → keyword pre-filter
-/// → extract facts → ingest marker event + add facts (within a savepoint).
+/// Pipeline: parse → [idempotency check] → ingest marker event (savepoint anchor)
+/// → reconstruct turns → classify outcome → keyword pre-filter → extract facts → add facts.
+/// The marker event is ingested *first* inside the savepoint so it can anchor the
+/// idempotency check; turn reconstruction, classification, and extraction follow.
 ///
 /// # Errors
 ///
