@@ -58,6 +58,15 @@ impl<'a> ScopeStore<'a> {
     }
 
     /// Insert a scope under a parent. Returns the created node.
+    ///
+    /// **Does not validate the label.** Unlike [`Self::ensure_path`], this
+    /// low-level method inserts `label` verbatim — callers are responsible for
+    /// ensuring it is non-empty, contains no `/`, has no leading/trailing
+    /// whitespace, and is at most [`crate::scope::MAX_SEGMENT_LEN`] bytes (the
+    /// rules enforced by [`crate::scope::validate_segment`]). Storing a malformed
+    /// label here can break round-tripping through
+    /// [`crate::scope::ScopeTree::resolve_path`]. Prefer [`Self::ensure_path`]
+    /// for a validated, idempotent alternative.
     pub fn insert(&self, parent_id: i64, label: &str, depth: i64) -> Result<ScopeNode> {
         self.conn.execute(
             "INSERT INTO scopes (parent_id, label, depth) VALUES (?1, ?2, ?3)",
@@ -72,24 +81,17 @@ impl<'a> ScopeStore<'a> {
         })
     }
 
-    /// Validate a scope label segment.
+    /// Validate a scope label segment (write path).
+    ///
+    /// Applies the shared structural rules from [`crate::scope::validate_segment`]
+    /// (non-empty, no `/`, at most 256 bytes) on the trimmed label, plus the
+    /// write-path-only rule that the label must have no leading/trailing
+    /// whitespace — so that stored labels always round-trip through
+    /// [`crate::scope::ScopeTree::resolve_path`].
     fn validate_label(label: &str) -> Result<()> {
         let trimmed = label.trim();
-        if trimmed.is_empty() {
-            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
-                "scope label must not be empty".into(),
-            )));
-        }
-        if trimmed.contains('/') {
-            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
-                "scope label must not contain '/'".into(),
-            )));
-        }
-        if trimmed.len() > 256 {
-            return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
-                "scope label must be at most 256 bytes".into(),
-            )));
-        }
+        crate::scope::validate_segment(trimmed)
+            .map_err(|reason| MemoryError::Conflict(ConflictError::ScopeLabel(reason.into())))?;
         if trimmed != label {
             return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
                 "scope label must not have leading/trailing whitespace".into(),

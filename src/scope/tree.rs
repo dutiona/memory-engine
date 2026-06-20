@@ -59,12 +59,48 @@ impl ScopeTree {
     }
 
     /// Resolve a path string to a `scope_id` (read-only, no creation).
-    /// Returns `None` if any segment is missing.
+    ///
+    /// The canonical root string `"/"` (the one [`ScopeTree::path_for_id`]
+    /// renders for the root) resolves to the root scope, so
+    /// `resolve_path(path_for_id(root))` round-trips rather than returning
+    /// `None` (the representation is invertible). The empty string `""` is
+    /// **not** a root synonym — it resolves to `None`, agreeing with the write
+    /// path ([`crate::store::ScopeStore::ensure_path`] rejects `""`) and keeping
+    /// an empty/defaulted scope query from silently meaning "the entire store".
+    ///
+    /// For any other input, segments are separated by `/`. Returns `None` if any
+    /// segment does not exist in the cached tree, or if the path contains an
+    /// empty *inner* segment (e.g. a leading/trailing `/` or `//`).
+    ///
+    /// **Whitespace:** each segment is trimmed of ASCII whitespace before lookup,
+    /// so `resolve_path(" user:michael")` matches the stored label `user:michael`.
+    /// This diverges from [`crate::store::ScopeStore::ensure_path`], which
+    /// *rejects* a label with surrounding whitespace (`MemoryError::Conflict`).
+    /// The asymmetry is intentional and safe: because `ensure_path` guarantees no
+    /// stored label ever carries surrounding whitespace, the trim here can only
+    /// recover the un-padded label — it is defensive, not permissive. Use
+    /// `ensure_path` when you need the input itself validated rather than coerced.
     pub fn resolve_path(&self, path: &str) -> Option<i64> {
+        // Root synonym: the canonical "/" rendered by `path_for_id`. Handled up
+        // front so the per-segment loop never sees the two empty segments "/"
+        // would otherwise split into. The empty string "" is deliberately *not*
+        // a root synonym: it stays unresolvable (`None`), matching the write
+        // path where `ScopeStore::ensure_path("")` errors. Resolving "" to root
+        // would make an empty/defaulted scope query mean "the entire store"
+        // (subtree(root) = all facts) — a fail-open hole for a scope-isolation
+        // primitive. `path_for_id` never emits "", so only "/" is needed for the
+        // representation to round-trip.
+        if path == "/" {
+            return Some(Self::ROOT_ID);
+        }
         let mut current = Self::ROOT_ID; // start at root
         for segment in path.split('/') {
             let segment = segment.trim();
-            if segment.is_empty() {
+            // Shared structural validation (non-empty, no '/', <= 256 bytes) —
+            // the single source of truth in `crate::scope::validate_segment`,
+            // also used by `ScopeStore::ensure_path` on the write path. Any
+            // failure is indistinguishable from "not found" here, so map to None.
+            if super::validate_segment(segment).is_err() {
                 return None;
             }
             let child_ids = self.children.get(&current)?;
@@ -180,8 +216,9 @@ impl ScopeTree {
     /// Returns `"/"` for the root scope. Non-root example: `"user:michael/project:demo"`.
     /// Returns `None` if the ID is not in the tree.
     ///
-    /// **Note:** The root path `"/"` is display-only — it is not a valid input to
-    /// [`ScopeTree::resolve_path`].
+    /// **Note:** The root path `"/"` is accepted by
+    /// [`ScopeTree::resolve_path`] as a root synonym, so the representation
+    /// round-trips: `resolve_path(path_for_id(root)) == Some(root_id())`.
     #[must_use]
     pub fn path_for_id(&self, scope_id: i64) -> Option<String> {
         if !self.nodes.contains_key(&scope_id) {
@@ -317,6 +354,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_query_ancestors() {
+        // `resolve_query` must dispatch `Ancestors` to `ancestors()` (not e.g.
+        // `subtree`). For demo the chain is demo -> user:michael -> root. (#322)
+        let tree = setup_tree();
+        let demo_id = tree.resolve_path("user:michael/project:demo").unwrap();
+        let ids = tree
+            .resolve_query(&ScopeQuery::Ancestors("user:michael/project:demo".into()))
+            .unwrap();
+        // Identical to the primitive — proves the arm routed to `ancestors`.
+        assert_eq!(ids, tree.ancestors(demo_id));
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0], demo_id);
+        assert_eq!(*ids.last().unwrap(), ScopeTree::root_id());
+    }
+
+    #[test]
+    fn resolve_query_inherited() {
+        // `resolve_query` must dispatch `Inherited` to `inherited()`. For
+        // user:michael that is ancestors [user, root] + descendants [demo,
+        // other], deduped to 4 unique ids. (#322)
+        let tree = setup_tree();
+        let user_id = tree.resolve_path("user:michael").unwrap();
+        let ids = tree
+            .resolve_query(&ScopeQuery::Inherited("user:michael".into()))
+            .unwrap();
+        // Identical to the primitive — proves the arm routed to `inherited`.
+        assert_eq!(ids, tree.inherited(user_id));
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 4, "expected user + root + demo + other");
+        assert!(ids.contains(&ScopeTree::root_id()));
+    }
+
+    #[test]
+    fn resolve_query_missing_path_returns_none() {
+        // Every arm short-circuits to None when the path does not resolve, so a
+        // nonexistent scope yields no ids regardless of query kind.
+        let tree = setup_tree();
+        for q in [
+            ScopeQuery::Exact("user:ghost".into()),
+            ScopeQuery::Subtree("user:ghost".into()),
+            ScopeQuery::Ancestors("user:ghost".into()),
+            ScopeQuery::Inherited("user:ghost".into()),
+        ] {
+            assert!(tree.resolve_query(&q).is_none(), "{q:?} should be None");
+        }
+    }
+
+    #[test]
     fn insert_idempotent() {
         let mut tree = setup_tree();
         let node_count_before = tree.nodes.len();
@@ -330,10 +417,70 @@ mod tests {
     #[test]
     fn path_for_id_root_returns_slash() {
         let tree = setup_tree();
-        // Root scope is the display-only "/" path (tree.rs:151-153).
+        // Root scope renders as the canonical "/" path.
         assert_eq!(
             tree.path_for_id(ScopeTree::root_id()),
             Some("/".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_path_root_synonyms() {
+        // The root path produced by `path_for_id` ("/") must round-trip back
+        // through `resolve_path` (#360 — eliminate the non-invertible
+        // representation). The empty string is deliberately NOT a root synonym:
+        // it stays unresolvable, agreeing with the write path
+        // (`ScopeStore::ensure_path("")` errors) and avoiding the fail-open
+        // "empty scope query == the entire store" footgun.
+        let tree = setup_tree();
+        let root = ScopeTree::root_id();
+        assert_eq!(tree.resolve_path("/"), Some(root));
+        assert_eq!(tree.resolve_path(""), None);
+    }
+
+    #[test]
+    fn path_for_id_root_roundtrips_through_resolve_path() {
+        // The whole point of #360: `resolve_path(path_for_id(root))` resolves
+        // back to root rather than silently returning `None`.
+        let tree = setup_tree();
+        let root = ScopeTree::root_id();
+        let rendered = tree.path_for_id(root).expect("root has a path");
+        assert_eq!(tree.resolve_path(&rendered), Some(root));
+    }
+
+    #[test]
+    fn resolve_path_still_rejects_empty_inner_segment() {
+        // A leading/trailing "/" or "//" still yields an empty *inner* segment
+        // and must remain unresolvable — accepting the root synonym must not
+        // make malformed multi-segment paths resolve.
+        let tree = setup_tree();
+        assert!(tree.resolve_path("user:michael//project:demo").is_none());
+        assert!(tree.resolve_path("/user:michael").is_none());
+        assert!(tree.resolve_path("user:michael/").is_none());
+    }
+
+    #[test]
+    fn resolve_query_empty_string_is_no_match_not_everything() {
+        // Guards the dangerous direction at the query boundary: an empty scope
+        // string must NOT resolve to root. If it did, `Subtree("")`/`Inherited("")`
+        // would expand to `subtree(root)` = every scope_id in the store, turning
+        // an empty/defaulted scope query into an unscoped scan over all facts —
+        // a fail-open hole for a scope-isolation primitive. All four variants
+        // must report `None` ("scope doesn't exist → no results"), the same as
+        // any other non-existent path.
+        let tree = setup_tree();
+        assert_eq!(tree.resolve_query(&ScopeQuery::Exact(String::new())), None);
+        assert_eq!(
+            tree.resolve_query(&ScopeQuery::Subtree(String::new())),
+            None
+        );
+        assert_eq!(
+            tree.resolve_query(&ScopeQuery::Ancestors(String::new())),
+            None
+        );
+        assert_eq!(
+            tree.resolve_query(&ScopeQuery::Inherited(String::new())),
+            None
         );
     }
 
@@ -353,6 +500,57 @@ mod tests {
             tree.path_for_id(demo_id),
             Some("user:michael/project:demo".to_string())
         );
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_tree() {
+        // `from_snapshot(to_snapshot())` is the crash-recovery path
+        // (engine/mod.rs builds the in-memory tree from a serialized snapshot on
+        // resume). Assert it reconstructs the tree faithfully: a future
+        // `ScopeNode` field left unwired in `from_snapshot` (or a dropped node)
+        // would silently lose scope hierarchy on restore, and this test catches
+        // it. (#323)
+        let tree = setup_tree(); // root -> user:michael -> {project:demo, project:other}
+        let rebuilt = ScopeTree::from_snapshot(&tree.to_snapshot());
+
+        // Same node set.
+        assert_eq!(rebuilt.node_count(), tree.node_count());
+
+        // Path resolution still works on the rebuilt tree.
+        let id = rebuilt
+            .resolve_path("user:michael/project:demo")
+            .expect("path must resolve in the rebuilt tree");
+        assert_eq!(id, tree.resolve_path("user:michael/project:demo").unwrap());
+
+        // Ancestor chain preserved: demo -> user:michael -> root.
+        let ancestors = rebuilt.ancestors(id);
+        assert_eq!(ancestors.len(), 3);
+        assert_eq!(*ancestors.last().unwrap(), ScopeTree::root_id());
+        assert_eq!(ancestors[0], id);
+
+        // path_for_id roundtrip preserved for every node, including siblings.
+        assert_eq!(
+            rebuilt.path_for_id(id).as_deref(),
+            Some("user:michael/project:demo")
+        );
+        let other_id = rebuilt.resolve_path("user:michael/project:other").unwrap();
+        assert_eq!(
+            rebuilt.path_for_id(other_id).as_deref(),
+            Some("user:michael/project:other")
+        );
+
+        // children maps agree node-for-node (the structural index, not just the
+        // node set): every parent resolves to the same descendant set.
+        for &node_id in &[
+            ScopeTree::root_id(),
+            tree.resolve_path("user:michael").unwrap(),
+        ] {
+            let mut a = rebuilt.subtree(node_id);
+            let mut b = tree.subtree(node_id);
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b, "subtree of {node_id} must survive the roundtrip");
+        }
     }
 
     #[test]
