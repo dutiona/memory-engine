@@ -148,7 +148,12 @@ fn qwen_embed_query_applies_instruction_prefix() {
 #[test]
 #[ignore = "requires a live Qwen embedding endpoint; run with --ignored"]
 #[allow(clippy::cast_precision_loss)] // MRR over a tiny corpus; rank/count precision irrelevant
-fn qwen_query_prefix_lifts_retrieval() {
+fn qwen_query_prefix_does_not_regress_retrieval() {
+    // The #611 SPIKE established the empirical *lift* (top-1 80%→100%); that go/no-go
+    // belongs to the spike, not a gated regression test. Here we assert the robust,
+    // non-flaky bar: enabling the query instruction prefix must not REGRESS MRR. (A
+    // strict `>` lift bar would be flaky — an easy corpus can already score plain MRR
+    // 1.0, and model nondeterminism could tie the two.)
     let prefixed = provider(true);
     let (docs, queries) = corpus();
     // Documents are embedded bare (no prefix) via embed_batch.
@@ -163,8 +168,10 @@ fn qwen_query_prefix_lifts_retrieval() {
     }
     let n = queries.len() as f32;
     let (mrr_plain, mrr_pref) = (mrr_plain / n, mrr_pref / n);
+    // Epsilon guards against f32 sum non-associativity tying the two at microscopically
+    // different values when ranks merely reorder across queries.
     assert!(
-        mrr_pref >= mrr_plain,
+        mrr_pref + 1e-4 >= mrr_plain,
         "the query instruction prefix must not regress retrieval: prefixed MRR {mrr_pref:.3} < plain {mrr_plain:.3}"
     );
 }
