@@ -157,8 +157,15 @@ pub fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Res
         "pass --jsonl-dir and/or --memory-dir"
     );
 
-    // Open or create the engine.
-    let engine = if args.create {
+    // Open or create the engine, plus its embedding provider (shared config —
+    // provider/MRL identity per #619).
+    //
+    // On --create the embed dim is known up front (--embed-dim), so the embedder is
+    // validated BEFORE the DB file is created: a misconfigured embedder must not
+    // leave an orphan empty database behind (#681). On the open paths the dim is
+    // only known after opening, but opening does not create a file, so building the
+    // embedder afterwards carries no orphan risk.
+    let (engine, embedder) = if args.create {
         let embed_dim = args
             .embed_dim
             .ok_or_else(|| anyhow::anyhow!("--embed-dim is required when using --create"))?;
@@ -167,20 +174,23 @@ pub fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Res
             "database {} already exists — remove it first or omit --create",
             db.display()
         );
-        MemoryEngine::builder(embed_dim)
+        let embedder = args.embed.build_required(embed_dim)?;
+        let engine = MemoryEngine::builder(embed_dim)
             .path(db.to_path_buf())
-            .build()?
-    } else if let Some(dim) = args.embed_dim {
-        // Existing DB: accept an explicit --embed-dim so a never-embedded store (no
-        // recorded identity yet under #613) is still writable. The engine's open path
-        // rejects a mismatch against any recorded identity.
-        open_engine_writable_with_dim(db, dim)?
+            .build()?;
+        (engine, embedder)
     } else {
-        open_engine_writable(db)?
+        let engine = if let Some(dim) = args.embed_dim {
+            // Existing DB: accept an explicit --embed-dim so a never-embedded store (no
+            // recorded identity yet under #613) is still writable. The engine's open path
+            // rejects a mismatch against any recorded identity.
+            open_engine_writable_with_dim(db, dim)?
+        } else {
+            open_engine_writable(db)?
+        };
+        let embedder = args.embed.build_required(engine.embed_dim())?;
+        (engine, embedder)
     };
-
-    // Embedding provider (shared config — provider/MRL identity per #619).
-    let embedder = args.embed.build_required(engine.embed_dim())?;
 
     // Author-seeded denylist (#51). Loud about how many literals loaded so an
     // unset env var (→ signatures-only) is never silently mistaken for "active".
@@ -317,6 +327,42 @@ mod tests {
         // jsonl session is skipped on the marker; the md memory reinforces.
         assert_eq!(report2.sessions_skipped, 1);
         assert_eq!(report2.facts_reinforced, 1, "the md memory reinforces");
+    }
+
+    #[test]
+    fn create_with_misconfigured_embedder_leaves_no_orphan_db() {
+        // #681: a --create run whose embedder is misconfigured (url without model →
+        // build_required errors) must fail BEFORE the DB file is created, so no orphan
+        // empty database is left behind for the next run to trip over.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("orphan.db");
+        let jsonl = tmp.path().join("jsonl");
+        fs::create_dir_all(&jsonl).unwrap();
+        let args = BootstrapArgs {
+            jsonl_dir: Some(jsonl),
+            memory_dir: None,
+            embed: EmbeddingArgs {
+                embed_url: Some("http://127.0.0.1:0/v1/embeddings".into()),
+                embed_model: None, // partial config → build_required errors
+                embed_provider: "ollama".into(),
+                embed_api_key: None,
+                native_dim: None,
+                query_instruction: None,
+                mrl_dim: None,
+                embed_timeout: 5,
+            },
+            scope: None,
+            max_turns: 0,
+            reprocess: false,
+            create: true,
+            embed_dim: Some(4),
+        };
+        let result = run(&db, &args, OutputFormat::Json);
+        assert!(result.is_err(), "misconfigured embedder must error");
+        assert!(
+            !db.exists(),
+            "no orphan DB file may be created when the embedder fails to build"
+        );
     }
 
     #[test]
