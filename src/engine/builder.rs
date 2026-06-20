@@ -194,7 +194,16 @@ impl MemoryEngineBuilder<File> {
         self
     }
 
-    /// Number of read connections in the pool (default 4).
+    /// Number of read connections for a file-backed pool (default 4).
+    ///
+    /// Must be in `[1, 256]`. A value of `0` or one above the cap (256) is
+    /// **rejected at open time** with [`MemoryError::Pool`] — `0` is not a covert
+    /// in-memory request (#340/#356) and each read connection is a real OS file
+    /// descriptor, so an oversized value is refused rather than allowed to
+    /// exhaust the FD table (#415). Ignored for in-memory engines, which serve
+    /// reads through the single shared connection.
+    ///
+    /// [`MemoryError::Pool`]: crate::MemoryError::Pool
     pub const fn read_pool_size(mut self, size: usize) -> Self {
         self.backing.read_pool_size = size;
         self
