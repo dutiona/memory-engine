@@ -15,6 +15,22 @@ impl memory_engine::EmbeddingProvider for ZeroEmbedder {
     }
 }
 
+/// Embedder that always fails — exercises the promotion-failure fallback path
+/// in `record_activity` (the `Err(e)` arm that logs a warning and degrades the
+/// status to `Recorded` rather than propagating or leaving an orphan fact).
+struct FailingEmbedder(usize);
+
+impl memory_engine::EmbeddingProvider for FailingEmbedder {
+    fn embed(&self, _text: &str) -> memory_engine::error::Result<Vec<f32>> {
+        Err(memory_engine::error::MemoryError::Internal(
+            "forced embedding failure".into(),
+        ))
+    }
+    fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+        memory_engine::EmbeddingFingerprint::new("mock", "test", self.0)
+    }
+}
+
 const DIM: usize = 4;
 
 fn engine() -> MemoryEngine {
@@ -100,6 +116,48 @@ fn record_activity_promotes_to_fact() {
     let fact = engine.get_fact(result.promoted_fact_id.unwrap()).unwrap();
     assert!(fact.content.contains("git_commit"));
     assert!(fact.content.contains("committed abc123"));
+}
+
+#[test]
+fn record_activity_promote_failure_falls_back_to_recorded() {
+    // When a promote-matched activity's embedding fails, promotion must degrade
+    // gracefully: the activity is still recorded, no fact id is surfaced, and —
+    // critically — no orphan fact is left in the store (the failed `add_fact`
+    // must not commit a partial fact).
+    let engine = engine();
+    let embedder = FailingEmbedder(DIM);
+    let config = ActivityFilterConfig {
+        promote_patterns: vec!["commit".into()],
+        ..Default::default()
+    };
+
+    let req = RecordActivityRequest {
+        tool_name: "git_commit".into(),
+        args: serde_json::json!({"msg": "feat: add feature"}),
+        result: Some("committed abc123".into()),
+        session_id: "sess-1".into(),
+        timestamp: Utc::now(),
+        scope_path: None,
+        outcome_class: None,
+    };
+
+    let result = engine
+        .record_activity(&req, Some(&embedder), &config)
+        .unwrap();
+
+    // Activity itself was persisted (the failure is only in the promotion step).
+    assert!(result.activity_id.is_some());
+    assert!(!result.was_deduplicated);
+    // Promotion failed → fall back to Recorded with no promoted fact id.
+    assert_eq!(result.status, ActivityStatus::Recorded);
+    assert!(result.promoted_fact_id.is_none());
+
+    // No orphan fact: the failed promotion left zero facts in the store.
+    let stats = engine.statistics().unwrap();
+    assert_eq!(
+        stats.facts.total, 0,
+        "promotion failure must not orphan a fact"
+    );
 }
 
 #[test]
