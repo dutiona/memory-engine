@@ -21,7 +21,7 @@ use memory_engine::{
 use memory_engine_embed::HttpDeltaProposer;
 
 use crate::commands::embedding_args::EmbeddingArgs;
-use crate::db::{open_engine_writable, peek_embed_dim_from_db};
+use crate::db::open_engine_writable;
 use crate::output::OutputFormat;
 
 /// Upper bound on #209 drain retries. `consolidate` is a manual force-consolidate, so a
@@ -106,7 +106,9 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
         BackendArg::Llm => {
             let llm_url = require(args.llm_url.as_ref(), "--llm-url")?;
             let llm_model = require(args.llm_model.as_ref(), "--llm-model")?;
-            let dim = peek_embed_dim_from_db(db)?;
+            // The engine is already open in scope — use its dim rather than reopening
+            // the DB to re-read the config (per review).
+            let dim = engine.embed_dim();
 
             let proposer = HttpDeltaProposer::new(
                 llm_url.to_owned(),
