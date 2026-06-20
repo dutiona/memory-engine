@@ -165,6 +165,14 @@ fn push_metadata(
             preds.push(format!("json_extract({prefix}metadata, ?) IS NOT NULL"));
             params.push(Box::new(json_path(key)));
         }
+        // Present-and-explicitly-null: `json_extract(..) = NULL` is never true, so
+        // null equality is `json_type(..) = 'null'` (the 'null' type is returned
+        // only for a present JSON null, not for an absent key). The literal is
+        // inline (not a bind) — it is a fixed SQL string, not caller input.
+        MetadataPredicate::KeyEquals(key, Value::Null) => {
+            preds.push(format!("json_type({prefix}metadata, ?) = 'null'"));
+            params.push(Box::new(json_path(key)));
+        }
         MetadataPredicate::KeyEquals(key, value) => {
             preds.push(format!("json_extract({prefix}metadata, ?) = ?"));
             params.push(Box::new(json_path(key)));
@@ -174,10 +182,16 @@ fn push_metadata(
     Ok(())
 }
 
-/// Render a metadata key as a JSON path expression (`$.key`) for the path
-/// argument of `json_extract`/`json_type`.
+/// Render a metadata key as a JSON path expression for the path argument of
+/// `json_extract`/`json_type`.
+///
+/// The key is **double-quoted and escaped** (`$."key"`) so any valid JSON object
+/// key works — an unquoted `$.user-id` is a `SQLite` JSON-path syntax error.
+/// Quoting is identity-preserving for simple keys, so it stays parity-faithful to
+/// the store's unquoted `'$.dream_cycle'` literals.
 fn json_path(key: &str) -> String {
-    format!("$.{key}")
+    let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("$.\"{escaped}\"")
 }
 
 /// Bind a non-null scalar `serde_json::Value` for comparison against a
@@ -281,17 +295,29 @@ mod tests {
     }
 
     #[test]
-    fn key_equals_rejects_null_value() {
-        // `json_extract(...) = NULL` is never true in SQL (would silently match
-        // nothing) — reject so callers use KeyAbsent/KeyPresent for null-ness.
+    fn key_equals_null_renders_json_type_null_predicate() {
+        // `= NULL` is never true in SQL; present-null equality is `json_type(..) = 'null'`.
         let f = FactFilter::new().with_metadata(MetadataPredicate::KeyEquals(
             "k".into(),
             serde_json::Value::Null,
         ));
-        assert!(matches!(
-            build_filter_sql(&f, ""),
-            Err(MemoryError::Internal(_))
-        ));
+        let sql = build_filter_sql(&f, "").unwrap();
+        assert!(
+            sql.where_clause.contains("json_type(metadata, ?) = 'null'"),
+            "got: {}",
+            sql.where_clause
+        );
+        // Only the path param — the 'null' literal is inline, not bound.
+        assert_eq!(sql.params.len(), 1);
+    }
+
+    #[test]
+    fn json_path_quotes_and_escapes_special_keys() {
+        assert_eq!(json_path("dream_cycle"), "$.\"dream_cycle\"");
+        assert_eq!(json_path("user-id"), "$.\"user-id\"");
+        // Embedded quote/backslash must be escaped, not break out of the path.
+        assert_eq!(json_path("a\"b"), "$.\"a\\\"b\"");
+        assert_eq!(json_path("a\\b"), "$.\"a\\\\b\"");
     }
 
     #[test]

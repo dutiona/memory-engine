@@ -452,6 +452,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_key_with_special_chars_is_a_valid_json_path() {
+        use crate::storage::MetadataPredicate;
+        // A hyphenated key must not break the JSON path (`$.user-id` is a SQLite
+        // path syntax error — the key has to be quoted + escaped).
+        let pool = seeded(&[
+            fact_meta("Rust tagged", serde_json::json!({"user-id": 1}), false),
+            fact_meta("Rust untagged", serde_json::json!({}), false),
+        ]);
+        let got = lexical_ids(
+            &pool,
+            &FactFilter::new().with_metadata(MetadataPredicate::KeyPresent("user-id".into())),
+        )
+        .await;
+        assert_eq!(
+            got.len(),
+            1,
+            "hyphenated metadata key must match, not error"
+        );
+    }
+
+    #[tokio::test]
+    async fn key_equals_null_matches_present_null_only() {
+        use crate::storage::MetadataPredicate;
+        // KeyEquals(k, null) means "k present and explicitly JSON null" — it must
+        // match {"k": null} but NOT an absent key nor a non-null value.
+        let pool = seeded(&[
+            fact_meta("Rust isnull", serde_json::json!({"k": null}), false),
+            fact_meta("Rust hasval", serde_json::json!({"k": 5}), false),
+            fact_meta("Rust absent", serde_json::json!({}), false),
+        ]);
+        let got = lexical_ids(
+            &pool,
+            &FactFilter::new().with_metadata(MetadataPredicate::KeyEquals(
+                "k".into(),
+                serde_json::Value::Null,
+            )),
+        )
+        .await;
+        assert_eq!(
+            got.len(),
+            1,
+            "KeyEquals(null) matches only the present-null row"
+        );
+    }
+
+    #[tokio::test]
     async fn asof_excludes_expired_rows_even_inside_their_valid_window() {
         use crate::storage::TemporalFilter;
         use chrono::Utc;
