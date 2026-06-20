@@ -15,14 +15,9 @@ pub fn default_filter_config() -> ActivityFilterConfig {
     ActivityFilterConfig::new(
         300,
         // Ignore: formatting tools that produce no semantic value.
-        [
-            "prettier".to_string(),
-            "eslint_fix".to_string(),
-            "ruff_format".to_string(),
-            "clang_format".to_string(),
-        ],
+        ["prettier", "eslint_fix", "ruff_format", "clang_format"],
         // Promote: significant actions worth promoting to facts.
-        ["git_commit".to_string(), "git_push".to_string()],
+        ["git_commit", "git_push"],
     )
 }
 

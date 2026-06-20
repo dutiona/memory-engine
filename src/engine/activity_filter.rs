@@ -56,18 +56,18 @@ impl ActivityFilterConfig {
     #[must_use]
     pub fn new(
         dedup_window_secs: i64,
-        ignore_patterns: impl IntoIterator<Item = String>,
-        promote_patterns: impl IntoIterator<Item = String>,
+        ignore_patterns: impl IntoIterator<Item = impl Into<String>>,
+        promote_patterns: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self {
             dedup_window_secs,
             ignore_patterns: ignore_patterns
                 .into_iter()
-                .map(|p| p.to_lowercase())
+                .map(|p| Into::<String>::into(p).to_lowercase())
                 .collect(),
             promote_patterns: promote_patterns
                 .into_iter()
-                .map(|p| p.to_lowercase())
+                .map(|p| Into::<String>::into(p).to_lowercase())
                 .collect(),
         }
     }
@@ -169,11 +169,11 @@ mod tests {
     use super::*;
 
     fn config_with_ignore(patterns: &[&str]) -> ActivityFilterConfig {
-        ActivityFilterConfig::new(300, patterns.iter().map(|s| (*s).to_string()), [])
+        ActivityFilterConfig::new(300, patterns.iter().copied(), [] as [&str; 0])
     }
 
     fn config_with_promote(patterns: &[&str]) -> ActivityFilterConfig {
-        ActivityFilterConfig::new(300, [], patterns.iter().map(|s| (*s).to_string()))
+        ActivityFilterConfig::new(300, [] as [&str; 0], patterns.iter().copied())
     }
 
     #[test]
