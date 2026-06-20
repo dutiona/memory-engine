@@ -4,7 +4,6 @@
 //! records a manifest row, hard-deletes from `SQLite`, and prunes the
 //! in-memory graph — all in a crash-safe sequence.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use chrono::Utc;
@@ -73,6 +72,11 @@ impl MemoryEngine {
             .to_string_lossy()
             .to_string();
 
+        // The `.pak` is already on disk. If the commit (manifest insert +
+        // hard-delete tx) fails, the file would be an orphan with no manifest
+        // row — a permanent disk leak that `verify_archives()` could never
+        // reconcile (CWE-459). Remove it on error, mirroring the cleanup the
+        // restore path uses for its half-written DB file.
         self.commit_archive(
             &pak_filename,
             &candidate_facts,
@@ -80,7 +84,10 @@ impl MemoryEngine {
             &fact_ids,
             pak_size_bytes,
             &blake3_hash,
-        )?;
+        )
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&pak_path);
+        })?;
 
         // Update in-memory graph
         {
@@ -152,24 +159,18 @@ impl MemoryEngine {
     // --- Private helpers ---
 
     /// Select expired, non-pinned facts and their internal edges.
+    ///
+    /// Both predicates are pushed into SQL — `FactStore::list_archive_candidates`
+    /// and `EdgeStore::list_internal_by_facts` — so a large database never
+    /// materializes every fact (with its embedding BLOB) and every edge just to
+    /// discard the rows that don't qualify.
     fn select_archive_candidates(&self, policy: &ArchivePolicy) -> Result<(Vec<Fact>, Vec<Edge>)> {
         let conn = self.pool.read()?;
-        let all_facts = FactStore::new(&conn, self.embed_dim).list_all()?;
-        let candidate_facts: Vec<_> = all_facts
-            .into_iter()
-            .filter(|f| !f.is_pinned && f.t_expired.is_some_and(|te| te < policy.expired_before))
-            .collect();
+        let candidate_facts =
+            FactStore::new(&conn, self.embed_dim).list_archive_candidates(policy.expired_before)?;
 
-        let candidate_ids: HashSet<i64> = candidate_facts.iter().map(|f| f.id).collect();
-
-        let all_edges = EdgeStore::new(&conn).list_all()?;
-        let candidate_edges: Vec<_> = all_edges
-            .into_iter()
-            .filter(|e| {
-                candidate_ids.contains(&e.source_fact_id)
-                    && candidate_ids.contains(&e.target_fact_id)
-            })
-            .collect();
+        let candidate_ids: Vec<i64> = candidate_facts.iter().map(|f| f.id).collect();
+        let candidate_edges = EdgeStore::new(&conn).list_internal_by_facts(&candidate_ids)?;
 
         drop(conn);
         Ok((candidate_facts, candidate_edges))
@@ -205,8 +206,14 @@ impl MemoryEngine {
         let pak_path = archive_dir.join(&pak_filename);
 
         let blake3_hash = write_pak_and_hash(pak, &pak_path)?;
+        // `write_pak_and_hash` has now renamed the `.pak` into place, so it
+        // physically exists. Any failure from here on must remove it, or it
+        // becomes an orphan with no manifest row (CWE-459) — the same guarantee
+        // `commit_archive`'s cleanup gives for the downstream commit step. The
+        // stat below is the only such fallible step before this fn returns.
         let pak_size_bytes = std::fs::metadata(&pak_path)
             .map_err(|e| {
+                let _ = std::fs::remove_file(&pak_path);
                 ArchiveError::Io(format!(
                     "failed to stat pak file {}: {e}",
                     pak_path.display()
@@ -344,5 +351,94 @@ impl MemoryEngine {
             ))
         })?;
         Ok(parent.join("archives"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    use crate::types::{FactType, NewFact};
+
+    const DIM: usize = 8;
+
+    fn make_expired_fact(content: &str, expired_at: chrono::DateTime<Utc>) -> NewFact {
+        NewFact {
+            content: content.into(),
+            content_hash: String::new(),
+            embedding: vec![0.1_f32; DIM],
+            fact_type: FactType::Episodic,
+            t_created: Utc::now() - Duration::days(2),
+            t_expired: Some(expired_at),
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: Utc::now(),
+            metadata: serde_json::json!({}),
+            scope_id: 1,
+            is_pinned: false,
+        }
+    }
+
+    /// #265: a failure inside `commit_archive` (here: the manifest INSERT fails
+    /// because the table was dropped) must NOT leave an orphan `.pak` file behind.
+    /// The `.pak` is written before the commit transaction; without on-error
+    /// cleanup it would be a permanent disk leak with no manifest row (CWE-459).
+    #[test]
+    fn archive_cleans_up_pak_when_commit_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.path().join("orphan.db"))
+            .build()
+            .unwrap();
+
+        // Insert expired, non-pinned facts directly via the store so they qualify
+        // as archive candidates.
+        let expired_at = Utc::now() - Duration::hours(1);
+        {
+            let conn = engine.write_conn().unwrap();
+            let store = FactStore::new(&conn, DIM);
+            for i in 0..20 {
+                store
+                    .insert(&make_expired_fact(&format!("orphan fact {i}"), expired_at))
+                    .unwrap();
+            }
+            // Force `commit_archive` to fail: drop the manifest table so its INSERT
+            // errors out *after* the `.pak` has already been written to disk.
+            conn.execute_batch("DROP TABLE archive_manifest;").unwrap();
+        }
+
+        let policy = ArchivePolicy {
+            expired_before: Utc::now() + Duration::hours(1),
+            min_facts: 1,
+        };
+
+        let result = engine.archive(&policy);
+        assert!(
+            result.is_err(),
+            "archive must propagate the commit failure, got {result:?}"
+        );
+
+        // The archive directory must contain no orphan `.pak` file.
+        let archive_dir = dir.path().join("archives");
+        let orphans: Vec<_> = std::fs::read_dir(&archive_dir)
+            .map(|rd| {
+                rd.filter_map(std::result::Result::ok)
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("pak"))
+                    })
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            orphans.is_empty(),
+            "commit_archive failure left orphan .pak file(s): {orphans:?}"
+        );
     }
 }
