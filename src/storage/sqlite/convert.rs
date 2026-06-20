@@ -11,8 +11,8 @@
 //! |------------------------|-----------------------------------------------------------|
 //! | `Active`               | `t_expired IS NULL`                                       |
 //! | `IncludeExpired`       | *(no system-time predicate)*                              |
-//! | `AsOf(t)`              | `(t_valid IS NULL OR t_valid <= ?) AND (t_invalid IS NULL OR t_invalid > ?)` |
-//! | `ValidDue(t)`          | `t_valid IS NOT NULL AND t_valid <= ? AND (t_invalid IS NULL OR t_invalid > ?)` |
+//! | `AsOf(t)`              | `t_expired IS NULL AND (t_valid IS NULL OR t_valid <= ?) AND (t_invalid IS NULL OR t_invalid > ?)` |
+//! | `ValidDue(t)`          | `t_expired IS NULL AND t_valid IS NOT NULL AND t_valid <= ? AND (t_invalid IS NULL OR t_invalid > ?)` |
 //! | `fact_type`            | `fact_type = ?`                                           |
 //! | `scope_ids` / `ids`    | `<col> IN (SELECT value FROM json_each(?))`              |
 //! | `pinned`               | `is_pinned = ?` (`1`/`0`)                                 |
@@ -43,9 +43,9 @@ use crate::store::facts::fact_type_to_str;
 /// # Errors
 /// - [`MemoryError::Serialization`] if `scope_ids`/`ids` fail to serialize
 ///   (unreachable for `&[i64]`).
-/// - [`MemoryError::Internal`] if a `KeyEquals` carries a non-scalar JSON value
-///   (array/object) or an unrepresentable number — `json_extract` comparison is
-///   defined only for scalars.
+/// - [`MemoryError::Internal`] if a `KeyEquals` carries a null, a non-scalar JSON
+///   value (array/object), or an unrepresentable number — `json_extract` equality
+///   is defined only for non-null scalars (`= NULL` never matches).
 pub(super) fn build_filter_sql(filter: &FactFilter, prefix: &str) -> Result<FilterSql> {
     let mut preds: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
@@ -101,16 +101,22 @@ fn push_temporal(
         TemporalFilter::Active => preds.push(format!("{prefix}t_expired IS NULL")),
         TemporalFilter::IncludeExpired => {}
         TemporalFilter::AsOf(t) => {
+            // System-time guard included to match the store oracle `list_active_at`
+            // (`facts.rs`): AsOf is "active AND valid at t", so soft-deleted rows
+            // never surface — only `IncludeExpired` does.
             preds.push(format!(
-                "({prefix}t_valid IS NULL OR {prefix}t_valid <= ?) \
+                "{prefix}t_expired IS NULL \
+                 AND ({prefix}t_valid IS NULL OR {prefix}t_valid <= ?) \
                  AND ({prefix}t_invalid IS NULL OR {prefix}t_invalid > ?)"
             ));
             params.push(Box::new(t.to_rfc3339()));
             params.push(Box::new(t.to_rfc3339()));
         }
         TemporalFilter::ValidDue(t) => {
+            // Same system-time guard, matching the store oracle `list_due`.
             preds.push(format!(
-                "{prefix}t_valid IS NOT NULL AND {prefix}t_valid <= ? \
+                "{prefix}t_expired IS NULL \
+                 AND {prefix}t_valid IS NOT NULL AND {prefix}t_valid <= ? \
                  AND ({prefix}t_invalid IS NULL OR {prefix}t_invalid > ?)"
             ));
             params.push(Box::new(t.to_rfc3339()));
@@ -174,13 +180,13 @@ fn json_path(key: &str) -> String {
     format!("$.{key}")
 }
 
-/// Bind a scalar `serde_json::Value` for comparison against a `json_extract`
-/// result, matching how `SQLite` surfaces extracted JSON scalars (text / integer /
-/// real; booleans as `1`/`0`).
+/// Bind a non-null scalar `serde_json::Value` for comparison against a
+/// `json_extract` result, matching how `SQLite` surfaces extracted JSON scalars
+/// (text / integer / real; booleans as `1`/`0`).
 ///
-/// Composite values (array/object) and non-finite numbers are rejected — equality
-/// against an extracted JSON scalar is undefined for them, so failing loud beats
-/// silently never matching.
+/// `Null`, composite values (array/object), and non-finite numbers are rejected:
+/// `= NULL` is never true in SQL, and equality against an extracted JSON scalar is
+/// undefined for composites — so failing loud beats silently never matching.
 fn value_to_sql(value: &Value) -> Result<Box<dyn ToSql>> {
     match value {
         Value::String(s) => Ok(Box::new(s.clone())),
@@ -192,9 +198,16 @@ fn value_to_sql(value: &Value) -> Result<Box<dyn ToSql>> {
                 "metadata KeyEquals: unrepresentable JSON number {n}"
             ))),
         },
-        Value::Null => Ok(Box::new(rusqlite::types::Null)),
+        // `json_extract(...) = NULL` is never true in SQL, so a bound NULL would
+        // silently match nothing. Reject and direct callers to KeyAbsent/KeyPresent,
+        // which express null-ness correctly via `json_type`/`json_extract IS NULL`.
+        Value::Null => Err(MemoryError::Internal(
+            "metadata KeyEquals does not support a null value (`= NULL` never matches in SQL); \
+             use KeyAbsent or KeyPresent to test for null/absence"
+                .into(),
+        )),
         Value::Array(_) | Value::Object(_) => Err(MemoryError::Internal(
-            "metadata KeyEquals supports scalar JSON values only (string/number/bool/null); \
+            "metadata KeyEquals supports scalar JSON values only (string/number/bool); \
              got a composite value"
                 .into(),
         )),
@@ -260,6 +273,20 @@ mod tests {
         let f = FactFilter::new().with_metadata(MetadataPredicate::KeyEquals(
             "k".into(),
             serde_json::json!([1, 2, 3]),
+        ));
+        assert!(matches!(
+            build_filter_sql(&f, ""),
+            Err(MemoryError::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn key_equals_rejects_null_value() {
+        // `json_extract(...) = NULL` is never true in SQL (would silently match
+        // nothing) — reject so callers use KeyAbsent/KeyPresent for null-ness.
+        let f = FactFilter::new().with_metadata(MetadataPredicate::KeyEquals(
+            "k".into(),
+            serde_json::Value::Null,
         ));
         assert!(matches!(
             build_filter_sql(&f, ""),

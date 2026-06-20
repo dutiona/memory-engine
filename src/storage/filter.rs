@@ -97,11 +97,14 @@ pub enum TemporalFilter {
     /// System-time live rows: `t_expired IS NULL`. The common case — default.
     #[default]
     Active,
-    /// Valid at an instant: `(t_valid IS NULL OR t_valid <= t) AND
-    /// (t_invalid IS NULL OR t_invalid > t)`.
+    /// Active *and* valid at an instant: `t_expired IS NULL AND
+    /// (t_valid IS NULL OR t_valid <= t) AND (t_invalid IS NULL OR t_invalid > t)`.
+    /// Mirrors the store's `list_active_at` — soft-deleted rows never surface here
+    /// (only [`IncludeExpired`](Self::IncludeExpired) does).
     AsOf(DateTime<Utc>),
-    /// "Due now": `t_valid IS NOT NULL AND t_valid <= now AND
-    /// (t_invalid IS NULL OR t_invalid > now)`.
+    /// Active *and* "due now": `t_expired IS NULL AND t_valid IS NOT NULL AND
+    /// t_valid <= now AND (t_invalid IS NULL OR t_invalid > now)`. Mirrors the
+    /// store's `list_due`.
     ValidDue(DateTime<Utc>),
     /// No system-time filter — include expired (soft-deleted) rows.
     IncludeExpired,

@@ -450,4 +450,27 @@ mod tests {
         assert_eq!(got, oracle, "AsOf must honor the valid-window oracle");
         assert_eq!(got.len(), 1, "only the in-window fact is visible at `now`");
     }
+
+    #[tokio::test]
+    async fn asof_excludes_expired_rows_even_inside_their_valid_window() {
+        use crate::storage::TemporalFilter;
+        use chrono::Utc;
+        // Both facts have an open valid window (t_valid/t_invalid = None), so the
+        // only thing that may exclude the expired one is the system-time guard
+        // `t_expired IS NULL` — the store's `list_active_at` keeps it; AsOf must too.
+        let pool = seeded(&[
+            fact("Rust active", [0.1; DIM], false),
+            fact("Rust expired", [0.1; DIM], true),
+        ]);
+        let got = lexical_ids(
+            &pool,
+            &FactFilter::new().temporal(TemporalFilter::AsOf(Utc::now())),
+        )
+        .await;
+        assert_eq!(
+            got.len(),
+            1,
+            "AsOf must NOT surface soft-deleted (expired) rows; got {got:?}"
+        );
+    }
 }
