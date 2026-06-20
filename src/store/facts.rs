@@ -262,10 +262,12 @@ impl<'a> FactStore<'a> {
         Ok(out)
     }
 
-    /// List active facts (`t_expired IS NULL`), optionally limited.
+    /// List active facts (`t_expired IS NULL`), optionally limited, in ascending
+    /// `id` (insertion) order (#495).
     ///
     /// When `limit` is `Some(n)`, a SQL `LIMIT n` clause is pushed into the
-    /// query so that at most `n` rows are materialized. `None` returns all.
+    /// query so that at most `n` rows are materialized — the `n` **oldest** active
+    /// facts, since results are ordered by `id`. `None` returns all.
     ///
     /// # Errors
     ///

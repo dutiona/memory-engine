@@ -417,7 +417,30 @@ mod tests {
             })
             .unwrap();
 
-        // Insert a "new" near-duplicate
+        // Insert a SECOND old fact that is a near-duplicate of "old fact". Both
+        // predate `since`, so the filter must keep them from being compared against
+        // each other — this is what makes the test diverge from a no-filter run.
+        store
+            .insert(&NewFact {
+                content: "old dup".into(),
+                content_hash: "h_old2".into(),
+                embedding: vec![0.999, 0.001, 0.0, 0.0],
+                fact_type: FactType::Semantic,
+                t_created: old_time,
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                scope_id: 1,
+                importance: 0.5,
+                access_count: 0,
+                last_accessed: old_time,
+                metadata: serde_json::json!({}),
+                is_pinned: false,
+            })
+            .unwrap();
+
+        // Insert a "new" near-duplicate (lower importance, so it expires when driven).
         store
             .insert(&NewFact {
                 content: "new duplicate".into(),
@@ -438,16 +461,30 @@ mod tests {
             })
             .unwrap();
 
-        // Only compare facts created since `old_time + 1 day`
+        // Only facts created since `old_time + 1 day` DRIVE comparisons — i.e. just
+        // the new one. It compares against all active and is expired against "old
+        // fact" (lower importance). Crucially, the two OLD near-duplicates are never
+        // compared against each other (neither drives), so both survive. Without the
+        // since-filter, "old fact" would drive and expire "old dup" too (removed=2,
+        // one survivor) — so this fixture's result genuinely depends on the filter.
         let since = old_time + Duration::days(1);
         let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, Some(since), base)
             .unwrap()
             .expect_ran();
-        assert_eq!(removed, 1); // new duplicate should be expired against old
+        assert_eq!(
+            removed, 1,
+            "only the new duplicate is expired (it alone drives)"
+        );
 
         let active = store.list_active(None).unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].content, "old fact"); // old survives (higher importance wins)
+        let mut survivors: Vec<&str> = active.iter().map(|f| f.content.as_str()).collect();
+        survivors.sort_unstable();
+        assert_eq!(
+            survivors,
+            vec!["old dup", "old fact"],
+            "both pre-`since` near-duplicates survive — the filter kept them from \
+             driving a comparison against each other"
+        );
     }
 
     #[test]
@@ -637,9 +674,8 @@ mod tests {
         assert_eq!(active.len(), 1);
         // Pin the collapse topology: A is the survivor. The 0.8-vs-0.5 regression
         // value is order-sensitive — it assumes the merge order A→B then A→C, which
-        // holds because `local_dedup` scans `list_active` in rowid (insertion) order.
-        // That ordering is not yet guaranteed by the query (no ORDER BY — #495); when
-        // that lands this coupling becomes a contract rather than an SQLite default.
+        // now holds as a contract: `list_active` is `ORDER BY id` (#495), so it scans
+        // in rowid (insertion) order rather than relying on an implicit SQLite default.
         assert_eq!(active[0].id, a);
         assert_eq!(active[0].content, "A");
         assert!(
