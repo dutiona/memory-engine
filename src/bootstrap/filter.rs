@@ -194,12 +194,12 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
         if let Some(assistant) = assistant {
             // Collect tool-result user entries that follow this assistant.
             let tool_results = collect_tool_result_entries(&tool_results_by_parent, assistant);
-            turns.push(build_turn(entry, assistant, &tool_results));
+            turns.push(build_turn(entry, assistant, tool_results));
             used.insert(user_uuid.as_str());
             if let Some(ref a_uuid) = assistant.uuid {
                 used.insert(a_uuid.as_str());
             }
-            for tr in &tool_results {
+            for tr in tool_results {
                 if let Some(ref u) = tr.uuid {
                     used.insert(u.as_str());
                 }
@@ -230,12 +230,12 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
 
             if let Some(assistant) = assistant {
                 let tool_results = collect_tool_result_entries(&tool_results_by_parent, assistant);
-                turns.push(build_turn(entry, assistant, &tool_results));
+                turns.push(build_turn(entry, assistant, tool_results));
                 used.insert(entry_uuid);
                 if let Some(ref a_uuid) = assistant.uuid {
                     used.insert(a_uuid.as_str());
                 }
-                for tr in &tool_results {
+                for tr in tool_results {
                     if let Some(ref u) = tr.uuid {
                         used.insert(u.as_str());
                     }
@@ -291,17 +291,16 @@ fn build_turn(
 /// [`reconstruct_turns`] (#406), replacing the former per-call O(n) scan. Slice
 /// order within each group is preserved by the index, so positional pairing in
 /// [`extract_tool_calls`] is unchanged.
-fn collect_tool_result_entries<'a>(
-    tool_results_by_parent: &HashMap<&str, Vec<&'a SessionEntry>>,
+fn collect_tool_result_entries<'a, 'b>(
+    tool_results_by_parent: &'b HashMap<&str, Vec<&'a SessionEntry>>,
     assistant: &SessionEntry,
-) -> Vec<&'a SessionEntry> {
+) -> &'b [&'a SessionEntry] {
     let Some(ref assistant_uuid) = assistant.uuid else {
-        return Vec::new();
+        return &[];
     };
     tool_results_by_parent
         .get(assistant_uuid.as_str())
-        .cloned()
-        .unwrap_or_default()
+        .map_or(&[], Vec::as_slice)
 }
 
 /// Extract plain text from an entry's message content blocks.

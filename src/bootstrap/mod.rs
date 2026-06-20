@@ -352,7 +352,12 @@ fn bootstrap_within_savepoint(
     // Apply max_turns limit AFTER outcome classification, keeping the TAIL
     // (most recent turns) since they contain resolution evidence.
     let turns = if ctx.config.max_turns > 0 && turns.len() > ctx.config.max_turns {
-        turns[turns.len() - ctx.config.max_turns..].to_vec()
+        // Keep the TAIL in place: drain the head prefix rather than cloning the
+        // kept turns via slice + to_vec (each ConversationTurn owns strings/vecs).
+        let mut turns = turns;
+        let drop_head = turns.len() - ctx.config.max_turns;
+        turns.drain(..drop_head);
+        turns
     } else {
         turns
     };
