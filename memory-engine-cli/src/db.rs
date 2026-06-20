@@ -150,3 +150,100 @@ pub fn open_engine_writable_with_dim(
     let engine = builder.build()?;
     Ok(engine)
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::{peek_embed_dim_from_db, peek_schema_version_from_db};
+
+    // --- peek_embed_dim_from_db ---
+
+    #[test]
+    fn peek_embed_dim_from_db_nonexistent_path_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.db");
+        let err = peek_embed_dim_from_db(&missing).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found") || msg.contains("directory"),
+            "expected 'not found' or 'directory' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn peek_embed_dim_from_db_non_sqlite_file_returns_error() {
+        // `std::fs::write` closes the file handle before SQLite opens the path,
+        // avoiding file-locking conflicts on Windows (per gemini review).
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("garbage.db");
+        std::fs::write(&path, b"this is not a sqlite database\n").unwrap();
+        // A non-SQLite file opens lazily, then the config-table query fails with
+        // the rusqlite "not a database" error — pin that, not just any Err.
+        let err = peek_embed_dim_from_db(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("not a database"),
+            "expected 'not a database', got: {err}"
+        );
+    }
+
+    #[test]
+    fn peek_embed_dim_from_db_fresh_engine_no_embedding_returns_error() {
+        // A freshly created engine with no facts yet has no embedding_meta.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("fresh.db");
+        let engine = memory_engine::MemoryEngine::builder(4)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
+        drop(engine);
+
+        let err = peek_embed_dim_from_db(&db_path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no embedding identity") || msg.contains("embed_dim"),
+            "expected 'no embedding identity' or 'embed_dim' in error, got: {msg}"
+        );
+    }
+
+    // --- peek_schema_version_from_db ---
+
+    #[test]
+    fn peek_schema_version_from_db_nonexistent_path_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.db");
+        let err = peek_schema_version_from_db(&missing).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found") || msg.contains("directory"),
+            "expected 'not found' or 'directory' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn peek_schema_version_from_db_non_sqlite_file_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("garbage.db");
+        std::fs::write(&path, b"not a real database\n").unwrap();
+        // Wrapped as "… is this a memory-engine database? (… not a database …)".
+        let err = peek_schema_version_from_db(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("not a database"),
+            "expected 'not a database', got: {err}"
+        );
+    }
+
+    #[test]
+    fn peek_schema_version_from_db_valid_engine_returns_current_version() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let engine = memory_engine::MemoryEngine::builder(4)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
+        drop(engine);
+
+        let version = peek_schema_version_from_db(&db_path).unwrap();
+        assert_eq!(version, memory_engine::CURRENT_SCHEMA_VERSION);
+    }
+}
