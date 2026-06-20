@@ -118,9 +118,27 @@ impl HttpEmbeddingProvider {
     /// speak `/v1/embeddings` — so it is an explicit argument: it feeds
     /// [`EmbeddingProvider::fingerprint`] and must reflect the real backend.
     ///
+    /// # Parameters
+    ///
+    /// - `endpoint`: Full URL of the `/v1/embeddings`-compatible endpoint.
+    /// - `model`: Model identifier forwarded verbatim in the JSON `"model"` field.
+    /// - `provider`: Operator-declared serving backend (see above); recorded in the
+    ///   [`fingerprint`](EmbeddingProvider::fingerprint), not sent on the wire.
+    /// - `api_key`: If `Some`, sent as a `Bearer` token in the `Authorization` header.
+    /// - `expected_dim`: The **native** dimensionality every raw response vector must
+    ///   have. It is validated on every [`embed`](EmbeddingProvider::embed) /
+    ///   [`embed_batch`](EmbeddingProvider::embed_batch) call, which return
+    ///   [`MemoryError::EmbeddingDimension`] on a mismatch. With
+    ///   [`with_mrl_dim`](Self::with_mrl_dim) set, the *stored* dimension is the
+    ///   truncated `mrl_dim`, but the raw response is still validated against this.
+    /// - `timeout_secs`: Per-request timeout in seconds applied to the blocking HTTP
+    ///   client. (Note: a body trickled under this timeout is still bounded by the
+    ///   32 MiB response size cap.)
+    ///
     /// # Errors
     ///
-    /// Returns an error if the HTTP client cannot be constructed (e.g., TLS init failure).
+    /// Returns [`MemoryError::Internal`] if the underlying `reqwest` blocking client
+    /// cannot be constructed (e.g., TLS init failure).
     pub fn new(
         endpoint: String,
         model: String,
