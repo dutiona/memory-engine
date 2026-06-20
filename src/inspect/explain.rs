@@ -100,10 +100,10 @@ fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
         };
         return FactState::Expired { reason };
     }
-    if let Some(t_invalid) = fact.t_invalid {
-        if t_invalid <= now {
-            return FactState::Invalidated { t_invalid };
-        }
+    if let Some(t_invalid) = fact.t_invalid
+        && t_invalid <= now
+    {
+        return FactState::Invalidated { t_invalid };
     }
     if fact.is_pinned {
         return FactState::Pinned;

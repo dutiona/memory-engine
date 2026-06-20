@@ -294,16 +294,16 @@ impl MemoryEngine {
         results.truncate(limit);
         diagnostics.results_returned = results.len();
 
-        // Expired-facts probe (opt-in, FTS-only).
-        if query.include_expired_probe {
-            if let Some(text) = &query.text {
-                let fact_type_ref = query.fact_type.as_ref();
-                let expired_count = self.with_read(|conn| {
-                    crate::search::fts::fts_count_expired(conn, text, fact_type_ref, scope_ids)
-                })?;
-                diagnostics.expired_matches = Some(expired_count);
-            }
-            // Vector-only queries: expired_matches stays None (documented limitation).
+        // Expired-facts probe (opt-in, FTS-only). Vector-only queries leave
+        // `expired_matches` as None (documented limitation).
+        if query.include_expired_probe
+            && let Some(text) = &query.text
+        {
+            let fact_type_ref = query.fact_type.as_ref();
+            let expired_count = self.with_read(|conn| {
+                crate::search::fts::fts_count_expired(conn, text, fact_type_ref, scope_ids)
+            })?;
+            diagnostics.expired_matches = Some(expired_count);
         }
 
         // Archive fallback (opt-in, best-effort).
@@ -389,18 +389,18 @@ impl MemoryEngine {
         }
 
         // Fact type (period branch already handles this in SQL; skip to avoid double-filter)
-        if !query.has_period() {
-            if let Some(ref ft) = query.fact_type {
-                facts.retain(|f| &f.fact_type == ft);
-            }
+        if !query.has_period()
+            && let Some(ref ft) = query.fact_type
+        {
+            facts.retain(|f| &f.fact_type == ft);
         }
 
         // Importance score (the default branch already handles this in SQL via min_score;
         // but the period branch does NOT, so we must apply it here for AND semantics)
-        if query.has_period() {
-            if let Some(min_score) = query.min_importance_score {
-                facts.retain(|f| f.importance_score >= min_score);
-            }
+        if query.has_period()
+            && let Some(min_score) = query.min_importance_score
+        {
+            facts.retain(|f| f.importance_score >= min_score);
         }
 
         // Pinned filter — always applied as post-filter regardless of primary query

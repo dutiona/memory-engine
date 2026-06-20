@@ -51,3 +51,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (all features)
         run: cargo test --workspace --all-features
+
+  cargo-deny:
+    name: Supply-chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Runs `cargo deny check` against deny.toml: RustSec advisories (the gate),
+      # license allow-list, duplicate-version visibility, and source allow-list.
+      # Config (incl. the all-features graph) lives in deny.toml at the repo root.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

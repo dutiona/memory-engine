@@ -59,31 +59,36 @@ pub fn search_archives(
 
         for fact in &pak.facts {
             // Fact-type filter
-            if let Some(ref ft) = query.fact_type {
-                if &fact.fact_type != ft {
-                    continue;
-                }
+            if let Some(ref ft) = query.fact_type
+                && &fact.fact_type != ft
+            {
+                continue;
             }
 
             let mut score = 0.0_f64;
+            // `matched` is set from three independent conditions below (text, vector,
+            // match-all), with `score` accumulated alongside. The let-if-seq lint's
+            // single-`if` rewrite would drop the other two branches, so suppress it.
+            #[allow(clippy::useless_let_if_seq)]
             let mut matched = false;
 
             // Text matching — simple case-insensitive substring
-            if let Some(ref text_lower) = query_text_lower {
-                if fact.content.to_lowercase().contains(text_lower) {
-                    score += 1.0;
-                    matched = true;
-                }
+            if let Some(ref text_lower) = query_text_lower
+                && fact.content.to_lowercase().contains(text_lower)
+            {
+                score += 1.0;
+                matched = true;
             }
 
             // Vector similarity — reuse existing cosine_similarity
-            if let Some(ref query_emb) = query.embedding {
-                if query_emb.len() == fact.embedding.len() && !fact.embedding.is_empty() {
-                    let cos = cosine_similarity(query_emb, &fact.embedding);
-                    if cos > 0.0 {
-                        score += f64::from(cos);
-                        matched = true;
-                    }
+            if let Some(ref query_emb) = query.embedding
+                && query_emb.len() == fact.embedding.len()
+                && !fact.embedding.is_empty()
+            {
+                let cos = cosine_similarity(query_emb, &fact.embedding);
+                if cos > 0.0 {
+                    score += f64::from(cos);
+                    matched = true;
                 }
             }
 

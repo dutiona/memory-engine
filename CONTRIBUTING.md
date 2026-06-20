@@ -9,7 +9,7 @@ cargo build
 cargo test
 ```
 
-**Requirements:** Rust 1.85+ (edition 2024). No external services needed — SQLite is bundled.
+**Requirements:** Rust 1.88+ (edition 2024). No external services needed — SQLite is bundled.
 
 ## Development
 

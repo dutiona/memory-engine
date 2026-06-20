@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- **Rust 1.85+** (edition 2024)
+- **Rust 1.88+** (edition 2024)
 - No external services — SQLite is bundled via `rusqlite`
 
 ## Add to Cargo.toml

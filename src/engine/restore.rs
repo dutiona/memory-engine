@@ -142,14 +142,14 @@ impl MemoryEngine {
         // this is acceptable because there are no users and no pre-existing v11 backups
         // (ADR 0015 §"No data migration"), and a v11 backup would need the v11→v12
         // migration on open regardless.
-        if let Some(fp) = db_meta {
-            if config.embed_dim != fp.dim {
-                let _ = std::fs::remove_file(&config.path);
-                return Err(MemoryError::EmbeddingDimension {
-                    expected: config.embed_dim,
-                    actual: fp.dim,
-                });
-            }
+        if let Some(fp) = db_meta
+            && config.embed_dim != fp.dim
+        {
+            let _ = std::fs::remove_file(&config.path);
+            return Err(MemoryError::EmbeddingDimension {
+                expected: config.embed_dim,
+                actual: fp.dim,
+            });
         }
 
         Self::open_from_config(config, None).inspect_err(|_| {

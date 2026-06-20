@@ -126,12 +126,11 @@ fn detect_commit(turns: &[super::filter::ConversationTurn]) -> bool {
         for tc in &turn.tool_calls {
             let is_bash = tc.tool_name.eq_ignore_ascii_case("bash");
 
-            if is_bash {
-                if let Some(cmd) = input_command(&tc.input) {
-                    if cmd.to_lowercase().contains("git commit") {
-                        return true;
-                    }
-                }
+            if is_bash
+                && let Some(cmd) = input_command(&tc.input)
+                && cmd.to_lowercase().contains("git commit")
+            {
+                return true;
             }
 
             if let Some(stdout) = &tc.stdout {

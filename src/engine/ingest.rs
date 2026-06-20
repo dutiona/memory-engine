@@ -49,12 +49,12 @@ impl MemoryEngine {
     /// `Conflict(PolicyParameter)` errors raised elsewhere for out-of-range
     /// policy parameters. `None` is always valid (the engine default is used).
     pub(crate) fn validate_importance(importance: Option<f64>) -> Result<()> {
-        if let Some(v) = importance {
-            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
-                return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
-                    format!("importance must be in [0, 1], got {v}"),
-                )));
-            }
+        if let Some(v) = importance
+            && (!v.is_finite() || !(0.0..=1.0).contains(&v))
+        {
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!("importance must be in [0, 1], got {v}"),
+            )));
         }
         Ok(())
     }
