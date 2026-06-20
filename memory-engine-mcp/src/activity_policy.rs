@@ -12,21 +12,18 @@ use memory_engine::ActivityFilterConfig;
 /// - **Dedup window:** 300 seconds (5 minutes)
 #[must_use]
 pub fn default_filter_config() -> ActivityFilterConfig {
-    ActivityFilterConfig {
-        dedup_window_secs: 300,
-        ignore_patterns: vec![
-            // Formatting tools that produce no semantic value
-            "prettier".into(),
-            "eslint_fix".into(),
-            "ruff_format".into(),
-            "clang_format".into(),
+    ActivityFilterConfig::new(
+        300,
+        // Ignore: formatting tools that produce no semantic value.
+        [
+            "prettier".to_string(),
+            "eslint_fix".to_string(),
+            "ruff_format".to_string(),
+            "clang_format".to_string(),
         ],
-        promote_patterns: vec![
-            // Significant actions worth promoting to facts
-            "git_commit".into(),
-            "git_push".into(),
-        ],
-    }
+        // Promote: significant actions worth promoting to facts.
+        ["git_commit".to_string(), "git_push".to_string()],
+    )
 }
 
 #[cfg(test)]
@@ -37,7 +34,7 @@ mod tests {
     fn default_config_has_sensible_defaults() {
         let config = default_filter_config();
         assert_eq!(config.dedup_window_secs, 300);
-        assert!(!config.ignore_patterns.is_empty());
-        assert!(!config.promote_patterns.is_empty());
+        assert!(!config.ignore_patterns().is_empty());
+        assert!(!config.promote_patterns().is_empty());
     }
 }

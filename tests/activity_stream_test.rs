@@ -67,10 +67,7 @@ fn record_activity_stores_and_deduplicates() {
 #[test]
 fn record_activity_ignore_drops_silently() {
     let engine = engine();
-    let config = ActivityFilterConfig {
-        ignore_patterns: vec!["format".into()],
-        ..Default::default()
-    };
+    let config = ActivityFilterConfig::new(300, ["format".to_string()], []);
 
     let req = RecordActivityRequest {
         tool_name: "FormatCode".into(),
@@ -91,10 +88,7 @@ fn record_activity_ignore_drops_silently() {
 fn record_activity_promotes_to_fact() {
     let engine = engine();
     let embedder = ZeroEmbedder(DIM);
-    let config = ActivityFilterConfig {
-        promote_patterns: vec!["commit".into()],
-        ..Default::default()
-    };
+    let config = ActivityFilterConfig::new(300, [], ["commit".to_string()]);
 
     let req = RecordActivityRequest {
         tool_name: "git_commit".into(),
@@ -126,10 +120,7 @@ fn record_activity_promote_failure_falls_back_to_recorded() {
     // must not commit a partial fact).
     let engine = engine();
     let embedder = FailingEmbedder(DIM);
-    let config = ActivityFilterConfig {
-        promote_patterns: vec!["commit".into()],
-        ..Default::default()
-    };
+    let config = ActivityFilterConfig::new(300, [], ["commit".to_string()]);
 
     let req = RecordActivityRequest {
         tool_name: "git_commit".into(),
