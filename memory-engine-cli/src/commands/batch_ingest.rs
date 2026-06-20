@@ -349,8 +349,15 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
         args.batch_size,
     );
 
-    // Open or create engine
-    let engine = if args.create {
+    // Open or create the engine, plus its embedding provider (shared config —
+    // provider/MRL identity per #619).
+    //
+    // On --create the embed dim is known up front (--embed-dim), so the embedder is
+    // validated BEFORE the DB file is created: a misconfigured embedder must not
+    // leave an orphan empty database behind (#681). On the open paths the dim is
+    // only known after opening, but opening does not create a file, so building the
+    // embedder afterwards carries no orphan risk.
+    let (engine, embedder) = if args.create {
         let embed_dim = args
             .embed_dim
             .ok_or_else(|| anyhow::anyhow!("--embed-dim is required when using --create"))?;
@@ -359,20 +366,23 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
             "database {} already exists — remove it first or omit --create",
             db.display()
         );
-        MemoryEngine::builder(embed_dim)
+        let embedder = args.embed.build_required(embed_dim)?;
+        let engine = MemoryEngine::builder(embed_dim)
             .path(db.to_path_buf())
-            .build()?
-    } else if let Some(dim) = args.embed_dim {
-        // Existing DB: accept an explicit --embed-dim so a never-embedded store (no
-        // recorded identity yet under #613) is still writable. The engine's open path
-        // rejects a mismatch against any recorded identity.
-        open_engine_writable_with_dim(db, dim)?
+            .build()?;
+        (engine, embedder)
     } else {
-        open_engine_writable(db)?
+        let engine = if let Some(dim) = args.embed_dim {
+            // Existing DB: accept an explicit --embed-dim so a never-embedded store (no
+            // recorded identity yet under #613) is still writable. The engine's open path
+            // rejects a mismatch against any recorded identity.
+            open_engine_writable_with_dim(db, dim)?
+        } else {
+            open_engine_writable(db)?
+        };
+        let embedder = args.embed.build_required(engine.embed_dim())?;
+        (engine, embedder)
     };
-
-    // Build embedding provider (shared config — provider/MRL identity per #619).
-    let embedder = args.embed.build_required(engine.embed_dim())?;
 
     // Open input — bind stdin before locking to extend lifetime
     let stdin = std::io::stdin();
@@ -784,6 +794,38 @@ not valid json
         assert_eq!(summary.total_ingested, 3);
         assert_eq!(summary.total_skipped, 0);
         assert_eq!(summary.failed_batches, 0);
+    }
+
+    #[test]
+    fn create_with_misconfigured_embedder_leaves_no_orphan_db() {
+        // #681: a --create run whose embedder is misconfigured (url without model →
+        // build_required errors) must fail BEFORE the DB file is created, so no orphan
+        // empty database is left behind for the next run to trip over.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("orphan.db");
+        let args = BatchIngestArgs {
+            file: PathBuf::from("-"),
+            embed: EmbeddingArgs {
+                embed_url: Some("http://127.0.0.1:0/v1/embeddings".into()),
+                embed_model: None, // partial config → build_required errors
+                embed_provider: "ollama".into(),
+                embed_api_key: None,
+                native_dim: None,
+                query_instruction: None,
+                mrl_dim: None,
+                embed_timeout: 5,
+            },
+            batch_size: 100,
+            create: true,
+            embed_dim: Some(4),
+            scope: None,
+        };
+        let result = run(&db, &args, OutputFormat::Json);
+        assert!(result.is_err(), "misconfigured embedder must error");
+        assert!(
+            !db.exists(),
+            "no orphan DB file may be created when the embedder fails to build"
+        );
     }
 
     #[test]
