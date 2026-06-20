@@ -73,6 +73,11 @@ impl MemoryEngine {
             .to_string_lossy()
             .to_string();
 
+        // The `.pak` is already on disk. If the commit (manifest insert +
+        // hard-delete tx) fails, the file would be an orphan with no manifest
+        // row — a permanent disk leak that `verify_archives()` could never
+        // reconcile (CWE-459). Remove it on error, mirroring the cleanup the
+        // restore path uses for its half-written DB file.
         self.commit_archive(
             &pak_filename,
             &candidate_facts,
@@ -80,7 +85,10 @@ impl MemoryEngine {
             &fact_ids,
             pak_size_bytes,
             &blake3_hash,
-        )?;
+        )
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&pak_path);
+        })?;
 
         // Update in-memory graph
         {
@@ -344,5 +352,94 @@ impl MemoryEngine {
             ))
         })?;
         Ok(parent.join("archives"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    use crate::types::{FactType, NewFact};
+
+    const DIM: usize = 8;
+
+    fn make_expired_fact(content: &str, expired_at: chrono::DateTime<Utc>) -> NewFact {
+        NewFact {
+            content: content.into(),
+            content_hash: String::new(),
+            embedding: vec![0.1_f32; DIM],
+            fact_type: FactType::Episodic,
+            t_created: Utc::now() - Duration::days(2),
+            t_expired: Some(expired_at),
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: Utc::now(),
+            metadata: serde_json::json!({}),
+            scope_id: 1,
+            is_pinned: false,
+        }
+    }
+
+    /// #265: a failure inside `commit_archive` (here: the manifest INSERT fails
+    /// because the table was dropped) must NOT leave an orphan `.pak` file behind.
+    /// The `.pak` is written before the commit transaction; without on-error
+    /// cleanup it would be a permanent disk leak with no manifest row (CWE-459).
+    #[test]
+    fn archive_cleans_up_pak_when_commit_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.path().join("orphan.db"))
+            .build()
+            .unwrap();
+
+        // Insert expired, non-pinned facts directly via the store so they qualify
+        // as archive candidates.
+        let expired_at = Utc::now() - Duration::hours(1);
+        {
+            let conn = engine.write_conn().unwrap();
+            let store = FactStore::new(&conn, DIM);
+            for i in 0..20 {
+                store
+                    .insert(&make_expired_fact(&format!("orphan fact {i}"), expired_at))
+                    .unwrap();
+            }
+            // Force `commit_archive` to fail: drop the manifest table so its INSERT
+            // errors out *after* the `.pak` has already been written to disk.
+            conn.execute_batch("DROP TABLE archive_manifest;").unwrap();
+        }
+
+        let policy = ArchivePolicy {
+            expired_before: Utc::now() + Duration::hours(1),
+            min_facts: 1,
+        };
+
+        let result = engine.archive(&policy);
+        assert!(
+            result.is_err(),
+            "archive must propagate the commit failure, got {result:?}"
+        );
+
+        // The archive directory must contain no orphan `.pak` file.
+        let archive_dir = dir.path().join("archives");
+        let orphans: Vec<_> = std::fs::read_dir(&archive_dir)
+            .map(|rd| {
+                rd.filter_map(std::result::Result::ok)
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("pak"))
+                    })
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            orphans.is_empty(),
+            "commit_archive failure left orphan .pak file(s): {orphans:?}"
+        );
     }
 }
