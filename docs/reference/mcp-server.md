@@ -154,7 +154,7 @@ Requires a summary generator (chat-completions endpoint) configured via `[summar
 
 The summary generator also requires an embedding provider (summaries must be embedded into the same vector space as facts). If `--summary-url` is set but no embedding provider is configured, the server logs a warning and disables consolidation.
 
-Parameters: `dedup_threshold` (default 0.92), `min_cluster_size` (default 3).
+Parameters: `dedup_threshold` (default 0.92; range `[0.0, 1.0]`, facts with cosine similarity `>=` this value are merged, `1.0` merges only exact duplicates), `min_cluster_size` (default 3; must be `>= 2`).
 
 ### Forget (`memory_forget`)
 

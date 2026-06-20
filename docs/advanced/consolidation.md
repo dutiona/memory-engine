@@ -8,7 +8,7 @@ Consolidation compresses the fact store by removing duplicates and generating hi
 
 ```
 Pass 1: Local Dedup       Pass 2: Cluster Fusion       Pass 3: Global Integration
-  cosine > threshold  -->   group by similarity     -->   summarize all clusters
+  cosine >= threshold -->   group by similarity     -->   summarize all clusters
   expire duplicates         generate cluster summaries     into one global summary
 ```
 
@@ -18,7 +18,7 @@ All three passes execute atomically. If any pass fails (including errors from th
 
 Compares facts created since the last consolidation against all active facts. **Pinned facts are excluded from dedup** — they are never candidates for expiration, and pinned candidates are skipped during comparison. This ensures unforgettable facts are preserved even if near-duplicates exist.
 
-Pairs with cosine similarity above `dedup_threshold` are resolved by expiring the lower-importance fact. Tie-break on equal importance: the newer fact (higher id) is expired.
+Pairs with cosine similarity **at or above** `dedup_threshold` are resolved by expiring the lower-importance fact. Tie-break on equal importance: the newer fact (higher id) is expired. `dedup_threshold` lives in `[0.0, 1.0]`; a value of `1.0` merges only exact duplicates (identical embeddings).
 
 ```rust
 // dedup.rs — core logic (simplified)
@@ -27,7 +27,7 @@ if new_fact.is_pinned { continue; }  // pinned facts skip dedup entirely
 let similarity = cosine_similarity(&new_fact.embedding, &candidate.embedding);
 if candidate.is_pinned { continue; }  // pinned candidates are also protected
 
-if similarity > threshold {
+if similarity >= threshold {  // >= so threshold 1.0 merges exact duplicates
     let expire_id = if new_fact.importance < candidate.importance {
         new_fact.id
     } else if new_fact.importance > candidate.importance {

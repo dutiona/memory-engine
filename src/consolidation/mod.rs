@@ -80,6 +80,8 @@ pub fn summarize_and_embed(
 ///
 /// # Errors
 ///
+/// Returns `MemoryError::Conflict` if `config` fails validation
+/// ([`ConsolidationConfig::validate`]).
 /// Propagates errors from any pass, the `SummaryGenerator`, or the
 /// `EmbeddingProvider`.
 /// Returns `MemoryError::Migration` if `last_consolidated_at` in config cannot be parsed.
@@ -116,6 +118,11 @@ fn consolidate_with_caps(
     config: &ConsolidationConfig,
     max_dedup_facts: usize,
 ) -> Result<(ConsolidationStats, Vec<i64>)> {
+    // Validate up front, before touching the store — mirrors `prune()` rejecting
+    // an invalid `ForgetPolicy` at the forget entry point. Placed here (the shared
+    // core), not in the public wrapper, so the test cap-path validates too.
+    config.validate()?;
+
     let last = get_config(conn, "last_consolidated_at")?
         .map(|s| DateTime::parse_from_rfc3339(&s))
         .transpose()
@@ -229,13 +236,6 @@ mod tests {
         }
     }
 
-    fn default_config() -> ConsolidationConfig {
-        ConsolidationConfig {
-            dedup_threshold: 0.90,
-            min_cluster_size: 2,
-        }
-    }
-
     /// Insert an active fact, returning its id.
     fn insert_fact(conn: &Connection, content: &str, embedding: Vec<f32>, importance: f64) -> i64 {
         let store = FactStore::new(conn, DIM);
@@ -273,8 +273,14 @@ mod tests {
         init_schema(&conn).unwrap();
         seed_cluster(&conn);
 
-        let (stats, expired) =
-            consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        let (stats, expired) = consolidate(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .unwrap();
 
         // Dedup pass: near-duplicates above 0.90 collapse. With 3 facts all > 0.90
         // similar, two get expired down to a single survivor.
@@ -291,6 +297,39 @@ mod tests {
     }
 
     #[test]
+    fn consolidate_rejects_invalid_config_before_mutating() {
+        // The entry point validates its config up front, before touching the store
+        // — mirroring how `prune()` rejects an invalid `ForgetPolicy`.
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        // Two near-duplicates the dedup pass *would* collapse at threshold 0.90.
+        insert_fact(&conn, "alpha", vec![1.0, 0.0, 0.0, 0.0], 0.9);
+        insert_fact(&conn, "alpha prime", vec![0.99, 0.01, 0.0, 0.0], 0.5);
+
+        // `dedup_threshold` is valid but `min_cluster_size` is not, so the error
+        // must come from validation rather than a pass. If validation did NOT run
+        // first, the valid threshold would have expired one near-duplicate.
+        let bad = ConsolidationConfig {
+            dedup_threshold: 0.90,
+            min_cluster_size: 0,
+        };
+        let err = consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &bad).unwrap_err();
+        assert!(
+            err.to_string().contains("min_cluster_size"),
+            "error should name the offending parameter, got: {err}"
+        );
+
+        // Nothing expired: validation aborted before the dedup pass ran.
+        let active = FactStore::new(&conn, DIM).list_active(None).unwrap();
+        assert_eq!(
+            active.len(),
+            2,
+            "no fact should be expired when the config is rejected"
+        );
+    }
+
+    #[test]
     fn cluster_and_global_summaries_created() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
@@ -304,8 +343,14 @@ mod tests {
         insert_fact(&conn, "b", vec![0.8829, 0.4695, 0.0, 0.0], 0.5);
         insert_fact(&conn, "c", vec![0.5592, 0.829, 0.0, 0.0], 0.5);
 
-        let (stats, expired) =
-            consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        let (stats, expired) = consolidate(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .unwrap();
 
         assert_eq!(stats.duplicates_removed, 0, "no near-duplicates expected");
         assert!(expired.is_empty());
@@ -340,8 +385,14 @@ mod tests {
         init_schema(&conn).unwrap();
         seed_cluster(&conn);
 
-        let (stats, _) =
-            consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        let (stats, _) = consolidate(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .unwrap();
         // No cluster/global summary is produced, so no summary vector is written.
         assert_eq!(stats.clusters_created, 0);
         assert_eq!(stats.global_summaries, 0);
@@ -373,8 +424,14 @@ mod tests {
         insert_fact(&conn, "b", vec![0.8829, 0.4695, 0.0, 0.0], 0.5);
         insert_fact(&conn, "c", vec![0.5592, 0.829, 0.0, 0.0], 0.5);
 
-        let (stats, _) =
-            consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        let (stats, _) = consolidate(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .unwrap();
         assert!(
             stats.clusters_created > 0 || stats.global_summaries > 0,
             "this fixture must write at least one summary vector"
@@ -397,7 +454,14 @@ mod tests {
         assert!(get_config(&conn, "last_consolidated_at").unwrap().is_none());
 
         let before = Utc::now();
-        consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        consolidate(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .unwrap();
         let after = Utc::now();
 
         let raw = get_config(&conn, "last_consolidated_at")
@@ -425,8 +489,14 @@ mod tests {
         insert_fact(&conn, "old A", vec![1.0, 0.0, 0.0, 0.0], 0.5);
         insert_fact(&conn, "old B", vec![0.99, 0.01, 0.0, 0.0], 0.3);
 
-        let (stats, expired) =
-            consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        let (stats, expired) = consolidate(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .unwrap();
 
         // Because both facts predate the watermark, dedup's "new facts" set is
         // empty and nothing is removed — proving the watermark is read and applied.
@@ -444,8 +514,14 @@ mod tests {
         init_schema(&conn).unwrap();
         set_config(&conn, "last_consolidated_at", "not-a-timestamp").unwrap();
 
-        let err = consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config())
-            .expect_err("a malformed watermark must surface as an error");
+        let err = consolidate(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .expect_err("a malformed watermark must surface as an error");
         assert!(
             matches!(err, crate::error::MemoryError::Migration(_)),
             "expected Migration error, got {err:?}"
@@ -475,7 +551,7 @@ mod tests {
             &FailingGenerator,
             &MockEmbedder,
             DIM,
-            &default_config(),
+            &ConsolidationConfig::default(),
         )
         .expect_err("a failing pass must abort consolidation");
         assert!(
@@ -517,8 +593,14 @@ mod tests {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
 
-        let (stats, expired) =
-            consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &default_config()).unwrap();
+        let (stats, expired) = consolidate(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .unwrap();
 
         assert_eq!(stats.duplicates_removed, 0);
         assert_eq!(stats.clusters_created, 0);
@@ -552,7 +634,7 @@ mod tests {
             &MockGenerator,
             &MockEmbedder,
             DIM,
-            &default_config(),
+            &ConsolidationConfig::default(),
             1,
         )
         .unwrap();

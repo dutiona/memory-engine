@@ -21,7 +21,7 @@ The key constraint: consolidation must be atomic. A partial consolidation (e.g.,
 
 Consolidation is a three-pass pipeline, configurable via `ConsolidationConfig`:
 
-**Pass 1: Local Dedup.** Pairwise cosine similarity between active facts. Facts exceeding `dedup_threshold` (default configurable) are deduplicated: the newer fact is kept, the older is soft-expired. Edges from expired facts are cascade-expired in both SQLite and the in-memory Petgraph.
+**Pass 1: Local Dedup.** Pairwise cosine similarity between active facts. Facts whose similarity is **at or above** `dedup_threshold` (in `[0.0, 1.0]`; `1.0` merges only exact duplicates) are deduplicated: the **lower-importance** fact is soft-expired, with a deterministic tie-break (on equal importance the newer/higher-id fact expires). Edges from expired facts are cascade-expired in both SQLite and the in-memory Petgraph.
 
 **Pass 2: Cluster Fusion.** Remaining active facts are grouped by cosine proximity. Groups meeting `min_cluster_size` are passed to the `SummaryGenerator` trait, which produces a textual summary and its embedding. A `Summary` record at `ConsolidationLevel::Cluster` is created with references to the source fact IDs.
 

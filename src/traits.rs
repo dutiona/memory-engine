@@ -317,8 +317,66 @@ pub trait DreamCycle {
 /// Configuration for the consolidation process (Phase 2).
 #[derive(Debug, Clone)]
 pub struct ConsolidationConfig {
+    /// Minimum cosine similarity for two facts to be treated as duplicates.
+    ///
+    /// The dedup pass merges any pair whose similarity is **≥** this value
+    /// (expiring the lower-importance fact). Lives in `[0.0, 1.0]`:
+    /// `1.0` deduplicates only exact duplicates (identical embeddings), lower
+    /// values fold in progressively looser near-duplicates.
     pub dedup_threshold: f32,
+    /// Minimum number of facts a similarity group must contain to be summarized
+    /// into a cluster. Must be ≥ 2 — a single-fact "cluster" is not a cluster.
     pub min_cluster_size: usize,
+}
+
+impl Default for ConsolidationConfig {
+    /// Canonical defaults: `dedup_threshold = 0.90`, `min_cluster_size = 2`.
+    ///
+    /// Hand-written rather than derived: a derived `Default` would yield
+    /// `0.0` / `0`, and `min_cluster_size = 0` fails [`validate`](Self::validate).
+    fn default() -> Self {
+        Self {
+            dedup_threshold: 0.90,
+            min_cluster_size: 2,
+        }
+    }
+}
+
+impl ConsolidationConfig {
+    /// Validate configuration parameters.
+    ///
+    /// Enforced at the consolidation entry point
+    /// ([`crate::consolidation::consolidate`]), mirroring
+    /// [`ForgetPolicy::validate`] at the forget entry point.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Conflict` if `dedup_threshold` is not a finite
+    /// value in `[0.0, 1.0]` (it is a cosine-similarity gate), or if
+    /// `min_cluster_size < 2` (a cluster requires at least two members to be
+    /// fused into a summary; see [`crate::consolidation`]).
+    pub fn validate(&self) -> Result<()> {
+        use crate::error::{ConflictError, MemoryError};
+
+        if !self.dedup_threshold.is_finite() || !(0.0..=1.0).contains(&self.dedup_threshold) {
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!(
+                    "dedup_threshold must be a finite value in [0.0, 1.0], got {}",
+                    self.dedup_threshold
+                ),
+            )));
+        }
+        if self.min_cluster_size < 2 {
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!(
+                    "min_cluster_size must be >= 2 (a cluster requires at least two members), \
+                     got {}",
+                    self.min_cluster_size
+                ),
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Statistics returned by consolidation (Phase 2).
@@ -722,6 +780,100 @@ mod tests {
             ..Default::default()
         };
         assert!(p.validate().is_err());
+    }
+
+    // --- ConsolidationConfig::default() ---
+
+    #[test]
+    fn consolidation_config_default_has_expected_field_values() {
+        let c = ConsolidationConfig::default();
+        assert!((c.dedup_threshold - 0.90).abs() < f32::EPSILON);
+        assert_eq!(c.min_cluster_size, 2);
+    }
+
+    #[test]
+    fn consolidation_config_default_validates_ok() {
+        ConsolidationConfig::default().validate().unwrap();
+    }
+
+    // --- ConsolidationConfig::validate(): dedup_threshold ∈ [0, 1] ---
+
+    #[test]
+    fn validate_rejects_dedup_threshold_above_one() {
+        let c = ConsolidationConfig {
+            dedup_threshold: 1.01,
+            ..Default::default()
+        };
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("dedup_threshold"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_negative_dedup_threshold() {
+        let c = ConsolidationConfig {
+            dedup_threshold: -0.01,
+            ..Default::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_boundary_dedup_threshold() {
+        for val in [0.0_f32, 1.0_f32] {
+            let c = ConsolidationConfig {
+                dedup_threshold: val,
+                ..Default::default()
+            };
+            c.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn validate_rejects_nan_dedup_threshold() {
+        let c = ConsolidationConfig {
+            dedup_threshold: f32::NAN,
+            ..Default::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_infinity_dedup_threshold() {
+        for val in [f32::INFINITY, f32::NEG_INFINITY] {
+            let c = ConsolidationConfig {
+                dedup_threshold: val,
+                ..Default::default()
+            };
+            assert!(c.validate().is_err(), "{val} should be rejected");
+        }
+    }
+
+    // --- ConsolidationConfig::validate(): min_cluster_size >= 2 ---
+
+    #[test]
+    fn validate_rejects_min_cluster_size_below_two() {
+        for val in [0_usize, 1_usize] {
+            let c = ConsolidationConfig {
+                min_cluster_size: val,
+                ..Default::default()
+            };
+            let err = c.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("min_cluster_size"),
+                "min_cluster_size={val} should reject; error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_min_cluster_size_two_and_above() {
+        for val in [2_usize, 3, 10] {
+            let c = ConsolidationConfig {
+                min_cluster_size: val,
+                ..Default::default()
+            };
+            c.validate().unwrap();
+        }
     }
 
     // --- Trait object safety ---

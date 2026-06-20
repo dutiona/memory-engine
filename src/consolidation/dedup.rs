@@ -7,6 +7,15 @@ use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::types::Fact;
 
+/// Floating-point tolerance for the dedup similarity comparison.
+///
+/// The f32 cosine of two identical vectors is `1.0` only in exact arithmetic;
+/// `dot / (√S·√S)` rounds it to `1.0 ± ε` because `√S·√S != S` by up to ~1 ULP.
+/// That error is ~`1.2e-7` and dimension-independent (`dot` and the norms
+/// accumulate the *same* sum `S`), so `1e-6` clears it with an 8× margin while
+/// staying far tighter than any gap between genuinely distinct facts.
+const DEDUP_SIMILARITY_EPSILON: f32 = 1e-6;
+
 /// Outcome of a [`local_dedup`] pass.
 ///
 /// Replaces the former `(usize, Vec<i64>)` return whose `usize::MAX` first element
@@ -43,9 +52,9 @@ pub enum DedupOutcome {
 /// Local deduplication pass.
 ///
 /// Compares facts created since `since` (or all if `None`) against all active facts.
-/// Near-duplicates (cosine > threshold) are resolved by expiring the lower-importance
+/// Duplicates (cosine ≥ threshold) are resolved by expiring the lower-importance
 /// fact. Deterministic tie-break: on equal importance, the newer fact (higher id) is
-/// expired.
+/// expired. A `threshold` of 1.0 therefore merges only exact duplicates.
 ///
 /// When the active corpus exceeds `max_facts` the O(N*M) pairwise comparison is
 /// skipped and [`DedupOutcome::Skipped`] is returned (the orchestrator then leaves
@@ -115,7 +124,16 @@ pub fn local_dedup(
             }
 
             let similarity = cosine_similarity(&new_fact.embedding, &candidate.embedding);
-            if similarity > threshold {
+            // Two facts are duplicates when they are *at least* as similar as the
+            // threshold, compared with a small floating-point tolerance. The naive
+            // `similarity >= threshold` is unreliable at `threshold = 1.0`: the f32
+            // cosine of *identical* vectors is `1.0` only in exact arithmetic — it
+            // rounds to `1.0 ± ε` (e.g. `0.99999994` for `[1, 1, 3]`), so a bare
+            // `>=` would non-deterministically miss exact duplicates. Subtracting
+            // `DEDUP_SIMILARITY_EPSILON` absorbs that noise in both directions, so
+            // `dedup_threshold = 1.0` reliably merges exact (and within-noise)
+            // duplicates without folding in genuinely distinct facts.
+            if similarity >= threshold - DEDUP_SIMILARITY_EPSILON {
                 // Expire the lower-importance fact. Tie-break: higher id (newer) expires.
                 let expire_id = if new_fact.importance < candidate.importance {
                     new_fact.id
@@ -289,6 +307,35 @@ mod tests {
         let active = store.list_active(None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "fact A");
+    }
+
+    #[test]
+    fn threshold_one_dedups_exact_duplicates() {
+        // `dedup_threshold = 1.0` reliably merges exact duplicates. The f32 cosine
+        // of identical vectors can round *below* 1.0 (here ~0.99999994), so a bare
+        // `similarity >= threshold` would miss them — the DEDUP_SIMILARITY_EPSILON
+        // tolerance is what makes this deterministic. Choosing an embedding whose
+        // self-cosine undershoots 1.0 turns this into a genuine regression guard.
+        let (conn, dim) = setup();
+        let emb = vec![1.0, 1.0, 3.0, 0.0];
+        assert!(
+            cosine_similarity(&emb, &emb) < 1.0,
+            "test premise: self-cosine must undershoot 1.0 to exercise the tolerance, got {}",
+            cosine_similarity(&emb, &emb),
+        );
+        insert_fact(&conn, dim, "identical A", emb.clone(), 0.7);
+        insert_fact(&conn, dim, "identical B", emb, 0.3);
+
+        let (removed, _) = local_dedup(&conn, dim, 1.0, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
+        assert_eq!(removed, 1, "threshold 1.0 must dedup exact duplicates");
+
+        // The lower-importance fact (B) is expired; the survivor is A.
+        let store = FactStore::new(&conn, dim);
+        let active = store.list_active(None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, "identical A");
     }
 
     #[test]
