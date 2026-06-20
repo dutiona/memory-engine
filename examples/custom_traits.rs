@@ -9,7 +9,7 @@ use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, ForgetPolicy,
-    SummaryGenerator,
+    SummarizableContent, SummaryGenerator,
 };
 use memory_engine::types::{AddFactRequest, Fact, FactType, NewFact};
 
@@ -43,13 +43,9 @@ impl EmbeddingProvider for SimpleEmbedder {
 struct ConcatSummarizer;
 
 impl SummaryGenerator for ConcatSummarizer {
-    fn summarize(&self, facts: &[Fact]) -> Result<String, MemoryError> {
-        // Toy: concatenate fact contents. Replace with LLM call in production.
-        let summary = facts
-            .iter()
-            .map(|f| f.content.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String, MemoryError> {
+        // Toy: concatenate the item texts. Replace with LLM call in production.
+        let summary = items.iter().map(|i| i.text).collect::<Vec<_>>().join("; ");
         Ok(format!("Summary: {summary}"))
     }
     // No `embed`: summaries are embedded by the EmbeddingProvider passed into

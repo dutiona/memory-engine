@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::search::vector::cosine_similarity;
 use crate::store::facts::FactStore;
 use crate::store::summaries::SummaryStore;
-use crate::traits::{EmbeddingProvider, SummaryGenerator};
+use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
 use crate::types::{ConsolidationLevel, Fact, NewSummary};
 
 /// Cluster fusion pass.
@@ -70,8 +70,15 @@ pub fn cluster_fusion(
             .collect();
         let source_ids: Vec<i64> = cluster_facts.iter().map(|f| f.id).collect();
 
+        let items: Vec<SummarizableContent<'_>> = cluster_facts
+            .iter()
+            .map(|f| SummarizableContent {
+                text: &f.content,
+                embedding: &f.embedding,
+            })
+            .collect();
         let (summary_text, summary_embedding) =
-            super::summarize_and_embed(generator, embedder, &cluster_facts, embed_dim)?;
+            super::summarize_and_embed(generator, embedder, &items, embed_dim)?;
 
         // Determine scope_id from majority vote of source facts.
         // Deterministic tie-break: lowest scope_id wins on equal counts.
@@ -154,12 +161,8 @@ mod tests {
     struct MockGenerator;
 
     impl SummaryGenerator for MockGenerator {
-        fn summarize(&self, facts: &[Fact]) -> Result<String> {
-            Ok(facts
-                .iter()
-                .map(|f| f.content.as_str())
-                .collect::<Vec<_>>()
-                .join(" + "))
+        fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String> {
+            Ok(items.iter().map(|i| i.text).collect::<Vec<_>>().join(" + "))
         }
     }
 

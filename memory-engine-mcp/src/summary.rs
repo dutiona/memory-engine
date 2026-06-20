@@ -1,6 +1,5 @@
 use memory_engine::error::MemoryError;
-use memory_engine::traits::SummaryGenerator;
-use memory_engine::types::Fact;
+use memory_engine::traits::{SummarizableContent, SummaryGenerator};
 
 /// Default system prompt for memory consolidation summarization.
 ///
@@ -52,11 +51,11 @@ impl HttpSummaryGenerator {
 }
 
 impl SummaryGenerator for HttpSummaryGenerator {
-    fn summarize(&self, facts: &[Fact]) -> Result<String, MemoryError> {
-        let user_content = facts
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String, MemoryError> {
+        let user_content = items
             .iter()
             .enumerate()
-            .map(|(i, f)| format!("{}. {}", i + 1, f.content))
+            .map(|(i, item)| format!("{}. {}", i + 1, item.text))
             .collect::<Vec<_>>()
             .join("\n");
 

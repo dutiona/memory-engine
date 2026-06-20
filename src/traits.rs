@@ -109,12 +109,30 @@ pub trait EmbeddingProvider: Send + Sync {
 /// Requires `Send + Sync`: summary generators are shared across the engine's
 /// worker threads alongside the other consumer providers.
 pub trait SummaryGenerator: Send + Sync {
-    /// Generate a textual summary from a slice of facts.
+    /// Generate a textual summary from a slice of items, each carrying its text
+    /// and the embedding of that text.
     ///
     /// # Errors
     ///
     /// Returns an error if summarization fails.
-    fn summarize(&self, facts: &[Fact]) -> Result<String>;
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String>;
+}
+
+/// A minimal, borrowed view of something to summarize: its text and the
+/// embedding of that text in the fact vector space.
+///
+/// Both the cluster-fusion pass (summarizing facts) and the global-integration
+/// pass (summarizing cluster summaries) feed [`SummaryGenerator::summarize`]
+/// through this type, so neither has to fabricate throwaway `Fact` structs with
+/// phantom field values just to satisfy the trait (#273). It is `Copy` — two
+/// shared references — and borrows its inputs, so no content or embedding is
+/// cloned to build it.
+#[derive(Debug, Clone, Copy)]
+pub struct SummarizableContent<'a> {
+    /// The text to summarize.
+    pub text: &'a str,
+    /// The embedding of `text`, in the same vector space as the facts.
+    pub embedding: &'a [f32],
 }
 
 /// Trait for proposing how to consolidate a window of facts (#554).
@@ -994,7 +1012,10 @@ mod tests {
     fn summary_generator_is_object_safe() {
         struct Dummy;
         impl SummaryGenerator for Dummy {
-            fn summarize(&self, _facts: &[Fact]) -> crate::error::Result<String> {
+            fn summarize(
+                &self,
+                _items: &[SummarizableContent<'_>],
+            ) -> crate::error::Result<String> {
                 Ok(String::new())
             }
         }
