@@ -22,9 +22,13 @@ use crate::types::EmbeddingFingerprint;
 /// # Errors
 /// Async methods return [`MemoryError::Storage`](crate::error::MemoryError::Storage)
 /// on a backend failure, or [`MemoryError::Migration`](crate::error::MemoryError::Migration)
-/// for a migration/compatibility failure, or
-/// [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
-/// from the fingerprint guard.
+/// for a migration/compatibility failure. The fingerprint methods add two:
+/// [`record_embedding_fingerprint_if_absent`](Self::record_embedding_fingerprint_if_absent)
+/// returns [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+/// when `candidate.dim` disagrees with the recorded (or expected) identity, and
+/// [`require_embedding_fingerprint_present`](Self::require_embedding_fingerprint_present)
+/// returns [`MemoryError::Internal`](crate::error::MemoryError::Internal) when no
+/// fingerprint has been recorded yet (the open-time identity guard).
 #[async_trait]
 pub trait SchemaManager: Send + Sync {
     /// Run all pending migrations to the current schema version. Idempotent at HEAD.
