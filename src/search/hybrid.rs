@@ -237,15 +237,15 @@ pub fn hybrid_search(
         // This ensures future-dated facts (t_valid > now) are invisible to
         // regular queries — they only surface via list_due()/resume_context().
         let cutoff = query.valid_at.unwrap_or_else(Utc::now);
-        if let Some(t_valid) = fact.t_valid {
-            if t_valid > cutoff {
-                continue;
-            }
+        if let Some(t_valid) = fact.t_valid
+            && t_valid > cutoff
+        {
+            continue;
         }
-        if let Some(t_invalid) = fact.t_invalid {
-            if t_invalid <= cutoff {
-                continue;
-            }
+        if let Some(t_invalid) = fact.t_invalid
+            && t_invalid <= cutoff
+        {
+            continue;
         }
 
         let match_type = if fts_ids.contains(&id) && vec_ids.contains(&id) {

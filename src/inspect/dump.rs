@@ -217,12 +217,12 @@ pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
     // Guard: refuse to dump onto the live database file (or a symlink resolving to it).
     if is_file_backed {
         let source = std::fs::canonicalize(&db_path)?;
-        if let Ok(target) = std::fs::canonicalize(path) {
-            if target == source {
-                return Err(MemoryError::Conflict(
-                    ConflictError::DumpTargetIsLiveDatabase,
-                ));
-            }
+        if let Ok(target) = std::fs::canonicalize(path)
+            && target == source
+        {
+            return Err(MemoryError::Conflict(
+                ConflictError::DumpTargetIsLiveDatabase,
+            ));
         }
     }
 

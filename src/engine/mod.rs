@@ -398,14 +398,14 @@ impl MemoryEngine {
     /// empty store has no identity to disagree with, and the runtime dimension always
     /// comes from `EngineConfig`.
     fn validate_embed_dim_against_meta(conn: &Connection, embed_dim: usize) -> Result<()> {
-        if let Some(fp) = crate::store::embedding_meta::load(conn)? {
-            if fp.dim != embed_dim {
-                return Err(MigrationError::EmbedDimMismatch {
-                    stored: fp.dim,
-                    requested: embed_dim,
-                }
-                .into());
+        if let Some(fp) = crate::store::embedding_meta::load(conn)?
+            && fp.dim != embed_dim
+        {
+            return Err(MigrationError::EmbedDimMismatch {
+                stored: fp.dim,
+                requested: embed_dim,
             }
+            .into());
         }
         Ok(())
     }
@@ -767,15 +767,15 @@ fn apply_surfaced_stamps<'a>(
 /// A fact passes if it's valid at the cutoff instant:
 /// `(t_valid IS NULL OR t_valid <= cutoff) AND (t_invalid IS NULL OR t_invalid > cutoff)`
 fn passes_temporal_cutoff(fact: &Fact, cutoff: DateTime<Utc>) -> bool {
-    if let Some(t_valid) = fact.t_valid {
-        if t_valid > cutoff {
-            return false;
-        }
+    if let Some(t_valid) = fact.t_valid
+        && t_valid > cutoff
+    {
+        return false;
     }
-    if let Some(t_invalid) = fact.t_invalid {
-        if t_invalid <= cutoff {
-            return false;
-        }
+    if let Some(t_invalid) = fact.t_invalid
+        && t_invalid <= cutoff
+    {
+        return false;
     }
     true
 }

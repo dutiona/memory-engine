@@ -106,15 +106,15 @@ struct JsonlFact {
 // ---------------------------------------------------------------------------
 
 fn validate_jsonl_fact(fact: &JsonlFact) -> Result<(), String> {
-    if let Some(imp) = fact.importance {
-        if !(0.0..=1.0).contains(&imp) {
-            return Err(format!("importance {imp} out of range [0, 1]"));
-        }
+    if let Some(imp) = fact.importance
+        && !(0.0..=1.0).contains(&imp)
+    {
+        return Err(format!("importance {imp} out of range [0, 1]"));
     }
-    if let (Some(tv), Some(ti)) = (fact.t_valid, fact.t_invalid) {
-        if tv >= ti {
-            return Err(format!("t_valid ({tv}) must be before t_invalid ({ti})"));
-        }
+    if let (Some(tv), Some(ti)) = (fact.t_valid, fact.t_invalid)
+        && tv >= ti
+    {
+        return Err(format!("t_valid ({tv}) must be before t_invalid ({ti})"));
     }
     Ok(())
 }

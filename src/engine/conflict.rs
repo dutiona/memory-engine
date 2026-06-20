@@ -59,10 +59,9 @@ impl MemoryEngine {
             if matches!(
                 &resolution.decision,
                 CrudDecision::Update | CrudDecision::Add
-            ) {
-                if let Some(new_id) = resolution.new_fact_id {
-                    hnsw.notify_insert(new_id, &embedding);
-                }
+            ) && let Some(new_id) = resolution.new_fact_id
+            {
+                hnsw.notify_insert(new_id, &embedding);
             }
         }
 

@@ -31,6 +31,12 @@ pub struct ArchiveSearchResult {
 /// # Errors
 ///
 /// Returns `MemoryError::Archive` on I/O or decompression failure.
+// `matched` accumulates across three independent branches (text, vector, and the
+// match-all fallback), so clippy::useless_let_if_seq's single-assignment
+// `let matched = if … { true } else { false }` rewrite is a false positive — it
+// would make `matched` immutable and fail to compile. (Surfaced by collapsing the
+// nested `if let` into a let-chain under the 1.88 MSRV.)
+#[allow(clippy::useless_let_if_seq)]
 pub fn search_archives(
     archive_dir: &Path,
     manifest_entries: &[ArchiveManifestEntry],
@@ -59,31 +65,32 @@ pub fn search_archives(
 
         for fact in &pak.facts {
             // Fact-type filter
-            if let Some(ref ft) = query.fact_type {
-                if &fact.fact_type != ft {
-                    continue;
-                }
+            if let Some(ref ft) = query.fact_type
+                && &fact.fact_type != ft
+            {
+                continue;
             }
 
             let mut score = 0.0_f64;
             let mut matched = false;
 
             // Text matching — simple case-insensitive substring
-            if let Some(ref text_lower) = query_text_lower {
-                if fact.content.to_lowercase().contains(text_lower) {
-                    score += 1.0;
-                    matched = true;
-                }
+            if let Some(ref text_lower) = query_text_lower
+                && fact.content.to_lowercase().contains(text_lower)
+            {
+                score += 1.0;
+                matched = true;
             }
 
             // Vector similarity — reuse existing cosine_similarity
-            if let Some(ref query_emb) = query.embedding {
-                if query_emb.len() == fact.embedding.len() && !fact.embedding.is_empty() {
-                    let cos = cosine_similarity(query_emb, &fact.embedding);
-                    if cos > 0.0 {
-                        score += f64::from(cos);
-                        matched = true;
-                    }
+            if let Some(ref query_emb) = query.embedding
+                && query_emb.len() == fact.embedding.len()
+                && !fact.embedding.is_empty()
+            {
+                let cos = cosine_similarity(query_emb, &fact.embedding);
+                if cos > 0.0 {
+                    score += f64::from(cos);
+                    matched = true;
                 }
             }
 
