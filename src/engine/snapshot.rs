@@ -31,6 +31,26 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Size of the blake3 checksum appended to the file.
 const BLAKE3_LEN: usize = 32;
 
+/// Hard upper bound on the on-disk size of a `.snapshot` sidecar (512 MiB).
+///
+/// Security guard against allocation denial-of-service (CWE-400/502/789):
+/// `load_from_file` reads the whole file into memory and
+/// `rmp_serde::from_slice` allocates `Vec`s sized by
+/// in-band `MessagePack` array-length prefixes. The blake3 checksum is *unkeyed*
+/// — it is a corruption check, not an authenticity control — so any actor able
+/// to write the sidecar (a local tamper / shared-data-dir threat) can produce a
+/// file that passes the checksum yet declares pathological lengths. Rejecting
+/// before `fs::read` caps the worst case at this many bytes. Tune to the
+/// expected corpus; a real snapshot is dominated by HNSW embeddings.
+const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Whether an on-disk size exceeds the [`MAX_SNAPSHOT_BYTES`] cap.
+///
+/// Boundary is `>` so a file exactly at the cap is still accepted.
+const fn exceeds_size_cap(len: u64) -> bool {
+    len > MAX_SNAPSHOT_BYTES
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot types (decoupled from internal representations)
 // ---------------------------------------------------------------------------
@@ -204,6 +224,30 @@ pub fn write_to_file(
 /// mismatch, checksum failure, `embed_dim` mismatch). Never errors — all
 /// failures are logged and treated as "snapshot unavailable".
 pub fn load_from_file(path: &Path, embed_dim: usize) -> Option<(SnapshotHeader, SnapshotPayload)> {
+    // Size guard BEFORE reading the file into memory: a crafted/corrupt sidecar
+    // must not be slurped wholesale, and its in-band length prefixes must not be
+    // allowed to drive an unbounded `Vec` allocation. blake3 is unkeyed and so
+    // is not an authenticity gate (see MAX_SNAPSHOT_BYTES). On metadata failure
+    // (other than NotFound) we discard and fall back to a full rebuild.
+    match fs::metadata(path) {
+        Ok(meta) if exceeds_size_cap(meta.len()) => {
+            tracing::warn!(
+                path = %path.display(),
+                size = meta.len(),
+                cap = MAX_SNAPSHOT_BYTES,
+                "snapshot exceeds size cap, discarding"
+            );
+            return None;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %path.display(), error = %e, "snapshot metadata failed");
+            }
+            return None;
+        }
+    }
+
     let data = match fs::read(path) {
         Ok(d) => d,
         Err(e) => {
@@ -278,6 +322,24 @@ pub fn load_from_file(path: &Path, embed_dim: usize) -> Option<(SnapshotHeader, 
             return None;
         }
     };
+
+    // 4. Post-validate per-entry embedding dimensions. The header `embed_dim`
+    //    check above only guards the declared dimension, not the actual vectors
+    //    inside each `HnswEntry`. A corrupt/tampered payload could carry a
+    //    wrong-length embedding that the header still claims is `embed_dim`;
+    //    feeding that into the HNSW rebuild would be a latent dimension bug.
+    if let Some(hnsw) = &payload.hnsw {
+        if let Some(bad) = hnsw.entries.iter().find(|e| e.embedding.len() != embed_dim) {
+            tracing::warn!(
+                path = %path.display(),
+                fact_id = bad.fact_id,
+                entry_dim = bad.embedding.len(),
+                expected = embed_dim,
+                "snapshot HNSW entry embedding dimension mismatch, discarding"
+            );
+            return None;
+        }
+    }
 
     Some((header, payload))
 }
@@ -493,6 +555,116 @@ mod tests {
         assert_eq!(p.graph.edges[0].edge_id, 1);
         assert_eq!(p.scope_tree.nodes.len(), 1);
         assert!(p.hnsw.is_none());
+    }
+
+    #[test]
+    fn oversized_file_returns_none() {
+        // Security (#411): a sidecar larger than MAX_SNAPSHOT_BYTES must be
+        // rejected before `fs::read` so a crafted/corrupt file cannot force a
+        // multi-gigabyte allocation. A sparse file (set_len) reports the
+        // logical size in metadata without consuming disk blocks, so we can
+        // exercise the real cap without writing 512 MiB.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.db.snapshot");
+        let f = fs::File::create(&path).unwrap();
+        f.set_len(MAX_SNAPSHOT_BYTES + 1).unwrap();
+        drop(f);
+
+        assert!(load_from_file(&path, 128).is_none());
+    }
+
+    #[test]
+    fn file_at_size_cap_is_not_rejected_for_size() {
+        // A file exactly at the cap passes the size guard (it then fails later
+        // on content, but NOT on the size check). This pins the boundary as
+        // `>` not `>=` so a legitimately large corpus at the limit still loads.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("at_cap.db.snapshot");
+        let f = fs::File::create(&path).unwrap();
+        f.set_len(MAX_SNAPSHOT_BYTES).unwrap();
+        drop(f);
+
+        // The all-zero sparse content is not a valid snapshot, so this returns
+        // None — but via the content path, having passed the size guard. We
+        // assert the size guard itself does not trip at exactly the cap.
+        assert!(!exceeds_size_cap(MAX_SNAPSHOT_BYTES));
+        assert!(exceeds_size_cap(MAX_SNAPSHOT_BYTES + 1));
+        assert!(load_from_file(&path, 128).is_none());
+    }
+
+    #[test]
+    fn mismatched_entry_embedding_dim_returns_none() {
+        // Security/integrity (#411): the header `embed_dim` check does not
+        // validate per-entry embedding lengths. A payload whose HnswEntry
+        // carries a wrong-dimension vector (corruption or tamper) must be
+        // rejected rather than fed into the index rebuild.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_dim.db.snapshot");
+
+        let header = SnapshotHeader {
+            format_version: FORMAT_VERSION,
+            fingerprint: DbFingerprint {
+                max_fact_id: 0,
+                active_fact_count: 0,
+                max_edge_id: 0,
+                active_edge_count: 0,
+                max_scope_id: 1,
+                scope_count: 1,
+            },
+            embed_dim: 4,
+            engine_version: "test".into(),
+        };
+        let payload = SnapshotPayload {
+            graph: GraphSnapshot { edges: vec![] },
+            scope_tree: ScopeTreeSnapshot { nodes: vec![] },
+            hnsw: Some(HnswSnapshot {
+                entries: vec![HnswEntry {
+                    fact_id: 1,
+                    // 3 components, but embed_dim is 4 → mismatch.
+                    embedding: vec![0.1, 0.2, 0.3],
+                }],
+            }),
+        };
+
+        write_to_file(&header, &payload, &path).unwrap();
+        assert!(load_from_file(&path, 4).is_none());
+    }
+
+    #[test]
+    fn matching_entry_embedding_dim_loads() {
+        // Counterpart to the mismatch test: a payload whose entry embedding
+        // matches `embed_dim` loads successfully (the validation does not
+        // reject well-formed data).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("good_dim.db.snapshot");
+
+        let header = SnapshotHeader {
+            format_version: FORMAT_VERSION,
+            fingerprint: DbFingerprint {
+                max_fact_id: 0,
+                active_fact_count: 0,
+                max_edge_id: 0,
+                active_edge_count: 0,
+                max_scope_id: 1,
+                scope_count: 1,
+            },
+            embed_dim: 4,
+            engine_version: "test".into(),
+        };
+        let payload = SnapshotPayload {
+            graph: GraphSnapshot { edges: vec![] },
+            scope_tree: ScopeTreeSnapshot { nodes: vec![] },
+            hnsw: Some(HnswSnapshot {
+                entries: vec![HnswEntry {
+                    fact_id: 1,
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                }],
+            }),
+        };
+
+        write_to_file(&header, &payload, &path).unwrap();
+        let (_, p) = load_from_file(&path, 4).expect("matching dim should load");
+        assert_eq!(p.hnsw.unwrap().entries.len(), 1);
     }
 
     #[test]
