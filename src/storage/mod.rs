@@ -15,7 +15,7 @@
 //! [`ConsolidationStore`], [`SessionStore`], [`SchemaManager`] — aggregated by the
 //! [`StorageBackend`] umbrella so the engine holds one `Arc<dyn StorageBackend>`;
 //! the bounded traits are what tests mock in isolation (a forgetting test mocks
-//! only [`FactGraph`]). [`ColdStorage`] is a **separate**, feature-gated
+//! only [`FactGraph`]). `ColdStorage` is a **separate**, feature-gated
 //! (`archive`) trait held as `Option<Arc<dyn ColdStorage>>`, not a supertrait
 //! bound — so the umbrella's type stays feature-invariant.
 //!

@@ -46,10 +46,9 @@ use crate::storage::{
 /// what tests mock in isolation (a forgetting test mocks only [`FactGraph`]); this
 /// umbrella is what the engine depends on.
 ///
-/// [`ColdStorage`](crate::storage::ColdStorage) is intentionally **not** a
-/// supertrait bound — it is feature-gated and held separately
-/// (`Option<Arc<dyn ColdStorage>>`), so this umbrella's type stays stable across
-/// feature sets.
+/// `ColdStorage` (feature `archive`) is intentionally **not** a supertrait bound —
+/// it is feature-gated and held separately (`Option<Arc<dyn ColdStorage>>`), so
+/// this umbrella's type stays stable across feature sets.
 pub trait StorageBackend:
     FactGraph + EventLog + SearchIndex + ConsolidationStore + SessionStore + SchemaManager
 {
