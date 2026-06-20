@@ -30,6 +30,18 @@ pub struct BootstrapConfig {
     /// signature detectors; empty = signatures-only. Ignored when `redact` is
     /// `false`.
     pub denylist: Vec<String>,
+    /// Maximum total bytes read from a single session stream before parsing
+    /// stops (#293). Bounds the per-stream I/O against a hostile or corrupt
+    /// `.jsonl` of many in-bounds lines; the reader is wrapped in
+    /// [`std::io::Read::take`]. `0` = no per-stream limit. Defaults to
+    /// [`crate::bootstrap::parse::DEFAULT_MAX_SESSION_BYTES`] (256 MiB).
+    pub max_session_bytes: u64,
+    /// Maximum number of parsed entries retained from a single session before
+    /// parsing stops with a truncation `warn` (#293). Bounds the in-memory
+    /// entry `Vec` — and every downstream linear pass — against an entry-count
+    /// flood. `0` = no entry-count limit. Defaults to
+    /// [`crate::bootstrap::parse::DEFAULT_MAX_ENTRIES`] (1,000,000).
+    pub max_entries: usize,
 }
 
 impl Default for BootstrapConfig {
@@ -40,6 +52,8 @@ impl Default for BootstrapConfig {
             skip_existing: true,
             redact: true,
             denylist: Vec::new(),
+            max_session_bytes: super::parse::DEFAULT_MAX_SESSION_BYTES,
+            max_entries: super::parse::DEFAULT_MAX_ENTRIES,
         }
     }
 }

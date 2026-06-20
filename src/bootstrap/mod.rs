@@ -60,8 +60,9 @@ pub(crate) fn bootstrap_session_inner(
 ) -> Result<BootstrapReport> {
     let mut report = BootstrapReport::default();
 
-    // --- Parse ---
-    let (entries, malformed) = parse::parse_session_file(reader);
+    // --- Parse (bounded against hostile/corrupt input, #293) ---
+    let (entries, malformed) =
+        parse::parse_session_file(reader, config.max_session_bytes, config.max_entries);
     report.entries_parsed = entries.len();
     report.entries_malformed = malformed;
 

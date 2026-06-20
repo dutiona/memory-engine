@@ -336,6 +336,81 @@ fn bootstrap_with_scope() {
 }
 
 #[test]
+fn bootstrap_max_entries_caps_parsed_entries() {
+    // #293 residual: a session of many small, individually-valid lines must be
+    // truncated at the per-stream entry-count cap surfaced on BootstrapConfig,
+    // bounding the in-memory entry Vec (and every downstream linear pass)
+    // regardless of file size. Build 50 valid entries but cap at 5.
+    let engine = engine();
+    let extractor = KeywordExtractor;
+    let config = BootstrapConfig {
+        max_entries: 5,
+        skip_existing: false,
+        ..Default::default()
+    };
+
+    let jsonl: String = (0..50)
+        .map(|i| {
+            serde_json::json!({
+                "type": "user", "sessionId": "cap-sess", "timestamp": "2024-05-01T10:00:00Z",
+                "uuid": format!("u{i}"), "parentUuid": serde_json::Value::Null,
+                "message": {"role": "user", "content": [{"type": "text", "text": format!("line {i}")}]}
+            })
+            .to_string()
+        })
+        .map(|s| s + "\n")
+        .collect();
+
+    let report = engine
+        .bootstrap_session(Cursor::new(jsonl), &TestEmbedder, &extractor, &config, None)
+        .unwrap();
+
+    assert_eq!(
+        report.entries_parsed, 5,
+        "entries_parsed must be capped at max_entries (5), got {}",
+        report.entries_parsed
+    );
+}
+
+#[test]
+fn bootstrap_max_session_bytes_caps_stream() {
+    // #293 residual: the per-stream byte ceiling stops the reader mid-file, so a
+    // huge session is bounded even before the entry-count cap. With a tight byte
+    // cap, only the prefix that fits is parsed; the rest is never read.
+    let engine = engine();
+    let extractor = KeywordExtractor;
+
+    let line = "{\"type\":\"user\",\"sessionId\":\"bytes-sess\",\"uuid\":\"u0\",\"parentUuid\":null,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}}";
+    let one = format!("{line}\n");
+    let mut jsonl = String::new();
+    for _ in 0..50 {
+        jsonl.push_str(&one);
+    }
+    // Admit roughly two lines' worth of bytes.
+    let cap = (one.len() * 2) as u64;
+    let config = BootstrapConfig {
+        max_session_bytes: cap,
+        skip_existing: false,
+        ..Default::default()
+    };
+
+    let report = engine
+        .bootstrap_session(Cursor::new(jsonl), &TestEmbedder, &extractor, &config, None)
+        .unwrap();
+
+    assert!(
+        report.entries_parsed <= 3,
+        "per-stream byte cap must bound parsed entries to the admitted prefix, got {}",
+        report.entries_parsed
+    );
+    assert!(
+        report.entries_parsed >= 1,
+        "the admitted prefix should still parse at least one entry, got {}",
+        report.entries_parsed
+    );
+}
+
+#[test]
 fn bootstrap_max_turns_limits_processing() {
     let engine = engine();
     let extractor = KeywordExtractor;
