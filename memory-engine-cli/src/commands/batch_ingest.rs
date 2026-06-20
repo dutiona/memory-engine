@@ -177,6 +177,13 @@ fn print_summary(summary: &IngestSummary, format: OutputFormat) -> anyhow::Resul
 // Core ingestion logic (testable — accepts reader + embedder)
 // ---------------------------------------------------------------------------
 
+/// Maximum bytes read for a single JSONL record. A line longer than this is
+/// skipped (and the reader resynced to the next line) rather than buffered, so a
+/// single unterminated or pathologically long line cannot force an unbounded
+/// `String` allocation (CWE-400 / CWE-770 / CWE-789). 8 MiB is far above any
+/// realistic fact-as-JSON record while still bounding the worst case.
+const MAX_LINE_BYTES: u64 = 8 << 20; // 8 MiB
+
 pub fn ingest_from_reader(
     engine: &MemoryEngine,
     reader: impl Read,
@@ -186,24 +193,42 @@ pub fn ingest_from_reader(
     format: OutputFormat,
 ) -> anyhow::Result<IngestSummary> {
     let start = Instant::now();
-    let buf = BufReader::new(reader);
+    let mut buf = BufReader::new(reader);
 
     let mut total_ingested: usize = 0;
     let mut total_skipped: usize = 0;
     let mut failed_batches: usize = 0;
     let mut batch: Vec<AddFactRequest> = Vec::with_capacity(batch_size);
     let mut line_no: usize = 0;
+    let mut line = String::new();
 
-    for line_result in buf.lines() {
-        line_no += 1;
-        let line = match line_result {
-            Ok(l) => l,
+    loop {
+        line.clear();
+        // Cap each line read so a single oversized or unterminated record cannot
+        // force an unbounded `String` allocation (CWE-400/770/789). Reading
+        // `MAX_LINE_BYTES + 1` lets us detect a line that ran past the cap.
+        let n = match (&mut buf).take(MAX_LINE_BYTES + 1).read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
             Err(e) => {
+                line_no += 1;
                 eprintln!("warning: line {line_no}: read error: {e}");
                 total_skipped += 1;
                 continue;
             }
         };
+        line_no += 1;
+
+        if n as u64 > MAX_LINE_BYTES {
+            eprintln!("warning: line {line_no}: exceeds {MAX_LINE_BYTES} bytes, skipping");
+            total_skipped += 1;
+            // Resync to the next record without buffering the rest of the line.
+            if let Err(e) = buf.skip_until(b'\n') {
+                eprintln!("warning: line {line_no}: read error while skipping: {e}");
+                break;
+            }
+            continue;
+        }
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -646,5 +671,48 @@ not valid json
         let s = summary.unwrap();
         assert_eq!(s.total_ingested, 0);
         assert_eq!(s.total_skipped, 0);
+    }
+
+    // --- per-line size cap (#408) + flush/error-path coverage (#431, #432) ---
+
+    struct CapEmbed;
+    impl EmbeddingProvider for CapEmbed {
+        fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
+            Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
+        fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+            memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
+        }
+    }
+
+    #[test]
+    fn skips_oversized_line_then_resumes() {
+        // A single record larger than the per-line cap must be dropped at the read
+        // boundary and ingestion must resync to the next record. Without the cap the
+        // giant line is read whole and handed to the engine, whose content-size
+        // limit rejects it; sharing a batch with the valid record, that failure
+        // poisons the whole batch and the call bails (verified RED: "no facts
+        // ingested"). With the cap the oversized line never reaches the engine, so
+        // the valid record ingests cleanly.
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let huge = "x".repeat(9 * 1024 * 1024); // > MAX_LINE_BYTES (8 MiB)
+        let input = format!(
+            "{{\"content\":\"{huge}\",\"fact_type\":\"semantic\"}}\n\
+             {{\"content\":\"ok\",\"fact_type\":\"semantic\"}}\n"
+        );
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            &CapEmbed,
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(summary.total_ingested, 1, "only the normal record ingests");
+        assert!(
+            summary.total_skipped >= 1,
+            "the oversized line must be skipped"
+        );
     }
 }
