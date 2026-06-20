@@ -7,7 +7,7 @@ use crate::store::events::EventStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
-use crate::types::{AddFactOptions, AddFactRequest, Fact, NewEvent, NewFact};
+use crate::types::{AddFactOptions, AddFactRequest, EmbeddingFingerprint, Fact, NewEvent, NewFact};
 
 #[cfg(feature = "ann")]
 use crate::search::strategy::VectorSearchStrategy;
@@ -91,31 +91,30 @@ impl MemoryEngine {
     /// Add a fact with a caller-supplied **pre-computed** embedding.
     ///
     /// Unlike [`add_fact`](Self::add_fact), this performs no embedding (the vector is
-    /// given) and does **not** record a model identity: a pre-computed vector carries no
-    /// real provider fingerprint (declaring its model is #615). Instead it requires the
-    /// store to **already** have a recorded identity
-    /// ([`require_present`](crate::store::embedding_meta::require_present)) and inserts
-    /// the dim-checked vector into that established space. On a fresh, never-embedded
-    /// store this errors — a pre-computed write cannot establish identity.
-    ///
-    /// This mirrors the `promote` and cycle `AddFact`/`Synthesize` pre-computed paths
-    /// (#613) and is the path the MCP `memory_add_fact` precomputed branch uses, so #614
-    /// enforcement does not compare the caller's vector against a sentinel fingerprint.
+    /// given) — the caller supplies the **declared** identity of the model that produced
+    /// it (#615, §Design.3). That declared fingerprint is treated exactly like a live
+    /// provider's: [`record_if_absent`](crate::store::embedding_meta::record_if_absent)
+    /// records it on a fresh store (so a precomputed-only workflow can bootstrap an
+    /// identity) and compares it (full-tuple `Eq`) against the stored identity on a
+    /// populated one, hard-rejecting a mismatch. This closes the same-dim foreign-vector
+    /// hole the old `PassthroughEmbedder` sentinel left open — the caller can no longer
+    /// slip a vector from a different model into the store's vector space unchecked.
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Internal` if the store has no recorded embedding identity,
-    /// `MemoryError::EmbeddingDimension` if the vector length is wrong, or any write
-    /// error.
+    /// Returns [`MemoryError::EmbeddingModelMismatch`] if `declared` disagrees with the
+    /// store's recorded identity, `MemoryError::EmbeddingDimension` if `declared.dim`
+    /// (the vector length) differs from the engine dimension, or any write error.
     pub fn add_fact_precomputed(
         &self,
         req: &AddFactRequest,
         embedding: Vec<f32>,
+        declared: &EmbeddingFingerprint,
         classifier: Option<&dyn PersistenceClassifier>,
     ) -> Result<i64> {
         Self::validate_add_fact_request(req)?;
         self.insert_fact_with_embedding(req, embedding, classifier, |conn| {
-            crate::store::embedding_meta::require_present(conn)
+            crate::store::embedding_meta::record_if_absent(conn, declared, self.embed_dim).map(drop)
         })
     }
 
@@ -135,9 +134,10 @@ impl MemoryEngine {
     /// [`add_fact_precomputed`](Self::add_fact_precomputed): classify, resolve scope, and
     /// insert the fact with its (already-obtained) `embedding` in a single write
     /// transaction. `stamp_identity` runs inside that transaction *before* the insert —
-    /// either recording the provider identity (`add_fact`) or asserting one already
-    /// exists (`add_fact_precomputed`) — so a vector is never committed without an
-    /// established identity (the #614 silent-corruption landmine).
+    /// recording-or-comparing the identity (from the live provider in `add_fact`, or the
+    /// caller's declared fingerprint in `add_fact_precomputed`) — so a vector is never
+    /// committed without an established, matching identity (the #614 silent-corruption
+    /// landmine).
     // The `conn` write lock is held until the block's end: `tx` borrows it and must
     // commit before it drops, so clippy's nursery suggestion to drop `conn` right after
     // `unchecked_transaction()` misses that transitive borrow and would not compile.

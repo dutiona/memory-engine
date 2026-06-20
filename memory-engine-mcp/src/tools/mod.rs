@@ -13,7 +13,7 @@ use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
 };
 use memory_engine::types::{
-    AddFactOptions, AddFactRequest, EventType, FactType, NewEvent, Outcome,
+    AddFactOptions, AddFactRequest, EmbeddingFingerprint, EventType, FactType, NewEvent, Outcome,
 };
 use memory_engine::{CycleOutcome, CycleReport, DefaultDreamCycle, INSIGHT_MARKER_KEY};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
@@ -66,7 +66,11 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                     "t_valid": { "type": "string", "format": "date-time", "description": "Real-world validity start (future = scheduled memory)" },
                     "t_invalid": { "type": "string", "format": "date-time", "description": "Real-world validity end" },
                     "pinned": { "type": "boolean", "description": "Make this fact unforgettable" },
-                    "embedding": { "type": "array", "items": { "type": "number" }, "description": "Pre-computed embedding (bypasses server-side embedding)" }
+                    "embedding": { "type": "array", "items": { "type": "number" }, "description": "Pre-computed embedding (bypasses server-side embedding). Requires model + provider to declare its identity." },
+                    "model": { "type": "string", "description": "Required with `embedding`: model slug that produced the vector (e.g. \"Qwen/Qwen3-Embedding-0.6B\"). Recorded on a fresh store; checked against the store identity otherwise." },
+                    "provider": { "type": "string", "description": "Required with `embedding`: serving backend (e.g. \"tei\", \"ollama\")." },
+                    "matryoshka_base_dim": { "type": "integer", "description": "Optional with `embedding`: native model dimension before MRL truncation. Omit if not truncated." },
+                    "element_type": { "type": "string", "description": "Optional with `embedding`: vector element type (default \"float32\")." }
                 },
                 "required": ["content"]
             }),
@@ -78,7 +82,11 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "Search query text" },
-                    "embedding": { "type": "array", "items": { "type": "number" }, "description": "Pre-computed query embedding" },
+                    "embedding": { "type": "array", "items": { "type": "number" }, "description": "Pre-computed query embedding. Requires model + provider to declare its identity (verified against the store)." },
+                    "model": { "type": "string", "description": "Required with `embedding`: model slug that produced the query vector. Checked against the store identity; mismatch is rejected." },
+                    "provider": { "type": "string", "description": "Required with `embedding`: serving backend (e.g. \"tei\", \"ollama\")." },
+                    "matryoshka_base_dim": { "type": "integer", "description": "Optional with `embedding`: native model dimension before MRL truncation." },
+                    "element_type": { "type": "string", "description": "Optional with `embedding`: vector element type (default \"float32\")." },
                     "mode": { "type": "string", "enum": ["fts", "vector", "hybrid"], "default": "hybrid", "description": "Search mode" },
                     "scope": { "type": "string" },
                     "scope_mode": { "type": "string", "enum": ["exact", "subtree", "ancestors", "inherited"], "default": "subtree" },
@@ -524,6 +532,67 @@ fn parse_embedding(args: &Map<String, Value>) -> Result<Option<Vec<f32>>, ErrorD
     }
 }
 
+/// Parse the caller-declared embedding identity that MUST accompany a pre-computed
+/// `embedding` (#615, §Design.3).
+///
+/// `model` and `provider` are **required** (the identity-critical pair); `dim` is the
+/// vector length the caller submitted; `matryoshka_base_dim` and `element_type` are
+/// optional, defaulting to no-truncation / `"float32"`. The declared tuple is compared
+/// (full `Eq`) against the store's recorded identity by the engine, closing the
+/// same-dimension foreign-vector hole — a vector from a different model can no longer be
+/// slipped into the store's vector space unchecked.
+fn parse_declared_fingerprint(
+    args: &Map<String, Value>,
+    dim: usize,
+) -> Result<EmbeddingFingerprint, ErrorData> {
+    let model = get_str(args, "model").ok_or_else(|| {
+        ErrorData::invalid_params(
+            "a pre-computed `embedding` requires a declared `model` (the model that produced it)",
+            None,
+        )
+    })?;
+    let provider = get_str(args, "provider").ok_or_else(|| {
+        ErrorData::invalid_params(
+            "a pre-computed `embedding` requires a declared `provider` (e.g. \"tei\", \"ollama\")",
+            None,
+        )
+    })?;
+    let matryoshka_base_dim = match args.get("matryoshka_base_dim") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        "matryoshka_base_dim must be a non-negative integer",
+                        None,
+                    )
+                })?,
+        ),
+    };
+    // A present-but-non-string `element_type` is rejected, not silently ignored — a
+    // malformed value must not fall back to the "float32" default and slip past the
+    // full-tuple identity check (consistent with matryoshka_base_dim's rejection).
+    let element_type = match args.get("element_type") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return Err(ErrorData::invalid_params(
+                "element_type must be a string (e.g. \"float32\")",
+                None,
+            ));
+        }
+    };
+    let mut fp = match matryoshka_base_dim {
+        Some(base) => EmbeddingFingerprint::with_matryoshka(model, provider, dim, base),
+        None => EmbeddingFingerprint::new(model, provider, dim),
+    };
+    if let Some(element_type) = element_type {
+        fp.element_type = element_type;
+    }
+    Ok(fp)
+}
+
 fn parse_search_mode(s: &str) -> Result<SearchMode, ErrorData> {
     match s {
         "fts" => Ok(SearchMode::Fts),
@@ -681,13 +750,13 @@ fn handle_add_fact(
     };
 
     let fact_id = if let Some(emb) = pre_computed {
-        // Pre-computed vector: insert into the store's already-established embedding
-        // space without recording a model identity (the caller's vector carries no real
-        // fingerprint until #615 lets it declare a model). add_fact_precomputed requires
-        // the store to already have an identity, so #614 enforcement does not compare the
-        // caller's vector against the passthrough sentinel.
+        // Pre-computed vector: the caller declares the model that produced it (#615,
+        // §Design.3). record_if_absent records that declared identity on a fresh store or
+        // compares it (full tuple) against the stored one, rejecting a foreign vector —
+        // closing the same-dim hole the old passthrough sentinel left open.
+        let declared = parse_declared_fingerprint(args, emb.len())?;
         engine
-            .add_fact_precomputed(&req, emb, None)
+            .add_fact_precomputed(&req, emb, &declared, None)
             .map_err(to_mcp_error)?
     } else {
         let emb = embedder.ok_or(ValidationError::NoEmbeddingProvider)?;
@@ -714,6 +783,17 @@ fn handle_query(
 
     // Parse embedding (with proper error on malformed input)
     let pre_emb = parse_embedding(args)?;
+
+    // §Design.3 (#615): a pre-computed query embedding must declare the model that
+    // produced it; verify that declaration against the store's identity before using the
+    // vector, so a foreign-vector-space query can't silently mis-retrieve. Covers both
+    // use sites below (with-text hybrid/vector, and embedding-only).
+    if let Some(ref emb) = pre_emb {
+        let declared = parse_declared_fingerprint(args, emb.len())?;
+        engine
+            .verify_embedding_fingerprint(&declared)
+            .map_err(to_mcp_error)?;
+    }
 
     if let Some(text) = get_str(args, "text") {
         query = query.text(text.clone());

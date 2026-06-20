@@ -16,7 +16,7 @@ use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, Reranker};
-use crate::types::{ConsolidationLevel, Fact};
+use crate::types::{ConsolidationLevel, EmbeddingFingerprint, Fact};
 
 mod activity;
 pub(crate) mod activity_filter;
@@ -463,14 +463,33 @@ impl MemoryEngine {
     /// from this engine's, or [`MemoryError::EmbeddingModelMismatch`] if its fingerprint
     /// disagrees with the store's recorded identity.
     pub fn verify_embedding_identity(&self, provider: &dyn EmbeddingProvider) -> Result<()> {
-        let candidate = provider.fingerprint();
+        self.verify_embedding_fingerprint(&provider.fingerprint())
+    }
+
+    /// Verify a **declared** embedding fingerprint is compatible with the store's
+    /// recorded identity, without writing (#615, §Design.3).
+    ///
+    /// This is the read-only check behind a pre-computed `memory_query` submission: the
+    /// caller declares the identity of the model that produced the query vector, and we
+    /// reject it if it disagrees with the store's space — otherwise the query would
+    /// silently retrieve against a foreign vector space. Same semantics as
+    /// [`verify_embedding_identity`](Self::verify_embedding_identity), but for a caller
+    /// declaration rather than a live provider. A fresh store (no identity) accepts any
+    /// same-dimension fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`] if `candidate.dim` differs from this
+    /// engine's dimension, or [`MemoryError::EmbeddingModelMismatch`] if it disagrees
+    /// with the store's recorded identity.
+    pub fn verify_embedding_fingerprint(&self, candidate: &EmbeddingFingerprint) -> Result<()> {
         if candidate.dim != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
                 expected: self.embed_dim,
                 actual: candidate.dim,
             });
         }
-        self.with_read(|conn| crate::store::embedding_meta::check_compatible(conn, &candidate))
+        self.with_read(|conn| crate::store::embedding_meta::check_compatible(conn, candidate))
     }
 
     /// Whether this engine was opened in read-only mode.
