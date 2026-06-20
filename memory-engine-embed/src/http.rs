@@ -464,6 +464,37 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         self.maybe_truncate(embedding)
     }
 
+    /// Embed multiple texts in a single HTTP POST to the configured endpoint.
+    ///
+    /// Overrides the trait default (which loops [`embed`](Self::embed)) to make
+    /// **one round-trip** for the whole batch — materially cheaper for providers
+    /// with native batch APIs. An empty slice short-circuits to `Ok(vec![])`
+    /// without any HTTP call.
+    ///
+    /// Supports the `OpenAI` batch format (`data[]` with `index` fields, so
+    /// out-of-order responses are reordered by index) and the Ollama batch format
+    /// (`embeddings[]`). The Direct single-embedding format (`embedding`) is
+    /// accepted only when exactly one text was requested. As with
+    /// [`embed`](Self::embed), MRL truncation (if configured) is applied to each
+    /// returned vector after native-dimension validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`] if:
+    /// - the HTTP request cannot be sent;
+    /// - the server returns a non-2xx status (status and capped body included);
+    /// - the response body exceeds the 32 MiB size cap;
+    /// - the body is not valid JSON, or matches no recognised batch format;
+    /// - the server returns a different number of embeddings than `texts.len()`,
+    ///   or a `Direct` single embedding when more than one text was requested;
+    /// - an `OpenAI` `data` item is missing/duplicates an `index`, leaves a gap,
+    ///   or carries an unparseable `embedding`;
+    /// - any returned vector contains `NaN` or infinite values;
+    /// - MRL truncation is configured and a truncated prefix has a zero or
+    ///   non-finite L2 norm.
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`] if any (pre-truncation) vector
+    /// length does not match the native `expected_dim` supplied at construction.
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
         if texts.is_empty() {
             return Ok(Vec::new());
