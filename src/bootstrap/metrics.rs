@@ -9,6 +9,13 @@ pub struct BootstrapConfig {
     /// `None` falls back to the root scope.
     pub scope: Option<String>,
     /// Maximum turns to process per session. `0` = no limit.
+    ///
+    /// When the session exceeds this limit the **most-recent** turns are kept
+    /// (tail selection), because outcome evidence — commits, test results —
+    /// concentrates at the end of sessions. Outcome classification always runs
+    /// on the full turn list *before* truncation, so capping does not change the
+    /// session outcome; it only bounds how many turns reach the keyword
+    /// pre-filter and fact extraction.
     pub max_turns: usize,
     /// Skip sessions already bootstrapped (idempotency via `session_id` check).
     pub skip_existing: bool,
