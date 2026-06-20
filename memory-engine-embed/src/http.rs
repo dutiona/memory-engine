@@ -376,7 +376,7 @@ impl HttpEmbeddingProvider {
             let status = resp.status();
             let body = read_body_capped(resp).map_or_else(
                 |_| String::new(),
-                |b| String::from_utf8_lossy(&b).into_owned(),
+                |b| truncate_on_char_boundary(&String::from_utf8_lossy(&b), 1000),
             );
             return Err(MemoryError::Internal(format!(
                 "embedding endpoint returned {status}: {body}"
