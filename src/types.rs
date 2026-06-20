@@ -960,9 +960,10 @@ impl EmbeddingFingerprint {
 // live inside the SQLite store). `pub use` shims in `store::facts` /
 // `store::events` preserve the original paths.
 
-/// Lightweight importance-scoring projection of a fact — only the scalar fields
-/// the forgetting policy needs, so a full active-set scan never deserializes
-/// embeddings. See `FactGraph::list_active_facts_scoring`.
+/// Lightweight importance-scoring projection of a fact.
+///
+/// Only the scalar fields the forgetting policy needs, so a full active-set scan
+/// never deserializes embeddings. See `FactGraph::list_active_facts_scoring`.
 #[derive(Debug, Clone)]
 pub struct FactScoringRow {
     pub id: i64,

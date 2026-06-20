@@ -43,7 +43,7 @@ impl FactFilter {
 
     /// Restrict to a single fact type.
     #[must_use]
-    pub fn fact_type(mut self, ft: FactType) -> Self {
+    pub const fn fact_type(mut self, ft: FactType) -> Self {
         self.fact_type = Some(ft);
         self
     }
@@ -64,14 +64,14 @@ impl FactFilter {
 
     /// Set the bi-temporal visibility constraint.
     #[must_use]
-    pub fn temporal(mut self, t: TemporalFilter) -> Self {
+    pub const fn temporal(mut self, t: TemporalFilter) -> Self {
         self.temporal = t;
         self
     }
 
     /// Restrict by pinned status.
     #[must_use]
-    pub fn pinned(mut self, p: bool) -> Self {
+    pub const fn pinned(mut self, p: bool) -> Self {
         self.pinned = Some(p);
         self
     }
@@ -107,6 +107,10 @@ pub enum TemporalFilter {
 
 /// A single metadata predicate for [`FactFilter`] — a **closed** set matching
 /// exactly the JSON1 shapes the store uses today (YAGNI on a general language).
+// `Eq` is intentionally NOT derived: `KeyEquals` carries a `serde_json::Value`,
+// which is not `Eq` (it holds `f64`). clippy's `derive_partial_eq_without_eq`
+// false-positives here — deriving `Eq` would not compile.
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataPredicate {
     /// Key absent: `json_type(metadata, '$.k') IS NULL` (the dream-cycle "not yet

@@ -20,6 +20,7 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::storage::FactFilter;
+use crate::types::FactType;
 
 /// Lexical + vector retrieval, returning ranked `(fact_id, score)` pairs.
 ///
@@ -36,6 +37,11 @@ pub trait SearchIndex: Send + Sync {
         k: usize,
     ) -> Result<Vec<(i64, f64)>>;
     /// Vector retrieval — up to `k` `(fact_id, score)` pairs, nearest-first.
+    ///
+    /// `embedding` must have the backend's configured dimension; a slice of the
+    /// wrong length (including empty) is a
+    /// [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension),
+    /// not an empty result.
     async fn vector_search(
         &self,
         embedding: &[f32],
@@ -44,7 +50,16 @@ pub trait SearchIndex: Send + Sync {
     ) -> Result<Vec<(i64, f64)>>;
     /// Count facts matching the lexical query that are **expired**
     /// (`t_expired IS NOT NULL`) — the `diagnostics.expired_matches` probe
-    /// (transcribes `fts_count_expired`). `filter` supplies `fact_type`/`scope_ids`;
-    /// the expired predicate is baked in (`filter.temporal` is ignored).
-    async fn lexical_count_expired(&self, query: &str, filter: &FactFilter) -> Result<usize>;
+    /// (transcribes `fts_count_expired`).
+    ///
+    /// Takes only the parameters it honors (`fact_type` + `scope_ids`); the
+    /// expired temporal predicate is intrinsic to this probe, so — unlike the
+    /// search methods — it deliberately does **not** accept a [`FactFilter`] (whose
+    /// `temporal`/`ids`/`pinned`/`metadata` would be silently meaningless here).
+    async fn lexical_count_expired(
+        &self,
+        query: &str,
+        fact_type: Option<&FactType>,
+        scope_ids: Option<&[i64]>,
+    ) -> Result<usize>;
 }

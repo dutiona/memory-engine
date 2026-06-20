@@ -1,6 +1,8 @@
-//! Dialect-free backend capability signals — how "is lexical retrieval degraded?"
-//! surfaces to the engine and the retrieval-quality benchmark **without** leaking
-//! whether the backend uses `bm25()` vs `ts_rank_cd`.
+//! Dialect-free backend capability signals.
+//!
+//! How "is lexical retrieval degraded?" surfaces to the engine and the
+//! retrieval-quality benchmark **without** leaking whether the backend uses
+//! `bm25()` vs `ts_rank_cd`.
 
 /// Which lexical ranking algorithm a backend's `SearchIndex` uses — the
 /// dialect-free signal behind the BM25-vs-`ts_rank` tier.

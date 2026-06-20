@@ -155,6 +155,8 @@ mod tests {
         fn _accepts_insight_stream(_: &dyn crate::InsightStream) {}
         fn _accepts_dream_cycle(_: &dyn crate::DreamCycle) {}
         fn _accepts_delta_proposer(_: &dyn crate::DeltaProposer) {}
+        // storage port umbrella (bounded traits stay at `crate::storage::*`)
+        fn _accepts_storage_backend(_: &dyn crate::StorageBackend) {}
 
         // trait types
         let _ = std::mem::size_of::<crate::CrudDecision>();
@@ -172,9 +174,8 @@ mod tests {
         let _ = std::mem::size_of::<crate::EngineConfig>();
         let _ = std::mem::size_of::<crate::MemoryEngine>();
 
-        // storage port (the umbrella + cross-cutting types are flat-re-exported;
-        // the six bounded traits stay reachable as `crate::storage::FactGraph`).
-        fn _accepts_storage_backend(_: &dyn crate::StorageBackend) {}
+        // storage port cross-cutting types (flat-re-exported; the six bounded
+        // traits stay reachable as `crate::storage::FactGraph`, asserted above).
         let _ = std::mem::size_of::<crate::FactFilter>();
         let _ = std::mem::size_of::<crate::TemporalFilter>();
         let _ = std::mem::size_of::<crate::MetadataPredicate>();
