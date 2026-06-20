@@ -228,36 +228,31 @@ pub fn ingest_from_reader(
         batch.push(jsonl_to_request(fact, default_scope));
 
         if batch.len() >= batch_size {
-            let chunk_size = batch.len();
-            match engine.add_facts_batch(&batch, embedder, None) {
-                Ok(ids) => {
-                    total_ingested += ids.len();
-                    eprint_progress(total_ingested, total_skipped, &start, format);
-                }
-                Err(e) => {
-                    eprintln!("warning: batch at line {line_no}: {e}");
-                    total_skipped += chunk_size;
-                    failed_batches += 1;
-                }
+            let flushed = flush_batch(
+                engine,
+                &mut batch,
+                embedder,
+                &format!("batch at line {line_no}"),
+                &mut total_ingested,
+                &mut total_skipped,
+                &mut failed_batches,
+            );
+            if flushed {
+                eprint_progress(total_ingested, total_skipped, &start, format);
             }
-            batch.clear();
         }
     }
 
-    // Flush remaining partial batch
-    if !batch.is_empty() {
-        let chunk_size = batch.len();
-        match engine.add_facts_batch(&batch, embedder, None) {
-            Ok(ids) => {
-                total_ingested += ids.len();
-            }
-            Err(e) => {
-                eprintln!("warning: final batch: {e}");
-                total_skipped += chunk_size;
-                failed_batches += 1;
-            }
-        }
-    }
+    // Flush remaining partial batch (no-op if empty).
+    flush_batch(
+        engine,
+        &mut batch,
+        embedder,
+        "final batch",
+        &mut total_ingested,
+        &mut total_skipped,
+        &mut failed_batches,
+    );
 
     let summary = IngestSummary {
         total_ingested,
@@ -282,6 +277,41 @@ fn eprint_progress(ingested: usize, skipped: usize, start: &Instant, format: Out
     }
     let elapsed = start.elapsed().as_secs_f64();
     eprint!("\r  ingested: {ingested}  skipped: {skipped}  elapsed: {elapsed:.1}s");
+}
+
+/// Flush the accumulated `batch` to the engine, updating the running counters in
+/// place, and clear it. Returns `true` when the batch was ingested, `false` when
+/// the engine rejected it (the batch is counted as skipped + one failed batch).
+///
+/// `context` is the location phrase used in the failure warning, e.g.
+/// `"batch at line 42"` or `"final batch"`. An empty batch is a no-op.
+fn flush_batch(
+    engine: &MemoryEngine,
+    batch: &mut Vec<AddFactRequest>,
+    embedder: &dyn EmbeddingProvider,
+    context: &str,
+    total_ingested: &mut usize,
+    total_skipped: &mut usize,
+    failed_batches: &mut usize,
+) -> bool {
+    if batch.is_empty() {
+        return true;
+    }
+    let chunk_size = batch.len();
+    let ingested = match engine.add_facts_batch(batch.as_slice(), embedder, None) {
+        Ok(ids) => {
+            *total_ingested += ids.len();
+            true
+        }
+        Err(e) => {
+            eprintln!("warning: {context}: {e}");
+            *total_skipped += chunk_size;
+            *failed_batches += 1;
+            false
+        }
+    };
+    batch.clear();
+    ingested
 }
 
 // ---------------------------------------------------------------------------
