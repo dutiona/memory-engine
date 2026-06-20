@@ -38,7 +38,9 @@ use crate::error::{MemoryError, Result, StorageError};
 use crate::pool::ConnectionPool;
 use crate::store::upcaster::UpcasterRegistry;
 
+mod convert;
 mod event_log;
+mod search_index;
 
 /// The default, in-process `SQLite` implementation of [`StorageBackend`](crate::storage::StorageBackend).
 ///
@@ -48,7 +50,6 @@ mod event_log;
 /// pool so the two can never diverge.
 pub struct SqliteBackend {
     pool: Arc<ConnectionPool>,
-    #[allow(dead_code, reason = "read by the FactGraph/SearchIndex impls (T2/T3)")]
     embed_dim: usize,
     upcaster_registry: Arc<UpcasterRegistry>,
 }
