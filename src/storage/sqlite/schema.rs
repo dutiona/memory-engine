@@ -221,16 +221,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_if_absent_stored_wins() {
+    async fn record_if_absent_returns_stored_when_candidate_matches() {
+        let be = backend();
+        let fp = EmbeddingFingerprint::new("model-a", "tei", DIM);
+        be.store_embedding_fingerprint(&fp).await.unwrap();
+        // A matching candidate is idempotent: the stored identity is returned.
+        let returned = be
+            .record_embedding_fingerprint_if_absent(&fp, DIM)
+            .await
+            .unwrap();
+        assert_eq!(returned, fp);
+    }
+
+    #[tokio::test]
+    async fn record_if_absent_rejects_model_mismatch() {
+        // #614: a candidate that differs from the stored identity is rejected, not
+        // silently ignored. The seam preserves the semantic variant (not opacified
+        // to Storage(Backend), since it is not a raw driver error).
         let be = backend();
         let fp_a = EmbeddingFingerprint::new("model-a", "tei", DIM);
         let fp_b = EmbeddingFingerprint::new("model-b", "tei", DIM);
         be.store_embedding_fingerprint(&fp_a).await.unwrap();
-        // Candidate fp_b is ignored; stored fp_a wins.
-        let returned = be
+        let err = be
             .record_embedding_fingerprint_if_absent(&fp_b, DIM)
             .await
-            .unwrap();
-        assert_eq!(returned, fp_a);
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "got {err:?}"
+        );
     }
 }
