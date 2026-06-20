@@ -257,4 +257,16 @@ mod tests {
         let dim = peek_embed_dim_from_reader(snapshot.as_bytes()).unwrap();
         assert_eq!(dim, 4);
     }
+
+    proptest::proptest! {
+        /// Fuzz the snapshot-header peek (#433): arbitrary attacker-controlled
+        /// bytes must never panic or hang — only ever Ok(dim) or a parse Err,
+        /// bounded by the MAX_HEADER_BYTES cap.
+        #[test]
+        fn peek_embed_dim_never_panics(
+            data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096)
+        ) {
+            let _ = peek_embed_dim_from_reader(data.as_slice());
+        }
+    }
 }

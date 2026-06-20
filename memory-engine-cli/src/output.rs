@@ -108,4 +108,19 @@ mod tests {
         assert!(parse_datetime("not-a-date").is_err());
         assert!(parse_datetime("2026-13-01T00:00:00Z").is_err());
     }
+
+    proptest::proptest! {
+        /// Property: for any string and bound, `truncate_str` never panics and
+        /// never returns more than `max_chars` characters (the documented
+        /// contract, including the `max_chars < 3` boundary).
+        #[test]
+        fn truncate_str_respects_max_chars(s in ".{0,400}", max in 0usize..64) {
+            let out = truncate_str(&s, max);
+            proptest::prop_assert!(
+                out.chars().count() <= max,
+                "got {} chars for max {max}",
+                out.chars().count()
+            );
+        }
+    }
 }

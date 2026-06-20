@@ -846,4 +846,17 @@ not valid json
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("no facts ingested"), "got: {msg}");
     }
+
+    #[test]
+    fn ingest_from_reader_never_panics() {
+        // Fuzz the JSONL ingest path (#433): arbitrary attacker-controlled bytes
+        // (the --file trust boundary) must never panic or hang — only ever
+        // Ok(summary) or an Err (e.g. the all-bad-lines bail). The engine is built
+        // once and reused across cases; ingest_from_reader only appends, so cases
+        // don't interfere.
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        proptest::proptest!(|(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096))| {
+            let _ = ingest_from_reader(&engine, data.as_slice(), &CapEmbed, 8, None, OutputFormat::Json);
+        });
+    }
 }
