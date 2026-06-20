@@ -82,13 +82,16 @@ jobs:
           fi
           echo "version=$msrv" >> "$GITHUB_OUTPUT"
           echo "Declared MSRV: $msrv"
-      - uses: dtolnay/rust-toolchain@master
+      # @v1 is the action's stable release tag (pinned, not the moving @master);
+      # the dynamic `toolchain:` input is what selects the version to install.
+      - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
-      # Build the whole workspace on exactly the declared MSRV (default and
-      # all-features) so a dependency bump that raises the effective MSRV fails here.
+      # Compile the whole workspace on exactly the declared MSRV — including tests
+      # and examples (so a dev-dep or test-only feature that needs a newer Rust is
+      # caught, not just library code) — for both default and all-features configs.
       - name: cargo build (MSRV, default features)
-        run: cargo build --workspace
+        run: cargo build --workspace --tests --examples
       - name: cargo build (MSRV, all features)
-        run: cargo build --workspace --all-features
+        run: cargo build --workspace --all-features --tests --examples
