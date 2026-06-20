@@ -14,7 +14,7 @@ use crate::types::FactType;
 /// # Pattern normalization invariant
 ///
 /// `ignore_patterns` and `promote_patterns` are stored **already lowercased**.
-/// Matching is case-insensitive substring, and [`apply_filter`] is called once
+/// Matching is case-insensitive substring, and `apply_filter` is called once
 /// per tool-activity event (a hot path); normalizing at construction means the
 /// per-call comparison never has to allocate a lowercased copy of each pattern.
 /// The fields are private to keep that invariant unbreakable — build via
@@ -51,7 +51,7 @@ impl ActivityFilterConfig {
     /// Construct a config, normalizing all patterns to lowercase up front.
     ///
     /// This is the only way to populate the pattern lists, so the
-    /// "patterns are lowercase" invariant always holds — [`apply_filter`] can
+    /// "patterns are lowercase" invariant always holds — `apply_filter` can
     /// then substring-match without allocating per call.
     #[must_use]
     pub fn new(
