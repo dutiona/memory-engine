@@ -203,6 +203,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "dedup_threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Cosine similarity threshold for deduplication (default: 0.92)" },
+                    "cluster_threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Cosine similarity threshold for clustering related facts; looser than dedup (default: 0.85)" },
                     "min_cluster_size": { "type": "integer", "minimum": 2, "description": "Minimum facts to form a cluster (default: 3)" }
                 }
             }),
@@ -1105,6 +1106,53 @@ fn handle_flush_insights(
 // P1 tool handlers
 // ---------------------------------------------------------------------------
 
+/// Parse + validate the `memory_consolidate` tuning args into a [`ConsolidationConfig`].
+///
+/// Extracted from the handler so the range checks (thresholds in `[0,1]`, cluster
+/// size floor) are unit-testable directly: the handler short-circuits on a missing
+/// provider *before* it would run, so an integration test with no providers can
+/// never reach this validation (#344 review).
+fn parse_consolidate_config(args: &Map<String, Value>) -> Result<ConsolidationConfig, ErrorData> {
+    // `require_f64_if_present` rejects a present-but-wrong-type value (e.g.
+    // `"0.95"`) instead of silently falling back to the default — `get_f64` would
+    // return None on a type mismatch and hide the bad input. f64→f32 narrowing is
+    // intentional: thresholds are similarity scores in [0,1], within f32's range.
+    #[allow(clippy::cast_possible_truncation)]
+    let dedup_threshold = require_f64_if_present(args, "dedup_threshold")?.unwrap_or(0.92) as f32;
+    if !(0.0..=1.0).contains(&dedup_threshold) {
+        return Err(ErrorData::invalid_params(
+            format!("dedup_threshold must be in [0.0, 1.0], got {dedup_threshold}"),
+            None,
+        ));
+    }
+
+    // Clustering threshold is configurable symmetrically with dedup (#344); looser
+    // than dedup by default.
+    #[allow(clippy::cast_possible_truncation)]
+    let cluster_threshold =
+        require_f64_if_present(args, "cluster_threshold")?.unwrap_or(0.85) as f32;
+    if !(0.0..=1.0).contains(&cluster_threshold) {
+        return Err(ErrorData::invalid_params(
+            format!("cluster_threshold must be in [0.0, 1.0], got {cluster_threshold}"),
+            None,
+        ));
+    }
+
+    let min_cluster_size = get_usize(args, "min_cluster_size").unwrap_or(3);
+    if min_cluster_size < 2 {
+        return Err(ErrorData::invalid_params(
+            format!("min_cluster_size must be >= 2, got {min_cluster_size}"),
+            None,
+        ));
+    }
+
+    Ok(ConsolidationConfig::builder()
+        .dedup_threshold(dedup_threshold)
+        .cluster_threshold(cluster_threshold)
+        .min_cluster_size(min_cluster_size)
+        .build())
+}
+
 fn handle_consolidate(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
@@ -1116,29 +1164,7 @@ fn handle_consolidate(
     // SummaryGenerator, so consolidation now requires an embedder too.
     let embedder = embedder.ok_or(ValidationError::NoEmbeddingProvider)?;
 
-    // f64→f32 narrowing is intentional: dedup_threshold is a similarity score in [0,1],
-    // well within f32's exact range; the loss of sub-microsecond precision is acceptable.
-    #[allow(clippy::cast_possible_truncation)]
-    let dedup_threshold = get_f64(args, "dedup_threshold").unwrap_or(0.92) as f32;
-    if !(0.0..=1.0).contains(&dedup_threshold) {
-        return Err(ValidationError::Other(format!(
-            "dedup_threshold must be in [0.0, 1.0], got {dedup_threshold}"
-        ))
-        .into());
-    }
-
-    let min_cluster_size = get_usize(args, "min_cluster_size").unwrap_or(3);
-    if min_cluster_size < 2 {
-        return Err(ValidationError::Other(format!(
-            "min_cluster_size must be >= 2, got {min_cluster_size}"
-        ))
-        .into());
-    }
-
-    let config = ConsolidationConfig {
-        dedup_threshold,
-        min_cluster_size,
-    };
+    let config = parse_consolidate_config(args)?;
 
     let stats = engine
         .consolidate(generator, embedder, &config)
@@ -1719,8 +1745,86 @@ fn handle_get_recent_insights(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_dump_name, default_dump_path};
+    use super::{default_dump_name, default_dump_path, parse_consolidate_config};
+    use serde_json::json;
     use std::collections::HashSet;
+
+    /// Build a `memory_consolidate` argument map from key/value pairs.
+    fn cfg_args(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_consolidate_config_rejects_out_of_range_dedup_threshold() {
+        let err =
+            parse_consolidate_config(&cfg_args(&[("dedup_threshold", json!(2.0))])).unwrap_err();
+        assert!(
+            err.message
+                .contains("dedup_threshold must be in [0.0, 1.0]"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_consolidate_config_rejects_out_of_range_cluster_threshold() {
+        // #344: this is the path the provider-less integration test could not reach.
+        let err =
+            parse_consolidate_config(&cfg_args(&[("cluster_threshold", json!(2.0))])).unwrap_err();
+        assert!(
+            err.message
+                .contains("cluster_threshold must be in [0.0, 1.0]"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_consolidate_config_rejects_tiny_min_cluster_size() {
+        let err =
+            parse_consolidate_config(&cfg_args(&[("min_cluster_size", json!(1))])).unwrap_err();
+        assert!(
+            err.message.contains("min_cluster_size must be >= 2"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_consolidate_config_rejects_wrong_type_threshold() {
+        // A present-but-wrong-type value must be REJECTED, not silently defaulted
+        // (gemini + codex review): `"0.95"` (string) is not a number.
+        let err = parse_consolidate_config(&cfg_args(&[("cluster_threshold", json!("0.95"))]))
+            .unwrap_err();
+        assert!(
+            err.message.contains("cluster_threshold must be a number"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_consolidate_config_applies_defaults_and_overrides() {
+        // Empty args → MCP-level defaults (dedup 0.92, cluster 0.85, min 3).
+        let cfg = parse_consolidate_config(&cfg_args(&[])).unwrap();
+        assert!((cfg.dedup_threshold - 0.92).abs() < f32::EPSILON);
+        assert!((cfg.cluster_threshold - 0.85).abs() < f32::EPSILON);
+        assert_eq!(cfg.min_cluster_size, 3);
+
+        // Provided values flow through to the config.
+        let cfg = parse_consolidate_config(&cfg_args(&[
+            ("dedup_threshold", json!(0.7)),
+            ("cluster_threshold", json!(0.6)),
+            ("min_cluster_size", json!(5)),
+        ]))
+        .unwrap();
+        assert!((cfg.dedup_threshold - 0.7).abs() < f32::EPSILON);
+        assert!((cfg.cluster_threshold - 0.6).abs() < f32::EPSILON);
+        assert_eq!(cfg.min_cluster_size, 5);
+    }
 
     /// Regression for #546: with a *frozen* timestamp and pid, the only thing
     /// that can keep default dump names distinct is the process-global atomic

@@ -197,10 +197,10 @@ fn bench_consolidation(c: &mut Criterion) {
                 |(engine, _dir)| {
                     let generator = ConcatSummaryGenerator;
                     let embedder = ConstEmbedder { dim: DIM };
-                    let config = ConsolidationConfig {
-                        dedup_threshold: 0.95,
-                        min_cluster_size: 3,
-                    };
+                    let config = ConsolidationConfig::builder()
+                        .dedup_threshold(0.95)
+                        .min_cluster_size(3)
+                        .build();
                     engine.consolidate(&generator, &embedder, &config).unwrap();
                 },
             );

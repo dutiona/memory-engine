@@ -153,8 +153,14 @@ fn consolidate_with_caps(
         DedupOutcome::Skipped { .. } => (0, Vec::new(), true),
     };
 
-    let clusters_created =
-        cluster_fusion(&tx, generator, embedder, embed_dim, config.min_cluster_size)?;
+    let clusters_created = cluster_fusion(
+        &tx,
+        generator,
+        embedder,
+        embed_dim,
+        config.min_cluster_size,
+        config.cluster_threshold,
+    )?;
     let global_summaries = global_integration(&tx, generator, embedder, embed_dim)?;
 
     // Record the embedding identity on first write (#613, ADR 0015 §2) — but only
@@ -313,6 +319,7 @@ mod tests {
         let bad = ConsolidationConfig {
             dedup_threshold: 0.90,
             min_cluster_size: 0,
+            ..Default::default()
         };
         let err = consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &bad).unwrap_err();
         assert!(

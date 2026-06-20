@@ -226,6 +226,11 @@ fn test_consolidate_validation() {
     );
     assert!(result.is_err());
 
+    // NOTE: cluster_threshold range validation (#344) is unit-tested directly in
+    // tools/mod.rs `parse_consolidate_config` tests — a provider-less dispatch here
+    // short-circuits on NoSummaryProvider before reaching threshold validation, so
+    // it cannot honestly exercise that path.
+
     // min_cluster_size too small
     let result = tools::dispatch(
         "memory_consolidate",

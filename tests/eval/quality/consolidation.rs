@@ -107,10 +107,10 @@ fn dedup_removes_exact_duplicates() {
     assert_eq!(stats_before.facts.active, 10);
 
     let generator = MockSummaryGenerator;
-    let config = ConsolidationConfig {
-        dedup_threshold: 0.92, // standard threshold; exact duplicates have cosine=1.0
-        min_cluster_size: 100, // disable clustering for this test
-    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.92) // standard threshold; exact duplicates have cosine=1.0
+        .min_cluster_size(100) // disable clustering for this test
+        .build();
 
     let stats = engine
         .consolidate(&generator, &TestEmbedder, &config)
@@ -150,10 +150,10 @@ fn cluster_fusion_creates_clusters() {
     insert_clusterable(&engine, 4, "project:rust");
 
     let generator = MockSummaryGenerator;
-    let config = ConsolidationConfig {
-        dedup_threshold: 0.95,
-        min_cluster_size: 2,
-    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.95)
+        .min_cluster_size(2)
+        .build();
 
     let stats = engine
         .consolidate(&generator, &ClusterableEmbedder, &config)
@@ -177,10 +177,10 @@ fn consolidation_is_idempotent() {
     let _ = insert_exact_duplicate_pairs(&engine);
 
     let generator = MockSummaryGenerator;
-    let config = ConsolidationConfig {
-        dedup_threshold: 0.92,
-        min_cluster_size: 2,
-    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.92)
+        .min_cluster_size(2)
+        .build();
 
     // First pass
     let stats1 = engine
@@ -213,10 +213,10 @@ fn cluster_and_global_summary_scoping() {
     insert_clusterable(&engine, 4, scope);
 
     let generator = MockSummaryGenerator;
-    let config = ConsolidationConfig {
-        dedup_threshold: 0.95,
-        min_cluster_size: 2,
-    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.95)
+        .min_cluster_size(2)
+        .build();
 
     let stats = engine
         .consolidate(&generator, &ClusterableEmbedder, &config)
