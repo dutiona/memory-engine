@@ -443,8 +443,11 @@ pub enum MemoryError {
 
     /// The connection pool could not hand out or manage a connection.
     ///
-    /// **Terminal — propagate, don't `match`.** Only surfaced under the `async`
-    /// feature (a task-join failure); a single failure mode, so no typed
+    /// **Terminal — propagate, don't `match`.** Surfaced when a read connection
+    /// cannot be acquired within the acquire timeout, when the pool is opened
+    /// with an out-of-range `read_pool_size` (`0` or above the cap), and under
+    /// the `async` feature on a task-join failure. The message identifies the
+    /// concrete cause; callers cannot recover differently per cause, so no typed
     /// sub-enum is warranted (see #560).
     #[error("connection pool error: {0}")]
     Pool(String),

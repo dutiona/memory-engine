@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use parking_lot::{MutexGuard, RwLock};
+use parking_lot::RwLock;
 use rusqlite::Connection;
 
 use crate::error::{MemoryError, MigrationError, RerankerError, Result};
@@ -109,7 +109,16 @@ impl EngineConfig {
         }
     }
 
-    /// Set the read connection pool size (default 4).
+    /// Set the read connection pool size for a file-backed engine (default 4).
+    ///
+    /// Must be in `[1, 256]`. A value of `0` or one above the cap (256) is
+    /// **rejected at open time** with [`MemoryError::Pool`] — `0` is not a covert
+    /// in-memory request (#340/#356) and each read connection is a real OS file
+    /// descriptor, so an oversized value is refused rather than allowed to
+    /// exhaust the FD table (#415). Ignored for in-memory engines, which serve
+    /// reads through the single shared connection.
+    ///
+    /// [`MemoryError::Pool`]: crate::MemoryError::Pool
     #[must_use]
     pub const fn with_read_pool_size(mut self, size: usize) -> Self {
         self.read_pool_size = size;
@@ -574,7 +583,7 @@ impl MemoryEngine {
     /// multiple operations (e.g., DB mutation + cache update).
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    fn write_conn(&self) -> Result<MutexGuard<'_, Connection>> {
+    fn write_conn(&self) -> Result<crate::pool::WriteGuard<'_>> {
         self.pool.try_write()
     }
 
