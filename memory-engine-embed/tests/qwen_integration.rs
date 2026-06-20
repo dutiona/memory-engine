@@ -56,6 +56,10 @@ fn provider(with_prefix: bool) -> HttpEmbeddingProvider {
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    // The dot product zips (truncating on a length mismatch) while the norms span full
+    // lengths — so a mismatch would silently yield a wrong value. All callers pass
+    // same-dim vectors from one provider; assert it so a future misuse fails loudly.
+    debug_assert_eq!(a.len(), b.len(), "cosine inputs must have equal length");
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
