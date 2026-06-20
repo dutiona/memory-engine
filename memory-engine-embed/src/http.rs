@@ -1,6 +1,20 @@
+use std::io::Read;
+
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
+
+/// Maximum embedding-response body the provider will buffer, in bytes (32 MiB).
+///
+/// `reqwest`'s `.json()` / `.text()` buffer the entire body with no length
+/// limit, so a compromised, misconfigured, or adversarial endpoint (e.g. a URL
+/// accidentally pointed at a large page, or a server trickling gigabytes under
+/// the request timeout) could exhaust host memory (CWE-400 / CWE-770). A real
+/// embedding response is at most a few MiB even for large batches of 4096-dim
+/// vectors, so 32 MiB is a generous ceiling. The cap is enforced on the bytes
+/// *actually read* via a bounded reader, not on the (absent or spoofable)
+/// `Content-Length` header.
+const MAX_BODY: u64 = 32 * 1024 * 1024;
 
 /// HTTP-based embedding provider calling an OpenAI-compatible `/v1/embeddings` endpoint.
 ///
@@ -306,14 +320,17 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = read_body_capped(resp).map_or_else(
+                |_| String::new(),
+                |b| String::from_utf8_lossy(&b).into_owned(),
+            );
             return Err(MemoryError::Internal(format!(
                 "embedding endpoint returned {status}: {body}"
             )));
         }
 
-        let body: serde_json::Value = resp
-            .json()
+        let bytes = read_body_capped(resp)?;
+        let body: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))?;
 
         // Auto-detect response format:
@@ -370,14 +387,17 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = read_body_capped(resp).map_or_else(
+                |_| String::new(),
+                |b| String::from_utf8_lossy(&b).into_owned(),
+            );
             return Err(MemoryError::Internal(format!(
                 "embedding endpoint returned {status}: {body}"
             )));
         }
 
-        let body: serde_json::Value = resp
-            .json()
+        let bytes = read_body_capped(resp)?;
+        let body: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))?;
 
         // Auto-detect response format and extract all embeddings:
@@ -462,6 +482,28 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             ),
         }
     }
+}
+
+/// Read an HTTP response body into memory, refusing to buffer more than
+/// [`MAX_BODY`] bytes.
+///
+/// Reads through [`std::io::Read::take`] so at most `MAX_BODY + 1` bytes are
+/// ever buffered, regardless of what the server claims in `Content-Length` or
+/// how slowly it trickles the body — the `+ 1` byte is the over-limit sentinel.
+/// This is the genuine resource-exhaustion guard: `Content-Length` can be
+/// absent or spoofed, so the cap is enforced on bytes actually read.
+fn read_body_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, MemoryError> {
+    let mut buf = Vec::new();
+    let read = resp
+        .take(MAX_BODY + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| MemoryError::Internal(format!("embedding response read failed: {e}")))?;
+    if read as u64 > MAX_BODY {
+        return Err(MemoryError::Internal(format!(
+            "embedding response too large: exceeds {MAX_BODY}-byte cap"
+        )));
+    }
+    Ok(buf)
 }
 
 /// Truncate `s` to at most `max` bytes for an error message, snapping the cut
