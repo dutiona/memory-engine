@@ -369,6 +369,61 @@ fn bootstrap_with_scope() {
 }
 
 #[test]
+fn bootstrap_savepoint_rolls_back_on_embed_failure() {
+    // #302: the error path in bootstrap_within_savepoint issues
+    // `ROLLBACK TO bootstrap; RELEASE bootstrap` to keep the connection usable
+    // after a mid-pipeline failure. An embedder that errors AFTER the marker
+    // event is inserted is the natural trigger. Assert the session returns Err,
+    // then that a SECOND, successful session on the SAME engine still processes —
+    // proving the savepoint was rolled back (marker gone, so not skipped) and
+    // released (no dangling open transaction).
+    struct FailEmbedder;
+    impl EmbeddingProvider for FailEmbedder {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
+            Err(MemoryError::NotFound("inject embed failure".into()))
+        }
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("mock", "test", 4)
+        }
+    }
+
+    let engine = engine();
+    let extractor = KeywordExtractor;
+    let config = BootstrapConfig::default();
+
+    // First session: embedding fails mid-pipeline (after the marker insert).
+    let err = engine.bootstrap_session(
+        Cursor::new(success_fixture()),
+        &FailEmbedder,
+        &extractor,
+        &config,
+        None,
+    );
+    assert!(
+        err.is_err(),
+        "embed failure must propagate as Err from bootstrap_session"
+    );
+
+    // Second session on the SAME engine with a working embedder: if the savepoint
+    // had been left open (or the marker not rolled back) this would fail or skip.
+    let report = engine
+        .bootstrap_session(
+            Cursor::new(success_fixture()),
+            &TestEmbedder,
+            &extractor,
+            &config,
+            None,
+        )
+        .expect("connection must remain usable after a rolled-back session");
+    assert_eq!(
+        report.sessions_processed, 1,
+        "second session must process (rollback removed the first marker; no open txn)"
+    );
+    assert_eq!(report.sessions_skipped, 0);
+    assert!(report.facts_created > 0, "second session must store facts");
+}
+
+#[test]
 fn bootstrap_pins_facts_when_classifier_returns_true() {
     // #301: the PersistenceClassifier branch in store_extracted_fact builds a
     // temporary Fact, calls should_pin, and sets new_fact.is_pinned. Integration
