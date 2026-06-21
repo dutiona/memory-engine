@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::store::facts::FactStore;
 use crate::types::Fact;
 
-/// Configuration for [`resume_context`].
+/// Configuration for [`MemoryEngine::resume_context`](crate::MemoryEngine::resume_context).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResumeConfig {
     /// Scope path to resume from. None = root only.
@@ -90,7 +90,7 @@ impl ResumeConfig {
     }
 }
 
-/// Result of [`resume_context`].
+/// Result of [`MemoryEngine::resume_context`](crate::MemoryEngine::resume_context).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResumeContext {
     /// Pinned (unforgettable) facts — agent identity, core beliefs.
