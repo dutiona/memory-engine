@@ -214,9 +214,10 @@ pub(super) fn compute_dedup(
 
 /// Apply a computed dedup plan inside the caller's write context (#409): the base- and
 /// score-importance inheritances first (while every fact is still active), then the
-/// expirations and their edge cascades. Returns the ids actually expired by **this**
-/// call, so the engine can drive its vector-index `notify_expire` and stats off what
-/// truly changed rather than the (possibly stale) plan.
+/// expirations and their edge cascades. Returns a [`DedupApplied`] — the ids actually
+/// expired by **this** call (so the engine drives `notify_expire`/stats off what truly
+/// changed, not the stale plan) plus whether a survivor was lost in the gap (so the
+/// caller can skip the now-stale summary writes).
 ///
 /// # Concurrency — the read→write gap (#409)
 ///
@@ -248,7 +249,7 @@ pub(super) fn apply_dedup(
     embed_dim: usize,
     computed: &DedupComputed,
     now: DateTime<Utc>,
-) -> Result<Vec<i64>> {
+) -> Result<DedupApplied> {
     let fact_store = FactStore::new(conn, embed_dim);
     let edge_store = EdgeStore::new(conn);
 
@@ -270,10 +271,13 @@ pub(super) fn apply_dedup(
     }
 
     let mut expired = Vec::with_capacity(computed.expirations.len());
+    let mut survivor_lost = false;
     for e in &computed.expirations {
-        // Survivor concurrently expired → the merge is void; keep the loser as the
-        // group's representative instead of orphaning the cluster.
+        // Survivor concurrently expired → the merge is void; keep the loser as the group's
+        // representative instead of orphaning the cluster. Flag it so the caller skips the
+        // now-stale summary writes (the plan clustered the survivors *without* this loser).
         if !survivor_live[&e.survivor] {
+            survivor_lost = true;
             continue;
         }
         match fact_store.expire(e.loser, now) {
@@ -283,12 +287,29 @@ pub(super) fn apply_dedup(
             }
             // Loser concurrently expired between snapshot and apply — the desired end
             // state already holds, so it is a no-op, not a failure, and not counted as
-            // expired by this call (#409, loser case).
+            // expired by this call (#409, loser case). Summaries stay valid: the loser was
+            // going to be removed from the cluster set anyway, just by another writer.
             Err(MemoryError::NotFound(_)) => {}
             Err(err) => return Err(err),
         }
     }
-    Ok(expired)
+    Ok(DedupApplied {
+        expired,
+        survivor_lost,
+    })
+}
+
+/// Outcome of [`apply_dedup`]: the ids actually expired by this call, and whether any
+/// planned loser was **kept** because its survivor was concurrently expired (#409). The
+/// latter signals that the cluster/global summaries in the plan are stale — they were
+/// computed over the survivors with that loser removed — so the caller should skip the
+/// summary writes and let the next consolidation rebuild them.
+pub(super) struct DedupApplied {
+    /// Ids the call actually expired (excludes concurrently-expired or kept losers).
+    pub(super) expired: Vec<i64>,
+    /// A survivor disappeared in the read→write gap, so a planned loser was kept and the
+    /// plan's summaries no longer match the store.
+    pub(super) survivor_lost: bool,
 }
 
 /// Local deduplication pass — compute + apply on a single connection.
@@ -316,7 +337,7 @@ fn local_dedup(
             active_count: active_facts.len(),
         });
     }
-    let expired_ids = apply_dedup(conn, embed_dim, &computed, now)?;
+    let expired_ids = apply_dedup(conn, embed_dim, &computed, now)?.expired;
     Ok(DedupOutcome::Ran {
         removed: expired_ids.len(),
         expired_ids,

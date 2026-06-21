@@ -317,27 +317,36 @@ pub fn apply_plan(
     let tx = conn.unchecked_transaction()?;
 
     // Dedup writes: importance inheritances + expirations (concurrency-tolerant, #409).
-    // Returns the ids actually expired by this call.
-    let expired = dedup::apply_dedup(&tx, embed_dim, &plan.dedup, plan.now)?;
+    // Returns the ids actually expired plus whether a survivor disappeared in the gap.
+    let applied = dedup::apply_dedup(&tx, embed_dim, &plan.dedup, plan.now)?;
 
-    // Summary writes — only when clustering actually ran (#345): over the cap we must not
-    // delete existing summaries without replacements. Cluster + global move together so
-    // global never re-summarizes stale clusters.
-    if plan.cluster_ran {
+    // Summary writes are gated on TWO conditions:
+    //  - clustering actually ran (#345): over the cap we must not delete existing summaries
+    //    without replacements;
+    //  - the dedup applied without a survivor disappearing in the read→write gap (#409): if
+    //    a concurrent writer expired a survivor, a planned loser was kept, so the plan's
+    //    summaries — clustered over the survivors *without* that loser — are stale. Skip
+    //    them and let the next consolidation rebuild from the corrected active set.
+    // Cluster + global move together so global never re-summarizes stale clusters.
+    let wrote_summaries = plan.cluster_ran && !applied.survivor_lost;
+    if wrote_summaries {
         cluster::apply_clusters(&tx, embed_dim, &plan.cluster_summaries)?;
         global::apply_global(&tx, embed_dim, plan.global_summary.as_ref())?;
-    }
 
-    // Record the embedding identity on first vector write only (#613/#643, ADR 0015 §2),
-    // atomically inside `tx` with the summaries it describes. A vector-less run leaves the
-    // store unstamped, so a later real first write with a different embedder establishes
-    // the true identity instead of inheriting a stale one (the #614-enforcement landmine).
-    if let Some(fingerprint) = &plan.embedding_fingerprint {
-        crate::store::embedding_meta::record_if_absent(&tx, fingerprint, embed_dim)?;
+        // Record the embedding identity on first vector write only (#613/#643, ADR 0015 §2),
+        // atomically inside `tx` with the summaries it describes. A vector-less run leaves
+        // the store unstamped, so a later real first write with a different embedder
+        // establishes the true identity instead of inheriting a stale one (the
+        // #614-enforcement landmine).
+        if let Some(fingerprint) = &plan.embedding_fingerprint {
+            crate::store::embedding_meta::record_if_absent(&tx, fingerprint, embed_dim)?;
+        }
     }
 
     // Advance the watermark only if dedup actually ran (#439/#306). When skipped, facts
-    // ingested during the over-cap period must be retried on the next run.
+    // ingested during the over-cap period must be retried on the next run. A survivor loss
+    // is a divergence, not a skip: the dedup that *did* apply is committed, so the
+    // watermark advances and the kept loser is reconsidered next run.
     if !plan.dedup.skipped {
         set_config(&tx, "last_consolidated_at", &plan.now.to_rfc3339())?;
     }
@@ -345,11 +354,15 @@ pub fn apply_plan(
     tx.commit()?;
 
     let stats = ConsolidationStats {
-        duplicates_removed: expired.len(),
-        clusters_created: plan.cluster_summaries.len(),
-        global_summaries: usize::from(plan.global_summary.is_some()),
+        duplicates_removed: applied.expired.len(),
+        clusters_created: if wrote_summaries {
+            plan.cluster_summaries.len()
+        } else {
+            0
+        },
+        global_summaries: usize::from(wrote_summaries && plan.global_summary.is_some()),
     };
-    Ok((stats, expired))
+    Ok((stats, applied.expired))
 }
 
 /// Orchestrate all 3 consolidation passes on a single connection (load → compute →
@@ -1028,5 +1041,62 @@ mod tests {
         );
         assert_eq!(active[0].id, loser);
         assert_eq!(active[0].content, "drop");
+    }
+
+    /// #409 read→write gap (codex review): when a survivor disappears, the plan's
+    /// cluster/global summaries were computed over the survivors WITHOUT the now-kept
+    /// loser, so they are stale. `apply_plan` must NOT write them — it leaves the existing
+    /// summaries in place for the next consolidation to rebuild. Seeds a cluster summary,
+    /// forces a survivor loss, and asserts the seeded summary survives (a normal run would
+    /// clear it).
+    #[test]
+    fn apply_plan_skips_stale_summary_writes_when_survivor_lost() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        // A pre-existing cluster summary from an earlier run.
+        let summary_store = SummaryStore::new(&conn, DIM);
+        summary_store
+            .insert(&NewSummary {
+                content: "prior cluster".into(),
+                embedding: vec![0.25; DIM],
+                level: ConsolidationLevel::Cluster,
+                source_fact_ids: vec![1, 2],
+                scope_id: 1,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+
+        // Two near-duplicates → dedup plans to expire `drop`, survivor `keep`.
+        insert_fact(&conn, "keep", vec![1.0, 0.0, 0.0, 0.0], 0.9);
+        insert_fact(&conn, "drop", vec![0.99, 0.01, 0.0, 0.0], 0.5);
+
+        let config = ConsolidationConfig::default();
+        let snapshot = load_snapshot(&conn, DIM, &config).unwrap();
+        let plan = compute_plan(&snapshot, &MockGenerator, &MockEmbedder, DIM, &config).unwrap();
+        let survivor = plan.dedup.expirations[0].survivor;
+
+        // Concurrently expire the survivor → the plan's summary view is now stale.
+        FactStore::new(&conn, DIM)
+            .expire(survivor, Utc::now())
+            .unwrap();
+
+        let (stats, _) = apply_plan(&conn, &plan, DIM).unwrap();
+        assert_eq!(
+            stats.clusters_created, 0,
+            "no summaries are (re)written when a survivor was lost"
+        );
+
+        // The seeded cluster summary is preserved — a normal (non-lost) run would have
+        // cleared it via apply_clusters' delete_by_level.
+        let clusters = SummaryStore::new(&conn, DIM)
+            .list_by_level(&ConsolidationLevel::Cluster)
+            .unwrap();
+        assert_eq!(
+            clusters.len(),
+            1,
+            "stale-plan summary writes must be skipped"
+        );
+        assert_eq!(clusters[0].content, "prior cluster");
     }
 }
