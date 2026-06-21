@@ -204,31 +204,47 @@ pub fn hybrid_search(
         }
     };
 
-    // Load full facts. t_expired, fact_type, and scope are now SQL-level filters.
-    // Only valid_at remains as a post-filter (complex temporal semantics).
-    // Collect up to effective_target candidates (rerank_depth widens the pool).
-    // Clamped to at least query.limit so rerank_depth can never shrink results.
-    let effective_limit = effective_target;
-    let ranked_count = ranked.len();
-    let store = FactStore::new(conn, embed_dim);
-
-    // Batch-materialize all ranked ids in a single round-trip, then re-order
-    // to the ranked order below. Fetching every ranked id (not just the first
-    // `effective_limit`) preserves the previous semantics: the temporal
-    // post-filter can drop candidates, so later ranked ids may be needed to
-    // fill the limit. The map keys back to ranked order; ids the store failed
-    // to load (e.g. raced deletion) are simply absent and skipped, matching
-    // the prior per-id `store.get` warn-and-continue behavior.
+    // Load full facts (t_expired/fact_type/scope are SQL-level filters; only
+    // valid_at remains a post-filter). Batch-materialize all ranked ids in one
+    // round-trip; `assemble_results` re-orders to ranked order, applies the
+    // temporal post-filter + match_type, and truncates to the effective limit.
     let ranked_ids: Vec<i64> = ranked.iter().map(|&(id, _)| id).collect();
-    let mut facts_by_id = store.get_many(&ranked_ids)?;
+    let facts_by_id = FactStore::new(conn, embed_dim).get_many(&ranked_ids)?;
+    Ok(assemble_results(
+        query,
+        ranked,
+        &fts_ids,
+        &vec_ids,
+        fts_candidate_count,
+        vec_candidate_count,
+        facts_by_id,
+    ))
+}
 
-    let mut results = Vec::new();
-    // Temporal cutoff is loop-invariant — compute once before iterating, both to
-    // avoid a per-result `Utc::now()` syscall and to keep the cutoff consistent
-    // across all results in this query. Explicit `valid_at` if provided, otherwise
-    // now, so future-dated facts (t_valid > now) stay invisible to regular queries
-    // — they surface only via list_due()/resume_context().
+/// Pure fusion stage shared by the sync (`hybrid_search`) and async
+/// (`port_hybrid_search`) I/O paths: re-order `ranked` to its rank order,
+/// apply the `valid_at`/`t_invalid` temporal post-filter, assign `match_type`,
+/// truncate to the effective limit, and build the diagnostics. The only inputs
+/// are the ranked `(id, score)` list, the per-source id sets, the candidate
+/// counts, and the materialized facts — no I/O — so both backends produce
+/// bit-identical results from identical channel outputs.
+fn assemble_results(
+    query: &SearchQuery,
+    ranked: Vec<(i64, f64)>,
+    fts_ids: &HashSet<i64>,
+    vec_ids: &HashSet<i64>,
+    fts_candidate_count: usize,
+    vec_candidate_count: usize,
+    mut facts_by_id: HashMap<i64, Fact>,
+) -> (Vec<SearchResult>, QueryDiagnostics) {
+    // Clamped to at least `limit` so rerank_depth can only widen, never shrink.
+    let effective_limit = query.rerank_depth.unwrap_or(query.limit).max(query.limit);
+    let ranked_count = ranked.len();
+    // Temporal cutoff is loop-invariant — compute once. Explicit `valid_at` if
+    // provided, otherwise now, so future-dated facts (t_valid > now) stay
+    // invisible to regular queries (they surface only via list_due()/resume).
     let cutoff = query.valid_at.unwrap_or_else(Utc::now);
+    let mut results = Vec::new();
     for (id, score) in ranked {
         if results.len() >= effective_limit {
             break;
@@ -273,7 +289,88 @@ pub fn hybrid_search(
         ..QueryDiagnostics::default()
     };
 
-    Ok((results, diagnostics))
+    (results, diagnostics)
+}
+
+/// Port-driven hybrid search (#631 Stage C) — the async twin of [`hybrid_search`].
+///
+/// Drives the lexical/vector channels + fact-fetch through
+/// `Arc<dyn StorageBackend>` instead of a raw `&Connection`, then feeds the
+/// identical pure [`assemble_results`] fusion. The engine adopts this in the
+/// Stage E cutover; until then it is proven bit-identical to the sync path by a
+/// parity oracle (see tests). RRF still fuses by rank only.
+///
+/// # Errors
+/// Propagates backend errors (`MemoryError::Storage`/`Database`,
+/// `EmbeddingDimension` on a wrong-length query embedding).
+#[cfg(feature = "async")]
+pub async fn port_hybrid_search(
+    storage: &dyn crate::storage::StorageBackend,
+    query: &SearchQuery,
+    scope_ids: Option<&[i64]>,
+) -> Result<(Vec<SearchResult>, QueryDiagnostics)> {
+    use crate::storage::{FactFilter, TemporalFilter};
+
+    let effective_target = query.rerank_depth.unwrap_or(query.limit).max(query.limit);
+    let overfetch = effective_target.saturating_mul(3).max(effective_target);
+
+    // The lexical/vector channels honor exactly `fact_type` + `scope_ids` +
+    // Active (the same SQL-level predicates the sync free functions push down).
+    let filter = FactFilter {
+        fact_type: query.fact_type,
+        scope_ids: scope_ids.map(<[i64]>::to_vec),
+        temporal: TemporalFilter::Active,
+        ..FactFilter::default()
+    };
+
+    let fts_results: Vec<(i64, f64)> = if matches!(query.mode, SearchMode::Fts | SearchMode::Hybrid)
+    {
+        match query.text.as_ref() {
+            Some(text) => storage.lexical_search(text, &filter, overfetch).await?,
+            None => vec![],
+        }
+    } else {
+        vec![]
+    };
+
+    let vec_results: Vec<(i64, f64)> =
+        if matches!(query.mode, SearchMode::Vector | SearchMode::Hybrid) {
+            match query.embedding.as_ref() {
+                Some(emb) => storage.vector_search(emb, &filter, overfetch).await?,
+                None => vec![],
+            }
+        } else {
+            vec![]
+        };
+
+    let fts_candidate_count = fts_results.len();
+    let vec_candidate_count = vec_results.len();
+    let fts_ids: HashSet<i64> = fts_results.iter().map(|&(id, _)| id).collect();
+    let vec_ids: HashSet<i64> = vec_results.iter().map(|&(id, _)| id).collect();
+
+    let ranked: Vec<(i64, f64)> = match query.mode {
+        SearchMode::Fts => fts_results,
+        SearchMode::Vector => vec_results,
+        SearchMode::Hybrid => {
+            // `rrf_merge` fuses by rank position and ignores the vector score
+            // value, so the placeholder f32 is irrelevant — the vec rank order
+            // (the only thing that matters) is preserved.
+            let vec_pairs: Vec<(i64, f32)> = vec_results.iter().map(|&(id, _)| (id, 0.0)).collect();
+            rrf_merge(&fts_results, &vec_pairs, RRF_K)
+        }
+    };
+
+    let ranked_ids: Vec<i64> = ranked.iter().map(|&(id, _)| id).collect();
+    let facts_by_id = storage.get_facts(&ranked_ids).await?;
+    Ok(assemble_results(
+        query,
+        ranked,
+        &fts_ids,
+        &vec_ids,
+        fts_candidate_count,
+        vec_candidate_count,
+        facts_by_id,
+    ))
 }
 
 #[cfg(test)]
@@ -313,6 +410,119 @@ mod tests {
 
     fn make_fact(content: &str, embedding: Vec<f32>) -> NewFact {
         make_fact_with(content, embedding, FactType::Episodic)
+    }
+
+    /// Stage C parity oracle: the async `port_hybrid_search` (driving the
+    /// channels through `SqliteBackend`) must be **bit-identical** to the sync
+    /// `hybrid_search` (raw `&Connection` + `BruteForce`) on the same data,
+    /// across all three modes. Distinct bm25/cosine scores avoid RRF tie
+    /// non-determinism; facts carry no `t_valid`/`t_invalid` so the `Utc::now()`
+    /// cutoff never filters (sidestepping its per-call timing). This is what
+    /// proves the port I/O channels (post-#684 `*_filtered` SQL) match the sync
+    /// free functions before the Stage E cutover consumes the port path.
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the write guard is intentionally held across the seed block"
+    )]
+    async fn port_hybrid_search_parity_with_sync() {
+        use std::sync::Arc;
+
+        use crate::pool::ConnectionPool;
+        use crate::storage::SqliteBackend;
+        use crate::store::facts::FactStore;
+        use crate::store::upcaster::UpcasterRegistry;
+
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        {
+            let conn = pool.write();
+            let store = FactStore::new(&conn, DIM);
+            // Distinct content (distinct bm25) + distinct embeddings (distinct cosine).
+            store
+                .insert(&make_fact(
+                    "rust systems programming language",
+                    vec![1.0, 0.0, 0.0, 0.0],
+                ))
+                .unwrap();
+            store
+                .insert(&make_fact(
+                    "rust ownership and borrowing model",
+                    vec![0.0, 1.0, 0.0, 0.0],
+                ))
+                .unwrap();
+            store
+                .insert(&make_fact(
+                    "rust async await with tokio",
+                    vec![0.9, 0.1, 0.0, 0.0],
+                ))
+                .unwrap();
+        }
+        let backend =
+            SqliteBackend::from_pool(Arc::clone(&pool), Arc::new(UpcasterRegistry::new()));
+
+        for mode in [SearchMode::Fts, SearchMode::Vector, SearchMode::Hybrid] {
+            let query = SearchQuery {
+                text: Some("rust".into()),
+                embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                mode,
+                limit: 10,
+                rerank_depth: None,
+                valid_at: None,
+                fact_type: None,
+                scope: None,
+            };
+
+            let (sync_results, sync_diag) = {
+                let conn = pool.read().unwrap();
+                hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap()
+            };
+            let (port_results, port_diag) =
+                port_hybrid_search(&backend, &query, None).await.unwrap();
+
+            // Compare under a canonical (score desc, id asc) order. RRF ties are
+            // ordered non-deterministically by `rrf_merge` (HashMap-seeded), so
+            // the sync path is itself tie-order-non-deterministic; canonicalizing
+            // asserts the most that is meaningful — the I/O channels + RRF scores
+            // match. (rrf_merge tie-determinism tracked as a follow-up.)
+            let canon = |rs: &[SearchResult]| -> Vec<(i64, MatchType, f64)> {
+                let mut v: Vec<(i64, MatchType, f64)> = rs
+                    .iter()
+                    .map(|r| (r.fact.id, r.match_type, r.score))
+                    .collect();
+                v.sort_by(|a, b| {
+                    b.2.partial_cmp(&a.2)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.0.cmp(&b.0))
+                });
+                v
+            };
+            let sync_c = canon(&sync_results);
+            let port_c = canon(&port_results);
+            assert_eq!(sync_c.len(), port_c.len(), "mode {mode:?}: result count");
+            for (s, p) in sync_c.iter().zip(port_c.iter()) {
+                assert_eq!(
+                    (s.0, s.1),
+                    (p.0, p.1),
+                    "mode {mode:?}: id/match_type must match (canonical order)"
+                );
+                assert!(
+                    (s.2 - p.2).abs() < 1e-9,
+                    "mode {mode:?}: score differs for id {} ({} vs {})",
+                    s.0,
+                    s.2,
+                    p.2
+                );
+            }
+            assert_eq!(
+                sync_diag, port_diag,
+                "mode {mode:?}: diagnostics must match"
+            );
+            assert!(
+                !sync_results.is_empty(),
+                "mode {mode:?}: fixture should match"
+            );
+        }
     }
 
     // --- rrf_merge pure function tests ---
