@@ -178,17 +178,14 @@ fn equiv_embed_dim_mismatch_is_migration_error() {
             .build()
             .unwrap();
         // The embedding identity (incl. dim) is recorded on the first embedding
-        // write (#613), not at open. Seed it via the config facade to pin dim=768
-        // without standing up an embedder in this builder-equivalence module.
-        engine
-            .set_config(
-                "embedding_meta",
-                &serde_json::to_string(&crate::types::EmbeddingFingerprint::new(
-                    "mock", "test", 768,
-                ))
-                .unwrap(),
-            )
-            .unwrap();
+        // write (#613), not at open. Seed it through the registry facade to pin
+        // dim=768 without standing up an embedder in this builder-equivalence module.
+        let conn = engine.write_conn().unwrap();
+        crate::store::embedding_meta::store(
+            &conn,
+            &crate::types::EmbeddingFingerprint::new("mock", "test", 768),
+        )
+        .unwrap();
     }
     let err = MemoryEngine::builder(384).path(path).build().unwrap_err();
     assert!(

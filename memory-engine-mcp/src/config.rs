@@ -132,7 +132,34 @@ pub fn probe_embed_dim(db_path: &Path) -> Result<usize, String> {
     )
     .map_err(|e| format!("cannot open database: {e}"))?;
 
-    // Preferred: the embedding_meta identity tuple records `dim` (#613).
+    // Preferred (v13+): the embedding_spaces registry's active row records `dim` (#622).
+    // Guard on the table existing so an un-migrated v12 DB (no such table) falls through to
+    // the legacy config paths below rather than erroring.
+    let has_registry: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedding_spaces'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| format!("schema query failed: {e}"))?
+        .unwrap_or(false);
+    if has_registry {
+        let dim: Option<i64> = conn
+            .query_row(
+                "SELECT dim FROM embedding_spaces WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("embedding_spaces query failed: {e}"))?;
+        if let Some(dim) = dim {
+            return usize::try_from(dim)
+                .map_err(|_| "embedding_spaces 'dim' out of range".to_owned());
+        }
+    }
+
+    // Legacy fallback: the pre-#622 embedding_meta config row records `dim` (#613).
     let meta_raw: Option<String> = conn
         .query_row(
             "SELECT value FROM config WHERE key = 'embedding_meta'",
@@ -231,5 +258,27 @@ model = "llama3"
     fn probe_nonexistent_db() {
         let result = probe_embed_dim(Path::new("/tmp/nonexistent_memory_engine_test.db"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn probe_reads_dim_from_embedding_spaces_registry() {
+        // #622: a v13 store records the identity (incl. dim) in the embedding_spaces
+        // table, not the config row. The probe must read it from there.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.db");
+        // Build creates the v13 schema (empty registry); the temporary engine drops here.
+        memory_engine::MemoryEngine::builder(8)
+            .path(path.clone())
+            .build()
+            .unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO embedding_spaces (name, model, provider, dim, status)
+             VALUES ('default', 'm', 'tei', 8, 'active')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(probe_embed_dim(&path).unwrap(), 8);
     }
 }

@@ -4,12 +4,13 @@ use memory_engine::MemoryEngine;
 
 /// Peek the embedding dimension from an existing `SQLite` database.
 ///
-/// Reads the persisted identity from the `embedding_meta` config row (#613,
-/// ADR 0015) and extracts its `dim`. Falls back to the legacy bare `embed_dim`
-/// key for pre-#613 databases. Errors if neither is present — a database that was
-/// created but never had an embedding written has no recorded dimension; write
-/// commands that know the dimension from their input (e.g. `add-fact`'s
-/// `--embedding`) should use [`open_engine_writable_with_dim`] instead of peeking.
+/// Reads the persisted identity's `dim` from the `embedding_spaces` registry's active
+/// row (#622, the v13+ home of the identity). Falls back to the legacy `embedding_meta`
+/// config row (#613) for an un-migrated v12 database, then to the bare `embed_dim` key for
+/// pre-#613 databases. Errors if none is present — a database that was created but never
+/// had an embedding written has no recorded dimension; write commands that know the
+/// dimension from their input (e.g. `add-fact`'s `--embedding`) should use
+/// [`open_engine_writable_with_dim`] instead of peeking.
 ///
 /// Distinct from the import path's snapshot-header reader (see
 /// `peek_embed_dim_from_snapshot` in `commands::import`).
@@ -31,7 +32,32 @@ pub fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
 
-    // Preferred: the embedding_meta identity tuple records `dim` (#613).
+    // Preferred (v13+): the embedding_spaces registry's active row records `dim` (#622).
+    // Guard on the table existing so an un-migrated v12 DB (no such table) falls through
+    // to the legacy config paths below rather than erroring.
+    let has_registry: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedding_spaces'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if has_registry {
+        let dim: Option<i64> = conn
+            .query_row(
+                "SELECT dim FROM embedding_spaces WHERE status = 'active'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(dim) = dim {
+            return usize::try_from(dim)
+                .map_err(|_| anyhow::anyhow!("embedding_spaces 'dim' out of range"));
+        }
+    }
+
+    // Legacy fallback: the pre-#622 embedding_meta config row records `dim` (#613).
     let meta_raw: Option<String> = conn
         .query_row(
             "SELECT value FROM config WHERE key = 'embedding_meta'",
@@ -160,7 +186,7 @@ pub fn open_engine_writable_with_dim(
 mod tests {
     use tempfile::TempDir;
 
-    use super::{peek_embed_dim_from_db, peek_schema_version_from_db};
+    use super::*;
 
     // --- peek_embed_dim_from_db ---
 
@@ -250,5 +276,29 @@ mod tests {
 
         let version = peek_schema_version_from_db(&db_path).unwrap();
         assert_eq!(version, memory_engine::CURRENT_SCHEMA_VERSION);
+    }
+
+    // --- #622: identity in the embedding_spaces registry ---
+
+    #[test]
+    fn peek_reads_dim_from_embedding_spaces_registry() {
+        // A v13 store records the identity (incl. dim) in the embedding_spaces table,
+        // not the config row. The peek must read it from there.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("peek.db");
+        // Build creates the v13 schema (empty registry); the temporary engine drops here.
+        memory_engine::MemoryEngine::builder(8)
+            .path(path.clone())
+            .build()
+            .unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO embedding_spaces (name, model, provider, dim, status)
+             VALUES ('default', 'm', 'tei', 8, 'active')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(peek_embed_dim_from_db(&path).unwrap(), 8);
     }
 }

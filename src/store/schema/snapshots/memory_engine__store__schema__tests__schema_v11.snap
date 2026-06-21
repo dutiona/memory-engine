@@ -32,6 +32,9 @@ CREATE INDEX idx_edges_source ON edges(source_fact_id);
 -- index: idx_edges_target
 CREATE INDEX idx_edges_target ON edges(target_fact_id);
 
+-- index: idx_embedding_spaces_one_active
+CREATE UNIQUE INDEX idx_embedding_spaces_one_active ON embedding_spaces(status) WHERE status = 'active';
+
 -- index: idx_events_origin_seq
 CREATE INDEX idx_events_origin_seq ON events(origin_node_id, sequence_id);
 
@@ -94,6 +97,9 @@ CREATE TABLE config ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
 
 -- table: edges
 CREATE TABLE edges ( id INTEGER PRIMARY KEY AUTOINCREMENT, source_fact_id INTEGER NOT NULL REFERENCES facts(id), target_fact_id INTEGER NOT NULL REFERENCES facts(id), relation_type TEXT NOT NULL, weight REAL NOT NULL DEFAULT 1.0, t_created TEXT NOT NULL, t_expired TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) );
+
+-- table: embedding_spaces
+CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, provider TEXT NOT NULL, dim INTEGER NOT NULL, matryoshka_base_dim INTEGER, element_type TEXT NOT NULL DEFAULT 'float32', status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'populating', 'deprecated')), created_at TEXT NOT NULL DEFAULT (datetime('now')) );
 
 -- table: events
 CREATE TABLE events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1 );

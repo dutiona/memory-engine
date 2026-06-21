@@ -42,8 +42,11 @@ existing shape cleanly.
 
 **Out of scope (Wave 2, future):**
 
-- Multiple embeddings per fact / multi-space coexistence.
-- Background embedding reconstruction (shadow space → backfill → atomic promote).
+- Multiple embeddings per fact / multi-space coexistence. _(The registry **schema** + single-active
+  API landed in #622 — schema v12→v13, the `embedding_spaces` table with a `status` enum and a
+  partial-unique single-active invariant, `store::embedding_meta` reduced to a facade over it.
+  End-to-end coexistence / query-across-spaces / promote-rollback remain Wave 2: #689.)_
+- Background embedding reconstruction (shadow space → backfill → atomic promote). _(#623.)_
 - Weight-hash identity (slug-level identity only for now).
 - TEI `/info` authoritative-identity probe.
 
