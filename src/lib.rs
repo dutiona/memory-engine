@@ -162,6 +162,29 @@ pub use engine::cycle::{
     TimeWindow,
 };
 
+/// Fuzz-only seam (`--cfg fuzzing`, set only by `cargo fuzz`).
+///
+/// Re-exports the otherwise crate-internal parser entry points so cargo-fuzz
+/// targets can drive untrusted-byte ingest directly:
+///
+/// - [`engine::snapshot::load_from_file`] — the `pub(crate)` binary snapshot
+///   reader (u32 LE header + msgpack header/payload + blake3).
+/// - [`bootstrap::parse::parse_session_file`] /
+///   [`bootstrap::parse::parse_content_blocks`] — the `pub(crate)` JSONL session
+///   parsers.
+///
+/// `inspect::restore::read_snapshot` (the JSON import path) is already public, so
+/// it is fuzzed directly without going through this seam.
+///
+/// This module compiles to nothing on a normal build, so it adds no public API
+/// to the shipped crate.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz_seam {
+    pub use crate::bootstrap::parse::{parse_content_blocks, parse_session_file};
+    pub use crate::engine::snapshot::{SnapshotHeader, SnapshotPayload, load_from_file};
+}
+
 #[cfg(test)]
 mod tests {
     /// Smoke-test: verify that re-exported types are reachable from the crate root.

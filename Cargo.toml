@@ -57,6 +57,10 @@ archive = ["compress-zstd"]
 
 [lints.rust]
 unsafe_code = "forbid"
+# `fuzzing` is set only by cargo-fuzz (`--cfg fuzzing`); it gates the
+# `fuzz_seam` module. Register it so the normal build does not warn on the
+# otherwise-unknown cfg name.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

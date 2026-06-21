@@ -635,6 +635,38 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> String {
     format!("{}... (truncated)", &s[..end])
 }
 
+/// Fuzz-only seam exposing the otherwise-private batch parsers.
+///
+/// [`HttpEmbeddingProvider::parse_openai_batch`] /
+/// [`HttpEmbeddingProvider::parse_ollama_batch`] are private associated fns:
+/// they parse untrusted network JSON (`serde_json::from_value::<Vec<f32>>` over
+/// attacker-controlled `data`/`embeddings` arrays) yet have no external call
+/// site a fuzz harness can reach. These thin wrappers live in the same module
+/// as the `impl`, so they can call the private fns, and are gated on `--cfg
+/// fuzzing` (set only by `cargo fuzz`) so they add nothing to the shipped crate.
+#[cfg(fuzzing)]
+pub mod fuzz_seam {
+    use super::HttpEmbeddingProvider;
+
+    /// Parse an `OpenAI`-shaped `data` array (untrusted). Returns `Err` on any
+    /// malformed item; the contract is "must not panic".
+    pub fn parse_openai_batch(
+        data: &[serde_json::Value],
+        expected_count: usize,
+    ) -> Result<Vec<Vec<f32>>, memory_engine::error::MemoryError> {
+        HttpEmbeddingProvider::parse_openai_batch(data, expected_count)
+    }
+
+    /// Parse an Ollama-shaped `embeddings` array (untrusted). Returns `Err` on
+    /// any malformed item; the contract is "must not panic".
+    pub fn parse_ollama_batch(
+        embeddings: &[serde_json::Value],
+        expected_count: usize,
+    ) -> Result<Vec<Vec<f32>>, memory_engine::error::MemoryError> {
+        HttpEmbeddingProvider::parse_ollama_batch(embeddings, expected_count)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

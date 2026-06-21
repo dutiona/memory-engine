@@ -1,0 +1,81 @@
+# cargo-fuzz crate for memory-engine — DELIBERATELY OUTSIDE the main workspace.
+#
+# The empty `[workspace]` table below detaches this package from the parent
+# workspace so that `cargo build --workspace --all-features` at the repo root
+# never compiles it. The fuzz targets require the nightly-only libFuzzer
+# sanitizer runtime (`-Z sanitizer`, `--cfg fuzzing`); pulling them into the
+# default members would force nightly on the stable main build. Build/run with:
+#
+#     cargo +nightly fuzz build
+#     cargo +nightly fuzz run <target>
+#
+# The seam they drive (`fuzz_seam` in memory-engine / memory-engine-embed) is
+# `#[cfg(fuzzing)]`-gated, so it exists only under cargo-fuzz's `--cfg fuzzing`.
+[package]
+name = "memory-engine-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.88"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+tempfile = "3"
+
+# Exercise the compressed-snapshot and HNSW restore branches as well as the
+# plain path, so the snapshot/restore targets cover every deserialization route.
+memory-engine = { path = "..", features = ["ann", "compress-gzip", "compress-zstd", "archive"] }
+memory-engine-embed = { path = "../memory-engine-embed" }
+
+# Detach from the parent workspace: an empty `[workspace]` makes this its own
+# workspace root, so the repo-root `cargo build --workspace` ignores it.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "snapshot_load"
+path = "fuzz_targets/snapshot_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_session_file"
+path = "fuzz_targets/parse_session_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_content_blocks"
+path = "fuzz_targets/parse_content_blocks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fact_deserialize"
+path = "fuzz_targets/fact_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_restore"
+path = "fuzz_targets/snapshot_restore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "embed_parse_response"
+path = "fuzz_targets/embed_parse_response.rs"
+test = false
+doc = false
+bench = false
