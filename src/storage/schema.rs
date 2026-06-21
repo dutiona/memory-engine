@@ -56,4 +56,20 @@ pub trait SchemaManager: Send + Sync {
     ) -> Result<EmbeddingFingerprint>;
     /// Require a fingerprint to be present (the open-time identity guard).
     async fn require_embedding_fingerprint_present(&self) -> Result<()>;
+
+    // -------------------------------------------------------------------------
+    // Stage A config accessors (cutover needs them at engine/mod.rs:649,659 +
+    // cycle watermarks — currently backend-private via `store::schema::{get,set}_config`).
+    // -------------------------------------------------------------------------
+
+    /// Read a config value by key. Returns `None` if the key is absent.
+    ///
+    /// Delegates to `store::schema::get_config`.
+    async fn get_config(&self, key: &str) -> Result<Option<String>>;
+
+    /// Write a config value (upsert).
+    ///
+    /// Delegates to `store::schema::set_config`. Returns `MemoryError::ReadOnly`
+    /// if the backend was opened in read-only mode.
+    async fn set_config(&self, key: &str, value: &str) -> Result<()>;
 }

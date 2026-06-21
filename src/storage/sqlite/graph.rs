@@ -24,7 +24,8 @@ use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
 use crate::types::{
-    Edge, Fact, FactScoringRow, FactType, NewEdge, NewFact, ScopeNode, SessionFact,
+    Edge, EmbeddingFingerprint, Fact, FactScoringRow, FactType, NewEdge, NewFact, ScopeNode,
+    SessionFact,
 };
 
 #[async_trait]
@@ -532,6 +533,175 @@ impl FactGraph for SqliteBackend {
         )
         .await
     }
+
+    // -------------------------------------------------------------------------
+    // Stage A atomic port methods
+    // -------------------------------------------------------------------------
+
+    // ATOMIC WRITE — identity stamp + fact insert in one transaction (#613/#614).
+    async fn insert_fact_atomic(
+        &self,
+        fact: &NewFact,
+        fingerprint: &EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<i64> {
+        let fact = fact.clone();
+        let fingerprint = fingerprint.clone();
+        let dim = self.embed_dim;
+        self.block_write(move |conn| {
+            // Verbatim body of ingest.rs:228-231: one unchecked_transaction wrapping
+            // stamp_identity + FactStore::insert so a vector is never committed
+            // without an established, matching identity (the #614 silent-corruption guard).
+            let tx = conn.unchecked_transaction()?;
+            // stamp_identity equivalent: record-if-absent or compare-and-reject
+            crate::store::embedding_meta::record_if_absent(&tx, &fingerprint, expected_dim)?;
+            let id = FactStore::new(&tx, dim).insert(&fact)?;
+            tx.commit()?;
+            Ok(id)
+        })
+        .await
+    }
+
+    // ATOMIC WRITE — savepoint wrapping scope-resolution + batch fact insert.
+    // Returns (fact_ids, scope_ids_to_cache) — the engine applies scope_tree.write()
+    // from scope_ids_to_cache AFTER this call returns, on the success path only.
+    async fn insert_facts_batch_atomic(
+        &self,
+        facts: &[NewFact],
+        scope_paths: &[Option<String>],
+        fingerprint: &EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<(Vec<i64>, Vec<i64>)> {
+        let facts = facts.to_vec();
+        let scope_paths = scope_paths.to_vec();
+        let fingerprint = fingerprint.clone();
+        let dim = self.embed_dim;
+        self.block_write(move |conn| {
+            // Verbatim body of ingest.rs:397-476: savepoint wrapping stamp +
+            // scope-resolve + per-fact insert.
+            conn.execute_batch("SAVEPOINT batch_insert")?;
+
+            let result: Result<(Vec<i64>, Vec<i64>)> = (|| {
+                // Record the embedding identity on first write (#613), inside the
+                // savepoint so it commits atomically with the batch.
+                crate::store::embedding_meta::record_if_absent(conn, &fingerprint, expected_dim)?;
+
+                let scope_store = ScopeStore::new(conn);
+                let store = FactStore::new(conn, dim);
+
+                // Resolve scopes INSIDE the savepoint so they roll back on error.
+                // Deduplicate by path to avoid N redundant DB lookups.
+                let mut scope_cache: std::collections::HashMap<String, i64> =
+                    std::collections::HashMap::new();
+                let mut per_entry_scope_ids = Vec::with_capacity(facts.len());
+                for path_opt in &scope_paths {
+                    let scope_id = match path_opt {
+                        Some(path) => {
+                            if let Some(&cached) = scope_cache.get(path) {
+                                cached
+                            } else {
+                                let id = scope_store.ensure_path(path)?;
+                                scope_cache.insert(path.clone(), id);
+                                id
+                            }
+                        }
+                        None => 1, // root scope
+                    };
+                    per_entry_scope_ids.push(scope_id);
+                }
+                let scope_ids_to_cache: Vec<i64> = scope_cache.into_values().collect();
+
+                let mut ids = Vec::with_capacity(facts.len());
+                for (i, fact) in facts.iter().enumerate() {
+                    // Patch scope_id from the resolved value (the NewFact coming in
+                    // may have a placeholder 0; in practice the engine already sets it,
+                    // but we honor the resolved scope_id from the savepoint).
+                    let mut f = fact.clone();
+                    f.scope_id = per_entry_scope_ids[i];
+                    let fact_id = store.insert(&f)?;
+                    ids.push(fact_id);
+                }
+
+                Ok((ids, scope_ids_to_cache))
+            })();
+
+            match result {
+                Ok(pair) => {
+                    conn.execute_batch("RELEASE batch_insert")?;
+                    Ok(pair)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK TO batch_insert");
+                    let _ = conn.execute_batch("RELEASE batch_insert");
+                    Err(e)
+                }
+            }
+        })
+        .await
+    }
+
+    // ATOMIC WRITE — co-session edge batch in one transaction.
+    async fn insert_cosession_edges_atomic(
+        &self,
+        fact_ids: &[i64],
+        relation: &str,
+        weight: f64,
+        scope_id: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(i64, i64, i64)>> {
+        let fact_ids = fact_ids.to_vec();
+        let relation = relation.to_owned();
+        self.block_write(move |conn| {
+            // Verbatim body of engine/graph.rs:71-101: one unchecked_transaction
+            // wrapping batch-dedup + edge inserts.
+            let tx = conn.unchecked_transaction()?;
+            let edge_store = EdgeStore::new(&tx);
+
+            let existing = edge_store.list_active_pairs_by_facts(&fact_ids, &relation)?;
+
+            let mut new_edges: Vec<(i64, i64, i64)> = Vec::new();
+            for i in 0..fact_ids.len() {
+                for j in (i + 1)..fact_ids.len() {
+                    let a_id = fact_ids[i];
+                    let b_id = fact_ids[j];
+                    for (src, tgt) in [(a_id, b_id), (b_id, a_id)] {
+                        if !existing.contains(&(src, tgt)) {
+                            let edge_id = edge_store.insert(&NewEdge {
+                                source_fact_id: src,
+                                target_fact_id: tgt,
+                                relation_type: relation.clone(),
+                                weight,
+                                scope_id,
+                                t_created: now,
+                                t_expired: None,
+                            })?;
+                            new_edges.push((edge_id, src, tgt));
+                        }
+                    }
+                }
+            }
+
+            tx.commit()?;
+            Ok(new_edges)
+        })
+        .await
+    }
+
+    // READ — archive candidate selection (verbatim body of engine/archive.rs:167-176).
+    async fn select_archive_candidates(
+        &self,
+        expired_before: DateTime<Utc>,
+    ) -> Result<(Vec<Fact>, Vec<Edge>)> {
+        let dim = self.embed_dim;
+        self.block_read(move |conn| {
+            let candidate_facts =
+                FactStore::new(conn, dim).list_archive_candidates(expired_before)?;
+            let candidate_ids: Vec<i64> = candidate_facts.iter().map(|f| f.id).collect();
+            let candidate_edges = EdgeStore::new(conn).list_internal_by_facts(&candidate_ids)?;
+            Ok((candidate_facts, candidate_edges))
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -928,5 +1098,355 @@ mod tests {
         let scope = be.get_scope(leaf_id).await.unwrap();
         assert_eq!(scope.label, "project:demo");
         assert_eq!(scope.depth, 2);
+    }
+
+    // =========================================================================
+    // Stage A — parity + rollback tests for atomic port methods
+    // =========================================================================
+
+    use crate::storage::schema::SchemaManager;
+    use crate::store::embedding_meta;
+    use crate::types::EmbeddingFingerprint;
+
+    fn fp() -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("test-model", "tei", DIM)
+    }
+
+    fn mismatched_fp() -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("other-model", "tei", DIM)
+    }
+
+    // -------------------------------------------------------------------------
+    // insert_fact_atomic
+    // -------------------------------------------------------------------------
+
+    /// Happy path: fact is inserted and `fact_id` is returned.
+    #[tokio::test]
+    async fn insert_fact_atomic_inserts_fact_and_stamps_identity() {
+        let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
+        let f = fact("hello", [0.1; DIM]);
+        let id = be.insert_fact_atomic(&f, &fp(), DIM).await.unwrap();
+        assert!(id > 0);
+        let got = be.get_fact(id).await.unwrap();
+        assert_eq!(got.content, "hello");
+        // Identity must now be stamped in the DB.
+        let stored = be.load_embedding_fingerprint().await.unwrap();
+        assert_eq!(stored, Some(fp()));
+    }
+
+    /// Parity: `insert_fact_atomic` produces the same row as a direct
+    /// `FactStore::insert` on a pre-stamped store.
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn insert_fact_atomic_parity_with_direct_store() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        // Oracle: stamp identity + insert via direct FactStore.
+        let oracle_id = {
+            let conn = pool.write();
+            embedding_meta::record_if_absent(&conn, &fp(), DIM).unwrap();
+            FactStore::new(&conn, DIM)
+                .insert(&fact("oracle", [0.2; DIM]))
+                .unwrap()
+        };
+        // Subject: insert via port.
+        let be = backend(Arc::clone(&pool));
+        let subject_id = be
+            .insert_fact_atomic(&fact("subject", [0.3; DIM]), &fp(), DIM)
+            .await
+            .unwrap();
+
+        // Both ids exist and are distinct.
+        assert_ne!(oracle_id, subject_id);
+        let oracle_row = be.get_fact(oracle_id).await.unwrap();
+        let subject_row = be.get_fact(subject_id).await.unwrap();
+        assert_eq!(oracle_row.content, "oracle");
+        assert_eq!(subject_row.content, "subject");
+    }
+
+    /// Crash-injection / rollback: a mismatched fingerprint inside the tx causes
+    /// an error — the fact must NOT have been persisted (store byte-identical).
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn insert_fact_atomic_rollback_on_fingerprint_mismatch() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        // Pre-stamp the store with fp(), then try to insert with a mismatched one.
+        {
+            let conn = pool.write();
+            embedding_meta::record_if_absent(&conn, &fp(), DIM).unwrap();
+        }
+        let be = backend(Arc::clone(&pool));
+        let err = be
+            .insert_fact_atomic(&fact("bad", [0.1; DIM]), &mismatched_fp(), DIM)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "expected EmbeddingModelMismatch, got {err:?}"
+        );
+        // Store must be byte-identical: no facts inserted.
+        let all = be.list_all_facts().await.unwrap();
+        assert!(
+            all.is_empty(),
+            "rollback must leave no fact in the store; got {all:?}"
+        );
+    }
+
+    /// #614 orphan-vector guard: a fresh (un-stamped) store must accept the
+    /// first insert (establishing identity) and reject a second insert whose
+    /// declared fingerprint disagrees.
+    #[tokio::test]
+    async fn insert_fact_atomic_orphan_vector_guard_614() {
+        let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
+        // First insert: establishes fp() as the stored identity.
+        let id1 = be
+            .insert_fact_atomic(&fact("first", [0.1; DIM]), &fp(), DIM)
+            .await
+            .unwrap();
+        assert!(id1 > 0);
+        // Second insert with a different model: must be rejected.
+        let err = be
+            .insert_fact_atomic(&fact("second", [0.2; DIM]), &mismatched_fp(), DIM)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "expected EmbeddingModelMismatch on second insert, got {err:?}"
+        );
+        // Only the first fact exists.
+        assert_eq!(be.list_all_facts().await.unwrap().len(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // insert_facts_batch_atomic
+    // -------------------------------------------------------------------------
+
+    /// Happy path: batch inserts all facts and returns ids in order.
+    #[tokio::test]
+    async fn insert_facts_batch_atomic_inserts_all_facts() {
+        let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
+        let facts = vec![
+            fact("a", [0.1; DIM]),
+            fact("b", [0.2; DIM]),
+            fact("c", [0.3; DIM]),
+        ];
+        let paths: Vec<Option<String>> = vec![None, None, None];
+        let (ids, scope_ids_to_cache) = be
+            .insert_facts_batch_atomic(&facts, &paths, &fp(), DIM)
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 3);
+        assert!(
+            scope_ids_to_cache.is_empty(),
+            "root-scope paths produce no cache entries"
+        );
+        for (i, id) in ids.iter().enumerate() {
+            let got = be.get_fact(*id).await.unwrap();
+            let expected_content = ["a", "b", "c"][i];
+            assert_eq!(got.content, expected_content);
+        }
+    }
+
+    /// Scope split: a named scope path is resolved inside the savepoint and its id
+    /// is returned in `scope_ids_to_cache` for the engine to update `scope_tree`.
+    #[tokio::test]
+    async fn insert_facts_batch_atomic_returns_scope_ids_to_cache() {
+        let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
+        let facts = vec![fact("scoped", [0.1; DIM])];
+        let paths: Vec<Option<String>> = vec![Some("user:test/project:foo".to_owned())];
+        let (ids, scope_ids_to_cache) = be
+            .insert_facts_batch_atomic(&facts, &paths, &fp(), DIM)
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        // The new scope ids must be non-empty (at least one new scope created).
+        assert!(
+            !scope_ids_to_cache.is_empty(),
+            "named scope must produce scope_ids_to_cache"
+        );
+        // The inserted fact's scope_id must be in the returned set.
+        let inserted = be.get_fact(ids[0]).await.unwrap();
+        assert!(
+            scope_ids_to_cache.contains(&inserted.scope_id) || inserted.scope_id == 1,
+            "fact scope_id must be root or in the returned cache set"
+        );
+    }
+
+    /// Rollback: injecting a dim-mismatch error on the stamp step aborts the
+    /// savepoint — no facts are persisted.
+    #[tokio::test]
+    async fn insert_facts_batch_atomic_rollback_on_stamp_error() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let be = backend(Arc::clone(&pool));
+        // Pre-stamp with fp() so a mismatched fingerprint fails.
+        be.insert_fact_atomic(&fact("seed", [0.9; DIM]), &fp(), DIM)
+            .await
+            .unwrap();
+
+        let batch = vec![fact("bad1", [0.1; DIM]), fact("bad2", [0.2; DIM])];
+        let paths: Vec<Option<String>> = vec![None, None];
+        let err = be
+            .insert_facts_batch_atomic(&batch, &paths, &mismatched_fp(), DIM)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "expected EmbeddingModelMismatch, got {err:?}"
+        );
+        // Only the seed fact is in the store (the batch was rolled back).
+        assert_eq!(
+            be.list_all_facts().await.unwrap().len(),
+            1,
+            "batch rollback must leave only the seed fact"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // insert_cosession_edges_atomic
+    // -------------------------------------------------------------------------
+
+    /// Happy path: edges are created between all fact pairs (bidirectional).
+    #[tokio::test]
+    async fn insert_cosession_edges_atomic_creates_bidirectional_edges() {
+        let pool = seeded(&[fact("a", [0.1; DIM]), fact("b", [0.2; DIM])]);
+        let be = backend(Arc::clone(&pool));
+        let all = be.list_all_facts().await.unwrap();
+        let fact_ids: Vec<i64> = all.iter().map(|f| f.id).collect();
+        let now = Utc::now();
+        let new_edges = be
+            .insert_cosession_edges_atomic(&fact_ids, "co_session", 0.5, 1, now)
+            .await
+            .unwrap();
+        // 2 facts → 2 directed edges (A→B and B→A).
+        assert_eq!(new_edges.len(), 2, "expected 2 directed co-session edges");
+        // Each entry is (edge_id, src, tgt) — edge_id > 0.
+        for (edge_id, src, tgt) in &new_edges {
+            assert!(*edge_id > 0);
+            assert_ne!(src, tgt);
+        }
+        // Persisted in the edge table.
+        let db_edges = be.list_active_edges().await.unwrap();
+        assert_eq!(db_edges.len(), 2);
+    }
+
+    /// Idempotent: calling again for the same session creates no duplicate edges.
+    #[tokio::test]
+    async fn insert_cosession_edges_atomic_is_idempotent() {
+        let pool = seeded(&[fact("x", [0.1; DIM]), fact("y", [0.2; DIM])]);
+        let be = backend(Arc::clone(&pool));
+        let all = be.list_all_facts().await.unwrap();
+        let fact_ids: Vec<i64> = all.iter().map(|f| f.id).collect();
+        let now = Utc::now();
+        let first = be
+            .insert_cosession_edges_atomic(&fact_ids, "co_session", 0.5, 1, now)
+            .await
+            .unwrap();
+        let second = be
+            .insert_cosession_edges_atomic(&fact_ids, "co_session", 0.5, 1, now)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(
+            second.len(),
+            0,
+            "idempotent: second call must create no new edges"
+        );
+        assert_eq!(be.list_active_edges().await.unwrap().len(), 2);
+    }
+
+    /// Crash-injection / rollback: including a non-existent `fact_id` triggers a
+    /// foreign-key violation mid-transaction (the `edges.source_fact_id` FK on
+    /// `facts.id` is enforced). Every edge insert that ran earlier in the tx must
+    /// be rolled back — the `edges` table is byte-identical to its state before
+    /// the call.
+    ///
+    /// Proof of atomicity (stronger than `is_err()`): we assert the exact edge
+    /// count after the error, not just that an error occurred.
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn insert_cosession_edges_atomic_rollback_on_error() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        // Seed two real facts.
+        let (real_a, real_b) = {
+            let conn = pool.write();
+            let store = FactStore::new(&conn, DIM);
+            let a = store.insert(&fact("p", [0.1; DIM])).unwrap();
+            let b = store.insert(&fact("q", [0.2; DIM])).unwrap();
+            (a, b)
+        };
+
+        let be = backend(Arc::clone(&pool));
+
+        // Assert baseline: no edges exist yet.
+        assert!(
+            be.list_active_edges().await.unwrap().is_empty(),
+            "baseline: edges table must be empty before the call"
+        );
+
+        // Pass [real_a, real_b, fake_id]. The method iterates pairs:
+        //   (a,b) → insert OK (inside tx, not yet committed)
+        //   (b,a) → insert OK
+        //   (a,fake) → FK violation: `source_fact_id` references non-existent row
+        //   (fake,a) → never reached
+        //   (b,fake) → never reached
+        // The whole transaction rolls back; no edges are committed.
+        let fake_id: i64 = 99_999;
+        let fact_ids = vec![real_a, real_b, fake_id];
+        let err = be
+            .insert_cosession_edges_atomic(&fact_ids, "co_session", 0.5, 1, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Storage(_) | MemoryError::Database(_)),
+            "expected a storage/database error from FK violation, got {err:?}"
+        );
+
+        // Byte-identical assertion: edges table is still empty — exactly as before.
+        let edges_after = be.list_active_edges().await.unwrap();
+        assert!(
+            edges_after.is_empty(),
+            "rollback must leave edges table byte-identical (empty); got {edges_after:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // select_archive_candidates (read method)
+    // -------------------------------------------------------------------------
+
+    /// Parity: `select_archive_candidates` matches direct `FactStore::list_archive_candidates`.
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn select_archive_candidates_parity_with_direct_store() {
+        use chrono::Duration;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let cutoff = Utc::now();
+        {
+            let conn = pool.write();
+            let store = FactStore::new(&conn, DIM);
+            // Expired fact (qualifies as candidate).
+            let mut expired = fact("expired", [0.1; DIM]);
+            expired.t_expired = Some(cutoff - Duration::hours(1));
+            store.insert(&expired).unwrap();
+            // Active fact (must NOT appear as candidate).
+            store.insert(&fact("active", [0.2; DIM])).unwrap();
+        }
+        // Oracle: direct FactStore call.
+        let oracle_facts = {
+            let conn = pool.read().unwrap();
+            crate::store::facts::FactStore::new(&conn, DIM)
+                .list_archive_candidates(cutoff + Duration::hours(1))
+                .unwrap()
+        };
+        let be = backend(Arc::clone(&pool));
+        let (port_facts, _edges) = be
+            .select_archive_candidates(cutoff + Duration::hours(1))
+            .await
+            .unwrap();
+        let oracle_ids: Vec<i64> = oracle_facts.iter().map(|f| f.id).collect();
+        let port_ids: Vec<i64> = port_facts.iter().map(|f| f.id).collect();
+        assert_eq!(
+            oracle_ids, port_ids,
+            "port must return same candidates as direct store"
+        );
+        assert_eq!(port_facts.len(), 1, "only the expired fact qualifies");
     }
 }

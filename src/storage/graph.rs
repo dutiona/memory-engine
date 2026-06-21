@@ -196,4 +196,109 @@ pub trait FactGraph: Send + Sync {
         &self,
         f: &mut (dyn FnMut(ScopeNode) -> Result<()> + Send),
     ) -> Result<()>;
+
+    // -------------------------------------------------------------------------
+    // Stage A atomic port methods (Fork B, §3 of the #631 plan)
+    // -------------------------------------------------------------------------
+
+    /// Atomically stamp the embedding identity (fingerprint) and insert one fact,
+    /// in a single `rusqlite` transaction.
+    ///
+    /// This is the verbatim body of `ingest.rs:228–231` moved below the seam.
+    /// The caller (`insert_fact_with_embedding`) is responsible for:
+    /// - scope resolution (done before the call, autocommit-separate by design)
+    /// - HNSW `notify_insert` (fired post-call, engine-side, on success)
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
+    ///
+    /// The `stamp_fn` closure is called **inside** the transaction before the
+    /// fact is inserted — it must either record-if-absent or verify the identity,
+    /// depending on the call site (live provider vs precomputed fingerprint). A
+    /// failing `stamp_fn` rolls back the entire transaction, so a vector is never
+    /// committed without an established, matching identity (the #614 guard).
+    ///
+    /// # Returns
+    ///
+    /// The assigned `fact_id` on success.
+    async fn insert_fact_atomic(
+        &self,
+        fact: &NewFact,
+        fingerprint: &crate::types::EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<i64>;
+
+    /// Atomically insert a batch of facts in a savepoint, returning their ids and
+    /// the scope ids that need to be cached engine-side.
+    ///
+    /// This is the verbatim DB body of `ingest.rs:397–476` moved below the seam.
+    ///
+    /// The **scope split** (plan §3): scope resolution and `ScopeStore::ensure_path`
+    /// run inside the savepoint and are returned as `scope_ids_to_cache` so the
+    /// engine can update `scope_tree.write()` **after** the successful commit,
+    /// preventing cache desync on rollback.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (savepoint rolled back)`.
+    ///
+    /// # Returns
+    ///
+    /// `(fact_ids, scope_ids_to_cache)` — `fact_ids` in the same order as `facts`;
+    /// `scope_ids_to_cache` is the deduplicated set of **new** scope ids resolved
+    /// inside the savepoint that the engine must insert into `scope_tree`.
+    async fn insert_facts_batch_atomic(
+        &self,
+        facts: &[NewFact],
+        scope_paths: &[Option<String>],
+        fingerprint: &crate::types::EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<(Vec<i64>, Vec<i64>)>;
+
+    /// Atomically insert co-session edges (deduplicating against existing ones)
+    /// for the given list of fact ids, in a single transaction.
+    ///
+    /// This is the verbatim tx body of `engine/graph.rs:71–101` moved below the
+    /// seam. The `now` timestamp is passed in so the engine controls the clock
+    /// (consistent with the surrounding engine logic).
+    ///
+    /// The caller is responsible for:
+    /// - Resolving `scope_ids` from the scope tree (done before the call)
+    /// - Updating the in-memory graph with the returned edge triples after the call
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical`.
+    ///
+    /// # Returns
+    ///
+    /// `Vec<(edge_id, src_fact_id, tgt_fact_id)>` — the new edges created (empty
+    /// if all candidate pairs already had an active co-session edge).
+    async fn insert_cosession_edges_atomic(
+        &self,
+        fact_ids: &[i64],
+        relation: &str,
+        weight: f64,
+        scope_id: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(i64, i64, i64)>>;
+
+    /// Select archive candidates (expired, non-pinned facts) and their internal
+    /// edges.
+    ///
+    /// This exposes the read body of `engine/archive.rs:167–176` through the port.
+    /// It is a **read method** (uses a read connection) — the write commit is
+    /// `ColdStorage::commit_archive_atomic`.
+    ///
+    /// # Note on `archive_dir`
+    ///
+    /// `pool.path()` disappears post-cutover (Stage E). In Stage A this method
+    /// simply returns the candidate data; the engine owns path resolution from
+    /// `EngineConfig` until Stage E rewires it. A backend-side path accessor is
+    /// **not** needed at this stage.
+    async fn select_archive_candidates(
+        &self,
+        expired_before: DateTime<Utc>,
+    ) -> Result<(Vec<crate::types::Fact>, Vec<crate::types::Edge>)>;
 }
