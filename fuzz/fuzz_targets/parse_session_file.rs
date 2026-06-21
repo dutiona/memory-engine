@@ -7,7 +7,7 @@
 //! caps are enforced; this drives the parser with adversarial bytes to prove it
 //! never panics and always returns a best-effort `(entries, malformed)` pair.
 //!
-//! The parser is `pub(crate)`; reached via the `#[cfg(fuzzing)]`
+//! The parser is crate-internal; reached via the `#[cfg(fuzzing)]`
 //! `memory_engine::fuzz_seam` re-export.
 #![no_main]
 
@@ -15,8 +15,9 @@ use libfuzzer_sys::fuzz_target;
 use std::io::BufReader;
 
 fuzz_target!(|data: &[u8]| {
-    // Caps fuzzed at both ends: 0/0 = fully unbounded (worst case for the
-    // allocator), plus a small explicit cap to exercise the truncation branch.
+    // Caps fuzzed at both ends: 0/0 disables the per-stream and per-entry caps
+    // (the per-line MAX_JSONL_LINE_BYTES cap stays fixed at 8 MiB inside the
+    // parser), plus a small explicit cap to exercise the truncation branch.
     let reader = BufReader::new(data);
     let _ = memory_engine::fuzz_seam::parse_session_file(reader, 0, 0);
 

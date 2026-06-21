@@ -7,7 +7,7 @@
 //! deep-nesting / large-allocation paths were never fuzzed. The contract is
 //! total: every malformed input must return `None`, never panic.
 //!
-//! The reader is `pub(crate)`; it is reached through the `#[cfg(fuzzing)]`
+//! The reader is crate-internal; it is reached through the `#[cfg(fuzzing)]`
 //! `memory_engine::fuzz_seam` re-export so this harness does not widen the
 //! shipped public API.
 #![no_main]
