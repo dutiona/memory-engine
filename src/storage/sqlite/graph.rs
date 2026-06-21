@@ -36,25 +36,45 @@ impl FactGraph for SqliteBackend {
 
     // WRITE
     async fn insert_fact(&self, fact: &NewFact) -> Result<i64> {
+        // Capture embedding before moving `fact` into the closure so we can
+        // call notify_insert post-commit without re-borrowing `fact`.
+        #[cfg(feature = "ann")]
+        let embedding = fact.embedding.clone();
         let fact = fact.clone();
         let dim = self.embed_dim;
-        self.block_write(move |c| FactStore::new(c, dim).insert(&fact))
-            .await
+        let id = self
+            .block_write(move |c| FactStore::new(c, dim).insert(&fact))
+            .await?;
+        // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238).
+        #[cfg(feature = "ann")]
+        self.hnsw_notify_insert(id, &embedding);
+        Ok(id)
     }
 
     // WRITE
     async fn insert_or_reinforce_fact(&self, fact: &NewFact) -> Result<(i64, bool)> {
+        #[cfg(feature = "ann")]
+        let embedding = fact.embedding.clone();
         let fact = fact.clone();
         let dim = self.embed_dim;
-        self.block_write(move |c| FactStore::new(c, dim).insert_or_reinforce(&fact))
-            .await
+        let result = self
+            .block_write(move |c| FactStore::new(c, dim).insert_or_reinforce(&fact))
+            .await?;
+        // Notify on any write that changes the active vector set (insert or reinforce).
+        #[cfg(feature = "ann")]
+        self.hnsw_notify_insert(result.0, &embedding);
+        Ok(result)
     }
 
     // WRITE
     async fn expire_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
         let dim = self.embed_dim;
         self.block_write(move |c| FactStore::new(c, dim).expire(id, now))
-            .await
+            .await?;
+        // Post-commit HNSW notification (mirrors engine's notify_expire calls).
+        #[cfg(feature = "ann")]
+        self.hnsw_notify_expire(id);
+        Ok(())
     }
 
     // WRITE
@@ -120,10 +140,19 @@ impl FactGraph for SqliteBackend {
 
     // WRITE
     async fn hard_delete_facts(&self, ids: &[i64]) -> Result<usize> {
+        #[cfg(feature = "ann")]
+        let ids_for_notify = ids.to_vec();
         let ids = ids.to_vec();
         let dim = self.embed_dim;
-        self.block_write(move |c| FactStore::new(c, dim).hard_delete_ids(&ids))
-            .await
+        let count = self
+            .block_write(move |c| FactStore::new(c, dim).hard_delete_ids(&ids))
+            .await?;
+        // Post-commit HNSW notification: tombstone each hard-deleted fact.
+        #[cfg(feature = "ann")]
+        for id in ids_for_notify {
+            self.hnsw_notify_expire(id);
+        }
+        Ok(count)
     }
 
     // -------------------------------------------------------------------------
@@ -545,21 +574,28 @@ impl FactGraph for SqliteBackend {
         fingerprint: &EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<i64> {
+        #[cfg(feature = "ann")]
+        let embedding = fact.embedding.clone();
         let fact = fact.clone();
         let fingerprint = fingerprint.clone();
         let dim = self.embed_dim;
-        self.block_write(move |conn| {
-            // Verbatim body of ingest.rs:228-231: one unchecked_transaction wrapping
-            // stamp_identity + FactStore::insert so a vector is never committed
-            // without an established, matching identity (the #614 silent-corruption guard).
-            let tx = conn.unchecked_transaction()?;
-            // stamp_identity equivalent: record-if-absent or compare-and-reject
-            crate::store::embedding_meta::record_if_absent(&tx, &fingerprint, expected_dim)?;
-            let id = FactStore::new(&tx, dim).insert(&fact)?;
-            tx.commit()?;
-            Ok(id)
-        })
-        .await
+        let id = self
+            .block_write(move |conn| {
+                // Verbatim body of ingest.rs:228-231: one unchecked_transaction wrapping
+                // stamp_identity + FactStore::insert so a vector is never committed
+                // without an established, matching identity (the #614 silent-corruption guard).
+                let tx = conn.unchecked_transaction()?;
+                // stamp_identity equivalent: record-if-absent or compare-and-reject
+                crate::store::embedding_meta::record_if_absent(&tx, &fingerprint, expected_dim)?;
+                let id = FactStore::new(&tx, dim).insert(&fact)?;
+                tx.commit()?;
+                Ok(id)
+            })
+            .await?;
+        // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238).
+        #[cfg(feature = "ann")]
+        self.hnsw_notify_insert(id, &embedding);
+        Ok(id)
     }
 
     // ATOMIC WRITE — savepoint wrapping scope-resolution + batch fact insert.
@@ -572,72 +608,86 @@ impl FactGraph for SqliteBackend {
         fingerprint: &EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<(Vec<i64>, Vec<i64>)> {
+        // Capture embeddings before moving `facts` into the closure.
+        #[cfg(feature = "ann")]
+        let embeddings: Vec<Vec<f32>> = facts.iter().map(|f| f.embedding.clone()).collect();
         let facts = facts.to_vec();
         let scope_paths = scope_paths.to_vec();
         let fingerprint = fingerprint.clone();
         let dim = self.embed_dim;
-        self.block_write(move |conn| {
-            // Verbatim body of ingest.rs:397-476: savepoint wrapping stamp +
-            // scope-resolve + per-fact insert.
-            conn.execute_batch("SAVEPOINT batch_insert")?;
+        let (ids, scope_ids_to_cache) = self
+            .block_write(move |conn| {
+                // Verbatim body of ingest.rs:397-476: savepoint wrapping stamp +
+                // scope-resolve + per-fact insert.
+                conn.execute_batch("SAVEPOINT batch_insert")?;
 
-            let result: Result<(Vec<i64>, Vec<i64>)> = (|| {
-                // Record the embedding identity on first write (#613), inside the
-                // savepoint so it commits atomically with the batch.
-                crate::store::embedding_meta::record_if_absent(conn, &fingerprint, expected_dim)?;
+                let result: Result<(Vec<i64>, Vec<i64>)> = (|| {
+                    // Record the embedding identity on first write (#613), inside the
+                    // savepoint so it commits atomically with the batch.
+                    crate::store::embedding_meta::record_if_absent(
+                        conn,
+                        &fingerprint,
+                        expected_dim,
+                    )?;
 
-                let scope_store = ScopeStore::new(conn);
-                let store = FactStore::new(conn, dim);
+                    let scope_store = ScopeStore::new(conn);
+                    let store = FactStore::new(conn, dim);
 
-                // Resolve scopes INSIDE the savepoint so they roll back on error.
-                // Deduplicate by path to avoid N redundant DB lookups.
-                let mut scope_cache: std::collections::HashMap<String, i64> =
-                    std::collections::HashMap::new();
-                let mut per_entry_scope_ids = Vec::with_capacity(facts.len());
-                for path_opt in &scope_paths {
-                    let scope_id = match path_opt {
-                        Some(path) => {
-                            if let Some(&cached) = scope_cache.get(path) {
-                                cached
-                            } else {
-                                let id = scope_store.ensure_path(path)?;
-                                scope_cache.insert(path.clone(), id);
-                                id
+                    // Resolve scopes INSIDE the savepoint so they roll back on error.
+                    // Deduplicate by path to avoid N redundant DB lookups.
+                    let mut scope_cache: std::collections::HashMap<String, i64> =
+                        std::collections::HashMap::new();
+                    let mut per_entry_scope_ids = Vec::with_capacity(facts.len());
+                    for path_opt in &scope_paths {
+                        let scope_id = match path_opt {
+                            Some(path) => {
+                                if let Some(&cached) = scope_cache.get(path) {
+                                    cached
+                                } else {
+                                    let id = scope_store.ensure_path(path)?;
+                                    scope_cache.insert(path.clone(), id);
+                                    id
+                                }
                             }
-                        }
-                        None => 1, // root scope
-                    };
-                    per_entry_scope_ids.push(scope_id);
-                }
-                let scope_ids_to_cache: Vec<i64> = scope_cache.into_values().collect();
+                            None => 1, // root scope
+                        };
+                        per_entry_scope_ids.push(scope_id);
+                    }
+                    let scope_ids_to_cache: Vec<i64> = scope_cache.into_values().collect();
 
-                let mut ids = Vec::with_capacity(facts.len());
-                for (i, fact) in facts.iter().enumerate() {
-                    // Patch scope_id from the resolved value (the NewFact coming in
-                    // may have a placeholder 0; in practice the engine already sets it,
-                    // but we honor the resolved scope_id from the savepoint).
-                    let mut f = fact.clone();
-                    f.scope_id = per_entry_scope_ids[i];
-                    let fact_id = store.insert(&f)?;
-                    ids.push(fact_id);
-                }
+                    let mut ids = Vec::with_capacity(facts.len());
+                    for (i, fact) in facts.iter().enumerate() {
+                        // Patch scope_id from the resolved value (the NewFact coming in
+                        // may have a placeholder 0; in practice the engine already sets it,
+                        // but we honor the resolved scope_id from the savepoint).
+                        let mut f = fact.clone();
+                        f.scope_id = per_entry_scope_ids[i];
+                        let fact_id = store.insert(&f)?;
+                        ids.push(fact_id);
+                    }
 
-                Ok((ids, scope_ids_to_cache))
-            })();
+                    Ok((ids, scope_ids_to_cache))
+                })();
 
-            match result {
-                Ok(pair) => {
-                    conn.execute_batch("RELEASE batch_insert")?;
-                    Ok(pair)
+                match result {
+                    Ok(pair) => {
+                        conn.execute_batch("RELEASE batch_insert")?;
+                        Ok(pair)
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK TO batch_insert");
+                        let _ = conn.execute_batch("RELEASE batch_insert");
+                        Err(e)
+                    }
                 }
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK TO batch_insert");
-                    let _ = conn.execute_batch("RELEASE batch_insert");
-                    Err(e)
-                }
-            }
-        })
-        .await
+            })
+            .await?;
+        // Post-commit HNSW notifications (mirrors engine/ingest.rs batch path).
+        #[cfg(feature = "ann")]
+        for (id, embedding) in ids.iter().zip(embeddings.iter()) {
+            self.hnsw_notify_insert(*id, embedding);
+        }
+        Ok((ids, scope_ids_to_cache))
     }
 
     // ATOMIC WRITE — co-session edge batch in one transaction.

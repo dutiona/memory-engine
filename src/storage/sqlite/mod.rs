@@ -36,6 +36,11 @@ use std::sync::Arc;
 
 use crate::error::{MemoryError, Result, StorageError};
 use crate::pool::ConnectionPool;
+#[cfg(feature = "ann")]
+use crate::search::ann::HnswStrategy;
+use crate::search::strategy::SearchConfig;
+#[cfg(feature = "ann")]
+use crate::search::strategy::VectorSearchStrategy as _;
 use crate::store::upcaster::UpcasterRegistry;
 
 #[cfg(all(feature = "async", feature = "archive"))]
@@ -56,15 +61,44 @@ mod session;
 /// need an owned handle) and the [`UpcasterRegistry`] as `Arc` (cloned into every
 /// [`EventLog`](crate::storage::EventLog) closure). `embed_dim` is derived from the
 /// pool so the two can never diverge.
+///
+/// ## HNSW ownership (Stage B, `ann` feature)
+///
+/// When the `ann` feature is enabled and a [`SearchConfig`] with
+/// `ann_threshold < usize::MAX` is provided via [`SqliteBackend::with_search_config`],
+/// an [`HnswStrategy`] is built from the database and stored here. `vector_search`
+/// dispatches to HNSW when `active_count() >= ann_threshold`, mirroring the engine's
+/// `should_use_hnsw()` predicate exactly. Without a `search_config` (the default),
+/// `vector_search` is always brute-force, preserving the `#630` behavior.
+///
+/// The HNSW index is maintained incrementally: `notify_insert` is called after every
+/// successful fact write (post-commit), and `notify_expire` after every expiry or hard
+/// delete — matching the engine's post-commit ordering in `ingest.rs` / `cognitive.rs`.
 pub struct SqliteBackend {
     pool: Arc<ConnectionPool>,
     embed_dim: usize,
     upcaster_registry: Arc<UpcasterRegistry>,
+    /// Optional vector search configuration — drives the HNSW dispatch predicate.
+    ///
+    /// `None` (the default from `from_pool`) ⇒ `ann_threshold` is effectively
+    /// `usize::MAX`, so HNSW never activates and `vector_search` is always
+    /// brute-force.
+    #[cfg_attr(not(feature = "ann"), allow(dead_code))]
+    search_config: Option<SearchConfig>,
+    /// Owned HNSW index, wrapped in `Arc` so the `'static` `spawn_blocking`
+    /// closures in `vector_search` can clone the reference without unsafe code.
+    /// Present only when the `ann` feature is enabled **and**
+    /// `with_search_config` was called with `ann_threshold < usize::MAX`.
+    #[cfg(feature = "ann")]
+    hnsw: Option<Arc<HnswStrategy>>,
 }
 
 // Build-time witness (not test-gated): `SqliteBackend` must be `Send + Sync` for
 // `Arc<dyn StorageBackend>` and the `#[async_trait]` `Send` futures. A field that
 // breaks this fails `cargo build`, not merely `cargo test`.
+//
+// `HnswStrategy` is `Send + Sync` because its interior `RwLock` (parking_lot) is
+// `Send + Sync`, and its `Hnsw<…>` is proven `Send + Sync` in `ann.rs:hnsw_is_send_sync`.
 const _: fn() = || {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SqliteBackend>();
@@ -74,6 +108,10 @@ impl SqliteBackend {
     /// Wrap an already-opened pool + upcaster registry. The canonical constructor
     /// `#631` will use where it builds the [`ConnectionPool`] today. `embed_dim` is
     /// read from the pool, so a backend's dimension cannot diverge from its pool's.
+    ///
+    /// The backend produced by this constructor has no `SearchConfig`, so HNSW never
+    /// activates and `vector_search` is always brute-force — identical to the `#630`
+    /// behavior. Use [`with_search_config`](Self::with_search_config) to opt into HNSW.
     #[must_use]
     pub fn from_pool(pool: Arc<ConnectionPool>, upcaster_registry: Arc<UpcasterRegistry>) -> Self {
         let embed_dim = pool.embed_dim();
@@ -81,6 +119,170 @@ impl SqliteBackend {
             pool,
             embed_dim,
             upcaster_registry,
+            search_config: None,
+            #[cfg(feature = "ann")]
+            hnsw: None,
+        }
+    }
+
+    /// Attach a [`SearchConfig`] and, when the `ann` feature is enabled and
+    /// `cfg.ann_threshold < usize::MAX`, build the HNSW index from the database.
+    ///
+    /// This is the builder that replicates the engine's `init_from_pool` HNSW
+    /// construction (`engine/mod.rs:272-284`). It acquires a read connection,
+    /// runs the full `SELECT id, embedding FROM facts WHERE t_expired IS NULL`
+    /// scan, and constructs an in-memory index.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on a pool or query failure, or
+    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
+    // Non-ann builds see only `self.search_config = Some(cfg); Ok(self)` which
+    // clippy flags as `missing_const_for_fn`. It is not const: under `ann` the
+    // method runs fallible DB I/O, and `const fn` cannot be conditionally const
+    // across feature flags. Suppress the FP on the non-ann build.
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "under `ann` this runs fallible DB I/O; \
+                  the method cannot be `const` across all feature combos"
+    )]
+    pub fn with_search_config(mut self, cfg: SearchConfig) -> Result<Self> {
+        #[cfg(feature = "ann")]
+        {
+            self.hnsw = if cfg.ann_threshold < usize::MAX {
+                let conn = self.pool.read()?;
+                Some(Arc::new(HnswStrategy::build_from_db(
+                    &conn,
+                    self.embed_dim,
+                )?))
+            } else {
+                None
+            };
+        }
+        self.search_config = Some(cfg);
+        Ok(self)
+    }
+
+    /// Replicate the engine's `should_use_hnsw()` predicate exactly:
+    /// `hnsw.is_some_and(|h| h.active_count() >= ann_threshold)`.
+    ///
+    /// When the `ann` feature is disabled, or when no `search_config` was set,
+    /// this is always `false` (brute-force).
+    ///
+    /// The extra guard `filter_is_hnsw_compatible` ensures the filter does not
+    /// carry predicates that HNSW's `check_fact_filters` cannot honour (pinned,
+    /// metadata, ids, non-Active temporal). In those cases the richer brute-force
+    /// SQL path is used so no result is incorrectly included or excluded.
+    #[cfg(feature = "ann")]
+    fn should_use_hnsw(&self, filter: &crate::storage::FactFilter) -> bool {
+        use crate::storage::TemporalFilter;
+        // Replication of `engine/mod.rs:379-387` + filter-compatibility guard.
+        // HNSW's `check_fact_filters` only handles:
+        //   t_expired IS NULL  +  fact_type  +  scope_ids
+        // Any extra dimension (pinned, metadata, ids, non-Active temporal) must
+        // fall through to the full brute-force SQL path.
+        let filter_compatible = filter.temporal == TemporalFilter::Active
+            && filter.ids.is_none()
+            && filter.pinned.is_none()
+            && filter.metadata.is_empty();
+        if !filter_compatible {
+            return false;
+        }
+        self.hnsw.as_ref().is_some_and(|h| {
+            h.active_count()
+                >= self
+                    .search_config
+                    .as_ref()
+                    .map_or(usize::MAX, |c| c.ann_threshold)
+        })
+    }
+
+    #[cfg(not(feature = "ann"))]
+    #[allow(
+        dead_code,
+        clippy::unused_self,
+        reason = "non-ann build: method exists for symmetry but is never called; \
+                  the ann twin uses self.hnsw / self.search_config"
+    )]
+    const fn should_use_hnsw(&self, _filter: &crate::storage::FactFilter) -> bool {
+        false
+    }
+
+    /// Serialize the in-memory HNSW index to a snapshot (reads active embeddings
+    /// from the database via a read connection).
+    ///
+    /// Returns `Ok(None)` if HNSW is not active (no `search_config`, `ann` feature
+    /// disabled, or `ann_threshold == usize::MAX`). This is the piece that Stage E
+    /// wires into the engine's `close()`/snapshot path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on pool or query failure, or
+    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
+    #[cfg(feature = "ann")]
+    pub fn hnsw_snapshot(&self) -> Result<Option<crate::engine::snapshot::HnswSnapshot>> {
+        let Some(ref hnsw) = self.hnsw else {
+            return Ok(None);
+        };
+        let conn = self.pool.read()?;
+        hnsw.to_snapshot(&conn, self.embed_dim).map(Some)
+    }
+
+    /// Rebuild the HNSW index from a snapshot produced by
+    /// [`hnsw_snapshot`](Self::hnsw_snapshot), discarding the current in-memory
+    /// index.
+    ///
+    /// This replicates `engine/mod.rs:334-353`'s `try_load_snapshot` HNSW path.
+    /// Returns `Ok(())` if HNSW is not active (no-op for non-ann builds or
+    /// `ann_threshold == usize::MAX`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::EmbeddingDimension` if a snapshot entry has the wrong
+    /// embedding size (corrupt/version-skewed snapshot).
+    #[cfg(feature = "ann")]
+    pub fn load_hnsw_snapshot(
+        &mut self,
+        snap: &crate::engine::snapshot::HnswSnapshot,
+    ) -> Result<()> {
+        // Only meaningful if the config requires ANN.
+        let ann_threshold = self
+            .search_config
+            .as_ref()
+            .map_or(usize::MAX, |c| c.ann_threshold);
+        if ann_threshold == usize::MAX {
+            return Ok(());
+        }
+        self.hnsw = Some(Arc::new(HnswStrategy::from_snapshot(snap, self.embed_dim)?));
+        Ok(())
+    }
+}
+
+impl SqliteBackend {
+    /// Notify the HNSW index that a fact was inserted (post-commit).
+    ///
+    /// Mirrors the engine's post-commit `notify_insert` calls in `ingest.rs:235-238`
+    /// and `cognitive.rs:362-364`. Must be called **after** the write has committed
+    /// and the write lock has been released (matching the engine's ordering).
+    ///
+    /// No-op when the `ann` feature is disabled or when no HNSW index is active.
+    #[cfg(feature = "ann")]
+    pub(super) fn hnsw_notify_insert(&self, fact_id: i64, embedding: &[f32]) {
+        if let Some(ref hnsw) = self.hnsw {
+            hnsw.notify_insert(fact_id, embedding);
+        }
+    }
+
+    /// Notify the HNSW index that a fact was expired or hard-deleted (post-commit).
+    ///
+    /// Mirrors the engine's `notify_expire` calls. Must be called **after** the write
+    /// has committed and the write lock has been released.
+    ///
+    /// No-op when the `ann` feature is disabled or when no HNSW index is active.
+    #[cfg(feature = "ann")]
+    pub(super) fn hnsw_notify_expire(&self, fact_id: i64) {
+        if let Some(ref hnsw) = self.hnsw {
+            hnsw.notify_expire(fact_id);
         }
     }
 }
