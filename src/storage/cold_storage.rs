@@ -56,6 +56,11 @@ pub trait ColdStorage: Send + Sync {
     ///
     /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
     ///
+    /// `created_at` is captured as `Utc::now()` inside the transaction, matching the
+    /// original `commit_archive` which stamps the manifest row at commit time (not
+    /// call-site time). This preserves ordering correctness for
+    /// `list_archive_manifest` (`ORDER BY created_at ASC`).
+    ///
     /// If this method returns `Err`, the caller is responsible for removing the
     /// already-written `.pak` file (the CWE-459 orphan guard, preserved from the
     /// original `commit_archive`).
@@ -63,7 +68,6 @@ pub trait ColdStorage: Send + Sync {
     async fn commit_archive_atomic(
         &self,
         pak_filename: &str,
-        created_at: DateTime<Utc>,
         fact_count: i64,
         edge_count: i64,
         fact_id_min: i64,

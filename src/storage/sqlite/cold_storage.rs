@@ -68,11 +68,14 @@ impl ColdStorage for SqliteBackend {
 
     // ATOMIC WRITE — manifest insert + hard-delete edges + hard-delete facts,
     // verbatim body of engine/archive.rs:238-279 moved below the seam.
+    //
+    // `created_at` is captured as `Utc::now()` inside the transaction, matching
+    // the original `commit_archive` (archive.rs:239). This preserves ordering
+    // correctness for `list_archive_manifest` (`ORDER BY created_at ASC`).
     #[allow(clippy::cast_possible_wrap, clippy::too_many_arguments)]
     async fn commit_archive_atomic(
         &self,
         pak_filename: &str,
-        created_at: DateTime<Utc>,
         fact_count: i64,
         edge_count: i64,
         fact_id_min: i64,
@@ -92,15 +95,17 @@ impl ColdStorage for SqliteBackend {
         let fact_ids = fact_ids.to_vec();
         let dim = self.embed_dim;
         self.block_write(move |conn| {
-            // Verbatim body of engine/archive.rs:253-279: one transaction wrapping
-            // manifest insert + FK-safe edge delete + fact hard-delete.
+            // Verbatim body of engine/archive.rs:239,253-279: capture `now` at the
+            // transaction boundary, then manifest insert + FK-safe edge delete + fact
+            // hard-delete, all in one transaction.
+            let now = Utc::now();
             let tx = conn.unchecked_transaction().map_err(|e| {
                 ArchiveError::Transaction(format!("failed to begin transaction: {e}"))
             })?;
 
             ArchiveManifestStore::new(&tx).insert(
                 &pak_filename,
-                created_at,
+                now,
                 fact_count,
                 edge_count,
                 fact_id_min,
@@ -133,13 +138,38 @@ mod tests {
     use super::super::SqliteBackend;
     use crate::pool::ConnectionPool;
     use crate::storage::cold_storage::ColdStorage;
+    use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
+    use crate::types::{FactType, NewFact};
 
     const DIM: usize = 4;
 
-    fn backend() -> SqliteBackend {
-        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+    fn backend_from(pool: Arc<ConnectionPool>) -> SqliteBackend {
         SqliteBackend::from_pool(pool, Arc::new(UpcasterRegistry::new()))
+    }
+
+    fn backend() -> SqliteBackend {
+        backend_from(Arc::new(ConnectionPool::open_memory(DIM).unwrap()))
+    }
+
+    fn new_fact(content: &str) -> NewFact {
+        NewFact {
+            content: content.into(),
+            content_hash: String::new(),
+            embedding: vec![0.1_f32; DIM],
+            fact_type: FactType::Episodic,
+            t_created: Utc::now(),
+            t_expired: Some(Utc::now()), // pre-expired so it qualifies as archive candidate
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            scope_id: 1,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed: Utc::now(),
+            metadata: serde_json::json!({}),
+            is_pinned: false,
+        }
     }
 
     async fn insert_entry(be: &SqliteBackend, pak_path: &str) -> i64 {
@@ -224,5 +254,90 @@ mod tests {
         assert_eq!(entry.fact_id_max, 141);
         assert_eq!(entry.size_bytes, 65536);
         assert_eq!(entry.blake3_hash, "cafebabecafebabecafebabecafebabe");
+    }
+
+    // -------------------------------------------------------------------------
+    // commit_archive_atomic — crash-injection / rollback test (F5)
+    // -------------------------------------------------------------------------
+
+    /// Crash-injection: dropping the `facts` table makes `hard_delete_ids` fail
+    /// mid-transaction. The manifest insert and edge delete that ran earlier in the
+    /// same tx must be rolled back — manifest + facts tables are byte-identical to
+    /// before.
+    ///
+    /// Proof of atomicity: if the tx did NOT roll back, the `archive_manifest` table
+    /// would contain a new entry for "crash.pak". We assert it still has exactly the
+    /// one pre-seeded entry, byte-identical to before.
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn commit_archive_atomic_rollback_on_mid_tx_error() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+
+        // Seed two facts so `fact_ids` is non-empty (exercises the delete path).
+        let fact_ids: Vec<i64> = {
+            let conn = pool.write();
+            let store = FactStore::new(&conn, DIM);
+            vec![
+                store.insert(&new_fact("f1")).unwrap(),
+                store.insert(&new_fact("f2")).unwrap(),
+            ]
+        };
+
+        // Pre-insert one manifest entry to establish a known "before" count.
+        let be = backend_from(Arc::clone(&pool));
+        let before_id = insert_entry(&be, "archives/before.pak").await;
+        let manifest_before = be.list_archive_manifest().await.unwrap();
+        assert_eq!(manifest_before.len(), 1);
+
+        // Drop the `facts` table to force `hard_delete_ids` to fail mid-tx.
+        // The transaction sequence inside `commit_archive_atomic` is:
+        //   1. ArchiveManifestStore::insert  ← succeeds
+        //   2. EdgeStore::hard_delete_by_facts ← succeeds (no edges)
+        //   3. FactStore::hard_delete_ids    ← FAILS (table gone)
+        // The whole tx must roll back.
+        {
+            let conn = pool.write();
+            conn.execute_batch("DROP TABLE facts").unwrap();
+        }
+
+        let now = Utc::now();
+        let err = be
+            .commit_archive_atomic(
+                "crash.pak",
+                2, // fact_count
+                0, // edge_count
+                fact_ids[0],
+                fact_ids[1],
+                now,
+                now,
+                4096,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &fact_ids,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::MemoryError::Archive(_)
+                    | crate::error::MemoryError::Database(_)
+                    | crate::error::MemoryError::Storage(_)
+            ),
+            "expected Archive, Database or Storage error, got {err:?}"
+        );
+
+        // Manifest must be byte-identical to before: only the one pre-seeded entry,
+        // NOT the "crash.pak" entry from the rolled-back tx.
+        let manifest_after = be.list_archive_manifest().await.unwrap();
+        assert_eq!(
+            manifest_after.len(),
+            1,
+            "rollback must leave manifest byte-identical; got {manifest_after:?}"
+        );
+        assert_eq!(
+            manifest_after[0].id, before_id,
+            "the surviving entry must be the pre-seeded one, not the rolled-back one"
+        );
+        assert_eq!(manifest_after[0].pak_path, "archives/before.pak");
     }
 }

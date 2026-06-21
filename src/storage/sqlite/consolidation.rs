@@ -317,21 +317,23 @@ impl ConsolidationStore for SqliteBackend {
             // --- Apply pass (one transaction) ---
             let now = Utc::now();
 
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(MemoryError::Database)?;
+
             // #613 guard: AddFact / Synthesize carry pre-computed embeddings with no
-            // live provider — reject against an un-stamped store.
+            // live provider — reject against an un-stamped store. Called inside the
+            // transaction (on `&tx`) to match the original apply.rs:91-94 exactly.
             if report
                 .deltas
                 .iter()
                 .any(|d| matches!(d, CycleDelta::AddFact(_) | CycleDelta::Synthesize { .. }))
             {
-                crate::store::embedding_meta::require_present(conn)?;
+                crate::store::embedding_meta::require_present(&tx)?;
             }
 
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(MemoryError::Database)?;
-
             let mut result = ApplyResult::default();
+            #[cfg_attr(not(feature = "ann"), allow(unused_mut))]
             let mut to_index: Vec<(i64, Vec<f32>)> = Vec::new();
             let mut expired_ids: Vec<i64> = Vec::new();
             let mut supersede_edges: Vec<(i64, i64, i64)> = Vec::new();
@@ -344,6 +346,7 @@ impl ConsolidationStore for SqliteBackend {
                         let id = FactStore::new(&tx, embed_dim).insert(nf)?;
                         result.new_fact_ids.push(id);
                         result.facts_added += 1;
+                        #[cfg(feature = "ann")]
                         to_index.push((id, nf.embedding.clone()));
                     }
                     CycleDelta::AdjustScore {
@@ -380,6 +383,16 @@ impl ConsolidationStore for SqliteBackend {
                         // unconditionally, matching the current cycle apply path exactly
                         // (Promote in apply_cycle_report always passes scope: None → 1).
                         let source = FactStore::new(&tx, embed_dim).get(*fact_id)?;
+
+                        // Embedding dimension guard — mirrors promote_in_conn (cognitive.rs:385-390).
+                        // Defends against a pre-existing data integrity violation producing a
+                        // wrong-dimension embedded fact.
+                        if source.embedding.len() != embed_dim {
+                            return Err(MemoryError::EmbeddingDimension {
+                                expected: embed_dim,
+                                actual: source.embedding.len(),
+                            });
+                        }
 
                         // #613/#615 — promotion identity guard
                         crate::store::embedding_meta::require_present(&tx)?;
@@ -425,6 +438,7 @@ impl ConsolidationStore for SqliteBackend {
                         )?;
                         result.promoted += 1;
                         result.promoted_fact_ids.push(promoted_id);
+                        #[cfg(feature = "ann")]
                         to_index.push((promoted_id, source.embedding));
                     }
                     CycleDelta::TagOutcome { fact_id, outcome } => {
@@ -510,6 +524,7 @@ impl ConsolidationStore for SqliteBackend {
                         synthesize_new_ids.push(synth_id);
                         result.synthesized_fact_ids.push(synth_id);
                         result.synthesized += 1;
+                        #[cfg(feature = "ann")]
                         to_index.push((synth_id, new_fact.embedding.clone()));
                     }
                 }
@@ -854,5 +869,116 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(collected, vec![wf_id]);
+    }
+
+    // -------------------------------------------------------------------------
+    // apply_cycle_deltas_atomic — crash-injection / rollback test (F6)
+    // -------------------------------------------------------------------------
+
+    /// Crash-injection: dropping the `config` table makes the final
+    /// `set_config(LAST_DREAM_CYCLE_AT, …)` fail at the end of the apply pass.
+    /// All earlier delta ops (here: Quarantine, which expires a fact) must be
+    /// rolled back — the store is byte-identical to before.
+    ///
+    /// Proof of atomicity: if the tx did NOT roll back, the quarantined fact
+    /// would have `t_expired != None`. We assert it is still `None`.
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn apply_cycle_deltas_atomic_rollback_on_mid_tx_error() {
+        use crate::engine::cycle::{
+            CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
+        };
+        use crate::storage::graph::FactGraph as _;
+        use crate::store::embedding_meta;
+        use crate::types::EmbeddingFingerprint;
+
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let fp = EmbeddingFingerprint::new("test-model", "tei", DIM);
+
+        // Seed one active fact and stamp the store identity.
+        let fact_id: i64 = {
+            let conn = pool.write();
+            embedding_meta::record_if_absent(&conn, &fp, DIM).unwrap();
+            FactStore::new(&conn, DIM)
+                .insert(&NewFact {
+                    content: "victim".into(),
+                    content_hash: String::new(),
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                    fact_type: FactType::Semantic,
+                    t_created: Utc::now(),
+                    t_expired: None,
+                    t_valid: None,
+                    t_invalid: None,
+                    source_event_id: None,
+                    scope_id: 1,
+                    importance: 0.5,
+                    access_count: 0,
+                    last_accessed: Utc::now(),
+                    metadata: serde_json::json!({}),
+                    is_pinned: false,
+                })
+                .unwrap()
+        };
+
+        let be = SqliteBackend::from_pool(Arc::clone(&pool), Arc::new(UpcasterRegistry::new()));
+
+        // Drop the `config` table so the final `set_config(LAST_DREAM_CYCLE_AT)`
+        // inside the transaction fails. The Quarantine delta (expire +
+        // merge_metadata on `facts`) will have run first inside the tx — rollback
+        // must undo it.
+        {
+            let conn = pool.write();
+            conn.execute_batch("DROP TABLE config").unwrap();
+        }
+
+        let start: chrono::DateTime<Utc> = "2026-06-16T00:00:00Z".parse().unwrap();
+        let report = CycleReport {
+            deltas: vec![CycleDelta::Quarantine {
+                fact_id,
+                reason: "test quarantine".into(),
+            }],
+            identity: IdentityOutput::empty(),
+            metadata: CycleMetadata {
+                cycle_id: 1,
+                ran_at: start,
+                time_window: TimeWindow {
+                    start,
+                    end: "2026-06-16T01:00:00Z".parse().unwrap(),
+                },
+                facts_selected: 1,
+                method_version: "rollback-test".into(),
+                processed_ids: vec![fact_id],
+            },
+        };
+
+        let registry = crate::store::upcaster::UpcasterRegistry::new();
+        let err = be
+            .apply_cycle_deltas_atomic(&report, DIM, &registry)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Database(_) | MemoryError::Storage(_)),
+            "expected Database or Storage error, got {err:?}"
+        );
+
+        // Restore the `config` table so we can query facts via the backend.
+        // (The pool's write connection is the same SQLite connection — DDL
+        // re-creates the table in the same in-memory database.)
+        {
+            let conn = pool.write();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS config \
+                 (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            )
+            .unwrap();
+        }
+
+        // Store must be byte-identical: the Quarantine was rolled back — fact still active.
+        let facts = be.list_all_facts().await.unwrap();
+        assert_eq!(facts.len(), 1, "only the seeded fact should exist");
+        assert!(
+            facts[0].t_expired.is_none(),
+            "rollback must leave t_expired = None; Quarantine must not have committed"
+        );
     }
 }

@@ -1353,34 +1353,58 @@ mod tests {
         assert_eq!(be.list_active_edges().await.unwrap().len(), 2);
     }
 
-    /// Rollback: dropping the edge table mid-method causes rollback; no edges persist.
+    /// Crash-injection / rollback: including a non-existent `fact_id` triggers a
+    /// foreign-key violation mid-transaction (the `edges.source_fact_id` FK on
+    /// `facts.id` is enforced). Every edge insert that ran earlier in the tx must
+    /// be rolled back — the `edges` table is byte-identical to its state before
+    /// the call.
+    ///
+    /// Proof of atomicity (stronger than `is_err()`): we assert the exact edge
+    /// count after the error, not just that an error occurred.
     #[tokio::test]
     #[allow(clippy::significant_drop_tightening)]
     async fn insert_cosession_edges_atomic_rollback_on_error() {
         let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
-        // Seed two facts.
-        let fact_ids: Vec<i64> = {
+        // Seed two real facts.
+        let (real_a, real_b) = {
             let conn = pool.write();
             let store = FactStore::new(&conn, DIM);
-            vec![
-                store.insert(&fact("p", [0.1; DIM])).unwrap(),
-                store.insert(&fact("q", [0.2; DIM])).unwrap(),
-            ]
+            let a = store.insert(&fact("p", [0.1; DIM])).unwrap();
+            let b = store.insert(&fact("q", [0.2; DIM])).unwrap();
+            (a, b)
         };
-        // Drop the edges table to force a failure inside the tx.
-        {
-            let conn = pool.write();
-            conn.execute_batch("DROP TABLE edges").unwrap();
-        }
+
         let be = backend(Arc::clone(&pool));
+
+        // Assert baseline: no edges exist yet.
+        assert!(
+            be.list_active_edges().await.unwrap().is_empty(),
+            "baseline: edges table must be empty before the call"
+        );
+
+        // Pass [real_a, real_b, fake_id]. The method iterates pairs:
+        //   (a,b) → insert OK (inside tx, not yet committed)
+        //   (b,a) → insert OK
+        //   (a,fake) → FK violation: `source_fact_id` references non-existent row
+        //   (fake,a) → never reached
+        //   (b,fake) → never reached
+        // The whole transaction rolls back; no edges are committed.
+        let fake_id: i64 = 99_999;
+        let fact_ids = vec![real_a, real_b, fake_id];
         let err = be
             .insert_cosession_edges_atomic(&fact_ids, "co_session", 0.5, 1, Utc::now())
             .await
             .unwrap_err();
-        // Error must surface (Storage::Backend or Database).
         assert!(
             matches!(err, MemoryError::Storage(_) | MemoryError::Database(_)),
-            "expected a storage error, got {err:?}"
+            "expected a storage/database error from FK violation, got {err:?}"
+        );
+
+        // Byte-identical assertion: edges table is still empty — exactly as before.
+        let edges_after = be.list_active_edges().await.unwrap();
+        assert!(
+            edges_after.is_empty(),
+            "rollback must leave edges table byte-identical (empty); got {edges_after:?}"
         );
     }
 
