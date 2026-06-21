@@ -47,8 +47,11 @@ harness = false
 name = "lifecycle_bench"
 harness = false
 
+# `async` is default-on (#631 Stage D): the engine becomes async-native in the
+# Stage E cutover, where a backend cannot exist without a tokio runtime, so the
+# flag is on its way to vacuous. Opt out (pre-cutover) with --no-default-features.
 [features]
-default = []
+default = ["async"]
 async = ["dep:tokio"]
 ann = ["dep:hnsw", "dep:space", "dep:rand"]
 compress-gzip = ["dep:flate2"]
