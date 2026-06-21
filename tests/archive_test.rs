@@ -1,4 +1,5 @@
 #![cfg(feature = "archive")]
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
 use chrono::{Duration, Utc};
 use memory_engine::ArchivePolicy;

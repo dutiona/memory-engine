@@ -3,6 +3,8 @@
 //! Public-API only: add facts carrying the insight marker across a nested scope
 //! subtree and assert subtree-scoped, newest-first, limited, active-only retrieval.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use memory_engine::{
     AddFactOptions, AddFactRequest, EmbeddingFingerprint, EmbeddingProvider, FactType,
     INSIGHT_MARKER_KEY, MemoryEngine, MemoryError,

@@ -6,6 +6,8 @@
 //! large-N) is owned by #231 — this file ships the single happy-path proof plus
 //! idempotency and read-only rejection.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use memory_engine::inspect::{ExpiredReason, FactState};
 use memory_engine::{
     AddFactOptions, AddFactRequest, CycleDelta, DefaultDreamCycle, EmbeddingFingerprint,

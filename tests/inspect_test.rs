@@ -3,6 +3,8 @@
 //! Tests exercise all 5 inspection methods through the public `MemoryEngine` API.
 //! No direct store access — edges are generated via `consolidate()` or `resolve_conflict()`.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use chrono::{Duration, Utc};
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;

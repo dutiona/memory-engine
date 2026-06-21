@@ -77,6 +77,12 @@
 //! # Ok::<(), MemoryError>(())
 //! ```
 
+// Panic-safety gate (#725): `unwrap_used = "deny"` (Cargo.toml) forbids
+// `.unwrap()` in this library's production paths, where a panic would abort the
+// consumer's process. The crate's own `#[cfg(test)]` unit tests are exempt — a
+// panic there is the intended failure signal, not a consumer-facing hazard.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 // === Public modules (consumer-facing API) ===
 #[cfg(feature = "async")]
 pub mod async_engine;
