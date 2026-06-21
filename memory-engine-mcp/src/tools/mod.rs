@@ -616,13 +616,14 @@ fn parse_event_type(s: &str) -> Result<EventType, ValidationError> {
     }
 }
 
+/// Parse an MCP `fact_type` tool parameter into the core [`FactType`].
+///
+/// Delegates to core's canonical [`FactType::from_str`] (the single source of
+/// truth shared with the CLI), so casing is reconciled across surfaces: the JSON
+/// schemas advertise `PascalCase` (`"Episodic"`), but `snake_case` is also accepted.
 fn parse_fact_type(s: &str) -> Result<FactType, ValidationError> {
-    match s {
-        "Episodic" => Ok(FactType::Episodic),
-        "Semantic" => Ok(FactType::Semantic),
-        "Procedural" => Ok(FactType::Procedural),
-        other => Err(ValidationError::UnknownFactType(other.to_owned())),
-    }
+    s.parse()
+        .map_err(|_| ValidationError::UnknownFactType(s.to_owned()))
 }
 
 /// Like `get_f64`, but returns a validation error if the key is present with a non-numeric type.
@@ -1750,9 +1751,34 @@ fn handle_get_recent_insights(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_dump_name, default_dump_path, parse_consolidate_config};
+    use super::{default_dump_name, default_dump_path, parse_consolidate_config, parse_fact_type};
+    use memory_engine::types::FactType;
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn parse_fact_type_accepts_schema_pascal_case() {
+        // The JSON schemas advertise PascalCase tokens — these must still parse.
+        assert_eq!(parse_fact_type("Episodic").unwrap(), FactType::Episodic);
+        assert_eq!(parse_fact_type("Semantic").unwrap(), FactType::Semantic);
+        assert_eq!(parse_fact_type("Procedural").unwrap(), FactType::Procedural);
+    }
+
+    #[test]
+    fn parse_fact_type_reconciles_cli_snake_case() {
+        // After delegating to core's canonical FromStr, the MCP surface also
+        // accepts the CLI's snake_case casing (#678 reconciliation).
+        assert_eq!(parse_fact_type("episodic").unwrap(), FactType::Episodic);
+        assert_eq!(parse_fact_type("semantic").unwrap(), FactType::Semantic);
+    }
+
+    #[test]
+    fn parse_fact_type_rejects_unknown_preserving_token() {
+        let err = parse_fact_type("wisdom").unwrap_err();
+        // ValidationError is a thiserror enum; the offending token is preserved
+        // in its Display string.
+        assert!(err.to_string().contains("wisdom"), "{err}");
+    }
 
     /// Build a `memory_consolidate` argument map from key/value pairs.
     fn cfg_args(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {

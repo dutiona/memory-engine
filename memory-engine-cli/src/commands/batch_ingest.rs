@@ -5,11 +5,11 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
-use memory_engine::types::{AddFactOptions, AddFactRequest};
+use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::embedding_args::EmbeddingArgs;
-use crate::commands::types::CliFactType;
+use crate::commands::types::deserialize_fact_type;
 use crate::db::{open_engine_writable, open_engine_writable_with_dim};
 use crate::output::{OutputFormat, print_json};
 
@@ -52,7 +52,8 @@ pub struct BatchIngestArgs {
 #[derive(Debug, Deserialize)]
 struct JsonlFact {
     content: String,
-    fact_type: CliFactType,
+    #[serde(deserialize_with = "deserialize_fact_type")]
+    fact_type: FactType,
     #[serde(default)]
     source_event_id: Option<i64>,
     #[serde(default)]
@@ -103,7 +104,7 @@ fn jsonl_to_request(fact: JsonlFact, default_scope: Option<&str>) -> AddFactRequ
     };
     AddFactRequest {
         content: fact.content,
-        fact_type: fact.fact_type.into(),
+        fact_type: fact.fact_type,
         source_event_id: fact.source_event_id,
         scope: fact.scope.or_else(|| default_scope.map(str::to_owned)),
         opts: Some(opts),
@@ -428,15 +429,15 @@ mod tests {
     fn jsonl_fact_deserialize_lowercase() {
         let line = r#"{"content":"hello","fact_type":"episodic"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        assert!(matches!(fact.fact_type, CliFactType::Episodic));
+        assert!(matches!(fact.fact_type, FactType::Episodic));
 
         let line = r#"{"content":"hello","fact_type":"semantic"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        assert!(matches!(fact.fact_type, CliFactType::Semantic));
+        assert!(matches!(fact.fact_type, FactType::Semantic));
 
         let line = r#"{"content":"hello","fact_type":"procedural"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
-        assert!(matches!(fact.fact_type, CliFactType::Procedural));
+        assert!(matches!(fact.fact_type, FactType::Procedural));
     }
 
     #[test]
@@ -464,7 +465,7 @@ mod tests {
         }"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
         assert_eq!(fact.content, "User moved to Istanbul");
-        assert!(matches!(fact.fact_type, CliFactType::Episodic));
+        assert!(matches!(fact.fact_type, FactType::Episodic));
         assert_eq!(fact.importance, Some(0.7));
         assert!(fact.t_valid.is_some());
         assert!(fact.t_invalid.is_some());
@@ -495,7 +496,7 @@ mod tests {
     fn validate_importance_out_of_range() {
         let fact = JsonlFact {
             content: "test".into(),
-            fact_type: CliFactType::Semantic,
+            fact_type: FactType::Semantic,
             source_event_id: None,
             scope: None,
             importance: Some(1.5),
@@ -515,7 +516,7 @@ mod tests {
         let t2 = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let fact = JsonlFact {
             content: "test".into(),
-            fact_type: CliFactType::Semantic,
+            fact_type: FactType::Semantic,
             source_event_id: None,
             scope: None,
             importance: None,
@@ -533,7 +534,7 @@ mod tests {
     fn validate_valid_fact_passes() {
         let fact = JsonlFact {
             content: "test".into(),
-            fact_type: CliFactType::Semantic,
+            fact_type: FactType::Semantic,
             source_event_id: None,
             scope: None,
             importance: Some(0.5),
