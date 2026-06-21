@@ -14,8 +14,8 @@ pub struct AddFactArgs {
     #[arg(long)]
     content: String,
 
-    /// Fact type
-    #[arg(long, value_enum)]
+    /// Fact type (episodic, semantic, procedural; case-insensitive)
+    #[arg(long, value_enum, ignore_case = true)]
     fact_type: CliFactType,
 
     /// Pre-computed embedding as a JSON array of floats (e.g., "[0.1, 0.2, 0.3]")

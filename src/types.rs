@@ -91,11 +91,15 @@ impl FromStr for FactType {
     /// Note: this is orthogonal to the serde `Deserialize` derive, which stays
     /// `PascalCase` to preserve `.pak` cold-storage archive back-compat.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "episodic" => Ok(Self::Episodic),
-            "semantic" => Ok(Self::Semantic),
-            "procedural" => Ok(Self::Procedural),
-            _ => Err(ParseFactTypeError(s.to_owned())),
+        // Zero-allocation case-insensitive match (no temporary lowercased String).
+        if s.eq_ignore_ascii_case("episodic") {
+            Ok(Self::Episodic)
+        } else if s.eq_ignore_ascii_case("semantic") {
+            Ok(Self::Semantic)
+        } else if s.eq_ignore_ascii_case("procedural") {
+            Ok(Self::Procedural)
+        } else {
+            Err(ParseFactTypeError(s.to_owned()))
         }
     }
 }
@@ -1096,6 +1100,15 @@ mod tests {
         let err = "wisdom".parse::<FactType>().unwrap_err();
         // The unknown token is preserved in the error for actionable messages.
         assert!(err.to_string().contains("wisdom"));
+    }
+
+    #[test]
+    fn fact_type_from_str_rejects_surrounding_whitespace() {
+        // The parser is intentionally strict on whitespace — it does not trim.
+        // Surrounding whitespace is a malformed token, not a valid variant.
+        assert!(" episodic".parse::<FactType>().is_err());
+        assert!("semantic ".parse::<FactType>().is_err());
+        assert!("".parse::<FactType>().is_err());
     }
 
     #[test]
