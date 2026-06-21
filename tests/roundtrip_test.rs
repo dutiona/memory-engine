@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use chrono::Utc;
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;

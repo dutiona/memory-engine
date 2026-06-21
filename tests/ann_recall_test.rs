@@ -7,6 +7,7 @@
 // usize→f64 casts for small item counts (K ≤ 10, recalls.len() ≤ 20) are
 // lossless in practice; assessed won't-fix in super-qa #124 findings L1/L2.
 #![allow(clippy::cast_precision_loss)]
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
 use std::collections::HashSet;
 

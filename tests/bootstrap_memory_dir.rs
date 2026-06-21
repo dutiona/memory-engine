@@ -12,6 +12,8 @@
 //!
 //! Hermetic: in-memory engine + zero-vector embedder. No network, no Ollama.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

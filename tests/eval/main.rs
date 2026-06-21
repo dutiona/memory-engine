@@ -6,6 +6,8 @@
 //!
 //! See issue #16 and `docs/plans/2026-03-09-future-phases-design.md`.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 mod conformance;
 mod corpus;
 mod helpers;

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use memory_engine::{MemoryEngine, MemoryError};
 use tempfile::tempdir;
 

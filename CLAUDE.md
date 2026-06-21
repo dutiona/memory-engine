@@ -86,6 +86,7 @@ Read these docs when working on the relevant area:
 4. **Bi-temporal** — 4 timestamps per fact: `t_created`/`t_expired` (system), `t_valid`/`t_invalid` (real-world). From Graphiti.
 5. **`unsafe_code = "forbid"`** — no unsafe code anywhere.
 6. **Read-only open path** — `EngineConfig::read_only` opens without write capability. Defense in depth: file existence check + `validate_schema_version()` (read-only) + SQLite `query_only` pragma + Rust-level `try_write()` guard.
+7. **No `unwrap` in library code** (#725) — `clippy::unwrap_used = "deny"`. As an embedded library, a panic aborts the _consumer's_ process, so production fallibility must propagate as a typed `MemoryError` via `?` (or `expect("documented invariant")` for genuinely-uncheckable cases). Same defense-in-depth philosophy as `unsafe_code = "forbid"`. Test code, benches, and examples opt out per-crate-root with a justified `#![allow(clippy::unwrap_used)]`; the lib's own unit tests via `#![cfg_attr(test, allow(...))]` in `lib.rs`.
 
 ## Status
 

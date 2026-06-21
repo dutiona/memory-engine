@@ -23,6 +23,8 @@
 //! - `consolidate()` and `forget()` are idempotent — `iter_with_setup`
 //!   creates a fresh engine per iteration to measure actual work, not no-ops.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use chrono::{Duration, Utc};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::EmbeddingFingerprint;

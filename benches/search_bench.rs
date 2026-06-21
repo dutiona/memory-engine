@@ -20,6 +20,8 @@
 //! - `SQLite` WAL mode + OS page cache → warm-cache after first iteration.
 //!   This is realistic for interactive use where the DB is already open.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;

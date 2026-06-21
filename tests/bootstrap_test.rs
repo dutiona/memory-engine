@@ -1,5 +1,7 @@
 //! Integration tests for the bootstrap pipeline.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use std::io::Cursor;
 
 use chrono::Utc;

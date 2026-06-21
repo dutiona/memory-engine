@@ -14,6 +14,8 @@
 //! Hermetic: in-memory engine + zero-vector embedder. No network, no Ollama,
 //! no GPU contention (S0 is build-only). See `docs/audits/S0.3-bootstrap-audit.md`.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use std::sync::Mutex;
 
 use chrono::{DateTime, Datelike, Utc};

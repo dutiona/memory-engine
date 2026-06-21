@@ -1,5 +1,7 @@
 //! Integration tests for import/export round-trips.
 
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
+
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::EmbeddingProvider;
 use memory_engine::engine::{EngineConfig, MemoryEngine};
