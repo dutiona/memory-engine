@@ -114,4 +114,71 @@ pub trait ConsolidationStore: Send + Sync {
         Vec<i64>,
         Vec<(i64, Vec<f32>)>,
     )>;
+
+    // -------------------------------------------------------------------------
+    // Stage E — three-pass consolidation read/write seams (#409). The engine
+    // owns the lock-free `compute_plan` (consumer IO offloaded via spawn_blocking);
+    // these two methods bracket it with the brief read snapshot and the atomic
+    // write apply, keeping all SQL below the port.
+    // -------------------------------------------------------------------------
+
+    /// Phase 1 — load the consolidation read snapshot under a brief read lock.
+    /// Wraps `consolidation::load_snapshot`, preserving the #659 over-both-caps
+    /// short-circuit (no embedding-BLOB materialization when the corpus is over
+    /// both caps).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) if
+    /// `config` fails validation, [`MemoryError::Migration`](crate::error::MemoryError::Migration)
+    /// if the stored watermark cannot be parsed, or
+    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a read failure.
+    async fn load_consolidation_snapshot(
+        &self,
+        config: crate::traits::ConsolidationConfig,
+    ) -> Result<crate::consolidation::Snapshot>;
+
+    /// Phase 3 — apply a fully-computed [`ConsolidationPlan`](crate::consolidation::ConsolidationPlan)
+    /// in a single transaction, firing the post-commit HNSW `notify_expire` for the
+    /// ids it actually expired (Stage B).
+    ///
+    /// # Returns
+    ///
+    /// `(ConsolidationStats, actually_expired)` — the engine reconciles its in-memory
+    /// graph against `actually_expired` post-commit (a concurrent writer may have
+    /// pre-empted some of the plan's expirations in the read→write gap).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a write
+    /// failure or [`MemoryError::Serialization`](crate::error::MemoryError::Serialization)
+    /// on a summary serialization failure.
+    async fn apply_plan(
+        &self,
+        plan: crate::consolidation::ConsolidationPlan,
+    ) -> Result<(crate::traits::ConsolidationStats, Vec<i64>)>;
+
+    /// Atomically promote a pre-built wisdom fact + its lineage record in one
+    /// transaction — the standalone `promote()` write path. Resolves `scope_path`
+    /// inside the transaction (returning any newly-created scope ids for the engine
+    /// to cache), guards that the store has a recorded embedding identity
+    /// (#613/#615), inserts the pinned fact and its lineage record, and fires the
+    /// post-commit HNSW `notify_insert` (Stage B). The provenance is already injected
+    /// into `fact.metadata` engine-side; `fact.scope_id` is a placeholder patched
+    /// from the resolved `scope_path`.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
+    ///
+    /// # Returns
+    ///
+    /// `(PromotionResult, scope_ids_to_cache)`.
+    async fn promote_atomic(
+        &self,
+        fact: &crate::types::NewFact,
+        scope_path: Option<&str>,
+        source_fact_ids: &[i64],
+        provenance: &crate::types::PromotionProvenance,
+    ) -> Result<(crate::types::PromotionResult, Vec<i64>)>;
 }

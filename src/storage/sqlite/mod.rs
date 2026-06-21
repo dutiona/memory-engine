@@ -104,6 +104,17 @@ const _: fn() = || {
     assert_send_sync::<SqliteBackend>();
 };
 
+/// Where the engine's open path sources the HNSW index when building the
+/// backend (#631). Keeps the snapshot-vs-rebuild branching below the seam.
+pub enum HnswOpenSource {
+    /// No/stale sidecar snapshot — build the index from a full DB scan.
+    Rebuild,
+    /// A validated sidecar snapshot — restore the index from this payload. The
+    /// inner `Option` is the sidecar's HNSW blob (`None` when the sidecar
+    /// predates HNSW, in which case the index falls back to a DB rebuild).
+    Snapshot(Option<crate::engine::snapshot::HnswSnapshot>),
+}
+
 impl SqliteBackend {
     /// Wrap an already-opened pool + upcaster registry. The canonical constructor
     /// `#631` will use where it builds the [`ConnectionPool`] today. `embed_dim` is
@@ -160,6 +171,61 @@ impl SqliteBackend {
             };
         }
         self.search_config = Some(cfg);
+        Ok(self)
+    }
+
+    /// Open-time backend setup (the engine's `init_from_pool` HNSW logic, now
+    /// owned below the seam). Sets the `SearchConfig` and, under `ann` with
+    /// `ann_threshold < usize::MAX`, materializes the HNSW index from the
+    /// requested [`HnswOpenSource`]:
+    ///
+    /// - [`HnswOpenSource::Snapshot(Some(snap))`] → restore from the sidecar blob.
+    /// - [`HnswOpenSource::Snapshot(None)`] or [`HnswOpenSource::Rebuild`] → build
+    ///   from a full DB scan.
+    ///
+    /// Mirrors `engine/mod.rs::try_load_snapshot`'s match arms exactly so the
+    /// cutover preserves open-time HNSW behavior bit-for-bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on a pool/query failure or
+    /// `MemoryError::EmbeddingDimension` on a corrupt snapshot/stored embedding.
+    #[cfg_attr(
+        not(feature = "ann"),
+        allow(
+            clippy::missing_const_for_fn,
+            unused_variables,
+            reason = "non-ann build only stores search_config; HNSW args are inert"
+        )
+    )]
+    pub fn with_open_config(
+        mut self,
+        search_config: Option<SearchConfig>,
+        hnsw_source: HnswOpenSource,
+    ) -> Result<Self> {
+        #[cfg(feature = "ann")]
+        {
+            let ann_wanted = search_config
+                .as_ref()
+                .is_some_and(|c| c.ann_threshold < usize::MAX);
+            self.hnsw = if ann_wanted {
+                match hnsw_source {
+                    HnswOpenSource::Snapshot(Some(snap)) => Some(Arc::new(
+                        HnswStrategy::from_snapshot(&snap, self.embed_dim)?,
+                    )),
+                    HnswOpenSource::Snapshot(None) | HnswOpenSource::Rebuild => {
+                        let conn = self.pool.read()?;
+                        Some(Arc::new(HnswStrategy::build_from_db(
+                            &conn,
+                            self.embed_dim,
+                        )?))
+                    }
+                }
+            } else {
+                None
+            };
+        }
+        self.search_config = search_config;
         Ok(self)
     }
 

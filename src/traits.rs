@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::error::Result;
 use crate::search::hybrid::SearchResult;
 use crate::types::{ConsolidationProposal, EmbeddingFingerprint, Fact};
@@ -190,7 +192,7 @@ pub trait ConflictArbiter: Send + Sync {
     ///
     /// # Warning: `importance_score` on `new_fact` is a placeholder
     ///
-    /// When called from [`resolve_conflict`](crate::conflict::resolve_conflict),
+    /// When called from [`MemoryEngine::resolve_conflict`](crate::MemoryEngine::resolve_conflict),
     /// `new_fact` is a temporary [`Fact`] constructed from a [`NewFact`](crate::types::NewFact)
     /// before it has been persisted or scored. Its `importance_score` field is hardcoded
     /// to [`Fact::UNSCORED_IMPORTANCE`](crate::types::Fact::UNSCORED_IMPORTANCE) and does
@@ -318,7 +320,21 @@ pub trait InsightStream {
 /// produce/apply split is what enables a human review gate before promotion.
 ///
 /// Passed as `&dyn DreamCycle` per-call (not stored in the engine).
-pub trait DreamCycle {
+///
+/// `run` is async (`#[async_trait]`): the cycle drives the engine through the
+/// now-async [`DreamContext`](crate::engine::cognitive::DreamContext) capability bag
+/// (query / consolidate / forget / promote all await the storage port).
+///
+/// The `Send + Sync` supertrait bound (#631) keeps the engine's
+/// `run_dream_cycle_guarded(&self, cycle: &dyn DreamCycle)` future `Send`: borrowing a
+/// trait object across the `.await` requires `dyn DreamCycle: Sync` (so `&dyn DreamCycle:
+/// Send`), and `#[async_trait]` additionally needs `Self: Send` for the boxed future. A
+/// multi-threaded async consumer (the MCP `ServerHandler`, whose `call_tool` future must
+/// be `Send`) cannot drive the cycle otherwise. All shipped impls (`DefaultDreamCycle`,
+/// `LlmDreamCycle`, the deterministic test doubles) are already `Send + Sync` — the bound
+/// only forbids a future implementor with interior, thread-unsafe state.
+#[async_trait]
+pub trait DreamCycle: Send + Sync {
     /// Run one cycle of the cognitive pipeline, returning a delta-based report.
     ///
     /// The [`CycleContext`](crate::engine::cycle::CycleContext) provides read access
@@ -341,9 +357,9 @@ pub trait DreamCycle {
     /// # Errors
     ///
     /// Returns an error if the cycle fails.
-    fn run(
+    async fn run(
         &self,
-        ctx: &crate::engine::cycle::CycleContext,
+        ctx: &crate::engine::cycle::CycleContext<'_>,
     ) -> Result<crate::engine::cycle::CycleReport>;
 }
 

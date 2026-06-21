@@ -5,8 +5,8 @@ use tempfile::tempdir;
 
 const DIM: usize = 4;
 
-#[test]
-fn open_read_only_on_initialized_db() {
+#[tokio::test]
+async fn open_read_only_on_initialized_db() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -27,12 +27,12 @@ fn open_read_only_on_initialized_db() {
     assert!(engine.is_read_only());
 
     // Read operations should work
-    let stats = engine.statistics().unwrap();
+    let stats = engine.statistics().await.unwrap();
     assert_eq!(stats.facts.active, 0);
 }
 
-#[test]
-fn open_read_only_on_nonexistent_db_fails() {
+#[tokio::test]
+async fn open_read_only_on_nonexistent_db_fails() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("nonexistent.db");
 
@@ -44,8 +44,8 @@ fn open_read_only_on_nonexistent_db_fails() {
     assert!(matches!(result, Err(MemoryError::Migration(_))));
 }
 
-#[test]
-fn read_only_engine_rejects_writes() {
+#[tokio::test]
+async fn read_only_engine_rejects_writes() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -65,18 +65,21 @@ fn read_only_engine_rejects_writes() {
         .unwrap();
 
     // set_config is the simplest write method — no mock providers needed
-    let err = engine.set_config("test_key", "test_value").unwrap_err();
+    let err = engine
+        .set_config("test_key", "test_value")
+        .await
+        .unwrap_err();
     assert!(matches!(err, MemoryError::ReadOnly));
 }
 
-#[test]
-fn engine_not_read_only_by_default() {
+#[tokio::test]
+async fn engine_not_read_only_by_default() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     assert!(!engine.is_read_only());
 }
 
-#[test]
-fn read_only_engine_query_works() {
+#[tokio::test]
+async fn read_only_engine_query_works() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -86,7 +89,7 @@ fn read_only_engine_query_works() {
             .path(db_path.clone())
             .build()
             .unwrap();
-        engine.set_config("test_key", "test_value").unwrap();
+        engine.set_config("test_key", "test_value").await.unwrap();
     }
 
     // Open read-only and verify read access
@@ -96,12 +99,12 @@ fn read_only_engine_query_works() {
         .build()
         .unwrap();
 
-    let val = engine.get_config("test_key").unwrap();
+    let val = engine.get_config("test_key").await.unwrap();
     assert_eq!(val, Some("test_value".to_string()));
 }
 
-#[test]
-fn open_read_only_with_reranker() {
+#[tokio::test]
+async fn open_read_only_with_reranker() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
 

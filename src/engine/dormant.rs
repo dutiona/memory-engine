@@ -1,6 +1,5 @@
 use crate::error::{MemoryError, Result};
 use crate::search::vector::cosine_similarity;
-use crate::store::facts::FactStore;
 use crate::types::Fact;
 
 use super::MemoryEngine;
@@ -27,7 +26,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::EmbeddingDimension` if `context.len() != embed_dim`.
-    pub fn sample_dormant(
+    pub async fn sample_dormant(
         &self,
         n: usize,
         context: &[f32],
@@ -46,10 +45,10 @@ impl MemoryEngine {
 
         // Query dormant facts from the store, filtered by scope
         let scope_ids_owned = scope_ids.map(<[i64]>::to_vec);
-        let candidates = self.with_read(|conn| {
-            FactStore::new(conn, self.embed_dim)
-                .list_dormant(DORMANT_THRESHOLD, scope_ids_owned.as_deref())
-        })?;
+        let candidates = self
+            .storage
+            .list_dormant_facts(DORMANT_THRESHOLD, scope_ids_owned.as_deref())
+            .await?;
 
         // Compute cosine similarity and sort descending (resonance = most relevant dormant)
         let mut scored: Vec<(f32, Fact)> = candidates
@@ -84,7 +83,7 @@ mod tests {
         }
     }
 
-    fn add_fact_with_importance(
+    async fn add_fact_with_importance(
         engine: &MemoryEngine,
         content: &str,
         importance: f64,
@@ -101,22 +100,33 @@ mod tests {
                 ..Default::default()
             }),
         };
-        engine.add_fact(&req, &embedder, None).unwrap()
+        engine
+            .add_fact(
+                &req,
+                std::sync::Arc::new(embedder) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap()
     }
 
-    #[test]
-    fn sample_dormant_empty_store() {
+    #[tokio::test]
+    async fn sample_dormant_empty_store() {
         let engine = MemoryEngine::builder(4).build().unwrap();
         let results = engine
             .sample_dormant(10, &[0.1, 0.2, 0.3, 0.4], None)
+            .await
             .unwrap();
         assert!(results.is_empty());
     }
 
-    #[test]
-    fn sample_dormant_wrong_dimension() {
+    #[tokio::test]
+    async fn sample_dormant_wrong_dimension() {
         let engine = MemoryEngine::builder(4).build().unwrap();
-        let err = engine.sample_dormant(10, &[0.1, 0.2], None).unwrap_err();
+        let err = engine
+            .sample_dormant(10, &[0.1, 0.2], None)
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             MemoryError::EmbeddingDimension {
@@ -126,43 +136,45 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn sample_dormant_returns_low_importance_only() {
+    #[tokio::test]
+    async fn sample_dormant_returns_low_importance_only() {
         let engine = MemoryEngine::builder(4).build().unwrap();
 
         // Low importance — should be returned
-        add_fact_with_importance(&engine, "low importance", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
+        add_fact_with_importance(&engine, "low importance", 0.1, vec![1.0, 0.0, 0.0, 0.0]).await;
         // High importance — should NOT be returned
-        add_fact_with_importance(&engine, "high importance", 0.9, vec![1.0, 0.0, 0.0, 0.0]);
+        add_fact_with_importance(&engine, "high importance", 0.9, vec![1.0, 0.0, 0.0, 0.0]).await;
 
         let results = engine
             .sample_dormant(10, &[1.0, 0.0, 0.0, 0.0], None)
+            .await
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "low importance");
     }
 
-    #[test]
-    fn sample_dormant_excludes_expired() {
+    #[tokio::test]
+    async fn sample_dormant_excludes_expired() {
         let engine = MemoryEngine::builder(4).build().unwrap();
 
-        let id = add_fact_with_importance(&engine, "to expire", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
-        // Expire the fact via the store
-        {
-            let conn = engine.write_conn().unwrap();
-            FactStore::new(&conn, 4)
-                .expire(id, chrono::Utc::now())
-                .unwrap();
-        }
+        let id =
+            add_fact_with_importance(&engine, "to expire", 0.1, vec![1.0, 0.0, 0.0, 0.0]).await;
+        // Expire the fact via the storage port
+        engine
+            .storage
+            .expire_fact(id, chrono::Utc::now())
+            .await
+            .unwrap();
 
         let results = engine
             .sample_dormant(10, &[1.0, 0.0, 0.0, 0.0], None)
+            .await
             .unwrap();
         assert!(results.is_empty(), "expired facts should not appear");
     }
 
-    #[test]
-    fn sample_dormant_excludes_pinned() {
+    #[tokio::test]
+    async fn sample_dormant_excludes_pinned() {
         let engine = MemoryEngine::builder(4).build().unwrap();
 
         // Add a pinned low-importance fact
@@ -178,41 +190,51 @@ mod tests {
                 ..Default::default()
             }),
         };
-        engine.add_fact(&req, &embedder, None).unwrap();
+        engine
+            .add_fact(
+                &req,
+                std::sync::Arc::new(embedder) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
 
         let results = engine
             .sample_dormant(10, &[1.0, 0.0, 0.0, 0.0], None)
+            .await
             .unwrap();
         assert!(results.is_empty(), "pinned facts should not appear");
     }
 
-    #[test]
-    fn sample_dormant_respects_n_limit() {
+    #[tokio::test]
+    async fn sample_dormant_respects_n_limit() {
         let engine = MemoryEngine::builder(4).build().unwrap();
 
         for i in 0..5 {
             #[allow(clippy::cast_precision_loss)] // test data, precision irrelevant
             let emb = vec![1.0 / (i as f32 + 1.0), 0.0, 0.0, 0.0];
-            add_fact_with_importance(&engine, &format!("fact {i}"), 0.1, emb);
+            add_fact_with_importance(&engine, &format!("fact {i}"), 0.1, emb).await;
         }
 
         let results = engine
             .sample_dormant(3, &[1.0, 0.0, 0.0, 0.0], None)
+            .await
             .unwrap();
         assert_eq!(results.len(), 3);
     }
 
-    #[test]
-    fn sample_dormant_sorts_by_similarity() {
+    #[tokio::test]
+    async fn sample_dormant_sorts_by_similarity() {
         let engine = MemoryEngine::builder(4).build().unwrap();
 
         // Less similar
-        add_fact_with_importance(&engine, "less similar", 0.1, vec![0.0, 1.0, 0.0, 0.0]);
+        add_fact_with_importance(&engine, "less similar", 0.1, vec![0.0, 1.0, 0.0, 0.0]).await;
         // More similar
-        add_fact_with_importance(&engine, "more similar", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
+        add_fact_with_importance(&engine, "more similar", 0.1, vec![1.0, 0.0, 0.0, 0.0]).await;
 
         let results = engine
             .sample_dormant(10, &[1.0, 0.0, 0.0, 0.0], None)
+            .await
             .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
@@ -221,12 +243,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sample_dormant_zero_n() {
+    #[tokio::test]
+    async fn sample_dormant_zero_n() {
         let engine = MemoryEngine::builder(4).build().unwrap();
-        add_fact_with_importance(&engine, "fact", 0.1, vec![1.0, 0.0, 0.0, 0.0]);
+        add_fact_with_importance(&engine, "fact", 0.1, vec![1.0, 0.0, 0.0, 0.0]).await;
         let results = engine
             .sample_dormant(0, &[1.0, 0.0, 0.0, 0.0], None)
+            .await
             .unwrap();
         assert!(results.is_empty());
     }

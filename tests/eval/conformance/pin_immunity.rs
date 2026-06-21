@@ -4,12 +4,13 @@
 //! `PersistenceClassifier` auto-pins by type, and that explicit
 //! `pinned=false` overrides the classifier.
 
+use memory_engine::traits::{EmbeddingProvider, PersistenceClassifier};
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
 use crate::helpers::{PinByType, TestEmbedder, add_fact, aggressive_forget_policy, eval_engine};
 
-#[test]
-fn all_pinned_survive_aggressive_forget() {
+#[tokio::test]
+async fn all_pinned_survive_aggressive_forget() {
     let engine = eval_engine();
 
     // 3 pinned facts.
@@ -19,8 +20,9 @@ fn all_pinned_survive_aggressive_forget() {
             &engine,
             &format!("critical pinned fact number {i}"),
             FactType::Semantic,
-        );
-        engine.pin_fact(id).expect("pin_fact failed");
+        )
+        .await;
+        engine.pin_fact(id).await.expect("pin_fact failed");
         pinned_ids.push(id);
     }
 
@@ -31,16 +33,17 @@ fn all_pinned_survive_aggressive_forget() {
             &engine,
             &format!("disposable unpinned fact number {i}"),
             FactType::Episodic,
-        );
+        )
+        .await;
         unpinned_ids.push(id);
     }
 
     let policy = aggressive_forget_policy();
-    let stats = engine.forget(&policy).expect("forget failed");
+    let stats = engine.forget(&policy).await.expect("forget failed");
 
     // All pinned facts should survive.
     for &pid in &pinned_ids {
-        let fact = engine.get_fact(pid).expect("get pinned fact");
+        let fact = engine.get_fact(pid).await.expect("get pinned fact");
         assert!(
             fact.t_expired.is_none(),
             "pinned fact {pid} should survive aggressive forget"
@@ -49,7 +52,7 @@ fn all_pinned_survive_aggressive_forget() {
 
     // All unpinned facts should be expired.
     for &uid in &unpinned_ids {
-        let fact = engine.get_fact(uid).expect("get unpinned fact");
+        let fact = engine.get_fact(uid).await.expect("get unpinned fact");
         assert!(
             fact.t_expired.is_some(),
             "unpinned fact {uid} should be expired by aggressive forget"
@@ -63,13 +66,13 @@ fn all_pinned_survive_aggressive_forget() {
     );
 }
 
-#[test]
-fn persistence_classifier_auto_pins_by_type() {
+#[tokio::test]
+async fn persistence_classifier_auto_pins_by_type() {
     let engine = eval_engine();
-    let embedder = TestEmbedder;
-    let classifier = PinByType {
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
+    let classifier: std::sync::Arc<dyn PersistenceClassifier> = std::sync::Arc::new(PinByType {
         pinned_type: FactType::Procedural,
-    };
+    });
 
     // Add a Procedural fact — classifier should auto-pin it.
     let proc_id = engine
@@ -81,9 +84,10 @@ fn persistence_classifier_auto_pins_by_type() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
-            Some(&classifier),
+            embedder.clone(),
+            Some(classifier.clone()),
         )
+        .await
         .expect("add procedural fact");
 
     // Add an Episodic fact — classifier should NOT pin it, and as a
@@ -97,13 +101,14 @@ fn persistence_classifier_auto_pins_by_type() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
-            Some(&classifier),
+            embedder.clone(),
+            Some(classifier.clone()),
         )
+        .await
         .expect("add episodic fact");
 
-    let proc_fact = engine.get_fact(proc_id).expect("get procedural fact");
-    let epi_fact = engine.get_fact(epi_id).expect("get episodic fact");
+    let proc_fact = engine.get_fact(proc_id).await.expect("get procedural fact");
+    let epi_fact = engine.get_fact(epi_id).await.expect("get episodic fact");
 
     assert!(
         proc_fact.is_pinned,
@@ -116,12 +121,16 @@ fn persistence_classifier_auto_pins_by_type() {
 
     // Verify the pinned fact survives forget.
     let policy = aggressive_forget_policy();
-    engine.forget(&policy).expect("forget failed");
+    engine.forget(&policy).await.expect("forget failed");
 
     let proc_after = engine
         .get_fact(proc_id)
+        .await
         .expect("get procedural after forget");
-    let epi_after = engine.get_fact(epi_id).expect("get episodic after forget");
+    let epi_after = engine
+        .get_fact(epi_id)
+        .await
+        .expect("get episodic after forget");
 
     assert!(
         proc_after.t_expired.is_none(),
@@ -133,8 +142,8 @@ fn persistence_classifier_auto_pins_by_type() {
     );
 }
 
-#[test]
-fn explicit_pinned_false_overrides_classifier() {
+#[tokio::test]
+async fn explicit_pinned_false_overrides_classifier() {
     let engine = eval_engine();
     let embedder = TestEmbedder;
     let classifier = PinByType {
@@ -154,12 +163,13 @@ fn explicit_pinned_false_overrides_classifier() {
                     ..Default::default()
                 }),
             },
-            &embedder,
-            Some(&classifier),
+            std::sync::Arc::new(embedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            Some(std::sync::Arc::new(classifier) as std::sync::Arc<dyn PersistenceClassifier>),
         )
+        .await
         .expect("add fact with pinned=false");
 
-    let fact = engine.get_fact(id).expect("get fact");
+    let fact = engine.get_fact(id).await.expect("get fact");
     assert!(
         !fact.is_pinned,
         "explicit pinned=false should override PersistenceClassifier"
@@ -173,34 +183,34 @@ fn explicit_pinned_false_overrides_classifier() {
     policy
         .half_life_overrides
         .insert(FactType::Procedural, 69.0);
-    engine.forget(&policy).expect("forget failed");
+    engine.forget(&policy).await.expect("forget failed");
 
-    let fact_after = engine.get_fact(id).expect("get fact after forget");
+    let fact_after = engine.get_fact(id).await.expect("get fact after forget");
     assert!(
         fact_after.t_expired.is_some(),
         "fact with explicit pinned=false should be expired by forget"
     );
 }
 
-#[test]
-fn unpin_allows_forgetting() {
+#[tokio::test]
+async fn unpin_allows_forgetting() {
     let engine = eval_engine();
 
-    let id = add_fact(&engine, "once pinned, now unpinned", FactType::Episodic);
-    engine.pin_fact(id).expect("pin_fact");
+    let id = add_fact(&engine, "once pinned, now unpinned", FactType::Episodic).await;
+    engine.pin_fact(id).await.expect("pin_fact");
 
     // Verify pinned.
-    assert!(engine.get_fact(id).unwrap().is_pinned);
+    assert!(engine.get_fact(id).await.unwrap().is_pinned);
 
     // Unpin.
-    engine.unpin_fact(id).expect("unpin_fact");
-    assert!(!engine.get_fact(id).unwrap().is_pinned);
+    engine.unpin_fact(id).await.expect("unpin_fact");
+    assert!(!engine.get_fact(id).await.unwrap().is_pinned);
 
     // Now it should be forgettable.
     let policy = aggressive_forget_policy();
-    engine.forget(&policy).expect("forget");
+    engine.forget(&policy).await.expect("forget");
 
-    let fact = engine.get_fact(id).expect("get after forget");
+    let fact = engine.get_fact(id).await.expect("get after forget");
     assert!(
         fact.t_expired.is_some(),
         "unpinned fact should be expired after forget"

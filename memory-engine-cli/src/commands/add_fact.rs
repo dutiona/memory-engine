@@ -51,7 +51,7 @@ pub struct AddFactArgs {
     source_event_id: Option<i64>,
 }
 
-pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Result<()> {
     // Parse embedding
     let embedding: Vec<f32> = serde_json::from_str(&args.embedding)
         .map_err(|e| anyhow::anyhow!("invalid embedding JSON: {e}"))?;
@@ -118,11 +118,13 @@ pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Resul
     };
 
     let embedder = PassthroughEmbedder::new(embedding);
-    let fact_id = engine.add_fact(&req, &embedder, None)?;
+    let fact_id = engine
+        .add_fact(&req, std::sync::Arc::new(embedder), None)
+        .await?;
 
     match format {
         OutputFormat::Json => {
-            let fact = engine.get_fact(fact_id)?;
+            let fact = engine.get_fact(fact_id).await?;
             output::print_json(&fact)?;
         }
         OutputFormat::Table => {

@@ -8,6 +8,8 @@
 //! - No mode + text + embedder → engine infers hybrid (embedding provided)
 //! - No mode + embedding only → engine infers vector
 
+use std::sync::Arc;
+
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::AddFactRequest;
@@ -49,8 +51,8 @@ fn make_engine() -> MemoryEngine {
         .expect("in-memory engine")
 }
 
-fn seed_facts(engine: &MemoryEngine) {
-    let embedder = TestEmbedder { dim: DIM };
+async fn seed_facts(engine: &MemoryEngine) {
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     engine
         .add_fact(
             &AddFactRequest {
@@ -60,9 +62,10 @@ fn seed_facts(engine: &MemoryEngine) {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb.clone(),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -73,9 +76,10 @@ fn seed_facts(engine: &MemoryEngine) {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb.clone(),
             None,
         )
+        .await
         .unwrap();
 }
 
@@ -101,10 +105,10 @@ fn unwrap_ok(result: Result<rmcp::model::CallToolResult, rmcp::model::ErrorData>
 // Explicit mode: fts
 // ---------------------------------------------------------------------------
 
-#[test]
-fn explicit_fts_no_embedder_succeeds() {
+#[tokio::test]
+async fn explicit_fts_no_embedder_succeeds() {
     let engine = make_engine();
-    seed_facts(&engine);
+    seed_facts(&engine).await;
 
     // mode=fts + text + no embedder → should work fine
     let result = tools::dispatch(
@@ -115,7 +119,8 @@ fn explicit_fts_no_embedder_succeeds() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
 }
@@ -124,10 +129,10 @@ fn explicit_fts_no_embedder_succeeds() {
 // Explicit mode: vector (requires embedding)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn explicit_vector_no_embedder_no_embedding_fails() {
+#[tokio::test]
+async fn explicit_vector_no_embedder_no_embedding_fails() {
     let engine = make_engine();
-    seed_facts(&engine);
+    seed_facts(&engine).await;
 
     // mode=vector + text + no embedder + no pre-computed embedding → error
     let result = tools::dispatch(
@@ -138,14 +143,15 @@ fn explicit_vector_no_embedder_no_embedding_fails() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn explicit_vector_with_precomputed_embedding_succeeds() {
+#[tokio::test]
+async fn explicit_vector_with_precomputed_embedding_succeeds() {
     let engine = make_engine();
-    seed_facts(&engine);
+    seed_facts(&engine).await;
 
     let embedder = TestEmbedder { dim: DIM };
     let emb = embedder.embed("Rust ownership").unwrap();
@@ -164,7 +170,8 @@ fn explicit_vector_with_precomputed_embedding_succeeds() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
 }
@@ -173,10 +180,10 @@ fn explicit_vector_with_precomputed_embedding_succeeds() {
 // Explicit mode: hybrid
 // ---------------------------------------------------------------------------
 
-#[test]
-fn explicit_hybrid_no_embedder_no_embedding_fails() {
+#[tokio::test]
+async fn explicit_hybrid_no_embedder_no_embedding_fails() {
     let engine = make_engine();
-    seed_facts(&engine);
+    seed_facts(&engine).await;
 
     // mode=hybrid + text + no embedder + no embedding → error
     let result = tools::dispatch(
@@ -187,14 +194,15 @@ fn explicit_hybrid_no_embedder_no_embedding_fails() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn explicit_hybrid_with_precomputed_embedding_succeeds() {
+#[tokio::test]
+async fn explicit_hybrid_with_precomputed_embedding_succeeds() {
     let engine = make_engine();
-    seed_facts(&engine);
+    seed_facts(&engine).await;
 
     let embedder = TestEmbedder { dim: DIM };
     let emb = embedder.embed("Rust ownership").unwrap();
@@ -213,7 +221,8 @@ fn explicit_hybrid_with_precomputed_embedding_succeeds() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
 }
@@ -222,10 +231,10 @@ fn explicit_hybrid_with_precomputed_embedding_succeeds() {
 // No explicit mode — engine inference
 // ---------------------------------------------------------------------------
 
-#[test]
-fn inferred_mode_text_only_no_embedder_falls_back_to_fts() {
+#[tokio::test]
+async fn inferred_mode_text_only_no_embedder_falls_back_to_fts() {
     let engine = make_engine();
-    seed_facts(&engine);
+    seed_facts(&engine).await;
 
     // No mode + text + no embedder → engine should infer FTS (no embedding provided)
     let result = tools::dispatch(
@@ -236,15 +245,16 @@ fn inferred_mode_text_only_no_embedder_falls_back_to_fts() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
 }
 
-#[test]
-fn inferred_mode_embedding_only_works() {
+#[tokio::test]
+async fn inferred_mode_embedding_only_works() {
     let engine = make_engine();
-    seed_facts(&engine);
+    seed_facts(&engine).await;
 
     let embedder = TestEmbedder { dim: DIM };
     let emb = embedder.embed("ownership memory safety").unwrap();
@@ -258,7 +268,8 @@ fn inferred_mode_embedding_only_works() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     // Should return some results via vector search
     assert!(body.as_object().unwrap().contains_key("results"));
@@ -268,8 +279,8 @@ fn inferred_mode_embedding_only_works() {
 // Unknown mode
 // ---------------------------------------------------------------------------
 
-#[test]
-fn unknown_mode_returns_error() {
+#[tokio::test]
+async fn unknown_mode_returns_error() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_query",
@@ -279,7 +290,8 @@ fn unknown_mode_returns_error() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -287,10 +299,10 @@ fn unknown_mode_returns_error() {
 // Scope + mode interaction
 // ---------------------------------------------------------------------------
 
-#[test]
-fn query_with_scope_parameters_accepted() {
+#[tokio::test]
+async fn query_with_scope_parameters_accepted() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
 
     engine
         .add_fact(
@@ -301,9 +313,10 @@ fn query_with_scope_parameters_accepted() {
                 scope: Some("lang/rust".into()),
                 opts: None,
             },
-            &embedder,
+            emb.clone(),
             None,
         )
+        .await
         .unwrap();
 
     // Verify all scope_mode variants are accepted by the dispatch layer
@@ -321,7 +334,8 @@ fn query_with_scope_parameters_accepted() {
             None,
             DIM,
             &memory_engine::ActivityFilterConfig::default(),
-        );
+        )
+        .await;
         // Should succeed (no validation error), regardless of result count
         assert!(
             result.is_ok(),
@@ -330,10 +344,10 @@ fn query_with_scope_parameters_accepted() {
     }
 }
 
-#[test]
-fn query_with_invalid_scope_mode_returns_error() {
+#[tokio::test]
+async fn query_with_invalid_scope_mode_returns_error() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
 
     engine
         .add_fact(
@@ -344,9 +358,10 @@ fn query_with_invalid_scope_mode_returns_error() {
                 scope: Some("lang/rust".into()),
                 opts: None,
             },
-            &embedder,
+            emb.clone(),
             None,
         )
+        .await
         .unwrap();
 
     // An explicit but unknown scope_mode must error rather than silently
@@ -364,7 +379,8 @@ fn query_with_invalid_scope_mode_returns_error() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let err = result.expect_err("invalid scope_mode should error");
     assert!(
         err.message.contains("scope_mode"),
@@ -377,10 +393,10 @@ fn query_with_invalid_scope_mode_returns_error() {
 // Fact type filter with mode
 // ---------------------------------------------------------------------------
 
-#[test]
-fn fts_with_fact_type_filter() {
+#[tokio::test]
+async fn fts_with_fact_type_filter() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
 
     engine
         .add_fact(
@@ -391,9 +407,10 @@ fn fts_with_fact_type_filter() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb.clone(),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -404,9 +421,10 @@ fn fts_with_fact_type_filter() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb.clone(),
             None,
         )
+        .await
         .unwrap();
 
     let result = tools::dispatch(
@@ -421,7 +439,8 @@ fn fts_with_fact_type_filter() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert_eq!(body["count"].as_u64().unwrap(), 1);
 }

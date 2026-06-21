@@ -40,10 +40,10 @@ fn make_new_fact(content: &str) -> NewFact {
 // CrudDecision::Add — keeps both, creates "supplements" edge
 // ---------------------------------------------------------------------------
 
-#[test]
-fn conflict_add_keeps_both_facts_active() {
+#[tokio::test]
+async fn conflict_add_keeps_both_facts_active() {
     let engine = eval_engine();
-    let embedder = TestEmbedder;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
 
     let old_id = engine
         .add_fact(
@@ -54,9 +54,10 @@ fn conflict_add_keeps_both_facts_active() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder.clone(),
             None,
         )
+        .await
         .expect("add old fact");
 
     let arbiter = FixedArbiter {
@@ -66,6 +67,7 @@ fn conflict_add_keeps_both_facts_active() {
 
     let resolution = engine
         .resolve_conflict(&arbiter, old_id, &new_fact)
+        .await
         .expect("resolve_conflict failed");
 
     assert_eq!(resolution.decision, CrudDecision::Add);
@@ -77,8 +79,8 @@ fn conflict_add_keeps_both_facts_active() {
     let new_id = resolution.new_fact_id.unwrap();
 
     // Both facts should be active (no t_expired).
-    let old = engine.get_fact(old_id).expect("get old");
-    let new = engine.get_fact(new_id).expect("get new");
+    let old = engine.get_fact(old_id).await.expect("get old");
+    let new = engine.get_fact(new_id).await.expect("get new");
     assert!(old.t_expired.is_none(), "old fact should remain active");
     assert!(new.t_expired.is_none(), "new fact should be active");
 }
@@ -87,8 +89,8 @@ fn conflict_add_keeps_both_facts_active() {
 // CrudDecision::Update — expires+invalidates old, inserts new, "contradicts" edge
 // ---------------------------------------------------------------------------
 
-#[test]
-fn conflict_update_expires_and_invalidates_old() {
+#[tokio::test]
+async fn conflict_update_expires_and_invalidates_old() {
     let engine = eval_engine();
     let embedder = TestEmbedder;
 
@@ -101,9 +103,10 @@ fn conflict_update_expires_and_invalidates_old() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            std::sync::Arc::new(embedder) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .expect("add old fact");
 
     let arbiter = FixedArbiter {
@@ -113,6 +116,7 @@ fn conflict_update_expires_and_invalidates_old() {
 
     let resolution = engine
         .resolve_conflict(&arbiter, old_id, &new_fact)
+        .await
         .expect("resolve_conflict");
 
     assert_eq!(resolution.decision, CrudDecision::Update);
@@ -121,7 +125,7 @@ fn conflict_update_expires_and_invalidates_old() {
         .expect("Update should produce new_fact_id");
 
     // Old fact: t_expired AND t_invalid should both be set (bi-temporal).
-    let old = engine.get_fact(old_id).expect("get old");
+    let old = engine.get_fact(old_id).await.expect("get old");
     assert!(old.t_expired.is_some(), "old fact must have t_expired set");
     assert!(
         old.t_invalid.is_some(),
@@ -129,7 +133,7 @@ fn conflict_update_expires_and_invalidates_old() {
     );
 
     // New fact should be active.
-    let new = engine.get_fact(new_id).expect("get new");
+    let new = engine.get_fact(new_id).await.expect("get new");
     assert!(new.t_expired.is_none(), "new fact should be active");
 }
 
@@ -137,8 +141,8 @@ fn conflict_update_expires_and_invalidates_old() {
 // CrudDecision::Delete — expires+invalidates old, does NOT insert new
 // ---------------------------------------------------------------------------
 
-#[test]
-fn conflict_delete_expires_old_no_new_fact() {
+#[tokio::test]
+async fn conflict_delete_expires_old_no_new_fact() {
     let engine = eval_engine();
     let embedder = TestEmbedder;
 
@@ -151,9 +155,10 @@ fn conflict_delete_expires_old_no_new_fact() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            std::sync::Arc::new(embedder) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .expect("add old fact");
 
     let arbiter = FixedArbiter {
@@ -163,6 +168,7 @@ fn conflict_delete_expires_old_no_new_fact() {
 
     let resolution = engine
         .resolve_conflict(&arbiter, old_id, &new_fact)
+        .await
         .expect("resolve_conflict");
 
     assert_eq!(resolution.decision, CrudDecision::Delete);
@@ -172,7 +178,7 @@ fn conflict_delete_expires_old_no_new_fact() {
     );
 
     // Old fact: t_expired AND t_invalid should both be set.
-    let old = engine.get_fact(old_id).expect("get old");
+    let old = engine.get_fact(old_id).await.expect("get old");
     assert!(old.t_expired.is_some(), "old fact must be expired");
     assert!(old.t_invalid.is_some(), "old fact must be invalidated");
 }
@@ -181,8 +187,8 @@ fn conflict_delete_expires_old_no_new_fact() {
 // CrudDecision::Noop — no changes at all
 // ---------------------------------------------------------------------------
 
-#[test]
-fn conflict_noop_changes_nothing() {
+#[tokio::test]
+async fn conflict_noop_changes_nothing() {
     let engine = eval_engine();
     let embedder = TestEmbedder;
 
@@ -195,12 +201,13 @@ fn conflict_noop_changes_nothing() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            std::sync::Arc::new(embedder) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .expect("add old fact");
 
-    let old_before = engine.get_fact(old_id).expect("get old before");
+    let old_before = engine.get_fact(old_id).await.expect("get old before");
 
     let arbiter = FixedArbiter {
         decision: CrudDecision::Noop,
@@ -209,6 +216,7 @@ fn conflict_noop_changes_nothing() {
 
     let resolution = engine
         .resolve_conflict(&arbiter, old_id, &new_fact)
+        .await
         .expect("resolve_conflict");
 
     assert_eq!(resolution.decision, CrudDecision::Noop);
@@ -217,7 +225,7 @@ fn conflict_noop_changes_nothing() {
         "Noop should not create a new fact"
     );
 
-    let old_after = engine.get_fact(old_id).expect("get old after");
+    let old_after = engine.get_fact(old_id).await.expect("get old after");
     assert!(
         old_after.t_expired.is_none(),
         "Noop should not expire the old fact"
@@ -236,8 +244,8 @@ fn conflict_noop_changes_nothing() {
 // Evidence provenance round-trip: ingest → add_fact(source_event_id) → explain_fact
 // ---------------------------------------------------------------------------
 
-#[test]
-fn evidence_provenance_round_trip() {
+#[tokio::test]
+async fn evidence_provenance_round_trip() {
     let engine = eval_engine();
     let embedder = TestEmbedder;
 
@@ -253,7 +261,7 @@ fn evidence_provenance_round_trip() {
         sequence_id: 1,
         created_at: None,
     };
-    let event_id = engine.ingest(&event).expect("ingest event");
+    let event_id = engine.ingest(&event).await.expect("ingest event");
 
     // Step 2: Add a fact linked to that event.
     let fact_id = engine
@@ -265,13 +273,14 @@ fn evidence_provenance_round_trip() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            std::sync::Arc::new(embedder) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .expect("add fact with source_event_id");
 
     // Step 3: Verify the fact carries the source_event_id.
-    let fact = engine.get_fact(fact_id).expect("get fact");
+    let fact = engine.get_fact(fact_id).await.expect("get fact");
     assert_eq!(
         fact.source_event_id,
         Some(event_id),
@@ -279,7 +288,7 @@ fn evidence_provenance_round_trip() {
     );
 
     // Step 4: explain_fact should trace provenance back to the event.
-    let explanation = engine.explain_fact(fact_id).expect("explain_fact");
+    let explanation = engine.explain_fact(fact_id).await.expect("explain_fact");
     assert_eq!(
         explanation.provenance.source_event_id,
         Some(event_id),

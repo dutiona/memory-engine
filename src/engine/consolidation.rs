@@ -1,11 +1,10 @@
+use std::sync::Arc;
+
 use crate::error::Result;
 use crate::graph::MemoryGraph;
 use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
 
-#[cfg(feature = "ann")]
-use crate::search::strategy::VectorSearchStrategy;
-
-use super::MemoryEngine;
+use super::{MemoryEngine, spawn_join_err};
 
 impl MemoryEngine {
     /// Run three-pass consolidation: local dedup, cluster fusion, global integration.
@@ -39,46 +38,48 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only. Propagates
     /// errors from any consolidation pass, the `SummaryGenerator`, or the
     /// `EmbeddingProvider`.
-    pub fn consolidate(
+    pub async fn consolidate(
         &self,
-        generator: &dyn SummaryGenerator,
-        embedder: &dyn EmbeddingProvider,
+        generator: Arc<dyn SummaryGenerator>,
+        embedder: Arc<dyn EmbeddingProvider>,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        // Phase 1 — READ (brief lock): snapshot the active set + watermark, then release.
-        let snapshot = {
-            let conn = self.write_conn()?;
-            crate::consolidation::load_snapshot(&conn, self.embed_dim, config)?
+        // Phase 1 — READ: snapshot the active set + watermark below the seam.
+        let snapshot = self
+            .storage
+            .load_consolidation_snapshot(config.clone())
+            .await?;
+
+        // Phase 2 — COMPUTE (no lock): dedup decision + cluster/global summaries,
+        // including the consumer `summarize`/`embed` IO. Offloaded to the blocking
+        // pool so the (possibly blocking HTTP) consumer calls never park the async
+        // executor (#409) — and a `reqwest::blocking` provider stays nested-runtime-safe.
+        let plan = {
+            let config = config.clone();
+            let embed_dim = self.embed_dim;
+            tokio::task::spawn_blocking(move || {
+                crate::consolidation::compute_plan(
+                    &snapshot,
+                    &*generator,
+                    &*embedder,
+                    embed_dim,
+                    &config,
+                )
+            })
+            .await
+            .map_err(spawn_join_err)??
         };
 
-        // Phase 2 — COMPUTE (NO lock): dedup decision + cluster/global summaries, including
-        // the consumer `summarize`/`embed` network IO. This is the work that used to run
-        // under the write lock and starve every other writer (#409).
-        let plan = crate::consolidation::compute_plan(
-            &snapshot,
-            generator,
-            embedder,
-            self.embed_dim,
-            config,
-        )?;
-
-        // Phase 3 — WRITE (brief lock, one transaction): apply atomically, then rebuild
-        // the graph inside the same lock if dedup expired facts (and their edges).
-        // `apply_plan` returns the ids it *actually* expired (a concurrent writer may have
-        // pre-empted some in the read→compute gap), so the graph rebuild and the vector
-        // index notify below key off real changes, not the stale plan.
-        let conn = self.write_conn()?;
-        let (stats, expired_ids) = crate::consolidation::apply_plan(&conn, &plan, self.embed_dim)?;
+        // Phase 3 — WRITE: apply atomically below the seam. `apply_plan` returns the
+        // ids it *actually* expired (a concurrent writer may have pre-empted some in
+        // the read→compute gap) and fires the HNSW `notify_expire` internally (Stage
+        // B), so the engine rebuilds its in-memory graph off the real change set only.
+        let (stats, expired_ids) = self.storage.apply_plan(plan).await?;
         if !expired_ids.is_empty() {
-            *self.graph.write() = MemoryGraph::load_from_db(&conn)?;
-        }
-        drop(conn); // release the write lock before notifying the vector index
-
-        #[cfg(feature = "ann")]
-        if let Some(ref hnsw) = self.hnsw_strategy {
-            for &id in &expired_ids {
-                hnsw.notify_expire(id);
-            }
+            // Rebuild the in-memory graph from the active edge set (port read first,
+            // then take the write guard — no guard held across `.await`).
+            let edges = self.storage.list_active_edges().await?;
+            *self.graph.write() = MemoryGraph::from_active_edges(&edges);
         }
 
         Ok(stats)

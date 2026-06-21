@@ -16,13 +16,14 @@
 
 #![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
-use std::sync::Mutex;
+use std::io::Cursor;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Datelike, Utc};
 use memory_engine::traits::PersistenceClassifier;
 use memory_engine::{
     BootstrapConfig, EmbeddingFingerprint, EmbeddingProvider, Fact, KeywordExtractor, MemoryEngine,
-    MemoryError,
+    MemoryError, SessionExtractor,
 };
 
 /// Zero-vector embedder (dim 4) — retrieval is irrelevant to this audit.
@@ -170,11 +171,12 @@ const SHARED: &str = "always use rustfmt before every commit";
 // A cohesive four-phase characterization run (yield → idempotency → backdating →
 // no-dedup) sharing one engine + recorder; kept as a single test on purpose.
 #[allow(clippy::too_many_lines)]
-#[test]
-fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
+#[tokio::test]
+async fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
     let engine = MemoryEngine::builder(4).build().unwrap();
-    let extractor = KeywordExtractor;
-    let recorder = RecordingClassifier::default();
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder);
+    let extractor: Arc<dyn SessionExtractor> = Arc::new(KeywordExtractor);
+    let recorder = Arc::new(RecordingClassifier::default());
     let config = BootstrapConfig::default(); // skip_existing = true
 
     let specs = specs();
@@ -189,12 +191,13 @@ fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
     for (i, jsonl) in sessions.iter().enumerate() {
         let report = engine
             .bootstrap_session(
-                jsonl.as_bytes(),
-                &TestEmbedder,
-                &extractor,
+                Cursor::new(jsonl.clone().into_bytes()),
+                embedder.clone(),
+                extractor.clone(),
                 &config,
-                Some(&recorder),
+                Some(recorder.clone() as Arc<dyn PersistenceClassifier>),
             )
+            .await
             .unwrap();
         println!(
             "session {i} ({}): processed={} entries={} turns={} candidates={} facts={} \
@@ -245,12 +248,13 @@ fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
     for jsonl in &sessions {
         let report = engine
             .bootstrap_session(
-                jsonl.as_bytes(),
-                &TestEmbedder,
-                &extractor,
+                Cursor::new(jsonl.clone().into_bytes()),
+                embedder.clone(),
+                extractor.clone(),
                 &config,
-                Some(&recorder),
+                Some(recorder.clone() as Arc<dyn PersistenceClassifier>),
             )
+            .await
             .unwrap();
         assert_eq!(report.sessions_processed, 0, "re-run must skip");
         assert_eq!(report.sessions_skipped, 1);
@@ -272,10 +276,15 @@ fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
 
     // --- Backdating: every t_created is the historical session time (2024/2025),
     //     never Utc::now() (2026+). ---
-    let seen = recorder.seen.lock().unwrap();
+    //
+    // Snapshot the recorder's captured facts once into an owned Vec; the
+    // `std::sync::MutexGuard` is released on this line, so nothing holds a thread-affine
+    // guard across the later engine `.await` calls (the engine API is async now). The
+    // owned clone stays in scope for the cross-session dedup checks below.
+    let seen: Vec<(String, DateTime<Utc>)> = recorder.seen.lock().unwrap().clone();
     assert!(!seen.is_empty(), "recorder should have captured facts");
     let now = Utc::now();
-    for (content, t) in seen.iter() {
+    for (content, t) in &seen {
         assert!(
             t.year() < now.year(),
             "t_created not backdated (year >= current) ({t}) for {content:?}"
@@ -308,15 +317,12 @@ fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
         classifier_sessions.len()
     );
 
-    // Drop the borrow so we can call engine methods below.
-    drop(seen);
-
     // --- Store-level dedup-with-reinforcement: query the persisted rows directly.
     //     Authoritative check — the two identical-content occurrences collapse to ONE
     //     stored row, reinforced: access_count bumped (one reinforcement), t_created
     //     rolled back to the earliest session (2024), last_accessed advanced to the
     //     latest (2025). Total active facts drop from 6 candidates to 5 stored. ---
-    let stored_facts = engine.list_active_facts(None).unwrap();
+    let stored_facts = engine.list_active_facts(None).await.unwrap();
     assert_eq!(
         stored_facts.len(),
         5,

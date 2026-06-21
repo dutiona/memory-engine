@@ -44,34 +44,36 @@ fn open_file_engine(dir: &std::path::Path) -> MemoryEngine {
 }
 
 /// Add `n` facts with unique content.
-fn add_facts(engine: &MemoryEngine, n: usize) -> Vec<i64> {
-    let embedder = TestEmbedder;
-    (0..n)
-        .map(|i| {
-            engine
-                .add_fact(
-                    &AddFactRequest {
-                        content: format!("archival test fact number {i}"),
-                        fact_type: FactType::Episodic,
-                        source_event_id: None,
-                        scope: None,
-                        opts: None,
-                    },
-                    &embedder,
-                    None,
-                )
-                .unwrap()
-        })
-        .collect()
+async fn add_facts(engine: &MemoryEngine, n: usize) -> Vec<i64> {
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        let id = engine
+            .add_fact(
+                &AddFactRequest {
+                    content: format!("archival test fact number {i}"),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                embedder.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    ids
 }
 
-#[test]
-fn archive_lifecycle_roundtrip() {
+#[tokio::test]
+async fn archive_lifecycle_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open_file_engine(dir.path());
 
     // Add 150 facts
-    let _ids = add_facts(&engine, 150);
+    let _ids = add_facts(&engine, 150).await;
 
     // Forget them all — set a very aggressive policy
     let forget_policy = ForgetPolicy {
@@ -79,7 +81,7 @@ fn archive_lifecycle_roundtrip() {
         min_importance: 1.0, // expire everything
         ..ForgetPolicy::default()
     };
-    let prune_stats = engine.forget(&forget_policy).unwrap();
+    let prune_stats = engine.forget(&forget_policy).await.unwrap();
     assert!(
         prune_stats.facts_expired >= 150,
         "expected >=150 expired, got {}",
@@ -93,6 +95,7 @@ fn archive_lifecycle_roundtrip() {
     };
     let stats = engine
         .archive(&archive_policy)
+        .await
         .unwrap()
         .expect("should archive facts");
 
@@ -102,12 +105,12 @@ fn archive_lifecycle_roundtrip() {
     assert!(!stats.blake3_hash.is_empty());
 
     // Manifest has exactly one entry
-    let manifest = engine.list_archives().unwrap();
+    let manifest = engine.list_archives().await.unwrap();
     assert_eq!(manifest.len(), 1);
     assert_eq!(manifest[0].fact_count, 150);
 
     // Verify integrity
-    let verify = engine.verify_archives().unwrap();
+    let verify = engine.verify_archives().await.unwrap();
     assert_eq!(verify.len(), 1);
     assert!(
         verify[0].ok,
@@ -116,7 +119,7 @@ fn archive_lifecycle_roundtrip() {
     );
 
     // Facts are gone from the live database
-    let active = engine.list_active_facts(None).unwrap();
+    let active = engine.list_active_facts(None).await.unwrap();
     assert!(
         active.is_empty(),
         "expected 0 active facts, got {}",
@@ -124,8 +127,8 @@ fn archive_lifecycle_roundtrip() {
     );
 }
 
-#[test]
-fn archive_skips_pinned_facts() {
+#[tokio::test]
+async fn archive_skips_pinned_facts() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open_file_engine(dir.path());
     let embedder = TestEmbedder;
@@ -140,14 +143,15 @@ fn archive_skips_pinned_facts() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            std::sync::Arc::new(embedder) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
-    engine.pin_fact(pinned_id).unwrap();
+    engine.pin_fact(pinned_id).await.unwrap();
 
     // Add 50 non-pinned facts
-    let _non_pinned = add_facts(&engine, 50);
+    let _non_pinned = add_facts(&engine, 50).await;
 
     // Forget aggressively
     let forget_policy = ForgetPolicy {
@@ -155,7 +159,7 @@ fn archive_skips_pinned_facts() {
         min_importance: 1.0,
         ..ForgetPolicy::default()
     };
-    engine.forget(&forget_policy).unwrap();
+    engine.forget(&forget_policy).await.unwrap();
 
     // Archive
     let archive_policy = ArchivePolicy {
@@ -164,6 +168,7 @@ fn archive_skips_pinned_facts() {
     };
     let stats = engine
         .archive(&archive_policy)
+        .await
         .unwrap()
         .expect("should archive non-pinned facts");
 
@@ -171,12 +176,12 @@ fn archive_skips_pinned_facts() {
     assert_eq!(stats.facts_archived, 50);
 
     // Pinned fact still exists
-    let pinned = engine.get_fact(pinned_id).unwrap();
+    let pinned = engine.get_fact(pinned_id).await.unwrap();
     assert!(pinned.is_pinned);
 }
 
-#[test]
-fn archive_returns_none_below_min_facts() {
+#[tokio::test]
+async fn archive_returns_none_below_min_facts() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open_file_engine(dir.path());
 
@@ -185,15 +190,15 @@ fn archive_returns_none_below_min_facts() {
         expired_before: Utc::now() + Duration::hours(1),
         min_facts: 100,
     };
-    let result = engine.archive(&archive_policy).unwrap();
+    let result = engine.archive(&archive_policy).await.unwrap();
     assert!(result.is_none(), "expected None for empty engine");
 }
 
-#[test]
-fn archive_search_finds_archived_facts() {
+#[tokio::test]
+async fn archive_search_finds_archived_facts() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open_file_engine(dir.path());
-    let embedder = TestEmbedder;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
 
     // Add 20 facts about deployment issues
     for i in 0..20 {
@@ -206,9 +211,10 @@ fn archive_search_finds_archived_facts() {
                     scope: None,
                     opts: None,
                 },
-                &embedder,
+                embedder.clone(),
                 None,
             )
+            .await
             .unwrap();
     }
 
@@ -218,7 +224,7 @@ fn archive_search_finds_archived_facts() {
         min_importance: 1.0, // expire everything
         ..ForgetPolicy::default()
     };
-    let prune_stats = engine.forget(&forget_policy).unwrap();
+    let prune_stats = engine.forget(&forget_policy).await.unwrap();
     assert!(
         prune_stats.facts_expired >= 20,
         "expected >=20 expired facts, got {}",
@@ -232,13 +238,14 @@ fn archive_search_finds_archived_facts() {
     };
     let stats = engine
         .archive(&archive_policy)
+        .await
         .unwrap()
         .expect("should produce archive stats");
     assert_eq!(stats.facts_archived, 20);
 
     // Normal search finds nothing (facts are gone from live DB)
     let query = MemoryQuery::new().text("deployment");
-    let response = engine.execute_query(&query).unwrap();
+    let response = engine.execute_query(&query).await.unwrap();
     assert_eq!(
         response.results.len(),
         0,
@@ -247,7 +254,7 @@ fn archive_search_finds_archived_facts() {
 
     // Archive search finds them
     let query = MemoryQuery::new().text("deployment").include_archives();
-    let response = engine.execute_query(&query).unwrap();
+    let response = engine.execute_query(&query).await.unwrap();
     assert!(
         !response.results.is_empty(),
         "archive search should find archived facts"

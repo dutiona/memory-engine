@@ -76,7 +76,7 @@ fn fmt_optional_dt(dt: Option<&DateTime<Utc>>) -> String {
     )
 }
 
-pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<()> {
     let engine = open_engine(db)?;
 
     let mut query = MemoryQuery::new().text(&args.text).limit(args.limit);
@@ -111,7 +111,7 @@ pub fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::Result<
         query = query.embedding(embedding);
     }
 
-    let response = engine.execute_query(&query)?;
+    let response = engine.execute_query(&query).await?;
     let results = response.results;
 
     match format {

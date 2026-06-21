@@ -14,11 +14,18 @@ memory-engine = { git = "https://github.com/dutiona/memory-engine" }
 
 ### Async support
 
-Enable the `async` feature for `AsyncMemoryEngine` (requires tokio):
+`MemoryEngine` is async-native: its DB-touching methods are `async fn` and are
+awaited inside a tokio runtime (`#[tokio::main]` or `Runtime::block_on`). The
+`async` feature provides that runtime and is **on by default** (`default = ["async"]`),
+so the snippet above already enables it — no opt-in needed.
+
+If you disable default features, you **must** re-add `async`, or the engine won't
+build its runtime expectations:
 
 ```toml
 [dependencies]
-memory-engine = { git = "https://github.com/dutiona/memory-engine", features = ["async"] }
+# default-features = false drops async — re-add it explicitly
+memory-engine = { git = "https://github.com/dutiona/memory-engine", default-features = false, features = ["async"] }
 ```
 
 ### ANN (Approximate Nearest Neighbor)

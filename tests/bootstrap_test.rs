@@ -67,15 +67,22 @@ const fn failed_fixture() -> &'static str {
     include_str!("fixtures/failed_session.jsonl")
 }
 
-#[test]
-fn bootstrap_success_session() {
+#[tokio::test]
+async fn bootstrap_success_session() {
     let engine = engine();
     let extractor = KeywordExtractor;
     let config = BootstrapConfig::default();
 
     let reader = Cursor::new(success_fixture());
     let report = engine
-        .bootstrap_session(reader, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(
+            reader,
+            std::sync::Arc::new(TestEmbedder),
+            std::sync::Arc::new(extractor),
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     assert_eq!(report.sessions_processed, 1);
@@ -91,24 +98,31 @@ fn bootstrap_success_session() {
     assert_eq!(report.events_ingested, 1, "one marker event per session");
 }
 
-#[test]
-fn bootstrap_leaves_t_valid_none_visible_but_unscheduled() {
+#[tokio::test]
+async fn bootstrap_leaves_t_valid_none_visible_but_unscheduled() {
     // #521: bootstrap intentionally leaves t_valid = None (valid-time is not externally
     // asserted for retro-observed facts; t_created carries the recency signal). Pin the
     // observable consequences: such facts are visible to active-at queries (None =
     // unbounded-valid) but are NOT scheduled by list_due (which requires t_valid IS NOT NULL).
     let engine = engine();
-    let extractor = KeywordExtractor;
     let config = BootstrapConfig::default();
 
     let reader = Cursor::new(success_fixture());
     let report = engine
-        .bootstrap_session(reader, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(
+            reader,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
     assert!(report.facts_created > 0, "fixture should create facts");
 
     // Visible, and every bootstrapped fact carries t_valid = None.
-    let active = engine.list_active_facts(None).unwrap();
+    let active = engine.list_active_facts(None).await.unwrap();
     assert_eq!(
         active.len(),
         report.facts_created,
@@ -120,7 +134,7 @@ fn bootstrap_leaves_t_valid_none_visible_but_unscheduled() {
     );
 
     // Unscheduled: list_due requires t_valid IS NOT NULL, so none are due.
-    let due = engine.list_due(Utc::now(), None).unwrap();
+    let due = engine.list_due(Utc::now(), None).await.unwrap();
     assert!(
         due.is_empty(),
         "facts with t_valid = None must not be scheduled by list_due; got {} due",
@@ -128,15 +142,22 @@ fn bootstrap_leaves_t_valid_none_visible_but_unscheduled() {
     );
 }
 
-#[test]
-fn bootstrap_failure_session() {
+#[tokio::test]
+async fn bootstrap_failure_session() {
     let engine = engine();
-    let extractor = KeywordExtractor;
     let config = BootstrapConfig::default();
 
     let reader = Cursor::new(failed_fixture());
     let report = engine
-        .bootstrap_session(reader, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(
+            reader,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     assert_eq!(report.sessions_processed, 1);
@@ -144,15 +165,22 @@ fn bootstrap_failure_session() {
     assert_eq!(report.events_ingested, 1);
 }
 
-#[test]
-fn bootstrap_empty_file() {
+#[tokio::test]
+async fn bootstrap_empty_file() {
     let engine = engine();
-    let extractor = KeywordExtractor;
     let config = BootstrapConfig::default();
 
     let reader = Cursor::new("");
     let report = engine
-        .bootstrap_session(reader, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(
+            reader,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     // Empty file → no session_id found → returns early
@@ -161,10 +189,12 @@ fn bootstrap_empty_file() {
     assert_eq!(report.facts_created, 0);
 }
 
-#[test]
-fn bootstrap_idempotency() {
+#[tokio::test]
+async fn bootstrap_idempotency() {
     let engine = engine();
-    let extractor = KeywordExtractor;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
+    let extractor: std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor> =
+        std::sync::Arc::new(KeywordExtractor);
     let config = BootstrapConfig {
         skip_existing: true,
         ..Default::default()
@@ -173,7 +203,8 @@ fn bootstrap_idempotency() {
     // First run
     let reader1 = Cursor::new(success_fixture());
     let report1 = engine
-        .bootstrap_session(reader1, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(reader1, embedder.clone(), extractor.clone(), &config, None)
+        .await
         .unwrap();
     assert_eq!(report1.sessions_processed, 1);
     assert_eq!(report1.sessions_skipped, 0);
@@ -181,17 +212,20 @@ fn bootstrap_idempotency() {
     // Second run with same session → should be skipped
     let reader2 = Cursor::new(success_fixture());
     let report2 = engine
-        .bootstrap_session(reader2, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(reader2, embedder.clone(), extractor.clone(), &config, None)
+        .await
         .unwrap();
     assert_eq!(report2.sessions_processed, 0);
     assert_eq!(report2.sessions_skipped, 1);
     assert_eq!(report2.facts_created, 0);
 }
 
-#[test]
-fn bootstrap_skip_existing_false_allows_reimport() {
+#[tokio::test]
+async fn bootstrap_skip_existing_false_allows_reimport() {
     let engine = engine();
-    let extractor = KeywordExtractor;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
+    let extractor: std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor> =
+        std::sync::Arc::new(KeywordExtractor);
     let config = BootstrapConfig {
         skip_existing: false,
         ..Default::default()
@@ -200,14 +234,16 @@ fn bootstrap_skip_existing_false_allows_reimport() {
     // First run
     let reader1 = Cursor::new(success_fixture());
     let report1 = engine
-        .bootstrap_session(reader1, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(reader1, embedder.clone(), extractor.clone(), &config, None)
+        .await
         .unwrap();
     let first_facts = report1.facts_created;
 
     // Second run with skip_existing=false → should process again
     let reader2 = Cursor::new(success_fixture());
     let report2 = engine
-        .bootstrap_session(reader2, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(reader2, embedder.clone(), extractor.clone(), &config, None)
+        .await
         .unwrap();
     assert_eq!(report2.sessions_processed, 1);
     assert_eq!(report2.sessions_skipped, 0);
@@ -223,8 +259,8 @@ fn bootstrap_skip_existing_false_allows_reimport() {
     );
 }
 
-#[test]
-fn bootstrap_directory_multiple() {
+#[tokio::test]
+async fn bootstrap_directory_multiple() {
     let dir = tempfile::tempdir().unwrap();
 
     // Write two fixture files
@@ -234,11 +270,18 @@ fn bootstrap_directory_multiple() {
     std::fs::write(dir.path().join("readme.txt"), "not a session").unwrap();
 
     let engine = engine();
-    let extractor = KeywordExtractor;
     let config = BootstrapConfig::default();
 
     let report = engine
-        .bootstrap_directory(dir.path(), &TestEmbedder, &extractor, &config, None)
+        .bootstrap_directory(
+            dir.path(),
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     // Both sessions processed (may differ in outcome classification)
@@ -250,8 +293,8 @@ fn bootstrap_directory_multiple() {
     assert!(report.entries_parsed > 0);
 }
 
-#[test]
-fn bootstrap_directory_recurses_and_skips_subagents() {
+#[tokio::test]
+async fn bootstrap_directory_recurses_and_skips_subagents() {
     // Real transcripts live one level down (`<project-slug>/<uuid>.jsonl`), and
     // `subagents/` holds lower-value subagent logs we exclude. Regression: a flat
     // top-level scan silently found nothing when pointed at `~/.claude/projects`.
@@ -265,11 +308,18 @@ fn bootstrap_directory_recurses_and_skips_subagents() {
     std::fs::write(dir.path().join("proj/subagents/sub.jsonl"), subagent).unwrap();
 
     let engine = engine();
-    let extractor = KeywordExtractor;
     let config = BootstrapConfig::default();
 
     let report = engine
-        .bootstrap_directory(dir.path(), &TestEmbedder, &extractor, &config, None)
+        .bootstrap_directory(
+            dir.path(),
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -279,8 +329,8 @@ fn bootstrap_directory_recurses_and_skips_subagents() {
     assert!(report.entries_parsed > 0);
 }
 
-#[test]
-fn redaction_runs_before_extraction() {
+#[tokio::test]
+async fn redaction_runs_before_extraction() {
     // #45/#51 (review P1): a pluggable SessionExtractor (the public API supports
     // LLM-powered extractors reaching external services) must receive ALREADY
     // REDACTED turns. Plant a secret in a turn, record what the extractor sees,
@@ -327,11 +377,18 @@ fn redaction_runs_before_extraction() {
     );
 
     let engine = engine();
-    let recorder = RecordingExtractor::default();
+    let recorder = std::sync::Arc::new(RecordingExtractor::default());
     let config = BootstrapConfig::default(); // redact = true
 
     engine
-        .bootstrap_session(Cursor::new(jsonl), &TestEmbedder, &recorder, &config, None)
+        .bootstrap_session(
+            Cursor::new(jsonl),
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            recorder.clone() as std::sync::Arc<dyn SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     let seen = recorder.seen.lock().unwrap().clone();
@@ -352,10 +409,9 @@ fn redaction_runs_before_extraction() {
     );
 }
 
-#[test]
-fn bootstrap_with_scope() {
+#[tokio::test]
+async fn bootstrap_with_scope() {
     let engine = engine();
-    let extractor = KeywordExtractor;
     let config = BootstrapConfig {
         scope: Some("project:test".into()),
         ..Default::default()
@@ -363,15 +419,23 @@ fn bootstrap_with_scope() {
 
     let reader = Cursor::new(success_fixture());
     let report = engine
-        .bootstrap_session(reader, &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(
+            reader,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     assert_eq!(report.sessions_processed, 1);
     // Facts should be in the scoped namespace
 }
 
-#[test]
-fn bootstrap_savepoint_rolls_back_on_embed_failure() {
+#[tokio::test]
+async fn bootstrap_savepoint_rolls_back_on_embed_failure() {
     // #302: the error path in bootstrap_within_savepoint issues
     // `ROLLBACK TO bootstrap; RELEASE bootstrap` to keep the connection usable
     // after a mid-pipeline failure. An embedder that errors AFTER the marker
@@ -390,19 +454,20 @@ fn bootstrap_savepoint_rolls_back_on_embed_failure() {
     }
 
     let engine = engine();
-    let extractor = KeywordExtractor;
+    let extractor: std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor> =
+        std::sync::Arc::new(KeywordExtractor);
     let config = BootstrapConfig::default();
 
     // First session: embedding fails mid-pipeline (after the marker insert).
     let err = engine.bootstrap_session(
         Cursor::new(success_fixture()),
-        &FailEmbedder,
-        &extractor,
+        std::sync::Arc::new(FailEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+        extractor.clone(),
         &config,
         None,
     );
     assert!(
-        err.is_err(),
+        err.await.is_err(),
         "embed failure must propagate as Err from bootstrap_session"
     );
 
@@ -411,11 +476,12 @@ fn bootstrap_savepoint_rolls_back_on_embed_failure() {
     let report = engine
         .bootstrap_session(
             Cursor::new(success_fixture()),
-            &TestEmbedder,
-            &extractor,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            extractor.clone(),
             &config,
             None,
         )
+        .await
         .expect("connection must remain usable after a rolled-back session");
     assert_eq!(
         report.sessions_processed, 1,
@@ -425,8 +491,8 @@ fn bootstrap_savepoint_rolls_back_on_embed_failure() {
     assert!(report.facts_created > 0, "second session must store facts");
 }
 
-#[test]
-fn bootstrap_pins_facts_when_classifier_returns_true() {
+#[tokio::test]
+async fn bootstrap_pins_facts_when_classifier_returns_true() {
     // #301: the PersistenceClassifier branch in store_extracted_fact builds a
     // temporary Fact, calls should_pin, and sets new_fact.is_pinned. Integration
     // coverage existed only for should_pin == false (the dryrun recorder), so the
@@ -448,21 +514,24 @@ fn bootstrap_pins_facts_when_classifier_returns_true() {
         }
     }
 
-    let extractor = KeywordExtractor;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
+    let extractor: std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor> =
+        std::sync::Arc::new(KeywordExtractor);
 
     // AlwaysPin: every bootstrapped fact must land pinned.
     let engine_pin = engine();
     let report_pin = engine_pin
         .bootstrap_session(
             Cursor::new(success_fixture()),
-            &TestEmbedder,
-            &extractor,
+            embedder.clone(),
+            extractor.clone(),
             &BootstrapConfig::default(),
-            Some(&AlwaysPin),
+            Some(std::sync::Arc::new(AlwaysPin) as std::sync::Arc<dyn PersistenceClassifier>),
         )
+        .await
         .unwrap();
     assert!(report_pin.facts_created > 0, "fixture should create facts");
-    let pinned = engine_pin.list_active_facts(None).unwrap();
+    let pinned = engine_pin.list_active_facts(None).await.unwrap();
     assert_eq!(pinned.len(), report_pin.facts_created);
     assert!(
         pinned.iter().all(|f| f.is_pinned),
@@ -474,28 +543,28 @@ fn bootstrap_pins_facts_when_classifier_returns_true() {
     let report_unpin = engine_unpin
         .bootstrap_session(
             Cursor::new(success_fixture()),
-            &TestEmbedder,
-            &extractor,
+            embedder.clone(),
+            extractor.clone(),
             &BootstrapConfig::default(),
-            Some(&NeverPin),
+            Some(std::sync::Arc::new(NeverPin) as std::sync::Arc<dyn PersistenceClassifier>),
         )
+        .await
         .unwrap();
     assert!(report_unpin.facts_created > 0);
-    let unpinned = engine_unpin.list_active_facts(None).unwrap();
+    let unpinned = engine_unpin.list_active_facts(None).await.unwrap();
     assert!(
         unpinned.iter().all(|f| !f.is_pinned),
         "NeverPin classifier must leave every stored fact unpinned"
     );
 }
 
-#[test]
-fn bootstrap_max_entries_caps_parsed_entries() {
+#[tokio::test]
+async fn bootstrap_max_entries_caps_parsed_entries() {
     // #293 residual: a session of many small, individually-valid lines must be
     // truncated at the per-stream entry-count cap surfaced on BootstrapConfig,
     // bounding the in-memory entry Vec (and every downstream linear pass)
     // regardless of file size. Build 50 valid entries but cap at 5.
     let engine = engine();
-    let extractor = KeywordExtractor;
     let config = BootstrapConfig {
         max_entries: 5,
         skip_existing: false,
@@ -515,7 +584,15 @@ fn bootstrap_max_entries_caps_parsed_entries() {
         .collect();
 
     let report = engine
-        .bootstrap_session(Cursor::new(jsonl), &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(
+            Cursor::new(jsonl),
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -525,13 +602,12 @@ fn bootstrap_max_entries_caps_parsed_entries() {
     );
 }
 
-#[test]
-fn bootstrap_max_session_bytes_caps_stream() {
+#[tokio::test]
+async fn bootstrap_max_session_bytes_caps_stream() {
     // #293 residual: the per-stream byte ceiling stops the reader mid-file, so a
     // huge session is bounded even before the entry-count cap. With a tight byte
     // cap, only the prefix that fits is parsed; the rest is never read.
     let engine = engine();
-    let extractor = KeywordExtractor;
 
     let line = "{\"type\":\"user\",\"sessionId\":\"bytes-sess\",\"uuid\":\"u0\",\"parentUuid\":null,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}}";
     let one = format!("{line}\n");
@@ -548,7 +624,15 @@ fn bootstrap_max_session_bytes_caps_stream() {
     };
 
     let report = engine
-        .bootstrap_session(Cursor::new(jsonl), &TestEmbedder, &extractor, &config, None)
+        .bootstrap_session(
+            Cursor::new(jsonl),
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     assert!(
@@ -563,14 +647,16 @@ fn bootstrap_max_session_bytes_caps_stream() {
     );
 }
 
-#[test]
-fn bootstrap_max_turns_limits_processing() {
+#[tokio::test]
+async fn bootstrap_max_turns_limits_processing() {
     // #300: assert the DOWNSTREAM effect of max_turns truncation, not the
     // pre-truncation `turns_reconstructed` count (which is set before the slice
     // and so proves nothing). A 3-turn session where every turn carries a bug
     // keyword yields 3 candidates uncapped; with max_turns=1 only the TAIL turn
     // survives, so exactly 1 candidate/fact is produced — proving the slice fired.
-    let extractor = KeywordExtractor;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
+    let extractor: std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor> =
+        std::sync::Arc::new(KeywordExtractor);
     let turns: &[(&str, &str)] = &[
         ("first?", "The root cause was an off-by-one in turn one."),
         ("second?", "The root cause was a null deref in turn two."),
@@ -585,11 +671,12 @@ fn bootstrap_max_turns_limits_processing() {
     let report_uncapped = engine_uncapped
         .bootstrap_session(
             Cursor::new(multi_turn_session("mt-uncapped", turns)),
-            &TestEmbedder,
-            &extractor,
+            embedder.clone(),
+            extractor.clone(),
             &BootstrapConfig::default(),
             None,
         )
+        .await
         .unwrap();
     assert_eq!(
         report_uncapped.turns_reconstructed, 3,
@@ -606,14 +693,15 @@ fn bootstrap_max_turns_limits_processing() {
     let report_capped = engine_capped
         .bootstrap_session(
             Cursor::new(multi_turn_session("mt-capped", turns)),
-            &TestEmbedder,
-            &extractor,
+            embedder.clone(),
+            extractor.clone(),
             &BootstrapConfig {
                 max_turns: 1,
                 ..Default::default()
             },
             None,
         )
+        .await
         .unwrap();
 
     assert_eq!(report_capped.sessions_processed, 1);
@@ -633,24 +721,25 @@ fn bootstrap_max_turns_limits_processing() {
     );
 }
 
-#[test]
-fn bootstrap_mixed_session_fixture() {
+#[tokio::test]
+async fn bootstrap_mixed_session_fixture() {
     // #424: mixed_session.jsonl is the only fixture exercising thinking blocks,
     // progress-noise filtering, and Decision + Learning + Convention categories in
     // one session with UUID pairing across progress noise — yet it was referenced
     // by no test. Lock its behavior end to end.
     let engine = engine();
-    let extractor = KeywordExtractor;
     let config = BootstrapConfig::default();
 
     let report = engine
         .bootstrap_session(
             Cursor::new(include_str!("fixtures/mixed_session.jsonl")),
-            &TestEmbedder,
-            &extractor,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(KeywordExtractor)
+                as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
             &config,
             None,
         )
+        .await
         .unwrap();
 
     assert_eq!(report.sessions_processed, 1);
@@ -676,7 +765,7 @@ fn bootstrap_mixed_session_fixture() {
     // Stored facts must not contain the noise/thinking-only text as standalone
     // leakage: every created fact traces to a keyword-matched turn.
     assert!(report.facts_created > 0, "fixture must create facts");
-    let facts = engine.list_active_facts(None).unwrap();
+    let facts = engine.list_active_facts(None).await.unwrap();
     assert!(
         facts
             .iter()

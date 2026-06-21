@@ -1,30 +1,13 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::limits::{check_json_size, check_str_size};
-use crate::store::events::EventStore;
-use crate::store::facts::FactStore;
-use crate::store::scopes::ScopeStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
-use crate::types::{AddFactOptions, AddFactRequest, EmbeddingFingerprint, Fact, NewEvent, NewFact};
+use crate::types::{AddFactRequest, EmbeddingFingerprint, Fact, NewEvent, NewFact};
 
-#[cfg(feature = "ann")]
-use crate::search::strategy::VectorSearchStrategy;
-
-use super::MemoryEngine;
-
-/// Prepared batch entry: a borrowed request plus the insert fields computed
-/// outside the write lock by [`MemoryEngine::prepare_batch_entries`]
-/// (aliased to keep `add_facts_batch` free of `clippy::type_complexity`).
-type PreparedBatchEntry<'a> = (
-    &'a AddFactRequest,
-    Vec<f32>,
-    AddFactOptions,
-    bool,
-    DateTime<Utc>,
-    DateTime<Utc>,
-);
+use super::{MemoryEngine, spawn_join_err};
 
 impl MemoryEngine {
     // --- Public API: Ingest ---
@@ -35,10 +18,9 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on insert failure.
-    pub fn ingest(&self, event: &NewEvent) -> Result<i64> {
+    pub async fn ingest(&self, event: &NewEvent) -> Result<i64> {
         check_json_size(&event.payload, "event payload")?;
-        let conn = self.write_conn()?;
-        EventStore::new(&conn, &self.upcaster_registry).insert(event)
+        self.storage.insert_event(event).await
     }
 
     /// Validate a caller-supplied `importance` override.
@@ -72,20 +54,27 @@ impl MemoryEngine {
     /// `opts.importance` is set and outside `[0, 1]` (or non-finite); the
     /// request is rejected before any embedding, event, or fact is written.
     /// Returns errors from embedding computation, dimension validation, or DB insert.
-    pub fn add_fact(
+    pub async fn add_fact(
         &self,
         req: &AddFactRequest,
-        embedder: &dyn EmbeddingProvider,
-        classifier: Option<&dyn PersistenceClassifier>,
+        embedder: Arc<dyn EmbeddingProvider>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<i64> {
         Self::validate_add_fact_request(req)?;
-        // Embed OUTSIDE the write lock (potentially slow)
-        let embedding = embedder.embed(&req.content)?;
+        // Embed off the async executor (the provider call may be a blocking HTTP
+        // round-trip; running it inline would park the runtime thread, and a
+        // `reqwest::blocking` provider would panic with a nested-runtime error).
+        let content = req.content.clone();
+        let provider = Arc::clone(&embedder);
+        let embedding = tokio::task::spawn_blocking(move || provider.embed(&content))
+            .await
+            .map_err(spawn_join_err)??;
         // Record the provider's identity on the first embedding write (#613) — which,
         // under #614, also rejects a fingerprint that disagrees with the stored one.
-        self.insert_fact_with_embedding(req, embedding, classifier, |conn| {
-            self.record_embedding_identity(conn, embedder)
-        })
+        // The atomic insert records-if-absent inside its transaction.
+        let fingerprint = embedder.fingerprint();
+        self.insert_fact_with_embedding(req, embedding, classifier, fingerprint)
+            .await
     }
 
     /// Add a fact with a caller-supplied **pre-computed** embedding.
@@ -105,17 +94,19 @@ impl MemoryEngine {
     /// Returns [`MemoryError::EmbeddingModelMismatch`] if `declared` disagrees with the
     /// store's recorded identity, `MemoryError::EmbeddingDimension` if `declared.dim`
     /// (the vector length) differs from the engine dimension, or any write error.
-    pub fn add_fact_precomputed(
+    pub async fn add_fact_precomputed(
         &self,
         req: &AddFactRequest,
         embedding: Vec<f32>,
         declared: &EmbeddingFingerprint,
-        classifier: Option<&dyn PersistenceClassifier>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<i64> {
         Self::validate_add_fact_request(req)?;
-        self.insert_fact_with_embedding(req, embedding, classifier, |conn| {
-            crate::store::embedding_meta::record_if_absent(conn, declared, self.embed_dim).map(drop)
-        })
+        // The caller's declared fingerprint is treated exactly like a live
+        // provider's: the atomic insert records-if-absent (and #614-rejects a
+        // mismatch) inside its transaction.
+        self.insert_fact_with_embedding(req, embedding, classifier, declared.clone())
+            .await
     }
 
     /// Validate an [`AddFactRequest`] before any expensive work (embedding, metadata
@@ -138,16 +129,12 @@ impl MemoryEngine {
     /// caller's declared fingerprint in `add_fact_precomputed`) — so a vector is never
     /// committed without an established, matching identity (the #614 silent-corruption
     /// landmine).
-    // The `conn` write lock is held until the block's end: `tx` borrows it and must
-    // commit before it drops, so clippy's nursery suggestion to drop `conn` right after
-    // `unchecked_transaction()` misses that transitive borrow and would not compile.
-    #[allow(clippy::significant_drop_tightening)]
-    fn insert_fact_with_embedding(
+    async fn insert_fact_with_embedding(
         &self,
         req: &AddFactRequest,
         embedding: Vec<f32>,
-        classifier: Option<&dyn PersistenceClassifier>,
-        stamp_identity: impl FnOnce(&Connection) -> Result<()>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
+        fingerprint: EmbeddingFingerprint,
     ) -> Result<i64> {
         let now = Utc::now();
         let opts = req.opts.clone().unwrap_or_default();
@@ -156,175 +143,78 @@ impl MemoryEngine {
         let effective_created = opts.t_created.unwrap_or(now);
         let effective_last_accessed = opts.last_accessed.unwrap_or(now);
 
-        // Classify OUTSIDE the write lock (potentially slow — LLM, I/O, etc.)
-        // Uses scope_id=0 placeholder; classifiers should rely on content/type/importance/metadata.
-        let is_pinned = opts.pinned.unwrap_or_else(|| {
-            classifier.is_some_and(|c| {
-                let temp = Fact {
-                    id: 0,
-                    content: req.content.clone(),
-                    content_hash: String::new(),
-                    embedding: embedding.clone(),
-                    fact_type: req.fact_type,
-                    t_created: effective_created,
-                    t_expired: None,
-                    t_valid: opts.t_valid,
-                    t_invalid: opts.t_invalid,
-                    source_event_id: req.source_event_id,
-                    importance: base_importance,
-                    access_count: 0,
-                    last_accessed: effective_last_accessed,
-                    metadata: opts
-                        .metadata
-                        .clone()
-                        .unwrap_or_else(|| serde_json::json!({})),
-                    scope_id: 0,
-                    is_pinned: false,
-                    importance_score: base_importance,
-                    surfaced_at: None,
-                };
-                c.should_pin(&temp)
-            })
-        });
-
-        // Resolve scope + insert fact in a single write lock, then release
-        #[cfg(feature = "ann")]
-        let emb_copy = embedding.clone();
-
-        let fact_id = {
-            let conn = self.write_conn()?;
-            let scope_id = match &req.scope {
-                Some(path) => self.ensure_scope_with_conn(&conn, path)?,
-                None => 1, // root scope
-            };
-
-            let new_fact = NewFact {
-                content: req.content.clone(),
-                content_hash: String::new(), // FactStore::insert computes this via blake3
-                embedding,
-                fact_type: req.fact_type,
-                t_created: effective_created,
-                t_expired: None,
-                t_valid: opts.t_valid,
-                t_invalid: opts.t_invalid,
-                source_event_id: req.source_event_id,
-                scope_id,
-                importance: opts.importance.unwrap_or(0.5),
-                access_count: 0,
-                last_accessed: effective_last_accessed,
-                metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
-                is_pinned,
-            };
-
-            // Atomic first-write: stamp/verify the embedding identity (#613/#614, ADR
-            // 0015 §2) and insert the fact in one transaction, so a vector is never
-            // committed without an established identity (the #614 silent-corruption
-            // landmine). The insert was previously a bare autocommit; a second autocommit
-            // statement for the identity would let a crash between them orphan the vector.
-            // Scope creation above stays autocommit (unchanged): an orphan scope on
-            // rollback is a pre-existing, benign outcome, and the scope row + its
-            // scope_tree cache entry commit together, independent of the fact — so no
-            // cache desync is introduced.
-            let tx = conn.unchecked_transaction()?;
-            stamp_identity(&tx)?;
-            let id = FactStore::new(&tx, self.embed_dim).insert(&new_fact)?;
-            tx.commit()?;
-            id
-        }; // DB lock released = committed
-
-        #[cfg(feature = "ann")]
-        if let Some(ref hnsw) = self.hnsw_strategy {
-            hnsw.notify_insert(fact_id, &emb_copy);
-        }
-
-        Ok(fact_id)
-    }
-
-    /// Classify and prepare each entry (importance, timestamps, auto-pin
-    /// decision) outside the write lock — the Phase-2 helper for
-    /// [`add_facts_batch`](Self::add_facts_batch).
-    fn prepare_batch_entries<'a>(
-        entries: &'a [AddFactRequest],
-        embeddings: Vec<Vec<f32>>,
-        classifier: Option<&dyn PersistenceClassifier>,
-        now: DateTime<Utc>,
-    ) -> Vec<PreparedBatchEntry<'a>> {
-        entries
-            .iter()
-            .zip(embeddings)
-            .map(|(entry, embedding)| {
-                let opts = entry.opts.clone().unwrap_or_default();
-                let base_importance = opts.importance.unwrap_or(0.5);
-                let effective_created = opts.t_created.unwrap_or(now);
-                let effective_last_accessed = opts.last_accessed.unwrap_or(now);
-
-                let is_pinned = opts.pinned.unwrap_or_else(|| {
-                    classifier.is_some_and(|c| {
-                        let temp = Fact {
-                            id: 0,
-                            content: entry.content.clone(),
-                            content_hash: String::new(),
-                            embedding: embedding.clone(),
-                            fact_type: entry.fact_type,
-                            t_created: effective_created,
-                            t_expired: None,
-                            t_valid: opts.t_valid,
-                            t_invalid: opts.t_invalid,
-                            source_event_id: entry.source_event_id,
-                            importance: base_importance,
-                            access_count: 0,
-                            last_accessed: effective_last_accessed,
-                            metadata: opts
-                                .metadata
-                                .clone()
-                                .unwrap_or_else(|| serde_json::json!({})),
-                            scope_id: 0,
-                            is_pinned: false,
-                            importance_score: base_importance,
-                            surfaced_at: None,
-                        };
-                        c.should_pin(&temp)
-                    })
-                });
-
-                (
-                    entry,
-                    embedding,
-                    opts,
-                    is_pinned,
-                    effective_created,
-                    effective_last_accessed,
-                )
-            })
-            .collect()
-    }
-
-    /// Resolve (and dedupe) the scope id for each prepared entry inside the
-    /// savepoint. Returns the per-entry scope ids and the unique set to cache.
-    fn resolve_batch_scopes(
-        scope_store: &ScopeStore,
-        prepared: &[PreparedBatchEntry<'_>],
-    ) -> Result<(Vec<i64>, Vec<i64>)> {
-        let mut scope_cache: std::collections::HashMap<String, i64> =
-            std::collections::HashMap::new();
-        let mut scope_ids = Vec::with_capacity(prepared.len());
-        for (entry, ..) in prepared {
-            let scope_id = match &entry.scope {
-                Some(path) => {
-                    if let Some(&cached) = scope_cache.get(path) {
-                        cached
-                    } else {
-                        let id = scope_store.ensure_path(path)?;
-                        scope_cache.insert(path.clone(), id);
-                        id
-                    }
+        // Classify off the async executor (a classifier may be a blocking LLM/HTTP
+        // call). scope_id=0 placeholder; classifiers rely on content/type/importance/metadata.
+        let is_pinned = match opts.pinned {
+            Some(p) => p,
+            None => match classifier {
+                None => false,
+                Some(c) => {
+                    let temp = Fact {
+                        id: 0,
+                        content: req.content.clone(),
+                        content_hash: String::new(),
+                        embedding: embedding.clone(),
+                        fact_type: req.fact_type,
+                        t_created: effective_created,
+                        t_expired: None,
+                        t_valid: opts.t_valid,
+                        t_invalid: opts.t_invalid,
+                        source_event_id: req.source_event_id,
+                        importance: base_importance,
+                        access_count: 0,
+                        last_accessed: effective_last_accessed,
+                        metadata: opts
+                            .metadata
+                            .clone()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                        scope_id: 0,
+                        is_pinned: false,
+                        importance_score: base_importance,
+                        surfaced_at: None,
+                    };
+                    tokio::task::spawn_blocking(move || c.should_pin(&temp))
+                        .await
+                        .map_err(spawn_join_err)?
                 }
-                None => 1, // root scope
-            };
-            scope_ids.push(scope_id);
-        }
-        let unique_scope_ids = scope_cache.into_values().collect();
-        Ok((scope_ids, unique_scope_ids))
+            },
+        };
+
+        // Resolve scope via the port (autocommit-separate by design, as before),
+        // caching the full chain into the in-memory tree.
+        let scope_id = match &req.scope {
+            Some(path) => {
+                let id = self.storage.ensure_scope_path(path).await?;
+                self.cache_scope_chain(id).await?;
+                id
+            }
+            None => 1, // root scope
+        };
+
+        let new_fact = NewFact {
+            content: req.content.clone(),
+            content_hash: String::new(), // FactStore::insert computes this via blake3
+            embedding,
+            fact_type: req.fact_type,
+            t_created: effective_created,
+            t_expired: None,
+            t_valid: opts.t_valid,
+            t_invalid: opts.t_invalid,
+            source_event_id: req.source_event_id,
+            scope_id,
+            importance: opts.importance.unwrap_or(0.5),
+            access_count: 0,
+            last_accessed: effective_last_accessed,
+            metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
+            is_pinned,
+        };
+
+        // Atomic first-write below the seam: record-or-verify the embedding identity
+        // (#613/#614) and insert the fact in one transaction; the backend fires the
+        // HNSW notify post-commit internally (Stage B). `Ok ⟹ committed`.
+        self.storage
+            .insert_fact_atomic(&new_fact, &fingerprint, self.embed_dim)
+            .await
     }
 
     /// Add multiple facts atomically: batch-embed all texts in a single call,
@@ -349,14 +239,11 @@ impl MemoryEngine {
     /// Returns errors from batch embedding, dimension validation, or DB insert.
     /// Returns `MemoryError::Internal` if the embedder returns a different
     /// number of embeddings than input entries.
-    // `conn` (write lock) spans the whole savepoint transaction via FactStore/
-    // ScopeStore wrappers that borrow it; clippy misses the transitive borrow.
-    #[allow(clippy::significant_drop_tightening)]
-    pub fn add_facts_batch(
+    pub async fn add_facts_batch(
         &self,
         entries: &[AddFactRequest],
-        embedder: &dyn EmbeddingProvider,
-        classifier: Option<&dyn PersistenceClassifier>,
+        embedder: Arc<dyn EmbeddingProvider>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<Vec<i64>> {
         if entries.is_empty() {
             return Ok(Vec::new());
@@ -373,9 +260,15 @@ impl MemoryEngine {
             }
         }
 
-        // --- Phase 1: Batch embed OUTSIDE the write lock ---
-        let texts: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
-        let embeddings = embedder.embed_batch(&texts)?;
+        // --- Phase 1: Batch embed off the executor (one blocking call) ---
+        let texts: Vec<String> = entries.iter().map(|e| e.content.clone()).collect();
+        let provider = Arc::clone(&embedder);
+        let embeddings = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            provider.embed_batch(&refs)
+        })
+        .await
+        .map_err(spawn_join_err)??;
 
         if embeddings.len() != entries.len() {
             return Err(MemoryError::Internal(format!(
@@ -385,106 +278,120 @@ impl MemoryEngine {
             )));
         }
 
-        // --- Phase 2: Classify + prepare OUTSIDE the write lock ---
+        // --- Phase 2: Classify + prepare (auto-pin off the executor) ---
         let now = Utc::now();
-        let prepared = Self::prepare_batch_entries(entries, embeddings, classifier, now);
+        let pins = self
+            .compute_batch_pins(entries, &embeddings, classifier, now)
+            .await?;
 
-        // --- Phase 3: DB operations INSIDE the write lock ---
-        #[cfg(feature = "ann")]
-        let mut hnsw_pairs: Vec<(i64, Vec<f32>)> = Vec::with_capacity(entries.len());
+        // --- Phase 3: build NewFacts (+ scope paths) for the atomic batch insert ---
+        // `scope_id` here is a placeholder; `insert_facts_batch_atomic` resolves
+        // each `scope_paths[i]` inside its savepoint and patches the real id.
+        let mut facts = Vec::with_capacity(entries.len());
+        let mut scope_paths = Vec::with_capacity(entries.len());
+        for ((entry, embedding), &is_pinned) in entries.iter().zip(embeddings).zip(&pins) {
+            let opts = entry.opts.clone().unwrap_or_default();
+            facts.push(NewFact {
+                content: entry.content.clone(),
+                content_hash: String::new(), // FactStore::insert computes via blake3
+                embedding,
+                fact_type: entry.fact_type,
+                t_created: opts.t_created.unwrap_or(now),
+                t_expired: None,
+                t_valid: opts.t_valid,
+                t_invalid: opts.t_invalid,
+                source_event_id: entry.source_event_id,
+                scope_id: 1, // placeholder — patched from scope_paths below the seam
+                importance: opts.importance.unwrap_or(0.5),
+                access_count: 0,
+                last_accessed: opts.last_accessed.unwrap_or(now),
+                metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
+                is_pinned,
+            });
+            scope_paths.push(entry.scope.clone());
+        }
 
-        let fact_ids = {
-            let conn = self.write_conn()?;
-            conn.execute_batch("SAVEPOINT batch_insert")?;
+        // --- Phase 4: atomic batch insert below the seam (one savepoint; the
+        // backend fires HNSW notify post-commit internally, Stage B). Returns the
+        // new ids + the unique scope ids to mirror into the in-memory tree. ---
+        let fingerprint = embedder.fingerprint();
+        let (ids, scope_ids_to_cache) = self
+            .storage
+            .insert_facts_batch_atomic(&facts, &scope_paths, &fingerprint, self.embed_dim)
+            .await?;
 
-            let result = (|| -> Result<(Vec<i64>, Vec<i64>)> {
-                let scope_store = ScopeStore::new(&conn);
-                let store = FactStore::new(&conn, self.embed_dim);
-
-                // Record the embedding identity on first write (#613), inside the
-                // savepoint so it commits atomically with the batch (write-once;
-                // a no-op on every subsequent batch).
-                self.record_embedding_identity(&conn, embedder)?;
-
-                // Resolve scopes INSIDE the savepoint so they roll back on error.
-                let (scope_ids, scope_ids_to_cache) =
-                    Self::resolve_batch_scopes(&scope_store, &prepared)?;
-
-                let mut ids = Vec::with_capacity(prepared.len());
-
-                for (
-                    i,
-                    (entry, embedding, opts, is_pinned, effective_created, effective_last_accessed),
-                ) in prepared.iter().enumerate()
-                {
-                    let new_fact = NewFact {
-                        content: entry.content.clone(),
-                        content_hash: String::new(), // FactStore::insert computes via blake3
-                        embedding: embedding.clone(),
-                        fact_type: entry.fact_type,
-                        t_created: *effective_created,
-                        t_expired: None,
-                        t_valid: opts.t_valid,
-                        t_invalid: opts.t_invalid,
-                        source_event_id: entry.source_event_id,
-                        scope_id: scope_ids[i],
-                        importance: opts.importance.unwrap_or(0.5),
-                        access_count: 0,
-                        last_accessed: *effective_last_accessed,
-                        metadata: opts
-                            .metadata
-                            .clone()
-                            .unwrap_or_else(|| serde_json::json!({})),
-                        is_pinned: *is_pinned,
-                    };
-
-                    let fact_id = store.insert(&new_fact)?;
-
-                    #[cfg(feature = "ann")]
-                    hnsw_pairs.push((fact_id, embedding.clone()));
-
-                    ids.push(fact_id);
-                }
-
-                Ok((ids, scope_ids_to_cache))
-            })();
-
-            match result {
-                Ok((ids, scope_ids_to_cache)) => {
-                    conn.execute_batch("RELEASE batch_insert")?;
-
-                    // Deferred scope_tree cache update — only after successful
-                    // commit. Prevents cache desync on rollback.
-                    let scope_store = ScopeStore::new(&conn);
-                    let mut tree = self.scope_tree.write();
-                    for sid in scope_ids_to_cache {
-                        if let Ok(node) = scope_store.get(sid) {
-                            tree.insert(node);
-                        }
-                    }
-                    drop(tree);
-
-                    ids
-                }
-                Err(e) => {
-                    // ROLLBACK TO restores savepoint but keeps it open —
-                    // RELEASE closes it, leaving the connection clean.
-                    let _ = conn.execute_batch("ROLLBACK TO batch_insert");
-                    let _ = conn.execute_batch("RELEASE batch_insert");
-                    return Err(e);
+        // --- Phase 5: deferred scope_tree cache (post-commit, leaf nodes only —
+        // matching the prior batch behavior). Fetch nodes via the port FIRST,
+        // then take the write lock so no guard is held across `.await`. ---
+        if !scope_ids_to_cache.is_empty() {
+            let mut nodes = Vec::with_capacity(scope_ids_to_cache.len());
+            for sid in scope_ids_to_cache {
+                if let Ok(node) = self.storage.get_scope(sid).await {
+                    nodes.push(node);
                 }
             }
-        }; // write lock released
-
-        // --- Phase 4: HNSW notification AFTER lock (success only) ---
-        #[cfg(feature = "ann")]
-        if let Some(ref hnsw) = self.hnsw_strategy {
-            for (fact_id, emb) in &hnsw_pairs {
-                hnsw.notify_insert(*fact_id, emb);
+            let mut tree = self.scope_tree.write();
+            for node in nodes {
+                tree.insert(node);
             }
         }
 
-        Ok(fact_ids)
+        Ok(ids)
+    }
+
+    /// Compute the per-entry auto-pin decision for a batch, offloading each
+    /// classifier call (a possibly-blocking LLM/HTTP round-trip) to the blocking
+    /// pool so it never parks the async executor. Mirrors the prior
+    /// `prepare_batch_entries` pin logic exactly.
+    async fn compute_batch_pins(
+        &self,
+        entries: &[AddFactRequest],
+        embeddings: &[Vec<f32>],
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<bool>> {
+        let mut pins = Vec::with_capacity(entries.len());
+        for (entry, embedding) in entries.iter().zip(embeddings) {
+            let opts = entry.opts.clone().unwrap_or_default();
+            let is_pinned = match opts.pinned {
+                Some(p) => p,
+                None => match &classifier {
+                    None => false,
+                    Some(c) => {
+                        let base_importance = opts.importance.unwrap_or(0.5);
+                        let temp = Fact {
+                            id: 0,
+                            content: entry.content.clone(),
+                            content_hash: String::new(),
+                            embedding: embedding.clone(),
+                            fact_type: entry.fact_type,
+                            t_created: opts.t_created.unwrap_or(now),
+                            t_expired: None,
+                            t_valid: opts.t_valid,
+                            t_invalid: opts.t_invalid,
+                            source_event_id: entry.source_event_id,
+                            importance: base_importance,
+                            access_count: 0,
+                            last_accessed: opts.last_accessed.unwrap_or(now),
+                            metadata: opts
+                                .metadata
+                                .clone()
+                                .unwrap_or_else(|| serde_json::json!({})),
+                            scope_id: 0,
+                            is_pinned: false,
+                            importance_score: base_importance,
+                            surfaced_at: None,
+                        };
+                        let c = Arc::clone(c);
+                        tokio::task::spawn_blocking(move || c.should_pin(&temp))
+                            .await
+                            .map_err(spawn_join_err)?
+                    }
+                },
+            };
+            pins.push(is_pinned);
+        }
+        Ok(pins)
     }
 }
 
@@ -511,8 +418,8 @@ mod tests {
 
     /// An oversized event payload is rejected by `ingest` before it touches the
     /// write path.
-    #[test]
-    fn ingest_rejects_oversized_payload() {
+    #[tokio::test]
+    async fn ingest_rejects_oversized_payload() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let big = "x".repeat(MAX_PAYLOAD_BYTES + 10);
         let event = NewEvent {
@@ -526,7 +433,7 @@ mod tests {
             sequence_id: 0,
             created_at: None,
         };
-        let err = engine.ingest(&event).unwrap_err();
+        let err = engine.ingest(&event).await.unwrap_err();
         assert!(matches!(
             err,
             MemoryError::Conflict(ConflictError::PayloadTooLarge {
@@ -538,8 +445,8 @@ mod tests {
 
     /// An oversized fact `metadata` is rejected by `add_fact`, and a normal one
     /// is accepted (guard does not regress the happy path).
-    #[test]
-    fn add_fact_rejects_oversized_metadata() {
+    #[tokio::test]
+    async fn add_fact_rejects_oversized_metadata() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let big = "x".repeat(MAX_PAYLOAD_BYTES + 10);
         let req = AddFactRequest {
@@ -552,7 +459,14 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let err = engine.add_fact(&req, &FakeEmbed, None).unwrap_err();
+        let err = engine
+            .add_fact(
+                &req,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             MemoryError::Conflict(ConflictError::PayloadTooLarge {
@@ -572,13 +486,22 @@ mod tests {
                 ..Default::default()
             }),
         };
-        assert!(engine.add_fact(&ok_req, &FakeEmbed, None).is_ok());
+        assert!(
+            engine
+                .add_fact(
+                    &ok_req,
+                    std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                    None
+                )
+                .await
+                .is_ok()
+        );
     }
 
     /// An oversized fact `content` body is rejected by `add_fact` — the content
     /// String is the larger unbounded vector, guarded alongside metadata.
-    #[test]
-    fn add_fact_rejects_oversized_content() {
+    #[tokio::test]
+    async fn add_fact_rejects_oversized_content() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let req = AddFactRequest {
             content: "x".repeat(MAX_PAYLOAD_BYTES + 1),
@@ -587,7 +510,14 @@ mod tests {
             scope: None,
             opts: None,
         };
-        let err = engine.add_fact(&req, &FakeEmbed, None).unwrap_err();
+        let err = engine
+            .add_fact(
+                &req,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             MemoryError::Conflict(ConflictError::PayloadTooLarge {

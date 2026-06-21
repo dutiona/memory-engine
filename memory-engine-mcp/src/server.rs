@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use memory_engine::ActivityFilterConfig;
@@ -17,8 +16,12 @@ use crate::tools;
 
 /// MCP server wrapping a [`MemoryEngine`] instance.
 ///
-/// All tool calls are dispatched to `tokio::task::spawn_blocking` via the engine's
-/// internal connection pool. The server holds an `Arc<MemoryEngine>` for thread-safe sharing.
+/// The engine is async-native (#631): every DB-touching method is an `async fn`
+/// whose storage I/O is offloaded below the `StorageBackend` seam and whose
+/// consumer-trait (HTTP/CPU) calls are offloaded internally via `spawn_blocking`.
+/// Tool calls are therefore `.await`ed directly on the async runtime — no
+/// `spawn_blocking` hop at the dispatch boundary. The server holds an
+/// `Arc<MemoryEngine>` for thread-safe sharing.
 pub struct MemoryMcpServer {
     pub(crate) engine: Arc<MemoryEngine>,
     pub(crate) embedder: Option<Arc<HttpEmbeddingProvider>>,
@@ -91,32 +94,21 @@ impl ServerHandler for MemoryMcpServer {
         let name = request.name.clone();
         let args = request.arguments.unwrap_or_default();
 
-        let engine = Arc::clone(&self.engine);
-        let embedder = self.embedder.clone();
-        let summary_gen = self.summary_gen.clone();
-        let embed_dim = self.embed_dim;
-        let filter_config = Arc::clone(&self.filter_config);
-
-        // Dispatch to tool handlers on the blocking thread pool.
-        // Engine operations are sync (SQLite) — must not run on the async runtime.
-        let result = tokio::task::spawn_blocking(move || {
-            tools::dispatch(
-                &name,
-                args,
-                &engine,
-                embedder.as_deref(),
-                summary_gen.as_deref(),
-                embed_dim,
-                &filter_config,
-            )
-        })
-        .await
-        .map_err(|e| {
-            rmcp::model::ErrorData::internal_error(
-                Cow::Owned(format!("task join error: {e}")),
-                None,
-            )
-        })??;
+        // The engine is async-native (#631): await the tool dispatch directly on the
+        // runtime. Storage I/O is offloaded below the `StorageBackend` seam and any
+        // consumer-trait (blocking HTTP) call is offloaded inside the engine, so no
+        // `spawn_blocking` hop is needed here. `MemoryEngine` is `Send + Sync` and its
+        // futures are `Send`, so the borrowed `&self` dispatch is sound across `.await`.
+        let result = tools::dispatch(
+            &name,
+            args,
+            &self.engine,
+            self.embedder.clone(),
+            self.summary_gen.clone(),
+            self.embed_dim,
+            &self.filter_config,
+        )
+        .await?;
 
         Ok(result)
     }

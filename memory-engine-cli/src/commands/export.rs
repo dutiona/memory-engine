@@ -34,7 +34,7 @@ pub struct ExportArgs {
     export_format: ExportFormat,
 }
 
-pub fn run(db: &Path, args: &ExportArgs) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &ExportArgs) -> anyhow::Result<()> {
     // Only SQLite export needs write access (VACUUM INTO); others are read-only.
     let engine = if args.export_format == ExportFormat::Sqlite {
         open_engine_writable(db)?
@@ -49,7 +49,7 @@ pub fn run(db: &Path, args: &ExportArgs) -> anyhow::Result<()> {
         ExportFormat::JsonZst => DumpFormat::JsonZstd(args.output.clone()),
     };
 
-    engine.dump_state(&format)?;
+    engine.dump_state(&format).await?;
     eprintln!("Exported to {}", args.output.display());
     Ok(())
 }

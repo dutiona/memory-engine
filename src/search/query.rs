@@ -37,42 +37,44 @@ const DEFAULT_LIMIT: usize = 50;
 ///     }
 /// }
 ///
-/// let dim = 64;
-/// let engine = MemoryEngine::builder(dim).build()?;
-/// let embedder = HashEmbedder { dim };
-/// // A deep, hierarchical scope: the fact lives under `user:michael/project:demo`.
-/// // `add_fact` auto-creates every missing segment (`user:michael`, then
-/// // `project:demo`) in both the database and the in-memory scope tree.
-/// engine.add_fact(
-///     &AddFactRequest {
-///         content: "deployment issue in the demo project".into(),
-///         fact_type: FactType::Episodic,
-///         source_event_id: None,
-///         scope: Some("user:michael/project:demo".into()),
-///         opts: None,
-///     },
-///     &embedder,
-///     None,
-/// )?;
+/// // The engine API is async (#631); a consumer binary uses `#[tokio::main]`.
+/// tokio::runtime::Runtime::new().unwrap().block_on(async {
+///     let dim = 64;
+///     let engine = MemoryEngine::builder(dim).build()?;
+///     let embedder = HashEmbedder { dim };
+///     // A deep, hierarchical scope: the fact lives under `user:michael/project:demo`.
+///     // `add_fact` auto-creates every missing segment (`user:michael`, then
+///     // `project:demo`) in both the database and the in-memory scope tree.
+///     engine.add_fact(
+///         &AddFactRequest {
+///             content: "deployment issue in the demo project".into(),
+///             fact_type: FactType::Episodic,
+///             source_event_id: None,
+///             scope: Some("user:michael/project:demo".into()),
+///             opts: None,
+///         },
+///         std::sync::Arc::new(embedder),
+///         None,
+///     ).await?;
 ///
-/// // Scoped retrieval over a *subtree*: every fact rooted at the `user:michael`
-/// // ancestor (which includes the deeper `project:demo` child), capped at 20
-/// // results. An empty query (no `text`/`embedding`) returns every
-/// // temporally-valid fact in scope, sorted by importance. This exercises the
-/// // multi-segment scope path: the intermediate `user:michael` node must be
-/// // resolvable for the subtree walk to reach its descendant.
-/// let response = engine.execute_query(
-///     &MemoryQuery::new()
-///         .scope_subtree("user:michael")
-///         .limit(20),
-/// )?;
-/// assert_eq!(response.results.len(), 1);
-/// assert_eq!(response.results[0].fact.content, "deployment issue in the demo project");
+///     // Scoped retrieval over a *subtree*: every fact rooted at the `user:michael`
+///     // ancestor (which includes the deeper `project:demo` child), capped at 20
+///     // results. An empty query (no `text`/`embedding`) returns every
+///     // temporally-valid fact in scope, sorted by importance.
+///     let response = engine.execute_query(
+///         &MemoryQuery::new()
+///             .scope_subtree("user:michael")
+///             .limit(20),
+///     ).await?;
+///     assert_eq!(response.results.len(), 1);
+///     assert_eq!(response.results[0].fact.content, "deployment issue in the demo project");
 ///
-/// // All pinned facts (none were pinned, so this is empty).
-/// let pinned = engine.execute_query(&MemoryQuery::new().pinned_only())?;
-/// assert!(pinned.results.is_empty());
-/// # Ok::<(), MemoryError>(())
+///     // All pinned facts (none were pinned, so this is empty).
+///     let pinned = engine.execute_query(&MemoryQuery::new().pinned_only()).await?;
+///     assert!(pinned.results.is_empty());
+///     Ok::<(), MemoryError>(())
+/// })
+/// .unwrap();
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct MemoryQuery {

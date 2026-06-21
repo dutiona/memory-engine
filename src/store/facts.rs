@@ -459,6 +459,27 @@ impl<'a> FactStore<'a> {
         Ok(())
     }
 
+    /// Bi-temporally expire AND invalidate a fact: set both `t_expired` (system
+    /// time: removed from the active set) and `t_invalid` (valid time: no longer
+    /// true in the world). Used by conflict resolution's `Update`/`Delete` arms —
+    /// a superseded/deleted fact is not merely forgotten, it is marked
+    /// no-longer-valid. Idempotent guard: only an unexpired row is affected.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if no rows affected (already expired or absent).
+    pub fn expire_and_invalidate(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
+        let now_str = now.to_rfc3339();
+        let changed = self.conn.execute(
+            "UPDATE facts SET t_expired = ?1, t_invalid = ?1 WHERE id = ?2 AND t_expired IS NULL",
+            params![now_str, id],
+        )?;
+        if changed == 0 {
+            return Err(MemoryError::NotFound(format!("fact {id}")));
+        }
+        Ok(())
+    }
+
     /// Update the importance score for a fact.
     ///
     /// # Errors

@@ -48,6 +48,14 @@ init_from_pool` funnel, shared by the builder's `File` state, the restore
    internals through the builder / `open_from_config`. A `build_async` terminal
    (and folding the restore family into the builder) are deferred follow-ups.
 
+> **Amendment (#631):** `AsyncMemoryEngine` was deleted by the #631 cutover.
+> `MemoryEngine` is now async-native: its **runtime, DB-touching** methods are
+> `async fn` that `.await` an `Arc<dyn StorageBackend>` port, so there is no async
+> wrapper to reroute. Construction stays **synchronous** — the typestate builder's
+> `build()` and the `restore_*` family assemble the backend without awaiting. The
+> typestate-builder decision (points 1–4) stands unchanged; only this point's
+> `AsyncMemoryEngine` surface is superseded.
+
 Behavior preservation is proven, not asserted: a golden `insta` equivalence
 harness froze the observable construction state of all five constructors, then
 re-pointed at the builder — the snapshots match byte-for-byte.

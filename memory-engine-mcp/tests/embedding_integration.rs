@@ -4,10 +4,16 @@
 //! formats (`OpenAI`, Ollama, direct) and exercises end-to-end embedding via
 //! `memory_add_fact` and `memory_flush_insights`.
 //!
-//! `HttpEmbeddingProvider` uses `reqwest::blocking::Client` which creates an
-//! internal tokio runtime. To avoid nested-runtime panics, the provider must
-//! be created AND dropped on the blocking thread pool. After async wiremock
-//! setup, all provider work runs inside a single `spawn_blocking` block.
+//! `HttpEmbeddingProvider` uses `reqwest::blocking::Client`, which builds an
+//! internal tokio runtime at construction. Building it inside an async runtime
+//! would panic ("cannot start a runtime from within a runtime"), so the provider
+//! (and the engine, alongside it) is constructed on the blocking thread pool and
+//! handed back as a `Send` value. The now-async `tools::dispatch` is then
+//! `.await`ed directly on the test runtime (#631): the engine offloads every
+//! `reqwest::blocking` consumer-trait call into its own `spawn_blocking`, so the
+//! actual HTTP embed never runs on — nor panics from — the async runtime thread.
+
+use std::sync::Arc;
 
 use memory_engine::MemoryEngine;
 use memory_engine_mcp::embedding::HttpEmbeddingProvider;
@@ -40,6 +46,39 @@ fn make_embedding(dim: usize) -> Vec<f32> {
     vec![0.25; dim]
 }
 
+/// Convenience filter config used by every dispatch in this file.
+fn cfg() -> memory_engine::ActivityFilterConfig {
+    memory_engine::ActivityFilterConfig::default()
+}
+
+/// Build the `HttpEmbeddingProvider` (and a fresh in-process engine) on the
+/// blocking thread pool, returning them as `Send` values for the async test body.
+///
+/// `HttpEmbeddingProvider::new` builds a `reqwest::blocking::Client`, which would
+/// panic if constructed inside the async runtime — so construction stays on
+/// `spawn_blocking`. The returned provider is `Arc`-wrapped because the now-async
+/// engine takes consumer traits as owned `Arc<dyn _>` (#631 §1.2).
+async fn build_engine_and_provider(
+    endpoint: String,
+    model: &str,
+    provider: &str,
+    api_key: Option<String>,
+    query_instruction: Option<String>,
+) -> (MemoryEngine, Arc<HttpEmbeddingProvider>) {
+    let model = model.to_string();
+    let provider = provider.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut p = HttpEmbeddingProvider::new(endpoint, model, provider, api_key, DIM, 5).unwrap();
+        if let Some(instruction) = query_instruction {
+            p = p.with_query_instruction(instruction);
+        }
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        (engine, Arc::new(p))
+    })
+    .await
+    .unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI response format
 // ---------------------------------------------------------------------------
@@ -59,31 +98,26 @@ async fn openai_format_embedding() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let result = tools::dispatch(
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "OpenAI format test" })),
             &engine,
-            Some(&provider),
+            Some(provider),
             None,
             DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-        unwrap_ok(result)
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
     assert!(body["fact_id"].as_i64().unwrap() > 0);
 }
 
@@ -104,31 +138,26 @@ async fn ollama_format_embedding() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "nomic-embed-text".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let result = tools::dispatch(
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "nomic-embed-text",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "Ollama format test" })),
             &engine,
-            Some(&provider),
+            Some(provider),
             None,
             DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-        unwrap_ok(result)
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
     assert!(body["fact_id"].as_i64().unwrap() > 0);
 }
 
@@ -149,31 +178,26 @@ async fn direct_format_embedding() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "custom-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let result = tools::dispatch(
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "custom-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "Direct format test" })),
             &engine,
-            Some(&provider),
+            Some(provider),
             None,
             DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-        unwrap_ok(result)
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
     assert!(body["fact_id"].as_i64().unwrap() > 0);
 }
 
@@ -199,54 +223,54 @@ async fn flush_insights_then_get_recent_insights_roundtrip() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider =
-            HttpEmbeddingProvider::new(
-                format!("{uri}/v1/embeddings"),
-                "test-model".into(),
-                "test-provider".to_string(),
-                None,
-                DIM,
-                5,
-            )
-                .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let cfg = memory_engine::ActivityFilterConfig::default();
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
 
-        // Writer: flush an insight scoped to project:p (creates the scope, stamps the marker).
-        unwrap_ok(tools::dispatch(
+    // Writer: flush an insight scoped to project:p (creates the scope, stamps the marker).
+    unwrap_ok(
+        tools::dispatch(
             "memory_flush_insights",
             args(json!({ "insights": [{ "content": "re-gate before merge", "scope": "project:p" }] })),
             &engine,
-            Some(&provider),
+            Some(Arc::clone(&provider)),
             None,
             DIM,
-            &cfg,
-        ));
-        // Add a plain (non-insight) fact in the same scope — must be excluded.
-        unwrap_ok(tools::dispatch(
+            &cfg(),
+        )
+        .await,
+    );
+    // Add a plain (non-insight) fact in the same scope — must be excluded.
+    unwrap_ok(
+        tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "ordinary fact", "scope": "project:p" })),
             &engine,
-            Some(&provider),
+            Some(Arc::clone(&provider)),
             None,
             DIM,
-            &cfg,
-        ));
-        // Reader.
-        unwrap_ok(tools::dispatch(
+            &cfg(),
+        )
+        .await,
+    );
+    // Reader.
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_get_recent_insights",
             args(json!({ "project_path": "project:p" })),
             &engine,
             None,
             None,
             DIM,
-            &cfg,
-        ))
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
 
     assert_eq!(
         body["count"].as_i64().unwrap(),
@@ -279,44 +303,42 @@ async fn flush_two_insights_then_get_recent_returns_both() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let cfg = memory_engine::ActivityFilterConfig::default();
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
 
-        unwrap_ok(tools::dispatch(
+    unwrap_ok(
+        tools::dispatch(
             "memory_flush_insights",
             args(json!({ "insights": [
                 { "content": "insight alpha", "scope": "project:p" },
                 { "content": "insight beta", "scope": "project:p" }
             ] })),
             &engine,
-            Some(&provider),
+            Some(Arc::clone(&provider)),
             None,
             DIM,
-            &cfg,
-        ));
-        unwrap_ok(tools::dispatch(
+            &cfg(),
+        )
+        .await,
+    );
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_get_recent_insights",
             args(json!({ "project_path": "project:p" })),
             &engine,
             None,
             None,
             DIM,
-            &cfg,
-        ))
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
 
     assert_eq!(
         body["count"].as_i64().unwrap(),
@@ -342,31 +364,25 @@ async fn wrong_dimension_from_server() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let is_err = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        tools::dispatch(
-            "memory_add_fact",
-            args(json!({ "content": "Dim mismatch test" })),
-            &engine,
-            Some(&provider),
-            None,
-            DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        )
-        .is_err()
-    })
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let is_err = tools::dispatch(
+        "memory_add_fact",
+        args(json!({ "content": "Dim mismatch test" })),
+        &engine,
+        Some(provider),
+        None,
+        DIM,
+        &cfg(),
+    )
     .await
-    .unwrap();
+    .is_err();
     assert!(is_err);
 }
 
@@ -384,31 +400,25 @@ async fn server_500_propagates_error() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let is_err = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        tools::dispatch(
-            "memory_add_fact",
-            args(json!({ "content": "Server error test" })),
-            &engine,
-            Some(&provider),
-            None,
-            DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        )
-        .is_err()
-    })
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let is_err = tools::dispatch(
+        "memory_add_fact",
+        args(json!({ "content": "Server error test" })),
+        &engine,
+        Some(provider),
+        None,
+        DIM,
+        &cfg(),
+    )
     .await
-    .unwrap();
+    .is_err();
     assert!(is_err);
 }
 
@@ -433,31 +443,26 @@ async fn bearer_auth_sent_when_configured() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            Some("test-key-123".into()),
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let result = tools::dispatch(
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        Some("test-key-123".into()),
+        None,
+    )
+    .await;
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_add_fact",
             args(json!({ "content": "Auth test" })),
             &engine,
-            Some(&provider),
+            Some(provider),
             None,
             DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-        unwrap_ok(result)
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
     assert!(body["fact_id"].as_i64().unwrap() > 0);
 }
 
@@ -482,19 +487,16 @@ async fn flush_insights_with_http_embedder() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let result = tools::dispatch(
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_flush_insights",
             args(json!({
                 "insights": [
@@ -503,15 +505,13 @@ async fn flush_insights_with_http_embedder() {
                 ]
             })),
             &engine,
-            Some(&provider),
+            Some(provider),
             None,
             DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-        unwrap_ok(result)
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
     assert_eq!(body["added"].as_u64().unwrap(), 2);
     assert_eq!(body["failed_count"].as_u64().unwrap(), 0);
 }
@@ -530,19 +530,16 @@ async fn flush_insights_partial_failure() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let result = tools::dispatch(
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_flush_insights",
             args(json!({
                 "insights": [
@@ -552,15 +549,13 @@ async fn flush_insights_partial_failure() {
                 ]
             })),
             &engine,
-            Some(&provider),
+            Some(provider),
             None,
             DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-        unwrap_ok(result)
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
     assert_eq!(body["added"].as_u64().unwrap(), 1);
     assert_eq!(body["failed_count"].as_u64().unwrap(), 2);
 }
@@ -580,19 +575,16 @@ async fn flush_insights_non_object_metadata_is_rejected() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let result = tools::dispatch(
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let body = unwrap_ok(
+        tools::dispatch(
             "memory_flush_insights",
             args(json!({
                 "insights": [
@@ -601,15 +593,13 @@ async fn flush_insights_non_object_metadata_is_rejected() {
                 ]
             })),
             &engine,
-            Some(&provider),
+            Some(provider),
             None,
             DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-        unwrap_ok(result)
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
     assert_eq!(body["added"].as_u64().unwrap(), 1);
     assert_eq!(body["failed_count"].as_u64().unwrap(), 1);
     assert_eq!(body["failed"][0]["index"], json!(1));
@@ -638,46 +628,42 @@ async fn query_hybrid_with_http_embedder() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    let body = tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "test-model".into(),
-            "test-provider".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap();
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
 
-        // Add a fact via the HTTP embedder — a real-embedder write that also stamps the
-        // store's embedding identity (so the subsequent query has an identity to match).
+    // Add a fact via the HTTP embedder — a real-embedder write that also stamps the
+    // store's embedding identity (so the subsequent query has an identity to match).
+    tools::dispatch(
+        "memory_add_fact",
+        args(json!({ "content": "Tokio async runtime" })),
+        &engine,
+        Some(Arc::clone(&provider)),
+        None,
+        DIM,
+        &cfg(),
+    )
+    .await
+    .unwrap();
+
+    // Query using server-side embedding
+    let body = unwrap_ok(
         tools::dispatch(
-            "memory_add_fact",
-            args(json!({ "content": "Tokio async runtime" })),
-            &engine,
-            Some(&provider),
-            None,
-            DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        )
-        .unwrap();
-
-        // Query using server-side embedding
-        let result = tools::dispatch(
             "memory_query",
             args(json!({ "text": "async runtime", "mode": "hybrid" })),
             &engine,
-            Some(&provider),
+            Some(provider),
             None,
             DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-        unwrap_ok(result)
-    })
-    .await
-    .unwrap();
+            &cfg(),
+        )
+        .await,
+    );
     assert!(body["count"].as_u64().unwrap() >= 1);
 }
 
@@ -708,32 +694,25 @@ async fn query_path_applies_query_instruction_prefix() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "Qwen/Qwen3-Embedding-0.6B".into(),
-            "tei".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap()
-        .with_query_instruction("Q-PREFIX: ");
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        // A vector-mode query with text forces server-side query embedding.
-        let _ = tools::dispatch(
-            "memory_query",
-            args(json!({ "text": "search terms", "mode": "vector" })),
-            &engine,
-            Some(&provider),
-            None,
-            DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-    })
-    .await
-    .unwrap();
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "Qwen/Qwen3-Embedding-0.6B",
+        "tei",
+        None,
+        Some("Q-PREFIX: ".to_string()),
+    )
+    .await;
+    // A vector-mode query with text forces server-side query embedding.
+    let _ = tools::dispatch(
+        "memory_query",
+        args(json!({ "text": "search terms", "mode": "vector" })),
+        &engine,
+        Some(provider),
+        None,
+        DIM,
+        &cfg(),
+    )
+    .await;
 
     // The query embedding request must carry the instruction prefix.
     assert_eq!(sole_input(&server).await, json!("Q-PREFIX: search terms"));
@@ -751,32 +730,25 @@ async fn add_fact_path_does_not_apply_query_instruction() {
         .mount(&server)
         .await;
 
-    let uri = server.uri();
-    tokio::task::spawn_blocking(move || {
-        let provider = HttpEmbeddingProvider::new(
-            format!("{uri}/v1/embeddings"),
-            "Qwen/Qwen3-Embedding-0.6B".into(),
-            "tei".to_string(),
-            None,
-            DIM,
-            5,
-        )
-        .unwrap()
-        .with_query_instruction("Q-PREFIX: ");
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        // add_fact embeds the document via engine.add_fact -> embed (no prefix).
-        let _ = tools::dispatch(
-            "memory_add_fact",
-            args(json!({ "content": "document text" })),
-            &engine,
-            Some(&provider),
-            None,
-            DIM,
-            &memory_engine::ActivityFilterConfig::default(),
-        );
-    })
-    .await
-    .unwrap();
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "Qwen/Qwen3-Embedding-0.6B",
+        "tei",
+        None,
+        Some("Q-PREFIX: ".to_string()),
+    )
+    .await;
+    // add_fact embeds the document via engine.add_fact -> embed (no prefix).
+    let _ = tools::dispatch(
+        "memory_add_fact",
+        args(json!({ "content": "document text" })),
+        &engine,
+        Some(provider),
+        None,
+        DIM,
+        &cfg(),
+    )
+    .await;
 
     // Documents are embedded prefix-free even when a query instruction is configured.
     assert_eq!(sole_input(&server).await, json!("document text"));

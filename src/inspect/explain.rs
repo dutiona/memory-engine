@@ -88,7 +88,7 @@ pub(crate) fn explain_fact_with_graph_context(
     })
 }
 
-fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
+pub(crate) fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     // Priority: Expired > Invalidated > Pinned > Due > Active
     if fact.t_expired.is_some() {
         // A DreamCycle quarantine leaves a `quarantine` metadata marker, letting us
@@ -175,7 +175,14 @@ pub(crate) fn build_graph_context(graph: &crate::graph::MemoryGraph, fact_id: i6
 pub fn fact_history(conn: &Connection, embed_dim: usize, fact_id: i64) -> Result<FactHistory> {
     let store = FactStore::new(conn, embed_dim);
     let fact = store.get(fact_id)?;
+    Ok(fact_history_from_fact(fact_id, &fact))
+}
 
+/// Pure core of [`fact_history`]: derive the bi-temporal lifecycle timeline from a
+/// single fact's timestamps. The async engine fetches the fact via the port
+/// (`get_fact`) and calls this directly — no `&Connection` needed (#631).
+#[must_use]
+pub(crate) fn fact_history_from_fact(fact_id: i64, fact: &Fact) -> FactHistory {
     let mut timeline = Vec::new();
     timeline.push(FactHistoryEntry {
         timestamp: fact.t_created,
@@ -201,7 +208,7 @@ pub fn fact_history(conn: &Connection, embed_dim: usize, fact_id: i64) -> Result
     }
     timeline.sort_by_key(|e| e.timestamp);
 
-    Ok(FactHistory { fact_id, timeline })
+    FactHistory { fact_id, timeline }
 }
 
 #[cfg(test)]
@@ -211,6 +218,7 @@ mod tests {
     use crate::traits::EmbeddingProvider;
     use crate::types::{AddFactOptions, AddFactRequest, EventType, FactType, NewEvent};
     use chrono::Duration;
+    use std::sync::Arc;
 
     const DIM: usize = 4;
 
@@ -225,8 +233,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explain_active_fact() {
+    #[tokio::test]
+    async fn explain_active_fact() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let id = engine
             .add_fact(
@@ -237,18 +245,19 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                Arc::new(FakeEmbed),
                 None,
             )
+            .await
             .unwrap();
-        let explanation = engine.explain_fact(id).unwrap();
+        let explanation = engine.explain_fact(id).await.unwrap();
         assert_eq!(explanation.fact_id, id);
         assert!(matches!(explanation.state, FactState::Active));
         assert_eq!(explanation.scope_path, "/"); // root scope
     }
 
-    #[test]
-    fn explain_pinned_fact() {
+    #[tokio::test]
+    async fn explain_pinned_fact() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let opts = AddFactOptions {
             pinned: Some(true),
@@ -263,17 +272,18 @@ mod tests {
                     scope: None,
                     opts: Some(opts),
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
-        let explanation = engine.explain_fact(id).unwrap();
+        let explanation = engine.explain_fact(id).await.unwrap();
         assert!(matches!(explanation.state, FactState::Pinned));
         assert!(explanation.provenance.is_pinned);
     }
 
-    #[test]
-    fn explain_due_fact() {
+    #[tokio::test]
+    async fn explain_due_fact() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let opts = AddFactOptions {
             t_valid: Some(Utc::now() - Duration::hours(1)),
@@ -288,23 +298,24 @@ mod tests {
                     scope: None,
                     opts: Some(opts),
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
-        let explanation = engine.explain_fact(id).unwrap();
+        let explanation = engine.explain_fact(id).await.unwrap();
         assert!(matches!(explanation.state, FactState::Due { .. }));
     }
 
-    #[test]
-    fn explain_not_found() {
+    #[tokio::test]
+    async fn explain_not_found() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let err = engine.explain_fact(999).unwrap_err();
+        let err = engine.explain_fact(999).await.unwrap_err();
         assert!(matches!(err, crate::error::MemoryError::NotFound(_)));
     }
 
-    #[test]
-    fn fact_history_all_timestamps() {
+    #[tokio::test]
+    async fn fact_history_all_timestamps() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let opts = AddFactOptions {
             t_valid: Some(Utc::now() - Duration::hours(2)),
@@ -320,11 +331,12 @@ mod tests {
                     scope: None,
                     opts: Some(opts),
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
-        let history = engine.fact_history(id).unwrap();
+        let history = engine.fact_history(id).await.unwrap();
         assert_eq!(history.fact_id, id);
         // Created + BecameValid + BecameInvalid = 3 entries (no t_expired)
         assert_eq!(history.timeline.len(), 3);
@@ -342,8 +354,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn fact_history_minimal() {
+    #[tokio::test]
+    async fn fact_history_minimal() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let id = engine
             .add_fact(
@@ -354,11 +366,12 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
-        let history = engine.fact_history(id).unwrap();
+        let history = engine.fact_history(id).await.unwrap();
         assert_eq!(history.timeline.len(), 1);
         assert!(matches!(
             history.timeline[0].kind,
@@ -366,8 +379,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn explain_fact_with_source_event() {
+    #[tokio::test]
+    async fn explain_fact_with_source_event() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
 
         // Ingest an event to get an event_id
@@ -382,7 +395,7 @@ mod tests {
             sequence_id: 1,
             created_at: None,
         };
-        let event_id = engine.ingest(&event).unwrap();
+        let event_id = engine.ingest(&event).await.unwrap();
 
         // Create a fact linked to that event
         let fact_id = engine
@@ -394,12 +407,13 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
-        let explanation = engine.explain_fact(fact_id).unwrap();
+        let explanation = engine.explain_fact(fact_id).await.unwrap();
         assert_eq!(explanation.provenance.source_event_id, Some(event_id));
 
         let source_event = explanation
@@ -410,8 +424,8 @@ mod tests {
         assert!(matches!(source_event.event_type, EventType::Interaction));
     }
 
-    #[test]
-    fn explain_fact_without_source_event() {
+    #[tokio::test]
+    async fn explain_fact_without_source_event() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let fact_id = engine
             .add_fact(
@@ -422,18 +436,19 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
-        let explanation = engine.explain_fact(fact_id).unwrap();
+        let explanation = engine.explain_fact(fact_id).await.unwrap();
         assert_eq!(explanation.provenance.source_event_id, None);
         assert!(explanation.provenance.source_event.is_none());
     }
 
-    #[test]
-    fn snapshot_active_fact_explanation() {
+    #[tokio::test]
+    async fn snapshot_active_fact_explanation() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let id = engine
             .add_fact(
@@ -444,11 +459,12 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
-        let explanation = engine.explain_fact(id).unwrap();
+        let explanation = engine.explain_fact(id).await.unwrap();
         insta::assert_yaml_snapshot!(explanation);
     }
 }

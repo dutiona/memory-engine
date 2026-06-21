@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -9,11 +10,9 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::scope::ScopeTree;
 use crate::search::hybrid::{MatchType, SearchResult};
-use crate::search::strategy::{BruteForce, SearchConfig, VectorSearchStrategy};
-use crate::store::facts::FactStore;
-use crate::store::schema::{get_config, set_config};
-use crate::store::scopes::ScopeStore;
-use crate::store::summaries::SummaryStore;
+use crate::search::strategy::SearchConfig;
+use crate::storage::StorageBackend;
+use crate::storage::sqlite::SqliteBackend;
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, Reranker};
 use crate::types::{ConsolidationLevel, EmbeddingFingerprint, Fact};
@@ -39,14 +38,6 @@ mod resume;
 mod scheduling;
 pub(crate) mod snapshot;
 
-/// Data loaded from a sidecar snapshot, ready to be assembled into a `MemoryEngine`.
-struct SnapshotData {
-    graph: MemoryGraph,
-    scope_tree: ScopeTree,
-    #[cfg(feature = "ann")]
-    hnsw_strategy: Option<crate::search::ann::HnswStrategy>,
-}
-
 #[cfg(feature = "archive")]
 mod archive;
 
@@ -56,6 +47,19 @@ mod tests;
 /// Construction-equivalence golden harness for the builder migration (#541).
 #[cfg(test)]
 mod equivalence;
+
+/// Which [`StorageBackend`] implementation backs the engine.
+///
+/// Resolved once in [`MemoryEngine::open_storage`]. The in-process
+/// [`SqliteBackend`] is the default and only variant today; epic #628 adds a
+/// `Postgres` arm (#634).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BackendKind {
+    /// The default in-process `SQLite` backend (read-pool + write-mutex).
+    #[default]
+    Sqlite,
+}
 
 /// Configuration for opening a file-backed [`MemoryEngine`].
 ///
@@ -92,6 +96,8 @@ pub struct EngineConfig {
     pub(crate) upcaster_registry: UpcasterRegistry,
     /// Open in read-only mode: skip init/migration, reject writes.
     pub(crate) read_only: bool,
+    /// Which storage backend to open (default: [`BackendKind::Sqlite`]).
+    pub(crate) backend: BackendKind,
 }
 
 impl EngineConfig {
@@ -106,7 +112,15 @@ impl EngineConfig {
             backup_dir: None,
             upcaster_registry: UpcasterRegistry::new(),
             read_only: false,
+            backend: BackendKind::Sqlite,
         }
+    }
+
+    /// Select the storage backend (default [`BackendKind::Sqlite`]).
+    #[must_use]
+    pub const fn with_backend(mut self, backend: BackendKind) -> Self {
+        self.backend = backend;
+        self
     }
 
     /// Set the read connection pool size for a file-backed engine (default 4).
@@ -163,25 +177,36 @@ impl EngineConfig {
 ///
 /// All public methods take `&self`. Consumers can share via `Arc<MemoryEngine>`.
 pub struct MemoryEngine {
-    pub(crate) pool: ConnectionPool,
+    /// The single persistence handle. All DB-touching methods await this port
+    /// (#631). HNSW + the connection pool live *inside* the backend now.
+    storage: Arc<dyn StorageBackend>,
+    /// Cold-storage handle for `.pak` archives, the same backend viewed through
+    /// the feature-gated [`ColdStorage`](crate::storage::ColdStorage) port.
+    #[cfg(feature = "archive")]
+    cold: Arc<dyn crate::storage::ColdStorage>,
     embed_dim: usize,
     graph: RwLock<MemoryGraph>,
     scope_tree: RwLock<ScopeTree>,
-    vector_strategy: Box<dyn VectorSearchStrategy>,
-    reranker: Option<Box<dyn Reranker>>,
-    #[cfg(feature = "ann")]
-    hnsw_strategy: Option<crate::search::ann::HnswStrategy>,
-    #[cfg_attr(not(feature = "ann"), allow(dead_code))]
-    search_config: Option<SearchConfig>,
+    reranker: Option<Arc<dyn Reranker>>,
     upcaster_registry: UpcasterRegistry,
+    /// Captured at open (the backend hides its pool): drives [`is_file_backed`].
+    is_file_backed: bool,
+    /// Captured at open (the backend hides its pool): drives [`is_read_only`].
+    read_only: bool,
+    /// The on-disk database path, captured at open (the backend hides its pool).
+    /// `None` for in-memory engines. Drives the archive directory resolution now
+    /// that `pool.path()` is no longer reachable from the engine.
+    #[cfg_attr(not(feature = "archive"), allow(dead_code))]
+    db_path: Option<PathBuf>,
+    /// Set by [`close`](MemoryEngine::close); read by `Drop` to warn if a
+    /// file-backed engine was dropped without flushing its sidecar snapshot.
+    closed: bool,
 }
 
 impl std::fmt::Debug for MemoryEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryEngine")
             .field("embed_dim", &self.embed_dim)
-            .field("vector_strategy", &self.vector_strategy.name())
-            .field("active_strategy", &self.active_strategy_name())
             .field("reranker", &self.reranker_name())
             .finish_non_exhaustive()
     }
@@ -200,7 +225,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub(crate) fn open_from_config(
         config: &EngineConfig,
-        reranker: Option<Box<dyn Reranker>>,
+        reranker: Option<Arc<dyn Reranker>>,
     ) -> Result<Self> {
         let pool = if config.read_only {
             ConnectionPool::open_read_only(&config.path, config.embed_dim, config.read_pool_size)?
@@ -212,6 +237,9 @@ impl MemoryEngine {
                 config.backup_dir.as_deref(),
             )?
         };
+        // `config.backend` selects the implementation. Today only `Sqlite`
+        // exists (#634 adds a `Postgres` arm that bypasses `ConnectionPool`).
+        let BackendKind::Sqlite = config.backend;
         Self::init_from_pool(
             pool,
             config.embed_dim,
@@ -221,18 +249,23 @@ impl MemoryEngine {
         )
     }
 
-    /// Shared constructor logic: validate `embed_dim`, load graph and scope tree.
+    /// Shared constructor chokepoint (both the in-memory builder and the
+    /// file-backed `open_from_config` funnel here): validate `embed_dim`,
+    /// recover the in-memory projections (snapshot fast path, else full scan),
+    /// then build the [`SqliteBackend`] that owns the pool + HNSW and expose it
+    /// as `Arc<dyn StorageBackend>` (+ the feature-gated cold-storage view).
     ///
-    /// Tries the snapshot fast path first (file-backed engines only). If the
-    /// sidecar validates against the current DB fingerprint, loads from it.
-    /// Otherwise falls back to full `SQLite` scan.
+    /// Stays **synchronous**: all work here is direct `rusqlite` I/O during
+    /// construction (the engine has not yet started awaiting the port).
     fn init_from_pool(
         pool: ConnectionPool,
         embed_dim: usize,
         search_config: Option<SearchConfig>,
         upcaster_registry: UpcasterRegistry,
-        reranker: Option<Box<dyn Reranker>>,
+        reranker: Option<Arc<dyn Reranker>>,
     ) -> Result<Self> {
+        use crate::storage::sqlite::HnswOpenSource;
+
         // 1. Validate embed_dim (must happen first — ensures schema is ready).
         if pool.is_read_only() {
             let conn = pool.read()?;
@@ -242,73 +275,66 @@ impl MemoryEngine {
             Self::validate_embed_dim_against_meta(&conn, embed_dim)?;
         }
 
-        // 2. Try snapshot fast path (file-backed engines only).
-        if let Some(loaded) = Self::try_load_snapshot(&pool, embed_dim, search_config.as_ref())? {
-            tracing::info!("loaded from snapshot (fingerprint match)");
-            return Ok(Self {
-                pool,
-                embed_dim,
-                graph: RwLock::new(loaded.graph),
-                scope_tree: RwLock::new(loaded.scope_tree),
-                vector_strategy: Box::new(BruteForce),
-                reranker,
-                #[cfg(feature = "ann")]
-                hnsw_strategy: loaded.hnsw_strategy,
-                search_config,
-                upcaster_registry,
-            });
-        }
+        let is_file_backed = pool.is_file_backed();
+        let read_only = pool.is_read_only();
+        let db_path = pool.path().map(std::path::Path::to_path_buf);
 
-        // 3. Full rebuild from SQLite (current behavior).
-        let (graph, scope_tree) = {
+        // 2. Recover the in-memory projections. On the snapshot fast path the
+        //    sidecar's HNSW payload (if any) is handed to the backend; on the
+        //    full-rebuild path the backend builds HNSW from the DB scan.
+        let (graph, scope_tree, hnsw_source) = if let Some((graph, scope_tree, hnsw_payload)) =
+            Self::try_load_snapshot(&pool, embed_dim)?
+        {
+            tracing::info!("loaded from snapshot (fingerprint match)");
+            (graph, scope_tree, HnswOpenSource::Snapshot(hnsw_payload))
+        } else {
             let conn = pool.read()?;
             let graph = MemoryGraph::load_from_db(&conn)?;
             let scope_tree = ScopeTree::load(&conn)?;
             drop(conn);
-            (graph, scope_tree)
+            (graph, scope_tree, HnswOpenSource::Rebuild)
         };
 
-        // HNSW build is read-only — always use a read connection.
-        #[cfg(feature = "ann")]
-        let hnsw_strategy = if let Some(ref cfg) = search_config {
-            if cfg.ann_threshold < usize::MAX {
-                let conn = pool.read()?;
-                Some(crate::search::ann::HnswStrategy::build_from_db(
-                    &conn, embed_dim,
-                )?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // 3. Build the backend; it owns the pool + HNSW from here on.
+        let pool = Arc::new(pool);
+        let upcaster = Arc::new(upcaster_registry.clone());
+        let backend = Arc::new(
+            SqliteBackend::from_pool(pool, upcaster)
+                .with_open_config(search_config, hnsw_source)?,
+        );
+
+        let storage: Arc<dyn StorageBackend> = backend.clone();
+        #[cfg(feature = "archive")]
+        let cold: Arc<dyn crate::storage::ColdStorage> = backend;
+        #[cfg(not(feature = "archive"))]
+        drop(backend);
 
         Ok(Self {
-            pool,
+            storage,
+            #[cfg(feature = "archive")]
+            cold,
             embed_dim,
             graph: RwLock::new(graph),
             scope_tree: RwLock::new(scope_tree),
-            vector_strategy: Box::new(BruteForce),
             reranker,
-            #[cfg(feature = "ann")]
-            hnsw_strategy,
-            search_config,
             upcaster_registry,
+            is_file_backed,
+            read_only,
+            db_path,
+            closed: false,
         })
     }
 
-    /// Attempt to load in-memory structures from a sidecar snapshot.
+    /// Attempt to recover the in-memory projections from a sidecar snapshot.
     ///
-    /// Returns `Ok(Some(data))` if the snapshot validated against the current
-    /// DB fingerprint. Returns `Ok(None)` if no snapshot exists or it's
-    /// stale/invalid. Returns `Err` only for unexpected DB query failures.
+    /// Returns `Ok(Some((graph, scope_tree, hnsw_payload)))` if the snapshot
+    /// validated against the current DB fingerprint — `hnsw_payload` is the
+    /// sidecar's HNSW blob (possibly `None`), forwarded to the backend. Returns
+    /// `Ok(None)` if no snapshot exists or it is stale/invalid.
     fn try_load_snapshot(
         pool: &ConnectionPool,
         embed_dim: usize,
-        #[cfg_attr(not(feature = "ann"), allow(unused_variables))] search_config: Option<
-            &SearchConfig,
-        >,
-    ) -> Result<Option<SnapshotData>> {
+    ) -> Result<Option<(MemoryGraph, ScopeTree, Option<snapshot::HnswSnapshot>)>> {
         let Some(db_path) = pool.path() else {
             return Ok(None); // in-memory engine
         };
@@ -329,70 +355,13 @@ impl MemoryEngine {
 
         let graph = MemoryGraph::from_snapshot(&payload.graph);
         let scope_tree = ScopeTree::from_snapshot(&payload.scope_tree);
-
-        #[cfg(feature = "ann")]
-        let hnsw_strategy = match (search_config, payload.hnsw) {
-            (Some(cfg), Some(ref hnsw_snap)) if cfg.ann_threshold < usize::MAX => Some(
-                crate::search::ann::HnswStrategy::from_snapshot(hnsw_snap, embed_dim)?,
-            ),
-            (Some(cfg), None) if cfg.ann_threshold < usize::MAX => {
-                // Snapshot was created without HNSW data (e.g. non-ann build),
-                // but current config requires ANN. Fall back to DB rebuild.
-                let conn = pool.read()?;
-                Some(crate::search::ann::HnswStrategy::build_from_db(
-                    &conn, embed_dim,
-                )?)
-            }
-            _ => None,
-        };
-
-        Ok(Some(SnapshotData {
-            graph,
-            scope_tree,
-            #[cfg(feature = "ann")]
-            hnsw_strategy,
-        }))
+        Ok(Some((graph, scope_tree, payload.hnsw)))
     }
 
     /// Returns the name of the active reranker, if any.
     #[must_use]
     pub fn reranker_name(&self) -> Option<&str> {
         self.reranker.as_ref().map(|r| r.name())
-    }
-
-    /// Name of the strategy that would be used for a query right now.
-    #[must_use]
-    // Not `const`: with the `ann` feature, `should_use_hnsw` is a non-const
-    // method (it inspects runtime HNSW state), so this cannot be const across
-    // the whole feature matrix even though clippy sees it as const-able under
-    // default features.
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn active_strategy_name(&self) -> &str {
-        if self.should_use_hnsw() {
-            "hnsw"
-        } else {
-            "brute_force"
-        }
-    }
-
-    #[cfg(feature = "ann")]
-    fn should_use_hnsw(&self) -> bool {
-        self.hnsw_strategy.as_ref().is_some_and(|hnsw| {
-            hnsw.active_count()
-                >= self
-                    .search_config
-                    .as_ref()
-                    .map_or(usize::MAX, |c| c.ann_threshold)
-        })
-    }
-
-    #[cfg(not(feature = "ann"))]
-    const fn should_use_hnsw(&self) -> bool {
-        // `self` is unused without the `ann` feature; the ann-enabled twin
-        // inspects `self.hnsw_strategy`, so both variants must share a
-        // `&self` signature for the call sites to compile in either config.
-        let _ = self;
-        false
     }
 
     /// Validate the configured `embed_dim` against the persisted embedding identity
@@ -419,38 +388,6 @@ impl MemoryEngine {
         Ok(())
     }
 
-    /// Record the embedding identity on the first embedding write (#613, ADR 0015 §2).
-    ///
-    /// Idempotent and cheap after the first call: [`embedding_meta::record_if_absent`]
-    /// returns the stored tuple without writing once an identity exists. Every code
-    /// path that embeds-then-persists (ingest, batch ingest) calls this **before**
-    /// inserting the derived vector, under the same write transaction, so the store's
-    /// identity is never older than its first vector.
-    ///
-    /// Free-function persist paths that hold no `&self` (consolidation, bootstrap)
-    /// call [`embedding_meta::record_if_absent`] directly with their `embed_dim`; this
-    /// method is the thin `&self` convenience for the engine's own ingest methods.
-    ///
-    /// **This is the seam #614 extends** — enforcement is added inside
-    /// `record_if_absent`; this method's call sites do not change when it lands.
-    ///
-    /// [`embedding_meta::record_if_absent`]: crate::store::embedding_meta::record_if_absent
-    ///
-    /// # Errors
-    ///
-    /// Propagates [`embedding_meta::record_if_absent`] errors, including
-    /// `MemoryError::EmbeddingDimension` when the provider's declared `dim` disagrees
-    /// with this engine's vector dimension.
-    pub(crate) fn record_embedding_identity(
-        &self,
-        conn: &Connection,
-        embedder: &dyn EmbeddingProvider,
-    ) -> Result<()> {
-        let fp = embedder.fingerprint();
-        crate::store::embedding_meta::record_if_absent(conn, &fp, self.embed_dim)?;
-        Ok(())
-    }
-
     /// Verify a provider's identity matches the store's recorded embedding identity —
     /// a fail-fast check for consumer startup (#614, §Design.2).
     ///
@@ -464,15 +401,17 @@ impl MemoryEngine {
     /// `EmbeddingDimension`, so we fail fast here too (mirroring `record_if_absent`).
     ///
     /// This is read-only and does not establish the identity (that happens lazily on the
-    /// first embedding *write*, via [`record_embedding_identity`](Self::record_embedding_identity)).
+    /// first embedding *write*, below the seam in the atomic insert paths via
+    /// `store::embedding_meta::record_if_absent`).
     ///
     /// # Errors
     ///
     /// Returns [`MemoryError::EmbeddingDimension`] if the provider's dimension differs
     /// from this engine's, or [`MemoryError::EmbeddingModelMismatch`] if its fingerprint
     /// disagrees with the store's recorded identity.
-    pub fn verify_embedding_identity(&self, provider: &dyn EmbeddingProvider) -> Result<()> {
+    pub async fn verify_embedding_identity(&self, provider: &dyn EmbeddingProvider) -> Result<()> {
         self.verify_embedding_fingerprint(&provider.fingerprint())
+            .await
     }
 
     /// Verify a **declared** embedding fingerprint is compatible with the store's
@@ -491,152 +430,99 @@ impl MemoryEngine {
     /// Returns [`MemoryError::EmbeddingDimension`] if `candidate.dim` differs from this
     /// engine's dimension, or [`MemoryError::EmbeddingModelMismatch`] if it disagrees
     /// with the store's recorded identity.
-    pub fn verify_embedding_fingerprint(&self, candidate: &EmbeddingFingerprint) -> Result<()> {
+    pub async fn verify_embedding_fingerprint(
+        &self,
+        candidate: &EmbeddingFingerprint,
+    ) -> Result<()> {
         if candidate.dim != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
                 expected: self.embed_dim,
                 actual: candidate.dim,
             });
         }
-        self.with_read(|conn| crate::store::embedding_meta::check_compatible(conn, candidate))
+        self.storage.check_embedding_compatible(candidate).await
     }
 
     /// Whether this engine was opened in read-only mode.
     #[must_use]
     pub const fn is_read_only(&self) -> bool {
-        self.pool.is_read_only()
+        self.read_only
     }
 
-    /// Write a snapshot of in-memory state to the sidecar file.
+    /// Flush the in-memory projections to the backend's sidecar snapshot.
     ///
-    /// No-op for in-memory engines or read-only engines.
-    /// Returns `Ok(false)` if skipped, `Ok(true)` if written.
+    /// After #631 the engine no longer holds the pool/HNSW, so snapshot assembly
+    /// (DB fingerprint + HNSW) lives below the port; `close` hands the engine's
+    /// two projections down via [`StorageBackend::write_engine_snapshot`].
     ///
-    /// # Preconditions
+    /// Call this before dropping a file-backed engine. `Drop` cannot run it (it
+    /// is `async` and touches the port) and only logs a warning if it was
+    /// skipped — the dropped-without-`close` sidecar is rebuilt on next open.
     ///
-    /// Assumes single-writer semantics: only one `MemoryEngine` instance per
-    /// database file. If multiple instances share the same file, the snapshot
-    /// may reflect stale in-memory state while the fingerprint matches the DB.
+    /// No-op for in-memory or read-only engines (`Ok(false)`). `Ok(true)` when a
+    /// snapshot was written.
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` or `MemoryError::Io` if reading the DB
-    /// fingerprint or writing the snapshot file fails.
-    ///
-    /// # No-panic contract
-    ///
-    /// This method never panics. All internal operations use checked access
-    /// and propagate errors via `Result`. Safe to call from `Drop`.
-    pub fn write_snapshot(&self) -> Result<bool> {
-        let Some(db_path) = self.pool.path() else {
-            return Ok(false);
-        };
-        if self.pool.is_read_only() {
-            return Ok(false);
-        }
-
-        let conn = self.pool.read()?;
-        let fingerprint = snapshot::read_fingerprint(&conn)?;
-
-        #[cfg(feature = "ann")]
-        let hnsw_snap = self
-            .hnsw_strategy
-            .as_ref()
-            .map(|h| h.to_snapshot(&conn, self.embed_dim))
-            .transpose()?;
-        drop(conn);
-        #[cfg(not(feature = "ann"))]
-        let hnsw_snap: Option<snapshot::HnswSnapshot> = None;
-
+    /// Returns `MemoryError::Storage` if the fingerprint read or sidecar write
+    /// fails.
+    pub async fn close(&mut self) -> Result<bool> {
+        // Build the owned snapshots, then await — the read guards are temporaries
+        // dropped at the end of each statement, so none is held across `.await`.
         let graph_snap = self.graph.read().to_snapshot();
         let scope_snap = self.scope_tree.read().to_snapshot();
-
-        let header = snapshot::SnapshotHeader {
-            format_version: snapshot::FORMAT_VERSION,
-            fingerprint,
-            embed_dim: self.embed_dim,
-            engine_version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-        let payload = snapshot::SnapshotPayload {
-            graph: graph_snap,
-            scope_tree: scope_snap,
-            hnsw: hnsw_snap,
-        };
-
-        snapshot::write_to_file(&header, &payload, &snapshot::snapshot_path(db_path))?;
-        Ok(true)
-    }
-
-    // --- Private connection dispatch helpers ---
-
-    /// Execute a read operation on a connection from the read pool.
-    fn with_read<F, R>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(&Connection) -> Result<R>,
-    {
-        let conn = self.pool.read()?;
-        f(&conn)
-    }
-
-    /// Lock the write connection and return the guard directly.
-    /// Callers use this when they need to hold the write lock across
-    /// multiple operations (e.g., DB mutation + cache update).
-    ///
-    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    fn write_conn(&self) -> Result<crate::pool::WriteGuard<'_>> {
-        self.pool.try_write()
+        let wrote = self
+            .storage
+            .write_engine_snapshot(graph_snap, scope_snap)
+            .await?;
+        self.closed = true;
+        Ok(wrote)
     }
 
     /// Stamp `surfaced_at` for the given fact IDs and return the DB-authoritative
     /// `(id, timestamp)` pairs. Shared by `list_due()` and `resume_context()`.
-    fn stamp_surfaced_facts(
+    async fn stamp_surfaced_facts(
         &self,
         fact_ids: &[i64],
         now: DateTime<Utc>,
     ) -> Result<std::collections::HashMap<i64, DateTime<Utc>>> {
-        let conn = self.write_conn()?;
-        let stamped = FactStore::new(&conn, self.embed_dim).stamp_surfaced(fact_ids, now)?;
-        drop(conn);
+        let stamped = self.storage.stamp_facts_surfaced(fact_ids, now).await?;
         Ok(stamped.into_iter().collect())
     }
 
-    /// Ensure a scope path exists using an already-held connection.
+    /// Mirror a freshly-resolved scope chain (leaf → root, excluding root) into
+    /// the in-memory [`ScopeTree`] after the DB rows exist.
     ///
-    /// Shared helper for [`ensure_scope_path()`] and [`add_fact()`] to avoid
-    /// duplicating scope resolution logic.
-    ///
-    /// `ensure_path` creates *every* segment of a multi-level path in the DB but
-    /// returns only the leaf id. The in-memory [`ScopeTree`] must mirror the DB,
-    /// so we insert the entire newly-resolved chain — leaf **and all ancestors up
-    /// to (but excluding) the root** — not just the leaf. Inserting only the leaf
-    /// would leave `resolve_path` (which walks `children` from root) unable to
-    /// traverse the missing intermediate links, making any depth > 1 scope query
-    /// (`scope_subtree`/`scope_exact`/…) return zero results in-session even
+    /// The in-memory tree must mirror the DB, so we insert the entire chain —
+    /// leaf **and all ancestors up to (but excluding) the root** — not just the
+    /// leaf. Inserting only the leaf would leave `resolve_path` (which walks
+    /// `children` from root) unable to traverse the missing intermediate links,
+    /// making any depth > 1 scope query return zero results in-session even
     /// though the facts are correctly persisted. [`ScopeTree::insert`] is
     /// idempotent by id, so re-inserting shared ancestors is a no-op.
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "write lock must be held for the entire leaf-to-root walk to prevent interleaved inserts from racing on the same path"
-    )]
-    fn ensure_scope_with_conn(&self, conn: &Connection, path: &str) -> Result<i64> {
-        let scope_store = ScopeStore::new(conn);
-        let id = scope_store.ensure_path(path)?;
-
-        // Walk leaf → root via parent_id, caching every node into the tree.
-        // Stop at the root (always present) and guard against a malformed
-        // parent cycle so a hostile DB can't spin this loop forever.
-        let mut tree = self.scope_tree.write();
+    ///
+    /// The port walk (`get_scope`) is awaited up front into an owned `Vec`; the
+    /// `scope_tree` write guard is taken only afterward, so no lock is held
+    /// across `.await` (keeps the future `Send`).
+    async fn cache_scope_chain(&self, leaf_id: i64) -> Result<()> {
+        let mut nodes = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut current = Some(id);
+        let mut current = Some(leaf_id);
         while let Some(node_id) = current {
             if node_id == ScopeTree::root_id() || !seen.insert(node_id) {
                 break;
             }
-            let node = scope_store.get(node_id)?;
+            let node = self.storage.get_scope(node_id).await?;
             current = node.parent_id;
-            tree.insert(node);
+            nodes.push(node);
         }
-        Ok(id)
+        {
+            let mut tree = self.scope_tree.write();
+            for node in nodes {
+                tree.insert(node);
+            }
+        }
+        Ok(())
     }
 
     // --- Public API: Config ---
@@ -646,8 +532,8 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn get_config(&self, key: &str) -> Result<Option<String>> {
-        self.with_read(|conn| get_config(conn, key))
+    pub async fn get_config(&self, key: &str) -> Result<Option<String>> {
+        self.storage.get_config(key).await
     }
 
     /// Write a config value (upsert).
@@ -656,9 +542,8 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on write failure.
-    pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self.write_conn()?;
-        set_config(&conn, key, value)
+    pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.storage.set_config(key, value).await
     }
 
     /// Embedding dimension configured for this engine.
@@ -670,7 +555,18 @@ impl MemoryEngine {
     /// Whether this engine is file-backed (vs in-memory).
     #[must_use]
     pub const fn is_file_backed(&self) -> bool {
-        self.pool.is_file_backed()
+        self.is_file_backed
+    }
+
+    /// Test-only accessor for the storage port.
+    ///
+    /// The `pool`/`write_conn()`/`with_read()` internals the pre-#631 tests reached
+    /// through are gone; tests that need to seed or inspect store state directly do
+    /// so through the same `Arc<dyn StorageBackend>` the engine uses (e.g.
+    /// `engine.storage().insert_fact(&new_fact).await`).
+    #[cfg(test)]
+    pub(crate) fn storage(&self) -> &Arc<dyn StorageBackend> {
+        &self.storage
     }
 
     // --- Public API: Scope management ---
@@ -685,9 +581,10 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on insert failure.
-    pub fn ensure_scope_path(&self, path: &str) -> Result<i64> {
-        let conn = self.write_conn()?;
-        self.ensure_scope_with_conn(&conn, path)
+    pub async fn ensure_scope_path(&self, path: &str) -> Result<i64> {
+        let id = self.storage.ensure_scope_path(path).await?;
+        self.cache_scope_chain(id).await?;
+        Ok(id)
     }
 
     // --- Public API: Direct data access ---
@@ -697,8 +594,8 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if the fact doesn't exist.
-    pub fn get_fact(&self, id: i64) -> Result<Fact> {
-        self.with_read(|conn| FactStore::new(conn, self.embed_dim).get(id))
+    pub async fn get_fact(&self, id: i64) -> Result<Fact> {
+        self.storage.get_fact(id).await
     }
 
     /// List active (non-expired) facts, optionally limited.
@@ -709,8 +606,8 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
-        self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_active(limit))
+    pub async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
+        self.storage.list_active_facts(limit).await
     }
 
     /// List summaries by consolidation level.
@@ -718,8 +615,11 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn list_summaries(&self, level: &ConsolidationLevel) -> Result<Vec<crate::types::Summary>> {
-        self.with_read(|conn| SummaryStore::new(conn, self.embed_dim).list_by_level(level))
+    pub async fn list_summaries(
+        &self,
+        level: &ConsolidationLevel,
+    ) -> Result<Vec<crate::types::Summary>> {
+        self.storage.list_summaries_by_level(level).await
     }
 
     // --- Private helpers ---
@@ -779,6 +679,17 @@ impl MemoryEngine {
     }
 }
 
+/// Map a `tokio::task::spawn_blocking` join failure (a panic or cancellation in an
+/// offloaded consumer-trait call — embed/rerank/summarize/classify/propose) to a
+/// `MemoryError`. Shared by every engine module that offloads a sync consumer trait.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used as map_err(spawn_join_err) fn pointer"
+)]
+pub(super) fn spawn_join_err(e: tokio::task::JoinError) -> MemoryError {
+    MemoryError::Internal(format!("offloaded task failed: {e}"))
+}
+
 /// Apply DB-authoritative `surfaced_at` timestamps to in-memory facts.
 fn apply_surfaced_stamps<'a>(
     facts: impl Iterator<Item = &'a mut Fact>,
@@ -825,8 +736,16 @@ const fn fact_to_search_result(fact: Fact) -> SearchResult {
 
 impl Drop for MemoryEngine {
     fn drop(&mut self) {
-        if let Err(e) = self.write_snapshot() {
-            tracing::warn!(error = %e, "failed to write snapshot on shutdown");
+        // The sidecar flush is now async ([`close`]) and touches the port — it
+        // cannot run from `Drop`. If a file-backed engine is dropped without
+        // `close()`, the in-memory snapshot is simply not written and is rebuilt
+        // from the DB on next open (correct, just slower). Warn so the missing
+        // `close()` is visible.
+        if self.is_file_backed && !self.closed {
+            tracing::warn!(
+                "MemoryEngine dropped without close(): sidecar snapshot not \
+                 flushed; it will be rebuilt from the database on next open"
+            );
         }
     }
 }

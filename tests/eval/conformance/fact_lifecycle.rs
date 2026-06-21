@@ -3,22 +3,22 @@
 //! Verifies content hashing, dedup consolidation, state transitions
 //! (create → pin → forget, create → forget), and `get_fact` round-trip.
 
-use memory_engine::traits::ConsolidationConfig;
+use memory_engine::traits::{ConsolidationConfig, EmbeddingProvider, SummaryGenerator};
 use memory_engine::types::FactType;
 
 use crate::helpers::{
     MockSummaryGenerator, TestEmbedder, add_fact, aggressive_forget_policy, eval_engine,
 };
 
-#[test]
-fn same_content_produces_identical_content_hash() {
+#[tokio::test]
+async fn same_content_produces_identical_content_hash() {
     let engine = eval_engine();
 
-    let id1 = add_fact(&engine, "Rust is a systems language", FactType::Semantic);
-    let id2 = add_fact(&engine, "Rust is a systems language", FactType::Semantic);
+    let id1 = add_fact(&engine, "Rust is a systems language", FactType::Semantic).await;
+    let id2 = add_fact(&engine, "Rust is a systems language", FactType::Semantic).await;
 
-    let fact1 = engine.get_fact(id1).expect("get fact1");
-    let fact2 = engine.get_fact(id2).expect("get fact2");
+    let fact1 = engine.get_fact(id1).await.expect("get fact1");
+    let fact2 = engine.get_fact(id2).await.expect("get fact2");
 
     assert_eq!(
         fact1.content_hash, fact2.content_hash,
@@ -30,19 +30,20 @@ fn same_content_produces_identical_content_hash() {
     );
 }
 
-#[test]
-fn different_content_produces_different_content_hash() {
+#[tokio::test]
+async fn different_content_produces_different_content_hash() {
     let engine = eval_engine();
 
-    let id1 = add_fact(&engine, "Rust is a systems language", FactType::Semantic);
+    let id1 = add_fact(&engine, "Rust is a systems language", FactType::Semantic).await;
     let id2 = add_fact(
         &engine,
         "Python is a scripting language",
         FactType::Semantic,
-    );
+    )
+    .await;
 
-    let fact1 = engine.get_fact(id1).expect("get fact1");
-    let fact2 = engine.get_fact(id2).expect("get fact2");
+    let fact1 = engine.get_fact(id1).await.expect("get fact1");
+    let fact2 = engine.get_fact(id2).await.expect("get fact2");
 
     assert_ne!(
         fact1.content_hash, fact2.content_hash,
@@ -50,17 +51,17 @@ fn different_content_produces_different_content_hash() {
     );
 }
 
-#[test]
-fn dedup_consolidation_expires_one_duplicate() {
+#[tokio::test]
+async fn dedup_consolidation_expires_one_duplicate() {
     let engine = eval_engine();
     let generator = MockSummaryGenerator;
 
-    let id1 = add_fact(&engine, "The server runs on port 8080", FactType::Semantic);
-    let id2 = add_fact(&engine, "The server runs on port 8080", FactType::Semantic);
+    let id1 = add_fact(&engine, "The server runs on port 8080", FactType::Semantic).await;
+    let id2 = add_fact(&engine, "The server runs on port 8080", FactType::Semantic).await;
 
     // Both should be active before consolidation.
-    assert!(engine.get_fact(id1).unwrap().t_expired.is_none());
-    assert!(engine.get_fact(id2).unwrap().t_expired.is_none());
+    assert!(engine.get_fact(id1).await.unwrap().t_expired.is_none());
+    assert!(engine.get_fact(id2).await.unwrap().t_expired.is_none());
 
     let config = ConsolidationConfig::builder()
         .dedup_threshold(1.0) // exact match only
@@ -68,7 +69,12 @@ fn dedup_consolidation_expires_one_duplicate() {
         .build();
 
     let stats = engine
-        .consolidate(&generator, &TestEmbedder, &config)
+        .consolidate(
+            std::sync::Arc::new(generator) as std::sync::Arc<dyn SummaryGenerator>,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+        )
+        .await
         .expect("consolidate failed");
     assert!(
         stats.duplicates_removed > 0,
@@ -76,8 +82,8 @@ fn dedup_consolidation_expires_one_duplicate() {
     );
 
     // Exactly one should survive, one should be expired.
-    let f1 = engine.get_fact(id1).unwrap();
-    let f2 = engine.get_fact(id2).unwrap();
+    let f1 = engine.get_fact(id1).await.unwrap();
+    let f2 = engine.get_fact(id2).await.unwrap();
     let expired_count = [&f1, &f2].iter().filter(|f| f.t_expired.is_some()).count();
 
     assert_eq!(
@@ -86,17 +92,17 @@ fn dedup_consolidation_expires_one_duplicate() {
     );
 }
 
-#[test]
-fn pinned_fact_survives_aggressive_forget() {
+#[tokio::test]
+async fn pinned_fact_survives_aggressive_forget() {
     let engine = eval_engine();
 
-    let id = add_fact(&engine, "critical system fact", FactType::Semantic);
-    engine.pin_fact(id).expect("pin_fact failed");
+    let id = add_fact(&engine, "critical system fact", FactType::Semantic).await;
+    engine.pin_fact(id).await.expect("pin_fact failed");
 
     let policy = aggressive_forget_policy();
-    engine.forget(&policy).expect("forget failed");
+    engine.forget(&policy).await.expect("forget failed");
 
-    let fact = engine.get_fact(id).expect("get_fact after forget");
+    let fact = engine.get_fact(id).await.expect("get_fact after forget");
     assert!(
         fact.t_expired.is_none(),
         "pinned fact should survive aggressive forget"
@@ -104,30 +110,30 @@ fn pinned_fact_survives_aggressive_forget() {
     assert!(fact.is_pinned, "fact should still be marked as pinned");
 }
 
-#[test]
-fn unpinned_fact_expired_by_aggressive_forget() {
+#[tokio::test]
+async fn unpinned_fact_expired_by_aggressive_forget() {
     let engine = eval_engine();
 
-    let id = add_fact(&engine, "ephemeral observation", FactType::Episodic);
+    let id = add_fact(&engine, "ephemeral observation", FactType::Episodic).await;
 
     let policy = aggressive_forget_policy();
-    engine.forget(&policy).expect("forget failed");
+    engine.forget(&policy).await.expect("forget failed");
 
-    let fact = engine.get_fact(id).expect("get_fact after forget");
+    let fact = engine.get_fact(id).await.expect("get_fact after forget");
     assert!(
         fact.t_expired.is_some(),
         "unpinned fact should be expired by aggressive forget"
     );
 }
 
-#[test]
-fn get_fact_round_trip_correctness() {
+#[tokio::test]
+async fn get_fact_round_trip_correctness() {
     let engine = eval_engine();
 
     let content = "The deployment runs on Kubernetes v1.28";
-    let id = add_fact(&engine, content, FactType::Procedural);
+    let id = add_fact(&engine, content, FactType::Procedural).await;
 
-    let fact = engine.get_fact(id).expect("get_fact failed");
+    let fact = engine.get_fact(id).await.expect("get_fact failed");
 
     assert_eq!(fact.id, id);
     assert_eq!(fact.content, content);

@@ -262,13 +262,24 @@ let engine = MemoryEngine::restore_sqlite(Path::new("backup.db"), &config)?;
 
 ## Async API
 
-All inspection and import/export methods are mirrored in `AsyncMemoryEngine`
-(requires the `async` feature):
+`MemoryEngine` is async-native: its inspection methods (`statistics`,
+`explain_fact`, `fact_history`, `dump_state`) are `async fn`, so you `.await` them
+directly from inside a tokio runtime (the `async` feature is default-on and supplies
+the runtime). There is no separate async wrapper type — you use `MemoryEngine`
+itself. (Construction — the builder and the `restore_*` family — stays synchronous.)
 
 ```rust
-let stats = async_engine.statistics().await?;
-let explanation = async_engine.explain_fact(id).await?;
+use std::path::Path;
 
-// Async restore
-let engine = AsyncMemoryEngine::restore_json_memory("snapshot.json".into()).await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Inspect an existing engine.
+    let stats = engine.statistics().await?;
+    let explanation = engine.explain_fact(id).await?;
+
+    // Restore into a fresh in-memory engine — synchronous (auto-detects compression).
+    let restored = MemoryEngine::restore_json_memory(Path::new("snapshot.json.gz"))?;
+
+    Ok(())
+}
 ```

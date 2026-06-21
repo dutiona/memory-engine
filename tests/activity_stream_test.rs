@@ -39,8 +39,8 @@ fn engine() -> MemoryEngine {
     MemoryEngine::builder(DIM).build().unwrap()
 }
 
-#[test]
-fn record_activity_stores_and_deduplicates() {
+#[tokio::test]
+async fn record_activity_stores_and_deduplicates() {
     let engine = engine();
     let config = ActivityFilterConfig::default();
 
@@ -54,20 +54,20 @@ fn record_activity_stores_and_deduplicates() {
         outcome_class: None,
     };
 
-    let r1 = engine.record_activity(&req, None, &config).unwrap();
+    let r1 = engine.record_activity(&req, None, &config).await.unwrap();
     assert!(r1.activity_id.is_some());
     assert!(!r1.was_deduplicated);
     assert_eq!(r1.status, ActivityStatus::Recorded);
 
     // Second call within dedup window should deduplicate.
-    let r2 = engine.record_activity(&req, None, &config).unwrap();
+    let r2 = engine.record_activity(&req, None, &config).await.unwrap();
     assert!(r2.was_deduplicated);
     assert_eq!(r2.activity_id, r1.activity_id);
     assert_eq!(r2.status, ActivityStatus::Deduplicated);
 }
 
-#[test]
-fn record_activity_ignore_drops_silently() {
+#[tokio::test]
+async fn record_activity_ignore_drops_silently() {
     let engine = engine();
     let config = ActivityFilterConfig::new(300, ["format"], [] as [&str; 0]);
 
@@ -81,13 +81,13 @@ fn record_activity_ignore_drops_silently() {
         outcome_class: None,
     };
 
-    let result = engine.record_activity(&req, None, &config).unwrap();
+    let result = engine.record_activity(&req, None, &config).await.unwrap();
     assert!(result.activity_id.is_none());
     assert_eq!(result.status, ActivityStatus::Ignored);
 }
 
-#[test]
-fn record_activity_promotes_to_fact() {
+#[tokio::test]
+async fn record_activity_promotes_to_fact() {
     let engine = engine();
     let embedder = ZeroEmbedder(DIM);
     let config = ActivityFilterConfig::new(300, [] as [&str; 0], ["commit"]);
@@ -103,19 +103,28 @@ fn record_activity_promotes_to_fact() {
     };
 
     let result = engine
-        .record_activity(&req, Some(&embedder), &config)
+        .record_activity(
+            &req,
+            Some(std::sync::Arc::new(embedder)
+                as std::sync::Arc<dyn memory_engine::EmbeddingProvider>),
+            &config,
+        )
+        .await
         .unwrap();
     assert_eq!(result.status, ActivityStatus::Promoted);
     assert!(result.promoted_fact_id.is_some());
 
     // Verify the fact was actually created.
-    let fact = engine.get_fact(result.promoted_fact_id.unwrap()).unwrap();
+    let fact = engine
+        .get_fact(result.promoted_fact_id.unwrap())
+        .await
+        .unwrap();
     assert!(fact.content.contains("git_commit"));
     assert!(fact.content.contains("committed abc123"));
 }
 
-#[test]
-fn record_activity_promote_failure_falls_back_to_recorded() {
+#[tokio::test]
+async fn record_activity_promote_failure_falls_back_to_recorded() {
     // When a promote-matched activity's embedding fails, promotion must degrade
     // gracefully: the activity is still recorded, no fact id is surfaced, and —
     // critically — no orphan fact is left in the store (the failed `add_fact`
@@ -135,7 +144,13 @@ fn record_activity_promote_failure_falls_back_to_recorded() {
     };
 
     let result = engine
-        .record_activity(&req, Some(&embedder), &config)
+        .record_activity(
+            &req,
+            Some(std::sync::Arc::new(embedder)
+                as std::sync::Arc<dyn memory_engine::EmbeddingProvider>),
+            &config,
+        )
+        .await
         .unwrap();
 
     // Activity itself was persisted (the failure is only in the promotion step).
@@ -146,20 +161,20 @@ fn record_activity_promote_failure_falls_back_to_recorded() {
     assert!(result.promoted_fact_id.is_none());
 
     // No orphan fact: the failed promotion left zero facts in the store.
-    let stats = engine.statistics().unwrap();
+    let stats = engine.statistics().await.unwrap();
     assert_eq!(
         stats.facts.total, 0,
         "promotion failure must not orphan a fact"
     );
 }
 
-#[test]
-fn checkpoint_and_load_context_cycle() {
+#[tokio::test]
+async fn checkpoint_and_load_context_cycle() {
     let engine = engine();
     let config = ActivityFilterConfig::default();
 
     // Create a scope first.
-    engine.ensure_scope_path("project:test").unwrap();
+    engine.ensure_scope_path("project:test").await.unwrap();
 
     // Record some activities.
     for i in 0..5 {
@@ -172,16 +187,17 @@ fn checkpoint_and_load_context_cycle() {
             scope_path: Some("project:test".into()),
             outcome_class: None,
         };
-        engine.record_activity(&req, None, &config).unwrap();
+        engine.record_activity(&req, None, &config).await.unwrap();
     }
 
     // Checkpoint.
     engine
         .checkpoint_session("sess-1", Some("project:test"), Some("test session"), None)
+        .await
         .unwrap();
 
     // Load context.
-    let ctx = engine.load_context("project:test", 10, 5).unwrap();
+    let ctx = engine.load_context("project:test", 10, 5).await.unwrap();
     assert_eq!(ctx.scope_path, "project:test");
     assert_eq!(ctx.recent_activities.len(), 5);
     assert!(ctx.last_checkpoint.is_some());
@@ -190,10 +206,13 @@ fn checkpoint_and_load_context_cycle() {
     assert_eq!(cp.summary, Some("test session".into()));
 }
 
-#[test]
-fn load_context_nonexistent_scope_errors() {
+#[tokio::test]
+async fn load_context_nonexistent_scope_errors() {
     let engine = engine();
-    let err = engine.load_context("nonexistent:scope", 10, 5).unwrap_err();
+    let err = engine
+        .load_context("nonexistent:scope", 10, 5)
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         memory_engine::error::MemoryError::NotFound(_)

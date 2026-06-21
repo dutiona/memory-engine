@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 
 use crate::error::Result;
-use crate::store::facts::FactStore;
 use crate::types::Fact;
 
 use super::{MemoryEngine, apply_surfaced_stamps};
@@ -19,10 +18,9 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` if scope resolution, the query, or
     /// surfaced-at stamping fails.
-    pub fn list_due(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>> {
+    pub async fn list_due(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>> {
         let scope_ids = self.resolve_scope_ids(scope)?;
-        let mut facts =
-            self.with_read(|conn| FactStore::new(conn, self.embed_dim).list_due(now, &scope_ids))?;
+        let mut facts = self.storage.list_due_facts(now, &scope_ids).await?;
 
         // Stamp surfaced_at for newly-surfaced facts
         let unsurfaced_ids: Vec<i64> = facts
@@ -32,7 +30,7 @@ impl MemoryEngine {
             .collect();
 
         if !unsurfaced_ids.is_empty() {
-            let stamped = self.stamp_surfaced_facts(&unsurfaced_ids, now)?;
+            let stamped = self.stamp_surfaced_facts(&unsurfaced_ids, now).await?;
             apply_surfaced_stamps(facts.iter_mut(), &stamped);
         }
 
@@ -45,10 +43,8 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` if scope resolution or the query fails.
-    pub fn next_due_time(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>> {
+    pub async fn next_due_time(&self, scope: Option<&str>) -> Result<Option<DateTime<Utc>>> {
         let scope_ids = self.resolve_scope_ids(scope)?;
-        self.with_read(|conn| {
-            FactStore::new(conn, self.embed_dim).next_due_time(Utc::now(), &scope_ids)
-        })
+        self.storage.next_due_time(Utc::now(), &scope_ids).await
     }
 }

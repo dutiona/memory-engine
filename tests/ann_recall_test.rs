@@ -40,8 +40,8 @@ impl EmbeddingProvider for Blake3Embedder {
     }
 }
 
-#[test]
-fn hnsw_recall_at_k_exceeds_threshold() {
+#[tokio::test]
+async fn hnsw_recall_at_k_exceeds_threshold() {
     // Build brute-force engine
     let dir_bf = tempfile::tempdir().unwrap();
     let engine_bf = MemoryEngine::builder(DIM)
@@ -57,7 +57,7 @@ fn hnsw_recall_at_k_exceeds_threshold() {
         .build()
         .unwrap();
 
-    let embedder = Blake3Embedder;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(Blake3Embedder);
     for i in 0..N {
         let content = format!("fact number {i} about topic {}", i % 50);
         engine_bf
@@ -69,9 +69,10 @@ fn hnsw_recall_at_k_exceeds_threshold() {
                     scope: None,
                     opts: None,
                 },
-                &embedder,
+                embedder.clone(),
                 None,
             )
+            .await
             .unwrap();
         engine_ann
             .add_fact(
@@ -82,9 +83,10 @@ fn hnsw_recall_at_k_exceeds_threshold() {
                     scope: None,
                     opts: None,
                 },
-                &embedder,
+                embedder.clone(),
                 None,
             )
+            .await
             .unwrap();
     }
 
@@ -111,8 +113,8 @@ fn hnsw_recall_at_k_exceeds_threshold() {
             scope: None,
         };
 
-        let bf_results = engine_bf.query(&query).unwrap();
-        let ann_results = engine_ann.query(&query).unwrap();
+        let bf_results = engine_bf.query(&query).await.unwrap();
+        let ann_results = engine_ann.query(&query).await.unwrap();
 
         // Compare by content strings, not row IDs (separate DBs)
         let bf_contents: HashSet<&str> =

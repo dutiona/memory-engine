@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use std::sync::Arc;
 
 use crate::error::Result;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
@@ -10,15 +10,23 @@ impl MemoryEngine {
 
     /// Resolve (or create) the scope for a bootstrap config, returning its ID.
     ///
-    /// When `config.scope` is `Some(path)`, ensures the path exists in the DB
-    /// and inserts the node into the in-memory scope tree cache.
-    /// When `None`, returns 1 (root scope).
+    /// When `scope` is `Some(path)`, ensures the path exists in the DB (port write)
+    /// and mirrors the chain into the in-memory scope tree cache. When `None`,
+    /// returns 1 (root scope). The scope is resolved up front — autocommit-separate
+    /// from the import savepoints below the seam, matching the prior behavior.
     ///
     /// # Errors
     ///
-    /// Returns errors from `ScopeStore::ensure_path` or `ScopeStore::get`.
-    fn ensure_bootstrap_scope(&self, conn: &Connection, scope: Option<&str>) -> Result<i64> {
-        scope.map_or_else(|| Ok(1), |path| self.ensure_scope_with_conn(conn, path))
+    /// Returns errors from `ensure_scope_path` or the scope cache walk.
+    async fn resolve_bootstrap_scope(&self, scope: Option<&str>) -> Result<i64> {
+        match scope {
+            Some(path) => {
+                let id = self.storage.ensure_scope_path(path).await?;
+                self.cache_scope_chain(id).await?;
+                Ok(id)
+            }
+            None => Ok(1), // root scope
+        }
     }
 
     // --- Public API: Bootstrap ---
@@ -27,45 +35,38 @@ impl MemoryEngine {
     ///
     /// Parses the session log, extracts noteworthy episodes via keyword
     /// pre-filter, classifies session outcome, and ingests extracted facts.
-    /// The entire session import is wrapped in a `SQLite` savepoint for
-    /// crash safety (all-or-nothing per session).
+    /// The entire session import runs in one `SQLite` savepoint below the seam
+    /// (all-or-nothing per session); the embedder/extractor are `Arc<dyn _>` so the
+    /// (possibly blocking) consumer calls run on the backend's blocking thread.
     ///
-    /// For LLM-powered extraction, provide a custom [`SessionExtractor`].
-    /// The default [`KeywordExtractor`] requires no LLM.
+    /// For LLM-powered extraction, provide a custom [`SessionExtractor`](crate::bootstrap::SessionExtractor).
+    /// The default [`KeywordExtractor`](crate::bootstrap::KeywordExtractor) requires no LLM.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns errors from embedding, DB insertion, or scope resolution.
-    // `conn` (write lock) legitimately spans scope resolution and the inner
-    // bootstrap call (the function's return expression), so it cannot be
-    // tightened without splitting the atomic import across two lock
-    // acquisitions. clippy's nursery suggestion would not compile here.
-    #[allow(clippy::significant_drop_tightening)]
-    pub fn bootstrap_session(
+    pub async fn bootstrap_session(
         &self,
-        reader: impl std::io::BufRead,
-        embedder: &dyn EmbeddingProvider,
-        extractor: &dyn crate::bootstrap::SessionExtractor,
+        reader: impl std::io::BufRead + Send + 'static,
+        embedder: Arc<dyn EmbeddingProvider>,
+        extractor: Arc<dyn crate::bootstrap::SessionExtractor>,
         config: &crate::bootstrap::BootstrapConfig,
-        classifier: Option<&dyn PersistenceClassifier>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
-        let conn = self.write_conn()?;
-        let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
-        // The embedding identity is stamped (#613) inside the session savepoint, gated
-        // on a fact actually being written (#643) — see `bootstrap_within_savepoint`.
-        // A no-op session (zero extracted facts) therefore leaves the store unstamped.
-        let ctx = crate::bootstrap::BootstrapContext {
-            conn: &conn,
-            embed_dim: self.embed_dim,
-            upcaster_registry: &self.upcaster_registry,
-            embedder,
-            extractor,
-            config,
-            classifier,
-            scope_id,
-        };
-        crate::bootstrap::bootstrap_session_inner(&ctx, reader)
+        let scope_id = self
+            .resolve_bootstrap_scope(config.scope.as_deref())
+            .await?;
+        self.storage
+            .bootstrap_session_atomic(
+                Box::new(reader),
+                embedder,
+                extractor,
+                config.clone(),
+                classifier,
+                scope_id,
+            )
+            .await
     }
 
     /// Bootstrap all JSONL session logs in a directory.
@@ -77,36 +78,27 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Io` for directory traversal failures.
-    // `conn` (write lock) legitimately spans scope resolution and the inner
-    // bootstrap call (the function's return expression), so it cannot be
-    // tightened without splitting the atomic import across two lock
-    // acquisitions. clippy's nursery suggestion would not compile here.
-    #[allow(clippy::significant_drop_tightening)]
-    pub fn bootstrap_directory(
+    pub async fn bootstrap_directory(
         &self,
         dir: &std::path::Path,
-        embedder: &dyn EmbeddingProvider,
-        extractor: &dyn crate::bootstrap::SessionExtractor,
+        embedder: Arc<dyn EmbeddingProvider>,
+        extractor: Arc<dyn crate::bootstrap::SessionExtractor>,
         config: &crate::bootstrap::BootstrapConfig,
-        classifier: Option<&dyn PersistenceClassifier>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
-        let conn = self.write_conn()?;
-        let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
-        // Each session is stamped (#613) inside its own savepoint, gated on a fact
-        // being written (#643) — see `bootstrap_within_savepoint`. This preserves
-        // per-session independence (each commits its identity atomically with its
-        // facts) and leaves an empty/no-op directory unstamped.
-        let ctx = crate::bootstrap::BootstrapContext {
-            conn: &conn,
-            embed_dim: self.embed_dim,
-            upcaster_registry: &self.upcaster_registry,
-            embedder,
-            extractor,
-            config,
-            classifier,
-            scope_id,
-        };
-        crate::bootstrap::bootstrap_directory_inner(&ctx, dir)
+        let scope_id = self
+            .resolve_bootstrap_scope(config.scope.as_deref())
+            .await?;
+        self.storage
+            .bootstrap_directory_atomic(
+                dir.to_path_buf(),
+                embedder,
+                extractor,
+                config.clone(),
+                classifier,
+                scope_id,
+            )
+            .await
     }
 
     /// Import native `.md` memory files (recursive) from a directory.
@@ -125,38 +117,32 @@ impl MemoryEngine {
     /// This is an import/backfill tool, not an edit-sync tool; change the body or
     /// expire the fact to re-derive metadata.
     ///
+    /// The embedding identity is stamped meta-first (#643) below the seam, because
+    /// this path is autocommit-per-file (no wrapping savepoint).
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Io` for directory traversal failures, or an
     /// embedding/DB error (which aborts; a re-run resumes idempotently).
-    #[allow(clippy::significant_drop_tightening)]
-    pub fn bootstrap_memory_directory(
+    pub async fn bootstrap_memory_directory(
         &self,
         dir: &std::path::Path,
-        embedder: &dyn EmbeddingProvider,
+        embedder: Arc<dyn EmbeddingProvider>,
         config: &crate::bootstrap::BootstrapConfig,
-        classifier: Option<&dyn PersistenceClassifier>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
-        let conn = self.write_conn()?;
-        let scope_id = self.ensure_bootstrap_scope(&conn, config.scope.as_deref())?;
-        // Stamp the embedding identity on first write (#613) — and, unlike the
-        // savepoint paths above, this one MUST stay meta-first (#643). It is
-        // autocommit-per-file (no wrapping savepoint), so each file commits its
-        // vector independently; deferring the stamp until after a vector is written
-        // would reopen the orphan-vector crash window (a vector committed before its
-        // identity). Recording before the first file keeps a crash benign: identity
-        // declared, possibly no facts — the same harmless no-op-stamp #643 removes
-        // from the deferrable paths, retained here because it is the crash-safe choice.
-        self.record_embedding_identity(&conn, embedder)?;
-        crate::bootstrap::memory_dir::bootstrap_memory_directory_inner(
-            &conn,
-            self.embed_dim,
-            dir,
-            embedder,
-            config,
-            classifier,
-            scope_id,
-        )
+        let scope_id = self
+            .resolve_bootstrap_scope(config.scope.as_deref())
+            .await?;
+        self.storage
+            .bootstrap_memory_directory_atomic(
+                dir.to_path_buf(),
+                embedder,
+                config.clone(),
+                classifier,
+                scope_id,
+            )
+            .await
     }
 }

@@ -66,6 +66,79 @@ impl EventLog for SqliteBackend {
         self.block_read(move |c| EventStore::new(c, &registry).list_upcasted(&filter))
             .await
     }
+
+    // READ — outcome-signal aggregation push-down (verbatim SQL from the pre-cutover
+    // `engine/outcome.rs::get_outcome_counts`).
+    async fn count_outcome_signals(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts> {
+        self.block_read(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT json_extract(payload, '$.outcome') AS outcome, COUNT(*) AS cnt
+                 FROM events
+                 WHERE event_type = 'OutcomeSignal'
+                   AND json_extract(payload, '$.fact_id') = ?1
+                 GROUP BY outcome",
+            )?;
+            let mut counts = crate::types::OutcomeCounts::default();
+            let rows = stmt.query_map(rusqlite::params![fact_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+            })?;
+            for row in rows {
+                let (outcome_str, cnt) = row?;
+                match outcome_str.as_str() {
+                    "Positive" => counts.positive = cnt,
+                    "Negative" => counts.negative = cnt,
+                    "Neutral" => counts.neutral = cnt,
+                    _ => {} // skip unknown variants (forward-compat)
+                }
+            }
+            Ok(counts)
+        })
+        .await
+    }
+
+    // READ — batch outcome-signal aggregation push-down (verbatim SQL from the
+    // pre-cutover `engine/outcome.rs::get_outcome_counts_batch`).
+    async fn count_outcome_signals_batch(
+        &self,
+        fact_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::types::OutcomeCounts>> {
+        if fact_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let ids_json = serde_json::to_string(fact_ids)?;
+        self.block_read(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT json_extract(payload, '$.fact_id') AS fid,
+                        json_extract(payload, '$.outcome') AS outcome,
+                        COUNT(*) AS cnt
+                 FROM events
+                 WHERE event_type = 'OutcomeSignal'
+                   AND json_extract(payload, '$.fact_id') IN (SELECT value FROM json_each(?1))
+                 GROUP BY fid, outcome",
+            )?;
+            let mut by_fact: std::collections::HashMap<i64, crate::types::OutcomeCounts> =
+                std::collections::HashMap::new();
+            let rows = stmt.query_map(rusqlite::params![ids_json], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (fid, outcome_str, cnt) = row?;
+                let entry = by_fact.entry(fid).or_default();
+                match outcome_str.as_str() {
+                    "Positive" => entry.positive = cnt,
+                    "Negative" => entry.negative = cnt,
+                    "Neutral" => entry.neutral = cnt,
+                    _ => {} // skip unknown variants (forward-compat)
+                }
+            }
+            Ok(by_fact)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]

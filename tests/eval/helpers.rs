@@ -107,8 +107,8 @@ pub struct CorpusBuilder;
 impl CorpusBuilder {
     /// Insert all facts from `corpus` into `engine`. Returns a vec where
     /// `result[i]` is the fact ID for `corpus.facts[i]`.
-    pub fn populate(engine: &MemoryEngine, corpus: &CorpusDefinition) -> Result<Vec<i64>> {
-        let embedder = TestEmbedder;
+    pub async fn populate(engine: &MemoryEngine, corpus: &CorpusDefinition) -> Result<Vec<i64>> {
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
         let mut ids = Vec::with_capacity(corpus.facts.len());
         for fact in &corpus.facts {
             let opts = fact.opts.as_ref().map(|o| AddFactOptions {
@@ -120,17 +120,19 @@ impl CorpusBuilder {
                 last_accessed: o.last_accessed,
                 ..Default::default()
             });
-            let id = engine.add_fact(
-                &AddFactRequest {
-                    content: fact.content.to_string(),
-                    fact_type: fact.fact_type,
-                    source_event_id: None,
-                    scope: fact.scope.map(String::from),
-                    opts,
-                },
-                &embedder,
-                None,
-            )?;
+            let id = engine
+                .add_fact(
+                    &AddFactRequest {
+                        content: fact.content.to_string(),
+                        fact_type: fact.fact_type,
+                        source_event_id: None,
+                        scope: fact.scope.map(String::from),
+                        opts,
+                    },
+                    embedder.clone(),
+                    None,
+                )
+                .await?;
             ids.push(id);
         }
         Ok(ids)
@@ -149,7 +151,7 @@ pub fn eval_engine() -> MemoryEngine {
 }
 
 /// Shorthand to add a single fact with minimal options.
-pub fn add_fact(engine: &MemoryEngine, content: &str, fact_type: FactType) -> i64 {
+pub async fn add_fact(engine: &MemoryEngine, content: &str, fact_type: FactType) -> i64 {
     engine
         .add_fact(
             &AddFactRequest {
@@ -159,14 +161,15 @@ pub fn add_fact(engine: &MemoryEngine, content: &str, fact_type: FactType) -> i6
                 scope: None,
                 opts: None,
             },
-            &TestEmbedder,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .expect("add_fact failed")
 }
 
 /// Add a fact with scope.
-pub fn add_scoped_fact(
+pub async fn add_scoped_fact(
     engine: &MemoryEngine,
     content: &str,
     fact_type: FactType,
@@ -181,14 +184,15 @@ pub fn add_scoped_fact(
                 scope: Some(scope.to_string()),
                 opts: None,
             },
-            &TestEmbedder,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .expect("add_fact failed")
 }
 
 /// Add a fact with full options.
-pub fn add_fact_with_opts(
+pub async fn add_fact_with_opts(
     engine: &MemoryEngine,
     content: &str,
     fact_type: FactType,
@@ -204,9 +208,10 @@ pub fn add_fact_with_opts(
                 scope: scope.map(String::from),
                 opts: Some(opts),
             },
-            &TestEmbedder,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .expect("add_fact failed")
 }
 

@@ -10,7 +10,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 /// Create a test database with sample data and return (tempdir, `db_path`).
-fn create_test_db() -> (TempDir, PathBuf) {
+async fn create_test_db() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -28,6 +28,8 @@ fn create_test_db() -> (TempDir, PathBuf) {
             memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
         }
     }
+    let embedder: std::sync::Arc<dyn memory_engine::EmbeddingProvider> =
+        std::sync::Arc::new(FakeEmbed);
 
     engine
         .add_fact(
@@ -38,9 +40,10 @@ fn create_test_db() -> (TempDir, PathBuf) {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -51,9 +54,10 @@ fn create_test_db() -> (TempDir, PathBuf) {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -64,9 +68,10 @@ fn create_test_db() -> (TempDir, PathBuf) {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
 
     drop(engine);
@@ -79,9 +84,9 @@ fn cli() -> Command {
 
 // --- stats ---
 
-#[test]
-fn stats_table_output() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn stats_table_output() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "stats"])
         .assert()
@@ -90,9 +95,9 @@ fn stats_table_output() {
         .stdout(predicate::str::contains("3"));
 }
 
-#[test]
-fn stats_json_output() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn stats_json_output() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -106,9 +111,9 @@ fn stats_json_output() {
         .stdout(predicate::str::contains("\"active\""));
 }
 
-#[test]
-fn stats_plain_output() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn stats_plain_output() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -122,8 +127,8 @@ fn stats_plain_output() {
         .stdout(predicate::str::contains("facts.active=3"));
 }
 
-#[test]
-fn stats_plain_includes_max_depth_and_page_count() {
+#[tokio::test]
+async fn stats_plain_includes_max_depth_and_page_count() {
     // Seed a fact under a nested scope so max_depth > 0 is observable.
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
@@ -152,13 +157,14 @@ fn stats_plain_includes_max_depth_and_page_count() {
                 scope: Some("project/sub".into()),
                 opts: None,
             },
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn memory_engine::EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
 
     // Ground the expected max_depth via the JSON projection.
-    let expected_max_depth = engine.statistics().unwrap().scopes.max_depth;
+    let expected_max_depth = engine.statistics().await.unwrap().scopes.max_depth;
     assert!(
         expected_max_depth > 0,
         "nested scope should produce max_depth > 0"
@@ -184,9 +190,9 @@ fn stats_plain_includes_max_depth_and_page_count() {
 
 // --- inspect ---
 
-#[test]
-fn inspect_existing_fact() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn inspect_existing_fact() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "inspect", "1"])
         .assert()
@@ -194,9 +200,9 @@ fn inspect_existing_fact() {
         .stdout(predicate::str::contains("The sky is blue"));
 }
 
-#[test]
-fn inspect_nonexistent_fact() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn inspect_nonexistent_fact() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "inspect", "999"])
         .assert()
@@ -206,9 +212,9 @@ fn inspect_nonexistent_fact() {
 
 // --- explain ---
 
-#[test]
-fn explain_fact() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn explain_fact() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "explain", "1"])
         .assert()
@@ -219,9 +225,9 @@ fn explain_fact() {
 
 // --- query ---
 
-#[test]
-fn query_fts() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_fts() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "query", "blue sky"])
         .assert()
@@ -229,9 +235,9 @@ fn query_fts() {
         .stdout(predicate::str::contains("sky"));
 }
 
-#[test]
-fn query_no_results() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_no_results() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "query", "xyznonexistent"])
         .assert()
@@ -241,9 +247,9 @@ fn query_no_results() {
 
 // --- query: filter flags (#430) ---
 
-#[test]
-fn query_filter_fact_type() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_filter_fact_type() {
+    let (_dir, db_path) = create_test_db().await;
     let db = db_path.to_str().unwrap();
     // "Rust is fast" is Procedural: it passes --fact-type procedural …
     cli()
@@ -271,9 +277,9 @@ fn query_filter_fact_type() {
         .stdout(predicate::str::contains("Rust"));
 }
 
-#[test]
-fn query_filter_fact_type_unknown_is_rejected() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_filter_fact_type_unknown_is_rejected() {
+    let (_dir, db_path) = create_test_db().await;
     // After #270 the fact type is a clap ValueEnum, so an unknown value is
     // rejected at parse time rather than via an anyhow bail in the command body.
     cli()
@@ -292,9 +298,9 @@ fn query_filter_fact_type_unknown_is_rejected() {
         );
 }
 
-#[test]
-fn query_filter_pinned_only_excludes_unpinned() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_filter_pinned_only_excludes_unpinned() {
+    let (_dir, db_path) = create_test_db().await;
     let db = db_path.to_str().unwrap();
     // Baseline: the query returns the fact when the filter is absent …
     cli()
@@ -310,9 +316,9 @@ fn query_filter_pinned_only_excludes_unpinned() {
         .stdout(predicate::str::contains("No results"));
 }
 
-#[test]
-fn query_filter_min_importance_excludes_below_threshold() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_filter_min_importance_excludes_below_threshold() {
+    let (_dir, db_path) = create_test_db().await;
     let db = db_path.to_str().unwrap();
     cli()
         .args(["--db", db, "query", "blue sky"])
@@ -327,9 +333,9 @@ fn query_filter_min_importance_excludes_below_threshold() {
         .stdout(predicate::str::contains("No results"));
 }
 
-#[test]
-fn query_filter_scope_subtree_excludes_other_scopes() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_filter_scope_subtree_excludes_other_scopes() {
+    let (_dir, db_path) = create_test_db().await;
     let db = db_path.to_str().unwrap();
     cli()
         .args(["--db", db, "query", "blue sky"])
@@ -344,9 +350,9 @@ fn query_filter_scope_subtree_excludes_other_scopes() {
         .stdout(predicate::str::contains("No results"));
 }
 
-#[test]
-fn query_filter_combined_fact_type_and_min_importance() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_filter_combined_fact_type_and_min_importance() {
+    let (_dir, db_path) = create_test_db().await;
     let db = db_path.to_str().unwrap();
     // --fact-type procedural alone matches "Rust is fast" …
     cli()
@@ -376,7 +382,7 @@ fn query_filter_combined_fact_type_and_min_importance() {
 
 /// Create a test database with facts that have explicit `t_valid` / `t_invalid`
 /// temporal bounds, for testing --valid-at filtering.
-fn create_temporal_db() -> (TempDir, PathBuf) {
+async fn create_temporal_db() -> (TempDir, PathBuf) {
     use chrono::{TimeZone, Utc};
 
     let dir = TempDir::new().unwrap();
@@ -396,6 +402,8 @@ fn create_temporal_db() -> (TempDir, PathBuf) {
             memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
         }
     }
+    let embedder: std::sync::Arc<dyn memory_engine::EmbeddingProvider> =
+        std::sync::Arc::new(FakeEmbed);
 
     // Fact 1: valid from March 1 to March 31
     engine
@@ -411,9 +419,10 @@ fn create_temporal_db() -> (TempDir, PathBuf) {
                     ..Default::default()
                 }),
             },
-            &FakeEmbed,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
 
     // Fact 2: valid from April 1, no end (still valid)
@@ -429,9 +438,10 @@ fn create_temporal_db() -> (TempDir, PathBuf) {
                     ..Default::default()
                 }),
             },
-            &FakeEmbed,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
 
     // Fact 3: no temporal bounds (always valid)
@@ -444,18 +454,19 @@ fn create_temporal_db() -> (TempDir, PathBuf) {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
 
     drop(engine);
     (dir, db_path)
 }
 
-#[test]
-fn query_valid_at_filters_to_march() {
-    let (_dir, db_path) = create_temporal_db();
+#[tokio::test]
+async fn query_valid_at_filters_to_march() {
+    let (_dir, db_path) = create_temporal_db().await;
     // March 15 should match: March event (in range) + timeless (no bounds)
     // but NOT April event (t_valid = April 1 > March 15)
     cli()
@@ -476,9 +487,9 @@ fn query_valid_at_filters_to_march() {
         .stdout(predicate::str::contains("daylight").not());
 }
 
-#[test]
-fn query_valid_at_filters_to_april() {
-    let (_dir, db_path) = create_temporal_db();
+#[tokio::test]
+async fn query_valid_at_filters_to_april() {
+    let (_dir, db_path) = create_temporal_db().await;
     // April 5 should match: April event (in range) + timeless (no bounds)
     // but NOT March event (t_invalid = March 31 <= April 5)
     cli()
@@ -499,9 +510,9 @@ fn query_valid_at_filters_to_april() {
         .stdout(predicate::str::contains("spring equinox").not());
 }
 
-#[test]
-fn query_valid_at_invalid_format_fails() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn query_valid_at_invalid_format_fails() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -516,9 +527,9 @@ fn query_valid_at_invalid_format_fails() {
         .stderr(predicate::str::contains("invalid RFC 3339"));
 }
 
-#[test]
-fn query_table_output_shows_temporal_columns() {
-    let (_dir, db_path) = create_temporal_db();
+#[tokio::test]
+async fn query_table_output_shows_temporal_columns() {
+    let (_dir, db_path) = create_temporal_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "query", "event"])
         .assert()
@@ -533,8 +544,8 @@ fn query_table_output_shows_temporal_columns() {
 /// version to simulate a stale database. The on-disk schema is already current, but
 /// the migration is idempotent (`CREATE INDEX IF NOT EXISTS`), so `migrate` re-applies
 /// it cleanly — exercising the version reading, pending computation, and exit codes.
-fn create_stale_db() -> (TempDir, PathBuf) {
-    let (dir, db_path) = create_test_db();
+async fn create_stale_db() -> (TempDir, PathBuf) {
+    let (dir, db_path) = create_test_db().await;
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let prev = memory_engine::CURRENT_SCHEMA_VERSION.saturating_sub(1);
     conn.execute(
@@ -545,9 +556,9 @@ fn create_stale_db() -> (TempDir, PathBuf) {
     (dir, db_path)
 }
 
-#[test]
-fn schema_up_to_date_exits_zero() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn schema_up_to_date_exits_zero() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "schema"])
         .assert()
@@ -555,9 +566,9 @@ fn schema_up_to_date_exits_zero() {
         .stdout(predicate::str::contains("up to date"));
 }
 
-#[test]
-fn migrate_check_up_to_date_exits_zero() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn migrate_check_up_to_date_exits_zero() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "migrate", "--check"])
         .assert()
@@ -565,9 +576,9 @@ fn migrate_check_up_to_date_exits_zero() {
         .stdout(predicate::str::contains("no pending"));
 }
 
-#[test]
-fn schema_mismatch_exits_nonzero() {
-    let (_dir, db_path) = create_stale_db();
+#[tokio::test]
+async fn schema_mismatch_exits_nonzero() {
+    let (_dir, db_path) = create_stale_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "schema"])
         .assert()
@@ -575,9 +586,9 @@ fn schema_mismatch_exits_nonzero() {
         .stdout(predicate::str::contains("MISMATCH"));
 }
 
-#[test]
-fn migrate_check_pending_exits_nonzero_without_mutating() {
-    let (_dir, db_path) = create_stale_db();
+#[tokio::test]
+async fn migrate_check_pending_exits_nonzero_without_mutating() {
+    let (_dir, db_path) = create_stale_db().await;
     let current = memory_engine::CURRENT_SCHEMA_VERSION.to_string();
     cli()
         .args(["--db", db_path.to_str().unwrap(), "migrate", "--check"])
@@ -592,9 +603,9 @@ fn migrate_check_pending_exits_nonzero_without_mutating() {
         .failure();
 }
 
-#[test]
-fn migrate_applies_pending_then_schema_matches() {
-    let (_dir, db_path) = create_stale_db();
+#[tokio::test]
+async fn migrate_applies_pending_then_schema_matches() {
+    let (_dir, db_path) = create_stale_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "migrate"])
         .assert()
@@ -607,9 +618,9 @@ fn migrate_applies_pending_then_schema_matches() {
         .stdout(predicate::str::contains("up to date"));
 }
 
-#[test]
-fn schema_json_output() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn schema_json_output() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -624,9 +635,9 @@ fn schema_json_output() {
         .stdout(predicate::str::contains("\"current_schema_version\""));
 }
 
-#[test]
-fn migrate_check_newer_db_exits_nonzero() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn migrate_check_newer_db_exits_nonzero() {
+    let (_dir, db_path) = create_test_db().await;
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let future = (memory_engine::CURRENT_SCHEMA_VERSION + 1).to_string();
     conn.execute(
@@ -652,9 +663,9 @@ fn migrate_check_newer_db_exits_nonzero() {
 
 // --- export + import roundtrip ---
 
-#[test]
-fn export_import_roundtrip() {
-    let (dir, db_path) = create_test_db();
+#[tokio::test]
+async fn export_import_roundtrip() {
+    let (dir, db_path) = create_test_db().await;
 
     // Export
     let export_path = dir.path().join("export.json");
@@ -698,9 +709,9 @@ fn export_import_roundtrip() {
 
 // --- dump ---
 
-#[test]
-fn dump_facts() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn dump_facts() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "dump", "facts"])
         .assert()
@@ -708,9 +719,9 @@ fn dump_facts() {
         .stdout(predicate::str::contains("Active Facts"));
 }
 
-#[test]
-fn dump_events() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn dump_events() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args(["--db", db_path.to_str().unwrap(), "dump", "events"])
         .assert()
@@ -738,9 +749,9 @@ fn nonexistent_db() {
         .stderr(predicate::str::contains("error"));
 }
 
-#[test]
-fn import_rejects_existing_db() {
-    let (dir, db_path) = create_test_db();
+#[tokio::test]
+async fn import_rejects_existing_db() {
+    let (dir, db_path) = create_test_db().await;
     let fake_snapshot = dir.path().join("fake.json");
     std::fs::write(&fake_snapshot, "{}").unwrap();
 
@@ -758,9 +769,9 @@ fn import_rejects_existing_db() {
 
 // --- record-outcome + outcome-counts (#304) ---
 
-#[test]
-fn record_outcome_positive_then_outcome_counts_shows_plus1() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn record_outcome_positive_then_outcome_counts_shows_plus1() {
+    let (_dir, db_path) = create_test_db().await;
     let db = db_path.to_str().unwrap();
     // Record a positive outcome for fact 1.
     cli()
@@ -791,9 +802,9 @@ fn record_outcome_positive_then_outcome_counts_shows_plus1() {
         .stdout(predicate::str::contains("+1"));
 }
 
-#[test]
-fn record_outcome_nonexistent_fact_fails() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn record_outcome_nonexistent_fact_fails() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -811,9 +822,9 @@ fn record_outcome_nonexistent_fact_fails() {
         .stderr(predicate::str::contains("not found"));
 }
 
-#[test]
-fn outcome_counts_json_reflects_recorded_positive() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn outcome_counts_json_reflects_recorded_positive() {
+    let (_dir, db_path) = create_test_db().await;
     let db = db_path.to_str().unwrap();
     // Record a *positive* outcome so the asserted value ties to the recorded
     // signal (the `positive` key is emitted unconditionally; asserting the value
@@ -847,9 +858,9 @@ fn outcome_counts_json_reflects_recorded_positive() {
 
 // --- dump all + dump JSON (#428) ---
 
-#[test]
-fn dump_all_json_contains_facts_and_events_keys() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn dump_all_json_contains_facts_and_events_keys() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -865,9 +876,9 @@ fn dump_all_json_contains_facts_and_events_keys() {
         .stdout(predicate::str::contains("\"events\""));
 }
 
-#[test]
-fn dump_facts_json_contains_fact_content() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn dump_facts_json_contains_fact_content() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -884,9 +895,9 @@ fn dump_facts_json_contains_fact_content() {
 
 // --- inspect JSON and plain formats (#429) ---
 
-#[test]
-fn inspect_json_format_contains_id_field() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn inspect_json_format_contains_id_field() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -901,9 +912,9 @@ fn inspect_json_format_contains_id_field() {
         .stdout(predicate::str::contains("\"id\""));
 }
 
-#[test]
-fn inspect_plain_format_emits_content() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn inspect_plain_format_emits_content() {
+    let (_dir, db_path) = create_test_db().await;
     // Plain format for inspect prints the fact content string.
     cli()
         .args([
@@ -921,9 +932,9 @@ fn inspect_plain_format_emits_content() {
 
 // --- explain JSON and plain formats (#429) ---
 
-#[test]
-fn explain_json_format_contains_fact_id_field() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn explain_json_format_contains_fact_id_field() {
+    let (_dir, db_path) = create_test_db().await;
     cli()
         .args([
             "--db",
@@ -938,9 +949,9 @@ fn explain_json_format_contains_fact_id_field() {
         .stdout(predicate::str::contains("\"fact_id\""));
 }
 
-#[test]
-fn explain_plain_format_emits_state_and_scope() {
-    let (_dir, db_path) = create_test_db();
+#[tokio::test]
+async fn explain_plain_format_emits_state_and_scope() {
+    let (_dir, db_path) = create_test_db().await;
     // Plain format for explain prints "state: ..." and "scope: ...".
     cli()
         .args([

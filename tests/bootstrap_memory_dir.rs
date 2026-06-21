@@ -103,8 +103,8 @@ fn build_corpus(root: &Path) {
     write_file(root, "empty.md", "---\nname: stub\n---\n");
 }
 
-#[test]
-fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
+#[tokio::test]
+async fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     build_corpus(root);
@@ -116,7 +116,13 @@ fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
 
     // --- First pass ---
     let report = engine
-        .bootstrap_memory_directory(root, &TestEmbedder, &config, None)
+        .bootstrap_memory_directory(
+            root,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     assert_eq!(
@@ -140,7 +146,7 @@ fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
     );
 
     // --- Redaction: the secret is nowhere in the store ---
-    let stored = engine.list_active_facts(None).unwrap();
+    let stored = engine.list_active_facts(None).await.unwrap();
     assert_eq!(stored.len(), 6);
     for f in &stored {
         assert!(
@@ -187,7 +193,13 @@ fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
 
     // --- Idempotency: re-run creates nothing, reinforces everything ---
     let report2 = engine
-        .bootstrap_memory_directory(root, &TestEmbedder, &config, None)
+        .bootstrap_memory_directory(
+            root,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
     assert_eq!(report2.facts_created, 0, "re-run must create 0 facts");
     assert_eq!(report2.facts_reinforced, 6, "re-run reinforces all 6");
@@ -197,7 +209,7 @@ fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
         "secrets_redacted is create-gated: a reinforced re-run re-scrubs but re-counts nothing"
     );
     assert_eq!(
-        engine.list_active_facts(None).unwrap().len(),
+        engine.list_active_facts(None).await.unwrap().len(),
         6,
         "store still holds exactly 6 facts after re-run"
     );
@@ -210,8 +222,8 @@ fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
     );
 }
 
-#[test]
-fn filename_encoded_date_backdates_when_no_frontmatter_date() {
+#[tokio::test]
+async fn filename_encoded_date_backdates_when_no_frontmatter_date() {
     // The real native corpus encodes the authored date in the filename and
     // carries no frontmatter date. Without filename parsing this would fall to
     // mtime (≈ current import time); assert it backdates to the filename's year.
@@ -226,10 +238,16 @@ fn filename_encoded_date_backdates_when_no_frontmatter_date() {
     let engine = MemoryEngine::builder(4).build().unwrap();
     let config = BootstrapConfig::default();
     engine
-        .bootstrap_memory_directory(root, &TestEmbedder, &config, None)
+        .bootstrap_memory_directory(
+            root,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
-    let stored = engine.list_active_facts(None).unwrap();
+    let stored = engine.list_active_facts(None).await.unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(
         stored[0].t_created.year(),
@@ -239,8 +257,8 @@ fn filename_encoded_date_backdates_when_no_frontmatter_date() {
     );
 }
 
-#[test]
-fn frontmatter_secret_in_description_is_redacted() {
+#[tokio::test]
+async fn frontmatter_secret_in_description_is_redacted() {
     // Regression (review BLOCKER): a secret in a frontmatter `description:` must
     // not reach the stored `metadata` column — redaction covers the whole row,
     // not just the body content.
@@ -257,7 +275,13 @@ fn frontmatter_secret_in_description_is_redacted() {
     let engine = MemoryEngine::builder(4).build().unwrap();
     let config = BootstrapConfig::default();
     let report = engine
-        .bootstrap_memory_directory(root, &TestEmbedder, &config, None)
+        .bootstrap_memory_directory(
+            root,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+            None,
+        )
+        .await
         .unwrap();
 
     assert_eq!(report.facts_created, 1);
@@ -267,7 +291,7 @@ fn frontmatter_secret_in_description_is_redacted() {
         report.secrets_redacted
     );
 
-    let stored = engine.list_active_facts(None).unwrap();
+    let stored = engine.list_active_facts(None).await.unwrap();
     assert_eq!(stored.len(), 1);
     let meta = &stored[0].metadata;
     assert!(

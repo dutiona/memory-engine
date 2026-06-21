@@ -1,5 +1,4 @@
-use crate::error::{MemoryError, Result};
-use crate::store::events::EventStore;
+use crate::error::Result;
 
 use super::MemoryEngine;
 
@@ -14,10 +13,8 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on SQL failure.
-    pub fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
-        self.with_read(|conn| {
-            crate::inspect::statistics::compute_statistics(conn, self.pool.path())
-        })
+    pub async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
+        self.storage.statistics().await
     }
 
     /// List recent insight facts within a project scope subtree, newest-first.
@@ -32,7 +29,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn list_recent_insights(
+    pub async fn list_recent_insights(
         &self,
         scope_path: &str,
         limit: usize,
@@ -40,6 +37,10 @@ impl MemoryEngine {
         // Resolve the scope subtree under a short-lived read lock. `subtree(unknown_id)`
         // would return a singleton, so branch on `resolve_path` returning `None` and
         // early-return empty — never call `subtree` with a fallback id.
+        //
+        // The `scope_tree` read guard is dropped at the end of this block (before any
+        // `.await`) so no parking_lot guard is held across the port call (keeps the
+        // future `Send`).
         let scope_ids = {
             let tree = self.scope_tree.read();
             match tree.resolve_path(scope_path) {
@@ -47,10 +48,9 @@ impl MemoryEngine {
                 None => return Ok(Vec::new()),
             }
         };
-        self.with_read(|conn| {
-            crate::store::facts::FactStore::new(conn, self.embed_dim)
-                .list_active_by_metadata_key_recent(&scope_ids, crate::INSIGHT_MARKER_KEY, limit)
-        })
+        self.storage
+            .list_active_facts_by_metadata_key_recent(&scope_ids, crate::INSIGHT_MARKER_KEY, limit)
+            .await
     }
 
     /// Replay a segment of the event log for debugging.
@@ -61,19 +61,19 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on SQL failure.
-    pub fn replay_events(
+    pub async fn replay_events(
         &self,
         filter: &crate::inspect::ReplayFilter,
     ) -> Result<Vec<crate::types::Event>> {
         let event_filter = crate::inspect::replay::to_event_filter(filter);
-        self.with_read(|conn| {
-            let store = EventStore::new(conn, &self.upcaster_registry);
-            if filter.upcast {
-                store.list_upcasted(&event_filter)
-            } else {
-                store.list(&event_filter)
-            }
-        })
+        // The backend owns the `UpcasterRegistry`, so the `list_upcasted_events` /
+        // `list_events` port split absorbs the former `EventStore::new(conn, &registry)`
+        // construction and the `filter.upcast` branch is preserved verbatim.
+        if filter.upcast {
+            self.storage.list_upcasted_events(&event_filter).await
+        } else {
+            self.storage.list_events(&event_filter).await
+        }
     }
 
     /// Explain why a fact is in its current state.
@@ -100,24 +100,48 @@ impl MemoryEngine {
     /// This means the graph context may reflect a slightly older snapshot than the
     /// database state under concurrent writes. This trade-off is intentional for
     /// an informational API — see [`inspect::explain::explain_fact_with_graph_context`].
-    pub fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
-        // Snapshot graph context under the graph lock, then release it.
+    pub async fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
+        use crate::inspect::explain;
+        use crate::inspect::types::FactProvenance;
+
+        // Snapshot graph context under the graph lock, then release it (the guard is
+        // dropped at the end of this block, before any `.await`).
         let graph_context = {
             let graph = self.graph.read();
-            crate::inspect::explain::build_graph_context(&graph, id)
+            explain::build_graph_context(&graph, id)
         };
-        // scope_tree lock is still held across with_read because scope_path
-        // resolution requires fact.scope_id, which comes from the DB.
-        let scope_tree = self.scope_tree.read();
-        self.with_read(|conn| {
-            crate::inspect::explain::explain_fact_with_graph_context(
-                conn,
-                &scope_tree,
-                self.embed_dim,
-                id,
-                &self.upcaster_registry,
-                graph_context,
-            )
+
+        // Fetch the fact + (when present) its upcasted source event via the port.
+        let fact = self.storage.get_fact(id).await?;
+        let state = explain::determine_state(&fact, chrono::Utc::now());
+        let source_event = match fact.source_event_id {
+            Some(event_id) => Some(self.storage.get_upcasted_event(event_id).await?),
+            None => None,
+        };
+        let provenance = FactProvenance {
+            source_event_id: fact.source_event_id,
+            source_event,
+            importance: fact.importance,
+            importance_score: fact.importance_score,
+            is_pinned: fact.is_pinned,
+            access_count: fact.access_count,
+        };
+
+        // Resolve the scope path off a `ScopeTree` snapshot — the read guard is taken
+        // only after the awaits above, so no parking_lot guard crosses an `.await`
+        // (keeps the future `Send`). The old code held this guard across `with_read`.
+        let scope_path = {
+            let tree = self.scope_tree.read();
+            tree.path_for_id(fact.scope_id)
+                .unwrap_or_else(|| format!("scope:{}", fact.scope_id))
+        };
+
+        Ok(crate::inspect::FactExplanation {
+            fact_id: id,
+            state,
+            provenance,
+            graph_context,
+            scope_path,
         })
     }
 
@@ -130,8 +154,11 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::NotFound` if the fact doesn't exist.
     /// Returns `MemoryError::Database` on SQL failure.
-    pub fn fact_history(&self, id: i64) -> Result<crate::inspect::FactHistory> {
-        self.with_read(|conn| crate::inspect::explain::fact_history(conn, self.embed_dim, id))
+    pub async fn fact_history(&self, id: i64) -> Result<crate::inspect::FactHistory> {
+        // The bi-temporal timeline is pure over a single fact's timestamps: fetch via
+        // the port, then derive it with no `&Connection` needed.
+        let fact = self.storage.get_fact(id).await?;
+        Ok(crate::inspect::explain::fact_history_from_fact(id, &fact))
     }
 
     /// Export full engine state to a file.
@@ -157,33 +184,12 @@ impl MemoryEngine {
     /// without the corresponding feature enabled.
     /// Returns [`MemoryError::ReadOnly`] for the `Sqlite` format if the engine
     /// was opened read-only (the `VACUUM INTO` backup acquires the write lock).
-    #[allow(unreachable_patterns)] // wildcard needed for #[non_exhaustive] forward compat
-    pub fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
-        match format {
-            crate::inspect::DumpFormat::Json(path) => {
-                self.with_read(|conn| crate::inspect::dump::dump_json(conn, self.embed_dim, path))
-            }
-            #[cfg(feature = "compress-gzip")]
-            crate::inspect::DumpFormat::JsonGzip(path) => self
-                .with_read(|conn| crate::inspect::dump::dump_json_gzip(conn, self.embed_dim, path)),
-            #[cfg(not(feature = "compress-gzip"))]
-            crate::inspect::DumpFormat::JsonGzip(_) => Err(MemoryError::NotImplemented(
-                "gzip compression requires the `compress-gzip` feature".into(),
-            )),
-            #[cfg(feature = "compress-zstd")]
-            crate::inspect::DumpFormat::JsonZstd(path) => self
-                .with_read(|conn| crate::inspect::dump::dump_json_zstd(conn, self.embed_dim, path)),
-            #[cfg(not(feature = "compress-zstd"))]
-            crate::inspect::DumpFormat::JsonZstd(_) => Err(MemoryError::NotImplemented(
-                "zstd compression requires the `compress-zstd` feature".into(),
-            )),
-            crate::inspect::DumpFormat::Sqlite(path) => {
-                let conn = self.write_conn()?;
-                crate::inspect::dump::dump_sqlite(&conn, path)
-            }
-            _ => Err(MemoryError::NotImplemented(
-                "unsupported dump format".into(),
-            )),
-        }
+    pub async fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
+        // The whole format dispatch (including the feature-gated `NotImplemented`
+        // arms and the read-vs-write connection choice) lives below the seam in
+        // [`SchemaManager::dump_state`](crate::storage::SchemaManager::dump_state).
+        self.storage
+            .dump_state(self.embed_dim, format.clone())
+            .await
     }
 }

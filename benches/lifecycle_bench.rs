@@ -94,32 +94,38 @@ const TOPICS: [&str; 10] = [
 
 /// Create a file-backed engine pre-populated with `n` facts.
 /// Returns `(engine, _dir)` — the `_dir` handle keeps the tempdir alive.
-fn setup_engine(n: usize) -> (MemoryEngine, tempfile::TempDir) {
+/// The corpus-building `add_fact` loop is driven through `rt` (the engine API
+/// is async under #631).
+fn setup_engine(rt: &tokio::runtime::Runtime, n: usize) -> (MemoryEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench.db");
     let engine = MemoryEngine::builder(DIM)
         .path(db_path)
         .build()
         .expect("open engine");
-    let embedder = ConstEmbedder { dim: DIM };
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(ConstEmbedder { dim: DIM });
 
-    for i in 0..n {
-        let topic = TOPICS[i % TOPICS.len()];
-        let content = format!("{topic} — fact number {i}");
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content,
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                &embedder,
-                None,
-            )
-            .expect("add_fact");
-    }
+    rt.block_on(async {
+        for i in 0..n {
+            let topic = TOPICS[i % TOPICS.len()];
+            let content = format!("{topic} — fact number {i}");
+            engine
+                .add_fact(
+                    &AddFactRequest {
+                        content,
+                        fact_type: FactType::Semantic,
+                        source_event_id: None,
+                        scope: None,
+                        opts: None,
+                    },
+                    embedder.clone(),
+                    None,
+                )
+                .await
+                .expect("add_fact");
+        }
+    });
 
     (engine, dir)
 }
@@ -127,38 +133,45 @@ fn setup_engine(n: usize) -> (MemoryEngine, tempfile::TempDir) {
 /// Create a file-backed engine with `n` old, low-importance facts that will
 /// actually be expired by `forget()`. Without this, fresh high-importance facts
 /// all survive and the benchmark only measures scan overhead.
-fn setup_forgettable_engine(n: usize) -> (MemoryEngine, tempfile::TempDir) {
+fn setup_forgettable_engine(
+    rt: &tokio::runtime::Runtime,
+    n: usize,
+) -> (MemoryEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench.db");
     let engine = MemoryEngine::builder(DIM)
         .path(db_path)
         .build()
         .expect("open engine");
-    let embedder = ConstEmbedder { dim: DIM };
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(ConstEmbedder { dim: DIM });
 
     let old = Utc::now() - Duration::days(120);
-    for i in 0..n {
-        let topic = TOPICS[i % TOPICS.len()];
-        let content = format!("{topic} — stale fact {i}");
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content,
-                    fact_type: FactType::Episodic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: Some(AddFactOptions {
-                        importance: Some(0.1),
-                        t_created: Some(old),
-                        last_accessed: Some(old),
-                        ..Default::default()
-                    }),
-                },
-                &embedder,
-                None,
-            )
-            .expect("add_fact");
-    }
+    rt.block_on(async {
+        for i in 0..n {
+            let topic = TOPICS[i % TOPICS.len()];
+            let content = format!("{topic} — stale fact {i}");
+            engine
+                .add_fact(
+                    &AddFactRequest {
+                        content,
+                        fact_type: FactType::Episodic,
+                        source_event_id: None,
+                        scope: None,
+                        opts: Some(AddFactOptions {
+                            importance: Some(0.1),
+                            t_created: Some(old),
+                            last_accessed: Some(old),
+                            ..Default::default()
+                        }),
+                    },
+                    embedder.clone(),
+                    None,
+                )
+                .await
+                .expect("add_fact");
+        }
+    });
 
     (engine, dir)
 }
@@ -184,6 +197,7 @@ fn make_requests(n: usize) -> Vec<AddFactRequest> {
 
 fn bench_consolidation(c: &mut Criterion) {
     let mut group = c.benchmark_group("consolidation");
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     for &size in &[100, 1_000, 5_000, 10_000, 50_000] {
         let samples = if size >= 10_000 { 10 } else { 20 };
@@ -191,15 +205,22 @@ fn bench_consolidation(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
             b.iter_with_setup(
-                || setup_engine(n),
+                || setup_engine(&rt, n),
                 |(engine, _dir)| {
-                    let generator = ConcatSummaryGenerator;
-                    let embedder = ConstEmbedder { dim: DIM };
+                    let generator: std::sync::Arc<dyn SummaryGenerator> =
+                        std::sync::Arc::new(ConcatSummaryGenerator);
+                    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+                        std::sync::Arc::new(ConstEmbedder { dim: DIM });
                     let config = ConsolidationConfig::builder()
                         .dedup_threshold(0.95)
                         .min_cluster_size(3)
                         .build();
-                    engine.consolidate(&generator, &embedder, &config).unwrap();
+                    rt.block_on(async {
+                        engine
+                            .consolidate(generator, embedder, &config)
+                            .await
+                            .unwrap();
+                    });
                 },
             );
         });
@@ -213,6 +234,7 @@ fn bench_consolidation(c: &mut Criterion) {
 
 fn bench_forgetting(c: &mut Criterion) {
     let mut group = c.benchmark_group("forgetting");
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     for &size in &[100, 1_000, 5_000, 10_000, 50_000] {
         let samples = if size >= 10_000 { 10 } else { 20 };
@@ -220,13 +242,15 @@ fn bench_forgetting(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
             b.iter_with_setup(
-                || setup_forgettable_engine(n),
+                || setup_forgettable_engine(&rt, n),
                 |(engine, _dir)| {
                     let policy = ForgetPolicy {
                         min_importance: 0.3,
                         ..Default::default()
                     };
-                    engine.forget(&policy).unwrap();
+                    rt.block_on(async {
+                        engine.forget(&policy).await.unwrap();
+                    });
                 },
             );
         });
@@ -240,7 +264,9 @@ fn bench_forgetting(c: &mut Criterion) {
 
 fn bench_add_fact_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_fact_single");
-    let embedder = ConstEmbedder { dim: DIM };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(ConstEmbedder { dim: DIM });
 
     for &corpus_size in &[0, 1_000, 10_000] {
         let samples = if corpus_size >= 10_000 { 10 } else { 20 };
@@ -251,21 +277,24 @@ fn bench_add_fact_single(c: &mut Criterion) {
             &corpus_size,
             |b, &n| {
                 b.iter_with_setup(
-                    || setup_engine(n),
+                    || setup_engine(&rt, n),
                     |(engine, _dir)| {
-                        engine
-                            .add_fact(
-                                &AddFactRequest {
-                                    content: "benchmark insertion probe".to_string(),
-                                    fact_type: FactType::Semantic,
-                                    source_event_id: None,
-                                    scope: None,
-                                    opts: None,
-                                },
-                                &embedder,
-                                None,
-                            )
-                            .unwrap();
+                        rt.block_on(async {
+                            engine
+                                .add_fact(
+                                    &AddFactRequest {
+                                        content: "benchmark insertion probe".to_string(),
+                                        fact_type: FactType::Semantic,
+                                        source_event_id: None,
+                                        scope: None,
+                                        opts: None,
+                                    },
+                                    embedder.clone(),
+                                    None,
+                                )
+                                .await
+                                .unwrap();
+                        });
                     },
                 );
             },
@@ -280,7 +309,9 @@ fn bench_add_fact_single(c: &mut Criterion) {
 
 fn bench_add_facts_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_facts_batch");
-    let embedder = ConstEmbedder { dim: DIM };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(ConstEmbedder { dim: DIM });
 
     for &batch_size in &[10, 100, 1_000] {
         let samples = if batch_size >= 1_000 { 10 } else { 20 };
@@ -303,7 +334,12 @@ fn bench_add_facts_batch(c: &mut Criterion) {
                         (engine, dir)
                     },
                     |(engine, _dir)| {
-                        engine.add_facts_batch(&requests, &embedder, None).unwrap();
+                        rt.block_on(async {
+                            engine
+                                .add_facts_batch(&requests, embedder.clone(), None)
+                                .await
+                                .unwrap();
+                        });
                     },
                 );
             },

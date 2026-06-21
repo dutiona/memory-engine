@@ -12,6 +12,8 @@ pub struct ImportArgs {
     embed_dim: Option<usize>,
 }
 
+// Sync: restore is a `MemoryEngine::restore_json` snapshot load with no async engine
+// calls — kept non-async so the future is never needlessly !Send-poisoned (clippy::unused_async).
 pub fn run(db: &Path, args: &ImportArgs) -> anyhow::Result<()> {
     if db.exists() {
         anyhow::bail!(

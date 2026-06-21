@@ -12,13 +12,14 @@ impl EmbeddingProvider for FakeEmbed {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let path = std::path::PathBuf::from("/tmp/smoke-test-agent.db");
     if path.exists() {
         std::fs::remove_file(&path).unwrap();
     }
     let engine = MemoryEngine::builder(4).path(path).build().unwrap();
-    let e = FakeEmbed;
+    let e: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(FakeEmbed);
 
     engine
         .add_fact(
@@ -29,9 +30,10 @@ fn main() {
                 scope: None,
                 opts: None,
             },
-            &e,
+            e.clone(),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -42,9 +44,10 @@ fn main() {
                 scope: None,
                 opts: None,
             },
-            &e,
+            e.clone(),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -56,9 +59,10 @@ fn main() {
                 scope: None,
                 opts: None,
             },
-            &e,
+            e.clone(),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -69,9 +73,10 @@ fn main() {
                 scope: None,
                 opts: None,
             },
-            &e,
+            e.clone(),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -82,11 +87,12 @@ fn main() {
                 scope: None,
                 opts: None,
             },
-            &e,
+            e.clone(),
             None,
         )
+        .await
         .unwrap();
-    engine.pin_fact(1).unwrap();
+    engine.pin_fact(1).await.unwrap();
 
     println!("Created /tmp/smoke-test-agent.db with 5 facts (fact 1 pinned)");
 }

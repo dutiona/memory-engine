@@ -40,12 +40,12 @@ fn cfg() -> memory_engine::ActivityFilterConfig {
     memory_engine::ActivityFilterConfig::default()
 }
 
-fn call(
+async fn call(
     engine: &MemoryEngine,
     name: &str,
     a: Map<String, Value>,
 ) -> Result<CallToolResult, ErrorData> {
-    tools::dispatch(name, a, engine, None, None, DIM, &cfg())
+    tools::dispatch(name, a, engine, None, None, DIM, &cfg()).await
 }
 
 fn extract_json(result: &CallToolResult) -> Value {
@@ -56,7 +56,7 @@ fn extract_json(result: &CallToolResult) -> Value {
 }
 
 /// Seed a Semantic fact directly (dispatch's `add_fact` needs an HTTP embedder).
-fn seed(engine: &MemoryEngine, content: &str, scope: Option<&str>, insight: bool) -> i64 {
+async fn seed(engine: &MemoryEngine, content: &str, scope: Option<&str>, insight: bool) -> i64 {
     let metadata =
         insight.then(|| json!({ INSIGHT_MARKER_KEY: { "flushed_at": "2024-01-01T00:00:00Z" } }));
     let req = AddFactRequest {
@@ -69,18 +69,26 @@ fn seed(engine: &MemoryEngine, content: &str, scope: Option<&str>, insight: bool
             ..Default::default()
         }),
     };
-    engine.add_fact(&req, &FakeEmbed, None).unwrap()
+    engine
+        .add_fact(
+            &req,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+            None,
+        )
+        .await
+        .unwrap()
 }
 
 // Seeding facts counts as caller writes (#209), so the FIRST guarded dream_cycle
 // invocation always defers. Drain that skip so the next call runs on the now-quiet store.
-fn drain_initial_skip(engine: &MemoryEngine) {
+async fn drain_initial_skip(engine: &MemoryEngine) {
     let skip = extract_json(
         &call(
             engine,
             "memory_dream_cycle",
             args(&[("apply", json!(false))]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(
@@ -91,19 +99,20 @@ fn drain_initial_skip(engine: &MemoryEngine) {
     assert!(skip["skipped"]["CallerWroteFacts"].is_object());
 }
 
-#[test]
-fn dream_cycle_apply_true_runs_and_applies() {
+#[tokio::test]
+async fn dream_cycle_apply_true_runs_and_applies() {
     let (engine, _d) = engine();
     for i in 0..3 {
-        seed(&engine, &format!("pattern {i}"), None, false);
+        seed(&engine, &format!("pattern {i}"), None, false).await;
     }
-    drain_initial_skip(&engine);
+    drain_initial_skip(&engine).await;
     let body = extract_json(
         &call(
             &engine,
             "memory_dream_cycle",
             args(&[("apply", json!(true))]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(body["did_run"], json!(true));
@@ -116,10 +125,10 @@ fn dream_cycle_apply_true_runs_and_applies() {
     );
 }
 
-#[test]
-fn dream_cycle_skips_when_caller_wrote_facts() {
+#[tokio::test]
+async fn dream_cycle_skips_when_caller_wrote_facts() {
     let (engine, _d) = engine();
-    seed(&engine, "a caller write", None, false);
+    seed(&engine, "a caller write", None, false).await;
     // #209: caller wrote a fact since the (absent=0) cursor → defer this run.
     let body = extract_json(
         &call(
@@ -127,6 +136,7 @@ fn dream_cycle_skips_when_caller_wrote_facts() {
             "memory_dream_cycle",
             args(&[("apply", json!(true))]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(body["did_run"], json!(false), "deferred, did not run");
@@ -137,13 +147,13 @@ fn dream_cycle_skips_when_caller_wrote_facts() {
     assert!(reason["new_max_fact_id"].as_i64().unwrap() > 0);
 }
 
-#[test]
-fn dream_cycle_dry_run_then_apply_roundtrips() {
+#[tokio::test]
+async fn dream_cycle_dry_run_then_apply_roundtrips() {
     let (engine, _d) = engine();
     for i in 0..3 {
-        seed(&engine, &format!("pattern {i}"), None, false);
+        seed(&engine, &format!("pattern {i}"), None, false).await;
     }
-    drain_initial_skip(&engine);
+    drain_initial_skip(&engine).await;
     // Dry-run: produce but do not apply.
     let dry = extract_json(
         &call(
@@ -151,6 +161,7 @@ fn dream_cycle_dry_run_then_apply_roundtrips() {
             "memory_dream_cycle",
             args(&[("apply", json!(false))]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(dry["did_run"], json!(true), "post-skip quiet call runs");
@@ -165,13 +176,14 @@ fn dream_cycle_dry_run_then_apply_roundtrips() {
             "memory_apply_cycle_report",
             args(&[("report", report)]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(applied["promoted"], json!(1));
 }
 
-#[test]
-fn apply_cycle_report_unknown_fact_is_invalid_params() {
+#[tokio::test]
+async fn apply_cycle_report_unknown_fact_is_invalid_params() {
     let (engine, _d) = engine();
     // Hand-built report: AdjustScore on a nonexistent fact → CycleError::UnknownFact → invalid_params.
     let report = json!({
@@ -188,32 +200,36 @@ fn apply_cycle_report_unknown_fact_is_invalid_params() {
         "memory_apply_cycle_report",
         args(&[("report", report)]),
     )
+    .await
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
 }
 
-#[test]
-fn apply_cycle_report_malformed_json_is_invalid_params() {
+#[tokio::test]
+async fn apply_cycle_report_malformed_json_is_invalid_params() {
     let (engine, _d) = engine();
     let err = call(
         &engine,
         "memory_apply_cycle_report",
         args(&[("report", json!({ "deltas": "nonsense" }))]),
     )
+    .await
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
 }
 
-#[test]
-fn apply_cycle_report_missing_report_key_is_invalid_params() {
+#[tokio::test]
+async fn apply_cycle_report_missing_report_key_is_invalid_params() {
     let (engine, _d) = engine();
     // The `report` key is absent entirely (distinct from present-but-malformed).
-    let err = call(&engine, "memory_apply_cycle_report", args(&[])).unwrap_err();
+    let err = call(&engine, "memory_apply_cycle_report", args(&[]))
+        .await
+        .unwrap_err();
     assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
 }
 
-#[test]
-fn dream_cycle_on_empty_store_succeeds_with_no_deltas() {
+#[tokio::test]
+async fn dream_cycle_on_empty_store_succeeds_with_no_deltas() {
     let (engine, _d) = engine();
     // No facts seeded: DefaultDreamCycle guards empty/under-min buckets, so the cycle
     // must succeed (not error) and produce an empty delta set.
@@ -223,6 +239,7 @@ fn dream_cycle_on_empty_store_succeeds_with_no_deltas() {
             "memory_dream_cycle",
             args(&[("apply", json!(true))]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(
@@ -237,24 +254,25 @@ fn dream_cycle_on_empty_store_succeeds_with_no_deltas() {
     );
 }
 
-#[test]
-fn get_recent_insights_limit_zero_is_invalid_params() {
+#[tokio::test]
+async fn get_recent_insights_limit_zero_is_invalid_params() {
     let (engine, _d) = engine();
-    seed(&engine, "insight", Some("project:p"), true);
+    seed(&engine, "insight", Some("project:p"), true).await;
     // Schema declares minimum:1; limit=0 must be rejected, not silently empty.
     let err = call(
         &engine,
         "memory_get_recent_insights",
         args(&[("project_path", json!("project:p")), ("limit", json!(0))]),
     )
+    .await
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
 }
 
-#[test]
-fn get_recent_insights_malformed_limit_is_invalid_params() {
+#[tokio::test]
+async fn get_recent_insights_malformed_limit_is_invalid_params() {
     let (engine, _d) = engine();
-    seed(&engine, "insight", Some("project:p"), true);
+    seed(&engine, "insight", Some("project:p"), true).await;
     // A present-but-wrong-type limit must reject, not silently default to 20.
     for bad in [json!("ten"), json!(-3), json!(1.5)] {
         let err = call(
@@ -262,6 +280,7 @@ fn get_recent_insights_malformed_limit_is_invalid_params() {
             "memory_get_recent_insights",
             args(&[("project_path", json!("project:p")), ("limit", bad.clone())]),
         )
+        .await
         .unwrap_err();
         assert_eq!(
             err.code,
@@ -271,8 +290,8 @@ fn get_recent_insights_malformed_limit_is_invalid_params() {
     }
 }
 
-#[test]
-fn dream_cycle_malformed_apply_is_invalid_params() {
+#[tokio::test]
+async fn dream_cycle_malformed_apply_is_invalid_params() {
     let (engine, _d) = engine();
     // `apply` mutates; a present-but-non-bool value must reject, not default to true.
     let err = call(
@@ -280,14 +299,15 @@ fn dream_cycle_malformed_apply_is_invalid_params() {
         "memory_dream_cycle",
         args(&[("apply", json!("yes"))]),
     )
+    .await
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
 }
 
-#[test]
-fn get_recent_insights_sparse_depth_shapes_facts() {
+#[tokio::test]
+async fn get_recent_insights_sparse_depth_shapes_facts() {
     let (engine, _d) = engine();
-    seed(&engine, "insight one", Some("project:p"), true);
+    seed(&engine, "insight one", Some("project:p"), true).await;
     let body = extract_json(
         &call(
             &engine,
@@ -297,6 +317,7 @@ fn get_recent_insights_sparse_depth_shapes_facts() {
                 ("depth", json!("sparse")),
             ]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(body["count"], json!(1));
@@ -309,18 +330,19 @@ fn get_recent_insights_sparse_depth_shapes_facts() {
     );
 }
 
-#[test]
-fn get_recent_insights_returns_marked_facts_scoped_and_limited() {
+#[tokio::test]
+async fn get_recent_insights_returns_marked_facts_scoped_and_limited() {
     let (engine, _d) = engine();
-    seed(&engine, "insight one", Some("project:p"), true);
-    seed(&engine, "insight two", Some("project:p/sub"), true); // subtree
-    seed(&engine, "ordinary", Some("project:p"), false); // unmarked → excluded
+    seed(&engine, "insight one", Some("project:p"), true).await;
+    seed(&engine, "insight two", Some("project:p/sub"), true).await; // subtree
+    seed(&engine, "ordinary", Some("project:p"), false).await; // unmarked → excluded
     seed(
         &engine,
         "other project insight",
         Some("project:other"),
         true,
-    ); // out of subtree → excluded
+    )
+    .await; // out of subtree → excluded
 
     let body = extract_json(
         &call(
@@ -328,6 +350,7 @@ fn get_recent_insights_returns_marked_facts_scoped_and_limited() {
             "memory_get_recent_insights",
             args(&[("project_path", json!("project:p"))]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(body["count"], json!(2), "only the two in-subtree insights");
@@ -339,6 +362,7 @@ fn get_recent_insights_returns_marked_facts_scoped_and_limited() {
             "memory_get_recent_insights",
             args(&[("project_path", json!("project:p")), ("limit", json!(1))]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(limited["count"], json!(1));
@@ -350,6 +374,7 @@ fn get_recent_insights_returns_marked_facts_scoped_and_limited() {
             "memory_get_recent_insights",
             args(&[("project_path", json!("project:nope"))]),
         )
+        .await
         .unwrap(),
     );
     assert_eq!(empty["count"], json!(0));

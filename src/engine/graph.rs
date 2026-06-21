@@ -2,9 +2,6 @@ use chrono::Utc;
 
 use crate::error::{MemoryError, Result};
 use crate::graph::EdgeData;
-use crate::store::edges::EdgeStore;
-use crate::store::facts::FactStore;
-use crate::types::NewEdge;
 
 use super::MemoryEngine;
 
@@ -41,8 +38,9 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` on SQL failure.
     /// Returns `MemoryError::NotFound` if `scope` is `Some` but the path
     /// does not exist.
-    pub fn link_session_facts(&self, session_id: &str, scope: Option<&str>) -> Result<usize> {
-        // Resolve scope path → subtree IDs (short-lived read lock)
+    pub async fn link_session_facts(&self, session_id: &str, scope: Option<&str>) -> Result<usize> {
+        // Resolve scope path → subtree IDs (short-lived read lock, dropped at the
+        // end of the match arm so no guard is held across the awaits below).
         let scope_ids: Vec<i64> = match scope {
             Some(path) => {
                 let tree = self.scope_tree.read();
@@ -54,53 +52,32 @@ impl MemoryEngine {
             None => Vec::new(),
         };
 
-        let conn = self.write_conn()?;
-        let facts =
-            FactStore::new(&conn, self.embed_dim).list_active_by_session(session_id, &scope_ids)?;
+        let facts = self
+            .storage
+            .list_active_facts_by_session(session_id, &scope_ids)
+            .await?;
 
         if facts.len() < 2 {
-            drop(conn);
             return Ok(0);
         }
 
         let now = Utc::now();
         let relation = Self::CO_SESSION_RELATION.to_string();
-        let mut new_edges: Vec<(i64, i64, i64)> = Vec::new(); // (edge_id, src, tgt)
 
-        {
-            let tx = conn.unchecked_transaction()?;
-            let edge_store = EdgeStore::new(&tx);
-
-            // Batch-fetch existing co_session edges for dedup (1 query instead of N²)
-            let fact_ids: Vec<i64> = facts.iter().map(|f| f.id).collect();
-            let existing =
-                edge_store.list_active_pairs_by_facts(&fact_ids, Self::CO_SESSION_RELATION)?;
-
-            for i in 0..facts.len() {
-                for j in (i + 1)..facts.len() {
-                    let a_id = facts[i].id;
-                    let b_id = facts[j].id;
-
-                    for (src, tgt) in [(a_id, b_id), (b_id, a_id)] {
-                        if !existing.contains(&(src, tgt)) {
-                            let edge_id = edge_store.insert(&NewEdge {
-                                source_fact_id: src,
-                                target_fact_id: tgt,
-                                relation_type: relation.clone(),
-                                weight: Self::CO_SESSION_WEIGHT,
-                                scope_id: Self::CO_SESSION_SCOPE_ID,
-                                t_created: now,
-                                t_expired: None,
-                            })?;
-                            new_edges.push((edge_id, src, tgt));
-                        }
-                    }
-                }
-            }
-
-            tx.commit()?;
-        }
-        drop(conn);
+        // Batch-dedup + edge inserts run in one transaction below the seam
+        // (`insert_cosession_edges_atomic`). The engine resolves `scope_ids`
+        // before the call and updates the in-memory graph after it.
+        let fact_ids: Vec<i64> = facts.iter().map(|f| f.id).collect();
+        let new_edges: Vec<(i64, i64, i64)> = self
+            .storage
+            .insert_cosession_edges_atomic(
+                &fact_ids,
+                Self::CO_SESSION_RELATION,
+                Self::CO_SESSION_WEIGHT,
+                Self::CO_SESSION_SCOPE_ID,
+                now,
+            )
+            .await?;
 
         // Sync in-memory graph after successful commit
         if !new_edges.is_empty() {

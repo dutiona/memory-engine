@@ -26,13 +26,15 @@ impl memory_engine::EmbeddingProvider for FakeEmbed {
 }
 
 /// Create a DB with three undreamt facts (ids 1, 2, 3) at embedding dim 4.
-fn create_db() -> (TempDir, PathBuf) {
+async fn create_db() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
     let engine = memory_engine::MemoryEngine::builder(DIM)
         .path(db_path.clone())
         .build()
         .unwrap();
+    let embedder: std::sync::Arc<dyn memory_engine::EmbeddingProvider> =
+        std::sync::Arc::new(FakeEmbed);
     for content in ["the sky is blue", "the sky is azure", "rust is fast"] {
         engine
             .add_fact(
@@ -43,9 +45,10 @@ fn create_db() -> (TempDir, PathBuf) {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                embedder.clone(),
                 None,
             )
+            .await
             .unwrap();
     }
     drop(engine);
@@ -71,9 +74,9 @@ fn run_consolidate(db: &Path, extra: &[&str]) -> Value {
     serde_json::from_slice(&out.stdout).expect("valid JSON on stdout")
 }
 
-#[test]
-fn dream_cycle_backend_drains_and_runs_in_one_invocation() {
-    let (_dir, db) = create_db();
+#[tokio::test]
+async fn dream_cycle_backend_drains_and_runs_in_one_invocation() {
+    let (_dir, db) = create_db().await;
 
     // The #209 guard defers the first guarded call (fresh caller writes), but the CLI
     // drains the deferral internally, so a single `consolidate` invocation runs+applies.
@@ -90,9 +93,9 @@ fn dream_cycle_backend_drains_and_runs_in_one_invocation() {
     );
 }
 
-#[test]
-fn llm_backend_requires_its_urls() {
-    let (_dir, db) = create_db();
+#[tokio::test]
+async fn llm_backend_requires_its_urls() {
+    let (_dir, db) = create_db().await;
     let out = Command::cargo_bin("memory-engine-cli")
         .unwrap()
         .args([
@@ -117,7 +120,7 @@ fn llm_backend_requires_its_urls() {
 
 #[tokio::test]
 async fn llm_backend_synthesizes_via_wiremock_end_to_end() {
-    let (_dir, db) = create_db();
+    let (_dir, db) = create_db().await;
     let server = MockServer::start().await;
 
     // The proposer asks the model to merge facts 1 and 2.
@@ -182,7 +185,7 @@ async fn consolidate_failure_emits_json_and_exits_nonzero() {
     // A consolidate-step failure (here: the embedder returns the wrong dimension) must
     // still print the machine-readable JSON (outcome "failed" + error) on stdout AND
     // exit non-zero — the benchmark's fail-loud contract (never a fake 0).
-    let (_dir, db) = create_db();
+    let (_dir, db) = create_db().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/generate"))

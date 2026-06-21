@@ -89,6 +89,7 @@ async fn main() -> Result<(), BoxError> {
     if let Some(provider) = embedder.as_deref() {
         engine
             .verify_embedding_identity(provider)
+            .await
             .map_err(|e| format!("embedding identity check failed: {e}"))?;
     }
 

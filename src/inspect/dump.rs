@@ -303,8 +303,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn json_dump_roundtrip() {
+    #[tokio::test]
+    async fn json_dump_roundtrip() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
@@ -315,15 +315,17 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let json_path = dir.path().join("dump.json");
         engine
             .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
             .unwrap();
 
         // Deserialize and verify
@@ -337,8 +339,8 @@ mod tests {
 
     /// Verify that streaming produces valid JSON that round-trips through
     /// `EngineSnapshot` deserialization — the format contract with restore.
-    #[test]
-    fn streaming_output_matches_snapshot_schema() {
+    #[tokio::test]
+    async fn streaming_output_matches_snapshot_schema() {
         use crate::store::schema::{init_schema, migrate, open_memory};
         use crate::store::serialize_embedding;
 
@@ -382,8 +384,8 @@ mod tests {
     }
 
     /// Verify empty database produces a valid (empty) snapshot.
-    #[test]
-    fn streaming_empty_database() {
+    #[tokio::test]
+    async fn streaming_empty_database() {
         use crate::store::schema::{init_schema, migrate, open_memory};
 
         let conn = open_memory().unwrap();
@@ -403,8 +405,8 @@ mod tests {
     }
 
     /// Stress test: 10K facts streamed to buffer. Verifies correctness at scale.
-    #[test]
-    fn streaming_10k_facts_roundtrips() {
+    #[tokio::test]
+    async fn streaming_10k_facts_roundtrips() {
         use crate::store::schema::{init_schema, migrate, open_memory};
         use crate::store::serialize_embedding;
 
@@ -437,8 +439,8 @@ mod tests {
         assert_eq!(snapshot.embed_dim, DIM);
     }
 
-    #[test]
-    fn sqlite_dump_from_in_memory() {
+    #[tokio::test]
+    async fn sqlite_dump_from_in_memory() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
@@ -449,15 +451,17 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("dump.db");
         engine
             .dump_state(&DumpFormat::Sqlite(db_path.clone()))
+            .await
             .unwrap();
 
         // Verify the dump is a valid SQLite database with our data.
@@ -473,8 +477,8 @@ mod tests {
     }
 
     #[cfg(feature = "compress-gzip")]
-    #[test]
-    fn gzip_dump_has_correct_magic_bytes() {
+    #[tokio::test]
+    async fn gzip_dump_has_correct_magic_bytes() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
@@ -485,15 +489,17 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dump.json.gz");
         engine
             .dump_state(&DumpFormat::JsonGzip(path.clone()))
+            .await
             .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
@@ -503,8 +509,8 @@ mod tests {
     }
 
     #[cfg(feature = "compress-zstd")]
-    #[test]
-    fn zstd_dump_has_correct_magic_bytes() {
+    #[tokio::test]
+    async fn zstd_dump_has_correct_magic_bytes() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
@@ -515,15 +521,17 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dump.json.zst");
         engine
             .dump_state(&DumpFormat::JsonZstd(path.clone()))
+            .await
             .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
@@ -531,8 +539,8 @@ mod tests {
         assert_eq!(&bytes[..4], &[0x28, 0xb5, 0x2f, 0xfd], "zstd magic bytes");
     }
 
-    #[test]
-    fn snapshot_empty_engine_dump() {
+    #[tokio::test]
+    async fn snapshot_empty_engine_dump() {
         use crate::store::schema::{init_schema, migrate, open_memory};
 
         let conn = open_memory().unwrap();
@@ -548,8 +556,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn snapshot_populated_engine_dump() {
+    #[tokio::test]
+    async fn snapshot_populated_engine_dump() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
@@ -560,15 +568,17 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let json_path = dir.path().join("dump.json");
         engine
             .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
             .unwrap();
 
         let content = std::fs::read_to_string(&json_path).unwrap();
@@ -587,8 +597,8 @@ mod tests {
     /// L6 hardening: a mistaken or hostile dump target that is a directory must
     /// be refused with a clear typed error, not the opaque `remove_file`-on-a-
     /// directory I/O failure the bare `path.exists()` check produced before.
-    #[test]
-    fn dump_sqlite_refuses_directory_target() {
+    #[tokio::test]
+    async fn dump_sqlite_refuses_directory_target() {
         use crate::store::schema::{init_schema, open_memory};
 
         let conn = open_memory().unwrap();
@@ -609,8 +619,8 @@ mod tests {
     /// A symlink resolving to a directory must also be refused — `is_dir()`
     /// follows the link, so the guard is not bypassed by indirection.
     #[cfg(unix)]
-    #[test]
-    fn dump_sqlite_refuses_symlink_to_directory() {
+    #[tokio::test]
+    async fn dump_sqlite_refuses_symlink_to_directory() {
         use crate::store::schema::{init_schema, open_memory};
 
         let conn = open_memory().unwrap();

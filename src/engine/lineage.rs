@@ -1,5 +1,4 @@
 use crate::error::Result;
-use crate::store::lineage::LineageStore;
 use crate::types::{LineageRecord, PromotionProvenance};
 
 use super::MemoryEngine;
@@ -32,13 +31,12 @@ impl MemoryEngine {
     /// savepoint), never through this bare wrapper. It is retained only so the
     /// engine-level lineage tests can seed records directly.
     #[cfg(test)]
-    pub(crate) fn record_lineage(
+    pub(crate) async fn record_lineage(
         &self,
         record: &crate::types::NewLineageRecord,
         provenance: &PromotionProvenance,
     ) -> Result<i64> {
-        let conn = self.write_conn()?;
-        LineageStore::new(&conn).insert(record, provenance)
+        self.storage.insert_lineage(record, provenance).await
     }
 
     /// Retrieve the provenance envelope and lineage record for a wisdom fact.
@@ -46,14 +44,13 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Lineage` if no lineage exists.
-    pub fn get_provenance(
+    pub async fn get_provenance(
         &self,
         wisdom_fact_id: i64,
     ) -> Result<(LineageRecord, PromotionProvenance)> {
-        self.with_read(|conn| {
-            let store = LineageStore::new(conn);
-            store.get_by_wisdom_fact(wisdom_fact_id)
-        })
+        self.storage
+            .get_lineage_by_wisdom_fact(wisdom_fact_id)
+            .await
     }
 
     /// Retrieve just the full source-fact ID chain for a wisdom fact.
@@ -64,11 +61,10 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Lineage` if no lineage exists.
-    pub fn get_full_lineage(&self, wisdom_fact_id: i64) -> Result<Vec<i64>> {
-        self.with_read(|conn| {
-            let store = LineageStore::new(conn);
-            store.get_source_fact_ids(wisdom_fact_id)
-        })
+    pub async fn get_full_lineage(&self, wisdom_fact_id: i64) -> Result<Vec<i64>> {
+        self.storage
+            .get_lineage_source_fact_ids(wisdom_fact_id)
+            .await
     }
 
     /// Delete the lineage record for a wisdom fact (e.g., when reversing a promotion).
@@ -78,15 +74,15 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
-    pub fn delete_lineage(&self, wisdom_fact_id: i64) -> Result<bool> {
-        let conn = self.write_conn()?;
-        LineageStore::new(&conn).delete(wisdom_fact_id)
+    pub async fn delete_lineage(&self, wisdom_fact_id: i64) -> Result<bool> {
+        self.storage.delete_lineage(wisdom_fact_id).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::engine::MemoryEngine;
+    use crate::traits::EmbeddingProvider;
     use crate::types::{AddFactRequest, FactType, NewLineageRecord, PromotionProvenance};
     use chrono::Utc;
 
@@ -115,9 +111,9 @@ mod tests {
         }
     }
 
-    fn engine_with_facts() -> MemoryEngine {
+    async fn engine_with_facts() -> MemoryEngine {
         let engine = MemoryEngine::builder(4).build().unwrap();
-        let embedder = FixedEmbedder;
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(FixedEmbedder);
 
         // Insert wisdom fact (id=1)
         engine
@@ -129,9 +125,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &embedder,
+                embedder.clone(),
                 None,
             )
+            .await
             .unwrap();
 
         // Insert source facts (id=2, id=3)
@@ -145,65 +142,72 @@ mod tests {
                         scope: None,
                         opts: None,
                     },
-                    &embedder,
+                    embedder.clone(),
                     None,
                 )
+                .await
                 .unwrap();
         }
         engine
     }
 
-    #[test]
-    fn record_and_get_provenance() {
-        let engine = engine_with_facts();
+    #[tokio::test]
+    async fn record_and_get_provenance() {
+        let engine = engine_with_facts().await;
         let new_rec = NewLineageRecord {
             wisdom_fact_id: 1,
             source_fact_ids: vec![2, 3],
         };
         let prov = test_provenance();
-        let lineage_id = engine.record_lineage(&new_rec, &prov).unwrap();
+        let lineage_id = engine.record_lineage(&new_rec, &prov).await.unwrap();
         assert!(lineage_id > 0);
 
-        let (record, got_prov) = engine.get_provenance(1).unwrap();
+        let (record, got_prov) = engine.get_provenance(1).await.unwrap();
         assert_eq!(record.wisdom_fact_id, 1);
         assert_eq!(record.source_fact_ids, vec![2, 3]);
         assert_eq!(got_prov.source_count, 2);
         assert_eq!(got_prov.lineage_id, lineage_id);
     }
 
-    #[test]
-    fn get_full_lineage_returns_ids() {
-        let engine = engine_with_facts();
+    #[tokio::test]
+    async fn get_full_lineage_returns_ids() {
+        let engine = engine_with_facts().await;
         let new_rec = NewLineageRecord {
             wisdom_fact_id: 1,
             source_fact_ids: vec![2, 3],
         };
-        engine.record_lineage(&new_rec, &test_provenance()).unwrap();
+        engine
+            .record_lineage(&new_rec, &test_provenance())
+            .await
+            .unwrap();
 
-        let ids = engine.get_full_lineage(1).unwrap();
+        let ids = engine.get_full_lineage(1).await.unwrap();
         assert_eq!(ids, vec![2, 3]);
     }
 
-    #[test]
-    fn delete_lineage_removes_record() {
-        let engine = engine_with_facts();
+    #[tokio::test]
+    async fn delete_lineage_removes_record() {
+        let engine = engine_with_facts().await;
         let new_rec = NewLineageRecord {
             wisdom_fact_id: 1,
             source_fact_ids: vec![2, 3],
         };
-        engine.record_lineage(&new_rec, &test_provenance()).unwrap();
+        engine
+            .record_lineage(&new_rec, &test_provenance())
+            .await
+            .unwrap();
 
-        let deleted = engine.delete_lineage(1).unwrap();
+        let deleted = engine.delete_lineage(1).await.unwrap();
         assert!(deleted);
 
-        let err = engine.get_provenance(1).unwrap_err();
+        let err = engine.get_provenance(1).await.unwrap_err();
         assert!(matches!(err, crate::error::MemoryError::Lineage(_)));
     }
 
-    #[test]
-    fn get_provenance_not_found() {
-        let engine = engine_with_facts();
-        let err = engine.get_provenance(999).unwrap_err();
+    #[tokio::test]
+    async fn get_provenance_not_found() {
+        let engine = engine_with_facts().await;
+        let err = engine.get_provenance(999).await.unwrap_err();
         assert!(matches!(err, crate::error::MemoryError::Lineage(_)));
     }
 }

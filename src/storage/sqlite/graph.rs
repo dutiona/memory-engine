@@ -13,6 +13,7 @@
 //! construction is not coupled to `self` inside the blocking thread.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -72,6 +73,15 @@ impl FactGraph for SqliteBackend {
         self.block_write(move |c| FactStore::new(c, dim).expire(id, now))
             .await?;
         // Post-commit HNSW notification (mirrors engine's notify_expire calls).
+        #[cfg(feature = "ann")]
+        self.hnsw_notify_expire(id);
+        Ok(())
+    }
+
+    async fn expire_and_invalidate_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
+        let dim = self.embed_dim;
+        self.block_write(move |c| FactStore::new(c, dim).expire_and_invalidate(id, now))
+            .await?;
         #[cfg(feature = "ann")]
         self.hnsw_notify_expire(id);
         Ok(())
@@ -749,6 +759,136 @@ impl FactGraph for SqliteBackend {
             let candidate_ids: Vec<i64> = candidate_facts.iter().map(|f| f.id).collect();
             let candidate_edges = EdgeStore::new(conn).list_internal_by_facts(&candidate_ids)?;
             Ok((candidate_facts, candidate_edges))
+        })
+        .await
+    }
+
+    // WRITE — importance-sweep write phase (verbatim tx body of
+    // `forgetting::policy::prune`, minus the engine-side scoring + in-memory graph
+    // reconciliation which the caller owns).
+    async fn prune_atomic(
+        &self,
+        scored: &[(i64, f64)],
+        to_expire: &[i64],
+        now: DateTime<Utc>,
+    ) -> Result<(crate::traits::PruneStats, Vec<i64>)> {
+        let dim = self.embed_dim;
+        let scored = scored.to_vec();
+        let to_expire = to_expire.to_vec();
+        let (stats, expired) = self
+            .block_write(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                let fact_store = FactStore::new(&tx, dim);
+                let edge_store = EdgeStore::new(&tx);
+
+                // Materialize importance scores for every active fact.
+                for &(id, score) in &scored {
+                    fact_store.update_importance_score(id, score)?;
+                }
+                // Expire the sub-threshold set + cascade edge expiry.
+                for &fact_id in &to_expire {
+                    fact_store.expire(fact_id, now)?;
+                    edge_store.expire_by_fact(fact_id, now)?;
+                }
+                tx.commit()?;
+
+                let stats = crate::traits::PruneStats {
+                    facts_expired: to_expire.len(),
+                    facts_evaluated: scored.len(),
+                };
+                Ok((stats, to_expire))
+            })
+            .await?;
+
+        // Post-commit: drop the expired facts from the HNSW index, mirroring the
+        // `expire_fact` ordering (notify after the write lock is released).
+        #[cfg(feature = "ann")]
+        for &fact_id in &expired {
+            self.hnsw_notify_expire(fact_id);
+        }
+
+        Ok((stats, expired))
+    }
+
+    // WRITE — one JSONL session import (savepoint) below the seam.
+    async fn bootstrap_session_atomic(
+        &self,
+        reader: Box<dyn std::io::BufRead + Send>,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let dim = self.embed_dim;
+        let upcaster = Arc::clone(&self.upcaster_registry);
+        self.block_write(move |conn| {
+            let ctx = crate::bootstrap::BootstrapContext {
+                conn,
+                embed_dim: dim,
+                upcaster_registry: &upcaster,
+                embedder: &*embedder,
+                extractor: &*extractor,
+                config: &config,
+                classifier: classifier.as_deref(),
+                scope_id,
+            };
+            crate::bootstrap::bootstrap_session_inner(&ctx, reader)
+        })
+        .await
+    }
+
+    // WRITE — directory of JSONL session imports (per-session savepoints) below the seam.
+    async fn bootstrap_directory_atomic(
+        &self,
+        dir: std::path::PathBuf,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let dim = self.embed_dim;
+        let upcaster = Arc::clone(&self.upcaster_registry);
+        self.block_write(move |conn| {
+            let ctx = crate::bootstrap::BootstrapContext {
+                conn,
+                embed_dim: dim,
+                upcaster_registry: &upcaster,
+                embedder: &*embedder,
+                extractor: &*extractor,
+                config: &config,
+                classifier: classifier.as_deref(),
+                scope_id,
+            };
+            crate::bootstrap::bootstrap_directory_inner(&ctx, &dir)
+        })
+        .await
+    }
+
+    // WRITE — native `.md` memory directory import (autocommit per file) below the seam.
+    async fn bootstrap_memory_directory_atomic(
+        &self,
+        dir: std::path::PathBuf,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let dim = self.embed_dim;
+        self.block_write(move |conn| {
+            // Meta-first identity stamp (#643): record before the first file, because
+            // this path is autocommit-per-file (no wrapping savepoint to defer under).
+            crate::store::embedding_meta::record_if_absent(conn, &embedder.fingerprint(), dim)?;
+            crate::bootstrap::memory_dir::bootstrap_memory_directory_inner(
+                conn,
+                dim,
+                &dir,
+                &*embedder,
+                &config,
+                classifier.as_deref(),
+                scope_id,
+            )
         })
         .await
     }

@@ -4,4 +4,4 @@
 
 mod connection_pool;
 
-pub use connection_pool::{ConnectionPool, WriteGuard};
+pub use connection_pool::ConnectionPool;

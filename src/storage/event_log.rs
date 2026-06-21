@@ -32,4 +32,30 @@ pub trait EventLog: Send + Sync {
     async fn get_upcasted_event(&self, id: i64) -> Result<Event>;
     /// Current-revision view of a filtered window.
     async fn list_upcasted_events(&self, filter: &EventFilter) -> Result<Vec<Event>>;
+
+    /// Aggregate outcome-signal counts for one fact via a SQL `GROUP BY` push-down
+    /// over the `OutcomeSignal` events (restoring the push-down the cutover would
+    /// otherwise lose by materializing the window in memory). Returns
+    /// [`OutcomeCounts::default`](crate::types::OutcomeCounts) when the fact has no
+    /// recorded outcomes. Does **not** validate fact existence — the caller does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// backend failure.
+    async fn count_outcome_signals(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts>;
+
+    /// Batch variant of [`count_outcome_signals`](Self::count_outcome_signals):
+    /// one `GROUP BY fact_id, outcome` scan filtered to `fact_ids`. Facts with no
+    /// recorded outcomes (including nonexistent ids) are absent from the map; an
+    /// empty `fact_ids` returns an empty map without querying.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// backend failure.
+    async fn count_outcome_signals_batch(
+        &self,
+        fact_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::types::OutcomeCounts>>;
 }

@@ -21,8 +21,6 @@ pub fn to_event_filter(filter: &ReplayFilter) -> EventFilter {
 mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
-    use crate::store::UpcasterRegistry;
-    use crate::store::events::EventStore;
     use crate::types::{EventType, NewEvent};
     use chrono::Utc;
 
@@ -42,47 +40,40 @@ mod tests {
         }
     }
 
-    #[test]
-    // `conn` (write lock) lives through the insert loop via the `store` wrapper
-    // that borrows it; clippy misses the transitive borrow (false positive).
-    #[allow(clippy::significant_drop_tightening)]
-    fn replay_by_id_range() {
+    #[tokio::test]
+    async fn replay_by_id_range() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
-        // Insert events via raw store access
-        {
-            let conn = engine.pool.write();
-            let registry = UpcasterRegistry::new();
-            let store = EventStore::new(&conn, &registry);
-            for i in 0..5 {
-                store.insert(&make_event(&format!("e{i}"))).unwrap();
-            }
+        // Insert events via the storage port (the empty default registry the old
+        // raw `EventStore` used is the backend's own registry).
+        for i in 0..5 {
+            engine
+                .storage()
+                .insert_event(&make_event(&format!("e{i}")))
+                .await
+                .unwrap();
         }
         let filter = ReplayFilter {
             id_range: Some((2, 4)),
             ..Default::default()
         };
-        let events = engine.replay_events(&filter).unwrap();
+        let events = engine.replay_events(&filter).await.unwrap();
         assert_eq!(events.len(), 3); // ids 2, 3, 4
         assert_eq!(events[0].id, 2);
         assert_eq!(events[2].id, 4);
     }
 
-    #[test]
-    // `conn` (write lock) lives through the insert loop via the `store` wrapper
-    // that borrows it; clippy misses the transitive borrow (false positive).
-    #[allow(clippy::significant_drop_tightening)]
-    fn replay_default_order_is_insertion() {
+    #[tokio::test]
+    async fn replay_default_order_is_insertion() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
-        {
-            let conn = engine.pool.write();
-            let registry = UpcasterRegistry::new();
-            let store = EventStore::new(&conn, &registry);
-            for i in 0..3 {
-                store.insert(&make_event(&format!("e{i}"))).unwrap();
-            }
+        for i in 0..3 {
+            engine
+                .storage()
+                .insert_event(&make_event(&format!("e{i}")))
+                .await
+                .unwrap();
         }
         let filter = ReplayFilter::default();
-        let events = engine.replay_events(&filter).unwrap();
+        let events = engine.replay_events(&filter).await.unwrap();
         // Default order is InsertionOrder (ORDER BY id ASC)
         assert!(events.windows(2).all(|w| w[0].id < w[1].id));
     }
