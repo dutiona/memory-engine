@@ -66,7 +66,7 @@ const METHOD_VERSION: &str = "dbscan-v1";
 ///     }
 /// }
 ///
-/// let engine = MemoryEngine::builder(2).build().unwrap();
+/// let engine = MemoryEngine::builder(2).build()?;
 /// for i in 0..3 {
 ///     let req = AddFactRequest {
 ///         content: format!("recurring pattern {i}"),
@@ -75,14 +75,15 @@ const METHOD_VERSION: &str = "dbscan-v1";
 ///         scope: None,
 ///         opts: None,
 ///     };
-///     engine.add_fact(&req, &Embed, None).unwrap();
+///     engine.add_fact(&req, &Embed, None)?;
 /// }
 ///
 /// // Produce an unapplied report (the review gate), then apply it atomically.
-/// let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults()).unwrap();
+/// let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults())?;
 /// assert_eq!(report.metadata.facts_selected, 3);
-/// let applied = engine.apply_cycle_report(&report).unwrap();
+/// let applied = engine.apply_cycle_report(&report)?;
 /// assert_eq!(applied.promoted, 1); // the three-fact cluster promotes one representative
+/// # Ok::<(), MemoryError>(())
 /// ```
 #[derive(Debug, Clone)]
 pub struct DefaultDreamCycle {
