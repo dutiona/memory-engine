@@ -401,7 +401,7 @@ impl ConsolidationConfig {
     /// Validate configuration parameters.
     ///
     /// Enforced at the consolidation entry point
-    /// ([`crate::consolidation::consolidate`]), mirroring
+    /// ([`MemoryEngine::consolidate`](crate::MemoryEngine::consolidate)), mirroring
     /// [`ForgetPolicy::validate`] at the forget entry point.
     ///
     /// # Errors

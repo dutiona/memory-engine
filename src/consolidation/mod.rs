@@ -59,7 +59,7 @@ const MAX_FACTS_FOR_CLUSTERING: usize = 50_000;
 ///
 /// Propagates `SummaryGenerator` / `EmbeddingProvider` errors; returns
 /// `MemoryError::EmbeddingDimension` when the embedding length != `embed_dim`.
-pub fn summarize_and_embed(
+fn summarize_and_embed(
     generator: &dyn SummaryGenerator,
     embedder: &dyn EmbeddingProvider,
     items: &[SummarizableContent<'_>],
@@ -110,20 +110,6 @@ pub struct ConsolidationPlan {
     embedding_fingerprint: Option<EmbeddingFingerprint>,
     /// Run-level timestamp (expiry stamp + watermark).
     now: DateTime<Utc>,
-}
-
-impl ConsolidationPlan {
-    /// Ids the plan will expire — the engine forwards these to its vector index
-    /// (`notify_expire`) after the write commits.
-    pub fn expirations(&self) -> &[i64] {
-        &self.dedup.expirations
-    }
-
-    /// Number of near-duplicates the plan removes — the engine rebuilds its graph when
-    /// this is `> 0`.
-    pub const fn duplicates_removed(&self) -> usize {
-        self.dedup.removed
-    }
 }
 
 /// Phase 1 — load the read snapshot under a brief lock (engine: production caps).
@@ -258,7 +244,8 @@ fn compute_plan_capped(
     // Survivors = the loaded active set minus the dedup expirations (no re-query, borrowed
     // so no clone — #679/#389). They carry the PRE-dedup `importance`/`importance_score`;
     // inert today, since clustering reads only `id`/`content`/`embedding`/`scope_id`.
-    let expired_set: std::collections::HashSet<i64> = dedup.expirations.iter().copied().collect();
+    let expired_set: std::collections::HashSet<i64> =
+        dedup.expirations.iter().map(|e| e.loser).collect();
     let survivors: Vec<&Fact> = snapshot
         .active_facts
         .iter()
@@ -310,8 +297,13 @@ fn compute_plan_capped(
 /// Phase 3 — apply the plan in a **single transaction** (#409, D3 atomicity).
 ///
 /// All-or-nothing: a failure here rolls back every write; a consumer failure has already
-/// aborted in [`compute_plan`], before this transaction opens. Idempotent and tolerant of
-/// a fact concurrently expired between the snapshot and this apply (see [`dedup::apply_dedup`]).
+/// aborted in [`compute_plan`], before this transaction opens. Tolerant of a fact
+/// concurrently expired between the snapshot and this apply (see [`dedup::apply_dedup`]).
+///
+/// Returns the stats plus the ids **actually** expired by this call — which may be fewer
+/// than the plan proposed if a concurrent writer expired a survivor (then its loser is
+/// kept) or a loser (then it is not counted). The engine drives `notify_expire` and the
+/// graph rebuild off this real set, not the stale plan.
 ///
 /// # Errors
 ///
@@ -321,11 +313,12 @@ pub fn apply_plan(
     conn: &Connection,
     plan: &ConsolidationPlan,
     embed_dim: usize,
-) -> Result<ConsolidationStats> {
+) -> Result<(ConsolidationStats, Vec<i64>)> {
     let tx = conn.unchecked_transaction()?;
 
-    // Dedup writes: importance inheritances + expirations (NotFound-tolerant, #409).
-    dedup::apply_dedup(&tx, embed_dim, &plan.dedup, plan.now)?;
+    // Dedup writes: importance inheritances + expirations (concurrency-tolerant, #409).
+    // Returns the ids actually expired by this call.
+    let expired = dedup::apply_dedup(&tx, embed_dim, &plan.dedup, plan.now)?;
 
     // Summary writes — only when clustering actually ran (#345): over the cap we must not
     // delete existing summaries without replacements. Cluster + global move together so
@@ -351,11 +344,12 @@ pub fn apply_plan(
 
     tx.commit()?;
 
-    Ok(ConsolidationStats {
-        duplicates_removed: plan.dedup.removed,
+    let stats = ConsolidationStats {
+        duplicates_removed: expired.len(),
         clusters_created: plan.cluster_summaries.len(),
         global_summaries: usize::from(plan.global_summary.is_some()),
-    })
+    };
+    Ok((stats, expired))
 }
 
 /// Orchestrate all 3 consolidation passes on a single connection (load → compute →
@@ -421,8 +415,7 @@ fn consolidate_with_caps(
         max_dedup_facts,
         max_cluster_facts,
     )?;
-    let stats = apply_plan(conn, &plan, embed_dim)?;
-    Ok((stats, plan.dedup.expirations))
+    apply_plan(conn, &plan, embed_dim)
 }
 
 #[cfg(test)]
@@ -954,16 +947,16 @@ mod tests {
         );
     }
 
-    /// #409 read→write gap: because the engine releases the write lock between the
-    /// snapshot and the apply, another writer may expire a planned-for fact in between.
-    /// [`apply_plan`] must tolerate that — a `NotFound` from `expire` is a no-op (the
-    /// desired end state already holds), not a failure. Simulated here by expiring the
-    /// dedup victim between [`compute_plan`] and [`apply_plan`].
+    /// #409 read→write gap (loser case): the engine releases the write lock between the
+    /// snapshot and the apply, so another writer may expire the *loser* a dedup merge was
+    /// about to expire. [`apply_plan`] must tolerate that — `expire` returns `NotFound`,
+    /// which is a no-op (the end state already holds), not a failure, and is not counted
+    /// as expired by this run.
     #[test]
-    fn apply_plan_tolerates_concurrently_expired_fact() {
+    fn apply_plan_tolerates_concurrently_expired_loser() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
-        // Two near-duplicates → dedup plans to expire the lower-importance one.
+        // Two near-duplicates → dedup plans to expire the lower-importance one (drop).
         insert_fact(&conn, "keep", vec![1.0, 0.0, 0.0, 0.0], 0.9);
         insert_fact(&conn, "drop", vec![0.99, 0.01, 0.0, 0.0], 0.5);
 
@@ -971,24 +964,69 @@ mod tests {
         let snapshot = load_snapshot(&conn, DIM, &config).unwrap();
         let plan = compute_plan(&snapshot, &MockGenerator, &MockEmbedder, DIM, &config).unwrap();
         assert_eq!(
-            plan.expirations().len(),
+            plan.dedup.expirations.len(),
             1,
             "dedup must plan exactly one expiry"
         );
-        let victim = plan.expirations()[0];
+        let loser = plan.dedup.expirations[0].loser;
 
-        // Simulate a concurrent writer expiring the victim between snapshot and apply.
+        // Simulate a concurrent writer expiring the loser between snapshot and apply.
         FactStore::new(&conn, DIM)
-            .expire(victim, Utc::now())
+            .expire(loser, Utc::now())
             .unwrap();
 
-        // apply_plan must NOT error on the already-expired victim (NotFound → no-op).
-        let stats = apply_plan(&conn, &plan, DIM).unwrap();
-        assert_eq!(stats.duplicates_removed, 1);
+        // apply_plan must NOT error; the loser is already gone, so this run expires
+        // nothing (it is not double-counted) and only the survivor remains.
+        let (stats, expired) = apply_plan(&conn, &plan, DIM).unwrap();
         assert_eq!(
-            FactStore::new(&conn, DIM).list_active(None).unwrap().len(),
-            1,
-            "exactly the survivor remains"
+            stats.duplicates_removed, 0,
+            "the loser was already expired concurrently; this run expired nothing"
         );
+        assert!(expired.is_empty());
+        let active = FactStore::new(&conn, DIM).list_active(None).unwrap();
+        assert_eq!(active.len(), 1, "exactly the survivor remains");
+        assert_eq!(active[0].content, "keep");
+    }
+
+    /// #409 read→write gap (survivor case): if the *survivor* a dedup merge folds a loser
+    /// into is concurrently expired in the snapshot→apply gap, the merge decision is void.
+    /// [`apply_plan`] must then KEEP the loser as the group's representative rather than
+    /// expiring it too and orphaning the duplicate cluster.
+    #[test]
+    fn apply_plan_keeps_loser_when_survivor_concurrently_expired() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // keep (higher importance) is the survivor; drop (lower) is the planned loser.
+        insert_fact(&conn, "keep", vec![1.0, 0.0, 0.0, 0.0], 0.9);
+        insert_fact(&conn, "drop", vec![0.99, 0.01, 0.0, 0.0], 0.5);
+
+        let config = ConsolidationConfig::default();
+        let snapshot = load_snapshot(&conn, DIM, &config).unwrap();
+        let plan = compute_plan(&snapshot, &MockGenerator, &MockEmbedder, DIM, &config).unwrap();
+        assert_eq!(plan.dedup.expirations.len(), 1);
+        let survivor = plan.dedup.expirations[0].survivor;
+        let loser = plan.dedup.expirations[0].loser;
+
+        // Concurrently expire the SURVIVOR between snapshot and apply.
+        FactStore::new(&conn, DIM)
+            .expire(survivor, Utc::now())
+            .unwrap();
+
+        let (stats, expired) = apply_plan(&conn, &plan, DIM).unwrap();
+        assert_eq!(
+            stats.duplicates_removed, 0,
+            "survivor gone → the merge is void, so the loser is NOT expired"
+        );
+        assert!(expired.is_empty());
+
+        // The loser survives as the group's representative — the cluster is not orphaned.
+        let active = FactStore::new(&conn, DIM).list_active(None).unwrap();
+        assert_eq!(
+            active.len(),
+            1,
+            "the loser is kept (survivor was expired elsewhere)"
+        );
+        assert_eq!(active[0].id, loser);
+        assert_eq!(active[0].content, "drop");
     }
 }

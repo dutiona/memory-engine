@@ -21,13 +21,18 @@ impl MemoryEngine {
     ///
     /// 1. **Read** (brief lock): snapshot the active set + watermark.
     /// 2. **Compute** (no lock): run dedup/cluster/global, including all consumer IO,
-    ///    against the snapshot — producing a [`ConsolidationPlan`](crate::consolidation::ConsolidationPlan).
+    ///    against the snapshot — producing a `ConsolidationPlan` of pure data.
     /// 3. **Write** (brief lock, one transaction): apply the plan atomically, then
     ///    rebuild the graph if dedup expired anything.
     ///
     /// Atomicity is preserved (a consumer failure aborts in the compute phase, before any
     /// write; the apply is all-or-nothing), but other engine writers — and, for an
-    /// in-memory pool, readers — are no longer starved for the IO duration.
+    /// in-memory pool, readers — are no longer starved for the IO duration. Because the
+    /// lock is released across the compute phase, a concurrent writer (`prune`, conflict
+    /// resolution) may expire a planned-for fact in the gap; the apply phase tolerates
+    /// that. This method is **not** designed to be invoked concurrently *with itself* —
+    /// the per-phase lock no longer serializes whole runs, so two overlapping runs are a
+    /// benign last-writer-wins on derived summaries, not a supported pattern.
     ///
     /// # Errors
     ///
@@ -59,16 +64,19 @@ impl MemoryEngine {
 
         // Phase 3 — WRITE (brief lock, one transaction): apply atomically, then rebuild
         // the graph inside the same lock if dedup expired facts (and their edges).
+        // `apply_plan` returns the ids it *actually* expired (a concurrent writer may have
+        // pre-empted some in the read→compute gap), so the graph rebuild and the vector
+        // index notify below key off real changes, not the stale plan.
         let conn = self.write_conn()?;
-        let stats = crate::consolidation::apply_plan(&conn, &plan, self.embed_dim)?;
-        if plan.duplicates_removed() > 0 {
+        let (stats, expired_ids) = crate::consolidation::apply_plan(&conn, &plan, self.embed_dim)?;
+        if !expired_ids.is_empty() {
             *self.graph.write() = MemoryGraph::load_from_db(&conn)?;
         }
         drop(conn); // release the write lock before notifying the vector index
 
         #[cfg(feature = "ann")]
         if let Some(ref hnsw) = self.hnsw_strategy {
-            for &id in plan.expirations() {
+            for &id in &expired_ids {
                 hnsw.notify_expire(id);
             }
         }

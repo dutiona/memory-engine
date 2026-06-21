@@ -310,6 +310,25 @@ impl<'a> FactStore<'a> {
         Ok(usize::try_from(count).unwrap_or(0))
     }
 
+    /// Whether a fact is currently active (`t_expired IS NULL`).
+    ///
+    /// A point liveness probe used by the consolidation apply phase to detect a fact
+    /// that was concurrently expired between the lock-free snapshot and the write — so a
+    /// dedup survivor removed in that gap does not cause its loser to be expired too,
+    /// orphaning the duplicate group (#409 read→write gap).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn is_active(&self, id: i64) -> Result<bool> {
+        let active: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM facts WHERE id = ?1 AND t_expired IS NULL)",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(active)
+    }
+
     /// List the importance-scoring projection of all active facts
     /// (`t_expired IS NULL`).
     ///

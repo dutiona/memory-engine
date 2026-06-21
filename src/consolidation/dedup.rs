@@ -42,8 +42,24 @@ enum DedupOutcome {
     },
 }
 
-/// Result of the pure dedup computation: which facts to expire and which importance
-/// values the survivors inherit, expressed as **data** rather than DB writes.
+/// One planned expiry: the `loser` to expire, folded into its `survivor`.
+///
+/// The pairing is what lets [`apply_dedup`] honor the #409 read→write gap: if the
+/// `survivor` was concurrently expired between the lock-free snapshot and the write, the
+/// merge decision is void and the `loser` must be kept (not expired), so the duplicate
+/// group is never left without an active representative. `survivor` is the **immediate**
+/// survivor of the pairwise decision; chain correctness comes from snapshotting every
+/// survivor's liveness in `apply_dedup` *before* any expiry (see there).
+pub(super) struct Expiry {
+    /// The lower-importance fact to expire.
+    pub(super) loser: i64,
+    /// The fact `loser` was folded into (the higher-importance member of the pair).
+    pub(super) survivor: i64,
+}
+
+/// Result of the pure dedup computation: which facts to expire (with their survivors) and
+/// which importance values the survivors inherit, expressed as **data** rather than DB
+/// writes.
 ///
 /// Produced by [`compute_dedup`] (no `Connection`, so it runs lock-free during the
 /// engine's compute phase, #409) and applied by [`apply_dedup`] inside the final
@@ -56,10 +72,9 @@ pub(super) struct DedupComputed {
     /// The corpus exceeded the cap, so the pass was skipped: no writes, and the
     /// caller must NOT advance the watermark.
     pub(super) skipped: bool,
-    /// Number of near-duplicates chosen for expiry.
-    pub(super) removed: usize,
-    /// Ids to expire (the lower-importance member of each duplicate pair).
-    pub(super) expirations: Vec<i64>,
+    /// Planned expiries (loser + its survivor), the lower-importance member of each
+    /// duplicate pair paired with the fact it merges into.
+    pub(super) expirations: Vec<Expiry>,
     /// Base-`importance` inheritances `(survivor_id, importance)` — empty under the
     /// current expiry rule (kept for write-set fidelity; see the struct docs).
     pub(super) importance_updates: Vec<(i64, f64)>,
@@ -73,7 +88,6 @@ impl DedupComputed {
     pub(super) const fn skipped() -> Self {
         Self {
             skipped: true,
-            removed: 0,
             expirations: Vec::new(),
             importance_updates: Vec::new(),
             importance_score_updates: Vec::new(),
@@ -121,8 +135,10 @@ pub(super) fn compute_dedup(
         },
     );
 
+    // `expired_ids` is the loop's skip set (a loser is never re-compared); `expiries` is
+    // the ordered plan (loser + its survivor) handed to `apply_dedup`.
     let mut expired_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut removed = 0;
+    let mut expiries: Vec<Expiry> = Vec::new();
     let mut importance_updates: Vec<(i64, f64)> = Vec::new();
     // Running maximum `importance_score` per surviving fact id (#264). The in-memory
     // `active_facts` slice is never mutated, so within a multi-duplicate chain a
@@ -162,15 +178,17 @@ pub(super) fn compute_dedup(
                     candidate.importance,
                     candidate.id,
                 );
-                expired_ids.insert(expire_id);
-                removed += 1;
-
                 // Survivor inherits the max importance values from the merged pair.
                 let (survivor, loser): (&Fact, &Fact) = if expire_id == new_fact.id {
                     (candidate, new_fact)
                 } else {
                     (new_fact, candidate)
                 };
+                expired_ids.insert(expire_id);
+                expiries.push(Expiry {
+                    loser: expire_id,
+                    survivor: survivor.id,
+                });
                 inherit_max_importance(
                     survivor,
                     loser,
@@ -188,8 +206,7 @@ pub(super) fn compute_dedup(
 
     DedupComputed {
         skipped: false,
-        removed,
-        expirations: expired_ids.into_iter().collect(),
+        expirations: expiries,
         importance_updates,
         importance_score_updates: running_scores.into_iter().collect(),
     }
@@ -197,15 +214,29 @@ pub(super) fn compute_dedup(
 
 /// Apply a computed dedup plan inside the caller's write context (#409): the base- and
 /// score-importance inheritances first (while every fact is still active), then the
-/// expirations and their edge cascades.
+/// expirations and their edge cascades. Returns the ids actually expired by **this**
+/// call, so the engine can drive its vector-index `notify_expire` and stats off what
+/// truly changed rather than the (possibly stale) plan.
 ///
-/// Tolerant of a concurrent expiry: because the engine now releases the write lock
-/// between snapshotting the active set and applying the plan, another writer (e.g.
-/// `prune` or conflict resolution) may already have expired a planned-for fact. A
-/// resulting [`MemoryError::NotFound`] from [`FactStore::expire`] is therefore treated
-/// as "already done", not an error — the desired end state (the fact is expired) still
-/// holds. In the single-connection wrapper/test path no concurrent writer exists, so
-/// that branch is never taken there.
+/// # Concurrency — the read→write gap (#409)
+///
+/// The engine releases the write lock between snapshotting the active set and applying
+/// the plan, so another writer (`prune`, conflict resolution, the dream cycle) may have
+/// expired a planned-for fact in between. Two cases are handled:
+///
+/// - **Loser concurrently expired:** [`FactStore::expire`] returns
+///   [`MemoryError::NotFound`]; tolerated as "already done" (the end state holds) and not
+///   counted as expired-by-us.
+/// - **Survivor concurrently expired:** the merge decision is void — expiring the loser
+///   too would leave the duplicate group with no active representative. So liveness of
+///   every survivor is **snapshotted up front** (before any expiry), and a loser is
+///   expired only if its survivor was still active at that point; otherwise the loser is
+///   kept. Snapshotting first (rather than checking at expiry time) is what keeps chains
+///   correct: an intermediate survivor that this call legitimately expires must not be
+///   mistaken for a concurrently-expired one.
+///
+/// The single-connection wrapper/test path has no concurrent writer, so every survivor is
+/// live and every planned loser is expired — behavior identical to the old pass.
 ///
 /// # Errors
 ///
@@ -217,7 +248,7 @@ pub(super) fn apply_dedup(
     embed_dim: usize,
     computed: &DedupComputed,
     now: DateTime<Utc>,
-) -> Result<()> {
+) -> Result<Vec<i64>> {
     let fact_store = FactStore::new(conn, embed_dim);
     let edge_store = EdgeStore::new(conn);
 
@@ -227,17 +258,37 @@ pub(super) fn apply_dedup(
     for &(id, score) in &computed.importance_score_updates {
         fact_store.update_importance_score(id, score)?;
     }
-    for &id in &computed.expirations {
-        match fact_store.expire(id, now) {
-            // `Ok` is the normal path; a `NotFound` means the fact was concurrently
-            // expired between the snapshot and this apply — the desired end state already
-            // holds, so it is a no-op, not a failure (#409).
-            Ok(()) | Err(MemoryError::NotFound(_)) => {}
-            Err(e) => return Err(e),
+
+    // Snapshot each distinct survivor's liveness BEFORE expiring anything, so a survivor
+    // this call itself expires (it may also be a loser in a merge chain) is not confused
+    // with one a concurrent writer expired (#409, survivor case).
+    let mut survivor_live: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
+    for e in &computed.expirations {
+        if let std::collections::hash_map::Entry::Vacant(slot) = survivor_live.entry(e.survivor) {
+            slot.insert(fact_store.is_active(e.survivor)?);
         }
-        edge_store.expire_by_fact(id, now)?;
     }
-    Ok(())
+
+    let mut expired = Vec::with_capacity(computed.expirations.len());
+    for e in &computed.expirations {
+        // Survivor concurrently expired → the merge is void; keep the loser as the
+        // group's representative instead of orphaning the cluster.
+        if !survivor_live[&e.survivor] {
+            continue;
+        }
+        match fact_store.expire(e.loser, now) {
+            Ok(()) => {
+                edge_store.expire_by_fact(e.loser, now)?;
+                expired.push(e.loser);
+            }
+            // Loser concurrently expired between snapshot and apply — the desired end
+            // state already holds, so it is a no-op, not a failure, and not counted as
+            // expired by this call (#409, loser case).
+            Err(MemoryError::NotFound(_)) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(expired)
 }
 
 /// Local deduplication pass — compute + apply on a single connection.
@@ -265,10 +316,10 @@ fn local_dedup(
             active_count: active_facts.len(),
         });
     }
-    apply_dedup(conn, embed_dim, &computed, now)?;
+    let expired_ids = apply_dedup(conn, embed_dim, &computed, now)?;
     Ok(DedupOutcome::Ran {
-        removed: computed.removed,
-        expired_ids: computed.expirations,
+        removed: expired_ids.len(),
+        expired_ids,
     })
 }
 
