@@ -182,7 +182,7 @@ pub use engine::cycle::{
 #[doc(hidden)]
 pub mod fuzz_seam {
     pub use crate::bootstrap::parse::{parse_content_blocks, parse_session_file};
-    pub use crate::engine::snapshot::load_from_file;
+    pub use crate::engine::snapshot::{fuzz_wrap_payload, load_from_file};
 }
 
 #[cfg(test)]

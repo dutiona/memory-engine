@@ -32,14 +32,25 @@ fuzz_target!(|data: &[u8]| {
             *slot = Some(t);
         }
         let path = slot.as_ref().unwrap().path();
+
+        // (1) Raw bytes: exercises the OUTER envelope parse — size gate,
+        // header_len bounds, header MessagePack deserialize, and the
+        // checksum-reject path. `embed_dim` fuzzed implicitly (768 vs a
+        // mismatching 0). Both None and Some(..) are fine; only a panic fails.
         // fs::write truncates, so each iteration fully replaces the contents.
-        if std::fs::write(path, data).is_err() {
-            return;
+        if std::fs::write(path, data).is_ok() {
+            let _ = memory_engine::fuzz_seam::load_from_file(path, 768);
+            let _ = memory_engine::fuzz_seam::load_from_file(path, 0);
         }
-        // `embed_dim` is fuzzed implicitly: try the common 768 and a mismatching
-        // 0 so both the dimension-accept and dimension-reject branches run. Both
-        // `None` and `Some(..)` are acceptable; the only failure is a panic.
-        let _ = memory_engine::fuzz_seam::load_from_file(path, 768);
-        let _ = memory_engine::fuzz_seam::load_from_file(path, 0);
+
+        // (2) Wrapped bytes: a valid header + a blake3 recomputed over `data`,
+        // so the checksum gate PASSES and `data` reaches the payload MessagePack
+        // deserializer (the deep-nesting / large-allocation paths #311 targets,
+        // which the raw path can never reach — guessing a 256-bit hash is
+        // infeasible). embed_dim 768 matches the header the wrapper writes.
+        let envelope = memory_engine::fuzz_seam::fuzz_wrap_payload(data, 768);
+        if std::fs::write(path, &envelope).is_ok() {
+            let _ = memory_engine::fuzz_seam::load_from_file(path, 768);
+        }
     });
 });

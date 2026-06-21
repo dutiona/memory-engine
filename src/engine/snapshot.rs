@@ -276,6 +276,41 @@ pub fn write_to_file(
     Ok(())
 }
 
+/// Wrap arbitrary fuzzer bytes as the **payload** of an otherwise-valid
+/// snapshot envelope: a correct header (current [`FORMAT_VERSION`] +
+/// `embed_dim`) and a blake3 recomputed over `payload`. Without this the
+/// fuzzer's bytes would be rejected at the checksum gate in
+/// [`load_from_file`] before ever reaching the payload MessagePack
+/// deserializer (the deep-nesting / large-allocation paths #311 targets).
+///
+/// `#[cfg(fuzzing)]` only — compiled solely under `cargo fuzz`, never shipped.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_wrap_payload(payload: &[u8], embed_dim: usize) -> Vec<u8> {
+    let header = SnapshotHeader {
+        format_version: FORMAT_VERSION,
+        fingerprint: DbFingerprint {
+            max_fact_id: 0,
+            active_fact_count: 0,
+            max_edge_id: 0,
+            active_edge_count: 0,
+            max_scope_id: 0,
+            scope_count: 0,
+        },
+        embed_dim,
+        engine_version: String::new(),
+    };
+    let header_bytes = rmp_serde::to_vec_named(&header).expect("fuzz header serialize");
+    let header_len = u32::try_from(header_bytes.len()).expect("fuzz header len fits u32");
+    let mut out = Vec::with_capacity(4 + header_bytes.len() + payload.len() + BLAKE3_LEN);
+    out.extend_from_slice(&header_len.to_le_bytes());
+    out.extend_from_slice(&header_bytes);
+    out.extend_from_slice(payload);
+    out.extend_from_slice(blake3::hash(payload).as_bytes());
+    out
+}
+
 /// Load and validate a snapshot from disk.
 ///
 /// Returns `None` on any failure (missing file, corrupt data, version
