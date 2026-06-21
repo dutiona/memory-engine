@@ -18,7 +18,9 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::NotFound` if the requested scope path doesn't exist.
+    /// Returns `MemoryError::NotFound` if the requested scope path doesn't exist,
+    /// or `MemoryError::Conflict` if [`ResumeConfig::validate`] rejects the config
+    /// (out-of-range `high_importance_min` or a zero tier cap).
     pub fn resume_context(&self, config: &ResumeConfig) -> Result<ResumeContext> {
         // Step 1: Resolve scope IDs from cache (short-lived read lock)
         let scope_ids = {

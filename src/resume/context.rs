@@ -40,6 +40,56 @@ impl Default for ResumeConfig {
     }
 }
 
+impl ResumeConfig {
+    /// Validate configuration parameters.
+    ///
+    /// `high_importance_min` is a materialized-score threshold that flows
+    /// directly into [`FactStore::list_by_importance_score`]'s `min_score`
+    /// comparison; it must be finite and within `[0.0, 1.0]` — a value like
+    /// `2.0` would silently yield an empty high-importance tier with no
+    /// diagnostic. The four tier caps must each be non-zero, since a `0` cap
+    /// silently empties that tier.
+    ///
+    /// Mirrors the [`DreamCycleConfig::validate`](crate::types::DreamCycleConfig::validate)
+    /// precedent and uses the same
+    /// [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
+    /// payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Conflict`](crate::error::MemoryError::Conflict)
+    /// wrapping [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
+    /// if `high_importance_min` is non-finite or outside `[0.0, 1.0]`, or if any
+    /// of the tier caps (`pinned_cap`, `high_importance_cap`, `due_cap`,
+    /// `recent_cap`) is zero.
+    pub fn validate(&self) -> Result<()> {
+        use crate::error::{ConflictError, MemoryError};
+
+        if !self.high_importance_min.is_finite() || !(0.0..=1.0).contains(&self.high_importance_min)
+        {
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!(
+                    "high_importance_min must be in [0.0, 1.0], got {}",
+                    self.high_importance_min
+                ),
+            )));
+        }
+        for (name, cap) in [
+            ("pinned_cap", self.pinned_cap),
+            ("high_importance_cap", self.high_importance_cap),
+            ("due_cap", self.due_cap),
+            ("recent_cap", self.recent_cap),
+        ] {
+            if cap == 0 {
+                return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                    format!("{name} must be greater than 0, got 0"),
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Result of [`resume_context`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResumeContext {
@@ -70,7 +120,9 @@ pub struct ResumeContext {
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::MemoryError`] if any underlying store query fails.
+/// Returns [`crate::error::MemoryError`] if [`ResumeConfig::validate`] rejects
+/// the config (out-of-range `high_importance_min` or a zero tier cap), or if any
+/// underlying store query fails.
 ///
 /// # Examples
 ///
@@ -92,6 +144,8 @@ pub fn resume_context(
     embed_dim: usize,
     config: &ResumeConfig,
 ) -> Result<ResumeContext> {
+    config.validate()?;
+
     let fact_store = FactStore::new(conn, embed_dim);
     let mut seen: HashSet<i64> = HashSet::new();
 
@@ -281,6 +335,79 @@ mod tests {
             .collect();
         let unique: HashSet<i64> = all_ids.iter().copied().collect();
         assert_eq!(all_ids.len(), unique.len(), "no duplicates across tiers");
+    }
+
+    #[test]
+    fn validate_accepts_default_config() {
+        assert!(ResumeConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_high_importance_min() {
+        use crate::error::{ConflictError, MemoryError};
+
+        for bad in [2.0_f64, -0.1, f64::NAN, f64::INFINITY] {
+            let config = ResumeConfig {
+                high_importance_min: bad,
+                ..ResumeConfig::default()
+            };
+            let err = config.validate().unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    MemoryError::Conflict(ConflictError::PolicyParameter(_))
+                ),
+                "expected PolicyParameter conflict for high_importance_min={bad}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_boundary_high_importance_min() {
+        for ok in [0.0_f64, 1.0] {
+            let config = ResumeConfig {
+                high_importance_min: ok,
+                ..ResumeConfig::default()
+            };
+            assert!(
+                config.validate().is_ok(),
+                "boundary high_importance_min={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_zero_caps() {
+        use crate::error::{ConflictError, MemoryError};
+
+        let zero_setters: [fn(&mut ResumeConfig); 4] = [
+            |c| c.pinned_cap = 0,
+            |c| c.high_importance_cap = 0,
+            |c| c.due_cap = 0,
+            |c| c.recent_cap = 0,
+        ];
+        for set_zero in zero_setters {
+            let mut config = ResumeConfig::default();
+            set_zero(&mut config);
+            let err = config.validate().unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    MemoryError::Conflict(ConflictError::PolicyParameter(_))
+                ),
+                "expected PolicyParameter conflict for a zero cap, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resume_context_propagates_invalid_config() {
+        let conn = setup();
+        let config = ResumeConfig {
+            high_importance_min: 5.0,
+            ..ResumeConfig::default()
+        };
+        assert!(resume_context(&conn, &[1], DIM, &config).is_err());
     }
 
     #[test]
