@@ -1,33 +1,45 @@
 //! Three-pass consolidation pipeline: dedup, cluster fusion, global integration.
 //!
-//! All passes run atomically in a single `SQLite` transaction.
+//! **Lock-free compute, atomic apply (#409).** The pipeline is split into three phases
+//! so the engine can release its single write lock across the unbounded consumer
+//! `summarize`/`embed` IO:
+//!
+//! 1. [`load_snapshot`] — a brief read: count + `last_consolidated_at` + the active set,
+//!    loaded once (#389) and short-circuited entirely when over both safety caps (#659).
+//! 2. [`compute_plan`] — **no `Connection`, no lock**: the dedup decision, the cluster
+//!    summaries, and the global summary are all computed (the consumer IO lives here) and
+//!    returned as a [`ConsolidationPlan`] of pure data.
+//! 3. [`apply_plan`] — all writes in a **single transaction**, preserving atomicity
+//!    exactly as before (D3): a consumer failure aborts in phase 2 before any write, and
+//!    a write failure rolls the whole transaction back.
+//!
+//! A single-connection `consolidate` entry composes all three on one connection for the
+//! unit tests; the engine calls the phases separately so it can drop the lock between the
+//! read and the compute.
 
 mod cluster;
 mod dedup;
 mod global;
 
-pub use cluster::cluster_fusion;
-pub use dedup::{DedupOutcome, local_dedup};
-pub use global::global_integration;
-
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::error::Result;
+use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};
 use crate::traits::{
     ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummarizableContent,
     SummaryGenerator,
 };
-use crate::types::Fact;
+use crate::types::{EmbeddingFingerprint, Fact, NewSummary};
 
-/// Safety cap for the O(N·M) [`local_dedup`] pass. Beyond this many active facts
+/// Safety cap for the O(N·M) dedup pass (`compute_dedup`). Beyond this many active facts
 /// the pass is **skipped and the consolidation watermark is NOT advanced**, so the
 /// skipped facts are retried on a later run once the corpus shrinks
-/// ([`DedupOutcome::Skipped`]).
+/// (`DedupComputed::skipped`).
 const MAX_FACTS_FOR_DEDUP: usize = 50_000;
 
-/// Safety cap for the O(N²) [`cluster_fusion`] pass. Beyond this many active facts
+/// Safety cap for the O(N²) cluster pass (`compute_clusters`). Beyond this many active facts
 /// clustering is **silently skipped, preserving any existing cluster summaries**
 /// (the cap is checked before they would be deleted).
 ///
@@ -64,31 +76,306 @@ pub fn summarize_and_embed(
     Ok((text, embedding))
 }
 
-/// Orchestrate all 3 consolidation passes atomically.
+/// An immutable read-phase snapshot of everything [`compute_plan`] needs, captured
+/// under a brief lock and then released so the compute phase runs lock-free (#409).
+pub struct Snapshot {
+    /// The active set, loaded once (#389). Empty when `over_both_caps` (the load was
+    /// short-circuited, #659) — distinguished from a genuinely empty store by the flag.
+    active_facts: Vec<Fact>,
+    /// `last_consolidated_at` watermark scoping the dedup "new facts" set.
+    last: Option<DateTime<Utc>>,
+    /// Single run-level timestamp; the watermark advances to this on success.
+    now: DateTime<Utc>,
+    /// The corpus exceeded BOTH safety caps, so the (expensive) `list_active` load was
+    /// skipped (#659): the plan is a complete no-op (dedup skipped, clustering skipped).
+    over_both_caps: bool,
+}
+
+/// The fully-computed plan for one consolidation run — pure data produced lock-free by
+/// [`compute_plan`] and applied atomically by [`apply_plan`] (#409). Holds no borrow of
+/// the store, so it survives the gap between releasing the read lock and acquiring the
+/// write lock.
+pub struct ConsolidationPlan {
+    /// Dedup decision (expirations + importance inheritances) as data.
+    dedup: dedup::DedupComputed,
+    /// Whether clustering ran (vs. skipped over the cap). Gates the summary writes so
+    /// existing summaries are preserved when the pass could not run (#345).
+    cluster_ran: bool,
+    /// New cluster summaries to write (already summarized + embedded).
+    cluster_summaries: Vec<NewSummary>,
+    /// New global summary to write, if any.
+    global_summary: Option<NewSummary>,
+    /// The embedder's fingerprint to stamp, set **iff** a summary vector was produced
+    /// (#643). Captured during compute so `apply_plan` needs no embedder.
+    embedding_fingerprint: Option<EmbeddingFingerprint>,
+    /// Run-level timestamp (expiry stamp + watermark).
+    now: DateTime<Utc>,
+}
+
+impl ConsolidationPlan {
+    /// Ids the plan will expire — the engine forwards these to its vector index
+    /// (`notify_expire`) after the write commits.
+    pub fn expirations(&self) -> &[i64] {
+        &self.dedup.expirations
+    }
+
+    /// Number of near-duplicates the plan removes — the engine rebuilds its graph when
+    /// this is `> 0`.
+    pub const fn duplicates_removed(&self) -> usize {
+        self.dedup.removed
+    }
+}
+
+/// Phase 1 — load the read snapshot under a brief lock (engine: production caps).
 ///
-/// 1. Local dedup — expire near-duplicate facts
-/// 2. Cluster fusion — group related facts, generate cluster summaries
-/// 3. Global integration — summarize all clusters into one global summary
+/// # Errors
 ///
-/// All passes run within a single transaction. On any failure (including
-/// `SummaryGenerator` or `EmbeddingProvider` errors), the entire consolidation
-/// is rolled back.
+/// Returns `MemoryError::Conflict` if `config` fails validation, `MemoryError::Migration`
+/// if `last_consolidated_at` cannot be parsed, or `MemoryError::Database` on read failure.
+pub fn load_snapshot(
+    conn: &Connection,
+    embed_dim: usize,
+    config: &ConsolidationConfig,
+) -> Result<Snapshot> {
+    load_snapshot_capped(
+        conn,
+        embed_dim,
+        config,
+        MAX_FACTS_FOR_DEDUP,
+        MAX_FACTS_FOR_CLUSTERING,
+    )
+}
+
+/// Cap-injecting core of [`load_snapshot`]; tests pass small caps to exercise the skip
+/// paths without a 50 000-fact corpus.
+fn load_snapshot_capped(
+    conn: &Connection,
+    embed_dim: usize,
+    config: &ConsolidationConfig,
+    max_dedup_facts: usize,
+    max_cluster_facts: usize,
+) -> Result<Snapshot> {
+    // Validate up front, before any read — mirrors `prune()` rejecting an invalid
+    // `ForgetPolicy` at the forget entry point. In the cap-injecting core so the test
+    // cap-path validates too.
+    config.validate()?;
+
+    let last = get_config(conn, "last_consolidated_at")?
+        .map(|s| DateTime::parse_from_rfc3339(&s))
+        .transpose()
+        .map_err(|e| {
+            crate::error::MigrationError::Incompatible(format!("invalid last_consolidated_at: {e}"))
+        })?
+        .map(|dt| dt.with_timezone(&Utc));
+    let now = Utc::now();
+
+    let fact_store = FactStore::new(conn, embed_dim);
+    let active_count = fact_store.count_active()?;
+
+    // #659: if the corpus is over BOTH caps, the dedup pass would skip AND the cluster
+    // pass would skip — so neither needs the materialized active set. Short-circuit the
+    // expensive `list_active` load (which deserializes every embedding BLOB) and return
+    // a no-op marker instead. A genuinely empty store (count 0) is NOT over the caps, so
+    // it still loads (and consolidates to a watermark-advancing no-op).
+    if active_count > max_dedup_facts && active_count > max_cluster_facts {
+        return Ok(Snapshot {
+            active_facts: Vec::new(),
+            last,
+            now,
+            over_both_caps: true,
+        });
+    }
+
+    // #389: load the active set ONCE and share it across the dedup and cluster passes,
+    // instead of each pass re-querying the store (and re-deserializing every embedding
+    // BLOB — ~147 MB for 50k×768-dim, previously paid twice).
+    let active_facts = fact_store.list_active(None)?;
+    Ok(Snapshot {
+        active_facts,
+        last,
+        now,
+        over_both_caps: false,
+    })
+}
+
+/// Phase 2 — compute the plan **without any lock or store access** (engine: production
+/// caps). The consumer `summarize`/`embed` IO happens here, off the write lock (#409).
 ///
-/// Reads `last_consolidated_at` from config to scope dedup.
-/// Updates `last_consolidated_at` after successful completion.
+/// # Errors
 ///
-/// `generator` produces the summary text; `embedder` projects that text into
-/// the fact vector space (issue #116 — embedding is no longer duplicated on the
-/// generator trait).
+/// Propagates errors from the `SummaryGenerator` or `EmbeddingProvider`, or
+/// `MemoryError::EmbeddingDimension` on a mismatched embedding length. A failure here
+/// aborts before any write, so the store is untouched (atomicity, D3).
+pub fn compute_plan(
+    snapshot: &Snapshot,
+    generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
+    embed_dim: usize,
+    config: &ConsolidationConfig,
+) -> Result<ConsolidationPlan> {
+    compute_plan_capped(
+        snapshot,
+        generator,
+        embedder,
+        embed_dim,
+        config,
+        MAX_FACTS_FOR_DEDUP,
+        MAX_FACTS_FOR_CLUSTERING,
+    )
+}
+
+/// Cap-injecting core of [`compute_plan`].
+fn compute_plan_capped(
+    snapshot: &Snapshot,
+    generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
+    embed_dim: usize,
+    config: &ConsolidationConfig,
+    max_dedup_facts: usize,
+    max_cluster_facts: usize,
+) -> Result<ConsolidationPlan> {
+    // Over both caps (#659): a complete no-op — dedup skipped (so the watermark is held)
+    // and clustering skipped (so existing summaries are preserved). No consumer IO.
+    if snapshot.over_both_caps {
+        return Ok(ConsolidationPlan {
+            dedup: dedup::DedupComputed::skipped(),
+            cluster_ran: false,
+            cluster_summaries: Vec::new(),
+            global_summary: None,
+            embedding_fingerprint: None,
+            now: snapshot.now,
+        });
+    }
+
+    // Pass 1 — dedup (pure): expirations + importance inheritances as data (#272/#264).
+    let dedup = dedup::compute_dedup(
+        &snapshot.active_facts,
+        config.dedup_threshold,
+        max_dedup_facts,
+        snapshot.last,
+    );
+
+    // Survivors = the loaded active set minus the dedup expirations (no re-query, borrowed
+    // so no clone — #679/#389). They carry the PRE-dedup `importance`/`importance_score`;
+    // inert today, since clustering reads only `id`/`content`/`embedding`/`scope_id`.
+    let expired_set: std::collections::HashSet<i64> = dedup.expirations.iter().copied().collect();
+    let survivors: Vec<&Fact> = snapshot
+        .active_facts
+        .iter()
+        .filter(|f| !expired_set.contains(&f.id))
+        .collect();
+
+    // Pass 2 — cluster (consumer IO, no store): summarize/embed each qualifying cluster.
+    // The single run-level `now` flows through so all summaries share a created_at (#495).
+    let params = cluster::ClusterParams {
+        embed_dim,
+        min_cluster_size: config.min_cluster_size,
+        cluster_threshold: config.cluster_threshold,
+        max_facts: max_cluster_facts,
+        now: snapshot.now,
+    };
+    let cluster = cluster::compute_clusters(&survivors, generator, embedder, &params)?;
+
+    // Pass 3 — global (consumer IO, no store): summarize THIS run's in-memory cluster
+    // summaries. Gated on `cluster.ran`: when clustering is skipped over the cap, the
+    // existing cluster/global summaries are left untouched, so global never re-summarizes
+    // stale clusters it could not refresh.
+    let global_summary = if cluster.ran {
+        global::compute_global(
+            &cluster.summaries,
+            generator,
+            embedder,
+            embed_dim,
+            snapshot.now,
+        )?
+    } else {
+        None
+    };
+
+    // Stamp the embedding identity only if a summary vector was actually produced (#643);
+    // capture the fingerprint now so `apply_plan` needs no embedder.
+    let stamp = !cluster.summaries.is_empty() || global_summary.is_some();
+    let embedding_fingerprint = stamp.then(|| embedder.fingerprint());
+
+    Ok(ConsolidationPlan {
+        dedup,
+        cluster_ran: cluster.ran,
+        cluster_summaries: cluster.summaries,
+        global_summary,
+        embedding_fingerprint,
+        now: snapshot.now,
+    })
+}
+
+/// Phase 3 — apply the plan in a **single transaction** (#409, D3 atomicity).
+///
+/// All-or-nothing: a failure here rolls back every write; a consumer failure has already
+/// aborted in [`compute_plan`], before this transaction opens. Idempotent and tolerant of
+/// a fact concurrently expired between the snapshot and this apply (see [`dedup::apply_dedup`]).
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on SQL failure, or `MemoryError::Serialization` on a
+/// summary serialization failure.
+pub fn apply_plan(
+    conn: &Connection,
+    plan: &ConsolidationPlan,
+    embed_dim: usize,
+) -> Result<ConsolidationStats> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Dedup writes: importance inheritances + expirations (NotFound-tolerant, #409).
+    dedup::apply_dedup(&tx, embed_dim, &plan.dedup, plan.now)?;
+
+    // Summary writes — only when clustering actually ran (#345): over the cap we must not
+    // delete existing summaries without replacements. Cluster + global move together so
+    // global never re-summarizes stale clusters.
+    if plan.cluster_ran {
+        cluster::apply_clusters(&tx, embed_dim, &plan.cluster_summaries)?;
+        global::apply_global(&tx, embed_dim, plan.global_summary.as_ref())?;
+    }
+
+    // Record the embedding identity on first vector write only (#613/#643, ADR 0015 §2),
+    // atomically inside `tx` with the summaries it describes. A vector-less run leaves the
+    // store unstamped, so a later real first write with a different embedder establishes
+    // the true identity instead of inheriting a stale one (the #614-enforcement landmine).
+    if let Some(fingerprint) = &plan.embedding_fingerprint {
+        crate::store::embedding_meta::record_if_absent(&tx, fingerprint, embed_dim)?;
+    }
+
+    // Advance the watermark only if dedup actually ran (#439/#306). When skipped, facts
+    // ingested during the over-cap period must be retried on the next run.
+    if !plan.dedup.skipped {
+        set_config(&tx, "last_consolidated_at", &plan.now.to_rfc3339())?;
+    }
+
+    tx.commit()?;
+
+    Ok(ConsolidationStats {
+        duplicates_removed: plan.dedup.removed,
+        clusters_created: plan.cluster_summaries.len(),
+        global_summaries: usize::from(plan.global_summary.is_some()),
+    })
+}
+
+/// Orchestrate all 3 consolidation passes on a single connection (load → compute →
+/// apply). The convenience entry for non-engine callers and the unit tests; the engine
+/// instead calls the three phases separately so it can drop its write lock across the
+/// lock-free [`compute_plan`] (#409).
+///
+/// Reads `last_consolidated_at` to scope dedup and updates it after a successful run.
+/// `generator` produces the summary text; `embedder` projects it into the fact vector
+/// space (#116). Returns the stats and the ids expired (so the engine can update vector
+/// indexes).
 ///
 /// # Errors
 ///
 /// Returns `MemoryError::Conflict` if `config` fails validation
-/// ([`ConsolidationConfig::validate`]).
-/// Propagates errors from any pass, the `SummaryGenerator`, or the
+/// ([`ConsolidationConfig::validate`]), `MemoryError::Migration` if `last_consolidated_at`
+/// cannot be parsed, or propagates errors from any pass, the `SummaryGenerator`, or the
 /// `EmbeddingProvider`.
-/// Returns `MemoryError::Migration` if `last_consolidated_at` in config cannot be parsed.
-pub fn consolidate(
+#[cfg(test)]
+fn consolidate(
     conn: &Connection,
     generator: &dyn SummaryGenerator,
     embedder: &dyn EmbeddingProvider,
@@ -102,17 +389,18 @@ pub fn consolidate(
         embed_dim,
         config,
         MAX_FACTS_FOR_DEDUP,
+        MAX_FACTS_FOR_CLUSTERING,
     )
 }
 
-/// Cap-injecting core of [`consolidate`]. The public entry point passes the
-/// production [`MAX_FACTS_FOR_DEDUP`]; tests pass a small `max_dedup_facts` to
-/// exercise the dedup-skip / watermark-suppression path without a 50 000-fact
-/// corpus.
+/// Cap-injecting core of [`consolidate`]; tests pass small caps to exercise the dedup-skip
+/// / watermark-suppression (#439/#306) and the over-both-caps load short-circuit (#659)
+/// without a 50 000-fact corpus.
 ///
 /// # Errors
 ///
-/// Same as [`consolidate`].
+/// Same as `consolidate`.
+#[cfg(test)]
 fn consolidate_with_caps(
     conn: &Connection,
     generator: &dyn SummaryGenerator,
@@ -120,108 +408,21 @@ fn consolidate_with_caps(
     embed_dim: usize,
     config: &ConsolidationConfig,
     max_dedup_facts: usize,
+    max_cluster_facts: usize,
 ) -> Result<(ConsolidationStats, Vec<i64>)> {
-    // Validate up front, before touching the store — mirrors `prune()` rejecting
-    // an invalid `ForgetPolicy` at the forget entry point. Placed here (the shared
-    // core), not in the public wrapper, so the test cap-path validates too.
-    config.validate()?;
-
-    let last = get_config(conn, "last_consolidated_at")?
-        .map(|s| DateTime::parse_from_rfc3339(&s))
-        .transpose()
-        .map_err(|e| {
-            crate::error::MigrationError::Incompatible(format!("invalid last_consolidated_at: {e}"))
-        })?
-        .map(|dt| dt.with_timezone(&Utc));
-    let now = Utc::now();
-
-    let tx = conn.unchecked_transaction()?;
-
-    // #389: load the active set ONCE and share it across the dedup and cluster
-    // passes, instead of each pass re-querying the store (and re-deserializing
-    // every embedding BLOB — ~147 MB for 50k×768-dim, previously paid twice).
-    let active_facts = crate::store::facts::FactStore::new(&tx, embed_dim).list_active(None)?;
-
-    // The dedup-skip state is carried in the return type ([`DedupOutcome`]), not an
-    // in-band `usize::MAX` sentinel (#272). A `Skipped` pass contributes no
-    // removals and leaves the watermark unadvanced so the over-cap facts are
-    // retried on the next run.
-    let (duplicates_removed, expired_ids, dedup_skipped) = match local_dedup(
-        &tx,
-        embed_dim,
-        &active_facts,
-        config.dedup_threshold,
-        max_dedup_facts,
-        last,
-        now,
-    )? {
-        DedupOutcome::Ran {
-            removed,
-            expired_ids,
-        } => (removed, expired_ids, false),
-        DedupOutcome::Skipped { .. } => (0, Vec::new(), true),
-    };
-
-    // Cluster operates on the post-dedup survivors: the loaded facts minus the ones
-    // dedup just expired (no re-query, borrowed so no clone — #679/#389). On the
-    // dedup-skip path `expired_ids` is empty, so this is the full loaded set, which
-    // `cluster_fusion`'s own cap then skips (the two caps are equal).
-    //
-    // These survivors carry the PRE-dedup `importance`/`importance_score` — dedup
-    // mutates those columns in the DB but not the in-memory `Fact`s. Inert today:
-    // `cluster_fusion` reads only `id`/`content`/`embedding`/`scope_id`. A future
-    // cluster pass that reads importance would need a re-read (or #264's running-max
-    // treatment) here.
-    let expired_set: std::collections::HashSet<i64> = expired_ids.iter().copied().collect();
-    let survivors: Vec<&Fact> = active_facts
-        .iter()
-        .filter(|f| !expired_set.contains(&f.id))
-        .collect();
-
-    // #495: thread the single run-level `now` through both summary-writing passes
-    // so all summaries from one consolidation share a created_at, instead of each
-    // pass calling `Utc::now()` independently.
-    let clusters_created = cluster_fusion(
-        &tx,
-        &survivors,
+    let snapshot =
+        load_snapshot_capped(conn, embed_dim, config, max_dedup_facts, max_cluster_facts)?;
+    let plan = compute_plan_capped(
+        &snapshot,
         generator,
         embedder,
         embed_dim,
-        config.min_cluster_size,
-        config.cluster_threshold,
-        now,
+        config,
+        max_dedup_facts,
+        max_cluster_facts,
     )?;
-    let global_summaries = global_integration(&tx, generator, embedder, embed_dim, now)?;
-
-    // Record the embedding identity on first write (#613, ADR 0015 §2) — but only
-    // once a summary vector has actually been written (#643). `local_dedup` only
-    // expires rows; `cluster_fusion`/`global_integration` are the sole vector
-    // writers here, so gating on their counts defers the stamp past a vector-less
-    // run (dedup-only, or a no-op on a sparse store). Done inside `tx`, so the
-    // identity still commits atomically with the summaries it describes. A no-op
-    // run leaves the store unstamped, so a later real first write with a different
-    // embedder establishes the true identity instead of inheriting a stale one
-    // (the #614-enforcement landmine).
-    if clusters_created > 0 || global_summaries > 0 {
-        crate::store::embedding_meta::record_if_absent(&tx, &embedder.fingerprint(), embed_dim)?;
-    }
-
-    // Only advance the watermark if dedup actually ran. When skipped, facts
-    // ingested during the over-cap period must be retried on the next run.
-    if !dedup_skipped {
-        set_config(&tx, "last_consolidated_at", &now.to_rfc3339())?;
-    }
-
-    tx.commit()?;
-
-    Ok((
-        ConsolidationStats {
-            duplicates_removed,
-            clusters_created,
-            global_summaries,
-        },
-        expired_ids,
-    ))
+    let stats = apply_plan(conn, &plan, embed_dim)?;
+    Ok((stats, plan.dedup.expirations))
 }
 
 #[cfg(test)]
@@ -661,7 +862,8 @@ mod tests {
             "precondition: no watermark before the run"
         );
 
-        // Dedup cap of 1 vs a 3-fact corpus → dedup is skipped.
+        // Dedup cap of 1 vs a 3-fact corpus → dedup is skipped. The cluster cap stays
+        // large (`MAX_FACTS_FOR_CLUSTERING`) so only the dedup pass skips, not clustering.
         let (stats, expired) = consolidate_with_caps(
             &conn,
             &MockGenerator,
@@ -669,6 +871,7 @@ mod tests {
             DIM,
             &ConsolidationConfig::default(),
             1,
+            MAX_FACTS_FOR_CLUSTERING,
         )
         .unwrap();
 
@@ -697,6 +900,95 @@ mod tests {
         assert!(
             get_config(&conn, "last_consolidated_at").unwrap().is_none(),
             "watermark must NOT advance when dedup is skipped (over cap)"
+        );
+    }
+
+    /// #659: when the corpus is over BOTH caps, [`load_snapshot_capped`] short-circuits
+    /// the expensive `list_active` load and [`compute_plan_capped`] returns a complete
+    /// no-op plan — nothing expired, no summaries written, watermark held. Driven with
+    /// both caps at 1 vs a 3-fact corpus so the over-both-caps branch is reachable without
+    /// a 50 000-fact corpus.
+    #[test]
+    fn over_both_caps_skips_load_and_is_noop() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        seed_cluster(&conn); // 3 near-duplicates that would normally dedup + cluster
+
+        // Sanity: the snapshot took the short-circuit (no facts materialized).
+        let snapshot =
+            load_snapshot_capped(&conn, DIM, &ConsolidationConfig::default(), 1, 1).unwrap();
+        assert!(
+            snapshot.over_both_caps,
+            "over both caps must short-circuit the load"
+        );
+        assert!(
+            snapshot.active_facts.is_empty(),
+            "the active set must not be materialized when over both caps"
+        );
+
+        let (stats, expired) = consolidate_with_caps(
+            &conn,
+            &MockGenerator,
+            &MockEmbedder,
+            DIM,
+            &ConsolidationConfig::default(),
+            1,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(stats.duplicates_removed, 0);
+        assert_eq!(stats.clusters_created, 0);
+        assert_eq!(stats.global_summaries, 0);
+        assert!(expired.is_empty());
+
+        // Nothing expired; both passes skipped, so the watermark is held for retry.
+        assert_eq!(
+            FactStore::new(&conn, DIM).list_active(None).unwrap().len(),
+            3,
+            "no fact is expired when over both caps"
+        );
+        assert!(
+            get_config(&conn, "last_consolidated_at").unwrap().is_none(),
+            "watermark must NOT advance when over both caps"
+        );
+    }
+
+    /// #409 read→write gap: because the engine releases the write lock between the
+    /// snapshot and the apply, another writer may expire a planned-for fact in between.
+    /// [`apply_plan`] must tolerate that — a `NotFound` from `expire` is a no-op (the
+    /// desired end state already holds), not a failure. Simulated here by expiring the
+    /// dedup victim between [`compute_plan`] and [`apply_plan`].
+    #[test]
+    fn apply_plan_tolerates_concurrently_expired_fact() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // Two near-duplicates → dedup plans to expire the lower-importance one.
+        insert_fact(&conn, "keep", vec![1.0, 0.0, 0.0, 0.0], 0.9);
+        insert_fact(&conn, "drop", vec![0.99, 0.01, 0.0, 0.0], 0.5);
+
+        let config = ConsolidationConfig::default();
+        let snapshot = load_snapshot(&conn, DIM, &config).unwrap();
+        let plan = compute_plan(&snapshot, &MockGenerator, &MockEmbedder, DIM, &config).unwrap();
+        assert_eq!(
+            plan.expirations().len(),
+            1,
+            "dedup must plan exactly one expiry"
+        );
+        let victim = plan.expirations()[0];
+
+        // Simulate a concurrent writer expiring the victim between snapshot and apply.
+        FactStore::new(&conn, DIM)
+            .expire(victim, Utc::now())
+            .unwrap();
+
+        // apply_plan must NOT error on the already-expired victim (NotFound → no-op).
+        let stats = apply_plan(&conn, &plan, DIM).unwrap();
+        assert_eq!(stats.duplicates_removed, 1);
+        assert_eq!(
+            FactStore::new(&conn, DIM).list_active(None).unwrap().len(),
+            1,
+            "exactly the survivor remains"
         );
     }
 }

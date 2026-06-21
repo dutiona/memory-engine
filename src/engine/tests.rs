@@ -831,6 +831,77 @@ fn consolidate_is_idempotent() {
     assert_eq!(engine.list_active_facts(None).unwrap().len(), 2);
 }
 
+/// A `SummaryGenerator` that performs an engine WRITE from inside `summarize`.
+/// Used to prove the consumer callbacks run without the engine holding its write
+/// lock (#409): the write only succeeds if `consolidate` is *not* holding
+/// `write_conn` across the summarize/embed phase.
+struct LockProbingGenerator {
+    engine: std::sync::Arc<MemoryEngine>,
+}
+impl SummaryGenerator for LockProbingGenerator {
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String> {
+        // A real engine write reached from within the consumer callback. If
+        // `consolidate` still held the single write lock across this phase, this
+        // same-thread re-lock would trip the pool's non-reentrant guard
+        // (`parking_lot::Mutex` + the debug reentrancy assertion) and panic
+        // instead of completing — the deterministic signal that the lock is held.
+        self.engine
+            .set_config("consolidate_compute_was_lock_free", "yes")?;
+        Ok(items.iter().map(|i| i.text).collect::<Vec<_>>().join("; "))
+    }
+}
+
+/// #409 (denial-of-service / lock starvation): the consumer `SummaryGenerator` /
+/// `EmbeddingProvider` callbacks must run **without** the engine holding its `write_conn` lock.
+/// Before the read→compute→write split, `MemoryEngine::consolidate` held that guard
+/// across the entire pipeline — including the unbounded `summarize`/`embed` network
+/// IO — starving every other engine writer (and, on an in-memory pool, every reader,
+/// since reads serialize through the same `Mutex`) for the full duration.
+///
+/// The probe is deterministic and thread-free: a generator that writes through the
+/// engine from inside `summarize` succeeds only if the compute phase is lock-free.
+/// With the lock still held this same-thread re-lock would panic ("reentrant")
+/// rather than complete (see [`LockProbingGenerator`]); after the fix the marker
+/// write lands and we assert it persisted.
+#[test]
+fn consolidate_runs_consumer_callbacks_without_holding_write_lock() {
+    use std::sync::Arc;
+    let engine = Arc::new(MemoryEngine::builder(DIM).build().unwrap());
+
+    // A single-linkage chain that forms exactly one cluster (so `summarize` is
+    // actually invoked) with no near-duplicate expiry: adjacent cosines ~0.883
+    // sit between the 0.85 cluster and 0.90 dedup thresholds.
+    insert_raw_fact(&engine, &make_new_fact("a", vec![1.0, 0.0, 0.0, 0.0]));
+    insert_raw_fact(&engine, &make_new_fact("b", vec![0.8829, 0.4695, 0.0, 0.0]));
+    insert_raw_fact(&engine, &make_new_fact("c", vec![0.5592, 0.829, 0.0, 0.0]));
+
+    let generator = LockProbingGenerator {
+        engine: Arc::clone(&engine),
+    };
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.90)
+        .cluster_threshold(0.85)
+        .min_cluster_size(2)
+        .build();
+
+    let stats = engine
+        .consolidate(&generator, &MockEmbedder { dim: DIM }, &config)
+        .unwrap();
+    assert_eq!(
+        stats.clusters_created, 1,
+        "fixture must form exactly one cluster so `summarize` runs"
+    );
+
+    // The callback's write landed → the compute phase did not hold the write lock.
+    assert_eq!(
+        engine
+            .get_config("consolidate_compute_was_lock_free")
+            .unwrap(),
+        Some("yes".to_string()),
+        "a consumer callback must be able to write during consolidation (#409)"
+    );
+}
+
 #[test]
 fn forget_prunes_stale_facts() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
