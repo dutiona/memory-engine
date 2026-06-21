@@ -144,8 +144,8 @@ pub fn resume_context(
     embed_dim: usize,
     config: &ResumeConfig,
 ) -> Result<ResumeContext> {
-    config.validate()?;
-
+    // Config is validated by the caller (MemoryEngine::resume_context) at the
+    // public boundary; this internal helper trusts its input (#359).
     let fact_store = FactStore::new(conn, embed_dim);
     let mut seen: HashSet<i64> = HashSet::new();
 
@@ -398,16 +398,6 @@ mod tests {
                 "expected PolicyParameter conflict for a zero cap, got {err:?}"
             );
         }
-    }
-
-    #[test]
-    fn resume_context_propagates_invalid_config() {
-        let conn = setup();
-        let config = ResumeConfig {
-            high_importance_min: 5.0,
-            ..ResumeConfig::default()
-        };
-        assert!(resume_context(&conn, &[1], DIM, &config).is_err());
     }
 
     #[test]

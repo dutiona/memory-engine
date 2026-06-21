@@ -1241,6 +1241,20 @@ fn resume_nonexistent_scope_returns_not_found() {
     assert!(matches!(err, MemoryError::NotFound(_)));
 }
 
+#[test]
+fn resume_rejects_invalid_config() {
+    // #359: ResumeConfig::validate() is enforced at the public boundary
+    // (fail-fast, before the scope lock / DB), so an out-of-range config is a
+    // Conflict — not a silently-empty tier.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let config = ResumeConfig {
+        high_importance_min: 5.0,
+        ..ResumeConfig::default()
+    };
+    let err = engine.resume_context(&config).unwrap_err();
+    assert!(matches!(err, MemoryError::Conflict(_)), "got {err:?}");
+}
+
 // --- Issue #93: surfaced_at for due facts in non-due tiers ---
 
 #[test]

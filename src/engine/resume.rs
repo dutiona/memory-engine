@@ -22,6 +22,11 @@ impl MemoryEngine {
     /// or `MemoryError::Conflict` if [`ResumeConfig::validate`] rejects the config
     /// (out-of-range `high_importance_min` or a zero tier cap).
     pub fn resume_context(&self, config: &ResumeConfig) -> Result<ResumeContext> {
+        // Fail fast at the public boundary: reject an invalid config before
+        // acquiring the scope_tree lock or touching the DB (#359). The internal
+        // `resume::resume_context` helper trusts its already-validated input.
+        config.validate()?;
+
         // Step 1: Resolve scope IDs from cache (short-lived read lock)
         let scope_ids = {
             let tree = self.scope_tree.read();
