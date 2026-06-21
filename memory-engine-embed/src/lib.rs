@@ -29,3 +29,12 @@ mod proposer;
 
 pub use http::HttpEmbeddingProvider;
 pub use proposer::{HttpDeltaProposer, ProposerStats};
+
+/// Fuzz-only seam (`--cfg fuzzing`, set only by `cargo fuzz`).
+///
+/// Re-exports the otherwise-private batch response parsers so cargo-fuzz targets
+/// can drive them directly. Compiles to nothing on a normal build, so it adds no
+/// public API to the shipped crate. See [`http::fuzz_seam`].
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use http::fuzz_seam;
