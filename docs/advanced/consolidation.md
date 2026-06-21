@@ -2,7 +2,9 @@
 
 **Status: Implemented**
 
-Consolidation compresses the fact store by removing duplicates and generating hierarchical summaries. It runs as a three-pass pipeline within a single SQLite transaction: dedup, cluster fusion, global integration. This taxonomy follows the Memory Survey's consolidation framework.
+Consolidation compresses the fact store by removing duplicates and generating hierarchical summaries via a three-pass pipeline: dedup, cluster fusion, global integration. This taxonomy follows the Memory Survey's consolidation framework.
+
+Each run is structured **read → compute → write** so the engine's single write lock is _not_ held across the consumer `SummaryGenerator`/`EmbeddingProvider` calls, which are unbounded network IO (#409): a brief locked read snapshots the active set, the three passes (including all consumer IO) then run lock-free against that snapshot to produce a plan, and a final brief locked transaction applies the plan. This keeps other writers — and, for an in-memory pool, readers — from being starved for the IO duration, while preserving atomicity (below).
 
 ## Three-Pass Pipeline
 
@@ -12,7 +14,7 @@ Pass 1: Local Dedup       Pass 2: Cluster Fusion       Pass 3: Global Integratio
   expire duplicates         generate cluster summaries     into one global summary
 ```
 
-All three passes execute atomically. If any pass fails (including errors from the `SummaryGenerator`), the entire consolidation rolls back.
+Atomicity is preserved end-to-end. The compute phase produces a plan without touching the store, so a failure there (including errors from the `SummaryGenerator`/`EmbeddingProvider`) aborts the run before any write. The write phase applies the whole plan — expirations, cluster + global summaries, embedding identity, watermark — in a **single SQLite transaction**, so a failure there rolls everything back. Either way the store is never left half-consolidated.
 
 ### Pass 1: Local Dedup
 

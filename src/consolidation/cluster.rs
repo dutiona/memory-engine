@@ -6,63 +6,74 @@ use crate::store::summaries::SummaryStore;
 use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
 use crate::types::{ConsolidationLevel, Fact, NewSummary};
 
-/// Cluster fusion pass.
+/// Parameters for the cluster-fusion pass, bundled so the [`compute_clusters`] and
+/// apply halves share one descriptor — and so each fits under clippy's argument limit
+/// now that the pass is split read→compute→write (#409).
+pub(super) struct ClusterParams {
+    /// Fact/summary embedding dimension (validated by `summarize_and_embed`).
+    pub(super) embed_dim: usize,
+    /// Minimum cluster size to summarize.
+    pub(super) min_cluster_size: usize,
+    /// Cosine threshold for greedy single-linkage clustering (looser than dedup).
+    pub(super) cluster_threshold: f32,
+    /// Safety cap: above this many facts the O(N²) pass is skipped (#345).
+    pub(super) max_facts: usize,
+    /// Single run-level timestamp shared by all summaries from this run (#495).
+    pub(super) now: chrono::DateTime<chrono::Utc>,
+}
+
+/// Result of the pure cluster computation: the new cluster summaries to write, plus
+/// whether the pass actually ran (vs. skipped over the safety cap).
+pub(super) struct ClusterComputed {
+    /// `false` when `facts.len()` exceeded the cap and clustering was skipped. The
+    /// caller must then NOT delete the existing cluster/global summaries (there are no
+    /// replacements), so this flag gates the apply-side delete+insert (#345).
+    pub(super) ran: bool,
+    /// The cluster summaries to insert (already summarized + embedded).
+    pub(super) summaries: Vec<NewSummary>,
+}
+
+/// Compute cluster summaries **without touching the store** (#409).
 ///
-/// Clears prior cluster-level summaries before creating new ones (idempotent).
-/// Groups active facts by similarity (greedy single-linkage clustering) at
-/// `cluster_threshold` (cosine; lower than the dedup threshold so clustering is
-/// looser than dedup). For each cluster >= `min_cluster_size`, calls
-/// `SummaryGenerator` to create a summary, then `EmbeddingProvider` to embed it
-/// into the fact vector space. Stores summaries via `SummaryStore` with
-/// `level=Cluster`.
+/// Greedy single-linkage clustering at `params.cluster_threshold` (cosine; lower than
+/// the dedup threshold so clustering is looser than dedup), then the consumer
+/// `summarize`/`embed` IO for each cluster ≥ `params.min_cluster_size`. Returns the
+/// summaries as data for [`apply_clusters`] to write — no store IO happens here, so it
+/// is safe to run while the engine holds no lock.
 ///
-/// Returns number of clusters created.
+/// `facts` is the post-dedup active set, borrowed (no clone — #679/#389). The safety
+/// cap (`params.max_facts`, #345) is checked first: over it, `ran = false` and no
+/// summaries (and no consumer IO) are produced, so the caller preserves any existing
+/// summaries rather than wiping them without replacements.
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on SQL failure, or propagates errors from
-/// the `SummaryGenerator` or `EmbeddingProvider`.
-/// Returns `MemoryError::EmbeddingDimension` if the embedder returns an embedding
-/// whose length does not match `embed_dim`.
-/// Returns `MemoryError::Serialization` on JSON serialization failure.
-// Interim arity: the run-level `now` (#495) pushed this to 8 params. Wave 5b's
-// read→compute→write restructure collapses these passes behind a plan type, which
-// removes the bloat; allow until then rather than introduce a throwaway params struct.
-#[allow(clippy::too_many_arguments)]
-pub fn cluster_fusion(
-    conn: &Connection,
+/// Propagates errors from the `SummaryGenerator` or `EmbeddingProvider`.
+/// Returns `MemoryError::EmbeddingDimension` if an embedding length != `embed_dim`.
+pub(super) fn compute_clusters(
     facts: &[&Fact],
     generator: &dyn SummaryGenerator,
     embedder: &dyn EmbeddingProvider,
-    embed_dim: usize,
-    min_cluster_size: usize,
-    cluster_threshold: f32,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<usize> {
-    // `facts` is the post-dedup active set, loaded once by the caller and shared
-    // with the dedup pass (#389). Safety cap (`super::MAX_FACTS_FOR_CLUSTERING`,
-    // #345) checked BEFORE deleting existing summaries so we never wipe them
-    // without producing replacements.
-    if facts.len() > super::MAX_FACTS_FOR_CLUSTERING {
+    params: &ClusterParams,
+) -> Result<ClusterComputed> {
+    if facts.len() > params.max_facts {
         tracing::warn!(
             count = facts.len(),
-            max = super::MAX_FACTS_FOR_CLUSTERING,
+            max = params.max_facts,
             "clustering skipped: too many active facts for O(N^2) comparison"
         );
-        return Ok(0);
+        return Ok(ClusterComputed {
+            ran: false,
+            summaries: Vec::new(),
+        });
     }
 
-    let summary_store = SummaryStore::new(conn, embed_dim);
+    // Greedy single-linkage clustering.
+    let clusters = greedy_cluster(facts, params.cluster_threshold);
 
-    // Idempotent: clear previous cluster summaries (safe — we know we'll rebuild them)
-    summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
-
-    // Greedy single-linkage clustering
-    let clusters = greedy_cluster(facts, cluster_threshold);
-
-    let mut clusters_created = 0;
+    let mut summaries = Vec::new();
     for cluster in &clusters {
-        if cluster.len() < min_cluster_size {
+        if cluster.len() < params.min_cluster_size {
             continue;
         }
 
@@ -75,7 +86,7 @@ pub fn cluster_fusion(
             .map(|&idx| SummarizableContent::new(&facts[idx].content, &facts[idx].embedding))
             .collect();
         let (summary_text, summary_embedding) =
-            super::summarize_and_embed(generator, embedder, &items, embed_dim)?;
+            super::summarize_and_embed(generator, embedder, &items, params.embed_dim)?;
 
         // Determine scope_id from majority vote of source facts.
         // Deterministic tie-break: lowest scope_id wins on equal counts.
@@ -91,19 +102,65 @@ pub fn cluster_fusion(
                 .map_or(1, |(id, _)| id)
         };
 
-        summary_store.insert(&NewSummary {
+        summaries.push(NewSummary {
             content: summary_text,
             embedding: summary_embedding,
             level: ConsolidationLevel::Cluster,
             source_fact_ids: source_ids,
             scope_id,
-            created_at: now,
-        })?;
-
-        clusters_created += 1;
+            created_at: params.now,
+        });
     }
 
-    Ok(clusters_created)
+    Ok(ClusterComputed {
+        ran: true,
+        summaries,
+    })
+}
+
+/// Apply computed cluster summaries inside the caller's write context (#409): clear the
+/// prior cluster-level summaries (idempotent), then insert the new ones. Call this only
+/// when the pass actually ran ([`ClusterComputed::ran`]) — over the cap, existing
+/// summaries must be preserved because there are no replacements.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on SQL failure, or `MemoryError::Serialization` on
+/// JSON serialization failure.
+pub(super) fn apply_clusters(
+    conn: &Connection,
+    embed_dim: usize,
+    summaries: &[NewSummary],
+) -> Result<()> {
+    let summary_store = SummaryStore::new(conn, embed_dim);
+    summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
+    for summary in summaries {
+        summary_store.insert(summary)?;
+    }
+    Ok(())
+}
+
+/// Cluster fusion pass — compute + apply on a single connection.
+///
+/// Thin wrapper over [`compute_clusters`] + [`apply_clusters`], kept as the per-pass
+/// entry point exercised by this module's unit tests (hence `#[cfg(test)]`). Returns the
+/// number of clusters created. The engine no longer calls this — it runs
+/// [`compute_clusters`] lock-free and applies the writes inside the final transaction
+/// (#409) — but the behavior is identical: existing summaries are cleared and rebuilt
+/// only when the pass runs (never over the cap).
+#[cfg(test)]
+fn cluster_fusion(
+    conn: &Connection,
+    facts: &[&Fact],
+    generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
+    params: &ClusterParams,
+) -> Result<usize> {
+    let computed = compute_clusters(facts, generator, embedder, params)?;
+    if computed.ran {
+        apply_clusters(conn, params.embed_dim, &computed.summaries)?;
+    }
+    Ok(computed.summaries.len())
 }
 
 /// Greedy single-linkage clustering.
@@ -157,6 +214,7 @@ mod tests {
 
     /// Load the active facts and run `cluster_fusion` over borrowed references —
     /// the orchestrator now owns the single load (#389), so tests mirror that here.
+    /// `max_facts` is `usize::MAX` so the cluster cap never trips in these tests.
     fn cluster(
         conn: &Connection,
         generator: &dyn SummaryGenerator,
@@ -167,16 +225,14 @@ mod tests {
     ) -> Result<usize> {
         let active = FactStore::new(conn, dim).list_active(None)?;
         let refs: Vec<&Fact> = active.iter().collect();
-        cluster_fusion(
-            conn,
-            &refs,
-            generator,
-            embedder,
-            dim,
+        let params = ClusterParams {
+            embed_dim: dim,
             min_cluster_size,
             cluster_threshold,
-            Utc::now(),
-        )
+            max_facts: usize::MAX,
+            now: Utc::now(),
+        };
+        cluster_fusion(conn, &refs, generator, embedder, &params)
     }
 
     /// Mock generator that concatenates fact contents.

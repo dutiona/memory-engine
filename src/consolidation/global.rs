@@ -5,35 +5,28 @@ use crate::store::summaries::SummaryStore;
 use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
 use crate::types::{ConsolidationLevel, NewSummary};
 
-/// Global integration pass.
+/// Compute the global summary from the **in-memory** cluster summaries, touching no
+/// store (#409). Returns `None` when there are no cluster summaries to integrate.
 ///
-/// Summarizes all cluster-level summaries into a single global summary.
-/// Deletes prior global summaries first (idempotent).
-///
-/// Returns 1 if a global summary was created, 0 if no clusters exist.
+/// The engine passes the cluster summaries it just computed this run (#409: not a store
+/// re-read), so the consumer `summarize`/`embed` IO here runs lock-free. Semantically
+/// identical to re-reading them: the global summary aggregates exactly the clusters this
+/// run produced.
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on SQL failure, or propagates errors from
-/// the `SummaryGenerator` or `EmbeddingProvider`.
-/// Returns `MemoryError::EmbeddingDimension` if the embedder returns an embedding
-/// whose length does not match `embed_dim`.
-/// Returns `MemoryError::Serialization` on JSON serialization failure.
-pub fn global_integration(
-    conn: &Connection,
+/// Propagates errors from the `SummaryGenerator` or `EmbeddingProvider`.
+/// Returns `MemoryError::EmbeddingDimension` if the embedder returns an embedding whose
+/// length does not match `embed_dim`.
+pub(super) fn compute_global(
+    cluster_summaries: &[NewSummary],
     generator: &dyn SummaryGenerator,
     embedder: &dyn EmbeddingProvider,
     embed_dim: usize,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<usize> {
-    let summary_store = SummaryStore::new(conn, embed_dim);
-
-    // Idempotent: clear previous global summaries
-    summary_store.delete_by_level(&ConsolidationLevel::Global)?;
-
-    let cluster_summaries = summary_store.list_by_level(&ConsolidationLevel::Cluster)?;
+) -> Result<Option<NewSummary>> {
     if cluster_summaries.is_empty() {
-        return Ok(0);
+        return Ok(None);
     }
 
     // Summarize the cluster summaries directly — borrow each summary's text and
@@ -53,23 +46,77 @@ pub fn global_integration(
         .map(|s| s.source_fact_ids.len())
         .sum();
     let mut all_source_ids: Vec<i64> = Vec::with_capacity(total_source_ids);
-    for s in &cluster_summaries {
+    for s in cluster_summaries {
         all_source_ids.extend_from_slice(&s.source_fact_ids);
     }
 
-    // Global summaries are intentionally root-scoped (scope_id=1).
-    // They aggregate across all cluster-level summaries regardless of
-    // individual cluster scopes.
-    summary_store.insert(&NewSummary {
+    // Global summaries are intentionally root-scoped (scope_id=1). They aggregate
+    // across all cluster-level summaries regardless of individual cluster scopes.
+    Ok(Some(NewSummary {
         content: global_text,
         embedding: global_embedding,
         level: ConsolidationLevel::Global,
         source_fact_ids: all_source_ids,
         scope_id: 1,
         created_at: now,
-    })?;
+    }))
+}
 
-    Ok(1)
+/// Apply the computed global summary inside the caller's write context (#409): clear the
+/// prior global summary (idempotent), then insert the new one if present. `None` leaves
+/// the store with no global summary (the cleared state).
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on SQL failure, or `MemoryError::Serialization` on
+/// JSON serialization failure.
+pub(super) fn apply_global(
+    conn: &Connection,
+    embed_dim: usize,
+    summary: Option<&NewSummary>,
+) -> Result<()> {
+    let summary_store = SummaryStore::new(conn, embed_dim);
+    summary_store.delete_by_level(&ConsolidationLevel::Global)?;
+    if let Some(s) = summary {
+        summary_store.insert(s)?;
+    }
+    Ok(())
+}
+
+/// Global integration pass — compute + apply on a single connection.
+///
+/// Thin wrapper over [`compute_global`] + [`apply_global`], kept as the per-pass entry
+/// point exercised by this module's unit tests (hence `#[cfg(test)]`). Reads the current
+/// cluster summaries from the store, summarizes them, and applies the result. Returns 1
+/// if a global summary was created, 0 if no clusters exist. The engine no longer calls
+/// this — it runs [`compute_global`] over the in-memory cluster summaries it just
+/// produced and applies inside the final transaction (#409) — but the behavior is
+/// identical.
+#[cfg(test)]
+fn global_integration(
+    conn: &Connection,
+    generator: &dyn SummaryGenerator,
+    embedder: &dyn EmbeddingProvider,
+    embed_dim: usize,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<usize> {
+    // The store hands back `Summary` (with ids); `compute_global` consumes the id-less
+    // `NewSummary` the engine path produces, so bridge the stored rows into that shape.
+    let cluster_summaries: Vec<NewSummary> = SummaryStore::new(conn, embed_dim)
+        .list_by_level(&ConsolidationLevel::Cluster)?
+        .into_iter()
+        .map(|s| NewSummary {
+            content: s.content,
+            embedding: s.embedding,
+            level: s.level,
+            source_fact_ids: s.source_fact_ids,
+            scope_id: s.scope_id,
+            created_at: s.created_at,
+        })
+        .collect();
+    let global = compute_global(&cluster_summaries, generator, embedder, embed_dim, now)?;
+    apply_global(conn, embed_dim, global.as_ref())?;
+    Ok(usize::from(global.is_some()))
 }
 
 #[cfg(test)]

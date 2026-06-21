@@ -293,6 +293,45 @@ impl<'a> FactStore<'a> {
         Ok(facts)
     }
 
+    /// Count active facts (`t_expired IS NULL`) without materializing any rows.
+    ///
+    /// A `COUNT(*)` companion to [`list_active`](Self::list_active): consolidation
+    /// uses it to test its O(N·M) / O(N²) safety caps **before** the expensive
+    /// `list_active` load — which would otherwise deserialize every embedding BLOB
+    /// (~147 MB for 50k×768-dim) only to discover the corpus is over the cap and
+    /// skip both passes (#659).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn count_active(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM facts WHERE t_expired IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Whether a fact is currently active (`t_expired IS NULL`).
+    ///
+    /// A point liveness probe used by the consolidation apply phase to detect a fact
+    /// that was concurrently expired between the lock-free snapshot and the write — so a
+    /// dedup survivor removed in that gap does not cause its loser to be expired too,
+    /// orphaning the duplicate group (#409 read→write gap).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
+    pub fn is_active(&self, id: i64) -> Result<bool> {
+        let active: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM facts WHERE id = ?1 AND t_expired IS NULL)",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(active)
+    }
+
     /// List the importance-scoring projection of all active facts
     /// (`t_expired IS NULL`).
     ///
@@ -1294,6 +1333,28 @@ mod tests {
             scope_id: 1,
             is_pinned: false,
         }
+    }
+
+    /// #659: `count_active` counts exactly the rows `list_active` would return
+    /// (`t_expired IS NULL`) without materializing them, and tracks expiry.
+    #[test]
+    fn count_active_matches_list_active_and_tracks_expiry() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        assert_eq!(store.count_active().unwrap(), 0, "empty table → 0");
+
+        let a = store.insert(&make_fact("a", vec![0.1; DIM])).unwrap();
+        store.insert(&make_fact("b", vec![0.2; DIM])).unwrap();
+        assert_eq!(store.count_active().unwrap(), 2);
+        assert_eq!(
+            store.count_active().unwrap(),
+            store.list_active(None).unwrap().len(),
+            "count must agree with list_active's row count"
+        );
+
+        // Expiring a fact drops it from the active count (soft delete).
+        store.expire(a, Utc::now()).unwrap();
+        assert_eq!(store.count_active().unwrap(), 1, "expired fact not counted");
     }
 
     /// #209 cursor probe: `max_caller_written_fact_id` returns the highest id among
