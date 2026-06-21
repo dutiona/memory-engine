@@ -40,6 +40,56 @@ impl Default for ResumeConfig {
     }
 }
 
+impl ResumeConfig {
+    /// Validate configuration parameters.
+    ///
+    /// `high_importance_min` is a materialized-score threshold that flows
+    /// directly into [`FactStore::list_by_importance_score`]'s `min_score`
+    /// comparison; it must be finite and within `[0.0, 1.0]` — a value like
+    /// `2.0` would silently yield an empty high-importance tier with no
+    /// diagnostic. The four tier caps must each be non-zero, since a `0` cap
+    /// silently empties that tier.
+    ///
+    /// Mirrors the [`DreamCycleConfig::validate`](crate::types::DreamCycleConfig::validate)
+    /// precedent and uses the same
+    /// [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
+    /// payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Conflict`](crate::error::MemoryError::Conflict)
+    /// wrapping [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
+    /// if `high_importance_min` is non-finite or outside `[0.0, 1.0]`, or if any
+    /// of the tier caps (`pinned_cap`, `high_importance_cap`, `due_cap`,
+    /// `recent_cap`) is zero.
+    pub fn validate(&self) -> Result<()> {
+        use crate::error::{ConflictError, MemoryError};
+
+        if !self.high_importance_min.is_finite() || !(0.0..=1.0).contains(&self.high_importance_min)
+        {
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!(
+                    "high_importance_min must be in [0.0, 1.0], got {}",
+                    self.high_importance_min
+                ),
+            )));
+        }
+        for (name, cap) in [
+            ("pinned_cap", self.pinned_cap),
+            ("high_importance_cap", self.high_importance_cap),
+            ("due_cap", self.due_cap),
+            ("recent_cap", self.recent_cap),
+        ] {
+            if cap == 0 {
+                return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                    format!("{name} must be greater than 0, got 0"),
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Result of [`resume_context`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResumeContext {
@@ -70,7 +120,9 @@ pub struct ResumeContext {
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::MemoryError`] if any underlying store query fails.
+/// Returns [`crate::error::MemoryError`] if [`ResumeConfig::validate`] rejects
+/// the config (out-of-range `high_importance_min` or a zero tier cap), or if any
+/// underlying store query fails.
 ///
 /// # Examples
 ///
@@ -92,6 +144,8 @@ pub fn resume_context(
     embed_dim: usize,
     config: &ResumeConfig,
 ) -> Result<ResumeContext> {
+    // Config is validated by the caller (MemoryEngine::resume_context) at the
+    // public boundary; this internal helper trusts its input (#359).
     let fact_store = FactStore::new(conn, embed_dim);
     let mut seen: HashSet<i64> = HashSet::new();
 
@@ -284,6 +338,69 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_default_config() {
+        assert!(ResumeConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_high_importance_min() {
+        use crate::error::{ConflictError, MemoryError};
+
+        for bad in [2.0_f64, -0.1, f64::NAN, f64::INFINITY] {
+            let config = ResumeConfig {
+                high_importance_min: bad,
+                ..ResumeConfig::default()
+            };
+            let err = config.validate().unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    MemoryError::Conflict(ConflictError::PolicyParameter(_))
+                ),
+                "expected PolicyParameter conflict for high_importance_min={bad}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_boundary_high_importance_min() {
+        for ok in [0.0_f64, 1.0] {
+            let config = ResumeConfig {
+                high_importance_min: ok,
+                ..ResumeConfig::default()
+            };
+            assert!(
+                config.validate().is_ok(),
+                "boundary high_importance_min={ok} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_zero_caps() {
+        use crate::error::{ConflictError, MemoryError};
+
+        let zero_setters: [fn(&mut ResumeConfig); 4] = [
+            |c| c.pinned_cap = 0,
+            |c| c.high_importance_cap = 0,
+            |c| c.due_cap = 0,
+            |c| c.recent_cap = 0,
+        ];
+        for set_zero in zero_setters {
+            let mut config = ResumeConfig::default();
+            set_zero(&mut config);
+            let err = config.validate().unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    MemoryError::Conflict(ConflictError::PolicyParameter(_))
+                ),
+                "expected PolicyParameter conflict for a zero cap, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn resume_high_importance_uses_score() {
         let conn = setup();
         let fs = FactStore::new(&conn, DIM);
@@ -303,5 +420,123 @@ mod tests {
         let ctx = resume_context(&conn, &[1], DIM, &config).unwrap();
         assert_eq!(ctx.high_importance.len(), 1);
         assert!(ctx.high_importance[0].importance_score >= 0.7);
+    }
+}
+
+/// Property-based tests for the tier mutual-exclusivity invariant (#475).
+///
+/// The single example test `resume_tiers_mutually_exclusive` covers exactly one
+/// fact arrangement (one pinned, one scored, one due, one recent). The invariant
+/// — *no fact appears in more than one tier* — is enforced by the `seen`
+/// `HashSet` accumulated across tiers in [`resume_context`], so it is most
+/// stressed by facts that qualify for several tiers at once (e.g. pinned AND
+/// high-scored AND due). These proptests vary fact attributes, fact counts, and
+/// tier caps to exercise that overlap broadly.
+///
+/// Placed in its own module after `mod tests` so no non-test items follow a
+/// `#[cfg(test)]` module (`clippy::items_after_test_module`).
+#[cfg(test)]
+mod proptest_tiers {
+    use std::collections::HashSet;
+
+    use chrono::{Duration, Utc};
+    use proptest::prelude::*;
+    use rusqlite::Connection;
+
+    use super::{ResumeConfig, resume_context};
+    use crate::store::facts::FactStore;
+    use crate::store::schema::{init_schema, migrate, open_memory};
+    use crate::types::{FactType, NewFact};
+
+    const DIM: usize = 4;
+
+    fn setup() -> Connection {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        conn
+    }
+
+    /// One generated fact: its tier-relevant attributes.
+    #[derive(Debug, Clone)]
+    struct FactSpec {
+        pinned: bool,
+        /// Materialized importance score, applied after insert.
+        score: f64,
+        /// `t_valid` offset in hours relative to `now`; negative = in the past
+        /// (due), positive = in the future (not yet due).
+        t_valid_offset_h: i64,
+    }
+
+    prop_compose! {
+        fn arb_fact_spec()(
+            pinned in any::<bool>(),
+            score in 0.0f64..=1.0,
+            t_valid_offset_h in -48i64..=48,
+        ) -> FactSpec {
+            FactSpec { pinned, score, t_valid_offset_h }
+        }
+    }
+
+    proptest! {
+        /// The four tiers returned by `resume_context` are always pairwise
+        /// disjoint: a fact's id never appears in more than one tier, for any
+        /// combination of fact attributes and (non-zero) tier caps.
+        #[test]
+        fn tiers_always_mutually_exclusive(
+            specs in proptest::collection::vec(arb_fact_spec(), 0..12),
+            pinned_cap in 1usize..8,
+            high_importance_cap in 1usize..8,
+            high_importance_min in 0.0f64..=1.0,
+            due_cap in 1usize..8,
+            recent_cap in 1usize..8,
+        ) {
+            let conn = setup();
+            let fs = FactStore::new(&conn, DIM);
+            let now = Utc::now();
+
+            for (i, spec) in specs.iter().enumerate() {
+                // Distinct content per fact (`fact-{i}`) so the content-hash
+                // dedup in FactStore::insert never collapses two specs into one
+                // row.
+                let new_fact = NewFact::builder(
+                    format!("fact-{i}"),
+                    vec![0.1; DIM],
+                    FactType::Semantic,
+                )
+                .scope_id(1)
+                .is_pinned(spec.pinned)
+                .t_valid(now + Duration::hours(spec.t_valid_offset_h))
+                .build();
+                let id = fs.insert(&new_fact).unwrap();
+                fs.update_importance_score(id, spec.score).unwrap();
+            }
+
+            let config = ResumeConfig {
+                now,
+                pinned_cap,
+                high_importance_cap,
+                high_importance_min,
+                due_cap,
+                recent_cap,
+                ..ResumeConfig::default()
+            };
+            let ctx = resume_context(&conn, &[1], DIM, &config).unwrap();
+
+            let all_ids: Vec<i64> = ctx
+                .pinned
+                .iter()
+                .chain(ctx.high_importance.iter())
+                .chain(ctx.due.iter())
+                .chain(ctx.recent.iter())
+                .map(|f| f.id)
+                .collect();
+            let unique: HashSet<i64> = all_ids.iter().copied().collect();
+            prop_assert_eq!(
+                all_ids.len(),
+                unique.len(),
+                "a fact appeared in more than one tier"
+            );
+        }
     }
 }

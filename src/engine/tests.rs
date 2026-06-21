@@ -1312,6 +1312,20 @@ fn resume_nonexistent_scope_returns_not_found() {
     assert!(matches!(err, MemoryError::NotFound(_)));
 }
 
+#[test]
+fn resume_rejects_invalid_config() {
+    // #359: ResumeConfig::validate() is enforced at the public boundary
+    // (fail-fast, before the scope lock / DB), so an out-of-range config is a
+    // Conflict — not a silently-empty tier.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let config = ResumeConfig {
+        high_importance_min: 5.0,
+        ..ResumeConfig::default()
+    };
+    let err = engine.resume_context(&config).unwrap_err();
+    assert!(matches!(err, MemoryError::Conflict(_)), "got {err:?}");
+}
+
 // --- Issue #93: surfaced_at for due facts in non-due tiers ---
 
 #[test]
@@ -1450,6 +1464,119 @@ fn resume_does_not_stamp_invalidated_pinned_due_fact() {
     assert!(
         ctx.pinned[0].surfaced_at.is_none(),
         "invalidated fact must not have surfaced_at stamped"
+    );
+}
+
+// --- Issue #476: surfaced_at stamping is idempotent across calls ---
+
+/// A second `resume_context` call on the same due fact must NOT re-stamp
+/// `surfaced_at`: the timestamp from the first surfacing is the authoritative
+/// record and must stay stable. Both the closure guard in `engine/resume.rs`
+/// (`f.surfaced_at.is_none()`) and the SQL guard in `FactStore::stamp_surfaced`
+/// (`AND surfaced_at IS NULL`) protect against re-stamping; this test fails if
+/// either drifts.
+///
+/// The two calls pass *different* `now` values (`now` then `later`). If
+/// re-stamping leaked, the second call would overwrite the timestamp with
+/// `later`, so the equality assertion discriminates the regression.
+#[test]
+fn resume_surfaced_at_is_idempotent() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder = MockEmbedder { dim: DIM };
+    let now = Utc::now();
+    let past = now - chrono::Duration::hours(1);
+    let later = now + chrono::Duration::hours(2);
+
+    // A plain due fact (t_valid in the past) — lands in the `due` tier.
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "deploy the staging build".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(AddFactOptions {
+                    t_valid: Some(past),
+                    ..Default::default()
+                }),
+            },
+            &embedder,
+            None,
+        )
+        .unwrap();
+
+    let ctx1 = engine
+        .resume_context(&ResumeConfig {
+            now,
+            ..ResumeConfig::default()
+        })
+        .unwrap();
+    assert_eq!(ctx1.due.len(), 1);
+    let first_stamp = ctx1.due[0]
+        .surfaced_at
+        .expect("due fact must be surfaced on first resume_context");
+
+    // Second call at a strictly later `now`. surfaced_at must be unchanged.
+    let ctx2 = engine
+        .resume_context(&ResumeConfig {
+            now: later,
+            ..ResumeConfig::default()
+        })
+        .unwrap();
+    assert_eq!(ctx2.due.len(), 1);
+    let second_stamp = ctx2.due[0]
+        .surfaced_at
+        .expect("due fact must still carry its surfaced_at on the second call");
+
+    assert_eq!(
+        second_stamp, first_stamp,
+        "surfaced_at must not be re-stamped on a second resume_context call"
+    );
+}
+
+/// The same idempotency guarantee on the public `list_due()` path, which shares
+/// the `surfaced_at.is_none()` guard (`engine/scheduling.rs`). A second
+/// `list_due()` call must return the original `surfaced_at`, not a fresh stamp.
+#[test]
+fn list_due_surfaced_at_is_idempotent() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder = MockEmbedder { dim: DIM };
+    let now = Utc::now();
+    let past = now - chrono::Duration::hours(1);
+    let later = now + chrono::Duration::hours(2);
+
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "rotate the API key".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: Some(AddFactOptions {
+                    t_valid: Some(past),
+                    ..Default::default()
+                }),
+            },
+            &embedder,
+            None,
+        )
+        .unwrap();
+
+    let due1 = engine.list_due(now, None).unwrap();
+    assert_eq!(due1.len(), 1);
+    let first_stamp = due1[0]
+        .surfaced_at
+        .expect("due fact must be surfaced on first list_due");
+
+    let due2 = engine.list_due(later, None).unwrap();
+    assert_eq!(due2.len(), 1);
+    let second_stamp = due2[0]
+        .surfaced_at
+        .expect("due fact must still carry its surfaced_at on the second call");
+
+    assert_eq!(
+        second_stamp, first_stamp,
+        "surfaced_at must not be re-stamped on a second list_due call"
     );
 }
 
