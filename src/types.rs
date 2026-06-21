@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 // --- Enums ---
 
@@ -62,6 +64,42 @@ impl fmt::Display for FactType {
             Self::Episodic => write!(f, "episodic"),
             Self::Semantic => write!(f, "semantic"),
             Self::Procedural => write!(f, "procedural"),
+        }
+    }
+}
+
+/// Error returned when a string does not name a known [`FactType`] variant.
+///
+/// Carries the offending token so callers can surface an actionable message.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown fact type: {0}")]
+pub struct ParseFactTypeError(pub String);
+
+impl FromStr for FactType {
+    type Err = ParseFactTypeError;
+
+    /// Canonical, case-insensitive parse of the `FactType` variant names.
+    ///
+    /// This is the **single source of truth** for the string→`FactType` mapping
+    /// shared by every consumer surface (the CLI's `--fact-type` arg and JSONL
+    /// ingest, the MCP server's tool parameters). It is intentionally lenient on
+    /// casing so it accepts both wire conventions present in the codebase:
+    /// `Display` emits `snake_case` (`"episodic"`), while serde-derive and the MCP
+    /// JSON-schema enums use `PascalCase` (`"Episodic"`). Parsing reconciles both
+    /// to one canonical enum; [`FactType::to_string`] remains the canonical output.
+    ///
+    /// Note: this is orthogonal to the serde `Deserialize` derive, which stays
+    /// `PascalCase` to preserve `.pak` cold-storage archive back-compat.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Zero-allocation case-insensitive match (no temporary lowercased String).
+        if s.eq_ignore_ascii_case("episodic") {
+            Ok(Self::Episodic)
+        } else if s.eq_ignore_ascii_case("semantic") {
+            Ok(Self::Semantic)
+        } else if s.eq_ignore_ascii_case("procedural") {
+            Ok(Self::Procedural)
+        } else {
+            Err(ParseFactTypeError(s.to_owned()))
         }
     }
 }
@@ -1018,11 +1056,66 @@ mod tests {
         assert_eq!(ConsolidationLevel::Cluster.to_string(), "cluster");
         assert_eq!(ConsolidationLevel::Global.to_string(), "global");
 
+        // (FactType FromStr parsing is exercised in `fact_type_from_str_*` below)
+
         // ActivityStatus
         assert_eq!(ActivityStatus::Recorded.to_string(), "recorded");
         assert_eq!(ActivityStatus::Deduplicated.to_string(), "deduplicated");
         assert_eq!(ActivityStatus::Ignored.to_string(), "ignored");
         assert_eq!(ActivityStatus::Promoted.to_string(), "promoted");
+    }
+
+    // --- FactType FromStr (canonical string parse, shared by CLI + MCP) ---
+
+    #[test]
+    fn fact_type_from_str_canonical_snake_case() {
+        assert_eq!("episodic".parse::<FactType>().unwrap(), FactType::Episodic);
+        assert_eq!("semantic".parse::<FactType>().unwrap(), FactType::Semantic);
+        assert_eq!(
+            "procedural".parse::<FactType>().unwrap(),
+            FactType::Procedural
+        );
+    }
+
+    #[test]
+    fn fact_type_from_str_accepts_pascal_case() {
+        // PascalCase is the serde-derive / MCP-JSON-schema wire form; the parser
+        // accepts it so both casings reconcile to one canonical enum.
+        assert_eq!("Episodic".parse::<FactType>().unwrap(), FactType::Episodic);
+        assert_eq!("Semantic".parse::<FactType>().unwrap(), FactType::Semantic);
+        assert_eq!(
+            "Procedural".parse::<FactType>().unwrap(),
+            FactType::Procedural
+        );
+    }
+
+    #[test]
+    fn fact_type_from_str_is_case_insensitive() {
+        assert_eq!("EPISODIC".parse::<FactType>().unwrap(), FactType::Episodic);
+        assert_eq!("sEmAnTiC".parse::<FactType>().unwrap(), FactType::Semantic);
+    }
+
+    #[test]
+    fn fact_type_from_str_rejects_unknown() {
+        let err = "wisdom".parse::<FactType>().unwrap_err();
+        // The unknown token is preserved in the error for actionable messages.
+        assert!(err.to_string().contains("wisdom"));
+    }
+
+    #[test]
+    fn fact_type_from_str_rejects_surrounding_whitespace() {
+        // The parser is intentionally strict on whitespace — it does not trim.
+        // Surrounding whitespace is a malformed token, not a valid variant.
+        assert!(" episodic".parse::<FactType>().is_err());
+        assert!("semantic ".parse::<FactType>().is_err());
+        assert!("".parse::<FactType>().is_err());
+    }
+
+    #[test]
+    fn fact_type_display_round_trips_through_from_str() {
+        for ft in [FactType::Episodic, FactType::Semantic, FactType::Procedural] {
+            assert_eq!(ft.to_string().parse::<FactType>().unwrap(), ft);
+        }
     }
 
     // --- NewFactBuilder ---

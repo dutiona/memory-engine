@@ -1,19 +1,29 @@
-//! CLI-local fact-type wrapper shared across subcommands.
+//! CLI-local fact-type plumbing.
 //!
-//! `memory_engine::FactType` deliberately exposes no `clap::ValueEnum`,
-//! `serde::Deserialize`, or `FromStr` impl (the core crate has no CLI/serde
-//! concerns), so the CLI needs a thin local wrapper. This is the single source of
-//! truth for it: `add-fact` (clap arg), `query` (clap arg), and `batch-ingest`
-//! (JSONL field) all parse into [`CliFactType`] and convert via `From`.
+//! The canonical string→[`FactType`] mapping lives in **core** as
+//! [`FactType::from_str`] (case-insensitive, accepts both `snake_case` and
+//! `PascalCase`) — it is the single source of truth shared with the MCP server
+//! (#678). This module holds only the two CLI-framework shims that cannot live in
+//! the framework-free core crate:
+//!
+//! * [`CliFactType`] — a `clap::ValueEnum` so `--fact-type` gets `[possible
+//!   values: …]` in `--help` and shell completion. Its tokens are locked to
+//!   core's canonical casing by a round-trip test below, so they cannot drift.
+//! * [`deserialize_fact_type`] — a serde adapter that parses the JSONL
+//!   `fact_type` field through core's `FromStr`, so batch-ingest shares the exact
+//!   same parser as every other surface.
+
+use std::str::FromStr;
 
 use memory_engine::types::FactType;
+use serde::Deserialize;
 
-/// Fact type as accepted on the CLI (`--fact-type`) and in JSONL (`fact_type`).
+/// Fact type as accepted on the CLI (`--fact-type` on `add-fact` / `query`).
 ///
-/// The clap value tokens and the serde field values are both the lower-cased
-/// variant names (`episodic`, `semantic`, `procedural`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// This exists solely to give clap a `ValueEnum` (core stays framework-free). The
+/// value tokens are the lower-cased variant names (`episodic`, `semantic`,
+/// `procedural`), matching core's canonical [`FactType`] `Display`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum CliFactType {
     Episodic,
     Semantic,
@@ -30,6 +40,20 @@ impl From<CliFactType> for FactType {
     }
 }
 
+/// Serde adapter for the JSONL `fact_type` field, routing through core's
+/// canonical [`FactType::from_str`].
+///
+/// Use via `#[serde(deserialize_with = "crate::commands::types::deserialize_fact_type")]`.
+/// Because it delegates to core, the CLI's JSONL ingest accepts the same casings
+/// as every other surface (`snake_case` and `PascalCase`) and can never diverge.
+pub fn deserialize_fact_type<'de, D>(deserializer: D) -> Result<FactType, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    FactType::from_str(&s).map_err(serde::de::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,13 +68,19 @@ mod tests {
         );
     }
 
+    /// The JSONL adapter delegates to core, so it accepts the canonical
+    /// `snake_case` and rejects unknown tokens.
     #[test]
-    fn deserializes_snake_case() {
-        assert_eq!(
-            serde_json::from_str::<CliFactType>("\"episodic\"").unwrap(),
-            CliFactType::Episodic
-        );
-        assert!(serde_json::from_str::<CliFactType>("\"unknown\"").is_err());
+    fn deserialize_fact_type_parses_snake_case() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_fact_type")]
+            fact_type: FactType,
+        }
+
+        let w: Wrapper = serde_json::from_str(r#"{"fact_type":"episodic"}"#).unwrap();
+        assert_eq!(w.fact_type, FactType::Episodic);
+        assert!(serde_json::from_str::<Wrapper>(r#"{"fact_type":"unknown"}"#).is_err());
     }
 
     #[test]
@@ -61,5 +91,20 @@ mod tests {
             .map(|v| v.to_possible_value().unwrap().get_name().to_owned())
             .collect();
         assert_eq!(tokens, ["episodic", "semantic", "procedural"]);
+    }
+
+    /// Structural lock: every clap token must parse through core's canonical
+    /// `FromStr` to the same `FactType` the clap `From` conversion yields, and
+    /// core's `Display` must reproduce that token. This makes the clap surface
+    /// unable to silently drift from the core single source of truth (#678).
+    #[test]
+    fn clap_tokens_round_trip_through_core_from_str() {
+        use clap::ValueEnum;
+        for &variant in CliFactType::value_variants() {
+            let token = variant.to_possible_value().unwrap().get_name().to_owned();
+            let parsed: FactType = token.parse().expect("clap token must parse via core");
+            assert_eq!(parsed, FactType::from(variant));
+            assert_eq!(parsed.to_string(), token);
+        }
     }
 }

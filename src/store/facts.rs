@@ -48,13 +48,16 @@ pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
     }
 }
 
+/// Parse a `fact_type` string read back from the store into the core [`FactType`].
+///
+/// Delegates to core's canonical [`FactType::from_str`] (the single source of
+/// truth shared with the CLI and MCP, #678) rather than re-matching the variants
+/// here. Stored values are written as `snake_case` via [`fact_type_to_str`]; the
+/// canonical parser accepts that (and is case-insensitive), so the DB round-trip
+/// is unaffected.
 fn str_to_fact_type(s: &str) -> Result<FactType> {
-    match s {
-        "episodic" => Ok(FactType::Episodic),
-        "semantic" => Ok(FactType::Semantic),
-        "procedural" => Ok(FactType::Procedural),
-        other => Err(MemoryError::NotFound(format!("unknown fact type: {other}"))),
-    }
+    s.parse::<FactType>()
+        .map_err(|e| MemoryError::NotFound(e.to_string()))
 }
 
 /// Compute blake3 hex hash of content, truncated to first 32 characters (128 bits).
