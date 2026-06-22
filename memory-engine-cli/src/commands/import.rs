@@ -12,9 +12,7 @@ pub struct ImportArgs {
     embed_dim: Option<usize>,
 }
 
-// Sync: restore is a `MemoryEngine::restore_json` snapshot load with no async engine
-// calls — kept non-async so the future is never needlessly !Send-poisoned (clippy::unused_async).
-pub fn run(db: &Path, args: &ImportArgs) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &ImportArgs) -> anyhow::Result<()> {
     if db.exists() {
         anyhow::bail!(
             "target database {} already exists — import requires a fresh path",
@@ -30,7 +28,10 @@ pub fn run(db: &Path, args: &ImportArgs) -> anyhow::Result<()> {
     };
 
     let config = EngineConfig::new(db.to_path_buf(), embed_dim);
-    let _engine = MemoryEngine::restore_json(&args.snapshot, &config)?;
+    let mut engine = MemoryEngine::restore_json(&args.snapshot, &config)?;
+    // Flush the restored projections to the sidecar so the next open of the freshly
+    // imported DB does not rebuild the HNSW index from scratch (#728 review C).
+    engine.close().await?;
 
     eprintln!(
         "Imported {} into {} (embed_dim={})",

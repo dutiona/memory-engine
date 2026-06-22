@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -198,9 +199,12 @@ pub struct MemoryEngine {
     /// that `pool.path()` is no longer reachable from the engine.
     #[cfg_attr(not(feature = "archive"), allow(dead_code))]
     db_path: Option<PathBuf>,
-    /// Set by [`close`](MemoryEngine::close); read by `Drop` to warn if a
-    /// file-backed engine was dropped without flushing its sidecar snapshot.
-    closed: bool,
+    /// Set by [`flush_snapshot`](MemoryEngine::flush_snapshot) /
+    /// [`close`](MemoryEngine::close) once the sidecar snapshot has been flushed;
+    /// read by `Drop` to warn if a file-backed engine was dropped without flushing.
+    /// `AtomicBool` so a shared owner (`Arc<MemoryEngine>`, e.g. the MCP server) can
+    /// flush + mark via `&self` without unwrapping the `Arc`.
+    closed: AtomicBool,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -321,7 +325,7 @@ impl MemoryEngine {
             is_file_backed,
             read_only,
             db_path,
-            closed: false,
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -449,15 +453,48 @@ impl MemoryEngine {
         self.read_only
     }
 
-    /// Flush the in-memory projections to the backend's sidecar snapshot.
+    /// Flush the in-memory projections to the backend's sidecar snapshot, taking
+    /// only `&self`.
     ///
     /// After #631 the engine no longer holds the pool/HNSW, so snapshot assembly
-    /// (DB fingerprint + HNSW) lives below the port; `close` hands the engine's
-    /// two projections down via [`StorageBackend::write_engine_snapshot`].
+    /// (DB fingerprint + HNSW) lives below the port; this hands the engine's two
+    /// projections down via [`StorageBackend::write_engine_snapshot`] and marks the
+    /// engine flushed so `Drop` won't warn.
     ///
-    /// Call this before dropping a file-backed engine. `Drop` cannot run it (it
-    /// is `async` and touches the port) and only logs a warning if it was
-    /// skipped — the dropped-without-`close` sidecar is rebuilt on next open.
+    /// Unlike [`close`](Self::close) this needs no `&mut`, so a **shared owner**
+    /// (`Arc<MemoryEngine>`, e.g. the long-lived MCP server that cannot unwrap the
+    /// `Arc` to get `&mut`) can persist the sidecar on shutdown — or periodically.
+    /// Idempotent and safe to call repeatedly.
+    ///
+    /// No-op for in-memory or read-only engines (`Ok(false)`). `Ok(true)` when a
+    /// snapshot was written.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` if the fingerprint read or sidecar write
+    /// fails.
+    pub async fn flush_snapshot(&self) -> Result<bool> {
+        // Build the owned snapshots, then await — the read guards are temporaries
+        // dropped at the end of each statement, so none is held across `.await`.
+        let graph_snap = self.graph.read().to_snapshot();
+        let scope_snap = self.scope_tree.read().to_snapshot();
+        let wrote = self
+            .storage
+            .write_engine_snapshot(graph_snap, scope_snap)
+            .await?;
+        self.closed.store(true, Ordering::Release);
+        Ok(wrote)
+    }
+
+    /// Flush the sidecar snapshot and finalize the engine (the exclusive-owner
+    /// shutdown path).
+    ///
+    /// Thin `&mut` wrapper over [`flush_snapshot`](Self::flush_snapshot): call this
+    /// before dropping a file-backed engine you own exclusively (e.g. a CLI command).
+    /// A shared `Arc<MemoryEngine>` owner that cannot obtain `&mut` should call
+    /// [`flush_snapshot`](Self::flush_snapshot) instead. `Drop` cannot run either (it
+    /// is `async` and touches the port) and only logs a warning if neither was
+    /// called — the dropped-without-flush sidecar is rebuilt from the DB on next open.
     ///
     /// No-op for in-memory or read-only engines (`Ok(false)`). `Ok(true)` when a
     /// snapshot was written.
@@ -467,16 +504,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Storage` if the fingerprint read or sidecar write
     /// fails.
     pub async fn close(&mut self) -> Result<bool> {
-        // Build the owned snapshots, then await — the read guards are temporaries
-        // dropped at the end of each statement, so none is held across `.await`.
-        let graph_snap = self.graph.read().to_snapshot();
-        let scope_snap = self.scope_tree.read().to_snapshot();
-        let wrote = self
-            .storage
-            .write_engine_snapshot(graph_snap, scope_snap)
-            .await?;
-        self.closed = true;
-        Ok(wrote)
+        self.flush_snapshot().await
     }
 
     /// Stamp `surfaced_at` for the given fact IDs and return the DB-authoritative
@@ -741,10 +769,10 @@ impl Drop for MemoryEngine {
         // `close()`, the in-memory snapshot is simply not written and is rebuilt
         // from the DB on next open (correct, just slower). Warn so the missing
         // `close()` is visible.
-        if self.is_file_backed && !self.closed {
+        if self.is_file_backed && !self.closed.load(Ordering::Acquire) {
             tracing::warn!(
-                "MemoryEngine dropped without close(): sidecar snapshot not \
-                 flushed; it will be rebuilt from the database on next open"
+                "MemoryEngine dropped without close()/flush_snapshot(): sidecar \
+                 snapshot not flushed; it will be rebuilt from the database on next open"
             );
         }
     }

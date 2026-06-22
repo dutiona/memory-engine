@@ -361,6 +361,9 @@ mod tests {
     /// The `.pak` is written before the commit transaction; without on-error
     /// cleanup it would be a permanent disk leak with no manifest row (CWE-459).
     #[tokio::test]
+    #[ignore = "#727: assertions are disabled — needs a #[cfg(test)] StorageBackend exec \
+                seam to DROP the manifest table below the port and inject the commit failure; \
+                ignored so its green status does not imply the CWE-459 cleanup guard is live"]
     async fn archive_cleans_up_pak_when_commit_fails() {
         let dir = tempfile::tempdir().unwrap();
         let engine = MemoryEngine::builder(DIM)

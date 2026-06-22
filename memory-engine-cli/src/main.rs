@@ -96,9 +96,9 @@ async fn main() -> ExitCode {
         Commands::Export(ref args) => commands::export::run(&cli.db, args)
             .await
             .map(|()| ExitCode::SUCCESS),
-        Commands::Import(ref args) => {
-            commands::import::run(&cli.db, args).map(|()| ExitCode::SUCCESS)
-        }
+        Commands::Import(ref args) => commands::import::run(&cli.db, args)
+            .await
+            .map(|()| ExitCode::SUCCESS),
         Commands::Dump(ref args) => commands::dump::run(&cli.db, args, cli.format)
             .await
             .map(|()| ExitCode::SUCCESS),

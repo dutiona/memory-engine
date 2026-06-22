@@ -92,7 +92,7 @@ fn require<'a>(value: Option<&'a String>, flag: &str) -> anyhow::Result<&'a str>
 }
 
 pub async fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::Result<()> {
-    let engine = open_engine_writable(db)?;
+    let mut engine = open_engine_writable(db)?;
     let start = Instant::now();
 
     // Run the selected backend through the #209 guard (draining deferrals). The LLM
@@ -220,5 +220,7 @@ pub async fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> any
     if failed {
         anyhow::bail!("consolidate: the consolidation step failed (see JSON `error` field)");
     }
+    // Success path only: flush the sidecar snapshot before the engine drops (#728 review C).
+    engine.close().await?;
     Ok(())
 }

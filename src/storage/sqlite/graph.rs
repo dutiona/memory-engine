@@ -747,6 +747,103 @@ impl FactGraph for SqliteBackend {
         .await
     }
 
+    // ATOMIC WRITE — arbitrated conflict resolution in ONE transaction (verbatim
+    // single-tx body of the former conflict::temporal::resolve_conflict). Restores the
+    // all-or-nothing semantics the #631 cutover lost when it decomposed this into
+    // separate per-call port transactions (a mid-sequence failure could leave an old
+    // fact expired+invalidated with no inserted successor = silent data loss).
+    async fn resolve_conflict_atomic(
+        &self,
+        decision: crate::traits::CrudDecision,
+        old_id: i64,
+        new_fact: &NewFact,
+        relation: &str,
+        weight: f64,
+        now: DateTime<Utc>,
+    ) -> Result<(Option<i64>, Option<i64>)> {
+        use crate::traits::CrudDecision;
+
+        // Capture the embedding before moving `new_fact` into the closure, for the
+        // post-commit HNSW notify (mirrors insert_fact_atomic).
+        #[cfg(feature = "ann")]
+        let embedding = new_fact.embedding.clone();
+        let new_fact = new_fact.clone();
+        let relation = relation.to_owned();
+        let scope_id = new_fact.scope_id;
+        let dim = self.embed_dim;
+
+        let (new_id, edge_id) = self
+            .block_write(move |conn| -> Result<(Option<i64>, Option<i64>)> {
+                // unchecked_transaction: we own the write connection exclusively here,
+                // so there is no risk of nesting. All writes for the decision commit
+                // atomically (or roll back together on any error).
+                match decision {
+                    CrudDecision::Noop => Ok((None, None)),
+                    CrudDecision::Add => {
+                        let tx = conn.unchecked_transaction()?;
+                        let new_id = FactStore::new(&tx, dim).insert(&new_fact)?;
+                        // "supplements" edge: new → old
+                        let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
+                            source_fact_id: new_id,
+                            target_fact_id: old_id,
+                            relation_type: relation.clone(),
+                            weight,
+                            scope_id,
+                            t_created: now,
+                            t_expired: None,
+                        })?;
+                        tx.commit()?;
+                        Ok((Some(new_id), Some(edge_id)))
+                    }
+                    CrudDecision::Update => {
+                        let tx = conn.unchecked_transaction()?;
+                        // Expire + invalidate old fact (bi-temporal: both columns).
+                        FactStore::new(&tx, dim).expire_and_invalidate(old_id, now)?;
+                        // Cascade: expire all edges involving the old fact.
+                        let edge_store = EdgeStore::new(&tx);
+                        edge_store.expire_by_fact(old_id, now)?;
+                        // Insert the replacement fact.
+                        let new_id = FactStore::new(&tx, dim).insert(&new_fact)?;
+                        // "contradicts" edge: new → old
+                        let edge_id = edge_store.insert(&NewEdge {
+                            source_fact_id: new_id,
+                            target_fact_id: old_id,
+                            relation_type: relation.clone(),
+                            weight,
+                            scope_id,
+                            t_created: now,
+                            t_expired: None,
+                        })?;
+                        tx.commit()?;
+                        Ok((Some(new_id), Some(edge_id)))
+                    }
+                    CrudDecision::Delete => {
+                        let tx = conn.unchecked_transaction()?;
+                        FactStore::new(&tx, dim).expire_and_invalidate(old_id, now)?;
+                        EdgeStore::new(&tx).expire_by_fact(old_id, now)?;
+                        tx.commit()?;
+                        Ok((None, None))
+                    }
+                }
+            })
+            .await?;
+
+        // Post-commit HNSW sidecar notifications — mirror the per-call port methods the
+        // engine previously invoked: Update/Delete expired the old fact (notify_expire),
+        // Add/Update inserted a new one (notify_insert). Fired only after the commit.
+        #[cfg(feature = "ann")]
+        {
+            if matches!(decision, CrudDecision::Update | CrudDecision::Delete) {
+                self.hnsw_notify_expire(old_id);
+            }
+            if let Some(nid) = new_id {
+                self.hnsw_notify_insert(nid, &embedding);
+            }
+        }
+
+        Ok((new_id, edge_id))
+    }
+
     // READ — archive candidate selection (verbatim body of engine/archive.rs:167-176).
     async fn select_archive_candidates(
         &self,
@@ -1595,6 +1692,101 @@ mod tests {
         assert!(
             edges_after.is_empty(),
             "rollback must leave edges table byte-identical (empty); got {edges_after:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // resolve_conflict_atomic — single-transaction conflict resolution
+    // (#728 review finding A: the cutover had decomposed this into separate
+    // per-call port transactions, losing all-or-nothing semantics.)
+    // -------------------------------------------------------------------------
+
+    /// Happy path: an `Update` expires+invalidates the old fact, inserts the
+    /// replacement, and creates a `contradicts` edge — all committed together.
+    #[tokio::test]
+    async fn resolve_conflict_atomic_update_commits_all() {
+        let pool = seeded(&[fact("old", [0.1; DIM])]);
+        let be = backend(Arc::clone(&pool));
+        let old_id = be.list_active_facts(None).await.unwrap()[0].id;
+
+        let new = fact("new", [0.9; DIM]);
+        let (new_id, edge_id) = be
+            .resolve_conflict_atomic(
+                crate::traits::CrudDecision::Update,
+                old_id,
+                &new,
+                "contradicts",
+                1.0,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let new_id = new_id.expect("Update returns the replacement fact id");
+        assert!(edge_id.is_some(), "Update must create a contradicts edge");
+
+        // Old fact expired + invalidated (both bi-temporal columns set).
+        let old = be.get_fact(old_id).await.unwrap();
+        assert!(old.t_expired.is_some(), "old fact must be expired");
+        assert!(old.t_invalid.is_some(), "old fact must be invalidated");
+        // Replacement fact active.
+        let replacement = be.get_fact(new_id).await.unwrap();
+        assert!(replacement.t_expired.is_none(), "new fact must be active");
+        // The contradicts edge new → old exists.
+        let edges = be.list_active_edges().await.unwrap();
+        assert!(
+            edges.iter().any(|e| e.source_fact_id == new_id
+                && e.target_fact_id == old_id
+                && e.relation_type == "contradicts"),
+            "a contradicts edge new→old must exist; got {edges:?}"
+        );
+    }
+
+    /// Rollback (the data-loss guard): if the replacement insert fails mid-transaction
+    /// (here via a wrong-dimension embedding, which `FactStore::insert` rejects with
+    /// `EmbeddingDimension`), the WHOLE `Update` rolls back — the old fact is STILL
+    /// active, not expired+invalidated with no successor, and nothing new is committed.
+    #[tokio::test]
+    async fn resolve_conflict_atomic_rollback_leaves_old_fact_active() {
+        let pool = seeded(&[fact("old", [0.1; DIM])]);
+        let be = backend(Arc::clone(&pool));
+        let old_id = be.list_active_facts(None).await.unwrap()[0].id;
+
+        // Replacement with a WRONG embedding dimension: inside the tx, expire_and_invalidate
+        // runs first (it would commit the old fact's death), THEN FactStore::insert fails.
+        let mut bad = fact("bad", [0.5; DIM]);
+        bad.embedding = vec![0.5; DIM + 1];
+
+        let err = be
+            .resolve_conflict_atomic(
+                crate::traits::CrudDecision::Update,
+                old_id,
+                &bad,
+                "contradicts",
+                1.0,
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingDimension { .. }),
+            "expected EmbeddingDimension from the wrong-dim insert, got {err:?}"
+        );
+
+        // The transaction must have rolled back: the old fact is STILL active — NOT
+        // expired+invalidated with no successor (that would be the silent data loss).
+        let old = be.get_fact(old_id).await.unwrap();
+        assert!(
+            old.t_expired.is_none() && old.t_invalid.is_none(),
+            "rollback must leave the old fact active; got t_expired={:?} t_invalid={:?}",
+            old.t_expired,
+            old.t_invalid
+        );
+        // Exactly one active fact (the original) — no replacement committed.
+        assert_eq!(
+            be.list_active_facts(None).await.unwrap().len(),
+            1,
+            "rollback must leave exactly the original active fact"
         );
     }
 

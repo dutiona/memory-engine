@@ -288,6 +288,45 @@ pub trait FactGraph: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<Vec<(i64, i64, i64)>>;
 
+    /// Atomically execute an arbitrated conflict-resolution write plan in ONE
+    /// transaction — the verbatim single-tx body of the former
+    /// `crate::conflict::temporal::resolve_conflict`, moved below the seam.
+    ///
+    /// The consumer [`ConflictArbiter`](crate::traits::ConflictArbiter) decision is
+    /// made engine-side **before** this call; this method performs only the DB
+    /// writes the decision implies, all-or-nothing, so a mid-sequence failure can
+    /// never leave a partial bi-temporal state (e.g. an old fact expired+invalidated
+    /// with no inserted successor):
+    /// - `Add`: insert `new_fact`, then a `relation` edge (new → old).
+    /// - `Update`: expire+invalidate `old_id`, cascade-expire its edges, insert
+    ///   `new_fact`, then a `relation` edge (new → old).
+    /// - `Delete`: expire+invalidate `old_id`, cascade-expire its edges.
+    /// - `Noop`: no writes (returns `(None, None)`).
+    ///
+    /// The edge's `scope_id`/`t_created` are taken from `new_fact.scope_id`/`now`;
+    /// `relation` is the engine's stable relation string (unused for Delete/Noop).
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
+    /// Any HNSW sidecar notification fires **post-commit** inside the impl. The
+    /// engine mirrors the in-memory graph from the returned ids **after** this
+    /// returns `Ok` (no lock held across the await).
+    ///
+    /// # Returns
+    ///
+    /// `(new_fact_id, edge_id)` — both `Some` for `Add`/`Update`, both `None` for
+    /// `Delete`/`Noop`.
+    async fn resolve_conflict_atomic(
+        &self,
+        decision: crate::traits::CrudDecision,
+        old_id: i64,
+        new_fact: &NewFact,
+        relation: &str,
+        weight: f64,
+        now: DateTime<Utc>,
+    ) -> Result<(Option<i64>, Option<i64>)>;
+
     /// Select archive candidates (expired, non-pinned facts) and their internal
     /// edges.
     ///

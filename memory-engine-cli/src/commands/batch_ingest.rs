@@ -375,7 +375,7 @@ pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> any
     // leave an orphan empty database behind (#681). On the open paths the dim is
     // only known after opening, but opening does not create a file, so building the
     // embedder afterwards carries no orphan risk.
-    let (engine, embedder) = if args.create {
+    let (mut engine, embedder) = if args.create {
         let embed_dim = args
             .embed_dim
             .ok_or_else(|| anyhow::anyhow!("--embed-dim is required when using --create"))?;
@@ -429,6 +429,8 @@ pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> any
     }
 
     print_summary(&summary, format)?;
+    // Flush the sidecar snapshot before the engine drops (#728 review C).
+    engine.close().await?;
     Ok(())
 }
 

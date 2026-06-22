@@ -3,7 +3,7 @@ use chrono::Utc;
 use crate::error::Result;
 use crate::graph::EdgeData;
 use crate::traits::{ConflictArbiter, ConflictResolution, CrudDecision};
-use crate::types::{NewEdge, NewFact};
+use crate::types::NewFact;
 
 use super::MemoryEngine;
 
@@ -74,118 +74,73 @@ impl MemoryEngine {
         // CONSUMER TRAIT — the main loop drives this; left exactly as-is (rule 5).
         let decision = arbiter.arbitrate(&old_fact, &new_as_fact)?;
 
-        match decision {
-            CrudDecision::Noop => Ok(ConflictResolution {
-                decision: CrudDecision::Noop,
-                old_fact_id: old_id,
-                new_fact_id: None,
-            }),
+        // The arbiter's decision (consumer trait) is made above, engine-side. The DB
+        // writes it implies now run in ONE transaction below the seam via
+        // `resolve_conflict_atomic` — restoring the all-or-nothing semantics the
+        // cutover's per-call port decomposition had lost (a mid-sequence failure could
+        // otherwise leave the old fact expired+invalidated with no inserted successor =
+        // silent data loss). The in-memory graph is mirrored only AFTER the commit.
+        let relation = match decision {
+            CrudDecision::Add => Self::CONFLICT_SUPPLEMENTS_RELATION,
+            CrudDecision::Update => Self::CONFLICT_CONTRADICTS_RELATION,
+            // Delete/Noop create no edge; the relation string is unused by the port.
+            CrudDecision::Delete | CrudDecision::Noop => "",
+        };
 
-            CrudDecision::Add => {
-                let new_id = self.storage.insert_fact(new_fact).await?;
+        let (new_fact_id, edge_id) = self
+            .storage
+            .resolve_conflict_atomic(
+                decision,
+                old_id,
+                new_fact,
+                relation,
+                Self::CONFLICT_EDGE_WEIGHT,
+                now,
+            )
+            .await?;
 
-                // Create "supplements" edge: new → old
-                let edge_id = self
-                    .storage
-                    .insert_edge(&NewEdge {
-                        source_fact_id: new_id,
-                        target_fact_id: old_id,
-                        relation_type: Self::CONFLICT_SUPPLEMENTS_RELATION.to_string(),
-                        weight: Self::CONFLICT_EDGE_WEIGHT,
-                        scope_id: new_fact.scope_id,
-                        t_created: now,
-                        t_expired: None,
-                    })
-                    .await?;
-
-                // Update in-memory graph after the persistence ops (no guard held
-                // across `.await`).
-                {
-                    let mut graph = self.graph.write();
-                    graph.add_edge(
-                        new_id,
-                        old_id,
-                        EdgeData {
-                            edge_id,
-                            relation_type: Self::CONFLICT_SUPPLEMENTS_RELATION.to_string(),
-                            weight: Self::CONFLICT_EDGE_WEIGHT,
-                        },
-                    );
+        // Mirror the in-memory graph AFTER the commit (no guard held across `.await`).
+        {
+            let mut graph = self.graph.write();
+            match decision {
+                CrudDecision::Add => {
+                    if let (Some(new_id), Some(edge_id)) = (new_fact_id, edge_id) {
+                        graph.add_edge(
+                            new_id,
+                            old_id,
+                            EdgeData {
+                                edge_id,
+                                relation_type: relation.to_string(),
+                                weight: Self::CONFLICT_EDGE_WEIGHT,
+                            },
+                        );
+                    }
                 }
-
-                Ok(ConflictResolution {
-                    decision: CrudDecision::Add,
-                    old_fact_id: old_id,
-                    new_fact_id: Some(new_id),
-                })
-            }
-
-            CrudDecision::Update => {
-                // Expire + invalidate old fact (bi-temporal).
-                self.storage.expire_and_invalidate_fact(old_id, now).await?;
-
-                // Cascade: expire all edges involving the old fact.
-                self.storage.expire_edges_by_fact(old_id, now).await?;
-
-                // Insert new fact.
-                let new_id = self.storage.insert_fact(new_fact).await?;
-
-                // Create "contradicts" edge: new → old
-                let edge_id = self
-                    .storage
-                    .insert_edge(&NewEdge {
-                        source_fact_id: new_id,
-                        target_fact_id: old_id,
-                        relation_type: Self::CONFLICT_CONTRADICTS_RELATION.to_string(),
-                        weight: Self::CONFLICT_EDGE_WEIGHT,
-                        scope_id: new_fact.scope_id,
-                        t_created: now,
-                        t_expired: None,
-                    })
-                    .await?;
-
-                // Update in-memory graph: remove expired edges, add new one (no
-                // guard held across `.await`).
-                {
-                    let mut graph = self.graph.write();
+                CrudDecision::Update => {
                     graph.remove_edges_by_fact(old_id);
-                    graph.add_edge(
-                        new_id,
-                        old_id,
-                        EdgeData {
-                            edge_id,
-                            relation_type: Self::CONFLICT_CONTRADICTS_RELATION.to_string(),
-                            weight: Self::CONFLICT_EDGE_WEIGHT,
-                        },
-                    );
+                    if let (Some(new_id), Some(edge_id)) = (new_fact_id, edge_id) {
+                        graph.add_edge(
+                            new_id,
+                            old_id,
+                            EdgeData {
+                                edge_id,
+                                relation_type: relation.to_string(),
+                                weight: Self::CONFLICT_EDGE_WEIGHT,
+                            },
+                        );
+                    }
                 }
-
-                Ok(ConflictResolution {
-                    decision: CrudDecision::Update,
-                    old_fact_id: old_id,
-                    new_fact_id: Some(new_id),
-                })
-            }
-
-            CrudDecision::Delete => {
-                // Expire + invalidate old fact.
-                self.storage.expire_and_invalidate_fact(old_id, now).await?;
-
-                // Cascade: expire all edges involving the old fact.
-                self.storage.expire_edges_by_fact(old_id, now).await?;
-
-                // Remove edges from in-memory graph (no guard held across `.await`).
-                {
-                    let mut graph = self.graph.write();
+                CrudDecision::Delete => {
                     graph.remove_edges_by_fact(old_id);
                 }
-
-                Ok(ConflictResolution {
-                    decision: CrudDecision::Delete,
-                    old_fact_id: old_id,
-                    new_fact_id: None,
-                })
+                CrudDecision::Noop => {}
             }
         }
+
+        Ok(ConflictResolution {
+            decision,
+            old_fact_id: old_id,
+            new_fact_id,
+        })
     }
 }

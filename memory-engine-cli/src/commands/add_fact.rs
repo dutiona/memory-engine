@@ -99,7 +99,7 @@ pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow:
     // the database: this works on a freshly-created, never-embedded store (which
     // has no recorded dimension under #613). If the store was previously embedded
     // at a different dimension, the engine's open path rejects the mismatch.
-    let engine = open_engine_writable_with_dim(db, embedding.len())?;
+    let mut engine = open_engine_writable_with_dim(db, embedding.len())?;
     let fact_type: FactType = args.fact_type.into();
 
     let req = AddFactRequest {
@@ -139,5 +139,8 @@ pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow:
         }
     }
 
+    // Persist the in-memory projections to the sidecar snapshot before the engine
+    // drops, so the next open does not rebuild the HNSW index from the DB (#728 review C).
+    engine.close().await?;
     Ok(())
 }

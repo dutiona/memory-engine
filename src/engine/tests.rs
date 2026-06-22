@@ -1286,19 +1286,39 @@ async fn engine_concurrent_reads() {
     }
 }
 
-#[tokio::test]
+// A FTS query by the shared "Concurrent" content — factored out so the concurrent
+// reader and the terminal check issue exactly the same query.
+#[cfg(test)]
+fn concurrent_probe_query() -> SearchQuery {
+    SearchQuery {
+        text: Some("Concurrent".into()),
+        embedding: None,
+        mode: SearchMode::Fts,
+        limit: 10,
+        rerank_depth: None,
+        valid_at: None,
+        fact_type: None,
+        scope: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_write_then_read_across_threads() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("write_read.db");
 
     let engine = std::sync::Arc::new(MemoryEngine::builder(DIM).path(db_path).build().unwrap());
 
-    // Task 1: write
-    let e1 = engine.clone();
+    // Writer and reader run CONCURRENTLY on a multi-threaded runtime, sharing the engine
+    // via `Arc` — exercising overlapping write+read through the async storage port and the
+    // RwLock-guarded in-memory projections (the cutover's whole point: high-fan-out
+    // concurrency, with no lock held across an `.await`). Both are spawned before either
+    // is awaited, so they genuinely overlap.
+    let e_w = engine.clone();
     let writer = tokio::spawn(async move {
         let embedder: std::sync::Arc<dyn EmbeddingProvider> =
             std::sync::Arc::new(MockEmbedder { dim: DIM });
-        e1.add_fact(
+        e_w.add_fact(
             &AddFactRequest {
                 content: "Concurrent write test".into(),
                 fact_type: FactType::Semantic,
@@ -1312,26 +1332,29 @@ async fn engine_write_then_read_across_threads() {
         .await
         .unwrap();
     });
-    writer.await.unwrap();
 
-    // Task 2: read (after write completes)
+    let e_r = engine.clone();
     let reader = tokio::spawn(async move {
-        let results = engine
-            .query(&SearchQuery {
-                text: Some("Concurrent".into()),
-                embedding: None,
-                mode: SearchMode::Fts,
-                limit: 10,
-                rerank_depth: None,
-                valid_at: None,
-                fact_type: None,
-                scope: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
+        // Concurrent with the writer: the count is inherently a race (0 or 1). Assert only
+        // that the query neither errors nor deadlocks and never over-counts.
+        let results = e_r.query(&concurrent_probe_query()).await.unwrap();
+        assert!(
+            results.len() <= 1,
+            "concurrent read must never see more than the one written fact, got {}",
+            results.len()
+        );
     });
+
+    // Join both, THEN assert the deterministic terminal state.
+    writer.await.unwrap();
     reader.await.unwrap();
+
+    let final_results = engine.query(&concurrent_probe_query()).await.unwrap();
+    assert_eq!(
+        final_results.len(),
+        1,
+        "the written fact must be visible after both tasks complete"
+    );
 }
 
 // --- Phase 3 / T9: resume_context ---
@@ -4617,6 +4640,9 @@ async fn builder_wires_search_config() {
 }
 
 #[tokio::test]
+#[ignore = "#727: the #543-regression assertion is disabled — needs a #[cfg(test)] \
+            StorageBackend raw-conn seam to insert a revision-1 event through an empty \
+            upcaster registry; ignored so its green status does not imply the guard is live"]
 #[allow(clippy::significant_drop_tightening)]
 async fn builder_threads_upcaster_registry_in_memory() {
     // Regression for #543: `.upcaster_registry(custom).build()` with NO `.path()`
