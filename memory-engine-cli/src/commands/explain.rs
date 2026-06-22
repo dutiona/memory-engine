@@ -13,9 +13,9 @@ struct ExplainRow {
     detail: String,
 }
 
-pub fn run(db: &Path, fact_id: i64, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, fact_id: i64, format: OutputFormat) -> anyhow::Result<()> {
     let engine = open_engine(db)?;
-    let explanation = engine.explain_fact(fact_id)?;
+    let explanation = engine.explain_fact(fact_id).await?;
 
     match format {
         OutputFormat::Json => output::print_json(&explanation)?,

@@ -2,6 +2,8 @@
 // platforms; the case-sensitive ends_with check is intentionally exact.
 #![allow(clippy::case_sensitive_file_extension_comparisons)]
 
+use std::sync::Arc;
+
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, FactType};
@@ -32,7 +34,8 @@ fn test_engine() -> (MemoryEngine, tempfile::TempDir) {
     (engine, dir)
 }
 
-fn add_test_fact(engine: &MemoryEngine, content: &str) -> i64 {
+async fn add_test_fact(engine: &MemoryEngine, content: &str) -> i64 {
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(FakeEmbed);
     engine
         .add_fact(
             &AddFactRequest {
@@ -42,9 +45,10 @@ fn add_test_fact(engine: &MemoryEngine, content: &str) -> i64 {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            emb,
             None,
         )
+        .await
         .unwrap()
 }
 
@@ -68,10 +72,10 @@ fn extract_json(result: &CallToolResult) -> Value {
 // Pin / Unpin
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_pin_unpin_roundtrip() {
+#[tokio::test]
+async fn test_pin_unpin_roundtrip() {
     let (engine, _dir) = test_engine();
-    let fact_id = add_test_fact(&engine, "important fact");
+    let fact_id = add_test_fact(&engine, "important fact").await;
 
     // Pin
     let result = tools::dispatch(
@@ -83,13 +87,14 @@ fn test_pin_unpin_roundtrip() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v = extract_json(&result);
     assert_eq!(v["fact_id"], fact_id);
     assert_eq!(v["pinned"], true);
 
     // Verify via get_fact
-    let fact = engine.get_fact(fact_id).unwrap();
+    let fact = engine.get_fact(fact_id).await.unwrap();
     assert!(fact.is_pinned);
 
     // Unpin
@@ -102,16 +107,17 @@ fn test_pin_unpin_roundtrip() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v = extract_json(&result);
     assert_eq!(v["pinned"], false);
 
-    let fact = engine.get_fact(fact_id).unwrap();
+    let fact = engine.get_fact(fact_id).await.unwrap();
     assert!(!fact.is_pinned);
 }
 
-#[test]
-fn test_pin_missing_fact() {
+#[tokio::test]
+async fn test_pin_missing_fact() {
     let (engine, _dir) = test_engine();
 
     let result = tools::dispatch(
@@ -122,7 +128,8 @@ fn test_pin_missing_fact() {
         None,
         3,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
@@ -132,10 +139,10 @@ fn test_pin_missing_fact() {
 // Forget
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_forget_defaults() {
+#[tokio::test]
+async fn test_forget_defaults() {
     let (engine, _dir) = test_engine();
-    add_test_fact(&engine, "old fact");
+    add_test_fact(&engine, "old fact").await;
 
     let result = tools::dispatch(
         "memory_forget",
@@ -146,14 +153,15 @@ fn test_forget_defaults() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v = extract_json(&result);
     assert!(v["facts_evaluated"].is_number());
     assert!(v["facts_expired"].is_number());
 }
 
-#[test]
-fn test_forget_validation_error() {
+#[tokio::test]
+async fn test_forget_validation_error() {
     let (engine, _dir) = test_engine();
 
     let result = tools::dispatch(
@@ -164,14 +172,15 @@ fn test_forget_validation_error() {
         None,
         3,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn test_forget_with_overrides() {
+#[tokio::test]
+async fn test_forget_with_overrides() {
     let (engine, _dir) = test_engine();
-    add_test_fact(&engine, "episodic event");
+    add_test_fact(&engine, "episodic event").await;
 
     let result = tools::dispatch(
         "memory_forget",
@@ -182,6 +191,7 @@ fn test_forget_with_overrides() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v = extract_json(&result);
     assert!(v["facts_evaluated"].is_number());
@@ -191,8 +201,8 @@ fn test_forget_with_overrides() {
 // Consolidate
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_consolidate_no_provider() {
+#[tokio::test]
+async fn test_consolidate_no_provider() {
     let (engine, _dir) = test_engine();
 
     let result = tools::dispatch(
@@ -203,15 +213,16 @@ fn test_consolidate_no_provider() {
         None,
         3,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     assert!(err.message.contains("not configured"));
 }
 
-#[test]
-fn test_consolidate_validation() {
+#[tokio::test]
+async fn test_consolidate_validation() {
     let (engine, _dir) = test_engine();
 
     // dedup_threshold out of range
@@ -223,7 +234,8 @@ fn test_consolidate_validation() {
         None,
         3,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 
     // NOTE: cluster_threshold range validation (#344) is unit-tested directly in
@@ -240,7 +252,8 @@ fn test_consolidate_validation() {
         None,
         3,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -248,10 +261,10 @@ fn test_consolidate_validation() {
 // Dump state
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_dump_state_json() {
+#[tokio::test]
+async fn test_dump_state_json() {
     let (engine, _dir) = test_engine();
-    add_test_fact(&engine, "fact for dump");
+    add_test_fact(&engine, "fact for dump").await;
 
     let result = tools::dispatch(
         "memory_dump_state",
@@ -262,6 +275,7 @@ fn test_dump_state_json() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v = extract_json(&result);
     let path = v["path"].as_str().unwrap();
@@ -271,10 +285,10 @@ fn test_dump_state_json() {
     std::fs::remove_file(path).ok();
 }
 
-#[test]
-fn test_dump_state_custom_path() {
+#[tokio::test]
+async fn test_dump_state_custom_path() {
     let (engine, dir) = test_engine();
-    add_test_fact(&engine, "fact for custom dump");
+    add_test_fact(&engine, "fact for custom dump").await;
 
     let custom_path = dir.path().join("my-dump.json");
 
@@ -290,6 +304,7 @@ fn test_dump_state_custom_path() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v = extract_json(&result);
     assert_eq!(
@@ -299,10 +314,10 @@ fn test_dump_state_custom_path() {
     assert!(custom_path.exists());
 }
 
-#[test]
-fn test_dump_state_default_path() {
+#[tokio::test]
+async fn test_dump_state_default_path() {
     let (engine, _dir) = test_engine();
-    add_test_fact(&engine, "fact for default dump");
+    add_test_fact(&engine, "fact for default dump").await;
 
     // No format or path → defaults to json + temp dir
     let result = tools::dispatch(
@@ -314,6 +329,7 @@ fn test_dump_state_default_path() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v = extract_json(&result);
     let path = v["path"].as_str().unwrap();
@@ -328,10 +344,10 @@ fn test_dump_state_default_path() {
 // Outcome tracking (Phase 5a, #63)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_record_outcome_and_counts() {
+#[tokio::test]
+async fn test_record_outcome_and_counts() {
     let (engine, _dir) = test_engine();
-    let fact_id = add_test_fact(&engine, "outcome test fact");
+    let fact_id = add_test_fact(&engine, "outcome test fact").await;
 
     // Record outcomes via MCP dispatch
     let r1 = tools::dispatch(
@@ -343,6 +359,7 @@ fn test_record_outcome_and_counts() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v1 = extract_json(&r1);
     assert_eq!(v1["fact_id"], fact_id);
@@ -358,6 +375,7 @@ fn test_record_outcome_and_counts() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
 
     let _ = tools::dispatch(
@@ -369,6 +387,7 @@ fn test_record_outcome_and_counts() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
 
     // Query counts
@@ -381,6 +400,7 @@ fn test_record_outcome_and_counts() {
         3,
         &memory_engine::ActivityFilterConfig::default(),
     )
+    .await
     .unwrap();
     let v2 = extract_json(&r2);
     assert_eq!(v2["fact_id"], fact_id);
@@ -389,8 +409,8 @@ fn test_record_outcome_and_counts() {
     assert_eq!(v2["neutral"], 0);
 }
 
-#[test]
-fn test_record_outcome_nonexistent_fact() {
+#[tokio::test]
+async fn test_record_outcome_nonexistent_fact() {
     let (engine, _dir) = test_engine();
 
     let result = tools::dispatch(
@@ -401,14 +421,15 @@ fn test_record_outcome_nonexistent_fact() {
         None,
         3,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn test_record_outcome_invalid_variant() {
+#[tokio::test]
+async fn test_record_outcome_invalid_variant() {
     let (engine, _dir) = test_engine();
-    let fact_id = add_test_fact(&engine, "variant test");
+    let fact_id = add_test_fact(&engine, "variant test").await;
 
     let result = tools::dispatch(
         "memory_record_outcome",
@@ -421,6 +442,7 @@ fn test_record_outcome_invalid_variant() {
         None,
         3,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }

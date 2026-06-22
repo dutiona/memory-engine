@@ -22,7 +22,7 @@ struct QueryMetrics {
 }
 
 /// Run a corpus query in FTS-only mode (avoids blake3 vector noise).
-fn run_fts_query(
+async fn run_fts_query(
     engine: &memory_engine::engine::MemoryEngine,
     query: &CorpusQuery,
 ) -> (Vec<i64>, memory_engine::search::hybrid::QueryDiagnostics) {
@@ -32,7 +32,7 @@ fn run_fts_query(
         mq = mq.scope_subtree(scope);
     }
 
-    let response = engine.execute_query(&mq).expect("query failed");
+    let response = engine.execute_query(&mq).await.expect("query failed");
     let ids: Vec<i64> = response.results.iter().map(|r| r.fact.id).collect();
     (ids, response.diagnostics)
 }
@@ -57,11 +57,13 @@ fn build_relevance_data(
     (relevant, grades)
 }
 
-#[test]
-fn golden_corpus_retrieval_quality_gates() {
+#[tokio::test]
+async fn golden_corpus_retrieval_quality_gates() {
     let engine = eval_engine();
     let corpus = golden_corpus();
-    let fact_ids = CorpusBuilder::populate(&engine, &corpus).expect("populate failed");
+    let fact_ids = CorpusBuilder::populate(&engine, &corpus)
+        .await
+        .expect("populate failed");
 
     assert_eq!(
         fact_ids.len(),
@@ -77,7 +79,7 @@ fn golden_corpus_retrieval_quality_gates() {
     let mut floor_failures: Vec<String> = Vec::new();
 
     for (qi, query) in corpus.queries.iter().enumerate() {
-        let (retrieved, diagnostics) = run_fts_query(&engine, query);
+        let (retrieved, diagnostics) = run_fts_query(&engine, query).await;
         let (relevant, grades) = build_relevance_data(query, &fact_ids);
 
         let p5 = precision_at_k(&retrieved, &relevant, 5);
@@ -130,11 +132,13 @@ fn golden_corpus_retrieval_quality_gates() {
     );
 }
 
-#[test]
-fn hybrid_queries_produce_vector_match_types() {
+#[tokio::test]
+async fn hybrid_queries_produce_vector_match_types() {
     let engine = eval_engine();
     let corpus = golden_corpus();
-    let fact_ids = CorpusBuilder::populate(&engine, &corpus).expect("populate failed");
+    let fact_ids = CorpusBuilder::populate(&engine, &corpus)
+        .await
+        .expect("populate failed");
 
     let embedder = TestEmbedder;
 
@@ -153,7 +157,7 @@ fn hybrid_queries_produce_vector_match_types() {
             mq = mq.scope_subtree(scope);
         }
 
-        let response = engine.execute_query(&mq).expect("query failed");
+        let response = engine.execute_query(&mq).await.expect("query failed");
         let has_vector_match = response
             .results
             .iter()

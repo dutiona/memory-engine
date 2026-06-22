@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::error::{MemoryError, Result};
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::types::Fact;
@@ -21,13 +23,15 @@ impl MemoryEngine {
     /// Returns `MemoryError::NotFound` if the requested scope path doesn't exist,
     /// or `MemoryError::Conflict` if [`ResumeConfig::validate`] rejects the config
     /// (out-of-range `high_importance_min` or a zero tier cap).
-    pub fn resume_context(&self, config: &ResumeConfig) -> Result<ResumeContext> {
+    pub async fn resume_context(&self, config: &ResumeConfig) -> Result<ResumeContext> {
         // Fail fast at the public boundary: reject an invalid config before
         // acquiring the scope_tree lock or touching the DB (#359). The internal
-        // `resume::resume_context` helper trusts its already-validated input.
+        // tier walk below trusts its already-validated input.
         config.validate()?;
 
-        // Step 1: Resolve scope IDs from cache (short-lived read lock)
+        // Step 1: Resolve scope IDs from cache (short-lived read lock).
+        // The scope_tree guard is taken and dropped entirely within this block —
+        // no lock is held across the `.await`s that follow (keeps the future Send).
         let scope_ids = {
             let tree = self.scope_tree.read();
             let root = crate::scope::ScopeTree::root_id();
@@ -42,10 +46,54 @@ impl MemoryEngine {
             }
         }; // scope_tree read lock dropped here
 
-        // Step 2: Query DB on read connection
-        let mut ctx = self.with_read(|conn| {
-            crate::resume::resume_context(conn, &scope_ids, self.embed_dim, config)
-        })?;
+        // Step 2: Assemble the five tiers via the async storage port. This inlines
+        // the former `resume::resume_context(conn, ...)` helper — the backend now
+        // owns embed_dim, so the per-tier port calls drop it. Control flow, tier
+        // ordering, dedup (`seen`), and caps are preserved verbatim.
+        let mut seen: HashSet<i64> = HashSet::new();
+
+        // Tier 1: Pinned facts (always present, cross-scope)
+        let pinned_all = self.storage.list_pinned_facts(&[]).await?;
+        let pinned: Vec<Fact> = pinned_all.into_iter().take(config.pinned_cap).collect();
+        seen.extend(pinned.iter().map(|f| f.id));
+
+        // Tier 2: High-importance by materialized score
+        let high_importance = self
+            .storage
+            .list_facts_by_importance_score(
+                &scope_ids,
+                config.high_importance_min,
+                config.high_importance_cap,
+                &seen,
+            )
+            .await?;
+        seen.extend(high_importance.iter().map(|f| f.id));
+
+        // Tier 3: Due facts (future memory now surfacing)
+        let due_all = self.storage.list_due_facts(config.now, &scope_ids).await?;
+        let due: Vec<Fact> = due_all
+            .into_iter()
+            .filter(|f| !seen.contains(&f.id))
+            .take(config.due_cap)
+            .collect();
+        seen.extend(due.iter().map(|f| f.id));
+
+        // Tier 4: Scope-filtered recent
+        let recent = self
+            .storage
+            .list_facts_by_scopes_recent(&scope_ids, config.recent_cap, &seen)
+            .await?;
+
+        // Tier 5: KB stubs (Phase 5 placeholder)
+        let kb_stubs = Vec::new();
+
+        let mut ctx = ResumeContext {
+            pinned,
+            high_importance,
+            due,
+            recent,
+            kb_stubs,
+        };
 
         // Step 3: Stamp surfaced_at on ALL due facts across ALL tiers (#93).
         // A fact is "due" if t_valid <= now AND not bi-temporally invalidated,
@@ -67,7 +115,9 @@ impl MemoryEngine {
             .collect();
 
         if !unsurfaced_ids.is_empty() {
-            let stamped = self.stamp_surfaced_facts(&unsurfaced_ids, config.now)?;
+            let stamped = self
+                .stamp_surfaced_facts(&unsurfaced_ids, config.now)
+                .await?;
             apply_surfaced_stamps(
                 ctx.pinned
                     .iter_mut()

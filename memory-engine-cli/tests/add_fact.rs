@@ -19,7 +19,7 @@ fn create_empty_db() -> (TempDir, PathBuf) {
 }
 
 /// Create a test database with a seeded event for `source_event_id` tests.
-fn create_db_with_event() -> (TempDir, PathBuf) {
+async fn create_db_with_event() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
     let engine = memory_engine::MemoryEngine::builder(EMBED_DIM)
@@ -39,6 +39,7 @@ fn create_db_with_event() -> (TempDir, PathBuf) {
             sequence_id: 1,
             created_at: None,
         })
+        .await
         .unwrap();
 
     drop(engine);
@@ -153,9 +154,9 @@ fn add_fact_with_optional_flags() {
         .stdout(predicate::str::contains("\"importance\": 0.9"));
 }
 
-#[test]
-fn add_fact_with_source_event_id() {
-    let (_dir, db_path) = create_db_with_event();
+#[tokio::test]
+async fn add_fact_with_source_event_id() {
+    let (_dir, db_path) = create_db_with_event().await;
     cli()
         .args([
             "--db",

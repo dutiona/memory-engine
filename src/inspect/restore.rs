@@ -634,8 +634,8 @@ mod tests {
 
     // --- Round-trip restore tests ---
 
-    #[test]
-    fn json_dump_restore_roundtrip() {
+    #[tokio::test]
+    async fn json_dump_restore_roundtrip() {
         // Create engine and add data.
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
@@ -647,9 +647,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
         engine
             .add_fact(
@@ -660,9 +661,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
         // Dump to JSON.
@@ -670,6 +672,7 @@ mod tests {
         let json_path = dir.path().join("dump.json");
         engine
             .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
             .unwrap();
 
         // Read snapshot and restore into fresh in-memory DB.
@@ -743,8 +746,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn restore_rejects_non_empty_db() {
+    #[tokio::test]
+    async fn restore_rejects_non_empty_db() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
@@ -755,9 +758,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
         // Dump.
@@ -765,6 +769,7 @@ mod tests {
         let json_path = dir.path().join("dump.json");
         engine
             .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
             .unwrap();
         let snapshot = read_snapshot(&json_path).unwrap();
 
@@ -784,8 +789,8 @@ mod tests {
         assert!(err.to_string().contains("not empty"));
     }
 
-    #[test]
-    fn autoincrement_reset_after_restore() {
+    #[tokio::test]
+    async fn autoincrement_reset_after_restore() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
             .add_fact(
@@ -796,9 +801,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
         engine
             .add_fact(
@@ -809,15 +815,17 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let json_path = dir.path().join("dump.json");
         engine
             .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
             .unwrap();
 
         let snapshot = read_snapshot(&json_path).unwrap();

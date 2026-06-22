@@ -51,7 +51,7 @@ pub struct AddFactArgs {
     source_event_id: Option<i64>,
 }
 
-pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Result<()> {
     // Parse embedding
     let embedding: Vec<f32> = serde_json::from_str(&args.embedding)
         .map_err(|e| anyhow::anyhow!("invalid embedding JSON: {e}"))?;
@@ -99,7 +99,7 @@ pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Resul
     // the database: this works on a freshly-created, never-embedded store (which
     // has no recorded dimension under #613). If the store was previously embedded
     // at a different dimension, the engine's open path rejects the mismatch.
-    let engine = open_engine_writable_with_dim(db, embedding.len())?;
+    let mut engine = open_engine_writable_with_dim(db, embedding.len())?;
     let fact_type: FactType = args.fact_type.into();
 
     let req = AddFactRequest {
@@ -118,11 +118,13 @@ pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Resul
     };
 
     let embedder = PassthroughEmbedder::new(embedding);
-    let fact_id = engine.add_fact(&req, &embedder, None)?;
+    let fact_id = engine
+        .add_fact(&req, std::sync::Arc::new(embedder), None)
+        .await?;
 
     match format {
         OutputFormat::Json => {
-            let fact = engine.get_fact(fact_id)?;
+            let fact = engine.get_fact(fact_id).await?;
             output::print_json(&fact)?;
         }
         OutputFormat::Table => {
@@ -137,5 +139,8 @@ pub fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Resul
         }
     }
 
+    // Persist the in-memory projections to the sidecar snapshot before the engine
+    // drops, so the next open does not rebuild the HNSW index from the DB (#728 review C).
+    engine.close().await?;
     Ok(())
 }

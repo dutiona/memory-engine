@@ -1,15 +1,12 @@
 //! Engine methods for activity stream and session lifecycle.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use chrono::Utc;
-use rusqlite::OptionalExtension;
 
 use crate::engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, apply_filter};
 use crate::error::{MemoryError, Result};
-use crate::store::activities::ActivityStore;
-use crate::store::checkpoints::CheckpointStore;
-use crate::store::facts::FactStore;
 use crate::traits::EmbeddingProvider;
 use crate::types::{
     ActivityStatus, AddFactOptions, AddFactRequest, NewActivity, ProjectContext,
@@ -42,10 +39,10 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on write failure, or
     /// `MemoryError::ReadOnly` if the engine is read-only.
-    pub fn record_activity(
+    pub async fn record_activity(
         &self,
         req: &RecordActivityRequest,
-        embedder: Option<&dyn EmbeddingProvider>,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
         filter_config: &ActivityFilterConfig,
     ) -> Result<RecordActivityResult> {
         // Step 1: Filter decision (no locks needed).
@@ -72,10 +69,9 @@ impl MemoryEngine {
             .unwrap_or("success")
             .to_string();
 
-        // Steps 3+4: Resolve scope and insert/dedup under one lock acquisition.
-        let conn = self.write_conn()?;
+        // Steps 3+4: Resolve scope, then insert/dedup via the port.
         let scope_id = match req.scope_path.as_deref() {
-            Some(path) => self.ensure_scope_with_conn(&conn, path)?,
+            Some(path) => self.ensure_scope_path(path).await?,
             None => 1, // root scope
         };
 
@@ -90,11 +86,10 @@ impl MemoryEngine {
             scope_id,
         };
 
-        let (activity_id, was_deduplicated) = {
-            let store = ActivityStore::new(&conn);
-            store.insert_or_dedup(&new_activity, filter_config.dedup_window_secs)?
-        };
-        drop(conn);
+        let (activity_id, was_deduplicated) = self
+            .storage
+            .insert_or_dedup_activity(&new_activity, filter_config.dedup_window_secs)
+            .await?;
 
         // Step 5: Promote (only if new, not deduplicated).
         let mut promoted_fact_id = None;
@@ -103,30 +98,33 @@ impl MemoryEngine {
         } else if let ActivityFilterDecision::Promote(action) = &decision {
             // Embed OUTSIDE the write lock.
             if let Some(emb) = embedder {
-                match self.add_fact(
-                    &AddFactRequest {
-                        content: action.fact_content.clone(),
-                        fact_type: action.fact_type,
-                        source_event_id: None,
-                        scope: req.scope_path.clone(),
-                        opts: Some(AddFactOptions {
-                            importance: Some(action.importance),
-                            ..Default::default()
-                        }),
-                    },
-                    emb,
-                    None, // no persistence classifier
-                ) {
+                match self
+                    .add_fact(
+                        &AddFactRequest {
+                            content: action.fact_content.clone(),
+                            fact_type: action.fact_type,
+                            source_event_id: None,
+                            scope: req.scope_path.clone(),
+                            opts: Some(AddFactOptions {
+                                importance: Some(action.importance),
+                                ..Default::default()
+                            }),
+                        },
+                        emb,
+                        None, // no persistence classifier
+                    )
+                    .await
+                {
                     Ok(fact_id) => {
                         promoted_fact_id = Some(fact_id);
                         // Update activity status to promoted.
-                        let conn = self.write_conn()?;
-                        ActivityStore::new(&conn).update_status(
-                            activity_id,
-                            ActivityStatus::Promoted,
-                            Some(fact_id),
-                        )?;
-                        drop(conn);
+                        self.storage
+                            .update_activity_status(
+                                activity_id,
+                                ActivityStatus::Promoted,
+                                Some(fact_id),
+                            )
+                            .await?;
                         ActivityStatus::Promoted
                     }
                     Err(e) => {
@@ -166,29 +164,23 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on write failure.
-    // `conn` (write lock) is used by both the `last_activity_id` query and the
-    // final `upsert` (the return expression), so it cannot be dropped earlier
-    // without splitting the atomic read+write across two lock acquisitions.
-    // clippy's nursery suggestion would not compile here.
-    #[allow(clippy::significant_drop_tightening)]
-    pub fn checkpoint_session(
+    pub async fn checkpoint_session(
         &self,
         session_id: &str,
         scope_path: Option<&str>,
         summary: Option<&str>,
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
-        let conn = self.write_conn()?;
-
-        // Find last activity_id for this session.
-        let last_activity_id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM activities WHERE session_id = ?1 ORDER BY last_seen DESC LIMIT 1",
-                rusqlite::params![session_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(MemoryError::Database)?;
+        // Find last activity_id for this session. `list_activities_by_session`
+        // orders by `last_seen DESC`, so the first row of a 1-row page is the
+        // most-recent activity — same row the old raw SQL `ORDER BY last_seen
+        // DESC LIMIT 1` returned.
+        let last_activity_id: Option<i64> = self
+            .storage
+            .list_activities_by_session(session_id, Some(1))
+            .await?
+            .first()
+            .map(|a| a.id);
 
         let checkpoint = SessionCheckpoint {
             session_id: session_id.to_string(),
@@ -198,7 +190,7 @@ impl MemoryEngine {
             checkpoint_at: Utc::now(),
             metadata: metadata.unwrap_or_else(|| serde_json::json!({})),
         };
-        CheckpointStore::new(&conn).upsert(&checkpoint)
+        self.storage.upsert_checkpoint(&checkpoint).await
     }
 
     /// Load project context for session bootstrap.
@@ -209,13 +201,15 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if the scope path doesn't exist.
-    pub fn load_context(
+    pub async fn load_context(
         &self,
         scope_path: &str,
         activity_limit: usize,
         fact_limit: usize,
     ) -> Result<ProjectContext> {
-        // Resolve scope IDs from cache (short-lived read lock).
+        // Resolve scope IDs from cache (short-lived read lock). The owned
+        // `scope_ids` vec is materialized before any `.await`, so the
+        // `scope_tree` guard is never held across the awaits below.
         let scope_ids = {
             let tree = self.scope_tree.read();
             let id = tree
@@ -224,23 +218,21 @@ impl MemoryEngine {
             tree.subtree(id)
         }; // scope_tree read lock dropped
 
-        // Single read snapshot for consistency.
-        self.with_read(|conn| {
-            let checkpoint = CheckpointStore::new(conn).get_by_scope(scope_path)?;
-            let recent_activities =
-                ActivityStore::new(conn).list_recent_by_scope(&scope_ids, activity_limit)?;
-            let relevant_facts = FactStore::new(conn, self.embed_dim).list_by_scopes_recent(
-                &scope_ids,
-                fact_limit,
-                &HashSet::new(),
-            )?;
+        let checkpoint = self.storage.get_checkpoint_by_scope(scope_path).await?;
+        let recent_activities = self
+            .storage
+            .list_recent_activities_by_scope(&scope_ids, activity_limit)
+            .await?;
+        let relevant_facts = self
+            .storage
+            .list_facts_by_scopes_recent(&scope_ids, fact_limit, &HashSet::new())
+            .await?;
 
-            Ok(ProjectContext {
-                scope_path: scope_path.to_string(),
-                recent_activities,
-                last_checkpoint: checkpoint,
-                relevant_facts,
-            })
+        Ok(ProjectContext {
+            scope_path: scope_path.to_string(),
+            recent_activities,
+            last_checkpoint: checkpoint,
+            relevant_facts,
         })
     }
 }

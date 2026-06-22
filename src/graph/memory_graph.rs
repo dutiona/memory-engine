@@ -193,9 +193,20 @@ impl MemoryGraph {
     pub fn load_from_db(conn: &Connection) -> Result<Self> {
         let store = EdgeStore::new(conn);
         let active_edges = store.list_active()?;
+        Ok(Self::from_active_edges(&active_edges))
+    }
 
+    /// Build the graph from an already-loaded set of active edges.
+    ///
+    /// The connection-free core of [`load_from_db`](Self::load_from_db): the async
+    /// engine rebuilds its in-memory graph from the `list_active_edges` port read
+    /// (e.g. after consolidation or a dream cycle expires facts) without reaching a
+    /// raw `&Connection`. Isolated nodes are not represented (edges only), matching
+    /// `load_from_db` semantics exactly.
+    #[must_use]
+    pub fn from_active_edges(active_edges: &[crate::types::Edge]) -> Self {
         let mut graph = Self::new();
-        for edge in &active_edges {
+        for edge in active_edges {
             graph.add_edges_from_iter(
                 edge.source_fact_id,
                 edge.target_fact_id,
@@ -204,8 +215,7 @@ impl MemoryGraph {
                 edge.weight,
             );
         }
-
-        Ok(graph)
+        graph
     }
 
     /// Extract all edges for snapshotting.

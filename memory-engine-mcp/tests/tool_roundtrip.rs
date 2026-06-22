@@ -4,6 +4,8 @@
 //! and calls the dispatch function directly — validating argument parsing,
 //! engine interaction, response shaping, and error mapping.
 
+use std::sync::Arc;
+
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::AddFactRequest;
@@ -53,8 +55,8 @@ fn make_engine() -> MemoryEngine {
         .expect("in-memory engine")
 }
 
-const fn make_embedder() -> TestEmbedder {
-    TestEmbedder { dim: DIM }
+fn make_embedder_arc() -> Arc<dyn EmbeddingProvider> {
+    Arc::new(TestEmbedder { dim: DIM })
 }
 
 fn args(pairs: Value) -> Map<String, Value> {
@@ -84,8 +86,8 @@ fn unwrap_ok(result: Result<rmcp::model::CallToolResult, rmcp::model::ErrorData>
 // 1. memory_ingest
 // ---------------------------------------------------------------------------
 
-#[test]
-fn ingest_minimal() {
+#[tokio::test]
+async fn ingest_minimal() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_ingest",
@@ -99,13 +101,14 @@ fn ingest_minimal() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["event_id"].as_i64().unwrap() > 0);
 }
 
-#[test]
-fn ingest_with_all_optional_fields() {
+#[tokio::test]
+async fn ingest_with_all_optional_fields() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_ingest",
@@ -122,13 +125,14 @@ fn ingest_with_all_optional_fields() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["event_id"].as_i64().unwrap() > 0);
 }
 
-#[test]
-fn ingest_invalid_event_type() {
+#[tokio::test]
+async fn ingest_invalid_event_type() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_ingest",
@@ -142,12 +146,13 @@ fn ingest_invalid_event_type() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn ingest_missing_required_field() {
+#[tokio::test]
+async fn ingest_missing_required_field() {
     let engine = make_engine();
     // Missing "source"
     let result = tools::dispatch(
@@ -161,7 +166,8 @@ fn ingest_missing_required_field() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -169,8 +175,8 @@ fn ingest_missing_required_field() {
 // 2. memory_add_fact
 // ---------------------------------------------------------------------------
 
-#[test]
-fn add_fact_with_precomputed_embedding() {
+#[tokio::test]
+async fn add_fact_with_precomputed_embedding() {
     let engine = make_engine();
     let emb = vec![0.1; DIM];
     // #615: a precomputed embedding declares its model; on a fresh store the declared
@@ -188,13 +194,14 @@ fn add_fact_with_precomputed_embedding() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["fact_id"].as_i64().unwrap() > 0);
 }
 
-#[test]
-fn add_fact_all_options() {
+#[tokio::test]
+async fn add_fact_all_options() {
     let engine = make_engine();
     let emb = vec![0.2; DIM];
     let result = tools::dispatch(
@@ -217,13 +224,14 @@ fn add_fact_all_options() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["fact_id"].as_i64().unwrap() > 0);
 }
 
-#[test]
-fn add_fact_precomputed_without_model_rejected() {
+#[tokio::test]
+async fn add_fact_precomputed_without_model_rejected() {
     // #615: a precomputed embedding MUST declare its model — bare embedding is rejected.
     let engine = make_engine();
     let result = tools::dispatch(
@@ -237,15 +245,16 @@ fn add_fact_precomputed_without_model_rejected() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(
         result.is_err(),
         "precomputed embedding without `model` must be rejected"
     );
 }
 
-#[test]
-fn add_fact_precomputed_non_string_element_type_rejected() {
+#[tokio::test]
+async fn add_fact_precomputed_non_string_element_type_rejected() {
     // #615: a present-but-malformed element_type must be rejected, not silently
     // defaulted to "float32" (which would let it slip past the identity check).
     let engine = make_engine();
@@ -263,57 +272,63 @@ fn add_fact_precomputed_non_string_element_type_rejected() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(
         result.is_err(),
         "a non-string element_type must be rejected as invalid params"
     );
 }
 
-#[test]
-fn add_fact_precomputed_model_mismatch_rejected() {
+#[tokio::test]
+async fn add_fact_precomputed_model_mismatch_rejected() {
     // #615: first precomputed add records the declared identity; a later add declaring a
     // DIFFERENT model (same dim) is hard-rejected, closing the foreign-vector hole.
     let engine = make_engine();
-    let common = |model: &str| {
-        json!({
+    let filter = memory_engine::ActivityFilterConfig::default();
+    let first = tools::dispatch(
+        "memory_add_fact",
+        args(json!({
             "content": "fact",
             "embedding": vec![0.1; DIM],
-            "model": model,
+            "model": "model-a",
             "provider": "tei",
-        })
-    };
-    let filter = memory_engine::ActivityFilterConfig::default();
-    unwrap_ok(tools::dispatch(
-        "memory_add_fact",
-        args(common("model-a")),
+        })),
         &engine,
         None,
         None,
         DIM,
         &filter,
-    ));
+    )
+    .await;
+    unwrap_ok(first);
     let mismatch = tools::dispatch(
         "memory_add_fact",
-        args(common("model-b")),
+        args(json!({
+            "content": "fact",
+            "embedding": vec![0.1; DIM],
+            "model": "model-b",
+            "provider": "tei",
+        })),
         &engine,
         None,
         None,
         DIM,
         &filter,
-    );
+    )
+    .await;
     assert!(
         mismatch.is_err(),
         "a differing declared model must be rejected"
     );
 }
 
-#[test]
-fn query_precomputed_model_mismatch_rejected() {
+#[tokio::test]
+async fn query_precomputed_model_mismatch_rejected() {
     // #615: a precomputed query embedding declaring a model that disagrees with the store
     // is rejected before retrieval (would otherwise query a foreign vector space).
     let engine = make_engine();
-    let embedder = make_embedder(); // fingerprint = mock/test
+    let embedder = make_embedder_arc();
     engine
         .add_fact(
             &AddFactRequest {
@@ -323,9 +338,10 @@ fn query_precomputed_model_mismatch_rejected() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder,
             None,
         )
+        .await
         .unwrap();
     let result = tools::dispatch(
         "memory_query",
@@ -341,15 +357,16 @@ fn query_precomputed_model_mismatch_rejected() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(
         result.is_err(),
         "query with a mismatched declared model must be rejected"
     );
 }
 
-#[test]
-fn add_fact_importance_out_of_range() {
+#[tokio::test]
+async fn add_fact_importance_out_of_range() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_add_fact",
@@ -363,12 +380,13 @@ fn add_fact_importance_out_of_range() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn add_fact_temporal_inconsistency() {
+#[tokio::test]
+async fn add_fact_temporal_inconsistency() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_add_fact",
@@ -383,12 +401,13 @@ fn add_fact_temporal_inconsistency() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn add_fact_wrong_embedding_dim() {
+#[tokio::test]
+async fn add_fact_wrong_embedding_dim() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_add_fact",
@@ -401,12 +420,13 @@ fn add_fact_wrong_embedding_dim() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn add_fact_no_embedder_no_embedding() {
+#[tokio::test]
+async fn add_fact_no_embedder_no_embedding() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_add_fact",
@@ -418,7 +438,8 @@ fn add_fact_no_embedder_no_embedding() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     // Should fail: no pre-computed embedding and no HttpEmbeddingProvider
     assert!(result.is_err());
 }
@@ -427,10 +448,10 @@ fn add_fact_no_embedder_no_embedding() {
 // 3. memory_query
 // ---------------------------------------------------------------------------
 
-#[test]
-fn query_fts_returns_results() {
+#[tokio::test]
+async fn query_fts_returns_results() {
     let engine = make_engine();
-    let embedder = make_embedder();
+    let embedder = make_embedder_arc();
 
     // Seed some facts
     engine
@@ -442,9 +463,10 @@ fn query_fts_returns_results() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            Arc::clone(&embedder),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -455,9 +477,10 @@ fn query_fts_returns_results() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder,
             None,
         )
+        .await
         .unwrap();
 
     let result = tools::dispatch(
@@ -471,16 +494,17 @@ fn query_fts_returns_results() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
     assert!(!body["results"].as_array().unwrap().is_empty());
 }
 
-#[test]
-fn query_with_precomputed_embedding() {
+#[tokio::test]
+async fn query_with_precomputed_embedding() {
     let engine = make_engine();
-    let embedder = make_embedder();
+    let embedder = make_embedder_arc();
 
     engine
         .add_fact(
@@ -491,9 +515,10 @@ fn query_with_precomputed_embedding() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            Arc::clone(&embedder),
             None,
         )
+        .await
         .unwrap();
 
     let query_emb = embedder.embed("sleep memory").unwrap();
@@ -512,13 +537,14 @@ fn query_with_precomputed_embedding() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
 }
 
-#[test]
-fn query_one_sided_period_rejected() {
+#[tokio::test]
+async fn query_one_sided_period_rejected() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_query",
@@ -531,12 +557,13 @@ fn query_one_sided_period_rejected() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn query_empty_engine() {
+#[tokio::test]
+async fn query_empty_engine() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_query",
@@ -549,7 +576,8 @@ fn query_empty_engine() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert_eq!(body["count"].as_u64().unwrap(), 0);
 }
@@ -558,8 +586,8 @@ fn query_empty_engine() {
 // 4. memory_resume_context
 // ---------------------------------------------------------------------------
 
-#[test]
-fn resume_context_empty_engine() {
+#[tokio::test]
+async fn resume_context_empty_engine() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_resume_context",
@@ -569,7 +597,8 @@ fn resume_context_empty_engine() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     // All tiers should be empty arrays
     assert!(body["pinned"].as_array().unwrap().is_empty());
@@ -578,10 +607,10 @@ fn resume_context_empty_engine() {
     assert!(body["recent"].as_array().unwrap().is_empty());
 }
 
-#[test]
-fn resume_context_with_pinned_fact() {
+#[tokio::test]
+async fn resume_context_with_pinned_fact() {
     let engine = make_engine();
-    let embedder = make_embedder();
+    let embedder = make_embedder_arc();
 
     let opts = memory_engine::types::AddFactOptions {
         importance: Some(0.95),
@@ -597,9 +626,10 @@ fn resume_context_with_pinned_fact() {
                 scope: None,
                 opts: Some(opts),
             },
-            &embedder,
+            embedder,
             None,
         )
+        .await
         .unwrap();
 
     let result = tools::dispatch(
@@ -610,7 +640,8 @@ fn resume_context_with_pinned_fact() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(!body["pinned"].as_array().unwrap().is_empty());
 }
@@ -619,8 +650,8 @@ fn resume_context_with_pinned_fact() {
 // 5. memory_list_due
 // ---------------------------------------------------------------------------
 
-#[test]
-fn list_due_empty() {
+#[tokio::test]
+async fn list_due_empty() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_list_due",
@@ -630,7 +661,8 @@ fn list_due_empty() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert_eq!(body["count"].as_u64().unwrap(), 0);
 }
@@ -639,8 +671,8 @@ fn list_due_empty() {
 // 6. memory_next_due_time
 // ---------------------------------------------------------------------------
 
-#[test]
-fn next_due_time_empty() {
+#[tokio::test]
+async fn next_due_time_empty() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_next_due_time",
@@ -650,7 +682,8 @@ fn next_due_time_empty() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body["next_due"].is_null());
 }
@@ -659,10 +692,10 @@ fn next_due_time_empty() {
 // 7. memory_explain_fact
 // ---------------------------------------------------------------------------
 
-#[test]
-fn explain_fact_existing() {
+#[tokio::test]
+async fn explain_fact_existing() {
     let engine = make_engine();
-    let embedder = make_embedder();
+    let embedder = make_embedder_arc();
 
     let fact_id = engine
         .add_fact(
@@ -673,9 +706,10 @@ fn explain_fact_existing() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder,
             None,
         )
+        .await
         .unwrap();
 
     let result = tools::dispatch(
@@ -686,13 +720,14 @@ fn explain_fact_existing() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert_eq!(body["fact_id"].as_i64().unwrap(), fact_id);
 }
 
-#[test]
-fn explain_fact_nonexistent() {
+#[tokio::test]
+async fn explain_fact_nonexistent() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_explain_fact",
@@ -702,12 +737,13 @@ fn explain_fact_nonexistent() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
-#[test]
-fn explain_fact_missing_id() {
+#[tokio::test]
+async fn explain_fact_missing_id() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_explain_fact",
@@ -717,7 +753,8 @@ fn explain_fact_missing_id() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -725,10 +762,10 @@ fn explain_fact_missing_id() {
 // 8. memory_get_fact
 // ---------------------------------------------------------------------------
 
-#[test]
-fn get_fact_existing() {
+#[tokio::test]
+async fn get_fact_existing() {
     let engine = make_engine();
-    let embedder = make_embedder();
+    let embedder = make_embedder_arc();
 
     let fact_id = engine
         .add_fact(
@@ -739,9 +776,10 @@ fn get_fact_existing() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder,
             None,
         )
+        .await
         .unwrap();
 
     let result = tools::dispatch(
@@ -752,14 +790,15 @@ fn get_fact_existing() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert_eq!(body["id"].as_i64().unwrap(), fact_id);
     assert_eq!(body["content"].as_str().unwrap(), "Retrievable fact");
 }
 
-#[test]
-fn get_fact_nonexistent() {
+#[tokio::test]
+async fn get_fact_nonexistent() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_get_fact",
@@ -769,7 +808,8 @@ fn get_fact_nonexistent() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -777,8 +817,8 @@ fn get_fact_nonexistent() {
 // 9. memory_statistics
 // ---------------------------------------------------------------------------
 
-#[test]
-fn statistics_empty_engine() {
+#[tokio::test]
+async fn statistics_empty_engine() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_statistics",
@@ -788,16 +828,17 @@ fn statistics_empty_engine() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     // Should return stats even on empty engine
     assert!(body.is_object());
 }
 
-#[test]
-fn statistics_after_ingestion() {
+#[tokio::test]
+async fn statistics_after_ingestion() {
     let engine = make_engine();
-    let embedder = make_embedder();
+    let embedder = make_embedder_arc();
 
     engine
         .add_fact(
@@ -808,9 +849,10 @@ fn statistics_after_ingestion() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            Arc::clone(&embedder),
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -821,9 +863,10 @@ fn statistics_after_ingestion() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder,
             None,
         )
+        .await
         .unwrap();
 
     let result = tools::dispatch(
@@ -834,7 +877,8 @@ fn statistics_after_ingestion() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     let body = unwrap_ok(result);
     assert!(body.is_object());
 }
@@ -843,8 +887,8 @@ fn statistics_after_ingestion() {
 // 10. memory_flush_insights
 // ---------------------------------------------------------------------------
 
-#[test]
-fn flush_insights_no_embedder() {
+#[tokio::test]
+async fn flush_insights_no_embedder() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_flush_insights",
@@ -858,13 +902,14 @@ fn flush_insights_no_embedder() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     // Requires embedder — should fail
     assert!(result.is_err());
 }
 
-#[test]
-fn flush_insights_missing_array() {
+#[tokio::test]
+async fn flush_insights_missing_array() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_flush_insights",
@@ -874,7 +919,8 @@ fn flush_insights_missing_array() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -882,8 +928,8 @@ fn flush_insights_missing_array() {
 // Unknown tool
 // ---------------------------------------------------------------------------
 
-#[test]
-fn unknown_tool_returns_error() {
+#[tokio::test]
+async fn unknown_tool_returns_error() {
     let engine = make_engine();
     let result = tools::dispatch(
         "memory_nonexistent",
@@ -893,7 +939,8 @@ fn unknown_tool_returns_error() {
         None,
         DIM,
         &memory_engine::ActivityFilterConfig::default(),
-    );
+    )
+    .await;
     assert!(result.is_err());
 }
 

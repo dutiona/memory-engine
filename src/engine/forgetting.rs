@@ -3,11 +3,7 @@
 use chrono::Utc;
 
 use crate::error::Result;
-use crate::store::facts::FactStore;
 use crate::traits::{ForgetPolicy, PruneStats};
-
-#[cfg(feature = "ann")]
-use crate::search::strategy::VectorSearchStrategy;
 
 use super::MemoryEngine;
 
@@ -21,21 +17,16 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
-    pub fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        let (stats, pruned_ids) = {
-            let conn = self.write_conn()?;
-            let mut graph = self.graph.write();
-            crate::forgetting::prune(&conn, &mut graph, policy, self.embed_dim, Utc::now())?
-        };
-
-        #[cfg(feature = "ann")]
-        if let Some(ref hnsw) = self.hnsw_strategy {
-            for &id in &pruned_ids {
-                hnsw.notify_expire(id);
-            }
-        }
-
-        let _ = pruned_ids; // consumed above when ann is enabled; suppress unused warning otherwise
+    pub async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
+        // The prune walk reads the in-memory graph (degree per fact) *before* any
+        // port write and mutates it (`remove_edges_by_fact`) *after* the expiries
+        // commit. To keep the future `Send`, the graph guards live entirely inside
+        // the async `prune` helper, scoped around each `.await` — no `self.graph`
+        // guard is held across an await here. HNSW expiry notification now happens
+        // inside the backend's `expire_fact` (Stage B, #713), so the old engine-side
+        // `notify_expire` loop is gone.
+        let (stats, _pruned_ids) =
+            crate::forgetting::prune(&self.storage, &self.graph, policy, Utc::now()).await?;
         Ok(stats)
     }
 
@@ -45,9 +36,8 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` if the update fails.
-    pub fn pin_fact(&self, id: i64) -> Result<()> {
-        let conn = self.write_conn()?;
-        FactStore::new(&conn, self.embed_dim).set_pinned(id, true)
+    pub async fn pin_fact(&self, id: i64) -> Result<()> {
+        self.storage.set_fact_pinned(id, true).await
     }
 
     /// Unpin a fact (allow forgetting).
@@ -56,8 +46,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` if the update fails.
-    pub fn unpin_fact(&self, id: i64) -> Result<()> {
-        let conn = self.write_conn()?;
-        FactStore::new(&conn, self.embed_dim).set_pinned(id, false)
+    pub async fn unpin_fact(&self, id: i64) -> Result<()> {
+        self.storage.set_fact_pinned(id, false).await
     }
 }

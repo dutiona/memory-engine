@@ -56,6 +56,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::error::Result;
 use crate::pool::ConnectionPool;
@@ -175,7 +176,7 @@ impl MemoryEngineBuilder<InMemory> {
             self.embed_dim,
             self.search_config,
             self.upcaster_registry,
-            self.reranker,
+            self.reranker.map(Arc::from),
         )
     }
 }
@@ -229,6 +230,7 @@ impl MemoryEngineBuilder<File> {
             backup_dir: self.backing.backup_dir.clone(),
             upcaster_registry: self.upcaster_registry.clone(),
             read_only: self.backing.read_only,
+            backend: super::BackendKind::Sqlite,
         }
     }
 
@@ -239,7 +241,7 @@ impl MemoryEngineBuilder<File> {
     /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
     pub fn build(self) -> Result<MemoryEngine> {
         let config = self.to_config();
-        MemoryEngine::open_from_config(&config, self.reranker)
+        MemoryEngine::open_from_config(&config, self.reranker.map(Arc::from))
     }
 }
 

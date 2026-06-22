@@ -31,13 +31,16 @@ use crate::output::OutputFormat;
 const MAX_DRAIN_ATTEMPTS: u32 = 8;
 
 /// Run a cycle through the #209 guard, draining transient caller-write deferrals.
-fn run_with_drain(engine: &MemoryEngine, cycle: &dyn DreamCycle) -> anyhow::Result<CycleOutcome> {
-    let mut outcome = engine.run_dream_cycle_guarded(cycle)?;
+async fn run_with_drain(
+    engine: &MemoryEngine,
+    cycle: &dyn DreamCycle,
+) -> anyhow::Result<CycleOutcome> {
+    let mut outcome = engine.run_dream_cycle_guarded(cycle).await?;
     let mut attempts = 1;
     while attempts < MAX_DRAIN_ATTEMPTS {
         match outcome {
             CycleOutcome::Skipped(SkipReason::CallerWroteFacts { .. }) => {
-                outcome = engine.run_dream_cycle_guarded(cycle)?;
+                outcome = engine.run_dream_cycle_guarded(cycle).await?;
                 attempts += 1;
             }
             _ => break,
@@ -88,8 +91,8 @@ fn require<'a>(value: Option<&'a String>, flag: &str) -> anyhow::Result<&'a str>
         .with_context(|| format!("--backend llm requires {flag}"))
 }
 
-pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::Result<()> {
-    let engine = open_engine_writable(db)?;
+pub async fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::Result<()> {
+    let mut engine = open_engine_writable(db)?;
     let start = Instant::now();
 
     // Run the selected backend through the #209 guard (draining deferrals). The LLM
@@ -101,27 +104,53 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
     let (run_result, llm_stats): (anyhow::Result<CycleOutcome>, Option<_>) = match args.backend {
         BackendArg::DreamCycle => {
             let cycle = DefaultDreamCycle::with_defaults();
-            (run_with_drain(&engine, &cycle), None)
+            (run_with_drain(&engine, &cycle).await, None)
         }
         BackendArg::Llm => {
-            let llm_url = require(args.llm_url.as_ref(), "--llm-url")?;
-            let llm_model = require(args.llm_model.as_ref(), "--llm-model")?;
+            let llm_url = require(args.llm_url.as_ref(), "--llm-url")?.to_owned();
+            let llm_model = require(args.llm_model.as_ref(), "--llm-model")?.to_owned();
             // The engine is already open in scope — use its dim rather than reopening
             // the DB to re-read the config (per review).
             let dim = engine.embed_dim();
+            let embed_args = args.embed.clone();
+            let timeout_secs = args.timeout_secs;
 
-            let proposer = HttpDeltaProposer::new(
-                llm_url.to_owned(),
-                llm_model.to_owned(),
-                None,
-                args.timeout_secs,
-            )?;
+            // Both the proposer and the embedder own a `reqwest::blocking::Client`.
+            // Building one spins up a temporary tokio runtime and then DROPS it; doing
+            // that on the `#[tokio::main]` executor thread panics ("cannot drop a
+            // runtime in a context where blocking is not allowed"). Build them on a
+            // blocking thread so neither construction nor the later drop ever touches
+            // the executor.
+            let proposer = std::sync::Arc::new(
+                tokio::task::spawn_blocking(move || {
+                    HttpDeltaProposer::new(llm_url, llm_model, None, timeout_secs)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("join error building proposer: {e}"))??,
+            );
             // Summary embedder: shared config (provider/MRL identity per #619). Required
             // for the LLM backend — errors if --embed-url/--embed-model are absent.
-            let embedder = args.embed.build_required(dim)?;
-            let cycle = LlmDreamCycle::new(&proposer, &embedder);
-            let result = run_with_drain(&engine, &cycle);
-            (result, Some(proposer.stats()))
+            let embedder = std::sync::Arc::new(
+                tokio::task::spawn_blocking(move || embed_args.build_required(dim))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))??,
+            );
+            let cycle = LlmDreamCycle::new(
+                std::sync::Arc::clone(&proposer)
+                    as std::sync::Arc<dyn memory_engine::DeltaProposer>,
+                std::sync::Arc::clone(&embedder)
+                    as std::sync::Arc<dyn memory_engine::EmbeddingProvider>,
+            );
+            let result = run_with_drain(&engine, &cycle).await;
+            // Snapshot token counters AFTER the run (a failed run still burned LLM
+            // calls — fail-loud accounting). `stats()` reads the live atomics.
+            let stats = proposer.stats();
+            // Drop every blocking-client owner — the cycle plus our retained handles —
+            // on a blocking thread, for the same runtime-drop reason as construction.
+            tokio::task::spawn_blocking(move || drop((cycle, proposer, embedder)))
+                .await
+                .map_err(|e| anyhow::anyhow!("join error dropping LLM backend: {e}"))?;
+            (result, Some(stats))
         }
     };
 
@@ -135,7 +164,7 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
     let mut error_json = serde_json::Value::Null;
     let mut failed = false;
     match run_result {
-        Ok(CycleOutcome::Ran(report)) => match engine.apply_cycle_report(&report) {
+        Ok(CycleOutcome::Ran(report)) => match engine.apply_cycle_report(&report).await {
             Ok(result) => {
                 outcome_label = "ran";
                 applied = serde_json::to_value(&result)?;
@@ -191,5 +220,7 @@ pub fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::R
     if failed {
         anyhow::bail!("consolidate: the consolidation step failed (see JSON `error` field)");
     }
+    // Success path only: flush the sidecar snapshot before the engine drops (#728 review C).
+    engine.close().await?;
     Ok(())
 }

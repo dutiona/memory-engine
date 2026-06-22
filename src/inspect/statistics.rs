@@ -147,10 +147,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_engine_statistics() {
+    #[tokio::test]
+    async fn empty_engine_statistics() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let stats = engine.statistics().unwrap();
+        let stats = engine.statistics().await.unwrap();
         assert_eq!(stats.facts.total, 0);
         assert_eq!(stats.facts.active, 0);
         assert_eq!(stats.facts.expired, 0);
@@ -167,8 +167,8 @@ mod tests {
         assert!(stats.storage.file_path.is_none());
     }
 
-    #[test]
-    fn statistics_with_facts() {
+    #[tokio::test]
+    async fn statistics_with_facts() {
         use crate::types::AddFactOptions;
 
         let engine = MemoryEngine::builder(DIM).build().unwrap();
@@ -181,9 +181,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
         engine
             .add_fact(
@@ -194,9 +195,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
         // Add a pinned fact
         let pin_opts = AddFactOptions {
@@ -212,22 +214,23 @@ mod tests {
                     scope: None,
                     opts: Some(pin_opts),
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
-        let stats = engine.statistics().unwrap();
+        let stats = engine.statistics().await.unwrap();
         assert_eq!(stats.facts.total, 3);
         assert_eq!(stats.facts.active, 3);
         assert_eq!(stats.facts.expired, 0);
         assert_eq!(stats.facts.pinned, 1);
     }
 
-    #[test]
-    fn snapshot_empty_engine_statistics() {
+    #[tokio::test]
+    async fn snapshot_empty_engine_statistics() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let stats = engine.statistics().unwrap();
+        let stats = engine.statistics().await.unwrap();
         insta::assert_yaml_snapshot!(stats, {
             ".storage.page_count" => "[page_count]",
             ".storage.page_size" => "[page_size]",
@@ -235,8 +238,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn snapshot_populated_statistics() {
+    #[tokio::test]
+    async fn snapshot_populated_statistics() {
         use crate::types::AddFactOptions;
 
         let engine = MemoryEngine::builder(DIM).build().unwrap();
@@ -249,9 +252,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
         engine
             .add_fact(
@@ -262,9 +266,10 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
         let pin_opts = AddFactOptions {
             pinned: Some(true),
@@ -279,12 +284,13 @@ mod tests {
                     scope: None,
                     opts: Some(pin_opts),
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
 
-        let stats = engine.statistics().unwrap();
+        let stats = engine.statistics().await.unwrap();
         insta::assert_yaml_snapshot!(stats, {
             ".storage.page_count" => "[page_count]",
             ".storage.page_size" => "[page_size]",

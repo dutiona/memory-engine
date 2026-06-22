@@ -26,9 +26,11 @@ impl EmbeddingProvider for TestEmbed {
 }
 
 /// Full lifecycle: add facts with various states, then exercise all inspection APIs.
-#[test]
-fn inspection_lifecycle() {
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one end-to-end lifecycle exercise; reads better whole than split
+async fn inspection_lifecycle() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbed);
 
     // --- Setup: create facts in different states ---
 
@@ -42,9 +44,10 @@ fn inspection_lifecycle() {
                 scope: None,
                 opts: None,
             },
-            &TestEmbed,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
 
     // Pinned fact
@@ -61,9 +64,10 @@ fn inspection_lifecycle() {
                 scope: None,
                 opts: Some(pin_opts),
             },
-            &TestEmbed,
+            std::sync::Arc::new(TestEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
 
     // Due fact (t_valid in the past)
@@ -80,13 +84,14 @@ fn inspection_lifecycle() {
                 scope: None,
                 opts: Some(due_opts),
             },
-            &TestEmbed,
+            std::sync::Arc::new(TestEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
 
     // --- statistics() ---
-    let stats = engine.statistics().unwrap();
+    let stats = engine.statistics().await.unwrap();
     assert_eq!(stats.facts.total, 3);
     assert_eq!(stats.facts.active, 3);
     assert_eq!(stats.facts.pinned, 1);
@@ -95,19 +100,19 @@ fn inspection_lifecycle() {
     assert!(stats.storage.main_db_bytes > 0);
 
     // --- explain_fact() ---
-    let active_exp = engine.explain_fact(active_id).unwrap();
+    let active_exp = engine.explain_fact(active_id).await.unwrap();
     assert!(matches!(active_exp.state, FactState::Active));
     assert_eq!(active_exp.scope_path, "/");
 
-    let pinned_exp = engine.explain_fact(pinned_id).unwrap();
+    let pinned_exp = engine.explain_fact(pinned_id).await.unwrap();
     assert!(matches!(pinned_exp.state, FactState::Pinned));
     assert!(pinned_exp.provenance.is_pinned);
 
-    let due_exp = engine.explain_fact(due_id).unwrap();
+    let due_exp = engine.explain_fact(due_id).await.unwrap();
     assert!(matches!(due_exp.state, FactState::Due { .. }));
 
     // --- fact_history() ---
-    let due_hist = engine.fact_history(due_id).unwrap();
+    let due_hist = engine.fact_history(due_id).await.unwrap();
     assert_eq!(due_hist.fact_id, due_id);
     // Due fact has t_created + t_valid = 2 entries
     assert_eq!(due_hist.timeline.len(), 2);
@@ -121,7 +126,7 @@ fn inspection_lifecycle() {
         HistoryEventKind::Created
     ));
 
-    let active_hist = engine.fact_history(active_id).unwrap();
+    let active_hist = engine.fact_history(active_id).await.unwrap();
     assert_eq!(active_hist.timeline.len(), 1);
     assert!(matches!(
         active_hist.timeline[0].kind,
@@ -130,7 +135,10 @@ fn inspection_lifecycle() {
 
     // --- replay_events() ---
     // No events ingested via ingest() — replay should return empty with default filter
-    let events = engine.replay_events(&ReplayFilter::default()).unwrap();
+    let events = engine
+        .replay_events(&ReplayFilter::default())
+        .await
+        .unwrap();
     // Events from add_fact are not logged (add_fact doesn't call ingest), so 0
     assert_eq!(events.len(), 0);
 
@@ -139,6 +147,7 @@ fn inspection_lifecycle() {
     let json_path = dir.path().join("snapshot.json");
     engine
         .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
         .unwrap();
 
     // Verify the dump is valid JSON containing our facts
@@ -152,30 +161,31 @@ fn inspection_lifecycle() {
     let sqlite_path = dir.path().join("snapshot.db");
     engine
         .dump_state(&DumpFormat::Sqlite(sqlite_path.clone()))
+        .await
         .unwrap();
     assert!(sqlite_path.exists());
 }
 
 /// Test `explain_fact` for a not-found ID returns proper error.
-#[test]
-fn explain_fact_not_found() {
+#[tokio::test]
+async fn explain_fact_not_found() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let err = engine.explain_fact(999);
-    assert!(err.is_err());
+    assert!(err.await.is_err());
 }
 
 /// Test `fact_history` for a not-found ID returns proper error.
-#[test]
-fn fact_history_not_found() {
+#[tokio::test]
+async fn fact_history_not_found() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let err = engine.fact_history(999);
-    assert!(err.is_err());
+    assert!(err.await.is_err());
 }
 
 /// `list_due` stamps `surfaced_at` on first return, and subsequent calls
 /// preserve the original timestamp (idempotent stamping).
-#[test]
-fn stamp_surfaced_on_list_due() {
+#[tokio::test]
+async fn stamp_surfaced_on_list_due() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let now = Utc::now();
 
@@ -193,20 +203,24 @@ fn stamp_surfaced_on_list_due() {
                 scope: None,
                 opts: Some(opts),
             },
-            &TestEmbed,
+            std::sync::Arc::new(TestEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
 
     // First call: surfaced_at should be stamped.
-    let due1 = engine.list_due(now, None).unwrap();
+    let due1 = engine.list_due(now, None).await.unwrap();
     assert_eq!(due1.len(), 1);
     let ts1 = due1[0]
         .surfaced_at
         .expect("surfaced_at should be Some after first list_due");
 
     // Second call: surfaced_at must be identical (not re-stamped).
-    let due2 = engine.list_due(now + Duration::seconds(5), None).unwrap();
+    let due2 = engine
+        .list_due(now + Duration::seconds(5), None)
+        .await
+        .unwrap();
     assert_eq!(due2.len(), 1);
     let ts2 = due2[0]
         .surfaced_at

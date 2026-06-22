@@ -47,9 +47,11 @@ harness = false
 name = "lifecycle_bench"
 harness = false
 
-# `async` is default-on (#631 Stage D): the engine becomes async-native in the
-# Stage E cutover, where a backend cannot exist without a tokio runtime, so the
-# flag is on its way to vacuous. Opt out (pre-cutover) with --no-default-features.
+# `async` is default-on (#631): the engine is async-native — its DB-touching methods
+# are `async fn` that await an `Arc<dyn StorageBackend>`, so a runtime is mandatory and
+# this flag only gates the optional `tokio` dependency. `--no-default-features` (without
+# re-adding `async`) drops `tokio` and will not build the engine; it exists only so a
+# consumer that supplies `async` explicitly can control the feature set.
 [features]
 default = ["async"]
 async = ["dep:tokio"]

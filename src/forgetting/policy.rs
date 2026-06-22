@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use parking_lot::RwLock;
 
 use crate::error::Result;
 use crate::graph::MemoryGraph;
-use crate::store::edges::EdgeStore;
-use crate::store::facts::{FactScoringRow, FactStore};
+use crate::storage::StorageBackend;
+use crate::store::facts::FactScoringRow;
 use crate::traits::{ForgetPolicy, PruneStats};
 use crate::types::{Fact, FactType};
 
@@ -118,93 +120,84 @@ pub fn compute_importance(
         )
 }
 
-/// Prune facts with importance below threshold.
+/// Prune facts with importance below threshold (the async cutover orchestrator).
 ///
-/// Iterates all active facts, computes importance, soft-deletes those below
-/// `min_importance`. For each expired fact, cascades edge expiry in `SQLite`
-/// and removes edges from the in-memory graph to keep it consistent.
+/// Loads the lightweight active-scoring projection through the port, scores every
+/// fact against the in-memory graph degree, expires the sub-threshold unpinned /
+/// non-exempt set atomically below the seam ([`StorageBackend::prune_atomic`]), then
+/// reconciles the in-memory graph. Pinned facts and decay-exempt fact types are
+/// unforgettable — they still get a materialized score but bypass the expiry filter.
 ///
-/// All mutations happen in a single transaction.
+/// # `Send`-safety
+///
+/// The `parking_lot` graph guards are scoped strictly *between* the `.await`s — a
+/// read guard for scoring, a write guard for reconciliation — so no guard is ever
+/// held across an `.await` and the returned future stays `Send`.
 ///
 /// # Returns
 ///
-/// A tuple of `(PruneStats, Vec<i64>)` where:
-/// - `PruneStats` contains aggregate counts (`facts_evaluated`, `facts_expired`).
-/// - `Vec<i64>` is the list of fact IDs that were soft-deleted during this run.
+/// `(PruneStats, Vec<i64>)` — `PruneStats` carries `facts_evaluated`/`facts_expired`;
+/// the vec is the set the backend **actually** expired (mirrored into the graph here).
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Conflict` if the policy fails validation.
-/// Returns `MemoryError::Database` on SQL failure.
-pub fn prune(
-    conn: &Connection,
-    graph: &mut MemoryGraph,
+/// Returns `MemoryError::Conflict` if the policy fails validation, or
+/// `MemoryError::Storage` on a backend failure.
+pub async fn prune(
+    storage: &Arc<dyn StorageBackend>,
+    graph: &RwLock<MemoryGraph>,
     policy: &ForgetPolicy,
-    embed_dim: usize,
     now: DateTime<Utc>,
 ) -> Result<(PruneStats, Vec<i64>)> {
     policy.validate()?;
 
-    let fact_store = FactStore::new(conn, embed_dim);
-    // Prune must evaluate the *entire* active set (importance is global), so we
-    // load the lightweight scoring projection rather than full facts — bounding
-    // the working set to a few scalars per fact instead of content + embedding
-    // + metadata. See `FactStore::list_active_scoring` (issue #572 / L8).
-    let active_facts = fact_store.list_active_scoring()?;
-    let facts_evaluated = active_facts.len();
+    // Prune must evaluate the *entire* active set (importance is global). The
+    // lightweight scoring projection bounds the working set to a few scalars per
+    // fact (issue #572 / L8). Awaited up front so the graph guard below is not held
+    // across it.
+    let active_facts = storage.list_active_facts_scoring().await?;
 
-    // Score all facts once before mutating, so degree values are consistent
-    // and importance is computed a single time per fact. Pinned facts and
-    // decay-exempt fact types are unforgettable — they bypass the expiry
-    // filter entirely (but still get scores materialized and count in
-    // `facts_evaluated`).
-    let scored: Vec<f64> = active_facts
-        .iter()
-        .map(|fact| {
-            let degree = graph.degree(fact.id);
-            compute_importance(fact, degree, now, policy)
-        })
-        .collect();
-
-    let to_expire: Vec<i64> = active_facts
-        .iter()
-        .zip(&scored)
-        .filter_map(|(fact, &score)| {
-            if fact.is_pinned || policy.is_decay_exempt(&fact.fact_type) {
-                return None;
-            }
-            (score < policy.min_importance).then_some(fact.id)
-        })
-        .collect();
-
-    let tx = conn.unchecked_transaction()?;
-    let fact_store = FactStore::new(&tx, embed_dim);
-    let edge_store = EdgeStore::new(&tx);
-
-    // Materialize importance scores for all active facts (reusing the
-    // scores computed above).
-    for (fact, &score) in active_facts.iter().zip(&scored) {
-        fact_store.update_importance_score(fact.id, score)?;
-    }
-
-    // Expire low-importance unpinned facts
-    for &fact_id in &to_expire {
-        fact_store.expire(fact_id, now)?;
-        edge_store.expire_by_fact(fact_id, now)?;
-    }
-
-    tx.commit()?;
-
-    // Update in-memory graph after successful commit
-    for &fact_id in &to_expire {
-        graph.remove_edges_by_fact(fact_id);
-    }
-
-    let stats = PruneStats {
-        facts_expired: to_expire.len(),
-        facts_evaluated,
+    // Score every active fact against its in-memory graph degree, and pick the
+    // sub-threshold unpinned/non-exempt set — all under one brief read guard with
+    // no `.await` inside (keeps the future `Send`).
+    let (scored, to_expire) = {
+        let g = graph.read();
+        let scored: Vec<(i64, f64)> = active_facts
+            .iter()
+            .map(|fact| {
+                (
+                    fact.id,
+                    compute_importance(fact, g.degree(fact.id), now, policy),
+                )
+            })
+            .collect();
+        let to_expire: Vec<i64> = active_facts
+            .iter()
+            .zip(&scored)
+            .filter_map(|(fact, &(_, score))| {
+                if fact.is_pinned || policy.is_decay_exempt(&fact.fact_type) {
+                    return None;
+                }
+                (score < policy.min_importance).then_some(fact.id)
+            })
+            .collect();
+        (scored, to_expire)
     };
-    Ok((stats, to_expire))
+
+    // Atomic write phase below the seam: materialize all scores + expire the
+    // sub-threshold set + cascade edge expiry, in one transaction. Returns the ids
+    // it actually expired (the backend also fires HNSW `notify_expire`).
+    let (stats, expired) = storage.prune_atomic(&scored, &to_expire, now).await?;
+
+    // Reconcile the in-memory graph after the commit (write guard, no `.await`).
+    if !expired.is_empty() {
+        let mut g = graph.write();
+        for &fact_id in &expired {
+            g.remove_edges_by_fact(fact_id);
+        }
+    }
+
+    Ok((stats, expired))
 }
 
 #[cfg(test)]
@@ -213,29 +206,32 @@ mod tests {
     use chrono::Duration;
     use std::collections::HashMap;
 
-    use crate::store::schema::{init_schema, open_memory};
+    use crate::pool::ConnectionPool;
+    use crate::storage::StorageBackend;
+    use crate::storage::sqlite::SqliteBackend;
+    use crate::store::upcaster::UpcasterRegistry;
     use crate::types::FactType;
 
-    #[test]
-    fn decay_at_zero_is_one() {
+    #[tokio::test]
+    async fn decay_at_zero_is_one() {
         let result = ebbinghaus_decay(0.0, 69.0);
         assert!((result - 1.0).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn decay_at_half_life_is_half() {
+    #[tokio::test]
+    async fn decay_at_half_life_is_half() {
         let result = ebbinghaus_decay(69.0, 69.0);
         assert!((result - 0.5).abs() < 1e-10);
     }
 
-    #[test]
-    fn decay_at_two_half_lives_is_quarter() {
+    #[tokio::test]
+    async fn decay_at_two_half_lives_is_quarter() {
         let result = ebbinghaus_decay(138.0, 69.0);
         assert!((result - 0.25).abs() < 1e-10);
     }
 
-    #[test]
-    fn high_access_recent_connected_beats_neglected_isolated() {
+    #[tokio::test]
+    async fn high_access_recent_connected_beats_neglected_isolated() {
         let now = Utc::now();
         let policy = ForgetPolicy::default();
 
@@ -291,8 +287,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn per_fact_type_half_life_override() {
+    #[tokio::test]
+    async fn per_fact_type_half_life_override() {
         let now = Utc::now();
         let mut overrides = HashMap::new();
         overrides.insert(FactType::Episodic, 30.0);
@@ -338,23 +334,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prune_expires_low_importance_facts() {
+    #[tokio::test]
+    async fn prune_expires_low_importance_facts() {
         use crate::types::NewFact;
-
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
 
         let now = Utc::now();
         let old_time = now - Duration::days(100);
         let embed_dim = 4;
 
-        // Insert 3 facts directly with varying importance and recency
-        let fact_store = FactStore::new(&conn, embed_dim);
+        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
+            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
+            std::sync::Arc::new(UpcasterRegistry::new()),
+        ));
+        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+
+        // Insert 3 facts directly with varying importance and recency.
 
         // Fact 1: high importance, recently accessed
-        fact_store
-            .insert(&NewFact {
+        storage
+            .insert_fact(&NewFact {
                 content: "very important".into(),
                 content_hash: "h1".into(),
                 embedding: vec![0.1; embed_dim],
@@ -371,11 +369,12 @@ mod tests {
                 metadata: serde_json::json!({}),
                 is_pinned: false,
             })
+            .await
             .unwrap();
 
         // Fact 2: medium importance, old
-        fact_store
-            .insert(&NewFact {
+        storage
+            .insert_fact(&NewFact {
                 content: "somewhat important".into(),
                 content_hash: "h2".into(),
                 embedding: vec![0.2; embed_dim],
@@ -392,11 +391,12 @@ mod tests {
                 metadata: serde_json::json!({}),
                 is_pinned: false,
             })
+            .await
             .unwrap();
 
         // Fact 3: low importance, very old
-        fact_store
-            .insert(&NewFact {
+        storage
+            .insert_fact(&NewFact {
                 content: "not important".into(),
                 content_hash: "h3".into(),
                 embedding: vec![0.3; embed_dim],
@@ -413,15 +413,16 @@ mod tests {
                 metadata: serde_json::json!({}),
                 is_pinned: false,
             })
+            .await
             .unwrap();
 
-        let mut graph = MemoryGraph::new();
+        let graph = parking_lot::RwLock::new(MemoryGraph::new());
         let policy = ForgetPolicy {
             min_importance: 0.3,
             ..ForgetPolicy::default()
         };
 
-        let (stats, _expired_ids) = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+        let (stats, _expired_ids) = prune(&storage, &graph, &policy, now).await.unwrap();
         assert_eq!(stats.facts_evaluated, 3);
         // At least 1 fact should be pruned (fact 3 with low importance + old age)
         assert!(
@@ -430,28 +431,29 @@ mod tests {
             stats.facts_expired
         );
 
-        // Verify expired facts still exist in DB (soft delete, not hard delete)
-        let all_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
-            .unwrap();
+        // Verify expired facts still exist in DB (soft delete, not hard delete):
+        // list_all_facts returns active + expired.
+        let all_count = storage.list_all_facts().await.unwrap().len();
         assert_eq!(all_count, 3, "All facts should still exist in DB");
     }
 
-    #[test]
-    fn prune_skips_pinned_facts() {
+    #[tokio::test]
+    async fn prune_skips_pinned_facts() {
         use crate::types::NewFact;
-
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
 
         let now = Utc::now();
         let old_time = now - Duration::days(200);
         let embed_dim = 4;
-        let fact_store = FactStore::new(&conn, embed_dim);
+
+        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
+            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
+            std::sync::Arc::new(UpcasterRegistry::new()),
+        ));
+        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
 
         // Pinned fact with low importance and old age — would normally be pruned
-        fact_store
-            .insert(&NewFact {
+        storage
+            .insert_fact(&NewFact {
                 content: "pinned identity".into(),
                 content_hash: "hp".into(),
                 embedding: vec![0.1; embed_dim],
@@ -468,11 +470,12 @@ mod tests {
                 metadata: serde_json::json!({}),
                 is_pinned: true,
             })
+            .await
             .unwrap();
 
         // Unpinned fact with same characteristics — should be pruned
-        fact_store
-            .insert(&NewFact {
+        storage
+            .insert_fact(&NewFact {
                 content: "forgettable".into(),
                 content_hash: "hf".into(),
                 embedding: vec![0.2; embed_dim],
@@ -489,37 +492,40 @@ mod tests {
                 metadata: serde_json::json!({}),
                 is_pinned: false,
             })
+            .await
             .unwrap();
 
-        let mut graph = MemoryGraph::new();
+        let graph = parking_lot::RwLock::new(MemoryGraph::new());
         let policy = ForgetPolicy {
             min_importance: 0.3,
             ..ForgetPolicy::default()
         };
-        let (stats, _pruned_ids) = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+        let (stats, _pruned_ids) = prune(&storage, &graph, &policy, now).await.unwrap();
 
         assert_eq!(stats.facts_expired, 1); // only unpinned
         assert_eq!(stats.facts_evaluated, 2);
 
         // Pinned fact still active
-        let active = fact_store.list_active(None).unwrap();
+        let active = storage.list_active_facts(None).await.unwrap();
         assert_eq!(active.len(), 1);
         assert!(active[0].is_pinned);
     }
 
-    #[test]
-    fn prune_materializes_importance_scores() {
+    #[tokio::test]
+    async fn prune_materializes_importance_scores() {
         use crate::types::NewFact;
-
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
 
         let now = Utc::now();
         let embed_dim = 4;
-        let fact_store = FactStore::new(&conn, embed_dim);
 
-        fact_store
-            .insert(&NewFact {
+        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
+            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
+            std::sync::Arc::new(UpcasterRegistry::new()),
+        ));
+        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+
+        storage
+            .insert_fact(&NewFact {
                 content: "scored fact".into(),
                 content_hash: "hs".into(),
                 embedding: vec![0.1; embed_dim],
@@ -536,14 +542,15 @@ mod tests {
                 metadata: serde_json::json!({}),
                 is_pinned: false,
             })
+            .await
             .unwrap();
 
-        let mut graph = MemoryGraph::new();
+        let graph = parking_lot::RwLock::new(MemoryGraph::new());
         let policy = ForgetPolicy::default();
-        prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+        prune(&storage, &graph, &policy, now).await.unwrap();
 
         // After prune, importance_score should be updated from default
-        let fact = fact_store.get(1).unwrap();
+        let fact = storage.get_fact(1).await.unwrap();
         assert!(
             (fact.importance_score - 0.5).abs() > f64::EPSILON,
             "importance_score should have been updated from default 0.5, got {}",
@@ -551,9 +558,9 @@ mod tests {
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[allow(clippy::field_reassign_with_default)]
-    fn policy_validation_rejects_invalid() {
+    async fn policy_validation_rejects_invalid() {
         let mut policy = ForgetPolicy::default();
 
         // Zero half-life
@@ -605,38 +612,44 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prune_exempts_knowledge_shaped_types_by_default() {
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
+    #[tokio::test]
+    async fn prune_exempts_knowledge_shaped_types_by_default() {
         let now = Utc::now();
         let embed_dim = 4;
-        let fact_store = FactStore::new(&conn, embed_dim);
+
+        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
+            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
+            std::sync::Arc::new(UpcasterRegistry::new()),
+        ));
+        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
 
         // Identical neglect across the three types; only Episodic may decay away.
-        fact_store
-            .insert(&neglected_fact(FactType::Semantic, "ks", now))
+        storage
+            .insert_fact(&neglected_fact(FactType::Semantic, "ks", now))
+            .await
             .unwrap();
-        fact_store
-            .insert(&neglected_fact(FactType::Procedural, "kp", now))
+        storage
+            .insert_fact(&neglected_fact(FactType::Procedural, "kp", now))
+            .await
             .unwrap();
-        fact_store
-            .insert(&neglected_fact(FactType::Episodic, "ke", now))
+        storage
+            .insert_fact(&neglected_fact(FactType::Episodic, "ke", now))
+            .await
             .unwrap();
 
-        let mut graph = MemoryGraph::new();
+        let graph = parking_lot::RwLock::new(MemoryGraph::new());
         let policy = ForgetPolicy {
             min_importance: 0.3,
             ..ForgetPolicy::default()
         };
-        let (stats, expired) = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+        let (stats, expired) = prune(&storage, &graph, &policy, now).await.unwrap();
 
         assert_eq!(stats.facts_evaluated, 3);
         assert_eq!(
             stats.facts_expired, 1,
             "only the episodic fact may expire, expired ids: {expired:?}"
         );
-        let active = fact_store.list_active(None).unwrap();
+        let active = storage.list_active_facts(None).await.unwrap();
         let types: Vec<FactType> = active.iter().map(|f| f.fact_type).collect();
         assert!(
             types.contains(&FactType::Semantic),
@@ -648,8 +661,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exempt_type_recency_does_not_decay() {
+    #[tokio::test]
+    async fn exempt_type_recency_does_not_decay() {
         let now = Utc::now();
         let policy = ForgetPolicy::default();
 
@@ -684,15 +697,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn explicit_half_life_override_wins_over_exemption() {
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
+    #[tokio::test]
+    async fn explicit_half_life_override_wins_over_exemption() {
         let now = Utc::now();
         let embed_dim = 4;
-        let fact_store = FactStore::new(&conn, embed_dim);
-        fact_store
-            .insert(&neglected_fact(FactType::Semantic, "ks", now))
+
+        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
+            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
+            std::sync::Arc::new(UpcasterRegistry::new()),
+        ));
+        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+        storage
+            .insert_fact(&neglected_fact(FactType::Semantic, "ks", now))
+            .await
             .unwrap();
 
         let mut overrides = HashMap::new();
@@ -703,16 +720,16 @@ mod tests {
             ..ForgetPolicy::default()
         };
 
-        let mut graph = MemoryGraph::new();
-        let (stats, _) = prune(&conn, &mut graph, &policy, embed_dim, now).unwrap();
+        let graph = parking_lot::RwLock::new(MemoryGraph::new());
+        let (stats, _) = prune(&storage, &graph, &policy, now).await.unwrap();
         assert_eq!(
             stats.facts_expired, 1,
             "an explicit half-life override re-enables decay for an exempt type"
         );
     }
 
-    #[test]
-    fn default_exemption_set_and_override_interaction() {
+    #[tokio::test]
+    async fn default_exemption_set_and_override_interaction() {
         let policy = ForgetPolicy::default();
         assert!(policy.is_decay_exempt(&FactType::Semantic));
         assert!(policy.is_decay_exempt(&FactType::Procedural));

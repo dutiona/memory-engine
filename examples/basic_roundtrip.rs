@@ -23,63 +23,72 @@ impl EmbeddingProvider for DummyEmbedder {
     }
 }
 
-fn main() -> Result<(), MemoryError> {
+#[tokio::main]
+async fn main() -> Result<(), MemoryError> {
     let engine = MemoryEngine::builder(4).build()?;
-    let embedder = DummyEmbedder;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(DummyEmbedder);
 
     // 1. Ingest an event (raw audit log)
-    let event_id = engine.ingest(&NewEvent {
-        timestamp: chrono::Utc::now(),
-        event_type: EventType::Interaction,
-        payload: serde_json::json!({"user": "alice", "message": "Tell me about Rust"}),
-        source: "chat".into(),
-        session_id: Some("session-1".into()),
-        scope_id: 1,
-        origin_node_id: "local".into(),
-        sequence_id: 0,
-        created_at: None,
-    })?;
+    let event_id = engine
+        .ingest(&NewEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: EventType::Interaction,
+            payload: serde_json::json!({"user": "alice", "message": "Tell me about Rust"}),
+            source: "chat".into(),
+            session_id: Some("session-1".into()),
+            scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
+        })
+        .await?;
     println!("Ingested event id={event_id}");
 
     // 2. Add facts derived from the interaction
-    let fact1 = engine.add_fact(
-        &AddFactRequest {
-            content: "Rust is a systems programming language focused on safety and performance"
-                .into(),
-            fact_type: FactType::Semantic,
-            source_event_id: Some(event_id),
-            scope: None,
-            opts: None,
-        },
-        &embedder,
-        None, // no persistence classifier
-    )?;
+    let fact1 = engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Rust is a systems programming language focused on safety and performance"
+                    .into(),
+                fact_type: FactType::Semantic,
+                source_event_id: Some(event_id),
+                scope: None,
+                opts: None,
+            },
+            embedder.clone(),
+            None, // no persistence classifier
+        )
+        .await?;
     println!("Added fact id={fact1}");
 
-    let fact2 = engine.add_fact(
-        &AddFactRequest {
-            content: "Alice asked about Rust programming".into(),
-            fact_type: FactType::Episodic,
-            source_event_id: Some(event_id),
-            scope: None,
-            opts: None,
-        },
-        &embedder,
-        None,
-    )?;
+    let fact2 = engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Alice asked about Rust programming".into(),
+                fact_type: FactType::Episodic,
+                source_event_id: Some(event_id),
+                scope: None,
+                opts: None,
+            },
+            embedder.clone(),
+            None,
+        )
+        .await?;
     println!("Added fact id={fact2}");
 
     // 3. Query with hybrid search
-    let results = engine.query(&SearchQuery {
-        text: Some("Rust programming".into()),
-        embedding: Some(vec![0.1; 4]),
-        mode: SearchMode::Hybrid,
-        limit: 5,
-        rerank_depth: None,
-        valid_at: None,
-        fact_type: None,
-        scope: None,
-    })?;
+    let results = engine
+        .query(&SearchQuery {
+            text: Some("Rust programming".into()),
+            embedding: Some(vec![0.1; 4]),
+            mode: SearchMode::Hybrid,
+            limit: 5,
+            rerank_depth: None,
+            valid_at: None,
+            fact_type: None,
+            scope: None,
+        })
+        .await?;
 
     println!("\nSearch results:");
     for r in &results {
@@ -97,7 +106,7 @@ fn main() -> Result<(), MemoryError> {
 
     // 4. Check engine stats
     let (nodes, edges) = engine.graph_stats();
-    let facts = engine.list_active_facts(None)?;
+    let facts = engine.list_active_facts(None).await?;
     println!(
         "\nEngine stats: {} facts, {} graph nodes, {} edges",
         facts.len(),

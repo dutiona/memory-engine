@@ -66,24 +66,29 @@ const METHOD_VERSION: &str = "dbscan-v1";
 ///     }
 /// }
 ///
-/// let engine = MemoryEngine::builder(2).build()?;
-/// for i in 0..3 {
-///     let req = AddFactRequest {
-///         content: format!("recurring pattern {i}"),
-///         fact_type: FactType::Semantic,
-///         source_event_id: None,
-///         scope: None,
-///         opts: None,
-///     };
-///     engine.add_fact(&req, &Embed, None)?;
-/// }
+/// // The engine API is async (#631); a consumer binary uses `#[tokio::main]`.
+/// tokio::runtime::Runtime::new().unwrap().block_on(async {
+///     let engine = MemoryEngine::builder(2).build()?;
+///     let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(Embed);
+///     for i in 0..3 {
+///         let req = AddFactRequest {
+///             content: format!("recurring pattern {i}"),
+///             fact_type: FactType::Semantic,
+///             source_event_id: None,
+///             scope: None,
+///             opts: None,
+///         };
+///         engine.add_fact(&req, embedder.clone(), None).await?;
+///     }
 ///
-/// // Produce an unapplied report (the review gate), then apply it atomically.
-/// let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults())?;
-/// assert_eq!(report.metadata.facts_selected, 3);
-/// let applied = engine.apply_cycle_report(&report)?;
-/// assert_eq!(applied.promoted, 1); // the three-fact cluster promotes one representative
-/// # Ok::<(), MemoryError>(())
+///     // Produce an unapplied report (the review gate), then apply it atomically.
+///     let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults()).await?;
+///     assert_eq!(report.metadata.facts_selected, 3);
+///     let applied = engine.apply_cycle_report(&report).await?;
+///     assert_eq!(applied.promoted, 1); // the three-fact cluster promotes one representative
+///     Ok::<(), MemoryError>(())
+/// })
+/// .unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct DefaultDreamCycle {
@@ -164,10 +169,11 @@ fn cluster_provenance(cluster: &[FactId], by_id: &HashMap<FactId, &Fact>) -> Pro
     }
 }
 
+#[async_trait::async_trait]
 impl DreamCycle for DefaultDreamCycle {
-    fn run(&self, ctx: &CycleContext) -> Result<CycleReport> {
+    async fn run(&self, ctx: &CycleContext<'_>) -> Result<CycleReport> {
         let window = ctx.time_window();
-        let facts = ctx.dream().list_undreamt_in_period(window)?;
+        let facts = ctx.dream().list_undreamt_in_period(window).await?;
         let processed_ids: Vec<FactId> = facts.iter().map(|f| f.id).collect();
         let by_id: HashMap<FactId, &Fact> = facts.iter().map(|f| (f.id, f)).collect();
 
@@ -219,7 +225,7 @@ impl DreamCycle for DefaultDreamCycle {
             .map(|f| f.id)
             .filter(|id| !promoted.contains(id))
             .collect();
-        let outcome_counts = ctx.dream().outcome_counts_batch(&outcome_ids)?;
+        let outcome_counts = ctx.dream().outcome_counts_batch(&outcome_ids).await?;
         for fact in &facts {
             if promoted.contains(&fact.id) {
                 continue;
@@ -285,7 +291,7 @@ mod tests {
         }
     }
 
-    fn add(engine: &MemoryEngine, content: &str, ft: FactType, importance: f64) -> i64 {
+    async fn add(engine: &MemoryEngine, content: &str, ft: FactType, importance: f64) -> i64 {
         let req = AddFactRequest {
             content: content.into(),
             fact_type: ft,
@@ -296,18 +302,26 @@ mod tests {
                 ..Default::default()
             }),
         };
-        engine.add_fact(&req, &FixedEmbed, None).unwrap()
+        engine
+            .add_fact(
+                &req,
+                std::sync::Arc::new(FixedEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap()
     }
 
-    #[test]
-    fn dense_cluster_yields_a_promote_delta() {
+    #[tokio::test]
+    async fn dense_cluster_yields_a_promote_delta() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         // Three identical-embedding Semantic facts → one DBSCAN cluster of 3.
         for i in 0..3 {
-            add(&engine, &format!("pattern {i}"), FactType::Semantic, 0.8);
+            add(&engine, &format!("pattern {i}"), FactType::Semantic, 0.8).await;
         }
         let report = engine
             .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+            .await
             .unwrap();
         let promotes = report
             .deltas
@@ -322,14 +336,15 @@ mod tests {
         assert_eq!(report.metadata.facts_selected, 3);
     }
 
-    #[test]
-    fn negative_outcomes_rescore_down() {
+    #[tokio::test]
+    async fn negative_outcomes_rescore_down() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let id = add(&engine, "lone fact", FactType::Episodic, 0.5);
-        engine.record_outcome(id, Outcome::Negative).unwrap();
-        engine.record_outcome(id, Outcome::Negative).unwrap();
+        let id = add(&engine, "lone fact", FactType::Episodic, 0.5).await;
+        engine.record_outcome(id, Outcome::Negative).await.unwrap();
+        engine.record_outcome(id, Outcome::Negative).await.unwrap();
         let report = engine
             .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+            .await
             .unwrap();
         // single fact → no cluster (min_pts=3) → only the rescore delta.
         assert!(report.deltas.iter().any(|d| matches!(
@@ -338,15 +353,16 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn consistent_negative_outcomes_quarantine() {
+    #[tokio::test]
+    async fn consistent_negative_outcomes_quarantine() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let id = add(&engine, "bad fact", FactType::Episodic, 0.5);
+        let id = add(&engine, "bad fact", FactType::Episodic, 0.5).await;
         for _ in 0..3 {
-            engine.record_outcome(id, Outcome::Negative).unwrap();
+            engine.record_outcome(id, Outcome::Negative).await.unwrap();
         }
         let report = engine
             .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+            .await
             .unwrap();
         assert!(report.deltas.iter().any(|d| matches!(
             d,
@@ -354,17 +370,19 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn run_is_deterministic_on_deltas() {
+    #[tokio::test]
+    async fn run_is_deterministic_on_deltas() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         for i in 0..3 {
-            add(&engine, &format!("p {i}"), FactType::Semantic, 0.8);
+            add(&engine, &format!("p {i}"), FactType::Semantic, 0.8).await;
         }
         let a = engine
             .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+            .await
             .unwrap();
         let b = engine
             .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+            .await
             .unwrap();
         assert_eq!(
             a.deltas, b.deltas,

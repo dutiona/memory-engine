@@ -57,6 +57,10 @@ pub trait FactGraph: Send + Sync {
     async fn insert_fact(&self, fact: &NewFact) -> Result<i64>;
     async fn insert_or_reinforce_fact(&self, fact: &NewFact) -> Result<(i64, bool)>;
     async fn expire_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()>;
+    /// Bi-temporally expire **and** invalidate a fact (set both `t_expired` and
+    /// `t_invalid`) — conflict resolution's `Update`/`Delete` semantics. Fires the
+    /// post-commit HNSW `notify_expire`, like [`expire_fact`](Self::expire_fact).
+    async fn expire_and_invalidate_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()>;
     async fn set_fact_pinned(&self, id: i64, pinned: bool) -> Result<()>;
     async fn update_fact_importance(&self, id: i64, importance: f64) -> Result<()>;
     async fn update_fact_importance_score(&self, id: i64, score: f64) -> Result<()>;
@@ -284,6 +288,45 @@ pub trait FactGraph: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<Vec<(i64, i64, i64)>>;
 
+    /// Atomically execute an arbitrated conflict-resolution write plan in ONE
+    /// transaction — the verbatim single-tx body of the former
+    /// `crate::conflict::temporal::resolve_conflict`, moved below the seam.
+    ///
+    /// The consumer [`ConflictArbiter`](crate::traits::ConflictArbiter) decision is
+    /// made engine-side **before** this call; this method performs only the DB
+    /// writes the decision implies, all-or-nothing, so a mid-sequence failure can
+    /// never leave a partial bi-temporal state (e.g. an old fact expired+invalidated
+    /// with no inserted successor):
+    /// - `Add`: insert `new_fact`, then a `relation` edge (new → old).
+    /// - `Update`: expire+invalidate `old_id`, cascade-expire its edges, insert
+    ///   `new_fact`, then a `relation` edge (new → old).
+    /// - `Delete`: expire+invalidate `old_id`, cascade-expire its edges.
+    /// - `Noop`: no writes (returns `(None, None)`).
+    ///
+    /// The edge's `scope_id`/`t_created` are taken from `new_fact.scope_id`/`now`;
+    /// `relation` is the engine's stable relation string (unused for Delete/Noop).
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
+    /// Any HNSW sidecar notification fires **post-commit** inside the impl. The
+    /// engine mirrors the in-memory graph from the returned ids **after** this
+    /// returns `Ok` (no lock held across the await).
+    ///
+    /// # Returns
+    ///
+    /// `(new_fact_id, edge_id)` — both `Some` for `Add`/`Update`, both `None` for
+    /// `Delete`/`Noop`.
+    async fn resolve_conflict_atomic(
+        &self,
+        decision: crate::traits::CrudDecision,
+        old_id: i64,
+        new_fact: &NewFact,
+        relation: &str,
+        weight: f64,
+        now: DateTime<Utc>,
+    ) -> Result<(Option<i64>, Option<i64>)>;
+
     /// Select archive candidates (expired, non-pinned facts) and their internal
     /// edges.
     ///
@@ -301,4 +344,90 @@ pub trait FactGraph: Send + Sync {
         &self,
         expired_before: DateTime<Utc>,
     ) -> Result<(Vec<crate::types::Fact>, Vec<crate::types::Edge>)>;
+
+    /// Atomically materialize importance scores for the active set and expire the
+    /// sub-threshold facts (cascading edge expiry) in a single transaction.
+    ///
+    /// This is the write phase of `forgetting::policy::prune` (the importance sweep)
+    /// moved below the seam. Scoring reads in-memory graph degrees, so it stays
+    /// engine-side; the engine passes the precomputed `scored` pairs (one `(id,
+    /// score)` per active fact) and the `to_expire` subset that fell below the
+    /// importance threshold.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
+    ///
+    /// The caller is responsible for mirroring the returned expired ids into the
+    /// in-memory graph (`remove_edges_by_fact`) **after** this returns `Ok`.
+    ///
+    /// # Returns
+    ///
+    /// `(PruneStats, actually_expired)` — `facts_evaluated = scored.len()`,
+    /// `facts_expired = to_expire.len()`; `actually_expired` is the id list the
+    /// engine reconciles against its in-memory graph post-commit.
+    async fn prune_atomic(
+        &self,
+        scored: &[(i64, f64)],
+        to_expire: &[i64],
+        now: DateTime<Utc>,
+    ) -> Result<(crate::traits::PruneStats, Vec<i64>)>;
+
+    // -------------------------------------------------------------------------
+    // Stage E bootstrap seams — the conn-threaded import pipelines run below the
+    // seam on the write connection (where a blocking `EmbeddingProvider`/extractor
+    // is nested-runtime-safe). The engine resolves the scope id up front and passes
+    // owned `Arc` consumer handles; ownership moves straight through the blocking
+    // boundary. Each preserves the per-session/per-file savepoint atomicity exactly.
+    // -------------------------------------------------------------------------
+
+    /// Import one JSONL session log into historical memory (one savepoint).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
+    /// read-only backend, or an embedding / extraction / store error.
+    async fn bootstrap_session_atomic(
+        &self,
+        reader: Box<dyn std::io::BufRead + Send>,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport>;
+
+    /// Import every top-level `*.jsonl` session log in `dir` (each its own savepoint).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
+    /// read-only backend, [`MemoryError::Io`](crate::error::MemoryError::Io) on a
+    /// traversal failure, or an embedding / store error.
+    async fn bootstrap_directory_atomic(
+        &self,
+        dir: std::path::PathBuf,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport>;
+
+    /// Import native `.md` memory files (recursive) from `dir` — autocommit per file.
+    /// Stamps the embedding identity meta-first (#643) before the first file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
+    /// read-only backend, [`MemoryError::Io`](crate::error::MemoryError::Io) on a
+    /// traversal failure, or an embedding / store error.
+    async fn bootstrap_memory_directory_atomic(
+        &self,
+        dir: std::path::PathBuf,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport>;
 }

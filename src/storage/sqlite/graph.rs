@@ -13,6 +13,7 @@
 //! construction is not coupled to `self` inside the blocking thread.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -72,6 +73,15 @@ impl FactGraph for SqliteBackend {
         self.block_write(move |c| FactStore::new(c, dim).expire(id, now))
             .await?;
         // Post-commit HNSW notification (mirrors engine's notify_expire calls).
+        #[cfg(feature = "ann")]
+        self.hnsw_notify_expire(id);
+        Ok(())
+    }
+
+    async fn expire_and_invalidate_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
+        let dim = self.embed_dim;
+        self.block_write(move |c| FactStore::new(c, dim).expire_and_invalidate(id, now))
+            .await?;
         #[cfg(feature = "ann")]
         self.hnsw_notify_expire(id);
         Ok(())
@@ -737,6 +747,103 @@ impl FactGraph for SqliteBackend {
         .await
     }
 
+    // ATOMIC WRITE — arbitrated conflict resolution in ONE transaction (verbatim
+    // single-tx body of the former conflict::temporal::resolve_conflict). Restores the
+    // all-or-nothing semantics the #631 cutover lost when it decomposed this into
+    // separate per-call port transactions (a mid-sequence failure could leave an old
+    // fact expired+invalidated with no inserted successor = silent data loss).
+    async fn resolve_conflict_atomic(
+        &self,
+        decision: crate::traits::CrudDecision,
+        old_id: i64,
+        new_fact: &NewFact,
+        relation: &str,
+        weight: f64,
+        now: DateTime<Utc>,
+    ) -> Result<(Option<i64>, Option<i64>)> {
+        use crate::traits::CrudDecision;
+
+        // Capture the embedding before moving `new_fact` into the closure, for the
+        // post-commit HNSW notify (mirrors insert_fact_atomic).
+        #[cfg(feature = "ann")]
+        let embedding = new_fact.embedding.clone();
+        let new_fact = new_fact.clone();
+        let relation = relation.to_owned();
+        let scope_id = new_fact.scope_id;
+        let dim = self.embed_dim;
+
+        let (new_id, edge_id) = self
+            .block_write(move |conn| -> Result<(Option<i64>, Option<i64>)> {
+                // unchecked_transaction: we own the write connection exclusively here,
+                // so there is no risk of nesting. All writes for the decision commit
+                // atomically (or roll back together on any error).
+                match decision {
+                    CrudDecision::Noop => Ok((None, None)),
+                    CrudDecision::Add => {
+                        let tx = conn.unchecked_transaction()?;
+                        let new_id = FactStore::new(&tx, dim).insert(&new_fact)?;
+                        // "supplements" edge: new → old
+                        let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
+                            source_fact_id: new_id,
+                            target_fact_id: old_id,
+                            relation_type: relation.clone(),
+                            weight,
+                            scope_id,
+                            t_created: now,
+                            t_expired: None,
+                        })?;
+                        tx.commit()?;
+                        Ok((Some(new_id), Some(edge_id)))
+                    }
+                    CrudDecision::Update => {
+                        let tx = conn.unchecked_transaction()?;
+                        // Expire + invalidate old fact (bi-temporal: both columns).
+                        FactStore::new(&tx, dim).expire_and_invalidate(old_id, now)?;
+                        // Cascade: expire all edges involving the old fact.
+                        let edge_store = EdgeStore::new(&tx);
+                        edge_store.expire_by_fact(old_id, now)?;
+                        // Insert the replacement fact.
+                        let new_id = FactStore::new(&tx, dim).insert(&new_fact)?;
+                        // "contradicts" edge: new → old
+                        let edge_id = edge_store.insert(&NewEdge {
+                            source_fact_id: new_id,
+                            target_fact_id: old_id,
+                            relation_type: relation.clone(),
+                            weight,
+                            scope_id,
+                            t_created: now,
+                            t_expired: None,
+                        })?;
+                        tx.commit()?;
+                        Ok((Some(new_id), Some(edge_id)))
+                    }
+                    CrudDecision::Delete => {
+                        let tx = conn.unchecked_transaction()?;
+                        FactStore::new(&tx, dim).expire_and_invalidate(old_id, now)?;
+                        EdgeStore::new(&tx).expire_by_fact(old_id, now)?;
+                        tx.commit()?;
+                        Ok((None, None))
+                    }
+                }
+            })
+            .await?;
+
+        // Post-commit HNSW sidecar notifications — mirror the per-call port methods the
+        // engine previously invoked: Update/Delete expired the old fact (notify_expire),
+        // Add/Update inserted a new one (notify_insert). Fired only after the commit.
+        #[cfg(feature = "ann")]
+        {
+            if matches!(decision, CrudDecision::Update | CrudDecision::Delete) {
+                self.hnsw_notify_expire(old_id);
+            }
+            if let Some(nid) = new_id {
+                self.hnsw_notify_insert(nid, &embedding);
+            }
+        }
+
+        Ok((new_id, edge_id))
+    }
+
     // READ — archive candidate selection (verbatim body of engine/archive.rs:167-176).
     async fn select_archive_candidates(
         &self,
@@ -749,6 +856,136 @@ impl FactGraph for SqliteBackend {
             let candidate_ids: Vec<i64> = candidate_facts.iter().map(|f| f.id).collect();
             let candidate_edges = EdgeStore::new(conn).list_internal_by_facts(&candidate_ids)?;
             Ok((candidate_facts, candidate_edges))
+        })
+        .await
+    }
+
+    // WRITE — importance-sweep write phase (verbatim tx body of
+    // `forgetting::policy::prune`, minus the engine-side scoring + in-memory graph
+    // reconciliation which the caller owns).
+    async fn prune_atomic(
+        &self,
+        scored: &[(i64, f64)],
+        to_expire: &[i64],
+        now: DateTime<Utc>,
+    ) -> Result<(crate::traits::PruneStats, Vec<i64>)> {
+        let dim = self.embed_dim;
+        let scored = scored.to_vec();
+        let to_expire = to_expire.to_vec();
+        let (stats, expired) = self
+            .block_write(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                let fact_store = FactStore::new(&tx, dim);
+                let edge_store = EdgeStore::new(&tx);
+
+                // Materialize importance scores for every active fact.
+                for &(id, score) in &scored {
+                    fact_store.update_importance_score(id, score)?;
+                }
+                // Expire the sub-threshold set + cascade edge expiry.
+                for &fact_id in &to_expire {
+                    fact_store.expire(fact_id, now)?;
+                    edge_store.expire_by_fact(fact_id, now)?;
+                }
+                tx.commit()?;
+
+                let stats = crate::traits::PruneStats {
+                    facts_expired: to_expire.len(),
+                    facts_evaluated: scored.len(),
+                };
+                Ok((stats, to_expire))
+            })
+            .await?;
+
+        // Post-commit: drop the expired facts from the HNSW index, mirroring the
+        // `expire_fact` ordering (notify after the write lock is released).
+        #[cfg(feature = "ann")]
+        for &fact_id in &expired {
+            self.hnsw_notify_expire(fact_id);
+        }
+
+        Ok((stats, expired))
+    }
+
+    // WRITE — one JSONL session import (savepoint) below the seam.
+    async fn bootstrap_session_atomic(
+        &self,
+        reader: Box<dyn std::io::BufRead + Send>,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let dim = self.embed_dim;
+        let upcaster = Arc::clone(&self.upcaster_registry);
+        self.block_write(move |conn| {
+            let ctx = crate::bootstrap::BootstrapContext {
+                conn,
+                embed_dim: dim,
+                upcaster_registry: &upcaster,
+                embedder: &*embedder,
+                extractor: &*extractor,
+                config: &config,
+                classifier: classifier.as_deref(),
+                scope_id,
+            };
+            crate::bootstrap::bootstrap_session_inner(&ctx, reader)
+        })
+        .await
+    }
+
+    // WRITE — directory of JSONL session imports (per-session savepoints) below the seam.
+    async fn bootstrap_directory_atomic(
+        &self,
+        dir: std::path::PathBuf,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let dim = self.embed_dim;
+        let upcaster = Arc::clone(&self.upcaster_registry);
+        self.block_write(move |conn| {
+            let ctx = crate::bootstrap::BootstrapContext {
+                conn,
+                embed_dim: dim,
+                upcaster_registry: &upcaster,
+                embedder: &*embedder,
+                extractor: &*extractor,
+                config: &config,
+                classifier: classifier.as_deref(),
+                scope_id,
+            };
+            crate::bootstrap::bootstrap_directory_inner(&ctx, &dir)
+        })
+        .await
+    }
+
+    // WRITE — native `.md` memory directory import (autocommit per file) below the seam.
+    async fn bootstrap_memory_directory_atomic(
+        &self,
+        dir: std::path::PathBuf,
+        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
+        config: crate::bootstrap::BootstrapConfig,
+        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
+        scope_id: i64,
+    ) -> Result<crate::bootstrap::BootstrapReport> {
+        let dim = self.embed_dim;
+        self.block_write(move |conn| {
+            // Meta-first identity stamp (#643): record before the first file, because
+            // this path is autocommit-per-file (no wrapping savepoint to defer under).
+            crate::store::embedding_meta::record_if_absent(conn, &embedder.fingerprint(), dim)?;
+            crate::bootstrap::memory_dir::bootstrap_memory_directory_inner(
+                conn,
+                dim,
+                &dir,
+                &*embedder,
+                &config,
+                classifier.as_deref(),
+                scope_id,
+            )
         })
         .await
     }
@@ -1455,6 +1692,101 @@ mod tests {
         assert!(
             edges_after.is_empty(),
             "rollback must leave edges table byte-identical (empty); got {edges_after:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // resolve_conflict_atomic — single-transaction conflict resolution
+    // (#728 review finding A: the cutover had decomposed this into separate
+    // per-call port transactions, losing all-or-nothing semantics.)
+    // -------------------------------------------------------------------------
+
+    /// Happy path: an `Update` expires+invalidates the old fact, inserts the
+    /// replacement, and creates a `contradicts` edge — all committed together.
+    #[tokio::test]
+    async fn resolve_conflict_atomic_update_commits_all() {
+        let pool = seeded(&[fact("old", [0.1; DIM])]);
+        let be = backend(Arc::clone(&pool));
+        let old_id = be.list_active_facts(None).await.unwrap()[0].id;
+
+        let new = fact("new", [0.9; DIM]);
+        let (new_id, edge_id) = be
+            .resolve_conflict_atomic(
+                crate::traits::CrudDecision::Update,
+                old_id,
+                &new,
+                "contradicts",
+                1.0,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let new_id = new_id.expect("Update returns the replacement fact id");
+        assert!(edge_id.is_some(), "Update must create a contradicts edge");
+
+        // Old fact expired + invalidated (both bi-temporal columns set).
+        let old = be.get_fact(old_id).await.unwrap();
+        assert!(old.t_expired.is_some(), "old fact must be expired");
+        assert!(old.t_invalid.is_some(), "old fact must be invalidated");
+        // Replacement fact active.
+        let replacement = be.get_fact(new_id).await.unwrap();
+        assert!(replacement.t_expired.is_none(), "new fact must be active");
+        // The contradicts edge new → old exists.
+        let edges = be.list_active_edges().await.unwrap();
+        assert!(
+            edges.iter().any(|e| e.source_fact_id == new_id
+                && e.target_fact_id == old_id
+                && e.relation_type == "contradicts"),
+            "a contradicts edge new→old must exist; got {edges:?}"
+        );
+    }
+
+    /// Rollback (the data-loss guard): if the replacement insert fails mid-transaction
+    /// (here via a wrong-dimension embedding, which `FactStore::insert` rejects with
+    /// `EmbeddingDimension`), the WHOLE `Update` rolls back — the old fact is STILL
+    /// active, not expired+invalidated with no successor, and nothing new is committed.
+    #[tokio::test]
+    async fn resolve_conflict_atomic_rollback_leaves_old_fact_active() {
+        let pool = seeded(&[fact("old", [0.1; DIM])]);
+        let be = backend(Arc::clone(&pool));
+        let old_id = be.list_active_facts(None).await.unwrap()[0].id;
+
+        // Replacement with a WRONG embedding dimension: inside the tx, expire_and_invalidate
+        // runs first (it would commit the old fact's death), THEN FactStore::insert fails.
+        let mut bad = fact("bad", [0.5; DIM]);
+        bad.embedding = vec![0.5; DIM + 1];
+
+        let err = be
+            .resolve_conflict_atomic(
+                crate::traits::CrudDecision::Update,
+                old_id,
+                &bad,
+                "contradicts",
+                1.0,
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingDimension { .. }),
+            "expected EmbeddingDimension from the wrong-dim insert, got {err:?}"
+        );
+
+        // The transaction must have rolled back: the old fact is STILL active — NOT
+        // expired+invalidated with no successor (that would be the silent data loss).
+        let old = be.get_fact(old_id).await.unwrap();
+        assert!(
+            old.t_expired.is_none() && old.t_invalid.is_none(),
+            "rollback must leave the old fact active; got t_expired={:?} t_invalid={:?}",
+            old.t_expired,
+            old.t_invalid
+        );
+        // Exactly one active fact (the original) — no replacement committed.
+        assert_eq!(
+            be.list_active_facts(None).await.unwrap().len(),
+            1,
+            "rollback must leave exactly the original active fact"
         );
     }
 

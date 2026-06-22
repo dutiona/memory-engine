@@ -198,13 +198,13 @@ fn qwen_concurrent_embeds_succeed() {
     }
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires a live Qwen embedding endpoint; run with --ignored"]
-fn qwen_model_mismatch_is_rejected() {
+async fn qwen_model_mismatch_is_rejected() {
     // End-to-end #614 enforcement against the real model: a store stamped by the real
     // Qwen provider rejects a provider that declares a different model identity.
     let engine = MemoryEngine::builder(NATIVE_DIM).build().unwrap();
-    let qwen = provider(false);
+    let qwen: Arc<dyn EmbeddingProvider> = Arc::new(provider(false));
 
     engine
         .add_fact(
@@ -215,9 +215,10 @@ fn qwen_model_mismatch_is_rejected() {
                 scope: None,
                 opts: None,
             },
-            &qwen,
+            qwen.clone(),
             None,
         )
+        .await
         .expect("first add stamps the Qwen identity");
 
     // A provider declaring a DIFFERENT model (same endpoint/dim) must be rejected — the
@@ -233,6 +234,7 @@ fn qwen_model_mismatch_is_rejected() {
     .unwrap();
     let err = engine
         .verify_embedding_identity(&other)
+        .await
         .expect_err("a differing model identity must be rejected");
     assert!(
         matches!(err, MemoryError::EmbeddingModelMismatch { .. }),

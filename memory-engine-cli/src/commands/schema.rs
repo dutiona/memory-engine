@@ -20,6 +20,8 @@ struct SchemaReport {
 /// This is the release-gate **verify hook**: exit `0` when they match, non-zero
 /// on any mismatch (the live DB is stale and needs `migrate`, or is from a newer
 /// binary). It never mutates the database.
+// Sync: a read-only `SchemaManager` version check on the DB file — no async engine call
+// (clippy::unused_async).
 pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<ExitCode> {
     let live = peek_schema_version_from_db(db)?;
     let current = memory_engine::CURRENT_SCHEMA_VERSION;

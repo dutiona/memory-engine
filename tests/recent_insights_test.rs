@@ -24,7 +24,13 @@ impl EmbeddingProvider for FixedEmbed {
 
 /// Add a fact, optionally insight-marked, at `scope`, with an explicit `t_created`
 /// (controls recency ordering).
-fn add(engine: &MemoryEngine, content: &str, scope: &str, marked: bool, t_created: &str) -> i64 {
+async fn add(
+    engine: &MemoryEngine,
+    content: &str,
+    scope: &str,
+    marked: bool,
+    t_created: &str,
+) -> i64 {
     let metadata = if marked {
         Some(serde_json::json!({ INSIGHT_MARKER_KEY: { "flushed_at": t_created } }))
     } else {
@@ -41,11 +47,18 @@ fn add(engine: &MemoryEngine, content: &str, scope: &str, marked: bool, t_create
             ..Default::default()
         }),
     };
-    engine.add_fact(&req, &FixedEmbed, None).unwrap()
+    engine
+        .add_fact(
+            &req,
+            std::sync::Arc::new(FixedEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+            None,
+        )
+        .await
+        .unwrap()
 }
 
-#[test]
-fn list_recent_insights_subtree_newest_first_limited_active_only() {
+#[tokio::test]
+async fn list_recent_insights_subtree_newest_first_limited_active_only() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     // Marked insights at the project node and a child node (subtree).
@@ -55,14 +68,16 @@ fn list_recent_insights_subtree_newest_first_limited_active_only() {
         "project:p",
         true,
         "2024-01-01T00:00:00Z",
-    );
+    )
+    .await;
     let at_child = add(
         &engine,
         "insight at p/sub",
         "project:p/sub",
         true,
         "2024-06-01T00:00:00Z",
-    );
+    )
+    .await;
     // An unmarked fact in-scope → excluded.
     add(
         &engine,
@@ -70,7 +85,8 @@ fn list_recent_insights_subtree_newest_first_limited_active_only() {
         "project:p",
         false,
         "2024-07-01T00:00:00Z",
-    );
+    )
+    .await;
     // A marked insight in a DIFFERENT project → excluded by subtree scoping.
     add(
         &engine,
@@ -78,11 +94,13 @@ fn list_recent_insights_subtree_newest_first_limited_active_only() {
         "project:other",
         true,
         "2024-08-01T00:00:00Z",
-    );
+    )
+    .await;
 
     // Subtree of project:p, newest-first → child (Jun) before root (Jan); excludes plain + other.
     let got: Vec<i64> = engine
         .list_recent_insights("project:p", 10)
+        .await
         .unwrap()
         .iter()
         .map(|f| f.id)
@@ -96,6 +114,7 @@ fn list_recent_insights_subtree_newest_first_limited_active_only() {
     // limit truncates to newest.
     let top1: Vec<i64> = engine
         .list_recent_insights("project:p", 1)
+        .await
         .unwrap()
         .iter()
         .map(|f| f.id)
@@ -105,6 +124,7 @@ fn list_recent_insights_subtree_newest_first_limited_active_only() {
     // Exact child scope returns only the child's insight.
     let child: Vec<i64> = engine
         .list_recent_insights("project:p/sub", 10)
+        .await
         .unwrap()
         .iter()
         .map(|f| f.id)
@@ -115,6 +135,7 @@ fn list_recent_insights_subtree_newest_first_limited_active_only() {
     assert!(
         engine
             .list_recent_insights("project:does-not-exist", 10)
+            .await
             .unwrap()
             .is_empty()
     );

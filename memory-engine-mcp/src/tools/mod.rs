@@ -434,48 +434,53 @@ fn tool_def(name: &'static str, description: &'static str, schema: Value) -> Too
     reason = "args is passed by value from the MCP framework's dispatch boundary; \
               taking &Map would force callers to retain ownership"
 )]
-pub fn dispatch(
+pub async fn dispatch(
     name: &str,
     args: Map<String, Value>,
     engine: &MemoryEngine,
-    embedder: Option<&HttpEmbeddingProvider>,
-    summary_gen: Option<&(dyn SummaryGenerator + Send + Sync)>,
+    embedder: Option<Arc<HttpEmbeddingProvider>>,
+    summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
     embed_dim: usize,
     filter_config: &memory_engine::ActivityFilterConfig,
 ) -> Result<CallToolResult, ErrorData> {
     let args = &args;
+    let embedder = embedder.as_ref();
     match name {
-        "memory_ingest" => handle_ingest(args, engine),
-        "memory_add_fact" => handle_add_fact(args, engine, embedder, embed_dim),
-        "memory_query" => handle_query(args, engine, embedder),
-        "memory_resume_context" => handle_resume_context(args, engine),
-        "memory_list_due" => handle_list_due(args, engine),
-        "memory_next_due_time" => handle_next_due_time(args, engine),
-        "memory_explain_fact" => handle_explain_fact(args, engine),
-        "memory_get_fact" => handle_get_fact(args, engine),
-        "memory_statistics" => handle_statistics(engine),
-        "memory_flush_insights" => handle_flush_insights(args, engine, embedder),
+        "memory_ingest" => handle_ingest(args, engine).await,
+        "memory_add_fact" => handle_add_fact(args, engine, embedder, embed_dim).await,
+        "memory_query" => handle_query(args, engine, embedder).await,
+        "memory_resume_context" => handle_resume_context(args, engine).await,
+        "memory_list_due" => handle_list_due(args, engine).await,
+        "memory_next_due_time" => handle_next_due_time(args, engine).await,
+        "memory_explain_fact" => handle_explain_fact(args, engine).await,
+        "memory_get_fact" => handle_get_fact(args, engine).await,
+        "memory_statistics" => handle_statistics(engine).await,
+        "memory_flush_insights" => handle_flush_insights(args, engine, embedder).await,
         // P1 tools
-        "memory_consolidate" => handle_consolidate(args, engine, embedder, summary_gen),
-        "memory_forget" => handle_forget(args, engine),
-        "memory_dump_state" => handle_dump_state(args, engine),
-        "memory_pin_fact" => handle_pin_fact(args, engine),
-        "memory_unpin_fact" => handle_unpin_fact(args, engine),
+        "memory_consolidate" => {
+            handle_consolidate(args, engine, embedder, summary_gen.as_ref()).await
+        }
+        "memory_forget" => handle_forget(args, engine).await,
+        "memory_dump_state" => handle_dump_state(args, engine).await,
+        "memory_pin_fact" => handle_pin_fact(args, engine).await,
+        "memory_unpin_fact" => handle_unpin_fact(args, engine).await,
         // P2 tools
-        "memory_replay_events" => handle_replay_events(args, engine),
-        "memory_fact_history" => handle_fact_history(args, engine),
-        "memory_bootstrap_session" => handle_bootstrap_session(args, engine, embedder),
+        "memory_replay_events" => handle_replay_events(args, engine).await,
+        "memory_fact_history" => handle_fact_history(args, engine).await,
+        "memory_bootstrap_session" => handle_bootstrap_session(args, engine, embedder).await,
         // Phase 5a: Outcome tracking
-        "memory_record_outcome" => handle_record_outcome(args, engine),
-        "memory_outcome_counts" => handle_outcome_counts(args, engine),
+        "memory_record_outcome" => handle_record_outcome(args, engine).await,
+        "memory_outcome_counts" => handle_outcome_counts(args, engine).await,
         // Activity stream + session lifecycle (#224)
-        "memory_record_activity" => handle_record_activity(args, engine, embedder, filter_config),
-        "memory_checkpoint_session" => handle_checkpoint_session(args, engine),
-        "memory_load_context" => handle_load_context(args, engine),
+        "memory_record_activity" => {
+            handle_record_activity(args, engine, embedder, filter_config).await
+        }
+        "memory_checkpoint_session" => handle_checkpoint_session(args, engine).await,
+        "memory_load_context" => handle_load_context(args, engine).await,
         // Phase 5a: Cognitive pipeline (dream cycle) (#225)
-        "memory_dream_cycle" => handle_dream_cycle(args, engine),
-        "memory_apply_cycle_report" => handle_apply_cycle_report(args, engine),
-        "memory_get_recent_insights" => handle_get_recent_insights(args, engine),
+        "memory_dream_cycle" => handle_dream_cycle(args, engine).await,
+        "memory_apply_cycle_report" => handle_apply_cycle_report(args, engine).await,
+        "memory_get_recent_insights" => handle_get_recent_insights(args, engine).await,
         _ => Err(ErrorData::invalid_params(
             format!("unknown tool: {name}"),
             None,
@@ -654,7 +659,7 @@ fn ok_serialized<T: serde::Serialize>(value: &T) -> Result<CallToolResult, Error
 // Tool handlers
 // ---------------------------------------------------------------------------
 
-fn handle_ingest(
+async fn handle_ingest(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -668,7 +673,10 @@ fn handle_ingest(
     let timestamp = get_datetime(args, "timestamp")?.unwrap_or_else(Utc::now);
 
     let scope_id = match get_str(args, "scope") {
-        Some(path) => engine.ensure_scope_path(&path).map_err(to_mcp_error)?,
+        Some(path) => engine
+            .ensure_scope_path(&path)
+            .await
+            .map_err(to_mcp_error)?,
         None => 1, // root scope
     };
 
@@ -684,14 +692,14 @@ fn handle_ingest(
         created_at: None,
     };
 
-    let event_id = engine.ingest(&event).map_err(to_mcp_error)?;
+    let event_id = engine.ingest(&event).await.map_err(to_mcp_error)?;
     ok_json(json!({ "event_id": event_id }))
 }
 
-fn handle_add_fact(
+async fn handle_add_fact(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
-    embedder: Option<&HttpEmbeddingProvider>,
+    embedder: Option<&Arc<HttpEmbeddingProvider>>,
     embed_dim: usize,
 ) -> Result<CallToolResult, ErrorData> {
     let content = get_str(args, "content")
@@ -759,19 +767,30 @@ fn handle_add_fact(
         let declared = parse_declared_fingerprint(args, emb.len())?;
         engine
             .add_fact_precomputed(&req, emb, &declared, None)
+            .await
             .map_err(to_mcp_error)?
     } else {
         let emb = embedder.ok_or(ValidationError::NoEmbeddingProvider)?;
-        engine.add_fact(&req, emb, None).map_err(to_mcp_error)?
+        // The async engine takes the provider as an owned `Arc<dyn EmbeddingProvider>`
+        // (#631 §1.2) so it can clone it into the `spawn_blocking` embed offload.
+        let provider = Arc::clone(emb) as Arc<dyn EmbeddingProvider>;
+        engine
+            .add_fact(&req, provider, None)
+            .await
+            .map_err(to_mcp_error)?
     };
 
     ok_json(json!({ "fact_id": fact_id }))
 }
 
-fn handle_query(
+// Slightly over the 100-line soft cap after the #631 cutover added the `embed_query`
+// spawn_blocking offload; the handler is a single linear request→embed→query→format flow
+// that reads worse split across helpers.
+#[allow(clippy::too_many_lines)]
+async fn handle_query(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
-    embedder: Option<&HttpEmbeddingProvider>,
+    embedder: Option<&Arc<HttpEmbeddingProvider>>,
 ) -> Result<CallToolResult, ErrorData> {
     let depth_level = get_depth(args)?;
 
@@ -794,6 +813,7 @@ fn handle_query(
         let declared = parse_declared_fingerprint(args, emb.len())?;
         engine
             .verify_embedding_fingerprint(&declared)
+            .await
             .map_err(to_mcp_error)?;
     }
 
@@ -814,7 +834,22 @@ fn handle_query(
                 // Query path uses embed_query, applying the asymmetric instruction prefix
                 // for models like Qwen (#618). add_fact stays on the document `embed`: it
                 // passes the provider to engine.add_fact, which calls embed() internally.
-                let emb = emb_provider.embed_query(&text).map_err(to_mcp_error)?;
+                //
+                // This is the ONE consumer-trait call made at the MCP layer rather than
+                // inside the engine ([`MemoryQuery`] carries a pre-computed vector, so the
+                // engine never embeds the query). It MUST be offloaded onto the blocking
+                // pool: a `reqwest::blocking` provider spins up — and on drop tears down —
+                // an internal runtime, which panics ("cannot drop a runtime …") if run
+                // inline on the async executor thread. `spawn_blocking` keeps it off-runtime,
+                // mirroring the engine's own consumer-trait offload (#631 §1.2).
+                let provider = Arc::clone(emb_provider);
+                let text = text.clone();
+                let emb = tokio::task::spawn_blocking(move || provider.embed_query(&text))
+                    .await
+                    .map_err(|e| {
+                        ErrorData::internal_error(format!("query embed task join error: {e}"), None)
+                    })?
+                    .map_err(to_mcp_error)?;
                 query = query.embedding(emb);
             } else if let Some(mode) = explicit_mode {
                 // User explicitly asked for vector/hybrid but no embedder available
@@ -886,7 +921,7 @@ fn handle_query(
         query = query.include_expired_probe();
     }
 
-    let response = engine.execute_query(&query).map_err(to_mcp_error)?;
+    let response = engine.execute_query(&query).await.map_err(to_mcp_error)?;
 
     let shaped: Vec<Value> = response
         .results
@@ -899,7 +934,7 @@ fn handle_query(
     ok_json(json!({ "results": shaped, "count": shaped.len(), "diagnostics": diagnostics }))
 }
 
-fn handle_resume_context(
+async fn handle_resume_context(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -915,13 +950,13 @@ fn handle_resume_context(
         recent_cap: get_usize(args, "recent_cap").unwrap_or(10),
     };
 
-    let ctx = engine.resume_context(&config).map_err(to_mcp_error)?;
+    let ctx = engine.resume_context(&config).await.map_err(to_mcp_error)?;
     let shaped = depth::shape_resume_context(&ctx, depth_level);
 
     ok_json(shaped)
 }
 
-fn handle_list_due(
+async fn handle_list_due(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -930,6 +965,7 @@ fn handle_list_due(
 
     let facts = engine
         .list_due(Utc::now(), scope.as_deref())
+        .await
         .map_err(to_mcp_error)?;
 
     let shaped: Vec<Value> = facts
@@ -940,19 +976,20 @@ fn handle_list_due(
     ok_json(json!({ "facts": shaped, "count": shaped.len() }))
 }
 
-fn handle_next_due_time(
+async fn handle_next_due_time(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let scope = get_str(args, "scope");
     let next = engine
         .next_due_time(scope.as_deref())
+        .await
         .map_err(to_mcp_error)?;
 
     ok_json(json!({ "next_due": next }))
 }
 
-fn handle_explain_fact(
+async fn handle_explain_fact(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -960,13 +997,13 @@ fn handle_explain_fact(
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
     let depth_level = get_depth(args)?;
 
-    let explanation: FactExplanation = engine.explain_fact(fact_id).map_err(to_mcp_error)?;
+    let explanation: FactExplanation = engine.explain_fact(fact_id).await.map_err(to_mcp_error)?;
     let shaped = depth::shape_explanation(&explanation, depth_level);
 
     ok_json(shaped)
 }
 
-fn handle_get_fact(
+async fn handle_get_fact(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -974,23 +1011,23 @@ fn handle_get_fact(
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
     let depth_level = get_depth(args)?;
 
-    let fact = engine.get_fact(fact_id).map_err(to_mcp_error)?;
+    let fact = engine.get_fact(fact_id).await.map_err(to_mcp_error)?;
     let shaped = depth::shape_fact(&fact, depth_level, None);
 
     ok_json(shaped)
 }
 
-fn handle_statistics(engine: &MemoryEngine) -> Result<CallToolResult, ErrorData> {
-    let stats = engine.statistics().map_err(to_mcp_error)?;
+async fn handle_statistics(engine: &MemoryEngine) -> Result<CallToolResult, ErrorData> {
+    let stats = engine.statistics().await.map_err(to_mcp_error)?;
     let value = serde_json::to_value(&stats)
         .map_err(|e| ErrorData::internal_error(format!("serialize stats: {e}"), None))?;
     ok_json(value)
 }
 
-fn handle_flush_insights(
+async fn handle_flush_insights(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
-    embedder: Option<&HttpEmbeddingProvider>,
+    embedder: Option<&Arc<HttpEmbeddingProvider>>,
 ) -> Result<CallToolResult, ErrorData> {
     let insights = args
         .get("insights")
@@ -1083,7 +1120,10 @@ fn handle_flush_insights(
     let fact_ids = if entries.is_empty() {
         Vec::new()
     } else {
-        match engine.add_facts_batch(&entries, emb, None) {
+        // The async engine takes the provider as an owned `Arc<dyn EmbeddingProvider>`
+        // (#631 §1.2) so it can clone it into the `spawn_blocking` embed offload.
+        let provider = Arc::clone(emb) as Arc<dyn EmbeddingProvider>;
+        match engine.add_facts_batch(&entries, provider, None).await {
             Ok(ids) => ids,
             Err(e) => {
                 // Batch failed — all valid entries become failures
@@ -1154,11 +1194,11 @@ fn parse_consolidate_config(args: &Map<String, Value>) -> Result<ConsolidationCo
         .build())
 }
 
-fn handle_consolidate(
+async fn handle_consolidate(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
-    embedder: Option<&HttpEmbeddingProvider>,
-    summary_gen: Option<&(dyn SummaryGenerator + Send + Sync)>,
+    embedder: Option<&Arc<HttpEmbeddingProvider>>,
+    summary_gen: Option<&Arc<dyn SummaryGenerator + Send + Sync>>,
 ) -> Result<CallToolResult, ErrorData> {
     let generator = summary_gen.ok_or(ValidationError::NoSummaryProvider)?;
     // Issue #116: summaries are embedded via the EmbeddingProvider, not the
@@ -1167,8 +1207,13 @@ fn handle_consolidate(
 
     let config = parse_consolidate_config(args)?;
 
+    // The async engine takes both consumer traits as owned `Arc<dyn _>` (#631 §1.2) so it
+    // can clone them into the lock-free `spawn_blocking` summarize/embed offload.
+    let generator = Arc::clone(generator) as Arc<dyn SummaryGenerator>;
+    let embedder = Arc::clone(embedder) as Arc<dyn EmbeddingProvider>;
     let stats = engine
         .consolidate(generator, embedder, &config)
+        .await
         .map_err(to_mcp_error)?;
 
     ok_json(json!({
@@ -1178,7 +1223,7 @@ fn handle_consolidate(
     }))
 }
 
-fn handle_forget(
+async fn handle_forget(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1231,7 +1276,7 @@ fn handle_forget(
 
     policy.validate().map_err(to_mcp_error)?;
 
-    let stats = engine.forget(&policy).map_err(to_mcp_error)?;
+    let stats = engine.forget(&policy).await.map_err(to_mcp_error)?;
 
     ok_json(json!({
         "facts_expired": stats.facts_expired,
@@ -1274,7 +1319,7 @@ fn default_dump_path(base_dir: &std::path::Path, ext: &str) -> PathBuf {
     base_dir.join(default_dump_name(&timestamp, pid, seq, ext))
 }
 
-fn handle_dump_state(
+async fn handle_dump_state(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1316,31 +1361,34 @@ fn handle_dump_state(
         _ => unreachable!(), // validated above
     };
 
-    engine.dump_state(&dump_format).map_err(to_mcp_error)?;
+    engine
+        .dump_state(&dump_format)
+        .await
+        .map_err(to_mcp_error)?;
 
     ok_json(json!({ "path": path.display().to_string() }))
 }
 
-fn handle_pin_fact(
+async fn handle_pin_fact(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
 
-    engine.pin_fact(fact_id).map_err(to_mcp_error)?;
+    engine.pin_fact(fact_id).await.map_err(to_mcp_error)?;
 
     ok_json(json!({ "fact_id": fact_id, "pinned": true }))
 }
 
-fn handle_unpin_fact(
+async fn handle_unpin_fact(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
 
-    engine.unpin_fact(fact_id).map_err(to_mcp_error)?;
+    engine.unpin_fact(fact_id).await.map_err(to_mcp_error)?;
 
     ok_json(json!({ "fact_id": fact_id, "pinned": false }))
 }
@@ -1360,7 +1408,7 @@ fn parse_replay_order(s: &str) -> Result<ReplayOrder, ErrorData> {
     }
 }
 
-fn handle_replay_events(
+async fn handle_replay_events(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1425,7 +1473,7 @@ fn handle_replay_events(
     filter.upcast = upcast;
     filter.order = order;
 
-    let events = engine.replay_events(&filter).map_err(to_mcp_error)?;
+    let events = engine.replay_events(&filter).await.map_err(to_mcp_error)?;
 
     let shaped: Vec<Value> = events
         .iter()
@@ -1435,7 +1483,7 @@ fn handle_replay_events(
     ok_json(json!({ "events": shaped, "count": shaped.len() }))
 }
 
-fn handle_fact_history(
+async fn handle_fact_history(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1443,16 +1491,16 @@ fn handle_fact_history(
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
     let depth_level = get_depth(args)?;
 
-    let history = engine.fact_history(fact_id).map_err(to_mcp_error)?;
+    let history = engine.fact_history(fact_id).await.map_err(to_mcp_error)?;
     let shaped = depth::shape_fact_history(&history, depth_level);
 
     ok_json(shaped)
 }
 
-fn handle_bootstrap_session(
+async fn handle_bootstrap_session(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
-    embedder: Option<&HttpEmbeddingProvider>,
+    embedder: Option<&Arc<HttpEmbeddingProvider>>,
 ) -> Result<CallToolResult, ErrorData> {
     let jsonl_data = get_str(args, "jsonl_data")
         .ok_or_else(|| ErrorData::invalid_params("missing jsonl_data", None))?;
@@ -1496,10 +1544,15 @@ fn handle_bootstrap_session(
     };
 
     let reader = Cursor::new(jsonl_data.into_bytes());
-    let extractor = KeywordExtractor;
+    // The async engine takes the provider and extractor as owned `Arc<dyn _>` (#631 §1.2):
+    // the per-session savepoint pipeline runs below the `StorageBackend` seam and clones
+    // them into the blocking offload, so both must outlive the borrowed handler scope.
+    let provider = Arc::clone(emb) as Arc<dyn EmbeddingProvider>;
+    let extractor: Arc<dyn memory_engine::bootstrap::SessionExtractor> = Arc::new(KeywordExtractor);
 
     let report = engine
-        .bootstrap_session(reader, emb, &extractor, &config, None)
+        .bootstrap_session(reader, provider, extractor, &config, None)
+        .await
         .map_err(to_mcp_error)?;
 
     let value = serde_json::to_value(&report)
@@ -1523,7 +1576,7 @@ fn parse_outcome(s: &str) -> Result<Outcome, ErrorData> {
     }
 }
 
-fn handle_record_outcome(
+async fn handle_record_outcome(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1535,6 +1588,7 @@ fn handle_record_outcome(
 
     let event_id = engine
         .record_outcome(fact_id, outcome)
+        .await
         .map_err(to_mcp_error)?;
 
     ok_json(json!({
@@ -1544,14 +1598,17 @@ fn handle_record_outcome(
     }))
 }
 
-fn handle_outcome_counts(
+async fn handle_outcome_counts(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let fact_id = get_i64(args, "fact_id")
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
 
-    let counts = engine.get_outcome_counts(fact_id).map_err(to_mcp_error)?;
+    let counts = engine
+        .get_outcome_counts(fact_id)
+        .await
+        .map_err(to_mcp_error)?;
 
     ok_json(json!({
         "fact_id": fact_id,
@@ -1565,10 +1622,10 @@ fn handle_outcome_counts(
 // Activity stream + session lifecycle (#224)
 // ---------------------------------------------------------------------------
 
-fn handle_record_activity(
+async fn handle_record_activity(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
-    embedder: Option<&HttpEmbeddingProvider>,
+    embedder: Option<&Arc<HttpEmbeddingProvider>>,
     filter_config: &memory_engine::ActivityFilterConfig,
 ) -> Result<CallToolResult, ErrorData> {
     let tool_name =
@@ -1591,12 +1648,13 @@ fn handle_record_activity(
         outcome_class,
     };
 
+    // The async engine takes an owned `Option<Arc<dyn EmbeddingProvider>>` (#631 §1.2):
+    // promotion-to-fact embeds via the provider on the blocking offload, so it must own
+    // a clone rather than borrow the handler's reference.
+    let provider = embedder.map(|e| Arc::clone(e) as Arc<dyn EmbeddingProvider>);
     let result = engine
-        .record_activity(
-            &req,
-            embedder.map(|e| e as &dyn EmbeddingProvider),
-            filter_config,
-        )
+        .record_activity(&req, provider, filter_config)
+        .await
         .map_err(to_mcp_error)?;
 
     ok_json(json!({
@@ -1607,7 +1665,7 @@ fn handle_record_activity(
     }))
 }
 
-fn handle_checkpoint_session(
+async fn handle_checkpoint_session(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1619,6 +1677,7 @@ fn handle_checkpoint_session(
 
     engine
         .checkpoint_session(&session_id, scope.as_deref(), summary.as_deref(), metadata)
+        .await
         .map_err(to_mcp_error)?;
 
     ok_json(json!({
@@ -1627,7 +1686,7 @@ fn handle_checkpoint_session(
     }))
 }
 
-fn handle_load_context(
+async fn handle_load_context(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1639,6 +1698,7 @@ fn handle_load_context(
 
     let ctx = engine
         .load_context(&scope, activity_limit, fact_limit)
+        .await
         .map_err(to_mcp_error)?;
 
     ok_json(depth::shape_project_context(&ctx, depth_level))
@@ -1649,7 +1709,7 @@ fn handle_load_context(
 // ---------------------------------------------------------------------------
 
 /// Run the dream-cycle pipeline, optionally applying the report (default: apply).
-fn handle_dream_cycle(
+async fn handle_dream_cycle(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1669,6 +1729,7 @@ fn handle_dream_cycle(
     // #209: the guarded entry defers when the caller wrote facts since the cursor.
     match engine
         .run_dream_cycle_guarded(&cycle)
+        .await
         .map_err(to_mcp_error)?
     {
         // Skip is NOT a report — emit `did_run: false` + the reason. No apply, no
@@ -1685,7 +1746,10 @@ fn handle_dream_cycle(
             let report_json = serde_json::to_value(&report)
                 .map_err(|e| ErrorData::internal_error(format!("serialize report: {e}"), None))?;
             if apply {
-                let applied = engine.apply_cycle_report(&report).map_err(to_mcp_error)?;
+                let applied = engine
+                    .apply_cycle_report(&report)
+                    .await
+                    .map_err(to_mcp_error)?;
                 let applied_json = serde_json::to_value(&applied).map_err(|e| {
                     ErrorData::internal_error(format!("serialize apply result: {e}"), None)
                 })?;
@@ -1701,7 +1765,7 @@ fn handle_dream_cycle(
 }
 
 /// Apply a client-supplied `CycleReport` (the gated path).
-fn handle_apply_cycle_report(
+async fn handle_apply_cycle_report(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1710,12 +1774,15 @@ fn handle_apply_cycle_report(
         .ok_or_else(|| ErrorData::invalid_params("missing 'report'", None))?;
     let report: CycleReport = serde_json::from_value(report_val.clone())
         .map_err(|e| ErrorData::invalid_params(format!("invalid CycleReport: {e}"), None))?;
-    let applied = engine.apply_cycle_report(&report).map_err(to_mcp_error)?;
+    let applied = engine
+        .apply_cycle_report(&report)
+        .await
+        .map_err(to_mcp_error)?;
     ok_serialized(&applied)
 }
 
 /// Return recent insight facts in a project scope subtree, newest-first.
-fn handle_get_recent_insights(
+async fn handle_get_recent_insights(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
@@ -1741,6 +1808,7 @@ fn handle_get_recent_insights(
 
     let facts = engine
         .list_recent_insights(&project_path, limit)
+        .await
         .map_err(to_mcp_error)?;
     let shaped: Vec<Value> = facts
         .iter()

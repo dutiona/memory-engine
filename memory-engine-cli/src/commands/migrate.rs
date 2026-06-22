@@ -43,6 +43,8 @@ struct MigrateReport {
 ///
 /// A genuine migration failure surfaces as `Err` (non-zero with an `error:` line);
 /// the transactional chain rolls back and the pre-migration backup remains.
+// Sync: schema migration runs `SchemaManager` DDL directly on the DB file — no async
+// engine path is involved (clippy::unused_async).
 pub fn run(db: &Path, args: &MigrateArgs, format: OutputFormat) -> anyhow::Result<ExitCode> {
     let live = peek_schema_version_from_db(db)?;
     let current = memory_engine::CURRENT_SCHEMA_VERSION;

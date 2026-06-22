@@ -21,7 +21,7 @@ impl EmbeddingProvider for FakeEmbed {
 }
 
 /// Create a populated engine for testing.
-fn make_engine() -> MemoryEngine {
+async fn make_engine() -> MemoryEngine {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     engine
         .add_fact(
@@ -32,9 +32,10 @@ fn make_engine() -> MemoryEngine {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
     engine
         .add_fact(
@@ -45,20 +46,22 @@ fn make_engine() -> MemoryEngine {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
     engine
 }
 
-#[test]
-fn json_restore_to_file_engine() {
-    let engine = make_engine();
+#[tokio::test]
+async fn json_restore_to_file_engine() {
+    let engine = make_engine().await;
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("dump.json");
     engine
         .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
         .unwrap();
 
     let target_path = dir.path().join("restored.db");
@@ -66,7 +69,7 @@ fn json_restore_to_file_engine() {
     let restored = MemoryEngine::restore_json(&json_path, &config).unwrap();
 
     // Verify data.
-    let stats = restored.statistics().unwrap();
+    let stats = restored.statistics().await.unwrap();
     assert_eq!(stats.facts.total, 2);
     assert!(stats.scopes.total >= 1);
 
@@ -80,29 +83,31 @@ fn json_restore_to_file_engine() {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
     assert!(new_id > 2, "new id {new_id} should be > max imported id 2");
 }
 
-#[test]
-fn json_restore_to_memory_engine() {
-    let engine = make_engine();
+#[tokio::test]
+async fn json_restore_to_memory_engine() {
+    let engine = make_engine().await;
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("dump.json");
     engine
         .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
         .unwrap();
 
     let restored = MemoryEngine::restore_json_memory(&json_path).unwrap();
-    let stats = restored.statistics().unwrap();
+    let stats = restored.statistics().await.unwrap();
     assert_eq!(stats.facts.total, 2);
 }
 
-#[test]
-fn sqlite_restore_roundtrip() {
+#[tokio::test]
+async fn sqlite_restore_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.db");
     let engine = MemoryEngine::builder(DIM)
@@ -118,15 +123,17 @@ fn sqlite_restore_roundtrip() {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
 
     // Dump to SQLite backup.
     let backup_path = dir.path().join("backup.db");
     engine
         .dump_state(&DumpFormat::Sqlite(backup_path.clone()))
+        .await
         .unwrap();
     drop(engine);
 
@@ -135,7 +142,7 @@ fn sqlite_restore_roundtrip() {
     let target_config = EngineConfig::new(target_path, DIM);
     let restored = MemoryEngine::restore_sqlite(&backup_path, &target_config).unwrap();
 
-    let stats = restored.statistics().unwrap();
+    let stats = restored.statistics().await.unwrap();
     assert_eq!(stats.facts.total, 1);
 
     // Engine is functional.
@@ -148,20 +155,22 @@ fn sqlite_restore_roundtrip() {
                 scope: None,
                 opts: None,
             },
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
+        .await
         .unwrap();
     assert!(new_id > 1);
 }
 
-#[test]
-fn restore_json_fails_if_target_exists() {
-    let engine = make_engine();
+#[tokio::test]
+async fn restore_json_fails_if_target_exists() {
+    let engine = make_engine().await;
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("dump.json");
     engine
         .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
         .unwrap();
 
     // Create the target file so it exists.
@@ -173,13 +182,14 @@ fn restore_json_fails_if_target_exists() {
     assert!(err.to_string().contains("already exists"));
 }
 
-#[test]
-fn restore_json_fails_on_embed_dim_mismatch() {
-    let engine = make_engine();
+#[tokio::test]
+async fn restore_json_fails_on_embed_dim_mismatch() {
+    let engine = make_engine().await;
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("dump.json");
     engine
         .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
         .unwrap();
 
     let target_path = dir.path().join("restored.db");
@@ -189,8 +199,8 @@ fn restore_json_fails_on_embed_dim_mismatch() {
     assert!(err.to_string().contains("embedding dimension"));
 }
 
-#[test]
-fn restore_sqlite_fails_if_backup_missing() {
+#[tokio::test]
+async fn restore_sqlite_fails_if_backup_missing() {
     let dir = tempfile::tempdir().unwrap();
     let backup_path = dir.path().join("nonexistent.db");
     let target_path = dir.path().join("target.db");
@@ -204,8 +214,8 @@ fn restore_sqlite_fails_if_backup_missing() {
 /// file") error, *before* `std::fs::copy` runs. With the old `exists()` guard
 /// the directory passed the check and `copy` later failed with a confusing
 /// OS-level I/O error.
-#[test]
-fn restore_sqlite_fails_if_backup_is_directory() {
+#[tokio::test]
+async fn restore_sqlite_fails_if_backup_is_directory() {
     let dir = tempfile::tempdir().unwrap();
 
     // The backup "source" is a directory, not a file.
@@ -240,48 +250,51 @@ fn restore_sqlite_fails_if_backup_is_directory() {
 }
 
 #[cfg(feature = "compress-gzip")]
-#[test]
-fn gzip_json_restore_roundtrip() {
-    let engine = make_engine();
+#[tokio::test]
+async fn gzip_json_restore_roundtrip() {
+    let engine = make_engine().await;
     let dir = tempfile::tempdir().unwrap();
     let gz_path = dir.path().join("dump.json.gz");
     engine
         .dump_state(&DumpFormat::JsonGzip(gz_path.clone()))
+        .await
         .unwrap();
 
     let restored = MemoryEngine::restore_json_memory(&gz_path).unwrap();
-    let stats = restored.statistics().unwrap();
+    let stats = restored.statistics().await.unwrap();
     assert_eq!(stats.facts.total, 2);
 }
 
 #[cfg(feature = "compress-zstd")]
-#[test]
-fn zstd_json_restore_roundtrip() {
-    let engine = make_engine();
+#[tokio::test]
+async fn zstd_json_restore_roundtrip() {
+    let engine = make_engine().await;
     let dir = tempfile::tempdir().unwrap();
     let zst_path = dir.path().join("dump.json.zst");
     engine
         .dump_state(&DumpFormat::JsonZstd(zst_path.clone()))
+        .await
         .unwrap();
 
     let restored = MemoryEngine::restore_json_memory(&zst_path).unwrap();
-    let stats = restored.statistics().unwrap();
+    let stats = restored.statistics().await.unwrap();
     assert_eq!(stats.facts.total, 2);
 }
 
-#[test]
-fn post_restore_ids_dont_collide() {
-    let engine = make_engine();
+#[tokio::test]
+async fn post_restore_ids_dont_collide() {
+    let engine = make_engine().await;
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("dump.json");
     engine
         .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
         .unwrap();
 
     let restored = MemoryEngine::restore_json_memory(&json_path).unwrap();
 
     // Get max fact id from the original.
-    let original_stats = engine.statistics().unwrap();
+    let original_stats = engine.statistics().await.unwrap();
     let max_original = original_stats.facts.total;
 
     // Add facts to restored engine — IDs should not collide.
@@ -295,9 +308,10 @@ fn post_restore_ids_dont_collide() {
                     scope: None,
                     opts: None,
                 },
-                &FakeEmbed,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .unwrap();
         assert!(
             id > max_original,

@@ -35,11 +35,11 @@ pub struct RecordOutcomeArgs {
     outcome: OutcomeArg,
 }
 
-pub fn run(db: &Path, args: &RecordOutcomeArgs, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &RecordOutcomeArgs, format: OutputFormat) -> anyhow::Result<()> {
     let engine = open_engine_writable(db)?;
     let outcome: Outcome = args.outcome.into();
 
-    let event_id = engine.record_outcome(args.fact_id, outcome)?;
+    let event_id = engine.record_outcome(args.fact_id, outcome).await?;
 
     match format {
         OutputFormat::Json => {

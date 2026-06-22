@@ -1,70 +1,52 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::search::hybrid::{
-    QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult, hybrid_search,
+    QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult, port_hybrid_search,
 };
 use crate::search::query::MemoryQuery;
-use crate::search::strategy::VectorSearchStrategy;
-use crate::store::facts::FactStore;
 use crate::types::Fact;
 
-use super::{MemoryEngine, fact_overlaps_period, fact_to_search_result, passes_temporal_cutoff};
+use super::{
+    MemoryEngine, fact_overlaps_period, fact_to_search_result, passes_temporal_cutoff,
+    spawn_join_err,
+};
 
 impl MemoryEngine {
-    /// Return the active vector search strategy: HNSW when available and
-    /// populated, brute-force cosine otherwise.
-    fn active_vector_strategy(&self) -> &dyn VectorSearchStrategy {
-        #[cfg(feature = "ann")]
-        if self.should_use_hnsw() {
-            return self
-                .hnsw_strategy
-                .as_ref()
-                .expect("should_use_hnsw() returns true only when hnsw_strategy is Some")
-                as &dyn VectorSearchStrategy;
-        }
-        &*self.vector_strategy
-    }
-
-    /// Resolve a query's optional scope into concrete scope IDs and pair it with
-    /// the active vector search strategy.
+    /// Resolve a query's optional scope into concrete scope IDs.
     ///
     /// Returns:
-    /// - `Some((scope_ids, strategy))` — scope resolved (or absent, giving
-    ///   `scope_ids == None` for an unscoped search).
-    /// - `None` — a scope query was provided but the path does not exist.
-    ///   Callers MUST surface this as empty results rather than falling through
-    ///   to an unscoped search.
+    /// - `Some(scope_ids)` — scope resolved (or absent, giving `scope_ids == None`
+    ///   for an unscoped search).
+    /// - `None` — a scope query was provided but the path does not exist. Callers
+    ///   MUST surface this as empty results rather than falling through to an
+    ///   unscoped search.
     ///
-    /// This consolidates the scope-resolution + strategy-dispatch logic shared
-    /// by [`query`](Self::query) and [`execute_query`](Self::execute_query) (#117).
+    /// Post-#631 the vector strategy lives inside the backend (HNSW vs brute-force
+    /// dispatch is internal to [`port_hybrid_search`]), so this only resolves scope.
     ///
-    /// Distinct from [`resolve_scope_ids`](Self::resolve_scope_ids), which
-    /// operates on a string path with ancestor-walk + fallback-to-root
-    /// semantics; this resolves a [`ScopeQuery`](crate::types::ScopeQuery) with
-    /// empty-on-miss semantics.
-    fn resolve_scope_and_strategy(
+    /// Distinct from [`resolve_scope_ids`](Self::resolve_scope_ids), which operates
+    /// on a string path with ancestor-walk + fallback-to-root semantics; this
+    /// resolves a [`ScopeQuery`](crate::types::ScopeQuery) with empty-on-miss
+    /// semantics.
+    #[allow(
+        clippy::option_option,
+        reason = "the two `None`s are distinct: outer None = a scope was requested but \
+                  does not exist (caller returns no results); inner None = no scope was \
+                  requested (unscoped search). Collapsing them would lose that distinction."
+    )]
+    fn resolve_query_scope_ids(
         &self,
         scope: Option<&crate::types::ScopeQuery>,
-    ) -> Option<(Option<Vec<i64>>, &dyn VectorSearchStrategy)> {
-        // Resolve scope IDs from cache (short-lived read lock).
-        // When a scope query is provided but the path doesn't exist, signal
-        // "no results" (None) instead of silently falling through to an
-        // unscoped search.
-        let scope_ids: Option<Vec<i64>> = match scope {
-            Some(sq) => {
-                // Bind the resolution before matching so the read guard is
-                // dropped promptly (short-lived read lock).
-                let resolved = self.scope_tree.read().resolve_query(sq);
-                match resolved {
-                    Some(ids) => Some(ids),
-                    None => return None, // scope doesn't exist → no results
-                }
-            }
-            None => None,
-        };
-
-        Some((scope_ids, self.active_vector_strategy()))
+    ) -> Option<Option<Vec<i64>>> {
+        // Resolve scope IDs from cache (short-lived read lock). `None` scope → unscoped
+        // (`Some(None)`); a requested-but-missing scope → outer `None` (no results); a hit
+        // carries its resolved ids (`Some(Some(ids))`).
+        scope.map_or(Some(None), |sq| {
+            self.scope_tree.read().resolve_query(sq).map(Some)
+        })
     }
 
     /// Query facts using hybrid search (FTS5 + vector + RRF).
@@ -79,22 +61,33 @@ impl MemoryEngine {
     ///
     /// Panics if internal candidate de-duplication yields an inconsistent
     /// index — an invariant that should never be violated in practice.
-    pub fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        // Resolve scope + active vector strategy. A provided-but-missing scope
-        // yields no results rather than an unscoped search (#117).
-        let Some((scope_ids, strategy)) = self.resolve_scope_and_strategy(query.scope.as_ref())
-        else {
+    pub async fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        // Resolve scope. A provided-but-missing scope yields no results rather than
+        // an unscoped search (#117).
+        let Some(scope_ids) = self.resolve_query_scope_ids(query.scope.as_ref()) else {
             return Ok(vec![]); // scope doesn't exist → no results
         };
 
-        let (mut results, _diagnostics) = self.with_read(|conn| {
-            hybrid_search(conn, query, self.embed_dim, scope_ids.as_deref(), strategy)
-        })?;
+        // Hybrid search runs entirely below the seam (lexical + vector channels +
+        // RRF fusion); the backend owns the HNSW-vs-brute dispatch (Stage C).
+        let (mut results, _diagnostics) =
+            port_hybrid_search(&*self.storage, query, scope_ids.as_deref()).await?;
 
         // Apply reranker if present and query has text (cross-encoder needs query text).
-        // Runs OUTSIDE the read lock — reranking may involve slow inference/API calls.
-        if let (Some(reranker), Some(text)) = (&self.reranker, &query.text) {
-            let ranked = reranker.rerank(text, &results)?;
+        // Offloaded to the blocking pool — reranking may be slow inference / a blocking
+        // HTTP round-trip, and must not park the async executor (also makes a
+        // `reqwest::blocking` reranker nested-runtime-safe).
+        if let (Some(reranker), Some(text)) = (self.reranker.as_ref(), query.text.as_ref()) {
+            let reranker = Arc::clone(reranker);
+            let text = text.clone();
+            let (ranked, returned) = tokio::task::spawn_blocking(move || {
+                let ranked = reranker.rerank(&text, &results);
+                (ranked, results)
+            })
+            .await
+            .map_err(spawn_join_err)?;
+            let ranked = ranked?;
+            results = returned;
             Self::validate_reranker_output(results.len(), &ranked)?;
             // Reconstruct results from indices — move, don't clone (#144).
             // Safe: validate_reranker_output guarantees unique indices.
@@ -130,15 +123,14 @@ impl MemoryEngine {
     /// - `search_mode` conflicts with available text/embedding inputs
     ///
     /// Returns `MemoryError::Database` on query failure.
-    pub fn execute_query(&self, query: &MemoryQuery) -> Result<QueryResponse> {
+    pub async fn execute_query(&self, query: &MemoryQuery) -> Result<QueryResponse> {
         // --- Validation ---
         Self::validate_memory_query(query)?;
 
-        // --- Resolve scope + active vector strategy ---
+        // --- Resolve scope ---
         // A provided-but-missing scope yields no results rather than an
         // unscoped search (#117).
-        let Some((scope_ids, strategy)) = self.resolve_scope_and_strategy(query.scope.as_ref())
-        else {
+        let Some(scope_ids) = self.resolve_query_scope_ids(query.scope.as_ref()) else {
             return Ok(QueryResponse {
                 results: vec![],
                 diagnostics: QueryDiagnostics::default(),
@@ -159,15 +151,11 @@ impl MemoryEngine {
         let limit = query.effective_limit();
 
         if query.has_search() {
-            self.execute_search_path(
-                query,
-                scope_ids.as_deref(),
-                strategy,
-                effective_cutoff,
-                limit,
-            )
+            self.execute_search_path(query, scope_ids.as_deref(), effective_cutoff, limit)
+                .await
         } else {
             self.execute_store_path(query, scope_ids.as_deref(), effective_cutoff, limit)
+                .await
         }
     }
 
@@ -237,11 +225,10 @@ impl MemoryEngine {
     /// When post-filters are active (period, importance, pinned), we pass the
     /// raw `limit` (not inflated) because `hybrid_search` already does its own
     /// internal 3x overfetch before its temporal filter.
-    fn execute_search_path(
+    async fn execute_search_path(
         &self,
         query: &MemoryQuery,
         scope_ids: Option<&[i64]>,
-        strategy: &dyn VectorSearchStrategy,
         effective_cutoff: Option<DateTime<Utc>>,
         limit: usize,
     ) -> Result<QueryResponse> {
@@ -272,9 +259,8 @@ impl MemoryEngine {
             scope: query.scope.clone(),
         };
 
-        let (mut results, mut diagnostics) = self.with_read(|conn| {
-            hybrid_search(conn, &search_query, self.embed_dim, scope_ids, strategy)
-        })?;
+        let (mut results, mut diagnostics) =
+            port_hybrid_search(&*self.storage, &search_query, scope_ids).await?;
 
         // Post-filter by period overlap
         if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
@@ -299,17 +285,17 @@ impl MemoryEngine {
         if query.include_expired_probe
             && let Some(text) = &query.text
         {
-            let fact_type_ref = query.fact_type.as_ref();
-            let expired_count = self.with_read(|conn| {
-                crate::search::fts::fts_count_expired(conn, text, fact_type_ref, scope_ids)
-            })?;
+            let expired_count = self
+                .storage
+                .lexical_count_expired(text, query.fact_type.as_ref(), scope_ids)
+                .await?;
             diagnostics.expired_matches = Some(expired_count);
         }
 
         // Archive fallback (opt-in, best-effort).
         #[cfg(feature = "archive")]
         if query.include_archives {
-            match self.search_archives_fallback(query, limit) {
+            match self.search_archives_fallback(query, limit).await {
                 Ok(Some(archive_results)) => {
                     diagnostics.archive_paks_scanned = archive_results.paks_scanned;
                     diagnostics.archive_search_ms = archive_results.search_ms;
@@ -339,7 +325,7 @@ impl MemoryEngine {
     ///
     /// Strategy: fetch a broad candidate set from the most selective SQL query,
     /// then apply ALL remaining filters as post-filters to guarantee AND semantics.
-    fn execute_store_path(
+    async fn execute_store_path(
         &self,
         query: &MemoryQuery,
         scope_ids: Option<&[i64]>,
@@ -356,26 +342,21 @@ impl MemoryEngine {
         let mut facts: Vec<Fact> =
             if let (Some(start), Some(end)) = (query.period_start, query.period_end) {
                 // Period is the most selective: overlap + scope + optional fact_type in SQL.
-                self.with_read(|conn| {
-                    FactStore::new(conn, self.embed_dim).list_active_in_period(
-                        start,
-                        end,
-                        scope_slice,
-                        query.fact_type.as_ref(),
-                    )
-                })?
+                self.storage
+                    .list_active_facts_in_period(start, end, scope_slice, query.fact_type.as_ref())
+                    .await?
             } else {
                 // Default: fetch by importance_score DESC (most useful ordering).
                 // Use min_importance_score if set, otherwise 0.0 (all active facts).
                 let min_score = query.min_importance_score.unwrap_or(0.0);
-                self.with_read(|conn| {
-                    FactStore::new(conn, self.embed_dim).list_by_importance_score(
+                self.storage
+                    .list_facts_by_importance_score(
                         scope_slice,
                         min_score,
                         fetch_limit,
                         &std::collections::HashSet::new(),
                     )
-                })?
+                    .await?
             };
 
         // --- Post-filters: apply ALL filters for AND semantics ---

@@ -236,8 +236,8 @@ fn partial_cli_without_toml_insufficient() {
 // embed_dim probing
 // ---------------------------------------------------------------------------
 
-#[test]
-fn probe_embed_dim_from_existing_db() {
+#[tokio::test]
+async fn probe_embed_dim_from_existing_db() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -255,6 +255,7 @@ fn probe_embed_dim_from_existing_db() {
             ))
             .unwrap(),
         )
+        .await
         .unwrap();
     drop(engine);
 
@@ -269,8 +270,8 @@ fn probe_embed_dim_nonexistent_db() {
     assert!(result.is_err());
 }
 
-#[test]
-fn probe_embed_dim_different_dimensions() {
+#[tokio::test]
+async fn probe_embed_dim_different_dimensions() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
 
@@ -286,6 +287,7 @@ fn probe_embed_dim_different_dimensions() {
             ))
             .unwrap(),
         )
+        .await
         .unwrap();
     drop(engine);
 

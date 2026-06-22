@@ -12,7 +12,7 @@
 
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::error::Result;
-use memory_engine::traits::{ConsolidationConfig, EmbeddingProvider};
+use memory_engine::traits::{ConsolidationConfig, EmbeddingProvider, SummaryGenerator};
 use memory_engine::types::{AddFactRequest, FactType};
 
 use crate::helpers::{DIM, MockSummaryGenerator, TestEmbedder, add_fact, eval_engine};
@@ -52,7 +52,7 @@ impl EmbeddingProvider for ClusterableEmbedder {
 /// Insert `n` distinct-but-clusterable facts under `scope`, embedded by
 /// [`ClusterableEmbedder`]. Each gets a unique `#<i>` suffix so their embeddings
 /// differ but stay ~0.88 similar.
-fn insert_clusterable(engine: &memory_engine::engine::MemoryEngine, n: usize, scope: &str) {
+async fn insert_clusterable(engine: &memory_engine::engine::MemoryEngine, n: usize, scope: &str) {
     // Each fact's perturbation lands at `1 + (i % (DIM - 1))`; two facts whose
     // indices collide there would get identical embeddings (and be deduplicated,
     // silently invalidating the cluster assertions). Guard against that.
@@ -71,16 +71,17 @@ fn insert_clusterable(engine: &memory_engine::engine::MemoryEngine, n: usize, sc
                     scope: Some(scope.to_string()),
                     opts: None,
                 },
-                &ClusterableEmbedder,
+                std::sync::Arc::new(ClusterableEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
+            .await
             .expect("add_fact failed");
     }
 }
 
 /// Insert 5 pairs of exact-duplicate facts. Identical text produces identical
 /// blake3 embeddings, giving cosine similarity = 1.0.
-fn insert_exact_duplicate_pairs(engine: &memory_engine::engine::MemoryEngine) -> Vec<i64> {
+async fn insert_exact_duplicate_pairs(engine: &memory_engine::engine::MemoryEngine) -> Vec<i64> {
     let contents = [
         "Rust ownership model prevents data races at compile time through the borrow checker",
         "Embedding models map text to dense vector representations for similarity search",
@@ -91,19 +92,19 @@ fn insert_exact_duplicate_pairs(engine: &memory_engine::engine::MemoryEngine) ->
 
     let mut ids = Vec::new();
     for content in &contents {
-        ids.push(add_fact(engine, content, FactType::Semantic));
-        ids.push(add_fact(engine, content, FactType::Semantic));
+        ids.push(add_fact(engine, content, FactType::Semantic).await);
+        ids.push(add_fact(engine, content, FactType::Semantic).await);
     }
     ids
 }
 
-#[test]
-fn dedup_removes_exact_duplicates() {
+#[tokio::test]
+async fn dedup_removes_exact_duplicates() {
     let engine = eval_engine();
-    let ids = insert_exact_duplicate_pairs(&engine);
+    let ids = insert_exact_duplicate_pairs(&engine).await;
     assert_eq!(ids.len(), 10, "5 pairs = 10 facts inserted");
 
-    let stats_before = engine.statistics().expect("statistics failed");
+    let stats_before = engine.statistics().await.expect("statistics failed");
     assert_eq!(stats_before.facts.active, 10);
 
     let generator = MockSummaryGenerator;
@@ -113,7 +114,12 @@ fn dedup_removes_exact_duplicates() {
         .build();
 
     let stats = engine
-        .consolidate(&generator, &TestEmbedder, &config)
+        .consolidate(
+            std::sync::Arc::new(generator) as std::sync::Arc<dyn SummaryGenerator>,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+        )
+        .await
         .expect("consolidate failed");
 
     assert!(
@@ -123,7 +129,7 @@ fn dedup_removes_exact_duplicates() {
     );
 
     // Verify active count decreased
-    let stats_after = engine.statistics().expect("statistics failed");
+    let stats_after = engine.statistics().await.expect("statistics failed");
     assert!(
         stats_after.facts.active <= stats_before.facts.active - 5,
         "active facts should decrease by at least 5: before={}, after={}",
@@ -139,15 +145,15 @@ fn dedup_removes_exact_duplicates() {
     );
 }
 
-#[test]
-fn cluster_fusion_creates_clusters() {
+#[tokio::test]
+async fn cluster_fusion_creates_clusters() {
     let engine = eval_engine();
 
     // Distinct-but-related facts (pairwise cosine ≈ 0.88, above the 0.85 cluster
     // threshold) form a single cluster. A 0.95 dedup_threshold leaves them intact
     // — they are similar but not duplicates. Identical facts would instead be
     // collapsed by the dedup pass; clustering operates on distinct survivors.
-    insert_clusterable(&engine, 4, "project:rust");
+    insert_clusterable(&engine, 4, "project:rust").await;
 
     let generator = MockSummaryGenerator;
     let config = ConsolidationConfig::builder()
@@ -156,7 +162,12 @@ fn cluster_fusion_creates_clusters() {
         .build();
 
     let stats = engine
-        .consolidate(&generator, &ClusterableEmbedder, &config)
+        .consolidate(
+            std::sync::Arc::new(generator) as std::sync::Arc<dyn SummaryGenerator>,
+            std::sync::Arc::new(ClusterableEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+        )
+        .await
         .expect("consolidate failed");
 
     assert_eq!(
@@ -171,12 +182,13 @@ fn cluster_fusion_creates_clusters() {
     );
 }
 
-#[test]
-fn consolidation_is_idempotent() {
+#[tokio::test]
+async fn consolidation_is_idempotent() {
     let engine = eval_engine();
-    let _ = insert_exact_duplicate_pairs(&engine);
+    let _ = insert_exact_duplicate_pairs(&engine).await;
 
-    let generator = MockSummaryGenerator;
+    let generator: std::sync::Arc<dyn SummaryGenerator> = std::sync::Arc::new(MockSummaryGenerator);
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
     let config = ConsolidationConfig::builder()
         .dedup_threshold(0.92)
         .min_cluster_size(2)
@@ -184,7 +196,8 @@ fn consolidation_is_idempotent() {
 
     // First pass
     let stats1 = engine
-        .consolidate(&generator, &TestEmbedder, &config)
+        .consolidate(generator.clone(), embedder.clone(), &config)
+        .await
         .expect("first consolidate failed");
     assert!(
         stats1.duplicates_removed > 0,
@@ -193,7 +206,8 @@ fn consolidation_is_idempotent() {
 
     // Second pass: no additional dedup expected
     let stats2 = engine
-        .consolidate(&generator, &TestEmbedder, &config)
+        .consolidate(generator.clone(), embedder.clone(), &config)
+        .await
         .expect("second consolidate failed");
     assert_eq!(
         stats2.duplicates_removed, 0,
@@ -202,15 +216,15 @@ fn consolidation_is_idempotent() {
     );
 }
 
-#[test]
-fn cluster_and_global_summary_scoping() {
+#[tokio::test]
+async fn cluster_and_global_summary_scoping() {
     let engine = eval_engine();
 
     // Distinct-but-related facts under a shared scope cluster (cosine ≈ 0.88 >
     // 0.85) without being deduplicated (< 0.95); a cluster then yields a global
     // summary.
     let scope = "project:demo";
-    insert_clusterable(&engine, 4, scope);
+    insert_clusterable(&engine, 4, scope).await;
 
     let generator = MockSummaryGenerator;
     let config = ConsolidationConfig::builder()
@@ -219,7 +233,12 @@ fn cluster_and_global_summary_scoping() {
         .build();
 
     let stats = engine
-        .consolidate(&generator, &ClusterableEmbedder, &config)
+        .consolidate(
+            std::sync::Arc::new(generator) as std::sync::Arc<dyn SummaryGenerator>,
+            std::sync::Arc::new(ClusterableEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+        )
+        .await
         .expect("consolidate failed");
 
     assert_eq!(

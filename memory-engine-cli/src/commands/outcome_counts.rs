@@ -10,9 +10,9 @@ pub struct OutcomeCountsArgs {
     fact_id: i64,
 }
 
-pub fn run(db: &Path, args: &OutcomeCountsArgs, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &OutcomeCountsArgs, format: OutputFormat) -> anyhow::Result<()> {
     let engine = open_engine(db)?;
-    let counts = engine.get_outcome_counts(args.fact_id)?;
+    let counts = engine.get_outcome_counts(args.fact_id).await?;
 
     match format {
         OutputFormat::Json => {

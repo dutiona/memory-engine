@@ -50,10 +50,38 @@ let config = EngineConfig::new(path, dim).with_read_only(true);
 
 Setters: `with_read_pool_size`, `with_search_config`, `with_backup_dir`,
 `with_upcaster_registry`, `with_read_only`. `EngineConfig` is still what the
-`restore_*` family and `AsyncMemoryEngine::open` consume; for the common
+`restore_*` family consumes (and, internally, the builder); for the common
 file-open path prefer the builder, which assembles a config internally.
 
 ## Async
 
-`AsyncMemoryEngine::open(config)` and `AsyncMemoryEngine::open_memory(dim)` are
-unchanged — only their internals now route through the builder.
+Construction stays **synchronous**: `MemoryEngine::builder(dim).build()` and the
+`restore_*` family build the pool/backend without awaiting. Only the engine's
+**runtime, DB-touching methods** (`add_fact`, `query`, `statistics`, `close`, …)
+are `async fn` — they `.await` the `Arc<dyn StorageBackend>` port.
+
+### Async-native cutover (#631)
+
+`MemoryEngine` is now async-native: its DB-touching methods are `async fn` that
+`.await` an `Arc<dyn StorageBackend>` port. There is no separate
+`AsyncMemoryEngine` wrapper anymore — you use `MemoryEngine` directly and await
+it from inside a tokio runtime (`#[tokio::main]` or `Runtime::block_on`). The
+`async` Cargo feature is now **default-on**: it no longer gates a wrapper type,
+it provides the tokio runtime the async-native engine needs.
+
+```rust
+use memory_engine::MemoryEngine;
+
+#[tokio::main]
+async fn main() -> Result<(), memory_engine::MemoryError> {
+    let mut engine = MemoryEngine::builder(384).build()?; // construction is synchronous
+    // ... await the engine's runtime methods (add_fact, query, …) ...
+    engine.close().await?; // close is async — it flushes the sidecar snapshot
+    Ok(())
+}
+```
+
+Call `MemoryEngine::close(&mut self).await` for a clean shutdown — it flushes the
+sidecar HNSW/snapshot. `Drop` is now warn-only: an engine dropped without
+`close()` is still durable (the source of truth is the DB), but it rebuilds its
+sidecar from the DB on the next open instead of loading the flushed snapshot.

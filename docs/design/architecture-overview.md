@@ -83,53 +83,57 @@ graph TB
 
 The crate is organized into modules with clear responsibilities:
 
-| Module           | Responsibility                                                                                                                           |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `engine`         | `MemoryEngine` facade. Orchestrates all operations, holds the `ConnectionPool`, `RwLock<MemoryGraph>`, and `RwLock<ScopeTree>`.          |
-| `store/`         | Persistence layer. `EventStore`, `FactStore`, `EdgeStore`, `SummaryStore`, `ScopeStore` each own their SQL. Schema migrations live here. |
-| `search/`        | Query layer. FTS5 (BM25), vector (cosine similarity, brute-force or HNSW via `ann` feature), strategy dispatch, and hybrid (RRF) search. |
-| `graph/`         | `MemoryGraph` wrapper around `petgraph::DiGraph`. Loaded from SQLite on startup, kept in sync on mutations.                              |
-| `scope/`         | `ScopeTree` for hierarchical isolation. In-memory tree structure, backed by `ScopeStore` in SQLite.                                      |
-| `resume/`        | Session bootstrapping. `resume_context()` implements 5-tier retrieval (pinned → high_importance → due → recent → kb_stubs).              |
-| `consolidation/` | Three-pass memory compression: local dedup, cluster fusion, global integration.                                                          |
-| `forgetting/`    | Ebbinghaus decay with multi-signal importance scoring.                                                                                   |
-| `conflict/`      | Bi-temporal conflict resolution delegated to `ConflictArbiter`.                                                                          |
-| `pool/`          | `ConnectionPool`: N reader connections + 1 writer connection. Supports read-only mode for operator tools.                                |
-| `traits`         | Consumer-provided trait definitions. Zero LLM/network dependencies in core.                                                              |
-| `types`          | All data types: `Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`, `ScopeQuery`, enums.                                                    |
-| `error`          | `MemoryError` enum with `thiserror` derivations.                                                                                         |
-| `async_engine`   | `AsyncMemoryEngine` (behind `async` feature flag). Wraps `MemoryEngine` with `tokio::task::spawn_blocking`.                              |
+| Module             | Responsibility                                                                                                                                                                                                                                                                               |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `engine`           | `MemoryEngine` facade. Orchestrates all operations, holds the `ConnectionPool`, `RwLock<MemoryGraph>`, and `RwLock<ScopeTree>`.                                                                                                                                                              |
+| `store/`           | Persistence layer. `EventStore`, `FactStore`, `EdgeStore`, `SummaryStore`, `ScopeStore` each own their SQL. Schema migrations live here.                                                                                                                                                     |
+| `search/`          | Query layer. FTS5 (BM25), vector (cosine similarity, brute-force or HNSW via `ann` feature), strategy dispatch, and hybrid (RRF) search.                                                                                                                                                     |
+| `graph/`           | `MemoryGraph` wrapper around `petgraph::DiGraph`. Loaded from SQLite on startup, kept in sync on mutations.                                                                                                                                                                                  |
+| `scope/`           | `ScopeTree` for hierarchical isolation. In-memory tree structure, backed by `ScopeStore` in SQLite.                                                                                                                                                                                          |
+| `resume/`          | Session bootstrapping. `MemoryEngine::resume_context()` (an `async` engine method) implements 5-tier retrieval (pinned → high_importance → due → recent → kb_stubs).                                                                                                                         |
+| `consolidation/`   | Three-pass memory compression: local dedup, cluster fusion, global integration.                                                                                                                                                                                                              |
+| `forgetting/`      | Ebbinghaus decay with multi-signal importance scoring.                                                                                                                                                                                                                                       |
+| `engine::conflict` | Bi-temporal conflict resolution (`MemoryEngine::resolve_conflict`) delegated to the consumer `ConflictArbiter`.                                                                                                                                                                              |
+| `pool/`            | `ConnectionPool`: N reader connections + 1 writer connection. Supports read-only mode for operator tools.                                                                                                                                                                                    |
+| `traits`           | Consumer-provided trait definitions. Zero LLM/network dependencies in core.                                                                                                                                                                                                                  |
+| `types`            | All data types: `Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`, `ScopeQuery`, enums.                                                                                                                                                                                                        |
+| `error`            | `MemoryError` enum with `thiserror` derivations.                                                                                                                                                                                                                                             |
+| `storage/`         | `StorageBackend` trait family (plus `FactFilter`, capability flags, `StorageError`) and `SqliteBackend`. The async port the engine `.await`s; `SqliteBackend` wraps the `ConnectionPool`, reuses the `store/` SQL verbatim, and offloads blocking SQLite onto `tokio::task::spawn_blocking`. |
 
 ## Threading Model
 
-`MemoryEngine` is `Send + Sync`. Consumers share it via `Arc<MemoryEngine>`.
+`MemoryEngine` is `Send + Sync`. Consumers share it via `Arc<MemoryEngine>`. The engine is **async-native**: its DB-touching methods are `async fn` that `.await` an `Arc<dyn StorageBackend>` port, so a single tokio runtime fans many concurrent operations out across few threads (the design chosen over a thread-per-query wrapper). The `async` feature is default-on and provides that runtime.
 
-Thread safety is provided by three mechanisms:
+Concurrency is provided by four mechanisms:
 
-1. **ConnectionPool** -- Bounded pool of N SQLite reader connections (default 4) protected by a semaphore, plus 1 exclusive writer connection behind a `parking_lot::Mutex`. Readers use SQLite WAL mode for concurrent access without blocking writes. In read-only mode (`EngineConfig::read_only`), the writer slot holds a read-only connection and `try_write()` returns `MemoryError::ReadOnly`.
+1. **`Arc<dyn StorageBackend>`** -- All persistence flows through the storage port. The default `SqliteBackend` owns the `ConnectionPool` (N SQLite reader connections, default 4, behind a semaphore + 1 exclusive writer connection behind a `parking_lot::Mutex`; readers use SQLite WAL mode for concurrent access without blocking writes) and offloads every blocking SQLite call onto the tokio blocking pool via `spawn_blocking`, so synchronous DB work never stalls the async executor. In read-only mode (`EngineConfig::read_only`), the writer slot holds a read-only connection and `try_write()` returns `MemoryError::ReadOnly`.
 
-2. **RwLock\<MemoryGraph\>** -- The in-memory petgraph is behind a `parking_lot::RwLock`. Read operations (`graph_degree`, `graph_neighbors`, etc.) take a shared read lock. Mutations (conflict resolution, forgetting, consolidation) take an exclusive write lock.
+2. **RwLock\<MemoryGraph\>** -- The in-memory petgraph is behind a `parking_lot::RwLock`. Read operations (`graph_degree`, `graph_neighbors`, etc.) take a shared read lock; mutations (conflict resolution, forgetting, consolidation) take an exclusive write lock. The lock is **never held across an `.await`** -- the guard is scoped tightly around the synchronous in-memory access.
 
-3. **RwLock\<ScopeTree\>** -- The hierarchical scope tree is behind a separate `RwLock`. Scope resolution during queries takes a read lock. Scope creation during `add_fact` takes a write lock.
+3. **RwLock\<ScopeTree\>** -- The hierarchical scope tree is behind a separate `RwLock`, with the same never-across-`.await` discipline. Scope resolution during queries takes a read lock; scope creation during `add_fact` takes a write lock.
 
-All public methods take `&self`. The embedding computation in `add_fact` happens _before_ acquiring the write lock, so slow network-based embedding calls do not block readers.
+4. **Offloaded consumer trait calls** -- Calls into consumer traits (`EmbeddingProvider`, `Reranker`, `SummaryGenerator`) may issue blocking HTTP, so the engine runs them on `spawn_blocking` rather than inline on the executor thread. This keeps slow network-based embedding/rerank/summary work off the async runtime and out of any held lock.
+
+All public methods take `&self` (the engine mutates only `close`). A clean shutdown is `MemoryEngine::close(&mut self).await`, which flushes the sidecar HNSW/snapshot. `Drop` is now **warn-only**: an engine dropped without `close()` is still durable (the DB is the source of truth) but rebuilds its sidecar from the DB on the next open instead of loading the flushed snapshot.
 
 ```
-                    Arc<MemoryEngine>
+                  Arc<MemoryEngine>  (one tokio runtime)
                            |
         ┌──────────────────┼──────────────────┐
         |                  |                  |
-   Thread A (read)   Thread B (read)   Thread C (write)
+   Task A (read)     Task B (read)     Task C (write)
         |                  |                  |
+        └─────── .await Arc<dyn StorageBackend> ───────┘
+                           |
+                   SqliteBackend
+              (ConnectionPool + spawn_blocking)
+        ┌──────────────────┼──────────────────┐
    pool.read()        pool.read()       pool.write()
    (any of N          (any of N         (Mutex<Connection>)
     readers)           readers)
-        |                  |                  |
-   graph.read()       scope_tree.read()  graph.write()
-   (shared RwLock)    (shared RwLock)    (exclusive RwLock)
 ```
 
-This design replaced an earlier single-writer `!Send` design (Phase 1-2) where the engine owned a single `Connection` and could not be shared across threads. The Phase 3 rework introduced `ConnectionPool` to make the engine usable from async runtimes and multithreaded consumers.
+This design replaced an earlier single-writer `!Send` design (Phase 1-2) where the engine owned a single `Connection` and could not be shared across threads, and the thread-pooled `ConnectionPool` of Phase 3. The #631 cutover made the engine fully async-native behind the `StorageBackend` port: the same trait will host a Postgres backend (#633/#634) with no engine change.
 
 ## Data Flow
 
@@ -174,11 +178,11 @@ This split is shipped, not aspirational. The cognitive-science basis is the pros
 
 ### API surface
 
-| Method | Source | Behavior |
-| --- | --- | --- |
+| Method                               | Source                                                          | Behavior                                                                                                                                                              |
+| ------------------------------------ | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MemoryEngine::list_due(now, scope)` | [`src/engine/scheduling.rs:17`](../../src/engine/scheduling.rs) | Returns active facts where `t_valid IS NOT NULL ∧ t_valid <= now` and `(t_invalid IS NULL ∨ t_invalid > now)`, scoped via `ScopeQuery::Subtree` semantics on `scope`. |
-| `MemoryEngine::next_due_time(scope)` | [`src/engine/scheduling.rs:39`](../../src/engine/scheduling.rs) | Returns the earliest `t_valid` strictly in the future as a polling-interval hint. `None` if no future-dated facts in scope. |
-| `Fact::surfaced_at` | [`src/types.rs:141`](../../src/types.rs) | First-fire timestamp. `None` until the fact is returned by `list_due`; subsequent calls observe the persisted value. The DB-authoritative value always wins on read. |
+| `MemoryEngine::next_due_time(scope)` | [`src/engine/scheduling.rs:39`](../../src/engine/scheduling.rs) | Returns the earliest `t_valid` strictly in the future as a polling-interval hint. `None` if no future-dated facts in scope.                                           |
+| `Fact::surfaced_at`                  | [`src/types.rs:141`](../../src/types.rs)                        | First-fire timestamp. `None` until the fact is returned by `list_due`; subsequent calls observe the persisted value. The DB-authoritative value always wins on read.  |
 
 The store-level primitives live in [`src/store/facts.rs:397`](../../src/store/facts.rs) (`list_due`), [`src/store/facts.rs:432`](../../src/store/facts.rs) (`next_due_time`), and [`src/store/facts.rs:470`](../../src/store/facts.rs) (`stamp_surfaced`). Two unit tests guard the round-trip behavior: `list_due_surfaces_facts_with_past_t_valid` and `next_due_time_returns_earliest_future_t_valid`.
 

@@ -67,32 +67,36 @@ const TOPICS: [&str; 10] = [
     "Real-time operating systems embedded",
 ];
 
-fn setup_engine_with_dim(n: usize, dim: usize) -> MemoryEngine {
+fn setup_engine_with_dim(rt: &tokio::runtime::Runtime, n: usize, dim: usize) -> MemoryEngine {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench.db");
     let engine = MemoryEngine::builder(dim)
         .path(db_path)
         .build()
         .expect("open engine");
-    let embedder = ConstEmbedder { dim };
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(ConstEmbedder { dim });
 
-    for i in 0..n {
-        let topic = TOPICS[i % TOPICS.len()];
-        let content = format!("{topic} — fact number {i}");
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: content.clone(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                &embedder,
-                None,
-            )
-            .expect("add_fact");
-    }
+    rt.block_on(async {
+        for i in 0..n {
+            let topic = TOPICS[i % TOPICS.len()];
+            let content = format!("{topic} — fact number {i}");
+            engine
+                .add_fact(
+                    &AddFactRequest {
+                        content: content.clone(),
+                        fact_type: FactType::Semantic,
+                        source_event_id: None,
+                        scope: None,
+                        opts: None,
+                    },
+                    embedder.clone(),
+                    None,
+                )
+                .await
+                .expect("add_fact");
+        }
+    });
 
     // Leak the tempdir so the DB file persists for the benchmark duration.
     // Criterion runs the benchmark function many times; the engine holds
@@ -101,18 +105,19 @@ fn setup_engine_with_dim(n: usize, dim: usize) -> MemoryEngine {
     engine
 }
 
-fn setup_engine(n: usize) -> MemoryEngine {
-    setup_engine_with_dim(n, DIM)
+fn setup_engine(rt: &tokio::runtime::Runtime, n: usize) -> MemoryEngine {
+    setup_engine_with_dim(rt, n, DIM)
 }
 
-fn setup_scoped_engine(n: usize) -> MemoryEngine {
+fn setup_scoped_engine(rt: &tokio::runtime::Runtime, n: usize) -> MemoryEngine {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench_scoped.db");
     let engine = MemoryEngine::builder(DIM)
         .path(db_path)
         .build()
         .expect("open engine");
-    let embedder = ConstEmbedder { dim: DIM };
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(ConstEmbedder { dim: DIM });
 
     let scopes = [
         "user:alice/project:alpha",
@@ -120,23 +125,26 @@ fn setup_scoped_engine(n: usize) -> MemoryEngine {
         "user:bob/project:gamma",
     ];
 
-    for i in 0..n {
-        let scope = scopes[i % scopes.len()];
-        let content = format!("scoped fact number {i} in {scope}");
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content,
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: Some(scope.into()),
-                    opts: None,
-                },
-                &embedder,
-                None,
-            )
-            .expect("add_fact");
-    }
+    rt.block_on(async {
+        for i in 0..n {
+            let scope = scopes[i % scopes.len()];
+            let content = format!("scoped fact number {i} in {scope}");
+            engine
+                .add_fact(
+                    &AddFactRequest {
+                        content,
+                        fact_type: FactType::Semantic,
+                        source_event_id: None,
+                        scope: Some(scope.into()),
+                        opts: None,
+                    },
+                    embedder.clone(),
+                    None,
+                )
+                .await
+                .expect("add_fact");
+        }
+    });
 
     std::mem::forget(dir);
     engine
@@ -187,28 +195,32 @@ fn bench_cosine_similarity(c: &mut Criterion) {
 
 fn bench_vector_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_search");
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     for &size in &[1_000, 10_000, 50_000, 100_000] {
         // Fewer samples for large N — each iteration is slow but stable.
         let samples = if size >= 50_000 { 10 } else { 20 };
         group.sample_size(samples);
 
-        let engine = setup_engine(size);
+        let engine = setup_engine(&rt, size);
         let emb = query_embedding();
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| {
-                engine
-                    .query(&SearchQuery {
-                        text: None,
-                        embedding: Some(emb.clone()),
-                        mode: SearchMode::Vector,
-                        limit: 10,
-                        rerank_depth: None,
-                        valid_at: None,
-                        fact_type: None,
-                        scope: None,
-                    })
-                    .unwrap();
+                rt.block_on(async {
+                    engine
+                        .query(&SearchQuery {
+                            text: None,
+                            embedding: Some(emb.clone()),
+                            mode: SearchMode::Vector,
+                            limit: 10,
+                            rerank_depth: None,
+                            valid_at: None,
+                            fact_type: None,
+                            scope: None,
+                        })
+                        .await
+                        .unwrap();
+                });
             });
         });
     }
@@ -222,25 +234,29 @@ fn bench_vector_search(c: &mut Criterion) {
 fn bench_vector_search_dims(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_search_dims");
     group.sample_size(10);
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     let n = 10_000;
     for &dim in &[128, 384, 768] {
-        let engine = setup_engine_with_dim(n, dim);
+        let engine = setup_engine_with_dim(&rt, n, dim);
         let emb = query_embedding_with_dim(dim);
         group.bench_with_input(BenchmarkId::new("dim", dim), &dim, |b, _| {
             b.iter(|| {
-                engine
-                    .query(&SearchQuery {
-                        text: None,
-                        embedding: Some(emb.clone()),
-                        mode: SearchMode::Vector,
-                        limit: 10,
-                        rerank_depth: None,
-                        valid_at: None,
-                        fact_type: None,
-                        scope: None,
-                    })
-                    .unwrap();
+                rt.block_on(async {
+                    engine
+                        .query(&SearchQuery {
+                            text: None,
+                            embedding: Some(emb.clone()),
+                            mode: SearchMode::Vector,
+                            limit: 10,
+                            rerank_depth: None,
+                            valid_at: None,
+                            fact_type: None,
+                            scope: None,
+                        })
+                        .await
+                        .unwrap();
+                });
             });
         });
     }
@@ -254,23 +270,27 @@ fn bench_vector_search_dims(c: &mut Criterion) {
 fn bench_fts_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("fts_search");
     group.sample_size(20);
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     for &size in &[1_000, 10_000] {
-        let engine = setup_engine(size);
+        let engine = setup_engine(&rt, size);
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| {
-                engine
-                    .query(&SearchQuery {
-                        text: Some("Rust memory safety".into()),
-                        embedding: None,
-                        mode: SearchMode::Fts,
-                        limit: 10,
-                        rerank_depth: None,
-                        valid_at: None,
-                        fact_type: None,
-                        scope: None,
-                    })
-                    .unwrap();
+                rt.block_on(async {
+                    engine
+                        .query(&SearchQuery {
+                            text: Some("Rust memory safety".into()),
+                            embedding: None,
+                            mode: SearchMode::Fts,
+                            limit: 10,
+                            rerank_depth: None,
+                            valid_at: None,
+                            fact_type: None,
+                            scope: None,
+                        })
+                        .await
+                        .unwrap();
+                });
             });
         });
     }
@@ -284,24 +304,28 @@ fn bench_fts_search(c: &mut Criterion) {
 fn bench_hybrid_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("hybrid_search");
     group.sample_size(20);
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     for &size in &[1_000, 10_000] {
-        let engine = setup_engine(size);
+        let engine = setup_engine(&rt, size);
         let emb = query_embedding();
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| {
-                engine
-                    .query(&SearchQuery {
-                        text: Some("Rust memory".into()),
-                        embedding: Some(emb.clone()),
-                        mode: SearchMode::Hybrid,
-                        limit: 10,
-                        rerank_depth: None,
-                        valid_at: None,
-                        fact_type: None,
-                        scope: None,
-                    })
-                    .unwrap();
+                rt.block_on(async {
+                    engine
+                        .query(&SearchQuery {
+                            text: Some("Rust memory".into()),
+                            embedding: Some(emb.clone()),
+                            mode: SearchMode::Hybrid,
+                            limit: 10,
+                            rerank_depth: None,
+                            valid_at: None,
+                            fact_type: None,
+                            scope: None,
+                        })
+                        .await
+                        .unwrap();
+                });
             });
         });
     }
@@ -315,59 +339,69 @@ fn bench_hybrid_search(c: &mut Criterion) {
 fn bench_scoped_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("scoped_search");
     group.sample_size(20);
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     let size = 10_000;
-    let engine = setup_scoped_engine(size);
+    let engine = setup_scoped_engine(&rt, size);
     let emb = query_embedding();
 
     group.bench_function("unscoped", |b| {
         b.iter(|| {
-            engine
-                .query(&SearchQuery {
-                    text: Some("scoped fact".into()),
-                    embedding: Some(emb.clone()),
-                    mode: SearchMode::Hybrid,
-                    limit: 10,
-                    rerank_depth: None,
-                    valid_at: None,
-                    fact_type: None,
-                    scope: None,
-                })
-                .unwrap();
+            rt.block_on(async {
+                engine
+                    .query(&SearchQuery {
+                        text: Some("scoped fact".into()),
+                        embedding: Some(emb.clone()),
+                        mode: SearchMode::Hybrid,
+                        limit: 10,
+                        rerank_depth: None,
+                        valid_at: None,
+                        fact_type: None,
+                        scope: None,
+                    })
+                    .await
+                    .unwrap();
+            });
         });
     });
 
     group.bench_function("scoped_exact", |b| {
         b.iter(|| {
-            engine
-                .query(&SearchQuery {
-                    text: Some("scoped fact".into()),
-                    embedding: Some(emb.clone()),
-                    mode: SearchMode::Hybrid,
-                    limit: 10,
-                    rerank_depth: None,
-                    valid_at: None,
-                    fact_type: None,
-                    scope: Some(ScopeQuery::Exact("user:alice/project:alpha".into())),
-                })
-                .unwrap();
+            rt.block_on(async {
+                engine
+                    .query(&SearchQuery {
+                        text: Some("scoped fact".into()),
+                        embedding: Some(emb.clone()),
+                        mode: SearchMode::Hybrid,
+                        limit: 10,
+                        rerank_depth: None,
+                        valid_at: None,
+                        fact_type: None,
+                        scope: Some(ScopeQuery::Exact("user:alice/project:alpha".into())),
+                    })
+                    .await
+                    .unwrap();
+            });
         });
     });
 
     group.bench_function("scoped_subtree", |b| {
         b.iter(|| {
-            engine
-                .query(&SearchQuery {
-                    text: Some("scoped fact".into()),
-                    embedding: Some(emb.clone()),
-                    mode: SearchMode::Hybrid,
-                    limit: 10,
-                    rerank_depth: None,
-                    valid_at: None,
-                    fact_type: None,
-                    scope: Some(ScopeQuery::Subtree("user:alice".into())),
-                })
-                .unwrap();
+            rt.block_on(async {
+                engine
+                    .query(&SearchQuery {
+                        text: Some("scoped fact".into()),
+                        embedding: Some(emb.clone()),
+                        mode: SearchMode::Hybrid,
+                        limit: 10,
+                        rerank_depth: None,
+                        valid_at: None,
+                        fact_type: None,
+                        scope: Some(ScopeQuery::Subtree("user:alice".into())),
+                    })
+                    .await
+                    .unwrap();
+            });
         });
     });
 
@@ -379,7 +413,7 @@ fn bench_scoped_search(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "ann")]
-fn setup_hnsw_engine(n: usize) -> MemoryEngine {
+fn setup_hnsw_engine(rt: &tokio::runtime::Runtime, n: usize) -> MemoryEngine {
     use memory_engine::search::SearchConfig;
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("bench_hnsw.db");
@@ -388,24 +422,28 @@ fn setup_hnsw_engine(n: usize) -> MemoryEngine {
         .search_config(SearchConfig { ann_threshold: 0 })
         .build()
         .expect("open engine");
-    let embedder = ConstEmbedder { dim: DIM };
-    for i in 0..n {
-        let topic = TOPICS[i % TOPICS.len()];
-        let content = format!("{topic} — fact number {i}");
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content,
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                &embedder,
-                None,
-            )
-            .expect("add_fact");
-    }
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(ConstEmbedder { dim: DIM });
+    rt.block_on(async {
+        for i in 0..n {
+            let topic = TOPICS[i % TOPICS.len()];
+            let content = format!("{topic} — fact number {i}");
+            engine
+                .add_fact(
+                    &AddFactRequest {
+                        content,
+                        fact_type: FactType::Semantic,
+                        source_event_id: None,
+                        scope: None,
+                        opts: None,
+                    },
+                    embedder.clone(),
+                    None,
+                )
+                .await
+                .expect("add_fact");
+        }
+    });
     std::mem::forget(dir);
     engine
 }
@@ -413,27 +451,31 @@ fn setup_hnsw_engine(n: usize) -> MemoryEngine {
 #[cfg(feature = "ann")]
 fn bench_hnsw_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("hnsw_search");
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     for &size in &[1_000, 10_000, 50_000, 100_000] {
         let samples = if size >= 50_000 { 10 } else { 20 };
         group.sample_size(samples);
 
-        let engine = setup_hnsw_engine(size);
+        let engine = setup_hnsw_engine(&rt, size);
         let emb = query_embedding();
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| {
-                engine
-                    .query(&SearchQuery {
-                        text: None,
-                        embedding: Some(emb.clone()),
-                        mode: SearchMode::Vector,
-                        limit: 10,
-                        rerank_depth: None,
-                        valid_at: None,
-                        fact_type: None,
-                        scope: None,
-                    })
-                    .unwrap();
+                rt.block_on(async {
+                    engine
+                        .query(&SearchQuery {
+                            text: None,
+                            embedding: Some(emb.clone()),
+                            mode: SearchMode::Vector,
+                            limit: 10,
+                            rerank_depth: None,
+                            valid_at: None,
+                            fact_type: None,
+                            scope: None,
+                        })
+                        .await
+                        .unwrap();
+                });
             });
         });
     }

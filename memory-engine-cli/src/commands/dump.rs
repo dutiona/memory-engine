@@ -59,45 +59,45 @@ struct EventRow {
     session: String,
 }
 
-pub fn run(db: &Path, args: &DumpArgs, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &DumpArgs, format: OutputFormat) -> anyhow::Result<()> {
     let engine = open_engine(db)?;
 
     match args.target {
-        DumpTarget::Facts => dump_facts(&engine, args.limit, format),
-        DumpTarget::Events => dump_events(&engine, args.limit, format),
-        DumpTarget::All => dump_all(&engine, args.limit, format),
+        DumpTarget::Facts => dump_facts(&engine, args.limit, format).await,
+        DumpTarget::Events => dump_events(&engine, args.limit, format).await,
+        DumpTarget::All => dump_all(&engine, args.limit, format).await,
     }
 }
 
-fn dump_all(
+async fn dump_all(
     engine: &memory_engine::MemoryEngine,
     limit: usize,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
     if format == OutputFormat::Json {
-        let facts = engine.list_active_facts(Some(limit))?;
+        let facts = engine.list_active_facts(Some(limit)).await?;
         let mut filter = ReplayFilter::default();
         filter.limit = Some(limit);
-        let events = engine.replay_events(&filter)?;
+        let events = engine.replay_events(&filter).await?;
         let combined = serde_json::json!({
             "facts": facts,
             "events": events,
         });
         output::print_json(&combined)?;
     } else {
-        dump_facts(engine, limit, format)?;
+        dump_facts(engine, limit, format).await?;
         println!();
-        dump_events(engine, limit, format)?;
+        dump_events(engine, limit, format).await?;
     }
     Ok(())
 }
 
-fn dump_facts(
+async fn dump_facts(
     engine: &memory_engine::MemoryEngine,
     limit: usize,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
-    let facts = engine.list_active_facts(Some(limit))?;
+    let facts = engine.list_active_facts(Some(limit)).await?;
 
     match format {
         OutputFormat::Json => output::print_json(&facts)?,
@@ -125,14 +125,14 @@ fn dump_facts(
     Ok(())
 }
 
-fn dump_events(
+async fn dump_events(
     engine: &memory_engine::MemoryEngine,
     limit: usize,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
     let mut filter = ReplayFilter::default();
     filter.limit = Some(limit);
-    let events = engine.replay_events(&filter)?;
+    let events = engine.replay_events(&filter).await?;
 
     match format {
         OutputFormat::Json => output::print_json(&events)?,

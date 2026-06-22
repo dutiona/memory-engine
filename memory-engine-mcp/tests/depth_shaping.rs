@@ -4,6 +4,8 @@
 //! the documented contract: sparse ~4 fields, standard ~15, full includes
 //! `embedding_dim` and `content_hash`.
 
+use std::sync::Arc;
+
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::AddFactRequest;
@@ -92,10 +94,10 @@ fn redact(v: &mut Value) {
 // memory_get_fact — fact shaping at all three depths
 // ---------------------------------------------------------------------------
 
-#[test]
-fn get_fact_sparse() {
+#[tokio::test]
+async fn get_fact_sparse() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -106,28 +108,32 @@ fn get_fact_sparse() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_get_fact",
-        args(json!({ "fact_id": fact_id, "depth": "sparse" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_get_fact",
+            args(json!({ "fact_id": fact_id, "depth": "sparse" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("get_fact_sparse", body);
 }
 
-#[test]
-fn get_fact_standard() {
+#[tokio::test]
+async fn get_fact_standard() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -138,28 +144,32 @@ fn get_fact_standard() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_get_fact",
-        args(json!({ "fact_id": fact_id, "depth": "standard" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_get_fact",
+            args(json!({ "fact_id": fact_id, "depth": "standard" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("get_fact_standard", body);
 }
 
-#[test]
-fn get_fact_full() {
+#[tokio::test]
+async fn get_fact_full() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -170,20 +180,24 @@ fn get_fact_full() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_get_fact",
-        args(json!({ "fact_id": fact_id, "depth": "full" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_get_fact",
+            args(json!({ "fact_id": fact_id, "depth": "full" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("get_fact_full", body);
 }
@@ -192,10 +206,10 @@ fn get_fact_full() {
 // memory_explain_fact — explanation shaping at all three depths
 // ---------------------------------------------------------------------------
 
-#[test]
-fn explain_fact_sparse() {
+#[tokio::test]
+async fn explain_fact_sparse() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -205,28 +219,32 @@ fn explain_fact_sparse() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_explain_fact",
-        args(json!({ "fact_id": fact_id, "depth": "sparse" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_explain_fact",
+            args(json!({ "fact_id": fact_id, "depth": "sparse" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("explain_fact_sparse", body);
 }
 
-#[test]
-fn explain_fact_standard() {
+#[tokio::test]
+async fn explain_fact_standard() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -236,28 +254,32 @@ fn explain_fact_standard() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_explain_fact",
-        args(json!({ "fact_id": fact_id, "depth": "standard" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_explain_fact",
+            args(json!({ "fact_id": fact_id, "depth": "standard" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("explain_fact_standard", body);
 }
 
-#[test]
-fn explain_fact_full() {
+#[tokio::test]
+async fn explain_fact_full() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -267,20 +289,24 @@ fn explain_fact_full() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_explain_fact",
-        args(json!({ "fact_id": fact_id, "depth": "full" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_explain_fact",
+            args(json!({ "fact_id": fact_id, "depth": "full" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("explain_fact_full", body);
 }
@@ -289,10 +315,10 @@ fn explain_fact_full() {
 // memory_query — search result shaping at all three depths
 // ---------------------------------------------------------------------------
 
-#[test]
-fn query_result_sparse() {
+#[tokio::test]
+async fn query_result_sparse() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     engine
         .add_fact(
             &AddFactRequest {
@@ -302,28 +328,32 @@ fn query_result_sparse() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_query",
-        args(json!({ "text": "neural", "mode": "fts", "depth": "sparse" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_query",
+            args(json!({ "text": "neural", "mode": "fts", "depth": "sparse" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("query_result_sparse", body);
 }
 
-#[test]
-fn query_result_standard() {
+#[tokio::test]
+async fn query_result_standard() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     engine
         .add_fact(
             &AddFactRequest {
@@ -333,28 +363,32 @@ fn query_result_standard() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_query",
-        args(json!({ "text": "neural", "mode": "fts", "depth": "standard" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_query",
+            args(json!({ "text": "neural", "mode": "fts", "depth": "standard" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("query_result_standard", body);
 }
 
-#[test]
-fn query_result_full() {
+#[tokio::test]
+async fn query_result_full() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     engine
         .add_fact(
             &AddFactRequest {
@@ -364,20 +398,24 @@ fn query_result_full() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_query",
-        args(json!({ "text": "neural", "mode": "fts", "depth": "full" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_query",
+            args(json!({ "text": "neural", "mode": "fts", "depth": "full" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("query_result_full", body);
 }
@@ -386,10 +424,10 @@ fn query_result_full() {
 // memory_resume_context — resume shaping at all three depths
 // ---------------------------------------------------------------------------
 
-#[test]
-fn resume_context_sparse() {
+#[tokio::test]
+async fn resume_context_sparse() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let opts = memory_engine::types::AddFactOptions {
         importance: Some(0.95),
         pinned: Some(true),
@@ -404,28 +442,32 @@ fn resume_context_sparse() {
                 scope: None,
                 opts: Some(opts),
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_resume_context",
-        args(json!({ "depth": "sparse" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_resume_context",
+            args(json!({ "depth": "sparse" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("resume_context_sparse", body);
 }
 
-#[test]
-fn resume_context_standard() {
+#[tokio::test]
+async fn resume_context_standard() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let opts = memory_engine::types::AddFactOptions {
         importance: Some(0.95),
         pinned: Some(true),
@@ -440,28 +482,32 @@ fn resume_context_standard() {
                 scope: None,
                 opts: Some(opts),
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_resume_context",
-        args(json!({ "depth": "standard" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_resume_context",
+            args(json!({ "depth": "standard" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("resume_context_standard", body);
 }
 
-#[test]
-fn resume_context_full() {
+#[tokio::test]
+async fn resume_context_full() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let opts = memory_engine::types::AddFactOptions {
         importance: Some(0.95),
         pinned: Some(true),
@@ -476,20 +522,24 @@ fn resume_context_full() {
                 scope: None,
                 opts: Some(opts),
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_resume_context",
-        args(json!({ "depth": "full" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_resume_context",
+            args(json!({ "depth": "full" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("resume_context_full", body);
 }
@@ -498,18 +548,21 @@ fn resume_context_full() {
 // memory_list_due — list shaping at all three depths
 // ---------------------------------------------------------------------------
 
-#[test]
-fn list_due_sparse() {
+#[tokio::test]
+async fn list_due_sparse() {
     let engine = make_engine();
-    let mut body = unwrap_ok(tools::dispatch(
-        "memory_list_due",
-        args(json!({ "depth": "sparse" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let mut body = unwrap_ok(
+        tools::dispatch(
+            "memory_list_due",
+            args(json!({ "depth": "sparse" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     redact(&mut body);
     insta::assert_yaml_snapshot!("list_due_sparse", body);
 }
@@ -518,10 +571,10 @@ fn list_due_sparse() {
 // Depth field-count assertions (structural, not snapshot)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn sparse_has_exactly_4_fields() {
+#[tokio::test]
+async fn sparse_has_exactly_4_fields() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -531,27 +584,31 @@ fn sparse_has_exactly_4_fields() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let body = unwrap_ok(tools::dispatch(
-        "memory_get_fact",
-        args(json!({ "fact_id": fact_id, "depth": "sparse" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let body = unwrap_ok(
+        tools::dispatch(
+            "memory_get_fact",
+            args(json!({ "fact_id": fact_id, "depth": "sparse" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     assert_eq!(body.as_object().unwrap().len(), 4);
 }
 
-#[test]
-fn standard_excludes_embedding_and_hash() {
+#[tokio::test]
+async fn standard_excludes_embedding_and_hash() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -561,30 +618,34 @@ fn standard_excludes_embedding_and_hash() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let body = unwrap_ok(tools::dispatch(
-        "memory_get_fact",
-        args(json!({ "fact_id": fact_id, "depth": "standard" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let body = unwrap_ok(
+        tools::dispatch(
+            "memory_get_fact",
+            args(json!({ "fact_id": fact_id, "depth": "standard" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     let obj = body.as_object().unwrap();
     assert!(!obj.contains_key("embedding"));
     assert!(!obj.contains_key("content_hash"));
     assert!(!obj.contains_key("embedding_dim"));
 }
 
-#[test]
-fn full_includes_embedding_dim_and_hash() {
+#[tokio::test]
+async fn full_includes_embedding_dim_and_hash() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -594,20 +655,24 @@ fn full_includes_embedding_dim_and_hash() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
-    let body = unwrap_ok(tools::dispatch(
-        "memory_get_fact",
-        args(json!({ "fact_id": fact_id, "depth": "full" })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let body = unwrap_ok(
+        tools::dispatch(
+            "memory_get_fact",
+            args(json!({ "fact_id": fact_id, "depth": "full" })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     let obj = body.as_object().unwrap();
     assert!(obj.contains_key("content_hash"));
     assert!(obj.contains_key("embedding_dim"));
@@ -618,10 +683,10 @@ fn full_includes_embedding_dim_and_hash() {
 // Default depth is standard
 // ---------------------------------------------------------------------------
 
-#[test]
-fn default_depth_is_standard() {
+#[tokio::test]
+async fn default_depth_is_standard() {
     let engine = make_engine();
-    let embedder = TestEmbedder { dim: DIM };
+    let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let fact_id = engine
         .add_fact(
             &AddFactRequest {
@@ -631,21 +696,25 @@ fn default_depth_is_standard() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            emb,
             None,
         )
+        .await
         .unwrap();
 
     // No depth parameter → default (standard)
-    let body = unwrap_ok(tools::dispatch(
-        "memory_get_fact",
-        args(json!({ "fact_id": fact_id })),
-        &engine,
-        None,
-        None,
-        DIM,
-        &memory_engine::ActivityFilterConfig::default(),
-    ));
+    let body = unwrap_ok(
+        tools::dispatch(
+            "memory_get_fact",
+            args(json!({ "fact_id": fact_id })),
+            &engine,
+            None,
+            None,
+            DIM,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await,
+    );
     let obj = body.as_object().unwrap();
     // Standard has content + fact_type but no embedding_dim
     assert!(obj.contains_key("fact_type"));

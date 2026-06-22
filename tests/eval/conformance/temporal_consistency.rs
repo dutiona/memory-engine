@@ -11,8 +11,8 @@ use memory_engine::types::{AddFactOptions, EventType, FactType, NewEvent};
 
 use crate::helpers::{add_fact_with_opts, days_ago, eval_engine};
 
-#[test]
-fn future_t_valid_fact_invisible_at_now() {
+#[tokio::test]
+async fn future_t_valid_fact_invisible_at_now() {
     let engine = eval_engine();
 
     let future = Utc::now() + Duration::days(30);
@@ -25,11 +25,13 @@ fn future_t_valid_fact_invisible_at_now() {
             t_valid: Some(future),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Default store-path query hides future-dated facts (temporal safety invariant).
     let response = engine
         .execute_query(&MemoryQuery::new())
+        .await
         .expect("query failed");
 
     assert!(
@@ -39,8 +41,8 @@ fn future_t_valid_fact_invisible_at_now() {
     );
 }
 
-#[test]
-fn future_t_valid_fact_visible_with_valid_at() {
+#[tokio::test]
+async fn future_t_valid_fact_visible_with_valid_at() {
     let engine = eval_engine();
 
     let future = Utc::now() + Duration::days(30);
@@ -53,12 +55,14 @@ fn future_t_valid_fact_visible_with_valid_at() {
             t_valid: Some(future),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // valid_at set to a point after t_valid should reveal the fact.
     let at = future + Duration::hours(1);
     let response = engine
         .execute_query(&MemoryQuery::new().valid_at(at))
+        .await
         .expect("query failed");
 
     assert!(
@@ -67,8 +71,8 @@ fn future_t_valid_fact_visible_with_valid_at() {
     );
 }
 
-#[test]
-fn past_t_invalid_fact_invisible() {
+#[tokio::test]
+async fn past_t_invalid_fact_invisible() {
     let engine = eval_engine();
 
     let past_invalid = days_ago(5);
@@ -83,11 +87,13 @@ fn past_t_invalid_fact_invisible() {
             t_invalid: Some(past_invalid),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Default query (effective cutoff = now) should exclude facts with t_invalid in the past.
     let response = engine
         .execute_query(&MemoryQuery::new())
+        .await
         .expect("query failed");
 
     assert!(
@@ -96,8 +102,8 @@ fn past_t_invalid_fact_invisible() {
     );
 }
 
-#[test]
-fn period_overlap_includes_overlapping_facts() {
+#[tokio::test]
+async fn period_overlap_includes_overlapping_facts() {
     let engine = eval_engine();
 
     // Fact valid from 20 days ago to 5 days ago.
@@ -111,7 +117,8 @@ fn period_overlap_includes_overlapping_facts() {
             t_invalid: Some(days_ago(5)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Fact valid from 3 days ago, still valid (no t_invalid).
     let id_current = add_fact_with_opts(
@@ -123,11 +130,13 @@ fn period_overlap_includes_overlapping_facts() {
             t_valid: Some(days_ago(3)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Store-path period query: 10 days ago to now — should overlap with both facts.
     let response = engine
         .execute_query(&MemoryQuery::new().period(days_ago(10), Utc::now()))
+        .await
         .expect("query failed");
 
     let ids: Vec<i64> = response.results.iter().map(|r| r.fact.id).collect();
@@ -141,8 +150,8 @@ fn period_overlap_includes_overlapping_facts() {
     );
 }
 
-#[test]
-fn period_excludes_non_overlapping_facts() {
+#[tokio::test]
+async fn period_excludes_non_overlapping_facts() {
     let engine = eval_engine();
 
     // Fact valid from 30 days ago to 20 days ago.
@@ -156,11 +165,13 @@ fn period_excludes_non_overlapping_facts() {
             t_invalid: Some(days_ago(20)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Store-path period query: last 5 days — should NOT overlap with the old fact.
     let response = engine
         .execute_query(&MemoryQuery::new().period(days_ago(5), Utc::now()))
+        .await
         .expect("query failed");
 
     assert!(
@@ -169,8 +180,8 @@ fn period_excludes_non_overlapping_facts() {
     );
 }
 
-#[test]
-fn event_sequence_ids_increase_monotonically() {
+#[tokio::test]
+async fn event_sequence_ids_increase_monotonically() {
     let engine = eval_engine();
 
     let mut event_ids = Vec::new();
@@ -186,7 +197,7 @@ fn event_sequence_ids_increase_monotonically() {
             sequence_id: i64::from(i),
             created_at: None,
         };
-        let id = engine.ingest(&event).expect("ingest failed");
+        let id = engine.ingest(&event).await.expect("ingest failed");
         event_ids.push(id);
     }
 
@@ -201,8 +212,8 @@ fn event_sequence_ids_increase_monotonically() {
     }
 }
 
-#[test]
-fn system_time_independent_of_real_world_time() {
+#[tokio::test]
+async fn system_time_independent_of_real_world_time() {
     let engine = eval_engine();
 
     // Create a fact with system t_created = now, but real-world t_valid = 10 days ago.
@@ -216,9 +227,10 @@ fn system_time_independent_of_real_world_time() {
             t_valid: Some(real_world_past),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
-    let fact = engine.get_fact(id).expect("get_fact failed");
+    let fact = engine.get_fact(id).await.expect("get_fact failed");
 
     // System time (t_created) should be recent (within last minute).
     let age = Utc::now() - fact.t_created;

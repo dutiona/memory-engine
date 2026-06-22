@@ -10,8 +10,8 @@ use memory_engine::types::{AddFactOptions, FactType};
 
 use crate::helpers::{add_fact_with_opts, days_ago, eval_engine};
 
-#[test]
-fn ebbinghaus_decay_ordering_old_before_young() {
+#[tokio::test]
+async fn ebbinghaus_decay_ordering_old_before_young() {
     let engine = eval_engine();
 
     // 120-day-old fact with 0 access (Episodic: the decaying type)
@@ -26,7 +26,8 @@ fn ebbinghaus_decay_ordering_old_before_young() {
             last_accessed: Some(days_ago(120)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // 0-day-old (fresh) fact with 0 access
     let young_id = add_fact_with_opts(
@@ -38,7 +39,8 @@ fn ebbinghaus_decay_ordering_old_before_young() {
             importance: Some(0.3),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Computed importance scores (default weights: recency=0.3, freq=0.2, graph=0.3, base=0.2):
     // Old (120d): 0.3*2^(-120/69) + 0 + 0 + 0.2*0.3 = 0.089 + 0.06 = ~0.149
@@ -49,11 +51,14 @@ fn ebbinghaus_decay_ordering_old_before_young() {
         ..ForgetPolicy::default()
     };
 
-    let _stats = engine.forget(&policy).expect("forget failed");
+    let _stats = engine.forget(&policy).await.expect("forget failed");
 
     // At least the old fact should be expired
-    let old_fact = engine.get_fact(old_id).expect("get old fact failed");
-    let young_fact = engine.get_fact(young_id).expect("get young fact failed");
+    let old_fact = engine.get_fact(old_id).await.expect("get old fact failed");
+    let young_fact = engine
+        .get_fact(young_id)
+        .await
+        .expect("get young fact failed");
 
     // The old fact should expire before (or at the same time as) the young one.
     // With min_importance=0.50, the 120-day-old fact should fall below threshold.
@@ -67,8 +72,8 @@ fn ebbinghaus_decay_ordering_old_before_young() {
     );
 }
 
-#[test]
-fn half_life_override_episodic_decays_faster() {
+#[tokio::test]
+async fn half_life_override_episodic_decays_faster() {
     let engine = eval_engine();
 
     let mut overrides = HashMap::new();
@@ -86,7 +91,8 @@ fn half_life_override_episodic_decays_faster() {
             last_accessed: Some(days_ago(45)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Semantic fact, also 45 days old (decay-exempt by default: recency
     // stays 1.0, so it survives regardless of age)
@@ -101,7 +107,8 @@ fn half_life_override_episodic_decays_faster() {
             last_accessed: Some(days_ago(45)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Computed importance scores:
     // Episodic (45d, 30d HL): 0.3*2^(-45/30) + 0 + 0 + 0.2*0.3 = 0.106 + 0.06 = ~0.166
@@ -113,10 +120,16 @@ fn half_life_override_episodic_decays_faster() {
         ..ForgetPolicy::default()
     };
 
-    let _stats = engine.forget(&policy).expect("forget failed");
+    let _stats = engine.forget(&policy).await.expect("forget failed");
 
-    let episodic = engine.get_fact(episodic_id).expect("get episodic failed");
-    let semantic = engine.get_fact(semantic_id).expect("get semantic failed");
+    let episodic = engine
+        .get_fact(episodic_id)
+        .await
+        .expect("get episodic failed");
+    let semantic = engine
+        .get_fact(semantic_id)
+        .await
+        .expect("get semantic failed");
 
     // At 45 days with 30-day half-life, episodic should have decayed significantly
     // (past 1.5 half-lives). With default 69-day half-life, semantic should still
@@ -131,8 +144,8 @@ fn half_life_override_episodic_decays_faster() {
     );
 }
 
-#[test]
-fn importance_scoring_monotonicity() {
+#[tokio::test]
+async fn importance_scoring_monotonicity() {
     let engine = eval_engine();
 
     // High-importance fact, 60 days old (Episodic: the decaying type)
@@ -147,7 +160,8 @@ fn importance_scoring_monotonicity() {
             last_accessed: Some(days_ago(60)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Low-importance fact, 60 days old
     let low_id = add_fact_with_opts(
@@ -161,7 +175,8 @@ fn importance_scoring_monotonicity() {
             last_accessed: Some(days_ago(60)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Computed importance scores (60d old, 0 access, 0 graph):
     // High (imp=0.9): 0.3*2^(-60/69) + 0 + 0 + 0.2*0.9 = 0.164 + 0.18 = ~0.344
@@ -172,10 +187,10 @@ fn importance_scoring_monotonicity() {
         ..ForgetPolicy::default()
     };
 
-    let _stats = engine.forget(&policy).expect("forget failed");
+    let _stats = engine.forget(&policy).await.expect("forget failed");
 
-    let high = engine.get_fact(high_id).expect("get high failed");
-    let low = engine.get_fact(low_id).expect("get low failed");
+    let high = engine.get_fact(high_id).await.expect("get high failed");
+    let low = engine.get_fact(low_id).await.expect("get low failed");
 
     // Same age, same access count — importance should be the differentiator.
     // Low-importance fact should expire first.
@@ -189,8 +204,8 @@ fn importance_scoring_monotonicity() {
     );
 }
 
-#[test]
-fn pin_immunity_survives_aggressive_forget() {
+#[tokio::test]
+async fn pin_immunity_survives_aggressive_forget() {
     let engine = eval_engine();
 
     // Pinned fact, very old, low importance — should still survive
@@ -207,7 +222,8 @@ fn pin_immunity_survives_aggressive_forget() {
             last_accessed: Some(days_ago(365)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Unpinned fact with same profile — should be expired
     let unpinned_id = add_fact_with_opts(
@@ -221,7 +237,8 @@ fn pin_immunity_survives_aggressive_forget() {
             last_accessed: Some(days_ago(365)),
             ..Default::default()
         },
-    );
+    )
+    .await;
 
     // Aggressive policy: high min_importance threshold
     let policy = ForgetPolicy {
@@ -229,10 +246,13 @@ fn pin_immunity_survives_aggressive_forget() {
         ..ForgetPolicy::default()
     };
 
-    let _stats = engine.forget(&policy).expect("forget failed");
+    let _stats = engine.forget(&policy).await.expect("forget failed");
 
-    let pinned = engine.get_fact(pinned_id).expect("get pinned failed");
-    let unpinned = engine.get_fact(unpinned_id).expect("get unpinned failed");
+    let pinned = engine.get_fact(pinned_id).await.expect("get pinned failed");
+    let unpinned = engine
+        .get_fact(unpinned_id)
+        .await
+        .expect("get unpinned failed");
 
     assert!(
         pinned.t_expired.is_none(),

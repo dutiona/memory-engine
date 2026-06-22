@@ -43,13 +43,18 @@ impl Reranker for NamedReranker {
 /// string. Every field here is one the legacy constructors set and the builder
 /// must reproduce verbatim.
 fn observe(engine: &MemoryEngine) -> String {
+    // TODO(#631-test): engine internals removed by the cutover. `engine.pool` is
+    // gone (the connection pool now lives *inside* the `Arc<dyn StorageBackend>`),
+    // so `pool.read_pool_size()` has no accessor, and the `search_config` field was
+    // dropped from the struct. Both columns are therefore omitted from the observed
+    // tuple below; `pool.is_file_backed()` / `pool.is_read_only()` are replaced by
+    // the public `is_file_backed()` / `is_read_only()` methods. The committed insta
+    // snapshots must be regenerated to match the reduced tuple.
     format!(
-        "embed_dim={}\nfile_backed={}\nread_only={}\nread_pool_size={}\nsearch_config={:?}\nupcaster_count={}\nreranker={:?}",
+        "embed_dim={}\nfile_backed={}\nread_only={}\nupcaster_count={}\nreranker={:?}",
         engine.embed_dim(),
-        engine.pool.is_file_backed(),
-        engine.pool.is_read_only(),
-        engine.pool.read_pool_size(),
-        engine.search_config,
+        engine.is_file_backed(),
+        engine.is_read_only(),
         engine.upcaster_registry.registered_count(),
         engine.reranker_name(),
     )
@@ -167,25 +172,28 @@ fn equiv_file_read_only_roundtrip() {
 // Behavioral pins (error variants — not config tuples)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn equiv_embed_dim_mismatch_is_migration_error() {
+#[tokio::test]
+async fn equiv_embed_dim_mismatch_is_migration_error() {
     use crate::error::MemoryError;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dim.db");
     {
-        let engine = MemoryEngine::builder(768)
+        let mut engine = MemoryEngine::builder(768)
             .path(path.clone())
             .build()
             .unwrap();
         // The embedding identity (incl. dim) is recorded on the first embedding
-        // write (#613), not at open. Seed it through the registry facade to pin
+        // write (#613), not at open. Seed it through the storage port to pin
         // dim=768 without standing up an embedder in this builder-equivalence module.
-        let conn = engine.write_conn().unwrap();
-        crate::store::embedding_meta::store(
-            &conn,
-            &crate::types::EmbeddingFingerprint::new("mock", "test", 768),
-        )
-        .unwrap();
+        engine
+            .storage()
+            .store_embedding_fingerprint(&crate::types::EmbeddingFingerprint::new(
+                "mock", "test", 768,
+            ))
+            .await
+            .unwrap();
+        // Flush + release the file so the reopen below sees the persisted identity.
+        engine.close().await.unwrap();
     }
     let err = MemoryEngine::builder(384).path(path).build().unwrap_err();
     assert!(

@@ -175,10 +175,10 @@ const MAX_LINE_BYTES: u64 = 8 << 20; // 8 MiB
 /// skipped for any reason (parse error, validation failure, oversized line, read
 /// error, or batch rejection). A wholesale failure is surfaced rather than
 /// reported as a successful no-op.
-pub fn ingest_from_reader(
+pub async fn ingest_from_reader(
     engine: &MemoryEngine,
     reader: impl Read,
-    embedder: &dyn EmbeddingProvider,
+    embedder: std::sync::Arc<dyn EmbeddingProvider>,
     batch_size: usize,
     default_scope: Option<&str>,
     format: OutputFormat,
@@ -255,12 +255,13 @@ pub fn ingest_from_reader(
             let flushed = flush_batch(
                 engine,
                 &mut batch,
-                embedder,
+                &embedder,
                 &format!("batch at line {line_no}"),
                 &mut total_ingested,
                 &mut total_skipped,
                 &mut failed_batches,
-            );
+            )
+            .await;
             if flushed {
                 eprint_progress(total_ingested, total_skipped, &start, format);
             }
@@ -271,12 +272,13 @@ pub fn ingest_from_reader(
     flush_batch(
         engine,
         &mut batch,
-        embedder,
+        &embedder,
         "final batch",
         &mut total_ingested,
         &mut total_skipped,
         &mut failed_batches,
-    );
+    )
+    .await;
 
     let summary = IngestSummary {
         total_ingested,
@@ -309,10 +311,10 @@ fn eprint_progress(ingested: usize, skipped: usize, start: &Instant, format: Out
 ///
 /// `context` is the location phrase used in the failure warning, e.g.
 /// `"batch at line 42"` or `"final batch"`. An empty batch is a no-op.
-fn flush_batch(
+async fn flush_batch(
     engine: &MemoryEngine,
     batch: &mut Vec<AddFactRequest>,
-    embedder: &dyn EmbeddingProvider,
+    embedder: &std::sync::Arc<dyn EmbeddingProvider>,
     context: &str,
     total_ingested: &mut usize,
     total_skipped: &mut usize,
@@ -322,7 +324,10 @@ fn flush_batch(
         return true;
     }
     let chunk_size = batch.len();
-    let ingested = match engine.add_facts_batch(batch.as_slice(), embedder, None) {
+    let ingested = match engine
+        .add_facts_batch(batch.as_slice(), embedder.clone(), None)
+        .await
+    {
         Ok(ids) => {
             *total_ingested += ids.len();
             true
@@ -346,7 +351,16 @@ fn flush_batch(
 /// `Vec` from operator-supplied input, enabling a trivial OOM denial-of-service.
 const MAX_BATCH_SIZE: usize = 10_000;
 
-pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::Result<()> {
+// The future streams from a `Box<dyn Read>` (the `-` branch yields a `!Send` `StdinLock`)
+// held across the per-batch `add_fact().await`, so it is intentionally `!Send`. Making the
+// reader `+ Send` would force buffering all of stdin up front, defeating the streaming
+// design (and the OOM guard it exists for). `run` is only ever awaited inline on the
+// single-threaded `#[tokio::main]` entrypoint — never spawned — so `Send` is not required.
+#[allow(
+    clippy::future_not_send,
+    reason = "awaited inline on #[tokio::main]; streams a !Send StdinLock"
+)]
+pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.batch_size > 0 && args.batch_size <= MAX_BATCH_SIZE,
         "--batch-size must be between 1 and {MAX_BATCH_SIZE}, got {}",
@@ -361,7 +375,7 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
     // leave an orphan empty database behind (#681). On the open paths the dim is
     // only known after opening, but opening does not create a file, so building the
     // embedder afterwards carries no orphan risk.
-    let (engine, embedder) = if args.create {
+    let (mut engine, embedder) = if args.create {
         let embed_dim = args
             .embed_dim
             .ok_or_else(|| anyhow::anyhow!("--embed-dim is required when using --create"))?;
@@ -402,11 +416,12 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
     let summary = ingest_from_reader(
         &engine,
         reader,
-        &embedder,
+        std::sync::Arc::new(embedder),
         args.batch_size,
         args.scope.as_deref(),
         format,
-    )?;
+    )
+    .await?;
 
     // Clear progress line before final output
     if format != OutputFormat::Json {
@@ -414,6 +429,8 @@ pub fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> anyhow::R
     }
 
     print_summary(&summary, format)?;
+    // Flush the sidecar snapshot before the engine drops (#728 review C).
+    engine.close().await?;
     Ok(())
 }
 
@@ -564,8 +581,8 @@ mod tests {
         assert_eq!(req.scope, Some("custom".into()));
     }
 
-    #[test]
-    fn ingest_from_reader_with_fake_embedder() {
+    #[tokio::test]
+    async fn ingest_from_reader_with_fake_embedder() {
         struct FakeEmbed;
         impl EmbeddingProvider for FakeEmbed {
             fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
@@ -583,19 +600,20 @@ mod tests {
         let summary = ingest_from_reader(
             &engine,
             input.as_bytes(),
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             100,
             None,
             OutputFormat::Json,
         )
+        .await
         .unwrap();
         assert_eq!(summary.total_ingested, 2);
         assert_eq!(summary.total_skipped, 0);
         assert_eq!(summary.failed_batches, 0);
     }
 
-    #[test]
-    fn ingest_skips_malformed_lines() {
+    #[tokio::test]
+    async fn ingest_skips_malformed_lines() {
         struct FakeEmbed;
         impl EmbeddingProvider for FakeEmbed {
             fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
@@ -614,18 +632,19 @@ not valid json
         let summary = ingest_from_reader(
             &engine,
             input.as_bytes(),
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             100,
             None,
             OutputFormat::Json,
         )
+        .await
         .unwrap();
         assert_eq!(summary.total_ingested, 2);
         assert_eq!(summary.total_skipped, 1);
     }
 
-    #[test]
-    fn ingest_skips_invalid_importance() {
+    #[tokio::test]
+    async fn ingest_skips_invalid_importance() {
         struct FakeEmbed;
         impl EmbeddingProvider for FakeEmbed {
             fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
@@ -643,18 +662,19 @@ not valid json
         let summary = ingest_from_reader(
             &engine,
             input.as_bytes(),
-            &FakeEmbed,
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             100,
             None,
             OutputFormat::Json,
         )
+        .await
         .unwrap();
         assert_eq!(summary.total_ingested, 1);
         assert_eq!(summary.total_skipped, 1);
     }
 
-    #[test]
-    fn ingest_empty_input() {
+    #[tokio::test]
+    async fn ingest_empty_input() {
         struct FakeEmbed;
         impl EmbeddingProvider for FakeEmbed {
             fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
@@ -666,8 +686,15 @@ not valid json
         }
 
         let engine = MemoryEngine::builder(4).build().unwrap();
-        let summary =
-            ingest_from_reader(&engine, &b""[..], &FakeEmbed, 100, None, OutputFormat::Json);
+        let summary = ingest_from_reader(
+            &engine,
+            &b""[..],
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .await;
         // Empty input = 0 ingested, 0 skipped → returns Ok (not an error)
         let s = summary.unwrap();
         assert_eq!(s.total_ingested, 0);
@@ -686,8 +713,8 @@ not valid json
         }
     }
 
-    #[test]
-    fn skips_oversized_line_then_resumes() {
+    #[tokio::test]
+    async fn skips_oversized_line_then_resumes() {
         // A single record larger than the per-line cap must be dropped at the read
         // boundary and ingestion must resync to the next record. Without the cap the
         // giant line is read whole and handed to the engine, whose content-size
@@ -704,11 +731,12 @@ not valid json
         let summary = ingest_from_reader(
             &engine,
             input.as_bytes(),
-            &CapEmbed,
+            std::sync::Arc::new(CapEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             100,
             None,
             OutputFormat::Json,
         )
+        .await
         .unwrap();
         assert_eq!(summary.total_ingested, 1, "only the normal record ingests");
         assert_eq!(
@@ -717,8 +745,8 @@ not valid json
         );
     }
 
-    #[test]
-    fn oversized_unterminated_final_line_at_eof() {
+    #[tokio::test]
+    async fn oversized_unterminated_final_line_at_eof() {
         // An oversized line that is also the LAST line and has no trailing newline
         // must be skipped cleanly: skip_until hits EOF and returns Ok, the loop
         // ends, and the earlier valid record is unaffected. Guards against a hang
@@ -730,11 +758,12 @@ not valid json
         let summary = ingest_from_reader(
             &engine,
             input.as_bytes(),
-            &CapEmbed,
+            std::sync::Arc::new(CapEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             100,
             None,
             OutputFormat::Json,
         )
+        .await
         .unwrap();
         assert_eq!(summary.total_ingested, 1, "the valid first record ingests");
         assert_eq!(
@@ -743,8 +772,8 @@ not valid json
         );
     }
 
-    #[test]
-    fn cap_sized_line_does_not_eat_following_record() {
+    #[tokio::test]
+    async fn cap_sized_line_does_not_eat_following_record() {
         // Regression for the resync off-by-one: a line whose bytes (incl. its '\n')
         // total exactly MAX_LINE_BYTES + 1 is read in full — read_line consumes the
         // terminating '\n' — yet n > MAX flags it oversized. An unconditional
@@ -766,11 +795,12 @@ not valid json
         let summary = ingest_from_reader(
             &engine,
             input.as_bytes(),
-            &CapEmbed,
+            std::sync::Arc::new(CapEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             100,
             None,
             OutputFormat::Json,
         )
+        .await
         .unwrap();
         assert_eq!(
             summary.total_ingested, 1,
@@ -778,8 +808,8 @@ not valid json
         );
     }
 
-    #[test]
-    fn mid_stream_flush_with_batch_size_one() {
+    #[tokio::test]
+    async fn mid_stream_flush_with_batch_size_one() {
         // batch_size=1 forces a flush after every record, exercising the mid-stream
         // flush path — not just the final partial flush the other tests hit.
         let engine = MemoryEngine::builder(4).build().unwrap();
@@ -789,19 +819,20 @@ not valid json
         let summary = ingest_from_reader(
             &engine,
             input.as_bytes(),
-            &CapEmbed,
+            std::sync::Arc::new(CapEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             1,
             None,
             OutputFormat::Json,
         )
+        .await
         .unwrap();
         assert_eq!(summary.total_ingested, 3);
         assert_eq!(summary.total_skipped, 0);
         assert_eq!(summary.failed_batches, 0);
     }
 
-    #[test]
-    fn create_with_misconfigured_embedder_leaves_no_orphan_db() {
+    #[tokio::test]
+    async fn create_with_misconfigured_embedder_leaves_no_orphan_db() {
         // #681: a --create run whose embedder is misconfigured (url without model →
         // build_required errors) must fail BEFORE the DB file is created, so no orphan
         // empty database is left behind for the next run to trip over.
@@ -824,7 +855,7 @@ not valid json
             embed_dim: Some(4),
             scope: None,
         };
-        let result = run(&db, &args, OutputFormat::Json);
+        let result = run(&db, &args, OutputFormat::Json).await;
         assert!(result.is_err(), "misconfigured embedder must error");
         assert!(
             !db.exists(),
@@ -832,8 +863,8 @@ not valid json
         );
     }
 
-    #[test]
-    fn all_bad_lines_returns_error() {
+    #[tokio::test]
+    async fn all_bad_lines_returns_error() {
         // 0 ingested AND >0 skipped → the function bails rather than reporting a
         // successful no-op. The empty-input test does not hit this (skipped is 0).
         let engine = MemoryEngine::builder(4).build().unwrap();
@@ -841,11 +872,12 @@ not valid json
         let result = ingest_from_reader(
             &engine,
             input.as_bytes(),
-            &CapEmbed,
+            std::sync::Arc::new(CapEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             100,
             None,
             OutputFormat::Json,
-        );
+        )
+        .await;
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("no facts ingested"), "got: {msg}");
@@ -879,18 +911,29 @@ not valid json
             .prop_map(|lines| lines.join("\n").into_bytes());
 
         // Built once and reused across cases; ingest_from_reader only appends, so
-        // cases cannot interfere.
+        // cases cannot interfere. The fn under test is async now, so each case is
+        // driven to completion on a current-thread runtime built once for the test.
         let engine = MemoryEngine::builder(4).build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         proptest::proptest!(|(data in prop_oneof![
             proptest::collection::vec(any::<u8>(), 0..4096),
             jsonl_doc,
         ])| {
-            let _ = ingest_from_reader(&engine, data.as_slice(), &CapEmbed, 8, None, OutputFormat::Json);
+            let _ = rt.block_on(ingest_from_reader(
+                &engine,
+                data.as_slice(),
+                std::sync::Arc::new(CapEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                8,
+                None,
+                OutputFormat::Json,
+            ));
         });
     }
 
-    #[test]
-    fn persistent_read_error_breaks_instead_of_looping() {
+    #[tokio::test]
+    async fn persistent_read_error_breaks_instead_of_looping() {
         // CWE-835 (#664): a reader that errors on every read must make the ingest
         // loop BREAK (a byte-stream read error is terminal), not `continue` and
         // spin forever. The reader panics if polled more than a few times, so a
@@ -914,17 +957,18 @@ not valid json
         let err = ingest_from_reader(
             &engine,
             AlwaysErr { reads: 0 },
-            &CapEmbed,
+            std::sync::Arc::new(CapEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
             8,
             None,
             OutputFormat::Json,
         )
+        .await
         .unwrap_err();
         assert!(err.to_string().contains("no facts ingested"), "got: {err}");
     }
 
-    #[test]
-    fn read_error_after_a_valid_line_still_flushes_it() {
+    #[tokio::test]
+    async fn read_error_after_a_valid_line_still_flushes_it() {
         // The `break` must not discard records read BEFORE the terminal read error:
         // the partial batch is flushed on the way out. A reader that yields one
         // valid JSONL line and then errors must still ingest that line.
@@ -947,8 +991,16 @@ not valid json
         let reader = LineThenErr {
             remaining: b"{\"content\":\"ok\",\"fact_type\":\"semantic\"}\n",
         };
-        let summary =
-            ingest_from_reader(&engine, reader, &CapEmbed, 8, None, OutputFormat::Json).unwrap();
+        let summary = ingest_from_reader(
+            &engine,
+            reader,
+            std::sync::Arc::new(CapEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+            8,
+            None,
+            OutputFormat::Json,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             summary.total_ingested, 1,
             "the valid line must still be flushed"

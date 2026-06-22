@@ -86,8 +86,8 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 ### Consolidation
 
-| Method        | Signature                                                                                               | Description                                                                                                               |
-| ------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Method        | Signature                                                                                                                                 | Description                                                                                                                                                                                                         |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `consolidate` | `(&self, generator: &dyn SummaryGenerator, embedder: &dyn EmbeddingProvider, config: &ConsolidationConfig) -> Result<ConsolidationStats>` | Run three-pass consolidation: local dedup, cluster fusion, global integration. The generator produces summary text; the embedder projects it into the fact vector space. Rebuilds graph if duplicates were removed. |
 
 `ConsolidationConfig` fields:
@@ -214,7 +214,7 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 ## Feature Flags
 
 `async`
-: Enables the `async_engine` module, which provides `AsyncMemoryEngine`. This is a thin wrapper that delegates every method to the synchronous `MemoryEngine` via `tokio::task::spawn_blocking`. All method signatures mirror the sync API but return `impl Future`.
+: **Default-on** (`default = ["async"]` in the crate-root `Cargo.toml`). Provides the tokio runtime that the async-native `MemoryEngine` requires: its DB-touching methods are `async fn` and must be `.await`ed from inside a tokio runtime (`#[tokio::main]` or `Runtime::block_on`). There is no `AsyncMemoryEngine` wrapper -- you use `MemoryEngine` directly and await it.
 
 ## Error Handling
 

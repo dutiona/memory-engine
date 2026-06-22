@@ -15,9 +15,9 @@ struct StatRow {
     value: String,
 }
 
-pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
     let engine = open_engine(db)?;
-    let stats = engine.statistics()?;
+    let stats = engine.statistics().await?;
 
     match format {
         OutputFormat::Json => output::print_json(&stats)?,

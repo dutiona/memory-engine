@@ -76,6 +76,10 @@ async fn main() -> Result<(), BoxError> {
         .build()
         .map_err(|e| format!("failed to open engine: {e}"))?;
     let engine = Arc::new(engine);
+    // Retain a shared handle for the shutdown sidecar flush: the server takes ownership
+    // of its own `Arc` clone below, and `close()` needs `&mut` (unreachable through a
+    // shared `Arc`), so the server-side handle uses `flush_snapshot(&self)` instead.
+    let engine_for_flush = Arc::clone(&engine);
 
     // 4. Initialize embedding provider (optional)
     // Use the resolved embed_dim (from DB probe or config), not the TOML value.
@@ -89,6 +93,7 @@ async fn main() -> Result<(), BoxError> {
     if let Some(provider) = embedder.as_deref() {
         engine
             .verify_embedding_identity(provider)
+            .await
             .map_err(|e| format!("embedding identity check failed: {e}"))?;
     }
 
@@ -104,6 +109,13 @@ async fn main() -> Result<(), BoxError> {
     let transport = rmcp::transport::io::stdio();
     let service = mcp_server.serve(transport).await?;
     service.waiting().await?;
+
+    // Shutdown: the serve loop has ended (engine is quiescent), so persist the in-memory
+    // projections to the sidecar snapshot. Best-effort — the DB is the source of truth,
+    // so a failed flush only means the next open rebuilds the sidecar from the DB.
+    if let Err(e) = engine_for_flush.flush_snapshot().await {
+        tracing::warn!("failed to flush sidecar snapshot on shutdown: {e}");
+    }
 
     Ok(())
 }

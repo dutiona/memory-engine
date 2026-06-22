@@ -109,11 +109,11 @@ fn print_report(report: &BootstrapReport, format: OutputFormat) -> anyhow::Resul
 ///
 /// Propagates engine errors (embedding, DB, traversal) and bails if neither
 /// `--jsonl-dir` nor `--memory-dir` was given.
-pub fn run_bootstrap(
+pub async fn run_bootstrap(
     engine: &MemoryEngine,
     jsonl_dir: Option<&Path>,
     memory_dir: Option<&Path>,
-    embedder: &dyn EmbeddingProvider,
+    embedder: std::sync::Arc<dyn EmbeddingProvider>,
     config: &BootstrapConfig,
 ) -> anyhow::Result<BootstrapReport> {
     anyhow::ensure!(
@@ -129,8 +129,16 @@ pub fn run_bootstrap(
             "--jsonl-dir is not a directory: {}",
             dir.display()
         );
-        let extractor = KeywordExtractor;
-        let sub = engine.bootstrap_directory(dir, embedder, &extractor, config, None)?;
+        let sub = engine
+            .bootstrap_directory(
+                dir,
+                embedder.clone(),
+                std::sync::Arc::new(KeywordExtractor)
+                    as std::sync::Arc<dyn memory_engine::bootstrap::SessionExtractor>,
+                config,
+                None,
+            )
+            .await?;
         report.merge(&sub);
     }
 
@@ -140,7 +148,9 @@ pub fn run_bootstrap(
             "--memory-dir is not a directory: {}",
             dir.display()
         );
-        let sub = engine.bootstrap_memory_directory(dir, embedder, config, None)?;
+        let sub = engine
+            .bootstrap_memory_directory(dir, embedder.clone(), config, None)
+            .await?;
         report.merge(&sub);
     }
 
@@ -151,7 +161,7 @@ pub fn run_bootstrap(
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Result<()> {
+pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.jsonl_dir.is_some() || args.memory_dir.is_some(),
         "pass --jsonl-dir and/or --memory-dir"
@@ -165,7 +175,7 @@ pub fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Res
     // leave an orphan empty database behind (#681). On the open paths the dim is
     // only known after opening, but opening does not create a file, so building the
     // embedder afterwards carries no orphan risk.
-    let (engine, embedder) = if args.create {
+    let (mut engine, embedder) = if args.create {
         let embed_dim = args
             .embed_dim
             .ok_or_else(|| anyhow::anyhow!("--embed-dim is required when using --create"))?;
@@ -218,11 +228,14 @@ pub fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Res
         &engine,
         args.jsonl_dir.as_deref(),
         args.memory_dir.as_deref(),
-        &embedder,
+        std::sync::Arc::new(embedder),
         &config,
-    )?;
+    )
+    .await?;
 
     print_report(&report, format)?;
+    // Flush the sidecar snapshot before the engine drops (#728 review C).
+    engine.close().await?;
     Ok(())
 }
 
@@ -277,8 +290,8 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn run_bootstrap_both_dirs_redacts_and_is_idempotent() {
+    #[tokio::test]
+    async fn run_bootstrap_both_dirs_redacts_and_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let jsonl_dir = tmp.path().join("jsonl");
         let memory_dir = tmp.path().join("md");
@@ -289,14 +302,16 @@ mod tests {
 
         let engine = MemoryEngine::builder(4).build().unwrap();
         let config = BootstrapConfig::default();
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(FakeEmbed);
 
         let report = run_bootstrap(
             &engine,
             Some(&jsonl_dir),
             Some(&memory_dir),
-            &FakeEmbed,
+            embedder.clone(),
             &config,
         )
+        .await
         .unwrap();
 
         assert_eq!(report.sessions_processed, 1, "one jsonl session imported");
@@ -311,7 +326,7 @@ mod tests {
         );
 
         // The secret is nowhere in the store.
-        for f in engine.list_active_facts(None).unwrap() {
+        for f in engine.list_active_facts(None).await.unwrap() {
             assert!(
                 !f.content.contains(PLANTED),
                 "secret leaked: {:?}",
@@ -324,9 +339,10 @@ mod tests {
             &engine,
             Some(&jsonl_dir),
             Some(&memory_dir),
-            &FakeEmbed,
+            embedder.clone(),
             &config,
         )
+        .await
         .unwrap();
         assert_eq!(report2.facts_created, 0, "re-run creates 0 facts");
         // jsonl session is skipped on the marker; the md memory reinforces.
@@ -334,8 +350,8 @@ mod tests {
         assert_eq!(report2.facts_reinforced, 1, "the md memory reinforces");
     }
 
-    #[test]
-    fn create_with_misconfigured_embedder_leaves_no_orphan_db() {
+    #[tokio::test]
+    async fn create_with_misconfigured_embedder_leaves_no_orphan_db() {
         // #681: a --create run whose embedder is misconfigured (url without model →
         // build_required errors) must fail BEFORE the DB file is created, so no orphan
         // empty database is left behind for the next run to trip over.
@@ -362,7 +378,7 @@ mod tests {
             create: true,
             embed_dim: Some(4),
         };
-        let result = run(&db, &args, OutputFormat::Json);
+        let result = run(&db, &args, OutputFormat::Json).await;
         assert!(result.is_err(), "misconfigured embedder must error");
         assert!(
             !db.exists(),
@@ -370,11 +386,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_bootstrap_requires_a_source() {
+    #[tokio::test]
+    async fn run_bootstrap_requires_a_source() {
         let engine = MemoryEngine::builder(4).build().unwrap();
         let config = BootstrapConfig::default();
-        let err = run_bootstrap(&engine, None, None, &FakeEmbed, &config).unwrap_err();
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(FakeEmbed);
+        let err = run_bootstrap(&engine, None, None, embedder, &config)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("nothing to do"));
     }
 }

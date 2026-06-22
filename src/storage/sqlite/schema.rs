@@ -112,6 +112,118 @@ impl SchemaManager for SqliteBackend {
         self.block_write(move |c| crate::store::schema::set_config(c, &key, &value))
             .await
     }
+
+    // -------------------------------------------------------------------------
+    // Stage E snapshot seam — assemble the sidecar below the port.
+    //
+    // Relocates `engine/mod.rs::write_snapshot`: the engine hands down its two
+    // in-memory projections; the backend folds in its own DB fingerprint and
+    // HNSW snapshot (both backend-private). Runs the fingerprint read + HNSW
+    // serialization + file write on one blocking thread via `block_read` (the
+    // HNSW `to_snapshot` reuses the same read connection — no nested pool
+    // acquisition). Returns `Ok(false)` for in-memory or read-only backends,
+    // matching the engine's prior behavior exactly.
+    async fn write_engine_snapshot(
+        &self,
+        graph: crate::engine::snapshot::GraphSnapshot,
+        scope_tree: crate::engine::snapshot::ScopeTreeSnapshot,
+    ) -> Result<bool> {
+        use crate::engine::snapshot;
+
+        let Some(db_path) = self.pool.path().map(std::path::Path::to_path_buf) else {
+            return Ok(false); // in-memory engine — no sidecar
+        };
+        if self.pool.is_read_only() {
+            return Ok(false); // read-only open never writes a sidecar
+        }
+
+        let embed_dim = self.embed_dim;
+        #[cfg(feature = "ann")]
+        let hnsw = self.hnsw.clone();
+
+        self.block_read(move |conn| {
+            let fingerprint = snapshot::read_fingerprint(conn)?;
+
+            #[cfg(feature = "ann")]
+            let hnsw_snap = hnsw
+                .as_ref()
+                .map(|h| h.to_snapshot(conn, embed_dim))
+                .transpose()?;
+            #[cfg(not(feature = "ann"))]
+            let hnsw_snap: Option<snapshot::HnswSnapshot> = None;
+
+            let header = snapshot::SnapshotHeader {
+                format_version: snapshot::FORMAT_VERSION,
+                fingerprint,
+                embed_dim,
+                engine_version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            let payload = snapshot::SnapshotPayload {
+                graph,
+                scope_tree,
+                hnsw: hnsw_snap,
+            };
+            snapshot::write_to_file(&header, &payload, &snapshot::snapshot_path(&db_path))?;
+            Ok(true)
+        })
+        .await
+    }
+
+    // -------------------------------------------------------------------------
+    // Stage E inspection ports — relocate the raw-`&Connection` `crate::inspect`
+    // free functions below the seam. The backend sources its own db path; the
+    // JSON dumps run on a read connection, `VACUUM INTO` on the write connection.
+    // -------------------------------------------------------------------------
+
+    // READ
+    async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
+        let db_path = self.pool.path().map(std::path::Path::to_path_buf);
+        self.block_read(move |c| {
+            crate::inspect::statistics::compute_statistics(c, db_path.as_deref())
+        })
+        .await
+    }
+
+    // READ (JSON variants) / WRITE (`VACUUM INTO`)
+    async fn dump_state(&self, embed_dim: usize, format: crate::inspect::DumpFormat) -> Result<()> {
+        use crate::inspect::DumpFormat;
+        use crate::inspect::dump;
+
+        match format {
+            DumpFormat::Json(path) => {
+                self.block_read(move |c| dump::dump_json(c, embed_dim, &path))
+                    .await
+            }
+            #[cfg(feature = "compress-gzip")]
+            DumpFormat::JsonGzip(path) => {
+                self.block_read(move |c| dump::dump_json_gzip(c, embed_dim, &path))
+                    .await
+            }
+            #[cfg(not(feature = "compress-gzip"))]
+            DumpFormat::JsonGzip(_) => Err(crate::error::MemoryError::NotImplemented(
+                "gzip compression requires the `compress-gzip` feature".into(),
+            )),
+            #[cfg(feature = "compress-zstd")]
+            DumpFormat::JsonZstd(path) => {
+                self.block_read(move |c| dump::dump_json_zstd(c, embed_dim, &path))
+                    .await
+            }
+            #[cfg(not(feature = "compress-zstd"))]
+            DumpFormat::JsonZstd(_) => Err(crate::error::MemoryError::NotImplemented(
+                "zstd compression requires the `compress-zstd` feature".into(),
+            )),
+            DumpFormat::Sqlite(path) => {
+                self.block_write(move |c| dump::dump_sqlite(c, &path)).await
+            }
+        }
+    }
+
+    // READ
+    async fn check_embedding_compatible(&self, candidate: &EmbeddingFingerprint) -> Result<()> {
+        let candidate = candidate.clone();
+        self.block_read(move |c| embedding_meta::check_compatible(c, &candidate))
+            .await
+    }
 }
 
 #[cfg(test)]

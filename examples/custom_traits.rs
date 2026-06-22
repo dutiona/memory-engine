@@ -70,76 +70,90 @@ impl ConflictArbiter for RecencyArbiter {
 
 // Example walkthrough kept linear for readability rather than split into helpers.
 #[allow(clippy::too_many_lines)]
-fn main() -> Result<(), MemoryError> {
+#[tokio::main]
+async fn main() -> Result<(), MemoryError> {
     let engine = MemoryEngine::builder(4).build()?;
-    let embedder = SimpleEmbedder;
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(SimpleEmbedder);
 
     // Add some facts
-    engine.add_fact(
-        &AddFactRequest {
-            content: "Rust uses ownership for memory safety".into(),
-            fact_type: FactType::Semantic,
-            source_event_id: None,
-            scope: None,
-            opts: None,
-        },
-        &embedder,
-        None,
-    )?;
-    engine.add_fact(
-        &AddFactRequest {
-            content: "Rust was created by Graydon Hoare".into(),
-            fact_type: FactType::Semantic,
-            source_event_id: None,
-            scope: None,
-            opts: None,
-        },
-        &embedder,
-        None,
-    )?;
-    engine.add_fact(
-        &AddFactRequest {
-            content: "Rust 1.85 introduced edition 2024".into(),
-            fact_type: FactType::Semantic,
-            source_event_id: None,
-            scope: None,
-            opts: None,
-        },
-        &embedder,
-        None,
-    )?;
-    engine.add_fact(
-        &AddFactRequest {
-            content: "Rust uses ownership for memory safety".into(),
-            fact_type: FactType::Semantic,
-            source_event_id: None,
-            scope: None,
-            opts: None,
-        },
-        &embedder,
-        None,
-    )?; // duplicate
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Rust uses ownership for memory safety".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            embedder.clone(),
+            None,
+        )
+        .await?;
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Rust was created by Graydon Hoare".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            embedder.clone(),
+            None,
+        )
+        .await?;
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Rust 1.85 introduced edition 2024".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            embedder.clone(),
+            None,
+        )
+        .await?;
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Rust uses ownership for memory safety".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            embedder.clone(),
+            None,
+        )
+        .await?; // duplicate
 
     println!("Added 4 facts (1 duplicate)");
-    println!("Active facts: {}", engine.list_active_facts(None)?.len());
+    println!(
+        "Active facts: {}",
+        engine.list_active_facts(None).await?.len()
+    );
 
     // --- Consolidation: uses SummaryGenerator (text) + EmbeddingProvider (vectors) ---
-    let summarizer = ConcatSummarizer;
-    let stats = engine.consolidate(
-        &summarizer,
-        &embedder,
-        &ConsolidationConfig::builder()
-            .dedup_threshold(0.99) // high threshold to catch near-exact duplicates
-            .min_cluster_size(2)
-            .build(),
-    )?;
+    let summarizer: std::sync::Arc<dyn SummaryGenerator> = std::sync::Arc::new(ConcatSummarizer);
+    let stats = engine
+        .consolidate(
+            summarizer,
+            embedder.clone(),
+            &ConsolidationConfig::builder()
+                .dedup_threshold(0.99) // high threshold to catch near-exact duplicates
+                .min_cluster_size(2)
+                .build(),
+        )
+        .await?;
     println!(
         "\nConsolidation: {} duplicates removed, {} clusters, {} global summaries",
         stats.duplicates_removed, stats.clusters_created, stats.global_summaries
     );
     println!(
         "Active facts after consolidation: {}",
-        engine.list_active_facts(None)?.len()
+        engine.list_active_facts(None).await?.len()
     );
 
     // --- Forgetting: uses ForgetPolicy (configurable struct, not a trait) ---
@@ -148,24 +162,26 @@ fn main() -> Result<(), MemoryError> {
         min_importance: 0.3,
         ..ForgetPolicy::default()
     };
-    let prune_stats = engine.forget(&policy)?;
+    let prune_stats = engine.forget(&policy).await?;
     println!(
         "\nForgetting: {}/{} facts expired",
         prune_stats.facts_expired, prune_stats.facts_evaluated
     );
 
     // --- Conflict resolution: uses ConflictArbiter ---
-    let fact_id = engine.add_fact(
-        &AddFactRequest {
-            content: "Rust 1.85 is the latest stable".into(),
-            fact_type: FactType::Semantic,
-            source_event_id: None,
-            scope: None,
-            opts: None,
-        },
-        &embedder,
-        None,
-    )?;
+    let fact_id = engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Rust 1.85 is the latest stable".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            embedder.clone(),
+            None,
+        )
+        .await?;
 
     let conflicting = NewFact {
         content: "Rust 1.86 is the latest stable".into(),
@@ -186,14 +202,16 @@ fn main() -> Result<(), MemoryError> {
     };
 
     let arbiter = RecencyArbiter;
-    let resolution = engine.resolve_conflict(&arbiter, fact_id, &conflicting)?;
+    let resolution = engine
+        .resolve_conflict(&arbiter, fact_id, &conflicting)
+        .await?;
     println!(
         "\nConflict resolution: {:?} (old={}, new={:?})",
         resolution.decision, resolution.old_fact_id, resolution.new_fact_id
     );
 
     // Final state
-    let facts = engine.list_active_facts(None)?;
+    let facts = engine.list_active_facts(None).await?;
     println!("\nFinal active facts: {}", facts.len());
     for f in &facts {
         println!("  [id={}] {}", f.id, f.content);

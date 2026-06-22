@@ -3,4 +3,4 @@
 
 pub mod context;
 
-pub use context::{ResumeConfig, ResumeContext, resume_context};
+pub use context::{ResumeConfig, ResumeContext};

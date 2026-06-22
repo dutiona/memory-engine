@@ -39,13 +39,13 @@ impl EmbeddingProvider for TestEmbedder {
     }
 }
 
-#[test]
+#[tokio::test]
 // End-to-end scenario kept as one linear test for readability.
 #[allow(clippy::too_many_lines)]
-fn full_roundtrip() {
+async fn full_roundtrip() {
     let dim = 8;
     let engine = MemoryEngine::builder(dim).build().unwrap();
-    let embedder = TestEmbedder { dim };
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder { dim });
 
     // 1. Ingest an event
     let event = NewEvent {
@@ -59,7 +59,7 @@ fn full_roundtrip() {
         sequence_id: 0,
         created_at: None,
     };
-    let event_id = engine.ingest(&event).unwrap();
+    let event_id = engine.ingest(&event).await.unwrap();
     assert!(event_id > 0);
 
     // 2. Add facts derived from the event
@@ -72,9 +72,10 @@ fn full_roundtrip() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
     let fact2_id = engine
         .add_fact(
@@ -85,9 +86,10 @@ fn full_roundtrip() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
     let fact3_id = engine
         .add_fact(
@@ -98,9 +100,10 @@ fn full_roundtrip() {
                 scope: None,
                 opts: None,
             },
-            &embedder,
+            embedder.clone(),
             None,
         )
+        .await
         .unwrap();
     assert!(fact1_id > 0);
     assert!(fact2_id > 0);
@@ -118,6 +121,7 @@ fn full_roundtrip() {
             fact_type: None,
             scope: None,
         })
+        .await
         .unwrap();
     assert_eq!(fts_results.len(), 2);
     assert!(fts_results.iter().all(|r| r.match_type == MatchType::Fts));
@@ -136,6 +140,7 @@ fn full_roundtrip() {
             fact_type: None,
             scope: None,
         })
+        .await
         .unwrap();
     assert!(!vec_results.is_empty());
     assert!(
@@ -157,6 +162,7 @@ fn full_roundtrip() {
             fact_type: None,
             scope: None,
         })
+        .await
         .unwrap();
     assert!(!hybrid_results.is_empty());
     // At least one result should come from both sources
@@ -181,6 +187,7 @@ fn full_roundtrip() {
             fact_type: Some(FactType::Semantic),
             scope: None,
         })
+        .await
         .unwrap();
     assert!(
         semantic_only

@@ -33,7 +33,7 @@ pub struct ExtractedFact {
 /// The default implementation ([`KeywordExtractor`]) uses the keyword
 /// pre-filter output directly. Consumers can implement this with an LLM to
 /// produce higher-quality, parameterized procedural patterns.
-pub trait SessionExtractor {
+pub trait SessionExtractor: Send + Sync {
     /// Extract facts from a candidate episode.
     ///
     /// # Errors
