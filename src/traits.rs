@@ -294,7 +294,13 @@ pub trait Reranker: Send + Sync {
 /// typically just writing to a buffer or database.
 ///
 /// Passed as `&dyn InsightStream` per-call (not stored in the engine).
-pub trait InsightStream {
+///
+/// Requires `Send + Sync` for consistency with the other consumer traits
+/// (#386): although `record` is invoked synchronously and the trait object is
+/// never sent across an `.await`, carrying the same bound as every sibling
+/// provider keeps the consumer-facing API surface uniform — a downstream
+/// `Arc<dyn InsightStream>` behaves like every other `Arc<dyn …Provider>`.
+pub trait InsightStream: Send + Sync {
     /// Record a high-value insight.
     ///
     /// # Errors
