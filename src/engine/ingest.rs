@@ -295,7 +295,7 @@ impl MemoryEngine {
         // Partition: `validation[i] == None` ⇒ entry i is valid and contributes
         // to `valid` (in input order); `Some(e)` ⇒ entry i is rejected.
         let mut validation: Vec<Option<MemoryError>> = Vec::with_capacity(entries.len());
-        let mut valid: Vec<&AddFactRequest> = Vec::new();
+        let mut valid: Vec<&AddFactRequest> = Vec::with_capacity(entries.len());
         for entry in entries {
             match Self::validate_add_fact_request(entry) {
                 Ok(()) => {
@@ -334,11 +334,17 @@ impl MemoryEngine {
         let results = validation
             .into_iter()
             .map(|v| {
+                // The count check above guarantees one id per `None` slot, so the
+                // `ok_or_else` Err is unreachable — but it keeps the re-thread
+                // panic-free (no `expect`) rather than relying on the invariant.
                 v.map_or_else(
                     || {
-                        Ok(ids_iter
-                            .next()
-                            .expect("one id per valid entry (checked above)"))
+                        ids_iter.next().ok_or_else(|| {
+                            MemoryError::Internal(
+                                "id count invariant violated (fewer ids than valid entries)"
+                                    .to_string(),
+                            )
+                        })
                     },
                     Err,
                 )
@@ -447,48 +453,67 @@ impl MemoryEngine {
         classifier: Option<Arc<dyn PersistenceClassifier>>,
         now: DateTime<Utc>,
     ) -> Result<Vec<bool>> {
-        let mut pins = Vec::with_capacity(entries.len());
+        // Resolve the slots that need no classification inline (caller-`pinned` set,
+        // or no classifier → `false`); collect the temp facts that DO need it into
+        // `pending` so the whole subset is classified in ONE blocking task instead of
+        // one task per entry (a batch of up to MAX_BATCH_SIZE = 10k would otherwise
+        // spawn 10k). A `None` slot consumes the next `pending` result, in order.
+        let mut slots: Vec<Option<bool>> = Vec::with_capacity(entries.len());
+        let mut pending: Vec<Fact> = Vec::new();
         for (entry, embedding) in entries.iter().zip(embeddings) {
             let opts = entry.opts.clone().unwrap_or_default();
-            let is_pinned = match opts.pinned {
-                Some(p) => p,
-                None => match &classifier {
-                    None => false,
-                    Some(c) => {
-                        let base_importance = opts.importance.unwrap_or(0.5);
-                        let temp = Fact {
-                            id: 0,
-                            content: entry.content.clone(),
-                            content_hash: String::new(),
-                            embedding: embedding.clone(),
-                            fact_type: entry.fact_type,
-                            t_created: opts.t_created.unwrap_or(now),
-                            t_expired: None,
-                            t_valid: opts.t_valid,
-                            t_invalid: opts.t_invalid,
-                            source_event_id: entry.source_event_id,
-                            importance: base_importance,
-                            access_count: 0,
-                            last_accessed: opts.last_accessed.unwrap_or(now),
-                            metadata: opts
-                                .metadata
-                                .clone()
-                                .unwrap_or_else(|| serde_json::json!({})),
-                            scope_id: 0,
-                            is_pinned: false,
-                            importance_score: base_importance,
-                            surfaced_at: None,
-                        };
-                        let c = Arc::clone(c);
-                        tokio::task::spawn_blocking(move || c.should_pin(&temp))
-                            .await
-                            .map_err(spawn_join_err)?
-                    }
-                },
-            };
-            pins.push(is_pinned);
+            slots.push(match opts.pinned {
+                Some(p) => Some(p),
+                None if classifier.is_some() => {
+                    let base_importance = opts.importance.unwrap_or(0.5);
+                    pending.push(Fact {
+                        id: 0,
+                        content: entry.content.clone(),
+                        content_hash: String::new(),
+                        embedding: embedding.clone(),
+                        fact_type: entry.fact_type,
+                        t_created: opts.t_created.unwrap_or(now),
+                        t_expired: None,
+                        t_valid: opts.t_valid,
+                        t_invalid: opts.t_invalid,
+                        source_event_id: entry.source_event_id,
+                        importance: base_importance,
+                        access_count: 0,
+                        last_accessed: opts.last_accessed.unwrap_or(now),
+                        metadata: opts
+                            .metadata
+                            .clone()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                        scope_id: 0,
+                        is_pinned: false,
+                        importance_score: base_importance,
+                        surfaced_at: None,
+                    });
+                    None
+                }
+                None => Some(false), // no classifier → not pinned
+            });
         }
-        Ok(pins)
+
+        // One blocking task classifies the whole `pending` subset, preserving order.
+        let mut pin_results = match classifier {
+            Some(c) if !pending.is_empty() => tokio::task::spawn_blocking(move || {
+                pending
+                    .iter()
+                    .map(|f| c.should_pin(f))
+                    .collect::<Vec<bool>>()
+            })
+            .await
+            .map_err(spawn_join_err)?
+            .into_iter(),
+            _ => Vec::new().into_iter(),
+        };
+
+        // Stitch: each `None` slot draws the next classification result, in order.
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.unwrap_or_else(|| pin_results.next().unwrap_or(false)))
+            .collect())
     }
 }
 
