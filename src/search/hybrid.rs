@@ -303,7 +303,6 @@ fn assemble_results(
 /// # Errors
 /// Propagates backend errors (`MemoryError::Storage`/`Database`,
 /// `EmbeddingDimension` on a wrong-length query embedding).
-#[cfg(feature = "async")]
 pub async fn port_hybrid_search(
     storage: &dyn crate::storage::StorageBackend,
     query: &SearchQuery,
@@ -420,7 +419,6 @@ mod tests {
     /// cutoff never filters (sidestepping its per-call timing). This is what
     /// proves the port I/O channels (post-#684 `*_filtered` SQL) match the sync
     /// free functions before the Stage E cutover consumes the port path.
-    #[cfg(feature = "async")]
     #[tokio::test]
     #[allow(
         clippy::significant_drop_tightening,

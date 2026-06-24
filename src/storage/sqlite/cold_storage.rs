@@ -1,7 +1,7 @@
 //! `impl ColdStorage for SqliteBackend` — delegates to [`ArchiveManifestStore`],
 //! the concrete SQL owner of the `archive_manifest` table.
 //!
-//! Feature-gated: `#[cfg(all(feature = "async", feature = "archive"))]`.
+//! Feature-gated: `#[cfg(feature = "archive")]`.
 //! Only the manifest CRUD is on this trait; `.pak` file I/O stays as free
 //! functions in `archive/pak.rs` — filesystem/codec plumbing, not a port concern.
 
