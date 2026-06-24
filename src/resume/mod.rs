@@ -1,5 +1,5 @@
-//! Session bootstrapping: 5-tier context retrieval (pinned, high-importance,
-//! due, scope-filtered recent, KB stubs).
+//! Session bootstrapping: 4-tier context retrieval (pinned, high-importance,
+//! due, scope-filtered recent).
 
 pub mod context;
 

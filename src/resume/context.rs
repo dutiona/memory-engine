@@ -101,6 +101,4 @@ pub struct ResumeContext {
     pub due: Vec<Fact>,
     /// Most recent facts from active scopes.
     pub recent: Vec<Fact>,
-    /// Placeholder: KB reference URIs for Phase 5.
-    pub kb_stubs: Vec<String>,
 }

@@ -46,7 +46,7 @@ src/
   conflict/           # Bi-temporal conflict resolution
   pool/               # ConnectionPool (N readers + 1 writer)
   scope/              # Hierarchical scope tree
-  resume/             # 5-tier cognitive boot (pinned → importance → due → recent → kb_stubs)
+  resume/             # 4-tier cognitive boot (pinned → importance → due → recent)
   bootstrap/          # Claude Code JSONL session import
   inspect/            # Debugging APIs (explain, replay, dump, restore, statistics)
   async_engine.rs     # AsyncMemoryEngine (tokio, feature-gated)

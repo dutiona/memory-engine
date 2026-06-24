@@ -63,7 +63,7 @@ Global summary invariant
 : Global-level summaries (consolidation pass 3) are always placed at `scope_id=1` (root scope), regardless of the scopes of the underlying facts. Cluster-level summaries use majority-vote scope assignment.
 
 Resume context
-: Five-tier fact retrieval for bootstrapping a new agent session. Tier 1 (pinned): unforgettable facts, cross-scope. Tier 2 (high-importance): facts above a materialized `importance_score` threshold. Tier 3 (due): future-memory facts whose `t_valid` has arrived. Tier 4 (recent): most recent facts from scope ancestors. Tier 5 (kb_stubs): placeholder for Phase 5 knowledge-base references. Tiers are mutually exclusive.
+: Four-tier fact retrieval for bootstrapping a new agent session. Tier 1 (pinned): unforgettable facts, cross-scope. Tier 2 (high-importance): facts above a materialized `importance_score` threshold. Tier 3 (due): future-memory facts whose `t_valid` has arrived. Tier 4 (recent): most recent facts from scope ancestors. Tiers are mutually exclusive.
 
 WAL (Write-Ahead Logging)
 : SQLite journaling mode used by the connection pool. Enables concurrent readers while a single writer commits. The engine opens all connections in WAL mode to maximize read throughput without blocking on writes.

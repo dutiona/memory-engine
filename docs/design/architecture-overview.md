@@ -90,7 +90,7 @@ The crate is organized into modules with clear responsibilities:
 | `search/`          | Query layer. FTS5 (BM25), vector (cosine similarity, brute-force or HNSW via `ann` feature), strategy dispatch, and hybrid (RRF) search.                                                                                                                                                     |
 | `graph/`           | `MemoryGraph` wrapper around `petgraph::DiGraph`. Loaded from SQLite on startup, kept in sync on mutations.                                                                                                                                                                                  |
 | `scope/`           | `ScopeTree` for hierarchical isolation. In-memory tree structure, backed by `ScopeStore` in SQLite.                                                                                                                                                                                          |
-| `resume/`          | Session bootstrapping. `MemoryEngine::resume_context()` (an `async` engine method) implements 5-tier retrieval (pinned → high_importance → due → recent → kb_stubs).                                                                                                                         |
+| `resume/`          | Session bootstrapping. `MemoryEngine::resume_context()` (an `async` engine method) implements 4-tier retrieval (pinned → high_importance → due → recent).                                                                                                                                     |
 | `consolidation/`   | Three-pass memory compression: local dedup, cluster fusion, global integration.                                                                                                                                                                                                              |
 | `forgetting/`      | Ebbinghaus decay with multi-signal importance scoring.                                                                                                                                                                                                                                       |
 | `engine::conflict` | Bi-temporal conflict resolution (`MemoryEngine::resolve_conflict`) delegated to the consumer `ConflictArbiter`.                                                                                                                                                                              |
@@ -155,7 +155,7 @@ The core data flow follows an event-sourced pattern:
 
 ### Resume Context
 
-Session bootstrapping uses 5-tier retrieval to populate the agent's context window:
+Session bootstrapping uses 4-tier retrieval to populate the agent's context window:
 
 | Tier                | Source          | Selection Criteria                                                           |
 | ------------------- | --------------- | ---------------------------------------------------------------------------- |
@@ -163,9 +163,8 @@ Session bootstrapping uses 5-tier retrieval to populate the agent's context wind
 | **High-importance** | Scope ancestors | Facts with materialized `importance_score` above a configurable threshold.   |
 | **Due**             | Scope ancestors | Future-memory facts whose `t_valid` has arrived (`t_valid <= now`).          |
 | **Recent**          | Scope ancestors | Most recently created facts. Current working context.                        |
-| **KB stubs**        | —               | Placeholder for Phase 5 knowledge-base references.                           |
 
-The five tiers are mutually exclusive (a fact appears in at most one tier). The consumer controls tier sizes and thresholds via `ResumeConfig`.
+The four tiers are mutually exclusive (a fact appears in at most one tier). The consumer controls tier sizes and thresholds via `ResumeConfig`.
 
 ## Prospective Memory
 

@@ -153,25 +153,24 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 | Method           | Signature                                                 | Description                                                                                                     |
 | ---------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `resume_context` | `(&self, config: &ResumeConfig) -> Result<ResumeContext>` | 5-tier fact retrieval for session bootstrapping. Returns `NotFound` if the requested scope path does not exist. |
+| `resume_context` | `(&self, config: &ResumeConfig) -> Result<ResumeContext>` | 4-tier fact retrieval for session bootstrapping. Returns `NotFound` if the requested scope path does not exist. |
 
 `ResumeConfig` fields:
 
 - `scope_path: Option<String>` -- scope to resume from (ancestors are included).
-- `now: DateTime<Utc>` -- current time for due-fact evaluation.
+- `now: Option<DateTime<Utc>>` -- evaluation instant for due facts. `None` (the default) defers to `resume_context`, which resolves `Utc::now()` once at call time; `Some(_)` pins a specific instant.
 - `pinned_cap: usize` -- max pinned facts (default: 50).
 - `high_importance_cap: usize` -- max high-importance facts (default: 20).
 - `high_importance_min: f64` -- minimum `importance_score` for tier 2 (default: 0.7).
 - `due_cap: usize` -- max due facts (default: 10).
 - `recent_cap: usize` -- max recent facts (default: 10).
 
-`ResumeContext` fields (5 tiers, mutually exclusive):
+`ResumeContext` fields (4 tiers, mutually exclusive):
 
 - `pinned: Vec<Fact>` -- tier 1: unforgettable facts, cross-scope, sorted by `importance_score` descending.
 - `high_importance: Vec<Fact>` -- tier 2: top facts by materialized `importance_score`.
 - `due: Vec<Fact>` -- tier 3: future-memory facts whose `t_valid` has arrived.
 - `recent: Vec<Fact>` -- tier 4: most recent facts from scope ancestors.
-- `kb_stubs: Vec<String>` -- tier 5: placeholder for Phase 5 knowledge-base references.
 
 ### Bootstrap
 

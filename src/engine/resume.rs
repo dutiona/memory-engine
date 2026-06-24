@@ -13,12 +13,11 @@ impl MemoryEngine {
 
     /// Retrieve tiered context for resuming a session.
     ///
-    /// Returns five tiers of facts (mutually exclusive):
+    /// Returns four tiers of facts (mutually exclusive):
     /// 1. **Pinned** — all pinned facts (cross-scope)
     /// 2. **High-importance** — top-N by materialized `importance_score`
     /// 3. **Due** — facts with `t_valid` <= now
     /// 4. **Recent** — most recent, from scope ancestors
-    /// 5. **KB stubs** — placeholder for Phase 5
     ///
     /// # Errors
     ///
@@ -54,7 +53,7 @@ impl MemoryEngine {
             }
         }; // scope_tree read lock dropped here
 
-        // Step 2: Assemble the five tiers via the async storage port. This inlines
+        // Step 2: Assemble the four tiers via the async storage port. This inlines
         // the former `resume::resume_context(conn, ...)` helper — the backend now
         // owns embed_dim, so the per-tier port calls drop it. Control flow, tier
         // ordering, dedup (`seen`), and caps are preserved verbatim.
@@ -92,15 +91,11 @@ impl MemoryEngine {
             .list_facts_by_scopes_recent(&scope_ids, config.recent_cap, &seen)
             .await?;
 
-        // Tier 5: KB stubs (Phase 5 placeholder)
-        let kb_stubs = Vec::new();
-
         let mut ctx = ResumeContext {
             pinned,
             high_importance,
             due,
             recent,
-            kb_stubs,
         };
 
         // Step 3: Stamp surfaced_at on ALL due facts across ALL tiers (#93).

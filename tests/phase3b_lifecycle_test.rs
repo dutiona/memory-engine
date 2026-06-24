@@ -230,7 +230,7 @@ async fn classifier_auto_pins_semantic_facts() {
 }
 
 #[tokio::test]
-async fn resume_context_5_tier_integration() {
+async fn resume_context_4_tier_integration() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder);
     let now = Utc::now();
@@ -302,10 +302,6 @@ async fn resume_context_5_tier_integration() {
     assert_eq!(ctx.pinned.len(), 1, "should have 1 pinned fact");
     assert_eq!(ctx.due.len(), 1, "should have 1 due fact");
     assert!(!ctx.recent.is_empty(), "should have recent facts");
-    assert!(
-        ctx.kb_stubs.is_empty(),
-        "kb_stubs placeholder should be empty"
-    );
 
     // Verify mutual exclusivity — no fact ID appears in multiple tiers
     let all_ids: Vec<i64> = ctx

@@ -103,7 +103,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
         ),
         tool_def(
             "memory_resume_context",
-            "Retrieve tiered cognitive boot context (5-tier: pinned → high-importance → due → recent → kb_stubs).",
+            "Retrieve tiered cognitive boot context (4-tier: pinned → high-importance → due → recent).",
             json!({
                 "type": "object",
                 "properties": {

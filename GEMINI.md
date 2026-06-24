@@ -48,7 +48,7 @@ Source lives in `src/`. Each module owns its domain:
 - `conflict/` — Bi-temporal conflict resolution via `ConflictArbiter` trait.
 - `pool/` — `ConnectionPool`: N readers + 1 writer, `parking_lot::Mutex`.
 - `scope/` — `ScopeTree` hierarchical cache. Paths like `"user:michael/project:demo"`.
-- `resume/` — 5-tier cognitive boot: pinned → high_importance → due → recent → kb_stubs.
+- `resume/` — 4-tier cognitive boot: pinned → high_importance → due → recent.
 - `bootstrap/` — Parse Claude Code JSONL session logs into historical facts.
 - `inspect/` — Debugging APIs: `explain_fact`, `fact_history`, `replay_events`, `dump_state`, `statistics`.
 - `async_engine.rs` — `AsyncMemoryEngine` via `tokio::spawn_blocking` (feature-gated).
