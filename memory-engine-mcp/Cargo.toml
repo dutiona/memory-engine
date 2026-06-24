@@ -20,7 +20,7 @@ name = "tools"
 path = "tests/tools.rs"
 
 [dependencies]
-memory-engine = { path = "..", features = ["async"] }
+memory-engine = { path = ".." }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 serde = { version = "1", features = ["derive"] }

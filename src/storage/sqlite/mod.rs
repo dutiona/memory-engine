@@ -25,8 +25,9 @@
 //!   [`MemoryError::Storage`] wrapping [`StorageError::Backend`] at the boundary.
 //!   Semantic variants (`NotFound`, `Migration`, `EmbeddingDimension`, `Conflict`,
 //!   `ReadOnly`, `Internal`, …) already have a precise home and pass through.
-//! - **Async gating (D1):** the whole subtree is `#[cfg(feature = "async")]`;
-//!   `spawn_blocking` needs a tokio runtime, so default builds stay runtime-free.
+//! - **Async (D1):** the backend is async-native — `spawn_blocking` needs a tokio
+//!   runtime, which is now non-optional (the engine has no synchronous path). The
+//!   former `#[cfg(feature = "async")]` gating was removed in #702.
 //! - **HNSW (D3):** `vector_search` is brute-force here; HNSW ownership + its
 //!   engine-owned dispatch policy move into the backend in `#631`.
 //! - **Atomicity (H5):** every trait method is an *independent* write — the engine
@@ -43,7 +44,7 @@ use crate::search::strategy::SearchConfig;
 use crate::search::strategy::VectorSearchStrategy as _;
 use crate::store::upcaster::UpcasterRegistry;
 
-#[cfg(all(feature = "async", feature = "archive"))]
+#[cfg(feature = "archive")]
 mod cold_storage;
 mod consolidation;
 mod convert;

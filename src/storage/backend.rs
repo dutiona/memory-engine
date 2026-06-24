@@ -86,9 +86,7 @@ mod tests {
     // trait object. `SearchIndex` (3 methods) is the cheap, sufficient witness of
     // the async-through-`dyn` mechanism; constructing a full `Arc<dyn StorageBackend>`
     // value (a ~90-method impl) is #630's `SqliteBackend`, exercised by the #632
-    // conformance suite — not pulled forward here. Gated on `async` (tokio) so
-    // default builds need no runtime.
-    #[cfg(feature = "async")]
+    // conformance suite — not pulled forward here.
     #[tokio::test]
     async fn async_method_callable_through_dyn() {
         use crate::storage::FactFilter;

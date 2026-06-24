@@ -26,7 +26,7 @@ tempfile = "3"
 tracing = "0.1"
 petgraph = "0.7"
 parking_lot = "0.12"
-tokio = { version = "1", features = ["rt", "macros", "sync"], optional = true }
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
 hnsw = { version = "0.11", optional = true }
 space = { version = "0.17", optional = true }
 rand = { version = "0.8", features = ["small_rng"], optional = true }
@@ -47,14 +47,12 @@ harness = false
 name = "lifecycle_bench"
 harness = false
 
-# `async` is default-on (#631): the engine is async-native — its DB-touching methods
-# are `async fn` that await an `Arc<dyn StorageBackend>`, so a runtime is mandatory and
-# this flag only gates the optional `tokio` dependency. `--no-default-features` (without
-# re-adding `async`) drops `tokio` and will not build the engine; it exists only so a
-# consumer that supplies `async` explicitly can control the feature set.
+# The engine is async-native (#631): its DB-touching methods are `async fn` that
+# await an `Arc<dyn StorageBackend>`, so a tokio runtime is mandatory — `tokio` is a
+# non-optional dependency and there is no `async` feature to toggle (#702). The
+# remaining flags are genuinely optional capabilities.
 [features]
-default = ["async"]
-async = ["dep:tokio"]
+default = []
 ann = ["dep:hnsw", "dep:space", "dep:rand"]
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
