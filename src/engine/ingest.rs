@@ -253,16 +253,113 @@ impl MemoryEngine {
         // single invalid importance or oversized content/metadata rejects the
         // whole call before any entry is embedded or persisted.
         for entry in entries {
-            Self::validate_importance(entry.opts.as_ref().and_then(|o| o.importance))?;
-            check_str_size(&entry.content, "fact content")?;
-            if let Some(metadata) = entry.opts.as_ref().and_then(|o| o.metadata.as_ref()) {
-                check_json_size(metadata, "fact metadata")?;
+            Self::validate_add_fact_request(entry)?;
+        }
+
+        let refs: Vec<&AddFactRequest> = entries.iter().collect();
+        self.insert_validated_batch(&refs, &embedder, classifier)
+            .await
+    }
+
+    /// Partial-success variant of [`add_facts_batch`](Self::add_facts_batch):
+    /// returns a per-record result so a single invalid record no longer poisons
+    /// its whole batch (#663).
+    ///
+    /// Each input entry maps positionally to one `Result<i64, MemoryError>`:
+    /// `Ok(id)` if it was embedded and inserted, `Err(e)` if it was rejected by
+    /// per-record validation (importance range, oversized content/metadata). The
+    /// **valid** partition is embedded and inserted in one atomic batch, so the
+    /// invalid records are simply skipped rather than failing their neighbours.
+    ///
+    /// # Errors
+    ///
+    /// Returns an **outer** `Err` for batch-level failures that prevent the valid
+    /// partition from being persisted at all: a consumer-`embedder` failure, an
+    /// `embed_batch` count mismatch, a rollback of the atomic insert itself
+    /// (a rare DB-constraint failure rolls the whole valid set back together —
+    /// per-record isolation covers *validation* rejection, the realistic poison,
+    /// not a mid-insert constraint violation), or a backend that returns a
+    /// different number of ids than valid entries (a contract violation). Every
+    /// internal-invariant breach surfaces as the outer `Err`; the returned `Vec`
+    /// carries **only** per-record validation failures, never an outer-`Err` cause.
+    pub async fn add_facts_batch_partial(
+        &self,
+        entries: &[AddFactRequest],
+        embedder: Arc<dyn EmbeddingProvider>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
+    ) -> Result<Vec<std::result::Result<i64, MemoryError>>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Partition: `validation[i] == None` ⇒ entry i is valid and contributes
+        // to `valid` (in input order); `Some(e)` ⇒ entry i is rejected.
+        let mut validation: Vec<Option<MemoryError>> = Vec::with_capacity(entries.len());
+        let mut valid: Vec<&AddFactRequest> = Vec::new();
+        for entry in entries {
+            match Self::validate_add_fact_request(entry) {
+                Ok(()) => {
+                    valid.push(entry);
+                    validation.push(None);
+                }
+                Err(e) => validation.push(Some(e)),
             }
         }
 
+        // Insert only the valid partition atomically (skipped entirely when all
+        // records were rejected). A systemic embed failure or an atomic-insert
+        // rollback propagates as the outer `Err`.
+        let ids = if valid.is_empty() {
+            Vec::new()
+        } else {
+            self.insert_validated_batch(&valid, &embedder, classifier)
+                .await?
+        };
+
+        // Invariant: the atomic insert returns exactly one id per valid entry (or
+        // an outer `Err`, rolled back). A short id vector is a backend-contract
+        // violation — surface it as an outer `Err`, not scattered in-band — which
+        // also makes the positional re-thread below total.
+        if ids.len() != valid.len() {
+            return Err(MemoryError::Internal(format!(
+                "batch insert returned {} ids for {} valid entries",
+                ids.len(),
+                valid.len()
+            )));
+        }
+
+        // Re-thread results positionally: each valid (`None`) slot consumes the
+        // next inserted id; each invalid slot keeps its validation error.
+        let mut ids_iter = ids.into_iter();
+        let results = validation
+            .into_iter()
+            .map(|v| {
+                v.map_or_else(
+                    || {
+                        Ok(ids_iter
+                            .next()
+                            .expect("one id per valid entry (checked above)"))
+                    },
+                    Err,
+                )
+            })
+            .collect();
+        Ok(results)
+    }
+
+    /// Embed, classify, and atomically insert a **pre-validated** set of entries
+    /// (the shared core of [`add_facts_batch`](Self::add_facts_batch) and
+    /// [`add_facts_batch_partial`](Self::add_facts_batch_partial)). Returns the
+    /// assigned ids in `entries` order. Callers are responsible for validation.
+    async fn insert_validated_batch(
+        &self,
+        entries: &[&AddFactRequest],
+        embedder: &Arc<dyn EmbeddingProvider>,
+        classifier: Option<Arc<dyn PersistenceClassifier>>,
+    ) -> Result<Vec<i64>> {
         // --- Phase 1: Batch embed off the executor (one blocking call) ---
         let texts: Vec<String> = entries.iter().map(|e| e.content.clone()).collect();
-        let provider = Arc::clone(&embedder);
+        let provider = Arc::clone(embedder);
         let embeddings = tokio::task::spawn_blocking(move || {
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
             provider.embed_batch(&refs)
@@ -345,7 +442,7 @@ impl MemoryEngine {
     /// `prepare_batch_entries` pin logic exactly.
     async fn compute_batch_pins(
         &self,
-        entries: &[AddFactRequest],
+        entries: &[&AddFactRequest],
         embeddings: &[Vec<f32>],
         classifier: Option<Arc<dyn PersistenceClassifier>>,
         now: DateTime<Utc>,
@@ -525,5 +622,81 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// #663: one oversized-content record is skipped **per-record** by
+    /// `add_facts_batch_partial`; its valid batch-mates are still ingested
+    /// (the all-or-nothing `add_facts_batch` would have lost all of them).
+    #[tokio::test]
+    async fn add_facts_batch_partial_isolates_invalid_record() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let mk = |content: String| AddFactRequest {
+            content,
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        };
+        let entries = vec![
+            mk("good-1".to_string()),
+            mk("x".repeat(MAX_PAYLOAD_BYTES + 1)), // poison: oversized content
+            mk("good-2".to_string()),
+            mk("good-3".to_string()),
+        ];
+
+        let results = engine
+            .add_facts_batch_partial(
+                &entries,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 4, "one result per input, positionally");
+        assert!(results[0].is_ok(), "good-1 ingested");
+        match &results[1] {
+            Err(MemoryError::Conflict(ConflictError::PayloadTooLarge { kind, .. })) => {
+                assert_eq!(*kind, "fact content");
+            }
+            other => panic!("expected per-record PayloadTooLarge at [1], got {other:?}"),
+        }
+        assert!(results[2].is_ok(), "good-2 ingested");
+        assert!(results[3].is_ok(), "good-3 ingested");
+
+        // The 3 valid neighbours are persisted — the bad record did NOT poison them.
+        let active = engine.list_active_facts(None).await.unwrap();
+        assert_eq!(active.len(), 3, "3 valid records survived the poison");
+    }
+
+    /// #663 edge case: an all-invalid batch returns all `Err` and persists nothing
+    /// (no spurious insert, no outer error).
+    #[tokio::test]
+    async fn add_facts_batch_partial_all_invalid_persists_nothing() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let entries = vec![AddFactRequest {
+            content: "x".repeat(MAX_PAYLOAD_BYTES + 1),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        }];
+
+        let results = engine
+            .add_facts_batch_partial(
+                &entries,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err(), "the only record is rejected");
+        assert_eq!(
+            engine.list_active_facts(None).await.unwrap().len(),
+            0,
+            "nothing persisted"
+        );
     }
 }

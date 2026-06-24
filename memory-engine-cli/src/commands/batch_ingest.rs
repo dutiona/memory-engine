@@ -162,9 +162,12 @@ const MAX_LINE_BYTES: u64 = 8 << 20; // 8 MiB
 /// Each line must deserialize as a JSONL fact record. Malformed lines, lines
 /// that fail validation, and lines exceeding [`MAX_LINE_BYTES`] are skipped
 /// (counted in `total_skipped`) rather than aborting the run. Valid records are
-/// embedded and inserted in transactions of `batch_size`; a batch the engine
-/// rejects is counted as skipped plus one `failed_batches`, and ingestion
-/// continues. Progress is reported on stderr unless `format` is JSON.
+/// embedded and inserted in transactions of `batch_size` via the partial-success
+/// engine path (#663): a record the engine rejects (e.g. oversized content) is
+/// counted as skipped individually, leaving its batch-mates ingested. Only a
+/// **batch-level** failure (embedder error or atomic-insert rollback) skips the
+/// whole batch and bumps `failed_batches`. Ingestion continues either way.
+/// Progress is reported on stderr unless `format` is JSON.
 ///
 /// `default_scope` is applied to records that omit a `scope` field; a per-record
 /// `scope` in the JSONL always takes precedence.
@@ -190,6 +193,9 @@ pub async fn ingest_from_reader(
     let mut total_skipped: usize = 0;
     let mut failed_batches: usize = 0;
     let mut batch: Vec<AddFactRequest> = Vec::with_capacity(batch_size);
+    // Parallel to `batch`: the source JSONL line of each batched record, so a
+    // per-record skip warning can name the offending line (#663 / #727 review).
+    let mut batch_lines: Vec<usize> = Vec::with_capacity(batch_size);
     let mut line_no: usize = 0;
     let mut line = String::new();
 
@@ -250,11 +256,13 @@ pub async fn ingest_from_reader(
         }
 
         batch.push(jsonl_to_request(fact, default_scope));
+        batch_lines.push(line_no);
 
         if batch.len() >= batch_size {
             let flushed = flush_batch(
                 engine,
                 &mut batch,
+                &mut batch_lines,
                 &embedder,
                 &format!("batch at line {line_no}"),
                 &mut total_ingested,
@@ -272,6 +280,7 @@ pub async fn ingest_from_reader(
     flush_batch(
         engine,
         &mut batch,
+        &mut batch_lines,
         &embedder,
         "final batch",
         &mut total_ingested,
@@ -314,6 +323,7 @@ fn eprint_progress(ingested: usize, skipped: usize, start: &Instant, format: Out
 async fn flush_batch(
     engine: &MemoryEngine,
     batch: &mut Vec<AddFactRequest>,
+    batch_lines: &mut Vec<usize>,
     embedder: &std::sync::Arc<dyn EmbeddingProvider>,
     context: &str,
     total_ingested: &mut usize,
@@ -324,15 +334,31 @@ async fn flush_batch(
         return true;
     }
     let chunk_size = batch.len();
-    let ingested = match engine
-        .add_facts_batch(batch.as_slice(), embedder.clone(), None)
+    // Partial-success ingest (#663): a single invalid record (e.g. content in the
+    // 1–8 MiB band that passes the CLI line cap but exceeds the engine's payload
+    // limit) is skipped individually instead of poisoning its whole batch.
+    let progressed = match engine
+        .add_facts_batch_partial(batch.as_slice(), embedder.clone(), None)
         .await
     {
-        Ok(ids) => {
-            *total_ingested += ids.len();
+        Ok(results) => {
+            // `results` is positional with `batch` (hence `batch_lines`), so each
+            // rejection is reported against its own source JSONL line, matching the
+            // CLI's other `warning: line N: …` diagnostics.
+            let mut inserted = 0usize;
+            for (src_line, result) in batch_lines.iter().zip(&results) {
+                match result {
+                    Ok(_) => inserted += 1,
+                    Err(err) => eprintln!("warning: line {src_line}: skipped (engine): {err}"),
+                }
+            }
+            *total_ingested += inserted;
+            *total_skipped += chunk_size - inserted;
             true
         }
         Err(e) => {
+            // Batch-level failure (embedder error or atomic-insert rollback): the
+            // whole batch could not be persisted.
             eprintln!("warning: {context}: {e}");
             *total_skipped += chunk_size;
             *failed_batches += 1;
@@ -340,7 +366,8 @@ async fn flush_batch(
         }
     };
     batch.clear();
-    ingested
+    batch_lines.clear();
+    progressed
 }
 
 // ---------------------------------------------------------------------------
