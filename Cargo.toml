@@ -59,6 +59,12 @@ ann = ["dep:hnsw", "dep:space", "dep:rand"]
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
 archive = ["compress-zstd"]
+# Exposes test-only escape hatches on the storage port (e.g.
+# `SchemaManager::raw_exec`) for cross-crate tests — notably the #632 conformance
+# suite, where every backend must provide the seam for the failure-injection
+# tests to run. Always active for this crate's own `#[cfg(test)]` builds; not part
+# of the public API surface and never enabled in release builds.
+test-util = []
 
 [lints.rust]
 unsafe_code = "forbid"

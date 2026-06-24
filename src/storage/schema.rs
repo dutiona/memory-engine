@@ -155,4 +155,23 @@ pub trait SchemaManager: Send + Sync {
     /// if an identity is recorded and `candidate` differs from it, or
     /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend failure.
     async fn check_embedding_compatible(&self, candidate: &EmbeddingFingerprint) -> Result<()>;
+
+    /// Execute a raw SQL statement or batch against the backend — no parameter
+    /// binding, no result. A **test-only** escape hatch (#727) for failure
+    /// injection and fixture setup the typed port cannot express: e.g.
+    /// `DROP TABLE archive_manifest` to force a commit failure (the CWE-459
+    /// orphan-`.pak` cleanup guard), or an `UPDATE` that downgrades an event's
+    /// stored revision to exercise replay-time upcasting (#543).
+    ///
+    /// Gated to `cfg(test)` / the `test-util` feature so it never reaches the
+    /// public API. The #632 conformance suite requires every backend to provide
+    /// it (in its own SQL dialect) so the failure-injection tests can run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// SQL or backend failure, or [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly)
+    /// on a read-only backend.
+    #[cfg(any(test, feature = "test-util"))]
+    async fn raw_exec(&self, sql: &str) -> Result<()>;
 }
