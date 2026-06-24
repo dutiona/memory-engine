@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use chrono::Utc;
+
 use crate::error::{MemoryError, Result};
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::types::Fact;
@@ -28,6 +30,12 @@ impl MemoryEngine {
         // acquiring the scope_tree lock or touching the DB (#359). The internal
         // tier walk below trusts its already-validated input.
         config.validate()?;
+
+        // Resolve the evaluation instant ONCE, before the tier walk. `ResumeConfig`
+        // defaults `now` to `None` (a pure `Default`); the wall-clock fallback lives
+        // here so every tier read below — due-fact filtering, the bi-temporal
+        // surfaced_at predicate, and the stamp — sees a single, consistent `now`.
+        let now = config.now.unwrap_or_else(Utc::now);
 
         // Step 1: Resolve scope IDs from cache (short-lived read lock).
         // The scope_tree guard is taken and dropped entirely within this block —
@@ -70,7 +78,7 @@ impl MemoryEngine {
         seen.extend(high_importance.iter().map(|f| f.id));
 
         // Tier 3: Due facts (future memory now surfacing)
-        let due_all = self.storage.list_due_facts(config.now, &scope_ids).await?;
+        let due_all = self.storage.list_due_facts(now, &scope_ids).await?;
         let due: Vec<Fact> = due_all
             .into_iter()
             .filter(|f| !seen.contains(&f.id))
@@ -101,8 +109,8 @@ impl MemoryEngine {
         // Must use write_conn — read connections have query_only = ON.
         let is_unsurfaced_due = |f: &Fact| -> bool {
             f.surfaced_at.is_none()
-                && f.t_valid.is_some_and(|tv| tv <= config.now)
-                && f.t_invalid.is_none_or(|ti| ti > config.now)
+                && f.t_valid.is_some_and(|tv| tv <= now)
+                && f.t_invalid.is_none_or(|ti| ti > now)
         };
         let unsurfaced_ids: Vec<i64> = ctx
             .pinned
@@ -115,9 +123,7 @@ impl MemoryEngine {
             .collect();
 
         if !unsurfaced_ids.is_empty() {
-            let stamped = self
-                .stamp_surfaced_facts(&unsurfaced_ids, config.now)
-                .await?;
+            let stamped = self.stamp_surfaced_facts(&unsurfaced_ids, now).await?;
             apply_surfaced_stamps(
                 ctx.pinned
                     .iter_mut()

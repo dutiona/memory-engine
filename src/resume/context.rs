@@ -8,8 +8,12 @@ use crate::types::Fact;
 pub struct ResumeConfig {
     /// Scope path to resume from. None = root only.
     pub scope_path: Option<String>,
-    /// Current time for due-fact evaluation.
-    pub now: DateTime<Utc>,
+    /// Current time for due-fact evaluation. `None` (the [`Default`]) defers
+    /// resolution to [`MemoryEngine::resume_context`](crate::MemoryEngine::resume_context),
+    /// which resolves it once to `Utc::now()` at call time — keeping the `Default`
+    /// impl pure (no wall-clock capture at construction). Set `Some(_)` to pin a
+    /// specific evaluation instant (e.g. for deterministic tests or replay).
+    pub now: Option<DateTime<Utc>>,
     /// Max pinned facts. Default: 50.
     pub pinned_cap: usize,
     /// Max high-importance facts (by materialized score). Default: 20.
@@ -26,7 +30,7 @@ impl Default for ResumeConfig {
     fn default() -> Self {
         Self {
             scope_path: None,
-            now: Utc::now(),
+            now: None,
             pinned_cap: 50,
             high_importance_cap: 20,
             high_importance_min: 0.7,

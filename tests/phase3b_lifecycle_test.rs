@@ -105,7 +105,7 @@ async fn full_lifecycle_pinned_and_future_memory() {
     // 4. resume_context at current time — future fact should NOT appear in due tier
     let ctx = engine
         .resume_context(&ResumeConfig {
-            now,
+            now: Some(now),
             ..Default::default()
         })
         .await
@@ -294,7 +294,7 @@ async fn resume_context_5_tier_integration() {
         .unwrap();
 
     let config = ResumeConfig {
-        now,
+        now: Some(now),
         ..ResumeConfig::default()
     };
     let ctx = engine.resume_context(&config).await.unwrap();

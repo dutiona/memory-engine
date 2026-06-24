@@ -942,7 +942,7 @@ async fn handle_resume_context(
 
     let config = ResumeConfig {
         scope_path: get_str(args, "scope"),
-        now: Utc::now(),
+        now: Some(Utc::now()),
         pinned_cap: get_usize(args, "pinned_cap").unwrap_or(50),
         high_importance_cap: get_usize(args, "high_importance_cap").unwrap_or(20),
         high_importance_min: get_f64(args, "high_importance_min").unwrap_or(0.7),
