@@ -189,9 +189,7 @@ pub async fn ingest_from_reader(
     let start = Instant::now();
     let mut buf = BufReader::new(reader);
 
-    let mut total_ingested: usize = 0;
-    let mut total_skipped: usize = 0;
-    let mut failed_batches: usize = 0;
+    let mut tally = BatchTally::default();
     let mut batch: Vec<AddFactRequest> = Vec::with_capacity(batch_size);
     // Parallel to `batch`: the source JSONL line of each batched record, so a
     // per-record skip warning can name the offending line (#663 / #727 review).
@@ -213,7 +211,7 @@ pub async fn ingest_from_reader(
                 // was already batched, consistent with the skip_until-error path.
                 line_no += 1;
                 eprintln!("warning: line {line_no}: read error, stopping: {e}");
-                total_skipped += 1;
+                tally.skipped += 1;
                 break;
             }
         };
@@ -221,7 +219,7 @@ pub async fn ingest_from_reader(
 
         if n as u64 > MAX_LINE_BYTES {
             eprintln!("warning: line {line_no}: exceeds {MAX_LINE_BYTES} bytes, skipping");
-            total_skipped += 1;
+            tally.skipped += 1;
             // Resync to the next record — but ONLY if read_line stopped at the byte
             // cap mid-line (no terminator captured). If the line already ends in
             // '\n', read_line consumed the whole record including its terminator, so
@@ -244,14 +242,14 @@ pub async fn ingest_from_reader(
             Ok(f) => f,
             Err(e) => {
                 eprintln!("warning: line {line_no}: parse error: {e}");
-                total_skipped += 1;
+                tally.skipped += 1;
                 continue;
             }
         };
 
         if let Err(e) = validate_jsonl_fact(&fact) {
             eprintln!("warning: line {line_no}: validation error: {e}");
-            total_skipped += 1;
+            tally.skipped += 1;
             continue;
         }
 
@@ -265,13 +263,11 @@ pub async fn ingest_from_reader(
                 &mut batch_lines,
                 &embedder,
                 &format!("batch at line {line_no}"),
-                &mut total_ingested,
-                &mut total_skipped,
-                &mut failed_batches,
+                &mut tally,
             )
             .await;
             if flushed {
-                eprint_progress(total_ingested, total_skipped, &start, format);
+                eprint_progress(tally.ingested, tally.skipped, &start, format);
             }
         }
     }
@@ -283,22 +279,22 @@ pub async fn ingest_from_reader(
         &mut batch_lines,
         &embedder,
         "final batch",
-        &mut total_ingested,
-        &mut total_skipped,
-        &mut failed_batches,
+        &mut tally,
     )
     .await;
 
     let summary = IngestSummary {
-        total_ingested,
-        total_skipped,
-        failed_batches,
+        total_ingested: tally.ingested,
+        total_skipped: tally.skipped,
+        failed_batches: tally.failed_batches,
         elapsed_secs: start.elapsed().as_secs_f64(),
     };
 
-    if total_ingested == 0 && total_skipped > 0 {
+    if tally.ingested == 0 && tally.skipped > 0 {
         anyhow::bail!(
-            "no facts ingested ({total_skipped} skipped, {failed_batches} failed batches)"
+            "no facts ingested ({} skipped, {} failed batches)",
+            tally.skipped,
+            tally.failed_batches
         );
     }
 
@@ -314,9 +310,19 @@ fn eprint_progress(ingested: usize, skipped: usize, start: &Instant, format: Out
     eprint!("\r  ingested: {ingested}  skipped: {skipped}  elapsed: {elapsed:.1}s");
 }
 
-/// Flush the accumulated `batch` to the engine, updating the running counters in
-/// place, and clear it. Returns `true` when the batch was ingested, `false` when
-/// the engine rejected it (the batch is counted as skipped + one failed batch).
+/// Running tallies threaded through [`flush_batch`] and folded into the final
+/// [`IngestSummary`]. Grouped into one struct so `flush_batch` stays within
+/// clippy's argument-count budget.
+#[derive(Default)]
+struct BatchTally {
+    ingested: usize,
+    skipped: usize,
+    failed_batches: usize,
+}
+
+/// Flush the accumulated `batch` to the engine, updating `tally` in place, and
+/// clear it. Returns `true` when the batch made progress, `false` when the engine
+/// rejected the whole batch (counted as skipped + one failed batch).
 ///
 /// `context` is the location phrase used in the failure warning, e.g.
 /// `"batch at line 42"` or `"final batch"`. An empty batch is a no-op.
@@ -326,9 +332,7 @@ async fn flush_batch(
     batch_lines: &mut Vec<usize>,
     embedder: &std::sync::Arc<dyn EmbeddingProvider>,
     context: &str,
-    total_ingested: &mut usize,
-    total_skipped: &mut usize,
-    failed_batches: &mut usize,
+    tally: &mut BatchTally,
 ) -> bool {
     if batch.is_empty() {
         return true;
@@ -352,16 +356,16 @@ async fn flush_batch(
                     Err(err) => eprintln!("warning: line {src_line}: skipped (engine): {err}"),
                 }
             }
-            *total_ingested += inserted;
-            *total_skipped += chunk_size - inserted;
+            tally.ingested += inserted;
+            tally.skipped += chunk_size - inserted;
             true
         }
         Err(e) => {
             // Batch-level failure (embedder error or atomic-insert rollback): the
             // whole batch could not be persisted.
             eprintln!("warning: {context}: {e}");
-            *total_skipped += chunk_size;
-            *failed_batches += 1;
+            tally.skipped += chunk_size;
+            tally.failed_batches += 1;
             false
         }
     };
