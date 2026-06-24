@@ -4640,10 +4640,6 @@ async fn builder_wires_search_config() {
 }
 
 #[tokio::test]
-#[ignore = "#727: the #543-regression assertion is disabled — needs a #[cfg(test)] \
-            StorageBackend raw-conn seam to insert a revision-1 event through an empty \
-            upcaster registry; ignored so its green status does not imply the guard is live"]
-#[allow(clippy::significant_drop_tightening)]
 async fn builder_threads_upcaster_registry_in_memory() {
     // Regression for #543: `.upcaster_registry(custom).build()` with NO `.path()`
     // must HONOR the custom registry. Before the fix, `build()`'s in-memory branch
@@ -4665,33 +4661,34 @@ async fn builder_threads_upcaster_registry_in_memory() {
         .build()
         .unwrap();
 
-    // Insert an event stamped at revision 1 using an *empty* registry, bypassing
-    // the engine's ingest (which would stamp at the engine registry's latest).
-    //
-    // TODO(#631-test): raw SQL needs a port escape. This site requires inserting an
-    // event through an EventStore built with an *empty* upcaster registry (revision 1)
-    // to exercise replay-time upcasting. `StorageBackend::insert_event` necessarily
-    // uses the backend's own (engine) registry, which would stamp at revision 2 and
-    // defeat the test premise. No object-safe raw-connection escape exists on
-    // `Arc<dyn StorageBackend>`. Body disabled pending a test-only raw-conn port.
-    /*
-    {
-        let conn = engine.pool.write();
-        let empty = crate::store::upcaster::UpcasterRegistry::new();
-        let store = crate::store::events::EventStore::new(&conn, &empty);
-        let event = NewEvent {
+    // Ingest an Interaction event (the threaded registry stamps it at its latest
+    // revision = 2), then downgrade its stored revision to 1 via the test-only
+    // `raw_exec` seam (#727) so replay must upcast it back through the engine's
+    // 1->2 upcaster. If the custom registry had been dropped (the #543 bug), the
+    // engine's empty registry would stamp at revision 1, the UPDATE would be a
+    // no-op, and replay would leave `upcasted` absent.
+    let id = engine
+        .ingest(&NewEvent {
             timestamp: chrono::Utc::now(),
             event_type: EventType::Interaction,
-            payload: serde_json::json!({"msg": "hello"}),
+            payload: serde_json::json!({ "msg": "hello" }),
             source: "test".into(),
             session_id: Some("s1".into()),
             scope_id: 1,
             origin_node_id: "local".into(),
             sequence_id: 0,
             created_at: None,
-        };
-        store.insert(&event).unwrap();
-    }
+        })
+        .await
+        .unwrap();
+
+    engine
+        .storage()
+        .raw_exec(&format!(
+            "UPDATE events SET event_revision = 1 WHERE id = {id}"
+        ))
+        .await
+        .unwrap();
 
     let filter = crate::inspect::ReplayFilter {
         upcast: true,
@@ -4707,8 +4704,6 @@ async fn builder_threads_upcaster_registry_in_memory() {
         "custom upcaster_registry must be honored in-memory and applied on replay"
     );
     assert_eq!(events[0].event_revision, 2, "payload upcast to revision 2");
-    */
-    let _ = &engine;
 }
 
 #[tokio::test]

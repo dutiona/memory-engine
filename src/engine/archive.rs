@@ -361,9 +361,6 @@ mod tests {
     /// The `.pak` is written before the commit transaction; without on-error
     /// cleanup it would be a permanent disk leak with no manifest row (CWE-459).
     #[tokio::test]
-    #[ignore = "#727: assertions are disabled — needs a #[cfg(test)] StorageBackend exec \
-                seam to DROP the manifest table below the port and inject the commit failure; \
-                ignored so its green status does not imply the CWE-459 cleanup guard is live"]
     async fn archive_cleans_up_pak_when_commit_fails() {
         let dir = tempfile::tempdir().unwrap();
         let engine = MemoryEngine::builder(DIM)
@@ -382,44 +379,43 @@ mod tests {
                 .unwrap();
         }
         // Force `commit_archive` to fail: drop the manifest table so its INSERT
-        // errors out *after* the `.pak` has already been written to disk.
-        // TODO(#631-test): raw SQL needs a port escape — `DROP TABLE
-        // archive_manifest` (the commit-failure injection) has no `StorageBackend`
-        // method, and `engine.write_conn()` is gone post-cutover. Without it the
-        // archive commit succeeds, so the failure-path assertions below cannot be
-        // exercised; they are commented out until a test-only raw-exec seam exists.
+        // errors out *after* the `.pak` has already been written to disk. The
+        // test-only `raw_exec` seam (#727) injects the failure below the port now
+        // that `engine.write_conn()` is gone post-#631.
+        engine
+            .storage()
+            .raw_exec("DROP TABLE archive_manifest")
+            .await
+            .unwrap();
 
         let policy = ArchivePolicy {
             expired_before: Utc::now() + Duration::hours(1),
             min_facts: 1,
         };
 
-        let _result = engine.archive(&policy).await;
-        // TODO(#631-test): without the DROP-TABLE injection above, `archive` now
-        // succeeds; the original commit-failure + orphan-cleanup assertions are
-        // disabled until the raw-exec port escape lands.
-        // assert!(
-        //     _result.is_err(),
-        //     "archive must propagate the commit failure, got {_result:?}"
-        // );
-        //
-        // // The archive directory must contain no orphan `.pak` file.
-        // let archive_dir = dir.path().join("archives");
-        // let orphans: Vec<_> = std::fs::read_dir(&archive_dir)
-        //     .map(|rd| {
-        //         rd.filter_map(std::result::Result::ok)
-        //             .filter(|e| {
-        //                 e.path()
-        //                     .extension()
-        //                     .is_some_and(|ext| ext.eq_ignore_ascii_case("pak"))
-        //             })
-        //             .map(|e| e.path())
-        //             .collect()
-        //     })
-        //     .unwrap_or_default();
-        // assert!(
-        //     orphans.is_empty(),
-        //     "commit_archive failure left orphan .pak file(s): {orphans:?}"
-        // );
+        let result = engine.archive(&policy).await;
+        assert!(
+            result.is_err(),
+            "archive must propagate the commit failure, got {result:?}"
+        );
+
+        // The archive directory must contain no orphan `.pak` file (CWE-459).
+        let archive_dir = dir.path().join("archives");
+        let orphans: Vec<_> = std::fs::read_dir(&archive_dir)
+            .map(|rd| {
+                rd.filter_map(std::result::Result::ok)
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("pak"))
+                    })
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            orphans.is_empty(),
+            "commit_archive failure left orphan .pak file(s): {orphans:?}"
+        );
     }
 }
