@@ -96,9 +96,9 @@ pub trait EmbeddingProvider: Send + Sync {
     fn fingerprint(&self) -> EmbeddingFingerprint;
 }
 
-// --- Phase 2 placeholder traits and types ---
+// --- Phase 2: Consolidation traits and types (summary, conflict arbitration) ---
 
-/// Trait for generating a textual summary from a set of related items (Phase 2).
+/// Trait for generating a textual summary from a set of related items.
 ///
 /// Used by consolidation: the cluster-fusion pass summarizes related *facts*, and
 /// the global-integration pass summarizes the resulting *cluster summaries* — both
@@ -183,7 +183,7 @@ pub trait DeltaProposer: Send + Sync {
     fn propose(&self, window: &[Fact], prior_wisdom: &[Fact]) -> Result<ConsolidationProposal>;
 }
 
-/// Trait for arbitrating conflicts between contradicting facts (Phase 2).
+/// Trait for arbitrating conflicts between contradicting facts.
 ///
 /// Requires `Send + Sync`: arbiters are shared across the engine's worker
 /// threads alongside the other consumer providers.
@@ -244,7 +244,7 @@ pub trait PersistenceClassifier: Send + Sync {
 
 // --- Phase 4a: Reranker ---
 
-/// Trait for reranking search results after initial retrieval (Phase 4a).
+/// Trait for reranking search results after initial retrieval.
 ///
 /// Cross-encoder rerankers score (query, candidate) pairs precisely,
 /// improving nDCG@10 by 5-15% on top-K candidates after RRF merge.
@@ -294,7 +294,13 @@ pub trait Reranker: Send + Sync {
 /// typically just writing to a buffer or database.
 ///
 /// Passed as `&dyn InsightStream` per-call (not stored in the engine).
-pub trait InsightStream {
+///
+/// Requires `Send + Sync` for consistency with the other consumer traits
+/// (#386): although `record` is invoked synchronously and the trait object is
+/// never sent across an `.await`, carrying the same bound as every sibling
+/// provider keeps the consumer-facing API surface uniform — a downstream
+/// `Arc<dyn InsightStream>` behaves like every other `Arc<dyn …Provider>`.
+pub trait InsightStream: Send + Sync {
     /// Record a high-value insight.
     ///
     /// # Errors
@@ -363,7 +369,7 @@ pub trait DreamCycle: Send + Sync {
     ) -> Result<crate::engine::cycle::CycleReport>;
 }
 
-/// Configuration for the consolidation process (Phase 2).
+/// Configuration for the consolidation process.
 ///
 /// `#[non_exhaustive]` (#344): construct it from outside the crate via
 /// [`ConsolidationConfig::builder`] or [`ConsolidationConfig::default`], not a
@@ -495,7 +501,7 @@ impl ConsolidationConfigBuilder {
     }
 }
 
-/// Statistics returned by consolidation (Phase 2).
+/// Statistics returned by consolidation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsolidationStats {
     pub duplicates_removed: usize,
@@ -503,14 +509,14 @@ pub struct ConsolidationStats {
     pub global_summaries: usize,
 }
 
-/// Statistics returned by the forget/prune operation (Phase 2).
+/// Statistics returned by the forget/prune operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PruneStats {
     pub facts_expired: usize,
     pub facts_evaluated: usize,
 }
 
-/// Result of a conflict resolution (Phase 2).
+/// Result of a conflict resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictResolution {
     pub decision: CrudDecision,
