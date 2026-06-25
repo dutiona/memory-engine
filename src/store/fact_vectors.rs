@@ -26,7 +26,9 @@
 use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
+use crate::store::embedding_spaces::{self, SpaceStatus};
 use crate::store::serialize_embedding;
+use crate::types::PromoteOutcome;
 
 /// Fetch the next window of facts that still lack a vector in `space_id`
 /// (cursorless anti-join), as `(fact_id, content)` pairs.
@@ -132,6 +134,113 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
     usize::try_from(n).map_err(|_| MemoryError::Internal("negative unbackfilled count".into()))
 }
 
+/// Atomically promote the `populating` space to active (#623 D6) — the O(N)
+/// copy-swap. **One transaction**, never decomposed (the #631-incident lesson:
+/// any `?` before `commit` drops the transaction and rusqlite rolls back, so a
+/// mid-promote failure can never leave partial state).
+///
+/// Steps, in order:
+/// 0. **Same-dim guard** — `populating.dim == active.dim`, else
+///    [`MemoryError::EmbeddingDimension`]. Different-dim is the #742 follow-up
+///    (the engine `embed_dim` is frozen at open).
+/// 1. **Completeness gate INSIDE the tx** (no TOCTOU) — every fact must already
+///    have a populating vector. A non-zero count aborts (a straggler arrived
+///    after the engine's pre-tx catch-up).
+/// 2. **Retain** the old active vectors into `fact_vectors[old]` for rollback.
+/// 3. **Copy-swap** the populating vectors into `facts.embedding` (the active
+///    serving store). The gate guarantees the subquery is never `NULL`
+///    (`facts.embedding` is `NOT NULL`) and covers every fact → the active space
+///    stays homogeneous.
+/// 4. **Status flip** — demote the old active, then activate the populating row
+///    (demote-then-activate, so the single-active partial index is never violated).
+///    This flip *is* the identity flip: `embedding_meta::load` reads the active
+///    row's fingerprint.
+/// 5. **Cleanup** — delete `fact_vectors[populating]` (now redundant with
+///    `facts.embedding`; the active space's vectors never live in `fact_vectors`).
+///
+/// Returns a [`PromoteOutcome`] carrying the swapped-fact count, the deprecated
+/// old space's name, and the new active fingerprint. `stragglers_caught` is `0`
+/// here (the engine sets it from its catch-up); `rebuild_index` is always `true`.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::EmbeddingDimension`] on a dim mismatch (different-dim),
+/// [`MemoryError::Internal`] if there is no active space, the populating space is
+/// absent or not `populating`, or the completeness gate fails, or
+/// [`MemoryError::Database`] on a write failure (which rolls the transaction back).
+pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutcome> {
+    let tx = conn.unchecked_transaction()?;
+
+    // (0) Resolve both spaces and enforce the same-dim guard.
+    let active = embedding_spaces::find_active(&tx)?.ok_or_else(|| {
+        MemoryError::Internal("promote: no active embedding space to swap over".into())
+    })?;
+    let new = embedding_spaces::find_by_name(&tx, populating)?.ok_or_else(|| {
+        MemoryError::Internal(format!(
+            "promote: populating space {populating:?} not found"
+        ))
+    })?;
+    if new.status != SpaceStatus::Populating {
+        return Err(MemoryError::Internal(format!(
+            "promote: space {populating:?} is {:?}, expected populating",
+            new.status
+        )));
+    }
+    if new.fingerprint.dim != active.fingerprint.dim {
+        return Err(MemoryError::EmbeddingDimension {
+            expected: active.fingerprint.dim,
+            actual: new.fingerprint.dim,
+        });
+    }
+
+    // (1) Completeness gate INSIDE the tx (no TOCTOU).
+    let missing = count_unbackfilled(&tx, populating)?;
+    if missing != 0 {
+        return Err(MemoryError::Internal(format!(
+            "promote: {missing} fact(s) un-backfilled in {populating:?} — backfill before promote"
+        )));
+    }
+
+    // (2) Retain the old active vectors (keyed by the old space) for rollback.
+    // No `ON CONFLICT`: the active space — by the `fact_vectors`-holds-only-
+    // non-active invariant — has no rows here, so a PK collision is impossible;
+    // were one to occur it would signal a corrupted invariant and should error,
+    // not silently skip. (It also dodges the SQLite `INSERT … SELECT … ON CONFLICT`
+    // parser ambiguity.)
+    tx.execute(
+        "INSERT INTO fact_vectors (fact_id, space_id, embedding)
+         SELECT id, ?1, embedding FROM facts",
+        params![active.name],
+    )?;
+
+    // (3) Copy-swap the populating vectors into the active serving store.
+    let promoted = tx.execute(
+        "UPDATE facts SET embedding =
+            (SELECT embedding FROM fact_vectors WHERE fact_id = facts.id AND space_id = ?1)",
+        params![populating],
+    )?;
+
+    // (4) Demote-then-activate (the partial-unique index never sees two actives).
+    embedding_spaces::deprecate(&tx, &active.name)?;
+    embedding_spaces::activate(&tx, populating)?;
+
+    // (5) Drop the now-redundant populating vectors.
+    tx.execute(
+        "DELETE FROM fact_vectors WHERE space_id = ?1",
+        params![populating],
+    )?;
+
+    tx.commit()?;
+
+    Ok(PromoteOutcome {
+        promoted,
+        deprecated_space: active.name,
+        new_fingerprint: new.fingerprint,
+        stragglers_caught: 0,
+        rebuild_index: true,
+    })
+}
+
 /// Count the vectors stored for `space_id`. Test-only inspection helper (the
 /// promote and dump paths read `fact_vectors` with their own queries); gated so it
 /// never reaches the lib target as dead code. Un-gate if a production caller needs
@@ -155,7 +264,10 @@ pub fn count_vectors(conn: &Connection, space_id: &str) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::embedding_spaces::{EmbeddingSpace, SpaceStatus, insert_populating};
+    use crate::store::deserialize_embedding;
+    use crate::store::embedding_spaces::{
+        EmbeddingSpace, SpaceStatus, find_active, find_by_name, insert_active, insert_populating,
+    };
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
     use crate::types::{EmbeddingFingerprint, FactType, NewFact};
@@ -200,6 +312,33 @@ mod tests {
 
     fn vecs(ids: &[i64]) -> Vec<(i64, Vec<f32>)> {
         ids.iter().map(|&id| (id, vec![0.5_f32; DIM])).collect()
+    }
+
+    /// Register the active space `default` (model `model`, dim `DIM`).
+    fn set_active(conn: &Connection, model: &str) {
+        insert_active(
+            conn,
+            &EmbeddingSpace::default_active(EmbeddingFingerprint::new(model, "tei", DIM)),
+        )
+        .expect("insert active space");
+    }
+
+    /// Backfill `ids` in `space` with the constant vector `[val; DIM]`.
+    fn backfill_all(conn: &Connection, space: &str, ids: &[i64], val: f32) {
+        let rows: Vec<(i64, Vec<f32>)> = ids.iter().map(|&id| (id, vec![val; DIM])).collect();
+        write_backfill_batch(conn, space, &rows).expect("backfill");
+    }
+
+    /// Read a fact's stored *active* embedding (`facts.embedding`) back as a vector.
+    fn read_embedding(conn: &Connection, id: i64) -> Vec<f32> {
+        let blob: Vec<u8> = conn
+            .query_row(
+                "SELECT embedding FROM facts WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .expect("read embedding blob");
+        deserialize_embedding(&blob, DIM).expect("deserialize")
     }
 
     #[test]
@@ -325,5 +464,183 @@ mod tests {
         let a = insert_fact(&conn, "alpha");
         let err = write_backfill_batch(&conn, "no-such-space", &vecs(&[a])).expect_err("FK");
         assert!(matches!(err, MemoryError::Database(_)), "got {err:?}");
+    }
+
+    // --- promote (#623 T3) ---
+
+    #[test]
+    fn promote_copy_swaps_and_flips_identity() {
+        let conn = fresh_conn();
+        set_active(&conn, "model-a"); // old active = "default" / model-a
+        add_populating_space(&conn); // shadow = model-b, same dim
+        let ids: Vec<i64> = (0..3)
+            .map(|i| insert_fact(&conn, &format!("f{i}")))
+            .collect();
+        // Facts start with [0;DIM]; backfill the shadow with the distinct [1;DIM].
+        backfill_all(&conn, SPACE, &ids, 1.0);
+
+        let outcome = promote_space(&conn, SPACE).expect("promote");
+        assert_eq!(outcome.promoted, 3);
+        assert_eq!(outcome.deprecated_space, "default");
+        assert_eq!(outcome.new_fingerprint.model, "model-b");
+        assert!(outcome.rebuild_index);
+        assert_eq!(outcome.stragglers_caught, 0);
+
+        // The identity flipped: the shadow is now the single active space.
+        let active = find_active(&conn).expect("find").expect("active");
+        assert_eq!(active.name, SPACE);
+        assert_eq!(active.fingerprint.model, "model-b");
+
+        // facts.embedding now serves the new vectors.
+        for &id in &ids {
+            assert_eq!(read_embedding(&conn, id), vec![1.0_f32; DIM]);
+        }
+        // Cleanup: the populating rows are gone; the OLD vectors are retained
+        // (keyed by the deprecated space) for an instant rollback.
+        assert_eq!(count_vectors(&conn, SPACE).expect("shadow"), 0);
+        assert_eq!(
+            count_vectors(&conn, "default").expect("retained"),
+            3,
+            "old vectors retained for rollback"
+        );
+        assert_eq!(
+            find_by_name(&conn, "default")
+                .expect("find")
+                .expect("present")
+                .status,
+            SpaceStatus::Deprecated
+        );
+    }
+
+    #[test]
+    fn promote_refuses_incomplete_populating() {
+        let conn = fresh_conn();
+        set_active(&conn, "model-a");
+        add_populating_space(&conn);
+        let ids: Vec<i64> = (0..3)
+            .map(|i| insert_fact(&conn, &format!("f{i}")))
+            .collect();
+        backfill_all(&conn, SPACE, &ids[0..1], 1.0); // only 1 of 3 backfilled
+
+        let err = promote_space(&conn, SPACE).expect_err("incomplete");
+        assert!(matches!(err, MemoryError::Internal(_)), "got {err:?}");
+        // No mutation: still one active = default, facts.embedding untouched.
+        assert_eq!(
+            find_active(&conn).expect("find").expect("active").name,
+            "default"
+        );
+        assert_eq!(read_embedding(&conn, ids[0]), vec![0.0_f32; DIM]);
+    }
+
+    #[test]
+    fn promote_rejects_different_dim() {
+        let conn = fresh_conn();
+        set_active(&conn, "model-a"); // active dim = DIM
+        insert_populating(
+            &conn,
+            &EmbeddingSpace {
+                name: "wide".to_string(),
+                fingerprint: EmbeddingFingerprint::new("model-wide", "tei", DIM * 2),
+                status: SpaceStatus::Populating,
+            },
+        )
+        .expect("insert wide");
+
+        let err = promote_space(&conn, "wide").expect_err("different dim");
+        assert!(
+            matches!(
+                err,
+                MemoryError::EmbeddingDimension { expected, actual }
+                    if expected == DIM && actual == DIM * 2
+            ),
+            "got {err:?}"
+        );
+        // Different-dim is #742; nothing changed here.
+        assert_eq!(
+            find_active(&conn).expect("find").expect("active").name,
+            "default"
+        );
+    }
+
+    #[test]
+    fn promote_rolls_back_on_mid_tx_error() {
+        let conn = fresh_conn();
+        set_active(&conn, "model-a");
+        add_populating_space(&conn);
+        let ids: Vec<i64> = (0..2)
+            .map(|i| insert_fact(&conn, &format!("f{i}")))
+            .collect();
+        backfill_all(&conn, SPACE, &ids, 1.0);
+
+        // Inject a mid-tx failure on the copy-swap (step 3 updates facts.embedding).
+        conn.execute_batch(
+            "CREATE TRIGGER fail_swap BEFORE UPDATE OF embedding ON facts \
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .expect("install trigger");
+
+        let err = promote_space(&conn, SPACE).expect_err("mid-tx failure");
+        assert!(matches!(err, MemoryError::Database(_)), "got {err:?}");
+
+        conn.execute_batch("DROP TRIGGER fail_swap;")
+            .expect("drop trigger");
+
+        // Full rollback (single-tx design): nothing moved.
+        assert_eq!(
+            find_active(&conn).expect("find").expect("active").name,
+            "default",
+            "old active intact"
+        );
+        for &id in &ids {
+            assert_eq!(
+                read_embedding(&conn, id),
+                vec![0.0_f32; DIM],
+                "embedding old"
+            );
+        }
+        assert_eq!(
+            count_vectors(&conn, SPACE).expect("shadow"),
+            2,
+            "populating vectors NOT deleted (step 5 rolled back)"
+        );
+        assert_eq!(
+            count_vectors(&conn, "default").expect("retained"),
+            0,
+            "no old vectors retained (step 2 rolled back)"
+        );
+        assert_eq!(
+            find_by_name(&conn, SPACE)
+                .expect("find")
+                .expect("present")
+                .status,
+            SpaceStatus::Populating,
+            "shadow not activated"
+        );
+    }
+
+    #[test]
+    fn backfill_is_invisible_to_active_read_path() {
+        // The pivot's core property: backfill writes ONLY fact_vectors, never
+        // facts.embedding — so reads see the old vectors until promote commits.
+        let conn = fresh_conn();
+        set_active(&conn, "model-a");
+        add_populating_space(&conn);
+        let ids: Vec<i64> = (0..2)
+            .map(|i| insert_fact(&conn, &format!("f{i}")))
+            .collect();
+        backfill_all(&conn, SPACE, &ids, 1.0);
+
+        for &id in &ids {
+            assert_eq!(read_embedding(&conn, id), vec![0.0_f32; DIM]);
+        }
+        assert_eq!(count_vectors(&conn, SPACE).expect("shadow"), 2);
+    }
+
+    #[test]
+    fn promote_errors_when_populating_space_absent() {
+        let conn = fresh_conn();
+        set_active(&conn, "model-a");
+        let err = promote_space(&conn, "ghost").expect_err("absent");
+        assert!(matches!(err, MemoryError::Internal(_)), "got {err:?}");
     }
 }

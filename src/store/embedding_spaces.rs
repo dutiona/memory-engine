@@ -175,6 +175,24 @@ pub fn find_active(conn: &Connection) -> Result<Option<EmbeddingSpace>> {
     Ok(Some(space))
 }
 
+/// Look up a single space by its `name` (PK), or `None` if absent. Used by the
+/// #623 promote to resolve the `populating` space and read its dimension for the
+/// same-dim guard.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on query failure, or `MemoryError::Internal`/`Migration`
+/// if a stored dimension/status is corrupt.
+pub fn find_by_name(conn: &Connection, name: &str) -> Result<Option<EmbeddingSpace>> {
+    let sql = format!("SELECT {SELECT_COLS} WHERE name = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([name])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row_to_space(row)??)),
+        None => Ok(None),
+    }
+}
+
 /// All registered spaces, oldest first. Today returns 0 or 1 row; #623+ returns more.
 ///
 /// # Errors
@@ -260,6 +278,26 @@ pub fn deprecate(conn: &Connection, name: &str) -> Result<()> {
         "UPDATE embedding_spaces SET status = 'deprecated' WHERE name = ?1",
         rusqlite::params![name],
     )?;
+    Ok(())
+}
+
+/// Flip a space to `active` (#623 promote, step 4). MUST be called **after** the
+/// current active row has been demoted in the same transaction (the
+/// demote-then-activate ordering), so the single-active partial index never
+/// transiently sees two `active` rows. A violation is remapped (via
+/// [`map_single_active_violation`]) to a diagnosable `Internal` error.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Internal` if activating `name` would create a second
+/// active space (the ordering was violated), or `MemoryError::Database` on any
+/// other write failure.
+pub fn activate(conn: &Connection, name: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE embedding_spaces SET status = 'active' WHERE name = ?1",
+        rusqlite::params![name],
+    )
+    .map_err(map_single_active_violation)?;
     Ok(())
 }
 

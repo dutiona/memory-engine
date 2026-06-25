@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::storage::capabilities::BackendCapabilities;
-use crate::types::EmbeddingFingerprint;
+use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 
 /// Backend lifecycle the engine drives post-open.
 ///
@@ -241,4 +241,31 @@ pub trait SchemaManager: Send + Sync {
     /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
     /// backend failure.
     async fn count_unbackfilled(&self, space: &str) -> Result<usize>;
+
+    /// Atomically promote the `populating` space to active (#623 D6): in one
+    /// transaction, retain the old active vectors for rollback, copy-swap the
+    /// populating vectors into `facts.embedding`, and flip the registry status
+    /// (the identity flip). **Same-dim only** this wave — a different-dim
+    /// populating space is rejected (the engine `embed_dim` is frozen at open;
+    /// different-dim is #742).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+    /// for a different-dim populating space,
+    /// [`MemoryError::Internal`](crate::error::MemoryError::Internal) if there is no
+    /// active space, the populating space is missing or not `populating`, or the
+    /// completeness gate fails, or
+    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend
+    /// failure (which rolls the transaction back).
+    async fn promote_space(&self, populating: &str) -> Result<PromoteOutcome>;
+
+    /// Mark `name` `deprecated` — abandon a `populating` space mid-reconstruction
+    /// or retire a space. Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// backend failure.
+    async fn deprecate_space(&self, name: &str) -> Result<()>;
 }

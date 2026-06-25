@@ -983,6 +983,35 @@ pub struct ProjectContext {
     pub relevant_facts: Vec<Fact>,
 }
 
+/// Outcome of an atomic background-reconstruction promote (#623 D6).
+///
+/// Returned by [`SchemaManager::promote_space`](crate::storage::schema::SchemaManager::promote_space)
+/// after the new (`populating`) space's vectors have been copy-swapped into the
+/// active serving store (`facts.embedding`) and the registry status flipped — all
+/// in one transaction. Internal-only this wave; the operator surface that renders
+/// it is #689.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromoteOutcome {
+    /// Facts whose active vector was copy-swapped to the new space (the homogeneous
+    /// active space covers every fact, so this is the total fact count).
+    pub promoted: usize,
+    /// The previously-active space, now `deprecated` and retained in `fact_vectors`
+    /// for an instant rollback (the inverse copy-swap, #689).
+    pub deprecated_space: String,
+    /// The now-active embedding identity. Carries the new `dim`, so the different-dim
+    /// follow-up (#742) reads it to drive the engine effective-dim transition with no
+    /// API change.
+    pub new_fingerprint: EmbeddingFingerprint,
+    /// Stragglers embedded by the engine's pre-tx catch-up pass (facts ingested after
+    /// their backfill cursor passed). `0` from the storage port's perspective — the
+    /// engine orchestration sets this; reserved for the live-write race work (#625).
+    pub stragglers_caught: usize,
+    /// The active vectors changed, so a downstream vector index (HNSW) must rebuild.
+    /// Always `true` for a promote — even same-dim, the vectors are new. The engine
+    /// fires a full `build_from_db` until the incremental rebuild hook lands (#624).
+    pub rebuild_index: bool,
+}
+
 /// Identity of the embedding model that produced a stored vector.
 ///
 /// The canonical **identity tuple** shared across the Memory and Knowledge layers

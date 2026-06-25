@@ -26,7 +26,7 @@ use crate::storage::capabilities::{BackendCapabilities, LexicalRanker};
 use crate::storage::schema::SchemaManager;
 use crate::store::schema::{get_config, migrate, validate_schema_version};
 use crate::store::{embedding_meta, embedding_spaces, fact_vectors};
-use crate::types::EmbeddingFingerprint;
+use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 
 #[async_trait]
 impl SchemaManager for SqliteBackend {
@@ -278,6 +278,20 @@ impl SchemaManager for SqliteBackend {
     async fn count_unbackfilled(&self, space: &str) -> Result<usize> {
         let space = space.to_owned();
         self.block_read(move |c| fact_vectors::count_unbackfilled(c, &space))
+            .await
+    }
+
+    // WRITE (one transaction — the atomic copy-swap)
+    async fn promote_space(&self, populating: &str) -> Result<PromoteOutcome> {
+        let populating = populating.to_owned();
+        self.block_write(move |c| fact_vectors::promote_space(c, &populating))
+            .await
+    }
+
+    // WRITE
+    async fn deprecate_space(&self, name: &str) -> Result<()> {
+        let name = name.to_owned();
+        self.block_write(move |c| embedding_spaces::deprecate(c, &name))
             .await
     }
 }
