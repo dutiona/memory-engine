@@ -79,7 +79,7 @@ fn main() -> Result<(), MemoryError> {
 - **Trait-based extensibility** — `EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker`
 - **Hierarchical scoping** — isolate facts by context (e.g., `"user:alice/project:demo"`)
 - **Pinned facts** — exempt critical facts from decay and deduplication
-- **5-tier resume** — `resume_context()` bootstraps agent sessions with graduated detail levels
+- **4-tier resume** — `resume_context()` bootstraps agent sessions with graduated detail levels
 - **Introspection** — `explain_fact()`, `replay_events()`, `statistics()`, import/export (JSON + SQLite, gzip/zstd compression)
 - **MCP server** — `memory-engine-mcp` crate exposes engine operations as MCP tools
 - **CLI inspector** — `memory-engine-cli` for terminal-based inspection and debugging

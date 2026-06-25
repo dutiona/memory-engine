@@ -158,7 +158,6 @@ pub fn shape_resume_context(ctx: &ResumeContext, depth: Depth) -> Value {
         "high_importance": shape_vec(&ctx.high_importance),
         "due": shape_vec(&ctx.due),
         "recent": shape_vec(&ctx.recent),
-        "kb_stubs": ctx.kb_stubs,
     })
 }
 

@@ -8,8 +8,12 @@ use crate::types::Fact;
 pub struct ResumeConfig {
     /// Scope path to resume from. None = root only.
     pub scope_path: Option<String>,
-    /// Current time for due-fact evaluation.
-    pub now: DateTime<Utc>,
+    /// Current time for due-fact evaluation. `None` (the [`Default`]) defers
+    /// resolution to [`MemoryEngine::resume_context`](crate::MemoryEngine::resume_context),
+    /// which resolves it once to `Utc::now()` at call time — keeping the `Default`
+    /// impl pure (no wall-clock capture at construction). Set `Some(_)` to pin a
+    /// specific evaluation instant (e.g. for deterministic tests or replay).
+    pub now: Option<DateTime<Utc>>,
     /// Max pinned facts. Default: 50.
     pub pinned_cap: usize,
     /// Max high-importance facts (by materialized score). Default: 20.
@@ -26,7 +30,7 @@ impl Default for ResumeConfig {
     fn default() -> Self {
         Self {
             scope_path: None,
-            now: Utc::now(),
+            now: None,
             pinned_cap: 50,
             high_importance_cap: 20,
             high_importance_min: 0.7,
@@ -40,7 +44,7 @@ impl ResumeConfig {
     /// Validate configuration parameters.
     ///
     /// `high_importance_min` is a materialized-score threshold that flows
-    /// directly into [`FactStore::list_by_importance_score`]'s `min_score`
+    /// directly into `FactStore::list_by_importance_score`'s `min_score`
     /// comparison; it must be finite and within `[0.0, 1.0]` — a value like
     /// `2.0` would silently yield an empty high-importance tier with no
     /// diagnostic. The four tier caps must each be non-zero, since a `0` cap
@@ -97,6 +101,4 @@ pub struct ResumeContext {
     pub due: Vec<Fact>,
     /// Most recent facts from active scopes.
     pub recent: Vec<Fact>,
-    /// Placeholder: KB reference URIs for Phase 5.
-    pub kb_stubs: Vec<String>,
 }

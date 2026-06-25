@@ -98,7 +98,7 @@ Add to `.claude/settings.json`:
 | `memory_ingest`              | P0        | Append event to log                    | —                    |
 | `memory_add_fact`            | P0        | Add fact with embedding                | —                    |
 | `memory_query`               | P0        | Hybrid FTS + vector search             | sparse/standard/full |
-| `memory_resume_context`      | P0        | 5-tier cognitive boot                  | sparse/standard/full |
+| `memory_resume_context`      | P0        | 4-tier cognitive boot                  | sparse/standard/full |
 | `memory_list_due`            | P0        | Scheduled fact surfacing               | sparse/standard/full |
 | `memory_next_due_time`       | P0        | Next scheduled time                    | —                    |
 | `memory_explain_fact`        | P0        | Fact provenance                        | sparse/standard/full |

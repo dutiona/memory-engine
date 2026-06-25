@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use chrono::Utc;
+
 use crate::error::{MemoryError, Result};
 use crate::resume::context::{ResumeConfig, ResumeContext};
 use crate::types::Fact;
@@ -11,12 +13,11 @@ impl MemoryEngine {
 
     /// Retrieve tiered context for resuming a session.
     ///
-    /// Returns five tiers of facts (mutually exclusive):
+    /// Returns four tiers of facts (mutually exclusive):
     /// 1. **Pinned** — all pinned facts (cross-scope)
     /// 2. **High-importance** — top-N by materialized `importance_score`
     /// 3. **Due** — facts with `t_valid` <= now
     /// 4. **Recent** — most recent, from scope ancestors
-    /// 5. **KB stubs** — placeholder for Phase 5
     ///
     /// # Errors
     ///
@@ -28,6 +29,12 @@ impl MemoryEngine {
         // acquiring the scope_tree lock or touching the DB (#359). The internal
         // tier walk below trusts its already-validated input.
         config.validate()?;
+
+        // Resolve the evaluation instant ONCE, before the tier walk. `ResumeConfig`
+        // defaults `now` to `None` (a pure `Default`); the wall-clock fallback lives
+        // here so every tier read below — due-fact filtering, the bi-temporal
+        // surfaced_at predicate, and the stamp — sees a single, consistent `now`.
+        let now = config.now.unwrap_or_else(Utc::now);
 
         // Step 1: Resolve scope IDs from cache (short-lived read lock).
         // The scope_tree guard is taken and dropped entirely within this block —
@@ -46,7 +53,7 @@ impl MemoryEngine {
             }
         }; // scope_tree read lock dropped here
 
-        // Step 2: Assemble the five tiers via the async storage port. This inlines
+        // Step 2: Assemble the four tiers via the async storage port. This inlines
         // the former `resume::resume_context(conn, ...)` helper — the backend now
         // owns embed_dim, so the per-tier port calls drop it. Control flow, tier
         // ordering, dedup (`seen`), and caps are preserved verbatim.
@@ -70,7 +77,7 @@ impl MemoryEngine {
         seen.extend(high_importance.iter().map(|f| f.id));
 
         // Tier 3: Due facts (future memory now surfacing)
-        let due_all = self.storage.list_due_facts(config.now, &scope_ids).await?;
+        let due_all = self.storage.list_due_facts(now, &scope_ids).await?;
         let due: Vec<Fact> = due_all
             .into_iter()
             .filter(|f| !seen.contains(&f.id))
@@ -84,15 +91,11 @@ impl MemoryEngine {
             .list_facts_by_scopes_recent(&scope_ids, config.recent_cap, &seen)
             .await?;
 
-        // Tier 5: KB stubs (Phase 5 placeholder)
-        let kb_stubs = Vec::new();
-
         let mut ctx = ResumeContext {
             pinned,
             high_importance,
             due,
             recent,
-            kb_stubs,
         };
 
         // Step 3: Stamp surfaced_at on ALL due facts across ALL tiers (#93).
@@ -101,8 +104,8 @@ impl MemoryEngine {
         // Must use write_conn — read connections have query_only = ON.
         let is_unsurfaced_due = |f: &Fact| -> bool {
             f.surfaced_at.is_none()
-                && f.t_valid.is_some_and(|tv| tv <= config.now)
-                && f.t_invalid.is_none_or(|ti| ti > config.now)
+                && f.t_valid.is_some_and(|tv| tv <= now)
+                && f.t_invalid.is_none_or(|ti| ti > now)
         };
         let unsurfaced_ids: Vec<i64> = ctx
             .pinned
@@ -115,9 +118,7 @@ impl MemoryEngine {
             .collect();
 
         if !unsurfaced_ids.is_empty() {
-            let stamped = self
-                .stamp_surfaced_facts(&unsurfaced_ids, config.now)
-                .await?;
+            let stamped = self.stamp_surfaced_facts(&unsurfaced_ids, now).await?;
             apply_surfaced_stamps(
                 ctx.pinned
                     .iter_mut()

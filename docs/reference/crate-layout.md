@@ -18,7 +18,7 @@ memory_engine (lib.rs)
   +-- pool          Connection pool (N readers + 1 writer)
   +-- scope         Hierarchical scope tree cache
   +-- bootstrap     Session log bootstrap pipeline
-  +-- resume        Session bootstrapping (5-tier retrieval)
+  +-- resume        Session bootstrapping (4-tier retrieval)
   +-- inspect       Debugging and observability APIs
 ```
 
@@ -94,13 +94,12 @@ memory_engine (lib.rs)
 : Session log bootstrap pipeline. Parses Claude Code JSONL session logs and imports noteworthy episodes (bug fixes, decisions, conventions, learnings) as historical facts. Sub-modules handle each pipeline stage: `parse` (JSONL deserialization), `filter` (turn reconstruction and keyword pre-filter), `outcome` (heuristic session outcome classification), `extract` (fact extraction via the `SessionExtractor` trait), and `metrics` (configuration, reporting, and prewarm quality metrics). Uses savepoint transactions for crash safety and event-based idempotency to prevent duplicate imports.
 
 `resume`
-: Session bootstrapping via `ResumeConfig` and `ResumeContext`. Implements 5-tier retrieval:
+: Session bootstrapping via `ResumeConfig` and `ResumeContext`. Implements 4-tier retrieval:
 
 1. **Pinned** -- unforgettable facts (`is_pinned = true`), cross-scope, sorted by `importance_score` descending.
 2. **High-importance** -- facts with materialized `importance_score` above a configurable threshold.
 3. **Due** -- future-memory facts whose `t_valid` has arrived (`t_valid <= now`).
 4. **Recent** -- most recent facts from scope ancestors.
-5. **KB stubs** -- placeholder for Phase 5 knowledge-base references.
    Tiers are mutually exclusive (a fact appears in at most one tier).
 
 `inspect`

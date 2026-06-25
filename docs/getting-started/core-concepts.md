@@ -131,7 +131,7 @@ Scope queries control visibility:
 | **Forget**      | `forget()`                      | Decay and prune low-importance facts (skips pinned) |
 | **Resolve**     | `resolve_conflict()`            | Arbitrate contradicting facts                       |
 | **Schedule**    | `list_due()`, `next_due_time()` | Surface future-memory facts and poll timing         |
-| **Resume**      | `resume_context()`              | 5-tier session bootstrapping                        |
+| **Resume**      | `resume_context()`              | 4-tier session bootstrapping                        |
 
 ## Threading
 

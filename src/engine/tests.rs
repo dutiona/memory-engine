@@ -1454,6 +1454,17 @@ async fn resume_rejects_invalid_config() {
     assert!(matches!(err, MemoryError::Conflict(_)), "got {err:?}");
 }
 
+// --- Issue #279: ResumeConfig::default() is pure (no wall-clock capture) ---
+
+/// `ResumeConfig::default()` must not capture `Utc::now()` at construction — the
+/// `now` field defaults to `None`, and the engine resolves the wall-clock instant
+/// once at call time. This makes `Default` deterministic and stops stored configs
+/// from operating on a stale timestamp.
+#[test]
+fn resume_config_default_now_is_none() {
+    assert_eq!(ResumeConfig::default().now, None);
+}
+
 // --- Issue #93: surfaced_at for due facts in non-due tiers ---
 
 #[tokio::test]
@@ -1487,7 +1498,7 @@ async fn resume_stamps_surfaced_at_on_pinned_due_fact() {
         .unwrap();
 
     let config = ResumeConfig {
-        now,
+        now: Some(now),
         ..ResumeConfig::default()
     };
     let ctx = engine.resume_context(&config).await.unwrap();
@@ -1535,7 +1546,7 @@ async fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
         .unwrap();
 
     let config = ResumeConfig {
-        now,
+        now: Some(now),
         high_importance_min: 0.7,
         ..ResumeConfig::default()
     };
@@ -1585,7 +1596,7 @@ async fn resume_does_not_stamp_invalidated_pinned_due_fact() {
         .unwrap();
 
     let config = ResumeConfig {
-        now,
+        now: Some(now),
         ..ResumeConfig::default()
     };
     let ctx = engine.resume_context(&config).await.unwrap();
@@ -1643,7 +1654,7 @@ async fn resume_surfaced_at_is_idempotent() {
 
     let ctx1 = engine
         .resume_context(&ResumeConfig {
-            now,
+            now: Some(now),
             ..ResumeConfig::default()
         })
         .await
@@ -1656,7 +1667,7 @@ async fn resume_surfaced_at_is_idempotent() {
     // Second call at a strictly later `now`. surfaced_at must be unchanged.
     let ctx2 = engine
         .resume_context(&ResumeConfig {
-            now: later,
+            now: Some(later),
             ..ResumeConfig::default()
         })
         .await
