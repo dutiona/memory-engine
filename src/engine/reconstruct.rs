@@ -181,7 +181,7 @@ impl MemoryEngine {
     /// embed task, an [`EmbeddingProvider::embed_batch`] contract violation
     /// (length mismatch), an [`MemoryError::EmbeddingDimension`] if a produced
     /// vector is not `target_dim`-wide, or any storage-port failure.
-    pub(crate) async fn backfill_space(
+    async fn backfill_space(
         &self,
         space_name: &str,
         embedder: &Arc<dyn EmbeddingProvider>,

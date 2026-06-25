@@ -638,7 +638,7 @@ impl MemoryEngine {
     /// net (#742 Phase 1) can be exercised without driving a full different-dim
     /// reconstruction. Production code arms it only inside [`reconstruct`](Self::reconstruct).
     #[cfg(test)]
-    pub(crate) fn force_reopen_fence(&self, new_dim: usize) {
+    fn force_reopen_fence(&self, new_dim: usize) {
         self.reopen_required.store(new_dim, Ordering::Release);
     }
 
