@@ -8,7 +8,7 @@ state: Active
 provenance:
   source_event_id: ~
   source_event: ~
-  importance: 0.5
+  base_importance: 0.5
   importance_score: 0.5
   is_pinned: false
   access_count: 0

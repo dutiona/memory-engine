@@ -59,7 +59,7 @@ struct JsonlFact {
     #[serde(default)]
     scope: Option<String>,
     #[serde(default)]
-    importance: Option<f64>,
+    base_importance: Option<f64>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
     #[serde(default)]
@@ -79,10 +79,10 @@ struct JsonlFact {
 // ---------------------------------------------------------------------------
 
 fn validate_jsonl_fact(fact: &JsonlFact) -> Result<(), String> {
-    if let Some(imp) = fact.importance
+    if let Some(imp) = fact.base_importance
         && !(0.0..=1.0).contains(&imp)
     {
-        return Err(format!("importance {imp} out of range [0, 1]"));
+        return Err(format!("base_importance {imp} out of range [0, 1]"));
     }
     if let (Some(tv), Some(ti)) = (fact.t_valid, fact.t_invalid)
         && tv >= ti
@@ -94,7 +94,7 @@ fn validate_jsonl_fact(fact: &JsonlFact) -> Result<(), String> {
 
 fn jsonl_to_request(fact: JsonlFact, default_scope: Option<&str>) -> AddFactRequest {
     let opts = AddFactOptions {
-        importance: fact.importance,
+        base_importance: fact.base_importance,
         metadata: fact.metadata,
         t_valid: fact.t_valid,
         t_invalid: fact.t_invalid,
@@ -493,7 +493,7 @@ mod tests {
         let line = r#"{"content":"Paris is in France","fact_type":"semantic"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
         assert_eq!(fact.content, "Paris is in France");
-        assert!(fact.importance.is_none());
+        assert!(fact.base_importance.is_none());
         assert!(fact.t_valid.is_none());
         assert!(fact.metadata.is_none());
         assert!(fact.scope.is_none());
@@ -506,7 +506,7 @@ mod tests {
             "fact_type": "episodic",
             "t_valid": "2026-03-01T00:00:00Z",
             "t_invalid": "2026-06-01T00:00:00Z",
-            "importance": 0.7,
+            "base_importance": 0.7,
             "metadata": {"source": "beam-conv-3"},
             "scope": "project/beam",
             "pinned": true
@@ -514,7 +514,7 @@ mod tests {
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
         assert_eq!(fact.content, "User moved to Istanbul");
         assert!(matches!(fact.fact_type, FactType::Episodic));
-        assert_eq!(fact.importance, Some(0.7));
+        assert_eq!(fact.base_importance, Some(0.7));
         assert!(fact.t_valid.is_some());
         assert!(fact.t_invalid.is_some());
         assert_eq!(fact.pinned, Some(true));
@@ -530,13 +530,13 @@ mod tests {
 
     #[test]
     fn jsonl_fact_to_request_mapping() {
-        let line = r#"{"content":"test","fact_type":"semantic","importance":0.8,"t_valid":"2026-01-01T00:00:00Z"}"#;
+        let line = r#"{"content":"test","fact_type":"semantic","base_importance":0.8,"t_valid":"2026-01-01T00:00:00Z"}"#;
         let fact: JsonlFact = serde_json::from_str(line).unwrap();
         let req = jsonl_to_request(fact, None);
         assert_eq!(req.content, "test");
         assert_eq!(req.fact_type, memory_engine::types::FactType::Semantic);
         let opts = req.opts.unwrap();
-        assert_eq!(opts.importance, Some(0.8));
+        assert_eq!(opts.base_importance, Some(0.8));
         assert!(opts.t_valid.is_some());
     }
 
@@ -547,7 +547,7 @@ mod tests {
             fact_type: FactType::Semantic,
             source_event_id: None,
             scope: None,
-            importance: Some(1.5),
+            base_importance: Some(1.5),
             metadata: None,
             t_valid: None,
             t_invalid: None,
@@ -567,7 +567,7 @@ mod tests {
             fact_type: FactType::Semantic,
             source_event_id: None,
             scope: None,
-            importance: None,
+            base_importance: None,
             metadata: None,
             t_valid: Some(t1),
             t_invalid: Some(t2), // t_invalid before t_valid
@@ -585,7 +585,7 @@ mod tests {
             fact_type: FactType::Semantic,
             source_event_id: None,
             scope: None,
-            importance: Some(0.5),
+            base_importance: Some(0.5),
             metadata: None,
             t_valid: None,
             t_invalid: None,
@@ -626,7 +626,7 @@ mod tests {
 
         let engine = MemoryEngine::builder(4).build().unwrap();
         let input = r#"{"content":"fact one","fact_type":"semantic"}
-{"content":"fact two","fact_type":"episodic","importance":0.8}
+{"content":"fact two","fact_type":"episodic","base_importance":0.8}
 "#;
         let summary = ingest_from_reader(
             &engine,
@@ -687,8 +687,8 @@ not valid json
         }
 
         let engine = MemoryEngine::builder(4).build().unwrap();
-        let input = r#"{"content":"good","fact_type":"semantic","importance":0.5}
-{"content":"bad","fact_type":"semantic","importance":2.0}
+        let input = r#"{"content":"good","fact_type":"semantic","base_importance":0.5}
+{"content":"bad","fact_type":"semantic","base_importance":2.0}
 "#;
         let summary = ingest_from_reader(
             &engine,
@@ -934,7 +934,7 @@ not valid json
             .prop_map(|(content, ft, importance)| {
                 let mut obj = serde_json::json!({ "content": content, "fact_type": ft });
                 if let Some(i) = importance {
-                    obj["importance"] = serde_json::json!(i);
+                    obj["base_importance"] = serde_json::json!(i);
                 }
                 obj.to_string()
             });

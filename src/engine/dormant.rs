@@ -97,7 +97,7 @@ mod tests {
             source_event_id: None,
             scope: None,
             opts: Some(crate::types::AddFactOptions {
-                importance: Some(importance),
+                base_importance: Some(importance),
                 ..Default::default()
             }),
         };
@@ -186,7 +186,7 @@ mod tests {
             source_event_id: None,
             scope: None,
             opts: Some(crate::types::AddFactOptions {
-                importance: Some(0.1),
+                base_importance: Some(0.1),
                 pinned: Some(true),
                 ..Default::default()
             }),

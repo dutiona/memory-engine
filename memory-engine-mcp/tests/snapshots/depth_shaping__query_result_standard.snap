@@ -11,10 +11,10 @@ diagnostics:
   vector_candidates: 0
 results:
   - access_count: 0
+    base_importance: 0.5
     content: Neural networks learn representations
     fact_type: Semantic
     id: 1
-    importance: 0.5
     importance_score: 0.5
     is_pinned: false
     last_accessed: "[REDACTED]"

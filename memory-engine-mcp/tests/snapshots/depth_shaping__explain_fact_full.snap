@@ -1,6 +1,5 @@
 ---
 source: memory-engine-mcp/tests/depth_shaping.rs
-assertion_line: 251
 expression: body
 ---
 fact_id: 1
@@ -10,7 +9,7 @@ graph_context:
   neighbor_ids: []
 provenance:
   access_count: 0
-  importance: 0.5
+  base_importance: 0.5
   importance_score: 0.5
   is_pinned: false
   source_event: ~

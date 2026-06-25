@@ -150,7 +150,7 @@ impl DreamCycle for LlmDreamCycle {
             // id is present in `by_id` (it passed the clamp), so indexing is safe.
             let importance = sources
                 .iter()
-                .map(|id| by_id[id].importance)
+                .map(|id| by_id[id].base_importance)
                 .fold(0.0_f64, f64::max);
             // The engine stays LLM-free: the backend embeds its own summary text.
             // Offload the embed (also possibly a blocking HTTP round-trip).
@@ -165,7 +165,7 @@ impl DreamCycle for LlmDreamCycle {
             // (empty metadata, `is_pinned = false`, `last_accessed = t_created`).
             let new_fact = NewFact::builder(group.summary.clone(), embedding, FactType::Semantic)
                 .t_created(now)
-                .importance(importance)
+                .base_importance(importance)
                 .scope_id(scope_id)
                 .build();
             // Claim the sources only now that the group is actually emitted, so a

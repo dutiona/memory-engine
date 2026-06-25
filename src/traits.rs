@@ -198,7 +198,7 @@ pub trait ConflictArbiter: Send + Sync {
     /// to [`Fact::UNSCORED_IMPORTANCE`](crate::types::Fact::UNSCORED_IMPORTANCE) and does
     /// **not** reflect the fact's actual computed importance. Implementations that branch on
     /// `new_fact.importance_score` will always see that sentinel.
-    /// Use `new_fact.importance` (the caller-supplied raw importance) instead if you need
+    /// Use `new_fact.base_importance` (the caller-supplied raw importance) instead if you need
     /// a signal for the incoming fact's weight.
     ///
     /// # Errors
@@ -560,7 +560,7 @@ pub struct ForgetPolicy {
     pub frequency_weight: f64,
     /// Weight for graph connectivity signal. Default: 0.3.
     pub graph_degree_weight: f64,
-    /// Weight for base importance (`fact.importance`). Default: 0.2.
+    /// Weight for base importance (`fact.base_importance`). Default: 0.2.
     pub base_importance_weight: f64,
 }
 
@@ -651,7 +651,7 @@ mod tests {
         ClassifierInput {
             content: String::new(),
             fact_type: FactType::Semantic,
-            importance: 0.5,
+            base_importance: 0.5,
             metadata: serde_json::Value::Null,
         }
     }

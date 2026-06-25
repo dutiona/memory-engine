@@ -500,7 +500,7 @@ async fn flush_insights_with_http_embedder() {
             "memory_flush_insights",
             args(json!({
                 "insights": [
-                    { "content": "Insight one", "importance": 0.8 },
+                    { "content": "Insight one", "base_importance": 0.8 },
                     { "content": "Insight two", "fact_type": "Procedural" }
                 ]
             })),

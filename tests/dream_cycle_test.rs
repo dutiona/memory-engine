@@ -43,7 +43,7 @@ async fn add(engine: &MemoryEngine, content: &str, ft: FactType, importance: f64
         source_event_id: None,
         scope: None,
         opts: Some(AddFactOptions {
-            importance: Some(importance),
+            base_importance: Some(importance),
             ..Default::default()
         }),
     };

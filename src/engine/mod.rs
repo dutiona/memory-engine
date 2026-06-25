@@ -873,7 +873,7 @@ mod proptest_temporal {
             t_valid,
             t_invalid,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
             metadata: serde_json::Value::Null,

@@ -139,7 +139,7 @@ fn build_provenance(
     Ok(FactProvenance {
         source_event_id: fact.source_event_id,
         source_event,
-        importance: fact.importance,
+        base_importance: fact.base_importance,
         importance_score: fact.importance_score,
         is_pinned: fact.is_pinned,
         access_count: fact.access_count,

@@ -28,7 +28,7 @@ Forgetting uses a `ForgetPolicy` struct with a weighted importance score compute
 | Recency            | 0.3              | Ebbinghaus decay: `0.5^(days_since_access / half_life)` |
 | Frequency          | 0.2              | `ln(access_count + 1) / ln(101.0)` (capped)             |
 | Graph connectivity | 0.3              | `ln(edge_count + 1) / ln(51.0)` (capped)                |
-| Base importance    | 0.2              | `fact.importance` (set at creation, range [0, 1])       |
+| Base importance    | 0.2              | `fact.base_importance` (set at creation, range [0, 1])  |
 
 Final score: `recency_weight * decay + frequency_weight * freq_norm + graph_degree_weight * degree_norm + base_importance_weight * importance`
 

@@ -16,7 +16,7 @@ facts:
     t_valid: ~
     t_invalid: ~
     source_event_id: ~
-    importance: 0.5
+    base_importance: 0.5
     access_count: 0
     last_accessed: "[timestamp]"
     metadata: {}

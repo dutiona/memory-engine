@@ -173,9 +173,9 @@ pub(super) fn compute_dedup(
             if similarity >= threshold - DEDUP_SIMILARITY_EPSILON {
                 // Expire the lower-importance fact. Tie-break: higher id (newer) expires.
                 let expire_id = choose_expiry(
-                    new_fact.importance,
+                    new_fact.base_importance,
                     new_fact.id,
-                    candidate.importance,
+                    candidate.base_importance,
                     candidate.id,
                 );
                 // Survivor inherits the max importance values from the merged pair.
@@ -254,7 +254,7 @@ pub(super) fn apply_dedup(
     let edge_store = EdgeStore::new(conn);
 
     for &(id, importance) in &computed.importance_updates {
-        fact_store.update_importance(id, importance)?;
+        fact_store.update_base_importance(id, importance)?;
     }
     for &(id, score) in &computed.importance_score_updates {
         fact_store.update_importance_score(id, score)?;
@@ -388,14 +388,14 @@ fn inherit_max_importance(
     // the invariant so a future change to the expiry rule that breaks it (re-introducing
     // the #264 staleness for this field) fails loudly in tests.
     debug_assert!(
-        loser.importance <= survivor.importance,
-        "expiry invariant violated: loser.importance ({}) > survivor.importance ({}); \
+        loser.base_importance <= survivor.base_importance,
+        "expiry invariant violated: loser.base_importance ({}) > survivor.base_importance ({}); \
          base-importance inheritance would need the same running-max fix as importance_score",
-        loser.importance,
-        survivor.importance
+        loser.base_importance,
+        survivor.base_importance
     );
-    if loser.importance > survivor.importance {
-        importance_updates.push((survivor.id, loser.importance));
+    if loser.base_importance > survivor.base_importance {
+        importance_updates.push((survivor.id, loser.base_importance));
     }
 
     // `importance_score`: compare live (not in-memory) maxima for both facts.
@@ -482,7 +482,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance,
+                base_importance: importance,
                 access_count: 0,
                 last_accessed: Utc::now(),
                 metadata: serde_json::json!({}),
@@ -578,7 +578,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.5,
+                base_importance: 0.5,
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
@@ -601,7 +601,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.5,
+                base_importance: 0.5,
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
@@ -622,7 +622,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.3,
+                base_importance: 0.3,
                 access_count: 0,
                 last_accessed: base,
                 metadata: serde_json::json!({}),
@@ -716,7 +716,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance,
+                base_importance: importance,
                 access_count: 0,
                 last_accessed: Utc::now(),
                 metadata: serde_json::json!({}),
@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].content, "high imp");
         // Survivor inherits max base importance (0.9 > 0.3)
-        assert!((active[0].importance - 0.9).abs() < f64::EPSILON);
+        assert!((active[0].base_importance - 0.9).abs() < f64::EPSILON);
         // Survivor inherits max importance_score (0.8 > 0.4)
         assert!(
             (active[0].importance_score - 0.8).abs() < f64::EPSILON,

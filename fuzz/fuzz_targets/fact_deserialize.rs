@@ -9,8 +9,8 @@
 //!
 //! Semantic note (the residual the #445 re-triage flags): serde accepts
 //! structurally valid but semantically extreme values — a non-finite
-//! `importance` (`Infinity`/`NaN` via the JSON `f64` path) or one outside
-//! `[0.0, 1.0]`. Per `Fact::importance`'s own docs, range enforcement lives in
+//! `base_importance` (`Infinity`/`NaN` via the JSON `f64` path) or one outside
+//! `[0.0, 1.0]`. Per `Fact::base_importance`'s own docs, range enforcement lives in
 //! `add_fact` (#571), not in the type, and a few direct-insert paths still skip
 //! it (#584). So this is an *observation* of the validation seam, not a crash
 //! condition: we surface the extreme value (via `std::hint::black_box`) without
@@ -24,9 +24,9 @@ use memory_engine::{Edge, Event, Fact};
 fuzz_target!(|data: &[u8]| {
     if let Ok(fact) = serde_json::from_slice::<Fact>(data) {
         // Observe (do not assert) the semantic-validation seam: a parsed Fact may
-        // carry a non-finite or out-of-range importance, an arbitrarily long
+        // carry a non-finite or out-of-range base_importance, an arbitrarily long
         // embedding, etc. The type accepts it; only `add_fact` rejects it.
-        std::hint::black_box(fact.importance.is_finite());
+        std::hint::black_box(fact.base_importance.is_finite());
         std::hint::black_box(fact.embedding.len());
     }
     let _ = serde_json::from_slice::<Event>(data);

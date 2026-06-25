@@ -210,7 +210,7 @@ async fn add_fact_all_options() {
             "content": "Ebbinghaus forgetting curve",
             "fact_type": "Procedural",
             "scope": "research/memory",
-            "importance": 0.9,
+            "base_importance": 0.9,
             "pinned": true,
             "metadata": {"source": "paper"},
             "t_valid": "2025-01-01T00:00:00Z",
@@ -372,7 +372,7 @@ async fn add_fact_importance_out_of_range() {
         "memory_add_fact",
         args(json!({
             "content": "test",
-            "importance": 1.5,
+            "base_importance": 1.5,
             "embedding": vec![0.1; DIM],
         })),
         &engine,
@@ -613,7 +613,7 @@ async fn resume_context_with_pinned_fact() {
     let embedder = make_embedder_arc();
 
     let opts = memory_engine::types::AddFactOptions {
-        importance: Some(0.95),
+        base_importance: Some(0.95),
         pinned: Some(true),
         ..Default::default()
     };

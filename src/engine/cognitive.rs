@@ -370,7 +370,7 @@ impl MemoryEngine {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: req.importance,
+            base_importance: req.importance,
             access_count: 0,
             last_accessed: now,
             metadata,

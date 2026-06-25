@@ -159,7 +159,7 @@ fn setup_forgettable_engine(
                         source_event_id: None,
                         scope: None,
                         opts: Some(AddFactOptions {
-                            importance: Some(0.1),
+                            base_importance: Some(0.1),
                             t_created: Some(old),
                             last_accessed: Some(old),
                             ..Default::default()

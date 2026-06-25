@@ -39,7 +39,7 @@ async fn main() -> Result<(), MemoryError> {
                 source_event_id: None,
                 scope: None,
                 opts: Some(AddFactOptions {
-                    importance: Some(0.9),
+                    base_importance: Some(0.9),
                     t_valid: Some(now - Duration::days(1)),
                     t_invalid: Some(now + Duration::days(5)),
                     ..Default::default()
@@ -59,7 +59,7 @@ async fn main() -> Result<(), MemoryError> {
                 source_event_id: None,
                 scope: None,
                 opts: Some(AddFactOptions {
-                    importance: Some(0.8),
+                    base_importance: Some(0.8),
                     t_valid: Some(now + Duration::days(10)),
                     ..Default::default()
                 }),

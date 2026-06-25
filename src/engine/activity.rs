@@ -103,7 +103,7 @@ impl MemoryEngine {
                             source_event_id: None,
                             scope: req.scope_path.clone(),
                             opts: Some(AddFactOptions {
-                                importance: Some(action.importance),
+                                base_importance: Some(action.importance),
                                 ..Default::default()
                             }),
                         },

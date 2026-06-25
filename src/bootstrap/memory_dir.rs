@@ -359,14 +359,14 @@ fn import_one_memory(
         redactions += redact::redact_json_strings(&mut metadata, &config.denylist);
     }
 
-    // Classifiers read only content/fact_type/importance/metadata — build the
+    // Classifiers read only content/fact_type/base_importance/metadata — build the
     // owned `ClassifierInput` view, not a 20-field synthetic `Fact` cloning the
     // embedding (#118/#343/#388).
     let is_pinned = classifier.is_some_and(|c| {
         let input = ClassifierInput {
             content: content.clone(),
             fact_type,
-            importance: MEMORY_IMPORTANCE,
+            base_importance: MEMORY_IMPORTANCE,
             metadata: metadata.clone(),
         };
         c.should_pin(&input)
@@ -385,7 +385,7 @@ fn import_one_memory(
         t_valid: None,
         t_invalid: None,
         source_event_id: None,
-        importance: MEMORY_IMPORTANCE,
+        base_importance: MEMORY_IMPORTANCE,
         access_count: 0,
         last_accessed: timestamp,
         metadata,

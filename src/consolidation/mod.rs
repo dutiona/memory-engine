@@ -490,7 +490,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance,
+                base_importance: importance,
                 access_count: 0,
                 last_accessed: Utc::now(),
                 metadata: serde_json::json!({}),

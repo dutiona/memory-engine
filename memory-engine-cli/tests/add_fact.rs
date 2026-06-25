@@ -136,7 +136,7 @@ fn add_fact_with_optional_flags() {
             "episodic",
             "--embedding",
             EMBEDDING_JSON,
-            "--importance",
+            "--base-importance",
             "0.9",
             "--t-valid",
             "2026-03-01T00:00:00Z",
@@ -151,7 +151,7 @@ fn add_fact_with_optional_flags() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"is_pinned\": true"))
-        .stdout(predicate::str::contains("\"importance\": 0.9"));
+        .stdout(predicate::str::contains("\"base_importance\": 0.9"));
 }
 
 #[tokio::test]
@@ -214,7 +214,7 @@ fn add_fact_importance_out_of_range() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
-            "--importance",
+            "--base-importance",
             "1.5",
         ])
         .assert()
