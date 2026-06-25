@@ -439,3 +439,24 @@ pub(super) fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+/// Add the `fact_vectors` table that holds **non-active** embedding spaces' vectors
+/// (issue #623, background reconstruction).
+///
+/// Purely additive — `fact_vectors` starts empty. The active space's vectors stay inline
+/// in `facts.embedding` (the authoritative serving store), so there is no data move and no
+/// read-path change. `fact_vectors` is populated only by reconstruction: the `populating`
+/// space during backfill, and the previous active space (now `deprecated`) retained after a
+/// promote for rollback. Frozen DDL snapshot — never reference the live `TABLES_DDL`.
+pub(super) fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS fact_vectors (
+            fact_id   INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+            space_id  TEXT    NOT NULL REFERENCES embedding_spaces(name) ON DELETE CASCADE,
+            embedding BLOB    NOT NULL,
+            PRIMARY KEY (fact_id, space_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_fact_vectors_space ON fact_vectors(space_id);",
+    )?;
+    Ok(())
+}

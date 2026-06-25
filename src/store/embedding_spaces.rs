@@ -219,6 +219,50 @@ pub fn insert_active(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
     Ok(())
 }
 
+/// Insert a shadow `populating` space being backfilled (#623 background reconstruction).
+///
+/// Its status is forced to `populating` (≠ `active`), so it coexists with the current
+/// active space without tripping the single-active partial index. The atomic promote
+/// (#623) later flips it to `active`; this is the registry-row half of the `#622`
+/// reserved seam.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on a `name` PK collision or any other write failure, or
+/// `MemoryError::Internal` if a dimension overflows `i64`.
+pub fn insert_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
+    let (dim, base) = dims_to_sql(&space.fingerprint)?;
+    conn.execute(
+        "INSERT INTO embedding_spaces
+             (name, model, provider, dim, matryoshka_base_dim, element_type, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'populating')",
+        rusqlite::params![
+            space.name,
+            space.fingerprint.model,
+            space.fingerprint.provider,
+            dim,
+            base,
+            space.fingerprint.element_type,
+        ],
+    )
+    .map_err(map_single_active_violation)?;
+    Ok(())
+}
+
+/// Mark a space `deprecated` — the old active space retained for rollback after a promote,
+/// or a `populating` space being abandoned (#623 mechanism; #689 drives the UX). Idempotent.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on write failure.
+pub fn deprecate(conn: &Connection, name: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE embedding_spaces SET status = 'deprecated' WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
+    Ok(())
+}
+
 /// Overwrite the `default` active space's identity (the `store` upsert — restore/import
 /// and unconditional re-stamp). Inserts the `default` active row if absent.
 ///
@@ -429,5 +473,43 @@ mod tests {
             b
         );
         assert_eq!(list_spaces(&conn).expect("list").len(), 1, "still one row");
+    }
+
+    #[test]
+    fn insert_populating_coexists_with_active() {
+        // A populating space is inserted alongside the active one WITHOUT tripping the
+        // single-active partial index (populating ≠ active). #623 backfill staging.
+        let conn = fresh_conn();
+        insert_active(
+            &conn,
+            &EmbeddingSpace::default_active(EmbeddingFingerprint::new("model-a", "tei", 8)),
+        )
+        .expect("insert active");
+        let shadow = EmbeddingSpace {
+            name: "model-b_8".to_string(),
+            fingerprint: EmbeddingFingerprint::new("model-b", "tei", 8),
+            status: SpaceStatus::Populating,
+        };
+        insert_populating(&conn, &shadow).expect("insert populating coexists with active");
+
+        // Both rows exist; exactly one is active.
+        assert_eq!(list_spaces(&conn).expect("list").len(), 2);
+        assert_eq!(
+            find_active(&conn)
+                .expect("find")
+                .expect("present")
+                .fingerprint
+                .model,
+            "model-a"
+        );
+        // deprecate() flips a space; idempotent.
+        deprecate(&conn, "model-b_8").expect("deprecate");
+        deprecate(&conn, "model-b_8").expect("deprecate idempotent");
+        let statuses: Vec<_> = list_spaces(&conn)
+            .expect("list")
+            .into_iter()
+            .map(|s| (s.name, s.status))
+            .collect();
+        assert!(statuses.contains(&("model-b_8".to_string(), SpaceStatus::Deprecated)));
     }
 }

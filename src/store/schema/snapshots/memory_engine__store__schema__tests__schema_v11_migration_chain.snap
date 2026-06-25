@@ -47,6 +47,9 @@ CREATE INDEX idx_events_session ON events(session_id) WHERE session_id IS NOT NU
 -- index: idx_events_timestamp
 CREATE INDEX idx_events_timestamp ON events(timestamp);
 
+-- index: idx_fact_vectors_space
+CREATE INDEX idx_fact_vectors_space ON fact_vectors(space_id);
+
 -- index: idx_facts_created
 CREATE INDEX idx_facts_created ON facts(t_created);
 
@@ -103,6 +106,9 @@ CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, prov
 
 -- table: events
 CREATE TABLE "events" ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) , origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1);
+
+-- table: fact_vectors
+CREATE TABLE fact_vectors ( fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE, space_id TEXT NOT NULL REFERENCES embedding_spaces(name) ON DELETE CASCADE, embedding BLOB NOT NULL, PRIMARY KEY (fact_id, space_id) ) WITHOUT ROWID;
 
 -- table: facts
 CREATE TABLE "facts" ( id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, content_hash TEXT NOT NULL, embedding BLOB NOT NULL, fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')), t_created TEXT NOT NULL, t_expired TEXT, t_valid TEXT, t_invalid TEXT, source_event_id INTEGER REFERENCES events(id), importance REAL NOT NULL DEFAULT 0.5, access_count INTEGER NOT NULL DEFAULT 0, last_accessed TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)), scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) , is_pinned INTEGER NOT NULL DEFAULT 0, importance_score REAL NOT NULL DEFAULT 0.5, surfaced_at TEXT);
