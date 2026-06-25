@@ -22,7 +22,7 @@ use crate::store::events::{EventFilter, EventStore};
 use crate::store::facts::FactStore;
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
-use crate::types::{EventType, FactType, NewEvent, NewFact};
+use crate::types::{ClassifierInput, EventType, FactType, NewEvent, NewFact};
 
 pub use extract::{ExtractedFact, KeywordExtractor, SessionExtractor};
 pub use filter::{CandidateEpisode, ConversationTurn, EpisodeCategory, ToolCallRecord};
@@ -246,28 +246,17 @@ fn store_extracted_fact(
 
     let embedding = ctx.embedder.embed(&content)?;
 
+    // Classifiers read only content/fact_type/importance/metadata — build the
+    // owned `ClassifierInput` view, not a 20-field synthetic `Fact` cloning the
+    // embedding (#118/#343/#388).
     let is_pinned = ctx.classifier.is_some_and(|c| {
-        let temp = crate::types::Fact {
-            id: 0,
+        let input = ClassifierInput {
             content: content.clone(),
-            content_hash: String::new(),
-            embedding: embedding.clone(),
             fact_type: fact.fact_type,
-            t_created: effective_created,
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: Some(marker_event_id),
             importance: fact.importance,
-            access_count: 0,
-            last_accessed: effective_created,
             metadata: metadata.clone(),
-            scope_id: ctx.scope_id,
-            is_pinned: false,
-            importance_score: fact.importance,
-            surfaced_at: None,
         };
-        c.should_pin(&temp)
+        c.should_pin(&input)
     });
 
     // Bi-temporal note (#521): t_created is backdated to the historical turn

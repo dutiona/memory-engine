@@ -10,7 +10,7 @@ use memory_engine::ResumeConfig;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::traits::{EmbeddingProvider, ForgetPolicy, PersistenceClassifier};
-use memory_engine::types::{AddFactOptions, AddFactRequest, Fact, FactType};
+use memory_engine::types::{AddFactOptions, AddFactRequest, ClassifierInput, FactType};
 
 const DIM: usize = 8;
 
@@ -164,8 +164,8 @@ async fn full_lifecycle_pinned_and_future_memory() {
 async fn classifier_auto_pins_semantic_facts() {
     struct PinSemantic;
     impl PersistenceClassifier for PinSemantic {
-        fn should_pin(&self, fact: &Fact) -> bool {
-            fact.fact_type == FactType::Semantic
+        fn should_pin(&self, input: &ClassifierInput) -> bool {
+            input.fact_type == FactType::Semantic
         }
     }
 

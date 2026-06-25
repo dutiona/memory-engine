@@ -7,8 +7,8 @@ use crate::traits::{
     PersistenceClassifier, SummarizableContent, SummaryGenerator,
 };
 use crate::types::{
-    AddFactOptions, AddFactRequest, EmbeddingFingerprint, EventType, Fact, FactType, NewEvent,
-    NewFact,
+    AddFactOptions, AddFactRequest, ClassifierInput, EmbeddingFingerprint, EventType, Fact,
+    FactType, NewEvent, NewFact,
 };
 
 const DIM: usize = 4;
@@ -2057,8 +2057,8 @@ async fn add_fact_with_explicit_pin() {
 async fn add_fact_with_classifier() {
     struct PinSemantic;
     impl PersistenceClassifier for PinSemantic {
-        fn should_pin(&self, fact: &Fact) -> bool {
-            fact.fact_type == FactType::Semantic
+        fn should_pin(&self, input: &ClassifierInput) -> bool {
+            input.fact_type == FactType::Semantic
         }
     }
 
@@ -2104,7 +2104,7 @@ async fn add_fact_with_classifier() {
 async fn explicit_pin_overrides_classifier() {
     struct AlwaysPin;
     impl PersistenceClassifier for AlwaysPin {
-        fn should_pin(&self, _fact: &Fact) -> bool {
+        fn should_pin(&self, _input: &ClassifierInput) -> bool {
             true
         }
     }
@@ -4150,7 +4150,7 @@ async fn add_facts_batch_with_scopes() {
 async fn add_facts_batch_with_classifier() {
     struct AlwaysPin;
     impl PersistenceClassifier for AlwaysPin {
-        fn should_pin(&self, _fact: &Fact) -> bool {
+        fn should_pin(&self, _input: &ClassifierInput) -> bool {
             true
         }
     }
@@ -4178,6 +4178,98 @@ async fn add_facts_batch_with_classifier() {
         .unwrap();
     let fact = engine.get_fact(ids[0]).await.unwrap();
     assert!(fact.is_pinned);
+}
+
+/// Multi-entry batch with a *discriminating* classifier, interleaving
+/// classifier-decided slots (`opts.pinned == None`) with caller-pinned slots
+/// (`Some(true)`/`Some(false)`).
+///
+/// This is the regression guard for the `compute_batch_pins` slot/pending
+/// stitching (`src/engine/ingest.rs`): each `None` slot must consume the *next*
+/// classifier result IN ORDER, and the `ClassifierInput` built per entry must
+/// carry *that* entry's own `fact_type`/`content` — not a neighbour's. A
+/// single-entry batch with a constant classifier (see the test above) cannot
+/// detect a mis-alignment: with one slot and one pending result, any ordering
+/// bug is invisible. Here the classifier verdict depends on `fact_type`
+/// (`Semantic` → pin, `Episodic` → no pin), and the `None`/`Some` slots are
+/// interleaved so an off-by-one in the stitch flips an observable `is_pinned`.
+#[tokio::test]
+async fn add_facts_batch_classifier_interleaved_slots_align() {
+    /// Pins iff the fact is `Semantic` — proves the per-entry `ClassifierInput`
+    /// carries the right `fact_type` (and that results map to the right slot).
+    struct PinSemantic;
+    impl PersistenceClassifier for PinSemantic {
+        fn should_pin(&self, input: &ClassifierInput) -> bool {
+            input.fact_type == FactType::Semantic
+        }
+    }
+
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(MockEmbedder { dim: DIM });
+
+    // The classifier-decided slots (None) are deliberately NON-palindromic in
+    // their verdicts (slots 0/2/4 → pin/skip/skip), so a mis-ordered stitch
+    // (e.g. results applied in reverse) flips an observable `is_pinned` rather
+    // than merely shuffling equal values.
+    //
+    // (content, fact_type, opts.pinned, expected is_pinned)
+    //   slot 0: Semantic,  None       → classifier pins  → true
+    //   slot 1: Episodic,  Some(true) → caller override  → true  (classifier would say false)
+    //   slot 2: Episodic,  None       → classifier skips → false
+    //   slot 3: Semantic,  Some(false)→ caller override  → false (classifier would say true)
+    //   slot 4: Episodic,  None       → classifier skips → false
+    let cases: [(&str, FactType, Option<bool>, bool); 5] = [
+        ("auto-semantic-pinned", FactType::Semantic, None, true),
+        ("caller-pin-episodic", FactType::Episodic, Some(true), true),
+        ("auto-episodic-a", FactType::Episodic, None, false),
+        (
+            "caller-unpin-semantic",
+            FactType::Semantic,
+            Some(false),
+            false,
+        ),
+        ("auto-episodic-b", FactType::Episodic, None, false),
+    ];
+
+    let entries: Vec<AddFactRequest> = cases
+        .iter()
+        .map(|(content, fact_type, pinned, _)| AddFactRequest {
+            content: (*content).into(),
+            fact_type: *fact_type,
+            source_event_id: None,
+            scope: None,
+            opts: pinned.map(|p| AddFactOptions {
+                pinned: Some(p),
+                ..Default::default()
+            }),
+        })
+        .collect();
+
+    let ids = engine
+        .add_facts_batch(
+            &entries,
+            embedder.clone(),
+            Some(std::sync::Arc::new(PinSemantic) as std::sync::Arc<dyn PersistenceClassifier>),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), cases.len());
+
+    for (id, (content, _, _, expected_pinned)) in ids.iter().zip(cases.iter()) {
+        let fact = engine.get_fact(*id).await.unwrap();
+        // The id-order must mirror the entry order, so each fact's content
+        // confirms we are asserting against the matching slot.
+        assert_eq!(
+            fact.content, *content,
+            "fact ids must preserve batch entry order"
+        );
+        assert_eq!(
+            fact.is_pinned, *expected_pinned,
+            "slot for {content:?} got is_pinned={} (expected {expected_pinned})",
+            fact.is_pinned
+        );
+    }
 }
 
 #[tokio::test]

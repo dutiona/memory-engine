@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::search::hybrid::SearchResult;
-use crate::types::{ConsolidationProposal, EmbeddingFingerprint, Fact};
+use crate::types::{ClassifierInput, ConsolidationProposal, EmbeddingFingerprint, Fact};
 
 // --- Phase 1: Embedding provider (fully used) ---
 
@@ -225,19 +225,21 @@ pub enum CrudDecision {
 ///
 /// Default implementation returns `false` — opt-in, zero behavior change.
 ///
-/// **Classifier input caveat:** The `Fact` passed to `should_pin()` during
-/// `add_fact()` is a pre-insert synthetic with `id=0`, `scope_id=0`,
-/// `importance_score` seeded from base `importance`, and no graph connectivity.
-/// Classifiers should only rely on `content`, `fact_type`, `importance`
-/// (caller hint), and `metadata` — not on `id`, `scope_id`,
-/// `importance_score`, or `access_count`.
+/// **Classifier input:** `should_pin` receives a [`ClassifierInput`] — an owned
+/// view of the *only* four fields a classifier is authorised to read at
+/// classification time: `content`, `fact_type`, `importance` (the caller hint),
+/// and `metadata`. The fact is pre-insert, so its `id`, `scope_id`,
+/// `importance_score`, graph connectivity, and timestamps are either unassigned
+/// or off-limits and are deliberately **not** exposed. This replaced an earlier
+/// `&Fact` signature whose callers built a 20-field synthetic `Fact` (cloning the
+/// embedding) purely to satisfy the parameter type (#118/#343/#388).
 ///
 /// Requires `Send + Sync`: classifiers are shared across the engine's worker
 /// threads alongside the other consumer providers.
 pub trait PersistenceClassifier: Send + Sync {
     /// Decide if a fact should be pinned (never forgotten).
-    fn should_pin(&self, fact: &Fact) -> bool {
-        let _ = fact;
+    fn should_pin(&self, input: &ClassifierInput) -> bool {
+        let _ = input;
         false
     }
 }
@@ -644,28 +646,13 @@ impl ForgetPolicy {
 mod tests {
     use super::*;
     use crate::types::FactType;
-    use chrono::Utc;
 
-    fn stub_fact() -> Fact {
-        Fact {
-            id: 0,
+    fn stub_classifier_input() -> ClassifierInput {
+        ClassifierInput {
             content: String::new(),
-            content_hash: String::new(),
-            embedding: vec![],
             fact_type: FactType::Semantic,
-            t_created: Utc::now(),
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
             importance: 0.5,
-            access_count: 0,
-            last_accessed: Utc::now(),
             metadata: serde_json::Value::Null,
-            scope_id: 0,
-            is_pinned: false,
-            importance_score: 0.5,
-            surfaced_at: None,
         }
     }
 
@@ -1076,7 +1063,7 @@ mod tests {
         impl PersistenceClassifier for Dummy {}
         let p: &dyn PersistenceClassifier = &Dummy;
         // Default impl returns false
-        assert!(!p.should_pin(&stub_fact()));
+        assert!(!p.should_pin(&stub_classifier_input()));
     }
 
     #[test]
@@ -1241,6 +1228,6 @@ mod tests {
     fn persistence_classifier_default_returns_false() {
         struct Blank;
         impl PersistenceClassifier for Blank {}
-        assert!(!Blank.should_pin(&stub_fact()));
+        assert!(!Blank.should_pin(&stub_classifier_input()));
     }
 }

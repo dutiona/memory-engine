@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::limits::{check_json_size, check_str_size};
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
-use crate::types::{AddFactRequest, EmbeddingFingerprint, Fact, NewEvent, NewFact};
+use crate::types::{AddFactRequest, ClassifierInput, EmbeddingFingerprint, NewEvent, NewFact};
 
 use super::{MemoryEngine, spawn_join_err};
 
@@ -144,36 +144,26 @@ impl MemoryEngine {
         let effective_last_accessed = opts.last_accessed.unwrap_or(now);
 
         // Classify off the async executor (a classifier may be a blocking LLM/HTTP
-        // call). scope_id=0 placeholder; classifiers rely on content/type/importance/metadata.
+        // call). Classifiers read only content/fact_type/importance/metadata.
         let is_pinned = match opts.pinned {
             Some(p) => p,
             None => match classifier {
                 None => false,
                 Some(c) => {
-                    let temp = Fact {
-                        id: 0,
+                    // Only the four classifier-authorised fields (no embedding
+                    // clone, no 20-field synthetic Fact — #118/#343/#388). Owned
+                    // so it moves into the blocking task that runs the (possibly
+                    // blocking) classifier off the async executor.
+                    let input = ClassifierInput {
                         content: req.content.clone(),
-                        content_hash: String::new(),
-                        embedding: embedding.clone(),
                         fact_type: req.fact_type,
-                        t_created: effective_created,
-                        t_expired: None,
-                        t_valid: opts.t_valid,
-                        t_invalid: opts.t_invalid,
-                        source_event_id: req.source_event_id,
                         importance: base_importance,
-                        access_count: 0,
-                        last_accessed: effective_last_accessed,
                         metadata: opts
                             .metadata
                             .clone()
                             .unwrap_or_else(|| serde_json::json!({})),
-                        scope_id: 0,
-                        is_pinned: false,
-                        importance_score: base_importance,
-                        surfaced_at: None,
                     };
-                    tokio::task::spawn_blocking(move || c.should_pin(&temp))
+                    tokio::task::spawn_blocking(move || c.should_pin(&input))
                         .await
                         .map_err(spawn_join_err)?
                 }
@@ -383,9 +373,7 @@ impl MemoryEngine {
 
         // --- Phase 2: Classify + prepare (auto-pin off the executor) ---
         let now = Utc::now();
-        let pins = self
-            .compute_batch_pins(entries, &embeddings, classifier, now)
-            .await?;
+        let pins = self.compute_batch_pins(entries, classifier).await?;
 
         // --- Phase 3: build NewFacts (+ scope paths) for the atomic batch insert ---
         // `scope_id` here is a placeholder; `insert_facts_batch_atomic` resolves
@@ -449,45 +437,30 @@ impl MemoryEngine {
     async fn compute_batch_pins(
         &self,
         entries: &[&AddFactRequest],
-        embeddings: &[Vec<f32>],
         classifier: Option<Arc<dyn PersistenceClassifier>>,
-        now: DateTime<Utc>,
     ) -> Result<Vec<bool>> {
         // Resolve the slots that need no classification inline (caller-`pinned` set,
-        // or no classifier → `false`); collect the temp facts that DO need it into
-        // `pending` so the whole subset is classified in ONE blocking task instead of
+        // or no classifier → `false`); collect a `ClassifierInput` for each entry that
+        // DOES need it into `pending` so the whole subset is classified in ONE blocking task instead of
         // one task per entry (a batch of up to MAX_BATCH_SIZE = 10k would otherwise
         // spawn 10k). A `None` slot consumes the next `pending` result, in order.
         let mut slots: Vec<Option<bool>> = Vec::with_capacity(entries.len());
-        let mut pending: Vec<Fact> = Vec::new();
-        for (entry, embedding) in entries.iter().zip(embeddings) {
+        let mut pending: Vec<ClassifierInput> = Vec::new();
+        for entry in entries {
             let opts = entry.opts.clone().unwrap_or_default();
             slots.push(match opts.pinned {
                 Some(p) => Some(p),
                 None if classifier.is_some() => {
-                    let base_importance = opts.importance.unwrap_or(0.5);
-                    pending.push(Fact {
-                        id: 0,
+                    // Only the four classifier-authorised fields — no embedding
+                    // clone, no synthetic Fact (#118/#343/#388).
+                    pending.push(ClassifierInput {
                         content: entry.content.clone(),
-                        content_hash: String::new(),
-                        embedding: embedding.clone(),
                         fact_type: entry.fact_type,
-                        t_created: opts.t_created.unwrap_or(now),
-                        t_expired: None,
-                        t_valid: opts.t_valid,
-                        t_invalid: opts.t_invalid,
-                        source_event_id: entry.source_event_id,
-                        importance: base_importance,
-                        access_count: 0,
-                        last_accessed: opts.last_accessed.unwrap_or(now),
+                        importance: opts.importance.unwrap_or(0.5),
                         metadata: opts
                             .metadata
                             .clone()
                             .unwrap_or_else(|| serde_json::json!({})),
-                        scope_id: 0,
-                        is_pinned: false,
-                        importance_score: base_importance,
-                        surfaced_at: None,
                     });
                     None
                 }
@@ -500,7 +473,7 @@ impl MemoryEngine {
             Some(c) if !pending.is_empty() => tokio::task::spawn_blocking(move || {
                 pending
                     .iter()
-                    .map(|f| c.should_pin(f))
+                    .map(|input| c.should_pin(input))
                     .collect::<Vec<bool>>()
             })
             .await
