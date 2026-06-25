@@ -401,10 +401,15 @@ impl FactGraph for SqliteBackend {
     }
 
     // READ
-    async fn list_pinned_facts(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Fact>> {
+    async fn list_pinned_facts(
+        &self,
+        scope_ids: &[i64],
+        limit: Option<usize>,
+    ) -> Result<Vec<Fact>> {
         let scope_ids = scope_ids.to_vec();
         let dim = self.embed_dim;
-        self.block_read(move |c| FactStore::new(c, dim).list_pinned(&scope_ids, limit))
+        let cap = limit.unwrap_or(usize::MAX);
+        self.block_read(move |c| FactStore::new(c, dim).list_pinned(&scope_ids, cap))
             .await
     }
 
@@ -1189,7 +1194,7 @@ mod tests {
                 .unwrap()
         };
         let be = backend(Arc::clone(&pool));
-        let got = be.list_pinned_facts(&[], usize::MAX).await.unwrap();
+        let got = be.list_pinned_facts(&[], None).await.unwrap();
         // Both should return the same 2 rows (empty = ALL scopes).
         assert_eq!(
             got.len(),
@@ -1201,7 +1206,7 @@ mod tests {
             oracle.iter().map(|f| f.id).collect::<HashSet<_>>(),
         );
         // #395: the limit is honored through the port — a cap of 1 returns 1 row.
-        let capped = be.list_pinned_facts(&[], 1).await.unwrap();
+        let capped = be.list_pinned_facts(&[], Some(1)).await.unwrap();
         assert_eq!(capped.len(), 1, "limit=1 must cap at one pinned fact");
     }
 

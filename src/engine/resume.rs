@@ -64,7 +64,7 @@ impl MemoryEngine {
         // of pinned facts beyond `pinned_cap` only to discard them in Rust.
         let pinned = self
             .storage
-            .list_pinned_facts(&[], config.pinned_cap)
+            .list_pinned_facts(&[], Some(config.pinned_cap))
             .await?;
         seen.extend(pinned.iter().map(|f| f.id));
 
