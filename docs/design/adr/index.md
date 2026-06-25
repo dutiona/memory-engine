@@ -20,4 +20,5 @@ Key design decisions, documented as ADRs. Each records the context, decision, an
 0013-typestate-engine-builder
 0014-delta-based-cycle-report
 0015-cross-layer-embedding-identity-policy
+0016-geometric-associative-memory
 ```
