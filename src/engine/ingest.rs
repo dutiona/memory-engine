@@ -19,6 +19,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Database` on insert failure.
     pub async fn ingest(&self, event: &NewEvent) -> Result<i64> {
+        self.ensure_open()?;
         check_json_size(&event.payload, "event payload")?;
         self.storage.insert_event(event).await
     }
@@ -60,6 +61,7 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<i64> {
+        self.ensure_open()?;
         Self::validate_add_fact_request(req)?;
         // Embed off the async executor (the provider call may be a blocking HTTP
         // round-trip; running it inline would park the runtime thread, and a
@@ -101,6 +103,7 @@ impl MemoryEngine {
         declared: &EmbeddingFingerprint,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<i64> {
+        self.ensure_open()?;
         Self::validate_add_fact_request(req)?;
         // The caller's declared fingerprint is treated exactly like a live
         // provider's: the atomic insert records-if-absent (and #614-rejects a
@@ -235,6 +238,7 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<Vec<i64>> {
+        self.ensure_open()?;
         if entries.is_empty() {
             return Ok(Vec::new());
         }
@@ -278,6 +282,7 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<Vec<std::result::Result<i64, MemoryError>>> {
+        self.ensure_open()?;
         if entries.is_empty() {
             return Ok(Vec::new());
         }

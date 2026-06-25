@@ -54,6 +54,7 @@ impl MemoryEngine {
         config: &crate::bootstrap::BootstrapConfig,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
+        self.ensure_open()?;
         let scope_id = self
             .resolve_bootstrap_scope(config.scope.as_deref())
             .await?;
@@ -86,6 +87,7 @@ impl MemoryEngine {
         config: &crate::bootstrap::BootstrapConfig,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
+        self.ensure_open()?;
         let scope_id = self
             .resolve_bootstrap_scope(config.scope.as_deref())
             .await?;
@@ -132,6 +134,7 @@ impl MemoryEngine {
         config: &crate::bootstrap::BootstrapConfig,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
+        self.ensure_open()?;
         let scope_id = self
             .resolve_bootstrap_scope(config.scope.as_deref())
             .await?;

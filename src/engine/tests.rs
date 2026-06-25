@@ -5278,4 +5278,62 @@ mod snapshot_integration {
         assert_eq!(snap_graph_nodes, rebuild_graph_nodes);
         assert_eq!(snap_graph_edges, rebuild_graph_edges);
     }
+
+    // --- #742 Phase 1: the reconstruction dimension fence ---
+
+    #[tokio::test]
+    async fn fence_blocks_embedding_touching_ops_until_reopen() {
+        // A handle fenced by a different-dim reconstruction refuses embedding-touching
+        // reads/writes with the actionable EmbeddingReopenRequired, while
+        // dimension-independent accessors keep working.
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+            std::sync::Arc::new(MockEmbedder { dim: DIM });
+        let req = |content: &str| AddFactRequest {
+            content: content.into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        };
+        let id = engine
+            .add_fact(&req("before fence"), embedder.clone(), None)
+            .await
+            .unwrap();
+
+        // Not fenced yet.
+        assert_eq!(engine.reopen_required(), None);
+
+        // Arm the fence at a new dimension (simulating a different-dim promote).
+        engine.force_reopen_fence(8);
+        assert_eq!(engine.reopen_required(), Some(8));
+
+        // Representative gated reads/writes now refuse with the actionable error.
+        assert!(matches!(
+            engine.get_fact(id).await,
+            Err(MemoryError::EmbeddingReopenRequired { new_dim: 8 })
+        ));
+        assert!(matches!(
+            engine.list_active_facts(None).await,
+            Err(MemoryError::EmbeddingReopenRequired { new_dim: 8 })
+        ));
+        assert!(matches!(
+            engine
+                .execute_query(&MemoryQuery::new().text("before"))
+                .await,
+            Err(MemoryError::EmbeddingReopenRequired { new_dim: 8 })
+        ));
+        assert!(matches!(
+            engine
+                .add_fact(&req("after fence"), embedder.clone(), None)
+                .await,
+            Err(MemoryError::EmbeddingReopenRequired { new_dim: 8 })
+        ));
+
+        // Dimension-independent accessors are NOT fenced.
+        assert_eq!(engine.embed_dim(), DIM);
+        assert_eq!(engine.reopen_required(), Some(8));
+        // A fenced flush is a clean no-op (not an error).
+        assert!(!engine.flush_snapshot().await.unwrap());
+    }
 }

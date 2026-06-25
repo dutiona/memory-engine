@@ -419,6 +419,20 @@ pub enum MemoryError {
         actual: Box<crate::types::EmbeddingFingerprint>,
     },
 
+    /// A different-dimension background reconstruction (#742) promoted a new
+    /// embedding space at `new_dim`, so this engine handle's cached `embed_dim` is
+    /// now stale: its `facts.embedding` blobs are `new_dim`-wide but every read
+    /// deserializes at the old dimension. The handle is **fenced** — it refuses
+    /// embedding-touching reads/writes until the consumer drops it and reopens the
+    /// engine at `new_dim` (e.g. `EngineConfig::new(path, new_dim)`), which
+    /// re-validates cleanly and rebuilds the vector index at the new dimension.
+    /// Same-dimension reconstruction does not fence (the cached dim stays valid).
+    #[error(
+        "engine dimension changed to {new_dim} by reconstruction; \
+         reopen the engine at this dimension before further use"
+    )]
+    EmbeddingReopenRequired { new_dim: usize },
+
     /// A precondition or input-validation conflict; see [`ConflictError`] for the
     /// specific cause (incompatible query options, out-of-range parameters,
     /// malformed scope labels, restore/dump preconditions, or a consumer-trait

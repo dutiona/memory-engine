@@ -39,6 +39,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Database` on SQL failure.
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
     pub async fn archive(&self, policy: &ArchivePolicy) -> Result<Option<ArchiveStats>> {
+        self.ensure_open()?;
         // Fail fast on read-only engines before any filesystem I/O — the atomic
         // commit below the seam checks this too, but we want to avoid writing an
         // orphan .pak file that would never be committed.

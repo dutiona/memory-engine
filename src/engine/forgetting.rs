@@ -18,6 +18,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Database` on SQL failure.
     pub async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
+        self.ensure_open()?;
         // The prune walk reads the in-memory graph (degree per fact) *before* any
         // port write and mutates it (`remove_edges_by_fact`) *after* the expiries
         // commit. To keep the future `Send`, the graph guards live entirely inside
