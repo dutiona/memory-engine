@@ -272,7 +272,6 @@ mod tests {
             confidence: 0.9,
             method_version: "dbscan-v1".into(),
             representative_ids: vec![1, 2],
-            lineage_id: 0,
         };
         let report = CycleReport {
             deltas: vec![

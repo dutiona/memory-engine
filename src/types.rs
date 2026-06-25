@@ -321,11 +321,17 @@ pub enum ScopeQuery {
 /// Lightweight provenance envelope attached to promoted wisdom facts.
 ///
 /// Carries summary statistics about the promotion (how many source facts,
-/// across how many sessions, confidence score). The full source chain lives
-/// in the sidecar `lineage` table, loaded on demand via `lineage_id`.
+/// across how many sessions, confidence score). It is the **serialized envelope**:
+/// every field round-trips through the `lineage.provenance` JSON column and the
+/// promoted fact's `metadata.promotion_provenance` key.
 ///
-/// `lineage_id` is reconstructed from the DB row PK on read and is
-/// **not** persisted in the JSON column (skipped during serialization).
+/// The owning `lineage_id` (DB row PK) is **not** part of this envelope — it is a
+/// property of the row, not of the provenance. Read paths return it alongside the
+/// envelope in the companion [`LineageRecord`] / [`LineageSnapshotEntry`], and the
+/// write path returns it in [`PromotionResult`]. Previously this struct carried a
+/// phantom `lineage_id: i64` with `#[serde(skip_serializing, default)]` that was
+/// always `0` on deserialization and reconstructed from the PK on read — a lying
+/// field with an invisible "0 means not-yet-persisted" invariant. It is removed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromotionProvenance {
     pub source_count: u32,
@@ -336,10 +342,6 @@ pub struct PromotionProvenance {
     pub method_version: String,
     /// 3-5 most representative source fact IDs (for quick human review).
     pub representative_ids: Vec<i64>,
-    /// Foreign key to the `lineage` table for the full source chain.
-    /// Reconstructed from the row PK on read — not stored in the provenance JSON.
-    #[serde(skip_serializing, default)]
-    pub lineage_id: i64,
 }
 
 /// A row in the `lineage` sidecar table (full source chain).
@@ -896,6 +898,90 @@ pub struct PromotionResult {
 #[error("unknown activity status: {0}")]
 pub struct ParseActivityStatusError(pub String);
 
+/// Outcome class of a recorded tool activity.
+///
+/// Replaces the previously stringly-typed `outcome_class` field on [`Activity`],
+/// [`NewActivity`], and [`RecordActivityRequest`]. Encoding the known outcomes as
+/// variants makes the dedup-key invariant (the `(session_id, tool_name, args_hash,
+/// outcome_class, scope_id)` index keys off the *string*) misuse-resistant: a
+/// consumer can no longer accidentally pass an empty string that would silently
+/// corrupt deduplication.
+///
+/// # String representation (DB + JSON back-compat)
+///
+/// [`Display`](fmt::Display)/[`FromStr`] are a total round-trip with the on-disk
+/// `outcome_class TEXT` column and the MCP JSON boundary:
+/// `Success` ⇄ `"success"`, `Error` ⇄ `"error"`, `TestFailure` ⇄ `"test_failure"`.
+/// Any other stored string parses into the open [`Other`](Self::Other) variant and
+/// serializes back **verbatim**, so existing activity rows keep their exact value.
+/// [`Default`] is [`Success`](Self::Success), matching the DB column default.
+///
+/// The [`Other`](Self::Other) arm is an escape hatch for consumer-defined classes;
+/// it deliberately **bypasses** compile-time checking and should be reserved for
+/// values not covered by a named variant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum OutcomeClass {
+    /// The tool invocation succeeded. Serializes as `"success"`. Default variant.
+    #[default]
+    Success,
+    /// The tool invocation failed. Serializes as `"error"`.
+    Error,
+    /// A test run reported failures. Serializes as `"test_failure"`.
+    TestFailure,
+    /// Any consumer-defined outcome class. Serializes as its inner string verbatim;
+    /// bypasses the compile-time invariant the named variants provide.
+    Other(String),
+}
+
+impl fmt::Display for OutcomeClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => f.write_str("success"),
+            Self::Error => f.write_str("error"),
+            Self::TestFailure => f.write_str("test_failure"),
+            Self::Other(s) => f.write_str(s),
+        }
+    }
+}
+
+impl FromStr for OutcomeClass {
+    type Err = std::convert::Infallible;
+
+    /// Total parse: every string maps to a variant, unknown ones into
+    /// [`Other`](Self::Other). The named arms match the exact lowercase strings the
+    /// store writes; parsing is therefore the inverse of [`Display`](fmt::Display)
+    /// and preserves stored values byte-for-byte on round-trip.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "success" => Self::Success,
+            "error" => Self::Error,
+            "test_failure" => Self::TestFailure,
+            other => Self::Other(other.to_owned()),
+        })
+    }
+}
+
+impl Serialize for OutcomeClass {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for OutcomeClass {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        // `FromStr` is infallible (`Other` captures the open set), so the `Err`
+        // arm is unreachable — destructure the `Infallible` `Ok` directly.
+        let Ok(class) = s.parse();
+        Ok(class)
+    }
+}
+
 impl std::str::FromStr for ActivityStatus {
     type Err = ParseActivityStatusError;
 
@@ -919,7 +1005,7 @@ pub struct Activity {
     pub args_hash: String,
     pub args: serde_json::Value,
     pub result_summary: Option<String>,
-    pub outcome_class: String,
+    pub outcome_class: OutcomeClass,
     pub status: ActivityStatus,
     pub occurrence_count: i64,
     pub first_seen: DateTime<Utc>,
@@ -936,7 +1022,7 @@ pub struct NewActivity {
     pub args_hash: String,
     pub args: serde_json::Value,
     pub result_summary: Option<String>,
-    pub outcome_class: String,
+    pub outcome_class: OutcomeClass,
     pub timestamp: DateTime<Utc>,
     pub scope_id: i64,
 }
@@ -961,8 +1047,9 @@ pub struct RecordActivityRequest {
     pub session_id: String,
     pub timestamp: DateTime<Utc>,
     pub scope_path: Option<String>,
-    /// Outcome class (e.g. "success", "error", "`test_failure`"). Defaults to "success".
-    pub outcome_class: Option<String>,
+    /// Outcome class of the activity. `None` defaults to
+    /// [`OutcomeClass::Success`] (the DB column default).
+    pub outcome_class: Option<OutcomeClass>,
 }
 
 /// Result of recording an activity.
@@ -1284,6 +1371,72 @@ mod tests {
         assert!(ActivityStatus::from_str("").is_err());
     }
 
+    // --- OutcomeClass (#347) ---
+
+    #[test]
+    fn outcome_class_display_emits_db_strings() {
+        // The named variants render exactly the lowercase strings the store writes.
+        assert_eq!(OutcomeClass::Success.to_string(), "success");
+        assert_eq!(OutcomeClass::Error.to_string(), "error");
+        assert_eq!(OutcomeClass::TestFailure.to_string(), "test_failure");
+        assert_eq!(OutcomeClass::Other("flaky".into()).to_string(), "flaky");
+    }
+
+    #[test]
+    fn outcome_class_default_is_success() {
+        // Matches the `outcome_class TEXT NOT NULL DEFAULT 'success'` column default.
+        assert_eq!(OutcomeClass::default(), OutcomeClass::Success);
+    }
+
+    #[test]
+    fn outcome_class_from_str_maps_known_and_open_set() {
+        use std::str::FromStr;
+        let Ok(s) = OutcomeClass::from_str("success");
+        assert_eq!(s, OutcomeClass::Success);
+        let Ok(e) = OutcomeClass::from_str("error");
+        assert_eq!(e, OutcomeClass::Error);
+        let Ok(tf) = OutcomeClass::from_str("test_failure");
+        assert_eq!(tf, OutcomeClass::TestFailure);
+        // Any unrecognized string lands in the open `Other` arm verbatim — this is
+        // the back-compat guarantee for activity rows written before this enum.
+        let Ok(o) = OutcomeClass::from_str("custom-thing");
+        assert_eq!(o, OutcomeClass::Other("custom-thing".into()));
+        // Even the empty string round-trips (it is no longer a silent footgun: a
+        // consumer must spell `Other("")` to produce it).
+        let Ok(empty) = OutcomeClass::from_str("");
+        assert_eq!(empty, OutcomeClass::Other(String::new()));
+    }
+
+    #[test]
+    fn outcome_class_string_round_trip_is_lossless() {
+        use std::str::FromStr;
+        for class in [
+            OutcomeClass::Success,
+            OutcomeClass::Error,
+            OutcomeClass::TestFailure,
+            OutcomeClass::Other("vendor-specific".into()),
+        ] {
+            let rendered = class.to_string();
+            let Ok(parsed) = OutcomeClass::from_str(&rendered);
+            assert_eq!(parsed, class, "Display->from_str round-trip failed");
+        }
+    }
+
+    #[test]
+    fn outcome_class_serde_is_a_plain_string() {
+        // Wire format is a bare JSON string (back-compat with the prior `String`
+        // field + the MCP `"type": "string"` schema), not an externally-tagged enum.
+        assert_eq!(
+            serde_json::to_string(&OutcomeClass::TestFailure).unwrap(),
+            "\"test_failure\""
+        );
+        let back: OutcomeClass = serde_json::from_str("\"error\"").unwrap();
+        assert_eq!(back, OutcomeClass::Error);
+        // An unknown stored value deserializes into the open arm, never an error.
+        let open: OutcomeClass = serde_json::from_str("\"legacy_value\"").unwrap();
+        assert_eq!(open, OutcomeClass::Other("legacy_value".into()));
+    }
+
     // --- Phase 5a type tests ---
 
     #[test]
@@ -1565,16 +1718,14 @@ mod tests {
             confidence: 0.87,
             method_version: "dreamcycle-v1".into(),
             representative_ids: vec![10, 20, 30],
-            lineage_id: 42,
         };
         let json = serde_json::to_string(&prov).unwrap();
-        // lineage_id is skip_serializing — should not appear in JSON
+        // The owning lineage_id is no longer a field — it belongs to the row, not
+        // the envelope — so it must never leak into the serialized provenance.
         assert!(!json.contains("lineage_id"));
         let back: PromotionProvenance = serde_json::from_str(&json).unwrap();
-        // lineage_id defaults to 0 on deserialization (not round-tripped)
-        assert_eq!(back.lineage_id, 0);
-        assert_eq!(back.source_count, prov.source_count);
-        assert_eq!(back.method_version, prov.method_version);
+        // Every remaining field is a true, lossless round-trip.
+        assert_eq!(back, prov);
     }
 
     #[test]
@@ -1626,6 +1777,103 @@ mod tests {
         let back: ConsolidationProposal = serde_json::from_str(&json).unwrap();
         assert_eq!(empty, back);
         assert!(back.merges.is_empty());
+    }
+
+    /// Property-based serde round-trips for the core types whose invariants the
+    /// example tests above only spot-check at one or two fixed inputs (#444).
+    ///
+    /// The example tests pin specific shapes (one `PromotionProvenance`, two
+    /// `Fact` JSON blobs); these assert the round-trip and field-omission
+    /// invariants hold across the *whole* input space — arbitrary counts, scores,
+    /// timestamps, id vectors, and the `surfaced_at` `Some`/`None` axis.
+    mod proptest_serde_roundtrip {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Build a UTC timestamp from a second-offset proptest sample, clamped to a
+        /// representable range so the strategy never produces an out-of-range value.
+        fn ts_from_secs(secs: i64) -> DateTime<Utc> {
+            // chrono's representable range is enormous; this band is more than wide
+            // enough to exercise the serialization without flirting with overflow.
+            let clamped = secs.clamp(-62_135_596_800, 253_402_300_799);
+            DateTime::<Utc>::from_timestamp(clamped, 0).unwrap_or_else(Utc::now)
+        }
+
+        proptest! {
+            /// `PromotionProvenance` is a lossless serde round-trip over arbitrary
+            /// field values, and — post-#402 — no `lineage_id` token ever appears in
+            /// the serialized JSON (the field was removed; the row PK is the
+            /// authoritative id, carried on the companion record, not the envelope).
+            #[test]
+            fn promotion_provenance_roundtrips_and_omits_lineage_id(
+                source_count in any::<u32>(),
+                session_count in any::<u32>(),
+                start_secs in any::<i64>(),
+                end_secs in any::<i64>(),
+                // Confidence is a score in [0, 1] by construction (see
+                // `cluster_provenance`); this also keeps it clear of the
+                // extreme-exponent magnitudes where serde_json's f64 formatting is
+                // not bit-exact — a property of the encoder, not of the type.
+                confidence in 0.0_f64..=1.0,
+                method_version in ".*",
+                representative_ids in proptest::collection::vec(any::<i64>(), 0..8),
+            ) {
+                let prov = PromotionProvenance {
+                    source_count,
+                    session_count,
+                    date_range_start: ts_from_secs(start_secs),
+                    date_range_end: ts_from_secs(end_secs),
+                    confidence,
+                    method_version,
+                    representative_ids,
+                };
+                let value = serde_json::to_value(&prov).unwrap();
+                // The phantom field is gone for good: no `lineage_id` *key* may ever
+                // appear in the serialized object, for any input. Checked on the
+                // parsed object (not a substring of the raw text) so an arbitrary
+                // `method_version` that happens to contain the token cannot fool it.
+                prop_assert!(
+                    value.as_object().is_some_and(|o| !o.contains_key("lineage_id")),
+                    "lineage_id key leaked into serialized provenance"
+                );
+                let back: PromotionProvenance = serde_json::from_value(value).unwrap();
+                prop_assert_eq!(back, prov);
+            }
+
+            /// `Fact.surfaced_at` (a `#[serde(default)] Option<DateTime<Utc>>`)
+            /// round-trips for both the `Some` and `None` arms across arbitrary
+            /// timestamps — the field the example tests exercise with only two fixed
+            /// JSON strings.
+            #[test]
+            fn fact_surfaced_at_roundtrips_over_some_and_none(
+                surfaced_secs in proptest::option::of(any::<i64>()),
+            ) {
+                let surfaced_at = surfaced_secs.map(ts_from_secs);
+                let fact = Fact {
+                    id: 1,
+                    content: "p".into(),
+                    content_hash: "h".into(),
+                    embedding: vec![0.0_f32],
+                    fact_type: FactType::Semantic,
+                    t_created: ts_from_secs(0),
+                    t_expired: None,
+                    t_valid: None,
+                    t_invalid: None,
+                    source_event_id: None,
+                    importance: 0.5,
+                    access_count: 0,
+                    last_accessed: ts_from_secs(0),
+                    metadata: serde_json::json!({}),
+                    scope_id: 1,
+                    is_pinned: false,
+                    importance_score: 0.5,
+                    surfaced_at,
+                };
+                let json = serde_json::to_string(&fact).unwrap();
+                let back: Fact = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back.surfaced_at, fact.surfaced_at);
+            }
+        }
     }
 
     // --- EmbeddingFingerprint (#612) ---

@@ -131,7 +131,7 @@ mod tests {
     use crate::pool::ConnectionPool;
     use crate::storage::session::SessionStore;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{ActivityStatus, NewActivity, SessionCheckpoint};
+    use crate::types::{ActivityStatus, NewActivity, OutcomeClass, SessionCheckpoint};
 
     const DIM: usize = 4;
 
@@ -147,7 +147,7 @@ mod tests {
             args_hash: format!("{tool:0<32}"),
             args: serde_json::json!({}),
             result_summary: None,
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         }

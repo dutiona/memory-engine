@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{MemoryError, Result};
-use crate::types::{Activity, ActivityStatus, NewActivity};
+use crate::types::{Activity, ActivityStatus, NewActivity, OutcomeClass};
 
 use super::parse_timestamp;
 
@@ -48,7 +48,7 @@ impl<'a> ActivityStore<'a> {
                     activity.session_id,
                     activity.tool_name,
                     activity.args_hash,
-                    activity.outcome_class,
+                    activity.outcome_class.to_string(),
                     activity.scope_id,
                     ts,
                     dedup_window_secs,
@@ -86,7 +86,7 @@ impl<'a> ActivityStore<'a> {
                     activity.args_hash,
                     activity.args.to_string(),
                     activity.result_summary,
-                    activity.outcome_class,
+                    activity.outcome_class.to_string(),
                     ts,
                     activity.scope_id,
                 ],
@@ -223,6 +223,10 @@ fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
     })?;
     let first_seen_str: String = row.get("first_seen")?;
     let last_seen_str: String = row.get("last_seen")?;
+    // `OutcomeClass::from_str` is infallible (the open `Other` arm captures any
+    // stored string), so any historical `outcome_class` value round-trips losslessly.
+    let outcome_class_str: String = row.get("outcome_class")?;
+    let Ok(outcome_class) = outcome_class_str.parse::<OutcomeClass>();
 
     Ok(Activity {
         id: row.get("id")?,
@@ -231,7 +235,7 @@ fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
         args_hash: row.get("args_hash")?,
         args,
         result_summary: row.get("result_summary")?,
-        outcome_class: row.get("outcome_class")?,
+        outcome_class,
         status,
         occurrence_count: row.get("occurrence_count")?,
         first_seen: parse_timestamp(&first_seen_str)?,
@@ -263,7 +267,7 @@ mod tests {
             args_hash: "abc123def456abc123def456abc123de".into(),
             args: serde_json::json!({"path": "/foo/bar.rs"}),
             result_summary: Some("200 lines".into()),
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         };
@@ -277,6 +281,48 @@ mod tests {
         assert_eq!(fetched.status, ActivityStatus::Recorded);
     }
 
+    /// Persist every [`OutcomeClass`] variant through the real `SQLite` `TEXT`
+    /// column and read it back, proving the `to_string()` -> column ->
+    /// `from_str()` round-trip in [`row_to_activity`] (the entire #347
+    /// back-compat justification) holds across the persistence seam — not just
+    /// in the isolated `Display`/`FromStr` unit tests.
+    #[test]
+    fn outcome_class_roundtrips_through_sqlite() {
+        let conn = setup();
+        let store = ActivityStore::new(&conn);
+
+        // One row per variant. `args_hash` is varied per variant so the dedup
+        // index never collapses two inserts (the round-trip, not dedup, is what
+        // we are exercising) — each insert is therefore a fresh row.
+        let cases = [
+            OutcomeClass::Success,
+            OutcomeClass::Error,
+            OutcomeClass::TestFailure,
+            OutcomeClass::Other("vendor-x".into()),
+        ];
+
+        for (i, expected) in cases.into_iter().enumerate() {
+            let activity = NewActivity {
+                session_id: "sess-roundtrip".into(),
+                tool_name: "Bash".into(),
+                args_hash: format!("hash{i:028}"),
+                args: serde_json::json!({"cmd": "cargo test"}),
+                result_summary: None,
+                outcome_class: expected.clone(),
+                timestamp: Utc::now(),
+                scope_id: 1,
+            };
+            let (id, deduped) = store.insert_or_dedup(&activity, 300).unwrap();
+            assert!(!deduped, "fresh args_hash must not dedup for {expected:?}");
+
+            let fetched = store.get(id).unwrap();
+            assert_eq!(
+                fetched.outcome_class, expected,
+                "outcome_class did not survive the SQLite round-trip"
+            );
+        }
+    }
+
     #[test]
     fn dedup_within_window() {
         let conn = setup();
@@ -287,7 +333,7 @@ mod tests {
             args_hash: "abc123def456abc123def456abc123de".into(),
             args: serde_json::json!({"path": "/foo/bar.rs"}),
             result_summary: Some("200 lines".into()),
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         };
@@ -314,12 +360,12 @@ mod tests {
             args_hash: "abc123def456abc123def456abc123de".into(),
             args: serde_json::json!({"cmd": "cargo test"}),
             result_summary: Some("ok".into()),
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         };
         let failure = NewActivity {
-            outcome_class: "error".into(),
+            outcome_class: OutcomeClass::Error,
             result_summary: Some("FAILED".into()),
             ..success.clone()
         };
@@ -341,7 +387,7 @@ mod tests {
                 args_hash: format!("hash{i:032}"),
                 args: serde_json::json!({}),
                 result_summary: None,
-                outcome_class: "success".into(),
+                outcome_class: OutcomeClass::Success,
                 timestamp: Utc::now(),
                 scope_id: 1,
             };
@@ -365,7 +411,7 @@ mod tests {
                 args_hash: format!("hash{i:032}"),
                 args: serde_json::json!({}),
                 result_summary: None,
-                outcome_class: "success".into(),
+                outcome_class: OutcomeClass::Success,
                 timestamp: Utc::now(),
                 scope_id: 1,
             };
@@ -388,7 +434,7 @@ mod tests {
             args_hash: "abc123def456abc123def456abc123de".into(),
             args: serde_json::json!({"cmd": "git commit"}),
             result_summary: Some("committed".into()),
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         };

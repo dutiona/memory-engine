@@ -63,11 +63,8 @@ impl MemoryEngine {
 
         // Step 2: Compute args hash.
         let hash = args_hash(&req.args);
-        let outcome = req
-            .outcome_class
-            .as_deref()
-            .unwrap_or("success")
-            .to_string();
+        // `None` defaults to `OutcomeClass::Success` (the DB column default).
+        let outcome = req.outcome_class.clone().unwrap_or_default();
 
         // Steps 3+4: Resolve scope, then insert/dedup via the port.
         let scope_id = match req.scope_path.as_deref() {

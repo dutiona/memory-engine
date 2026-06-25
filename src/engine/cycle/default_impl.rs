@@ -165,7 +165,6 @@ fn cluster_provenance(cluster: &[FactId], by_id: &HashMap<FactId, &Fact>) -> Pro
         confidence,
         method_version: METHOD_VERSION.to_owned(),
         representative_ids,
-        lineage_id: 0,
     }
 }
 

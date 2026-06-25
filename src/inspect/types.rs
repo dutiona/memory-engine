@@ -415,7 +415,6 @@ mod tests {
                 confidence: 0.9,
                 method_version: "v1".into(),
                 representative_ids: vec![1, 2],
-                lineage_id: 21,
             },
         }
     }
@@ -705,10 +704,10 @@ mod tests {
             fact_vectors: vec![],
             config,
         };
-        // EngineSnapshot is intentionally not `PartialEq`: `PromotionProvenance`
-        // carries a denormalized `lineage_id` re-derived from its parent entry on
-        // load, so serialize→deserialize is not value-identity. Assert JSON
-        // stability (re-serialization is byte-stable) instead.
+        // EngineSnapshot does not derive `PartialEq` (it nests `serde_json::Value`
+        // metadata and float scores, for which value-identity is ill-defined), so
+        // assert JSON stability (re-serialization is byte-stable) instead of
+        // structural equality.
         assert_roundtrip_json_stable(&snapshot);
     }
 

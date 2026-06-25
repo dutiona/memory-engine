@@ -342,9 +342,9 @@ impl MemoryEngine {
 
         // Normalize metadata to an object + inject the provenance envelope (pure
         // engine-side work; the atomic insert + identity guard live below the seam).
-        // `lineage_id` has `#[serde(skip_serializing)]` on PromotionProvenance, so only
-        // descriptive fields are stored — the lineage table is authoritative for the
-        // `lineage_id → source_fact_ids` mapping.
+        // `PromotionProvenance` carries only descriptive fields — the lineage table
+        // (keyed by its row PK) is authoritative for the `lineage_id →
+        // source_fact_ids` mapping, so no id leaks into the stored envelope.
         let mut metadata = match req.metadata.clone() {
             serde_json::Value::Object(map) => serde_json::Value::Object(map),
             _ => serde_json::json!({}),
@@ -462,7 +462,6 @@ mod tests {
             confidence: 0.85,
             method_version: "test-v1".into(),
             representative_ids: vec![1, 2, 3],
-            lineage_id: 0, // reconstructed from DB row PK on read
         }
     }
 
