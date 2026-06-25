@@ -188,6 +188,20 @@ impl MemoryEngine {
                 )));
             }
 
+            // Defense in depth: a misconfigured provider whose declared fingerprint
+            // dim matches the active space (so the same-dim promote guard passes)
+            // but which actually returns wrong-width vectors would otherwise write
+            // corrupt blobs that the promote copy-swaps straight into
+            // `facts.embedding`. Reject any off-dimension vector before it lands.
+            for emb in &embeddings {
+                if emb.len() != self.embed_dim {
+                    return Err(MemoryError::EmbeddingDimension {
+                        expected: self.embed_dim,
+                        actual: emb.len(),
+                    });
+                }
+            }
+
             let rows: Vec<(i64, Vec<f32>)> =
                 window.iter().map(|(id, _)| *id).zip(embeddings).collect();
             total += self.storage.write_backfill_batch(space_name, rows).await?;
@@ -509,5 +523,45 @@ mod tests {
                 vec![0.9_f32; DIM]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn backfill_rejects_off_dimension_vectors() {
+        // Defense in depth (review): a provider whose fingerprint claims `DIM` but
+        // actually returns wider vectors must be rejected before its blobs reach
+        // `fact_vectors` — otherwise the promote copy-swaps corruption straight into
+        // `facts.embedding` (the same-dim guard only checks the declared dim).
+        struct LyingEmbedder {
+            declared: usize,
+            actual: usize,
+        }
+        impl EmbeddingProvider for LyingEmbedder {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.5_f32; self.actual])
+            }
+            fn fingerprint(&self) -> EmbeddingFingerprint {
+                EmbeddingFingerprint::new("liar", "test", self.declared)
+            }
+        }
+
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        seed(&engine, &["a"]).await;
+        begin(&engine).await;
+        let liar: Arc<dyn EmbeddingProvider> = Arc::new(LyingEmbedder {
+            declared: DIM,
+            actual: DIM + 1,
+        });
+
+        let err = engine.backfill_space(SPACE, &liar, 8).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::EmbeddingDimension { expected, actual }
+                    if expected == DIM && actual == DIM + 1
+            ),
+            "off-dim vectors rejected before write, got {err:?}"
+        );
+        // Nothing was written: the fact stays un-backfilled.
+        assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 1);
     }
 }
