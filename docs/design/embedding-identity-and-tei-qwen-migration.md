@@ -49,9 +49,11 @@ existing shape cleanly.
 - Background embedding reconstruction (shadow space → backfill → atomic promote). _(**Same-dim
   reconstruction landed in #623** — schema v13→v14 adds `fact_vectors` (non-active spaces),
   `MemoryEngine::reconstruct` drives a resumable backfill + an atomic copy-swap promote that keeps
-  `facts.embedding` as the active store. **Different-dim** (engine effective-`embed_dim` transition)
-  is the #742 follow-up; the live HNSW rebuild is #624; operator UX + query-across-spaces is #689.
-  See `docs/advanced/reconstruction.md` and §Design.7.)_
+  `facts.embedding` as the active store. **Different-dim landed in #742** (reopen-at-D′: a different-
+  dimension promote fences the handle, the consumer reopens at the new dim — the engine `embed_dim`
+  is frozen at open). The live in-process HNSW rebuild (same-dim) is #624; a truly in-place no-reopen
+  dim transition is deferred; operator UX + query-across-spaces is #689. See
+  `docs/advanced/reconstruction.md` and §Design.7.)_
 - Weight-hash identity (slug-level identity only for now).
 - TEI `/info` authoritative-identity probe.
 
@@ -172,8 +174,9 @@ vector — `facts.content` is source-of-truth, `facts.embedding` is derived) **l
 as reusable tooling for future **same-dim** model swaps: `MemoryEngine::reconstruct` re-embeds
 `facts.content` under the new identity into a `populating` space (schema v13→v14's `fact_vectors`
 table), then atomically copy-swaps it into `facts.embedding` and flips the registry identity in
-one transaction, with the old vectors retained for rollback. Different-dim swaps (a new
-`embed_dim`) are #742. See `docs/advanced/reconstruction.md`.
+one transaction, with the old vectors retained for rollback. **Different-dim swaps (a new
+`embed_dim`) landed in #742** via reopen-at-D′ (the promote fences the handle; the consumer reopens
+the engine at the new dim, since `embed_dim` is frozen at open). See `docs/advanced/reconstruction.md`.
 
 ## Wave 0 — validation gate (smoke test)
 

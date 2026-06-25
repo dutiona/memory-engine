@@ -25,6 +25,7 @@ impl MemoryEngine {
     /// or `MemoryError::Conflict` if [`ResumeConfig::validate`] rejects the config
     /// (out-of-range `high_importance_min` or a zero tier cap).
     pub async fn resume_context(&self, config: &ResumeConfig) -> Result<ResumeContext> {
+        self.ensure_open()?;
         // Fail fast at the public boundary: reject an invalid config before
         // acquiring the scope_tree lock or touching the DB (#359). The internal
         // tier walk below trusts its already-validated input.

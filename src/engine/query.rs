@@ -62,6 +62,7 @@ impl MemoryEngine {
     /// Panics if internal candidate de-duplication yields an inconsistent
     /// index — an invariant that should never be violated in practice.
     pub async fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        self.ensure_open()?;
         // Resolve scope. A provided-but-missing scope yields no results rather than
         // an unscoped search (#117).
         let Some(scope_ids) = self.resolve_query_scope_ids(query.scope.as_ref()) else {
@@ -124,6 +125,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on query failure.
     pub async fn execute_query(&self, query: &MemoryQuery) -> Result<QueryResponse> {
+        self.ensure_open()?;
         // --- Validation ---
         Self::validate_memory_query(query)?;
 

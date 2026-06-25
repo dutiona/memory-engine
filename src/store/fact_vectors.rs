@@ -140,9 +140,12 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
 /// mid-promote failure can never leave partial state).
 ///
 /// Steps, in order:
-/// 0. **Same-dim guard** — `populating.dim == active.dim`, else
-///    [`MemoryError::EmbeddingDimension`]. Different-dim is the #742 follow-up
-///    (the engine `embed_dim` is frozen at open).
+/// 0. **Resolve** the active + populating spaces (no dim guard — a promote is
+///    dimension-agnostic at the storage layer since the copy-swap is a blob-level
+///    `UPDATE`; #742 allows `populating.dim != active.dim`. The width invariant is
+///    the engine-side `backfill_space` per-vector check against the populating
+///    space's declared dim, and a different-dim promote fences the engine handle
+///    until it reopens at the new dim).
 /// 1. **Completeness gate INSIDE the tx** (no TOCTOU) — every fact must already
 ///    have a populating vector. A non-zero count aborts (a straggler arrived
 ///    after the engine's pre-tx catch-up).
@@ -164,14 +167,20 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::EmbeddingDimension`] on a dim mismatch (different-dim),
-/// [`MemoryError::Internal`] if there is no active space, the populating space is
-/// absent or not `populating`, or the completeness gate fails, or
+/// Returns [`MemoryError::Internal`] if there is no active space, the populating
+/// space is absent or not `populating`, or the completeness gate fails, or
 /// [`MemoryError::Database`] on a write failure (which rolls the transaction back).
 pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutcome> {
     let tx = conn.unchecked_transaction()?;
 
-    // (0) Resolve both spaces and enforce the same-dim guard.
+    // (0) Resolve both spaces. NO dim guard: a promote is dimension-agnostic at the
+    // storage layer (the copy-swap below is a blob-level UPDATE), so #742 allows the
+    // populating space's dim to differ from the active one. The width invariant is
+    // enforced engine-side by `backfill_space`'s per-vector check against the
+    // populating space's declared dim (the sole backstop once this guard is gone),
+    // and a different-dim promote leaves the engine handle fenced until it reopens at
+    // the new dim. The completeness gate (step 1) still guarantees every fact has a
+    // populating vector, so the total copy-swap never nulls `facts.embedding`.
     let active = embedding_spaces::find_active(&tx)?.ok_or_else(|| {
         MemoryError::Internal("promote: no active embedding space to swap over".into())
     })?;
@@ -185,12 +194,6 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
             "promote: space {populating:?} is {:?}, expected populating",
             new.status
         )));
-    }
-    if new.fingerprint.dim != active.fingerprint.dim {
-        return Err(MemoryError::EmbeddingDimension {
-            expected: active.fingerprint.dim,
-            actual: new.fingerprint.dim,
-        });
     }
 
     // (1) Completeness gate INSIDE the tx (no TOCTOU).
@@ -246,19 +249,29 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
 /// the streaming snapshot writer. Ordered by `(space_id, fact_id)` for a stable
 /// dump.
 ///
-/// Deserializes each blob at `embed_dim`: same-dim reconstruction (#623) keeps
-/// every non-active space at the engine dimension; the different-dim follow-up
-/// (#742) will thread per-space dims here.
+/// Deserializes each blob at **its own space's recorded dimension** (#742): after
+/// a different-dimension reconstruction the active space is D′ while a retained
+/// `deprecated` space is still D-wide, so a single engine `embed_dim` cannot decode
+/// every row. The per-space dims are read once from `embedding_spaces`; `embed_dim`
+/// is only a fallback for a row whose space is somehow absent (the FK makes that
+/// impossible). This preserves the deprecated space's rollback vectors across a
+/// dump/restore of a reconstructed store (no data loss).
 ///
 /// # Errors
 ///
 /// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on query
 /// failure, [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
-/// if a stored blob is not `embed_dim`-sized, or any error the callback returns.
+/// if a stored blob is not its space's dim, or any error the callback returns.
 pub fn for_each<F>(conn: &Connection, embed_dim: usize, mut cb: F) -> Result<()>
 where
     F: FnMut(i64, String, Vec<f32>) -> Result<()>,
 {
+    // Per-space dims: a non-active space may differ from the active `embed_dim`
+    // after a #742 different-dim reconstruction.
+    let space_dims: std::collections::HashMap<String, usize> = embedding_spaces::list_spaces(conn)?
+        .into_iter()
+        .map(|s| (s.name, s.fingerprint.dim))
+        .collect();
     let mut stmt = conn.prepare(
         "SELECT fact_id, space_id, embedding FROM fact_vectors ORDER BY space_id, fact_id",
     )?;
@@ -267,7 +280,8 @@ where
         let fact_id: i64 = row.get(0)?;
         let space_id: String = row.get(1)?;
         let blob: Vec<u8> = row.get(2)?;
-        let embedding = crate::store::deserialize_embedding(&blob, embed_dim)?;
+        let dim = space_dims.get(&space_id).copied().unwrap_or(embed_dim);
+        let embedding = crate::store::deserialize_embedding(&blob, dim)?;
         cb(fact_id, space_id, embedding)?;
     }
     Ok(())
@@ -565,9 +579,14 @@ mod tests {
     }
 
     #[test]
-    fn promote_rejects_different_dim() {
+    fn promote_allows_different_dim() {
+        // #742 (inverts promote_rejects_different_dim): the storage promote is
+        // dimension-agnostic — it copy-swaps DIM*2-wide vectors into facts.embedding,
+        // flips identity, and retains the old DIM-wide vectors for rollback.
         let conn = fresh_conn();
-        set_active(&conn, "model-a"); // active dim = DIM
+        set_active(&conn, "model-a"); // active @ DIM; facts seeded @ DIM
+        let a = insert_fact(&conn, "alpha");
+        let b = insert_fact(&conn, "beta");
         insert_populating(
             &conn,
             &EmbeddingSpace {
@@ -577,20 +596,46 @@ mod tests {
             },
         )
         .expect("insert wide");
+        // Backfill the wide space with DIM*2-wide vectors.
+        let wide_rows: Vec<(i64, Vec<f32>)> = [a, b]
+            .iter()
+            .map(|&id| (id, vec![0.9_f32; DIM * 2]))
+            .collect();
+        write_backfill_batch(&conn, "wide", &wide_rows).expect("backfill wide");
 
-        let err = promote_space(&conn, "wide").expect_err("different dim");
-        assert!(
-            matches!(
-                err,
-                MemoryError::EmbeddingDimension { expected, actual }
-                    if expected == DIM && actual == DIM * 2
-            ),
-            "got {err:?}"
-        );
-        // Different-dim is #742; nothing changed here.
+        let outcome = promote_space(&conn, "wide").expect("promote allows different dim");
+        assert_eq!(outcome.promoted, 2);
+        assert_eq!(outcome.new_fingerprint.dim, DIM * 2);
+
+        // facts.embedding is now DIM*2-wide (the new space's vectors).
+        for id in [a, b] {
+            let blob: Vec<u8> = conn
+                .query_row(
+                    "SELECT embedding FROM facts WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .expect("blob");
+            assert_eq!(blob.len(), DIM * 2 * 4, "served vector is now D*2-wide");
+            assert_eq!(
+                deserialize_embedding(&blob, DIM * 2).expect("deserialize"),
+                vec![0.9_f32; DIM * 2]
+            );
+        }
+        // Identity flipped to the wide space; the old "default" is retained @ DIM
+        // for rollback, the populating rows cleaned up.
+        let active = find_active(&conn).expect("find").expect("active");
+        assert_eq!(active.name, "wide");
+        assert_eq!(active.fingerprint.dim, DIM * 2);
         assert_eq!(
-            find_active(&conn).expect("find").expect("active").name,
-            "default"
+            count_vectors(&conn, "default").expect("retained"),
+            2,
+            "old DIM-wide vectors retained for rollback"
+        );
+        assert_eq!(
+            count_vectors(&conn, "wide").expect("cleanup"),
+            0,
+            "populating rows deleted post-promote"
         );
     }
 
@@ -674,5 +719,57 @@ mod tests {
         set_active(&conn, "model-a");
         let err = promote_space(&conn, "ghost").expect_err("absent");
         assert!(matches!(err, MemoryError::Internal(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn for_each_decodes_each_space_at_its_own_dim() {
+        // #742 (R6): a dump of a reconstructed store has a deprecated space at the
+        // OLD dim while the active space (engine embed_dim) is the NEW dim. `for_each`
+        // must decode each row at its space's own recorded dim — not the engine dim —
+        // so a dump at the new dim still preserves the deprecated rollback vectors.
+        let conn = fresh_conn();
+        // Active space at the NEW (wide) dim.
+        insert_active(
+            &conn,
+            &EmbeddingSpace::default_active(EmbeddingFingerprint::new("new", "tei", DIM * 2)),
+        )
+        .expect("active wide");
+        // A deprecated space at the OLD dim, holding old-dim retained vectors.
+        insert_active(
+            &conn,
+            &EmbeddingSpace {
+                name: "old".to_string(),
+                fingerprint: EmbeddingFingerprint::new("old", "tei", DIM),
+                status: SpaceStatus::Deprecated,
+            },
+        )
+        .expect("deprecated old");
+        let a = insert_fact(&conn, "alpha");
+        let b = insert_fact(&conn, "beta");
+        write_backfill_batch(
+            &conn,
+            "old",
+            &[(a, vec![0.3_f32; DIM]), (b, vec![0.3_f32; DIM])],
+        )
+        .expect("write old-dim vectors");
+
+        // for_each at the ACTIVE (wide) embed_dim must still decode the old DIM-wide rows.
+        let mut seen: Vec<(i64, String, Vec<f32>)> = Vec::new();
+        for_each(&conn, DIM * 2, |fid, space, emb| {
+            seen.push((fid, space, emb));
+            Ok(())
+        })
+        .expect("for_each across heterogeneous dims");
+
+        assert_eq!(seen.len(), 2);
+        for (_, space, emb) in &seen {
+            assert_eq!(space, "old");
+            assert_eq!(
+                emb.len(),
+                DIM,
+                "decoded at the space's own dim, not the engine dim"
+            );
+            assert_eq!(emb, &vec![0.3_f32; DIM]);
+        }
     }
 }

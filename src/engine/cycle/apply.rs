@@ -41,6 +41,7 @@ impl MemoryEngine {
     ///   `AddFact`/`Promote`/`Synthesize` embedding does not match the engine dimension.
     /// - [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend failure.
     pub async fn apply_cycle_report(&self, report: &CycleReport) -> Result<ApplyResult> {
+        self.ensure_open()?;
         let (result, supersede_edges, _expired_ids, _to_index) = self
             .storage
             .apply_cycle_deltas_atomic(report, self.embed_dim, &self.upcaster_registry)

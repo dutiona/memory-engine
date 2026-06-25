@@ -44,6 +44,7 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
+        self.ensure_open()?;
         // Phase 1 — READ: snapshot the active set + watermark below the seam.
         let snapshot = self
             .storage

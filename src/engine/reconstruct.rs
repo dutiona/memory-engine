@@ -1,7 +1,7 @@
-//! Background reconstruction (#623): re-embed stored fact **content** (the
-//! lossless source of truth) under a new same-dimension embedding identity in the
-//! background, staging the vectors in a `populating` space's `fact_vectors`, then
-//! atomically promoting them as the active serving vectors.
+//! Background reconstruction (#623, #742): re-embed stored fact **content** (the
+//! lossless source of truth) under a new embedding identity in the background,
+//! staging the vectors in a `populating` space's `fact_vectors`, then atomically
+//! promoting them as the active serving vectors.
 //!
 //! This module owns the **engine-side orchestration** ([`MemoryEngine::reconstruct`]):
 //! it drives the embedding — off the write lock, under
@@ -19,12 +19,17 @@
 //! and re-running [`reconstruct`](MemoryEngine::reconstruct) resumes the same
 //! `populating` space (`begin_populating_space` is idempotent).
 //!
-//! **Scope: same-dim only.** A different-dim transition needs the engine
-//! effective-`embed_dim` rebuild (pool / dim-validation / HNSW at the new dim) and
-//! is the #742 follow-up; the storage layer here is already dim-agnostic and
-//! [`PromoteOutcome::new_fingerprint`] carries the new dim for it.
+//! **Same-dim vs different-dim.** A same-dim reconstruction (#623) swaps with no
+//! downtime — the engine keeps serving. A **different-dim** reconstruction (#742)
+//! also succeeds, but because the engine's `embed_dim` is cached immutably at open,
+//! the promote **fences** the handle ([`MemoryEngine::reopen_required`]): every
+//! embedding-touching op then returns [`MemoryError::EmbeddingReopenRequired`] until
+//! the consumer drops the handle and reopens the engine at the new dimension (which
+//! re-validates cleanly and rebuilds the index at the new dim). A truly in-place,
+//! no-reopen dimension transition is deferred (see the issue).
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use super::spawn_join_err;
 use crate::engine::MemoryEngine;
@@ -58,10 +63,10 @@ fn space_name_for(fp: &EmbeddingFingerprint) -> String {
 }
 
 impl MemoryEngine {
-    /// Reconstruct the active embedding space under a new **same-dimension**
-    /// identity, with no downtime: open a shadow space, backfill it in the
-    /// background, then atomically promote it (the served vectors swap in one
-    /// transaction; the old vectors are retained for an instant rollback).
+    /// Reconstruct the active embedding space under a new `new_fingerprint`
+    /// identity: open a shadow space, backfill it in the background, then atomically
+    /// promote it (the served vectors swap in one transaction; the old vectors are
+    /// retained for an instant rollback).
     ///
     /// Sequence: open (or resume) the `populating` space → backfill → a second
     /// **catch-up** pass (facts ingested during the first pass — live
@@ -71,38 +76,48 @@ impl MemoryEngine {
     /// Returns the [`PromoteOutcome`], with `stragglers_caught` set from the
     /// catch-up pass.
     ///
-    /// `new_fingerprint.dim` must equal the engine's [`embed_dim`](Self::embed_dim)
-    /// (same-dim only — see the module docs; different-dim is #742). The atomic
-    /// promote re-checks the dim against the active space.
+    /// **Dimension change → fence.** `new_fingerprint.dim` may differ from the
+    /// engine's current [`embed_dim`](Self::embed_dim) — that is a different-dimension
+    /// reconstruction (#742). It succeeds, but since `embed_dim` is cached immutably
+    /// at open, a different-dim promote leaves this handle stale, so it is **fenced**:
+    /// subsequent embedding-touching ops return [`MemoryError::EmbeddingReopenRequired`]
+    /// (and [`reopen_required`](Self::reopen_required) reports the new dim) until the
+    /// consumer reopens the engine at that dimension. A same-dim reconstruction does
+    /// not fence. The provider must actually produce `new_fingerprint.dim`-wide
+    /// vectors (checked up front).
     ///
     /// After the promote, [`PromoteOutcome::rebuild_index`] is `true`: the active
     /// vectors changed, so a `SQLite`+HNSW backend's in-memory index is stale until
-    /// the next open (which rebuilds it via `build_from_db`). The live in-process
-    /// rebuild hook is **#624**; until then a same-process `ann` query between
-    /// promote and reopen may use the stale index. The brute-force vector path
-    /// (default features) reads `facts.embedding` directly and is correct
-    /// immediately.
+    /// the next open (which rebuilds it via `build_from_db`). For a same-dim
+    /// reconstruction the live in-process rebuild hook is **#624**; a different-dim
+    /// reconstruction rebuilds the index on the required reopen. The brute-force
+    /// vector path (default features) reads `facts.embedding` directly and is correct
+    /// immediately (same-dim) or on reopen (different-dim).
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::EmbeddingDimension`] if `new_fingerprint.dim` differs
-    /// from the engine dimension (different-dim → #742), [`MemoryError::ReadOnly`]
-    /// from the write port on a read-only engine, or any embedding-provider /
-    /// storage failure surfaced by the backfill or promote.
+    /// Returns [`MemoryError::EmbeddingDimension`] if `new_fingerprint.dim` disagrees
+    /// with the provider's own `fingerprint().dim` (a misconfiguration, rejected
+    /// before any backfill), [`MemoryError::ReadOnly`] from the write port on a
+    /// read-only engine, or any embedding-provider / storage failure surfaced by the
+    /// backfill or promote.
     pub async fn reconstruct(
         &self,
         new_fingerprint: &EmbeddingFingerprint,
         embedder: &Arc<dyn EmbeddingProvider>,
     ) -> Result<PromoteOutcome> {
-        // Fail fast on a different-dim request (the promote also guards, but only
-        // after a full backfill — reject before that wasted work).
-        if new_fingerprint.dim != self.embed_dim {
+        // Fail fast on a genuine misconfiguration: the declared target identity's
+        // dimension must match what the provider actually produces. (A target dim
+        // that differs from the engine's *current* dim is the whole point of #742
+        // and is allowed — that is the different-dimension transition.)
+        if new_fingerprint.dim != embedder.fingerprint().dim {
             return Err(MemoryError::EmbeddingDimension {
-                expected: self.embed_dim,
-                actual: new_fingerprint.dim,
+                expected: new_fingerprint.dim,
+                actual: embedder.fingerprint().dim,
             });
         }
 
+        let target_dim = new_fingerprint.dim;
         let space = space_name_for(new_fingerprint);
 
         // 1. Open (or resume) the shadow space.
@@ -110,26 +125,36 @@ impl MemoryEngine {
             .begin_populating_space(&space, new_fingerprint)
             .await?;
 
-        // 2. Backfill every fact's content under the new identity.
-        self.backfill_space(&space, embedder, DEFAULT_BACKFILL_BATCH)
+        // 2. Backfill every fact's content under the new identity. Vectors are
+        //    validated against `target_dim` (which may differ from the engine's
+        //    current `embed_dim` — a different-dim reconstruction).
+        self.backfill_space(&space, embedder, target_dim, DEFAULT_BACKFILL_BATCH)
             .await?;
 
         // 3. Catch-up: re-embed facts ingested during the backfill (live
         //    reconstruction). The count is the stragglers caught before promote.
         let stragglers = self
-            .backfill_space(&space, embedder, DEFAULT_BACKFILL_BATCH)
+            .backfill_space(&space, embedder, target_dim, DEFAULT_BACKFILL_BATCH)
             .await?;
 
         // 4. Atomic promote (the completeness gate re-checks INSIDE the tx).
         let mut outcome = self.storage.promote_space(&space).await?;
         outcome.stragglers_caught = stragglers;
 
+        // 5. A DIFFERENT-dimension promote leaves this handle's cached `embed_dim`
+        //    stale (`facts.embedding` is now `target_dim`-wide while every read
+        //    deserializes at the old dim). Fence the handle: embedding-touching ops
+        //    refuse with `EmbeddingReopenRequired` until the consumer reopens the
+        //    engine at the new dim. A same-dim promote does NOT fence — the cached
+        //    dim stays valid (#623 behavior preserved exactly).
+        if outcome.new_fingerprint.dim != self.embed_dim {
+            self.reopen_required
+                .store(outcome.new_fingerprint.dim, Ordering::Release);
+        }
+
         Ok(outcome)
     }
 
-    /// Backfill the `populating` space `space_name`: re-embed every fact's content
-    /// with `embedder` and stage the vectors in `fact_vectors[space_name]`.
-    ///
     /// Backfill the `populating` space `space_name`: re-embed every fact's content
     /// with `embedder` and stage the vectors in `fact_vectors[space_name]`.
     ///
@@ -138,6 +163,12 @@ impl MemoryEngine {
     /// **actually written** this call (0 on a fully-backfilled space — the
     /// idempotent/crash-resume case). The space must already exist (open it with
     /// `begin_populating_space`); this method only fills it.
+    ///
+    /// `target_dim` is the dimension every produced vector must have — the
+    /// **populating space's** declared dim, NOT the engine's current `embed_dim`
+    /// (which differs for a different-dimension reconstruction, #742). This
+    /// per-vector check is the sole width invariant once `promote_space`'s storage
+    /// guard is gone, so it is load-bearing.
     ///
     /// `after_id` advances past each window to skip the already-written prefix —
     /// an intra-run optimization only; correctness rests on the port's cursorless
@@ -148,11 +179,13 @@ impl MemoryEngine {
     ///
     /// Propagates embedding-provider failures, a join error from the blocking
     /// embed task, an [`EmbeddingProvider::embed_batch`] contract violation
-    /// (length mismatch), or any storage-port failure.
-    pub(crate) async fn backfill_space(
+    /// (length mismatch), an [`MemoryError::EmbeddingDimension`] if a produced
+    /// vector is not `target_dim`-wide, or any storage-port failure.
+    async fn backfill_space(
         &self,
         space_name: &str,
         embedder: &Arc<dyn EmbeddingProvider>,
+        target_dim: usize,
         batch_size: usize,
     ) -> Result<usize> {
         let mut after_id = 0_i64;
@@ -188,15 +221,17 @@ impl MemoryEngine {
                 )));
             }
 
-            // Defense in depth: a misconfigured provider whose declared fingerprint
-            // dim matches the active space (so the same-dim promote guard passes)
-            // but which actually returns wrong-width vectors would otherwise write
-            // corrupt blobs that the promote copy-swaps straight into
-            // `facts.embedding`. Reject any off-dimension vector before it lands.
+            // Defense in depth (the SOLE width invariant since `promote_space` no
+            // longer guards dim, #742 D4): a provider whose declared fingerprint dim
+            // matches the target space but which actually returns wrong-width vectors
+            // would otherwise write corrupt blobs that the promote copy-swaps straight
+            // into `facts.embedding`. Reject any vector not `target_dim`-wide before it
+            // lands. Note `target_dim`, NOT `self.embed_dim` — they differ for a
+            // different-dimension reconstruction.
             for emb in &embeddings {
-                if emb.len() != self.embed_dim {
+                if emb.len() != target_dim {
                     return Err(MemoryError::EmbeddingDimension {
-                        expected: self.embed_dim,
+                        expected: target_dim,
                         actual: emb.len(),
                     });
                 }
@@ -271,7 +306,10 @@ mod tests {
         begin(&engine).await;
 
         // A small batch forces several windows — exercises the loop's advance.
-        let written = engine.backfill_space(SPACE, &embedder(), 2).await.unwrap();
+        let written = engine
+            .backfill_space(SPACE, &embedder(), DIM, 2)
+            .await
+            .unwrap();
         assert_eq!(written, 5, "one vector per fact across multiple windows");
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 0);
     }
@@ -283,12 +321,18 @@ mod tests {
         begin(&engine).await;
 
         assert_eq!(
-            engine.backfill_space(SPACE, &embedder(), 8).await.unwrap(),
+            engine
+                .backfill_space(SPACE, &embedder(), DIM, 8)
+                .await
+                .unwrap(),
             3
         );
         // Re-running over a fully-backfilled space writes nothing.
         assert_eq!(
-            engine.backfill_space(SPACE, &embedder(), 8).await.unwrap(),
+            engine
+                .backfill_space(SPACE, &embedder(), DIM, 8)
+                .await
+                .unwrap(),
             0
         );
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 0);
@@ -322,7 +366,10 @@ mod tests {
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 2);
 
         // Restart: the loop re-derives only the remaining 2 via the anti-join.
-        let written = engine.backfill_space(SPACE, &embedder(), 8).await.unwrap();
+        let written = engine
+            .backfill_space(SPACE, &embedder(), DIM, 8)
+            .await
+            .unwrap();
         assert_eq!(written, 2, "only the un-backfilled remainder is written");
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 0);
     }
@@ -333,7 +380,10 @@ mod tests {
         seed(&engine, &["a", "b"]).await;
         begin(&engine).await;
         assert_eq!(
-            engine.backfill_space(SPACE, &embedder(), 8).await.unwrap(),
+            engine
+                .backfill_space(SPACE, &embedder(), DIM, 8)
+                .await
+                .unwrap(),
             2
         );
 
@@ -342,7 +392,10 @@ mod tests {
         seed(&engine, &["late-arrival"]).await;
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 1);
         assert_eq!(
-            engine.backfill_space(SPACE, &embedder(), 8).await.unwrap(),
+            engine
+                .backfill_space(SPACE, &embedder(), DIM, 8)
+                .await
+                .unwrap(),
             1
         );
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 0);
@@ -444,24 +497,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconstruct_rejects_different_dim() {
+    async fn reconstruct_different_dim_fences_handle() {
+        // #742 (inverts the old `reconstruct_rejects_different_dim`): a different-dim
+        // reconstruction now SUCCEEDS (the same-dim guard is gone) and fences the
+        // handle — `facts.embedding` is now D′-wide, so the engine refuses reads
+        // until the consumer reopens at D′. (In-memory engine = terminal fence, no
+        // reopen possible; the full file-backed D→D′→reopen cycle is a separate test.)
         let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "old",
+            value: 0.1,
+            dim: DIM,
+        });
+        let mut ids = Vec::new();
+        for c in ["a", "b"] {
+            ids.push(engine.add_fact(&req(c), old.clone(), None).await.unwrap());
+        }
         let wide: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
             model: "wide",
             value: 0.9,
             dim: DIM * 2,
         });
+        let new_fp = EmbeddingFingerprint::new("wide", "test", DIM * 2);
+
+        let outcome = engine.reconstruct(&new_fp, &wide).await.unwrap();
+        assert_eq!(outcome.promoted, 2);
+        assert_eq!(outcome.new_fingerprint.dim, DIM * 2);
+        assert!(outcome.rebuild_index);
+
+        // The handle is fenced at the new dim; reads refuse until reopen.
+        assert_eq!(engine.reopen_required(), Some(DIM * 2));
+        assert!(matches!(
+            engine.get_fact(ids[0]).await,
+            Err(MemoryError::EmbeddingReopenRequired { new_dim }) if new_dim == DIM * 2
+        ));
+    }
+
+    #[tokio::test]
+    async fn reconstruct_rejects_embedder_target_dim_mismatch() {
+        // The retained fail-fast: the declared target identity's dim must match what
+        // the provider actually produces (a genuine misconfiguration), rejected
+        // before any backfill work.
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let mismatched: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "wide",
+            value: 0.9,
+            dim: DIM, // provider produces DIM-wide, but the target declares DIM*2
+        });
         let err = engine
-            .reconstruct(&EmbeddingFingerprint::new("wide", "test", DIM * 2), &wide)
+            .reconstruct(
+                &EmbeddingFingerprint::new("wide", "test", DIM * 2),
+                &mismatched,
+            )
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
                 MemoryError::EmbeddingDimension { expected, actual }
-                    if expected == DIM && actual == DIM * 2
+                    if expected == DIM * 2 && actual == DIM
             ),
-            "different-dim is #742, got {err:?}"
+            "embedder/target dim mismatch rejected, got {err:?}"
         );
     }
 
@@ -552,7 +648,10 @@ mod tests {
             actual: DIM + 1,
         });
 
-        let err = engine.backfill_space(SPACE, &liar, 8).await.unwrap_err();
+        let err = engine
+            .backfill_space(SPACE, &liar, DIM, 8)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,

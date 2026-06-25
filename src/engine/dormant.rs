@@ -32,6 +32,7 @@ impl MemoryEngine {
         context: &[f32],
         scope_ids: Option<&[i64]>,
     ) -> Result<Vec<Fact>> {
+        self.ensure_open()?;
         if context.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
                 expected: self.embed_dim,

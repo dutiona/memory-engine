@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -206,6 +206,16 @@ pub struct MemoryEngine {
     /// `AtomicBool` so a shared owner (`Arc<MemoryEngine>`, e.g. the MCP server) can
     /// flush + mark via `&self` without unwrapping the `Arc`.
     closed: AtomicBool,
+    /// The reconstruction **dimension fence** (#742). `0` = not fenced. Set to the
+    /// new dimension `D′` after a *different-dimension* [`reconstruct`](Self::reconstruct)
+    /// promotes a new embedding space: this handle's cached `embed_dim` is now stale
+    /// (its `facts.embedding` blobs are `D′`-wide), so [`ensure_open`](Self::ensure_open)
+    /// refuses every embedding-touching read/write with
+    /// [`MemoryError::EmbeddingReopenRequired`] until the consumer reopens at `D′`.
+    /// `AtomicUsize` keeps the engine `Send + Sync` with `&self` methods and adds no
+    /// lock contention. Same-dimension reconstruction never sets it (the cached dim
+    /// stays valid — #623 behavior preserved exactly).
+    reopen_required: AtomicUsize,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -327,6 +337,7 @@ impl MemoryEngine {
             read_only,
             db_path,
             closed: AtomicBool::new(false),
+            reopen_required: AtomicUsize::new(0),
         })
     }
 
@@ -470,11 +481,26 @@ impl MemoryEngine {
     /// No-op for in-memory or read-only engines (`Ok(false)`). `Ok(true)` when a
     /// snapshot was written.
     ///
+    /// Also a no-op (`Ok(false)`) when the handle is **fenced** by a different-dim
+    /// reconstruction (#742): the in-memory HNSW it would serialize was built at the
+    /// old dimension, while the DB (and thus the sidecar's fingerprint/`embed_dim`
+    /// header) is now `D′`. The reopen at `D′` rebuilds the index from the DB anyway
+    /// (the `embed_dim` header gate at [`snapshot::load_from_file`] already rejects a
+    /// stale-dim sidecar), and under `ann` the assembly would otherwise *fail*
+    /// re-reading the now-`D′` `facts.embedding` at the old dim. Short-circuiting
+    /// avoids that spurious error and the wasted work. The consumer can still flush +
+    /// drop a fenced engine cleanly.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Storage` if the fingerprint read or sidecar write
     /// fails.
     pub async fn flush_snapshot(&self) -> Result<bool> {
+        // Fenced by a different-dim reconstruction → no sidecar (see doc above).
+        if self.reopen_required.load(Ordering::Acquire) != 0 {
+            self.closed.store(true, Ordering::Release);
+            return Ok(false);
+        }
         // Build the owned snapshots, then await — the read guards are temporaries
         // dropped at the end of each statement, so none is held across `.await`.
         let graph_snap = self.graph.read().to_snapshot();
@@ -581,6 +607,41 @@ impl MemoryEngine {
         self.embed_dim
     }
 
+    /// The new dimension a different-dimension reconstruction (#742) promoted to,
+    /// if this handle is **fenced** — `Some(new_dim)` means the engine refuses
+    /// embedding-touching operations until reopened at `new_dim`; `None` means it
+    /// is serving normally. The pull-side companion to the push-side
+    /// [`MemoryError::EmbeddingReopenRequired`] the gated methods return; a consumer
+    /// can poll this after a [`reconstruct`](Self::reconstruct) instead of catching
+    /// the error.
+    #[must_use]
+    pub fn reopen_required(&self) -> Option<usize> {
+        match self.reopen_required.load(Ordering::Acquire) {
+            0 => None,
+            new_dim => Some(new_dim),
+        }
+    }
+
+    /// Read-fence guard (#742): `Err(EmbeddingReopenRequired)` once a different-dim
+    /// reconstruction has fenced this handle, else `Ok(())`. Called at the entry of
+    /// every embedding-touching public method so a stale-dimension read surfaces an
+    /// actionable error rather than a low-level `EmbeddingDimension` from a blob of
+    /// the wrong width.
+    fn ensure_open(&self) -> Result<()> {
+        match self.reopen_required.load(Ordering::Acquire) {
+            0 => Ok(()),
+            new_dim => Err(MemoryError::EmbeddingReopenRequired { new_dim }),
+        }
+    }
+
+    /// Test-only: arm the reconstruction dimension fence directly, so the read-safety
+    /// net (#742 Phase 1) can be exercised without driving a full different-dim
+    /// reconstruction. Production code arms it only inside [`reconstruct`](Self::reconstruct).
+    #[cfg(test)]
+    fn force_reopen_fence(&self, new_dim: usize) {
+        self.reopen_required.store(new_dim, Ordering::Release);
+    }
+
     /// Whether this engine is file-backed (vs in-memory).
     #[must_use]
     pub const fn is_file_backed(&self) -> bool {
@@ -624,6 +685,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::NotFound` if the fact doesn't exist.
     pub async fn get_fact(&self, id: i64) -> Result<Fact> {
+        self.ensure_open()?;
         self.storage.get_fact(id).await
     }
 
@@ -636,6 +698,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on query failure.
     pub async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
+        self.ensure_open()?;
         self.storage.list_active_facts(limit).await
     }
 
@@ -648,6 +711,7 @@ impl MemoryEngine {
         &self,
         level: &ConsolidationLevel,
     ) -> Result<Vec<crate::types::Summary>> {
+        self.ensure_open()?;
         self.storage.list_summaries_by_level(level).await
     }
 

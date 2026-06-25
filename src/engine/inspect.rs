@@ -14,6 +14,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Database` on SQL failure.
     pub async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
+        self.ensure_open()?;
         self.storage.statistics().await
     }
 
@@ -104,6 +105,8 @@ impl MemoryEngine {
         use crate::inspect::explain;
         use crate::inspect::types::FactProvenance;
 
+        self.ensure_open()?;
+
         // Snapshot graph context under the graph lock, then release it (the guard is
         // dropped at the end of this block, before any `.await`).
         let graph_context = {
@@ -155,6 +158,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::NotFound` if the fact doesn't exist.
     /// Returns `MemoryError::Database` on SQL failure.
     pub async fn fact_history(&self, id: i64) -> Result<crate::inspect::FactHistory> {
+        self.ensure_open()?;
         // The bi-temporal timeline is pure over a single fact's timestamps: fetch via
         // the port, then derive it with no `&Connection` needed.
         let fact = self.storage.get_fact(id).await?;
@@ -185,6 +189,7 @@ impl MemoryEngine {
     /// Returns [`MemoryError::ReadOnly`] for the `Sqlite` format if the engine
     /// was opened read-only (the `VACUUM INTO` backup acquires the write lock).
     pub async fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
+        self.ensure_open()?;
         // The whole format dispatch (including the feature-gated `NotImplemented`
         // arms and the read-vs-write connection choice) lives below the seam in
         // [`SchemaManager::dump_state`](crate::storage::SchemaManager::dump_state).

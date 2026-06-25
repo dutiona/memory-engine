@@ -194,6 +194,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
     /// Returns an error if context construction or the cycle's `run()` fails.
     pub async fn run_dream_cycle(&self, cycle: &dyn DreamCycle) -> Result<CycleReport> {
+        self.ensure_open()?;
         // Verify write access up front (apply happens separately).
         if self.read_only {
             return Err(MemoryError::ReadOnly);
@@ -232,6 +233,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine is read-only, or a store/cycle error.
     #[must_use = "the CycleOutcome carries the skip/run decision — a dropped Skipped silently loses the deferral"]
     pub async fn run_dream_cycle_guarded(&self, cycle: &dyn DreamCycle) -> Result<CycleOutcome> {
+        self.ensure_open()?;
         // Cursor read + max-id read + (skip-only) advance via the port. These are
         // separate port calls rather than one lock-held critical section: per the
         // deferral contract this is benign — a caller write landing between the reads

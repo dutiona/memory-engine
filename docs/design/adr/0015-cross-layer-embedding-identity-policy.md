@@ -97,10 +97,12 @@ transaction — a completeness gate _inside_ the tx, retain-old, an O(N) copy-sw
 new vectors into `facts.embedding`, then a demote-then-activate registry flip. **The
 status flip _is_ the identity swap** (`embedding_meta::load` reads the active row's
 fingerprint), so the identity and vectors swap atomically, satisfying this section. The
-post-promote vector-index (HNSW) rebuild is tracked separately (#624); a same-dim swap
-still changes every vector, so a rebuild is required. **Different-dim** reconstruction
-(the engine effective-`embed_dim` transition) is the #742 follow-up — the storage layer is
-already dim-agnostic and the promote surfaces the new dim in its outcome.
+post-promote vector-index (HNSW) rebuild for a **same-dim** swap is tracked separately
+(#624; the swap still changes every vector). **Different-dim** reconstruction (a new
+`embed_dim`) is also implemented (#742): the storage layer is dim-agnostic, but because
+the engine's `embed_dim` is frozen at open, a different-dim promote **fences** the handle
+and the consumer reopens the engine at the new dim (which re-validates and rebuilds the
+index at the new dim). A truly in-place, no-reopen dimension transition is deferred.
 
 > **Cross-repo parity (ADR 0015 is shared verbatim with `knowledge-base`).** This section
 > was updated for the Memory-layer implementation only. The Knowledge layer uses per-space
