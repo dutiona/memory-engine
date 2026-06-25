@@ -37,6 +37,11 @@ pub mod search_index;
 pub mod session;
 pub mod sqlite;
 
+/// Cross-backend conformance battery (#632) — asserts the `StorageBackend` CONTRACT
+/// against `Arc<dyn StorageBackend>` directly. Test-only; see its module docs.
+#[cfg(test)]
+mod conformance;
+
 pub use backend::StorageBackend;
 pub use capabilities::{BackendCapabilities, LexicalRanker};
 #[cfg(feature = "archive")]
