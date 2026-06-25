@@ -117,8 +117,27 @@ pub trait FactGraph: Send + Sync {
         limit: usize,
         exclude: &HashSet<i64>,
     ) -> Result<Vec<Fact>>;
-    async fn list_pinned_facts(&self, scope_ids: &[i64]) -> Result<Vec<Fact>>;
-    async fn list_due_facts(&self, now: DateTime<Utc>, scope_ids: &[i64]) -> Result<Vec<Fact>>;
+    /// List active pinned facts, ordered by `importance_score` DESC, capped at
+    /// `limit` (pushed to the backend so embedding BLOBs past the cap are never
+    /// materialized — #395). `None` retrieves all pinned facts — consistent with
+    /// [`list_due_facts`](Self::list_due_facts) and
+    /// [`list_active_facts`](Self::list_active_facts). `scope_ids` empty = **all
+    /// scopes** (see the trait-level contract).
+    async fn list_pinned_facts(&self, scope_ids: &[i64], limit: Option<usize>)
+    -> Result<Vec<Fact>>;
+    /// List active facts "due now" (`t_valid <= now`, not bi-temporally
+    /// invalidated), ordered by `t_valid` ASC. `exclude` is an id set removed in
+    /// the backend (empty = no exclusion); `limit` caps the result in the backend
+    /// (`None` = uncapped, the scheduling contract). Pushing both down (#396)
+    /// avoids materializing and decoding embedding BLOBs the caller would discard.
+    /// `scope_ids` empty = **all scopes** (see the trait-level contract).
+    async fn list_due_facts(
+        &self,
+        now: DateTime<Utc>,
+        scope_ids: &[i64],
+        exclude: &[i64],
+        limit: Option<usize>,
+    ) -> Result<Vec<Fact>>;
     async fn next_due_time(
         &self,
         now: DateTime<Utc>,

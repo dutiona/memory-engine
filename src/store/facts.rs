@@ -569,26 +569,34 @@ impl<'a> FactStore<'a> {
             .map_err(MemoryError::Database)
     }
 
-    /// List active pinned (unforgettable) facts, optionally filtered by scope.
-    /// Pass empty slice to get all pinned facts across all scopes.
-    pub fn list_pinned(&self, scope_ids: &[i64]) -> Result<Vec<Fact>> {
+    /// List active pinned (unforgettable) facts, optionally filtered by scope,
+    /// ordered by `importance_score` DESC and capped at `limit`.
+    ///
+    /// Pass empty `scope_ids` to get pinned facts across all scopes. Pass
+    /// `usize::MAX` for `limit` to retrieve every pinned fact (no cap). The cap is
+    /// pushed down to SQL (`LIMIT ?`) so the DB never transmits or deserializes the
+    /// embedding BLOBs of facts beyond the cap (#395) — matching the pattern of
+    /// `list_by_importance_score`.
+    pub fn list_pinned(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Fact>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let base =
             format!("SELECT {FACT_COLUMNS} FROM facts WHERE t_expired IS NULL AND is_pinned = 1");
         let dim = self.embed_dim;
         if scope_ids.is_empty() {
-            let sql = format!("{base} ORDER BY importance_score DESC");
+            let sql = format!("{base} ORDER BY importance_score DESC LIMIT ?1");
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
+            let rows = stmt.query_map(rusqlite::params![limit_i64], |row| row_to_fact(row, dim))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into)
         } else {
             let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
             let sql = format!(
-                "{base} AND scope_id IN (SELECT value FROM json_each(?1)) ORDER BY importance_score DESC"
+                "{base} AND scope_id IN (SELECT value FROM json_each(?1)) ORDER BY importance_score DESC LIMIT ?2"
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows =
-                stmt.query_map(rusqlite::params![scope_json], |row| row_to_fact(row, dim))?;
+            let rows = stmt.query_map(rusqlite::params![scope_json, limit_i64], |row| {
+                row_to_fact(row, dim)
+            })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into)
         }
@@ -596,29 +604,70 @@ impl<'a> FactStore<'a> {
 
     /// List active, valid facts where `t_valid <= now` and `t_valid IS NOT NULL`.
     /// Excludes facts where `t_invalid <= now` (bi-temporally invalidated).
-    pub fn list_due(&self, now: DateTime<Utc>, scope_ids: &[i64]) -> Result<Vec<Fact>> {
+    ///
+    /// `exclude` is an id set removed in SQL (`id NOT IN (json_each(?))`); pass an
+    /// empty slice for no exclusion. `limit` caps the result in SQL (`LIMIT ?`);
+    /// pass `None` for the uncapped scheduling contract (`MemoryEngine::list_due`
+    /// returns ALL due facts). Pushing both down (#396) keeps the resume Tier-3
+    /// path from materializing — and decoding the embedding BLOB of — every due
+    /// fact only to filter+cap it in Rust, matching `list_by_importance_score`.
+    pub fn list_due(
+        &self,
+        now: DateTime<Utc>,
+        scope_ids: &[i64],
+        exclude: &[i64],
+        limit: Option<usize>,
+    ) -> Result<Vec<Fact>> {
         let now_str = now.to_rfc3339();
         let base = format!(
             "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL AND t_valid IS NOT NULL AND t_valid <= ?1
              AND (t_invalid IS NULL OR t_invalid > ?1)"
         );
-        let sql = if scope_ids.is_empty() {
-            format!("{base} ORDER BY t_valid ASC")
+
+        // Build the dynamic clauses and the matching positional params together so
+        // the `?N` indices stay in lock-step. `?1` is always `now`; subsequent
+        // indices are assigned in append order.
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now_str)];
+        let mut next_idx = 2;
+
+        let scope_clause = if scope_ids.is_empty() {
+            String::new()
         } else {
             let placeholders: String = scope_ids
                 .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 2))
+                .map(|_| {
+                    let p = format!("?{next_idx}");
+                    next_idx += 1;
+                    p
+                })
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("{base} AND scope_id IN ({placeholders}) ORDER BY t_valid ASC")
+            for id in scope_ids {
+                params.push(Box::new(*id));
+            }
+            format!(" AND scope_id IN ({placeholders})")
         };
+
+        let exclude_clause = if exclude.is_empty() {
+            String::new()
+        } else {
+            let exclude_json = serde_json::to_string(exclude).expect("serialize exclude_ids");
+            let clause = format!(" AND id NOT IN (SELECT value FROM json_each(?{next_idx}))");
+            next_idx += 1;
+            params.push(Box::new(exclude_json));
+            clause
+        };
+
+        let limit_clause = limit.map_or_else(String::new, |n| {
+            let clause = format!(" LIMIT ?{next_idx}");
+            params.push(Box::new(i64::try_from(n).unwrap_or(i64::MAX)));
+            clause
+        });
+
+        let sql =
+            format!("{base}{scope_clause}{exclude_clause} ORDER BY t_valid ASC{limit_clause}");
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now_str)];
-        for id in scope_ids {
-            params.push(Box::new(*id));
-        }
         let dim = self.embed_dim;
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
             row_to_fact(row, dim)
@@ -2107,9 +2156,42 @@ mod tests {
         fs.insert(&make_fact("normal fact", vec![0.2; DIM]))
             .unwrap();
 
-        let result = fs.list_pinned(&[]).unwrap();
+        let result = fs.list_pinned(&[], usize::MAX).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].is_pinned);
+    }
+
+    /// #395: the SQL `LIMIT` returns the SAME set the old Rust
+    /// `list_pinned(..).take(cap)` did — the top-`cap` pinned facts by
+    /// `importance_score` DESC — and `usize::MAX` retrieves all of them.
+    #[test]
+    fn list_pinned_sql_limit_matches_rust_take() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        // Seed five pinned facts with strictly increasing importance_score so the
+        // DESC ordering (and thus the top-N selected by LIMIT) is unambiguous.
+        for i in 0..5 {
+            let mut f = make_fact(&format!("pinned {i}"), vec![0.1; DIM]);
+            f.is_pinned = true;
+            let id = fs.insert(&f).unwrap();
+            fs.update_importance_score(id, f64::from(i) / 10.0).unwrap();
+        }
+        // Oracle: fetch all, then take(cap) in Rust (the pre-#395 behavior).
+        let all = fs.list_pinned(&[], usize::MAX).unwrap();
+        assert_eq!(all.len(), 5, "usize::MAX = no cap");
+        for cap in [0_usize, 1, 3, 5, 99] {
+            let rust_take: Vec<i64> = all.iter().take(cap).map(|f| f.id).collect();
+            let sql_limit: Vec<i64> = fs
+                .list_pinned(&[], cap)
+                .unwrap()
+                .iter()
+                .map(|f| f.id)
+                .collect();
+            assert_eq!(
+                sql_limit, rust_take,
+                "SQL LIMIT {cap} must equal Rust .take({cap}) (same order)"
+            );
+        }
     }
 
     #[test]
@@ -2134,9 +2216,137 @@ mod tests {
         fs.insert(&make_fact("regular fact", vec![0.3; DIM]))
             .unwrap();
 
-        let result = fs.list_due(now, &[]).unwrap();
+        let result = fs.list_due(now, &[], &[], None).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].content.contains("past"));
+    }
+
+    /// #396: the SQL `exclude` + `LIMIT` returns the SAME set the old resume Tier-3
+    /// Rust path did — `list_due(now, scope).filter(|f| !seen.contains).take(cap)` —
+    /// and the uncapped scheduling shape (`exclude=[]`, `limit=None`) is unaffected.
+    #[test]
+    fn list_due_exclude_and_limit_match_rust_filter_take() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+
+        // Six due facts, all in the past so all are due; ascending t_valid so the
+        // `ORDER BY t_valid ASC` selection (and thus what LIMIT keeps) is unambiguous.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let mut f = make_fact(&format!("due {i}"), vec![0.1; DIM]);
+            f.t_valid = Some(now - TimeDelta::hours(i64::from(6 - i)));
+            ids.push(fs.insert(&f).unwrap());
+        }
+        // One future fact that must never be due.
+        let mut future = make_fact("future", vec![0.2; DIM]);
+        future.t_valid = Some(now + TimeDelta::hours(1));
+        fs.insert(&future).unwrap();
+
+        // Uncapped scheduling shape: ALL six due, none excluded.
+        let all_due = fs.list_due(now, &[], &[], None).unwrap();
+        assert_eq!(all_due.len(), 6, "scheduling shape returns ALL due facts");
+
+        // Exclude the two earliest (the first two in t_valid ASC order) and cap.
+        let seen: std::collections::HashSet<i64> = [ids[0], ids[1]].into_iter().collect();
+        for cap in [0_usize, 1, 2, 4, 99] {
+            // Oracle: the pre-#396 Rust path over the uncapped query.
+            let rust: Vec<i64> = all_due
+                .iter()
+                .filter(|f| !seen.contains(&f.id))
+                .take(cap)
+                .map(|f| f.id)
+                .collect();
+            // SQL pushdown.
+            let exclude: Vec<i64> = seen.iter().copied().collect();
+            let sql: Vec<i64> = fs
+                .list_due(now, &[], &exclude, Some(cap))
+                .unwrap()
+                .iter()
+                .map(|f| f.id)
+                .collect();
+            assert_eq!(
+                sql, rust,
+                "SQL exclude+LIMIT {cap} must equal Rust .filter(!seen).take({cap})"
+            );
+        }
+    }
+
+    /// #477: the SQL `list_due` predicate and the shared in-Rust
+    /// `Fact::is_temporally_due` predicate MUST agree on the same active fact
+    /// population, over a corpus with varied `t_valid`/`t_invalid` combinations.
+    /// This pins the two against silent drift (the resume walk and `explain`'s
+    /// `FactState::Due` both route through `is_temporally_due`).
+    #[test]
+    fn list_due_membership_equals_is_temporally_due_predicate() {
+        // Item-before-statements (clippy::items_after_statements): the alias keeps
+        // the `cases` corpus type readable.
+        type Ts = Option<chrono::DateTime<Utc>>;
+
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+        let past = now - TimeDelta::hours(1);
+        let future = now + TimeDelta::hours(1);
+
+        // A corpus spanning every meaningful (t_valid, t_invalid) combination,
+        // including the boundary instants (== now) the predicate hinges on.
+        let cases: &[(&str, Ts, Ts)] = &[
+            ("no_tvalid", None, None), // t_valid None → never due
+            ("no_tvalid_invalidated", None, Some(future)),
+            ("past_tvalid", Some(past), None),     // due
+            ("tvalid_eq_now", Some(now), None),    // due (boundary: t_valid <= now)
+            ("future_tvalid", Some(future), None), // not yet valid
+            ("past_then_invalid_future", Some(past), Some(future)), // due (invalid still ahead)
+            ("past_then_invalid_past", Some(past), Some(past)), // invalidated
+            ("invalid_eq_now", Some(past), Some(now)), // invalidated (boundary: t_invalid > now is false)
+        ];
+
+        let mut active_facts = Vec::new();
+        for (label, t_valid, t_invalid) in cases {
+            let mut f = make_fact(label, vec![0.1; DIM]);
+            f.t_valid = *t_valid;
+            f.t_invalid = *t_invalid;
+            let id = fs.insert(&f).unwrap();
+            active_facts.push(fs.get(id).unwrap());
+        }
+
+        // Also seed an EXPIRED-but-otherwise-due fact: it must NOT appear in
+        // list_due (system-time filter), and is excluded from the predicate oracle
+        // because is_temporally_due deliberately does not test t_expired (its
+        // documented scope — the caller's active-only read owns that).
+        let mut expired = make_fact("expired_due", vec![0.2; DIM]);
+        expired.t_valid = Some(past);
+        let expired_id = fs.insert(&expired).unwrap();
+        fs.expire(expired_id, now).unwrap();
+
+        // SQL truth set (uncapped, unfiltered — the scheduling shape).
+        let sql_ids: std::collections::HashSet<i64> = fs
+            .list_due(now, &[], &[], None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+
+        // Predicate truth set over the ACTIVE corpus only (matches the predicate's
+        // documented scope: valid-time only, system-time liveness owned by caller).
+        let pred_ids: std::collections::HashSet<i64> = active_facts
+            .iter()
+            .filter(|f| f.is_temporally_due(now))
+            .map(|f| f.id)
+            .collect();
+
+        assert_eq!(
+            sql_ids, pred_ids,
+            "SQL list_due and Fact::is_temporally_due must agree on the active corpus"
+        );
+        // The expired-but-due fact must be in NEITHER (SQL filters it, oracle omits it).
+        assert!(
+            !sql_ids.contains(&expired_id),
+            "expired fact must not be due"
+        );
+        // Sanity: the due set is non-empty (3 due cases above).
+        assert_eq!(sql_ids.len(), 3, "exactly the three due cases");
     }
 
     #[test]

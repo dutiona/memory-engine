@@ -59,9 +59,13 @@ impl MemoryEngine {
         // ordering, dedup (`seen`), and caps are preserved verbatim.
         let mut seen: HashSet<i64> = HashSet::new();
 
-        // Tier 1: Pinned facts (always present, cross-scope)
-        let pinned_all = self.storage.list_pinned_facts(&[]).await?;
-        let pinned: Vec<Fact> = pinned_all.into_iter().take(config.pinned_cap).collect();
+        // Tier 1: Pinned facts (always present, cross-scope). The cap is pushed to
+        // SQL (#395) — the DB no longer transmits/deserializes the embedding BLOBs
+        // of pinned facts beyond `pinned_cap` only to discard them in Rust.
+        let pinned = self
+            .storage
+            .list_pinned_facts(&[], Some(config.pinned_cap))
+            .await?;
         seen.extend(pinned.iter().map(|f| f.id));
 
         // Tier 2: High-importance by materialized score
@@ -76,13 +80,17 @@ impl MemoryEngine {
             .await?;
         seen.extend(high_importance.iter().map(|f| f.id));
 
-        // Tier 3: Due facts (future memory now surfacing)
-        let due_all = self.storage.list_due_facts(now, &scope_ids).await?;
-        let due: Vec<Fact> = due_all
-            .into_iter()
-            .filter(|f| !seen.contains(&f.id))
-            .take(config.due_cap)
-            .collect();
+        // Tier 3: Due facts (future memory now surfacing). The exclude(seen) set
+        // and the cap are pushed to SQL (#396) — the DB no longer materializes (and
+        // decodes the embedding BLOB of) every due fact only to drop the already-seen
+        // ones and truncate to `due_cap` in Rust. json_each exclusion is
+        // order-independent, and `ORDER BY t_valid ASC LIMIT` yields the identical
+        // set the old `.filter(!seen).take(due_cap)` produced.
+        let exclude: Vec<i64> = seen.iter().copied().collect();
+        let due = self
+            .storage
+            .list_due_facts(now, &scope_ids, &exclude, Some(config.due_cap))
+            .await?;
         seen.extend(due.iter().map(|f| f.id));
 
         // Tier 4: Scope-filtered recent
@@ -100,13 +108,14 @@ impl MemoryEngine {
 
         // Step 3: Stamp surfaced_at on ALL due facts across ALL tiers (#93).
         // A fact is "due" if t_valid <= now AND not bi-temporally invalidated,
-        // regardless of which tier claimed it. Matches FactStore::list_due() predicate.
+        // regardless of which tier claimed it. The valid-time test is the shared
+        // `Fact::is_temporally_due` predicate (#477) — the single source of truth
+        // the SQL `list_due` and `explain`'s FactState::Due both mirror, so they
+        // cannot silently drift. Here we additionally require the fact to be
+        // *unsurfaced* (the surfacing concern stays at the call site).
         // Must use write_conn — read connections have query_only = ON.
-        let is_unsurfaced_due = |f: &Fact| -> bool {
-            f.surfaced_at.is_none()
-                && f.t_valid.is_some_and(|tv| tv <= now)
-                && f.t_invalid.is_none_or(|ti| ti > now)
-        };
+        let is_unsurfaced_due =
+            |f: &Fact| -> bool { f.surfaced_at.is_none() && f.is_temporally_due(now) };
         let unsurfaced_ids: Vec<i64> = ctx
             .pinned
             .iter()

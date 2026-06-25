@@ -20,7 +20,12 @@ impl MemoryEngine {
     /// surfaced-at stamping fails.
     pub async fn list_due(&self, now: DateTime<Utc>, scope: Option<&str>) -> Result<Vec<Fact>> {
         let scope_ids = self.resolve_scope_ids(scope)?;
-        let mut facts = self.storage.list_due_facts(now, &scope_ids).await?;
+        // Scheduling contract: ALL due facts, uncapped and unfiltered (#396 made
+        // the exclude/limit params optional precisely so this path stays uncapped).
+        let mut facts = self
+            .storage
+            .list_due_facts(now, &scope_ids, &[], None)
+            .await?;
 
         // Stamp surfaced_at for newly-surfaced facts
         let unsurfaced_ids: Vec<i64> = facts

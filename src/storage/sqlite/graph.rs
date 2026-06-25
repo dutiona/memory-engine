@@ -29,6 +29,116 @@ use crate::types::{
     SessionFact,
 };
 
+/// `(fact_ids, scope_ids_to_cache, embeddings)` — the result of the batch-insert
+/// savepoint. `embeddings` is aligned with `fact_ids` (ann only; empty otherwise).
+type BatchInsertResult = (Vec<i64>, Vec<i64>, Vec<Vec<f32>>);
+
+impl SqliteBackend {
+    /// Savepoint body for [`insert_facts_batch_atomic`](FactGraph::insert_facts_batch_atomic):
+    /// stamp identity, resolve scopes, and insert each fact, all-or-nothing.
+    ///
+    /// Takes `facts` **by value** so it can patch `scope_id` in place (no per-fact
+    /// clone in the insert loop) and then move the embeddings out of the consumed
+    /// vec for the caller's post-commit HNSW notify — neither path clones the
+    /// embedding (#391). Under `not(feature = "ann")` the returned embeddings vec
+    /// is empty (the sidecar is absent, so the move is skipped entirely).
+    ///
+    /// # Returns
+    ///
+    /// `(fact_ids, scope_ids_to_cache, embeddings)` — `fact_ids` in `facts` order;
+    /// `scope_ids_to_cache` the deduplicated new scope ids; `embeddings` aligned
+    /// with `fact_ids` (ann only, else empty).
+    fn batch_insert_savepoint(
+        conn: &rusqlite::Connection,
+        facts: Vec<NewFact>,
+        scope_paths: &[Option<String>],
+        fingerprint: &EmbeddingFingerprint,
+        expected_dim: usize,
+        dim: usize,
+    ) -> Result<BatchInsertResult> {
+        // Defensive precondition: the insert loop indexes `per_entry_scope_ids`
+        // (built 1:1 from `scope_paths`) by fact position, so the two MUST be the
+        // same length. Reject a mismatch with a typed error rather than panicking
+        // on an out-of-bounds index (or silently dropping facts via a zip).
+        if facts.len() != scope_paths.len() {
+            return Err(crate::error::MemoryError::Internal(format!(
+                "batch insert: facts ({}) and scope_paths ({}) length mismatch",
+                facts.len(),
+                scope_paths.len()
+            )));
+        }
+
+        // Verbatim body of ingest.rs:397-476: savepoint wrapping stamp +
+        // scope-resolve + per-fact insert.
+        conn.execute_batch("SAVEPOINT batch_insert")?;
+
+        let result: Result<BatchInsertResult> = (|| {
+            // Record the embedding identity on first write (#613), inside the
+            // savepoint so it commits atomically with the batch.
+            crate::store::embedding_meta::record_if_absent(conn, fingerprint, expected_dim)?;
+
+            let scope_store = ScopeStore::new(conn);
+            let store = FactStore::new(conn, dim);
+
+            // Resolve scopes INSIDE the savepoint so they roll back on error.
+            // Deduplicate by path to avoid N redundant DB lookups.
+            let mut scope_cache: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+            let mut per_entry_scope_ids = Vec::with_capacity(facts.len());
+            for path_opt in scope_paths {
+                let scope_id = match path_opt {
+                    Some(path) => {
+                        if let Some(&cached) = scope_cache.get(path) {
+                            cached
+                        } else {
+                            let id = scope_store.ensure_path(path)?;
+                            scope_cache.insert(path.clone(), id);
+                            id
+                        }
+                    }
+                    None => 1, // root scope
+                };
+                per_entry_scope_ids.push(scope_id);
+            }
+            let scope_ids_to_cache: Vec<i64> = scope_cache.into_values().collect();
+
+            // Patch scope_id in place and insert by reference — no per-fact clone
+            // (the NewFact coming in may have a placeholder; we honor the resolved
+            // scope_id from the savepoint).
+            let mut facts = facts;
+            let mut ids = Vec::with_capacity(facts.len());
+            for (i, fact) in facts.iter_mut().enumerate() {
+                fact.scope_id = per_entry_scope_ids[i];
+                ids.push(store.insert(fact)?);
+            }
+
+            // Move the embeddings out of the now-consumed facts for the post-commit
+            // HNSW notify (ann only; otherwise the sidecar is absent so skip it).
+            #[cfg(feature = "ann")]
+            let embeddings: Vec<Vec<f32>> = facts.into_iter().map(|f| f.embedding).collect();
+            #[cfg(not(feature = "ann"))]
+            let embeddings: Vec<Vec<f32>> = {
+                drop(facts);
+                Vec::new()
+            };
+
+            Ok((ids, scope_ids_to_cache, embeddings))
+        })();
+
+        match result {
+            Ok(triple) => {
+                conn.execute_batch("RELEASE batch_insert")?;
+                Ok(triple)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK TO batch_insert");
+                let _ = conn.execute_batch("RELEASE batch_insert");
+                Err(e)
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl FactGraph for SqliteBackend {
     // -------------------------------------------------------------------------
@@ -303,18 +413,30 @@ impl FactGraph for SqliteBackend {
     }
 
     // READ
-    async fn list_pinned_facts(&self, scope_ids: &[i64]) -> Result<Vec<Fact>> {
+    async fn list_pinned_facts(
+        &self,
+        scope_ids: &[i64],
+        limit: Option<usize>,
+    ) -> Result<Vec<Fact>> {
         let scope_ids = scope_ids.to_vec();
         let dim = self.embed_dim;
-        self.block_read(move |c| FactStore::new(c, dim).list_pinned(&scope_ids))
+        let cap = limit.unwrap_or(usize::MAX);
+        self.block_read(move |c| FactStore::new(c, dim).list_pinned(&scope_ids, cap))
             .await
     }
 
     // READ
-    async fn list_due_facts(&self, now: DateTime<Utc>, scope_ids: &[i64]) -> Result<Vec<Fact>> {
+    async fn list_due_facts(
+        &self,
+        now: DateTime<Utc>,
+        scope_ids: &[i64],
+        exclude: &[i64],
+        limit: Option<usize>,
+    ) -> Result<Vec<Fact>> {
         let scope_ids = scope_ids.to_vec();
+        let exclude = exclude.to_vec();
         let dim = self.embed_dim;
-        self.block_read(move |c| FactStore::new(c, dim).list_due(now, &scope_ids))
+        self.block_read(move |c| FactStore::new(c, dim).list_due(now, &scope_ids, &exclude, limit))
             .await
     }
 
@@ -618,78 +740,29 @@ impl FactGraph for SqliteBackend {
         fingerprint: &EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<(Vec<i64>, Vec<i64>)> {
-        // Capture embeddings before moving `facts` into the closure.
-        #[cfg(feature = "ann")]
-        let embeddings: Vec<Vec<f32>> = facts.iter().map(|f| f.embedding.clone()).collect();
+        // One owning copy of the batch is unavoidable: the `block_write` closure is
+        // `'static + Send`, so it must own its data and the engine keeps the
+        // borrowed originals. The owned `facts` vec is moved into the helper, which
+        // patches scope_id in place (no per-fact clone inside the insert loop) and
+        // then moves the embeddings out of it (no embedding clone) — #391.
         let facts = facts.to_vec();
         let scope_paths = scope_paths.to_vec();
         let fingerprint = fingerprint.clone();
         let dim = self.embed_dim;
-        let (ids, scope_ids_to_cache) = self
+        // The savepoint helper moves the owned embeddings OUT of `facts` after the
+        // inserts (the post-commit HNSW notify needs them, fired outside the
+        // closure) — moved, not cloned, since `facts` is dropped at the closure's
+        // end anyway (#391). Under `not(ann)` the helper returns them empty.
+        let (ids, scope_ids_to_cache, embeddings) = self
             .block_write(move |conn| {
-                // Verbatim body of ingest.rs:397-476: savepoint wrapping stamp +
-                // scope-resolve + per-fact insert.
-                conn.execute_batch("SAVEPOINT batch_insert")?;
-
-                let result: Result<(Vec<i64>, Vec<i64>)> = (|| {
-                    // Record the embedding identity on first write (#613), inside the
-                    // savepoint so it commits atomically with the batch.
-                    crate::store::embedding_meta::record_if_absent(
-                        conn,
-                        &fingerprint,
-                        expected_dim,
-                    )?;
-
-                    let scope_store = ScopeStore::new(conn);
-                    let store = FactStore::new(conn, dim);
-
-                    // Resolve scopes INSIDE the savepoint so they roll back on error.
-                    // Deduplicate by path to avoid N redundant DB lookups.
-                    let mut scope_cache: std::collections::HashMap<String, i64> =
-                        std::collections::HashMap::new();
-                    let mut per_entry_scope_ids = Vec::with_capacity(facts.len());
-                    for path_opt in &scope_paths {
-                        let scope_id = match path_opt {
-                            Some(path) => {
-                                if let Some(&cached) = scope_cache.get(path) {
-                                    cached
-                                } else {
-                                    let id = scope_store.ensure_path(path)?;
-                                    scope_cache.insert(path.clone(), id);
-                                    id
-                                }
-                            }
-                            None => 1, // root scope
-                        };
-                        per_entry_scope_ids.push(scope_id);
-                    }
-                    let scope_ids_to_cache: Vec<i64> = scope_cache.into_values().collect();
-
-                    let mut ids = Vec::with_capacity(facts.len());
-                    for (i, fact) in facts.iter().enumerate() {
-                        // Patch scope_id from the resolved value (the NewFact coming in
-                        // may have a placeholder 0; in practice the engine already sets it,
-                        // but we honor the resolved scope_id from the savepoint).
-                        let mut f = fact.clone();
-                        f.scope_id = per_entry_scope_ids[i];
-                        let fact_id = store.insert(&f)?;
-                        ids.push(fact_id);
-                    }
-
-                    Ok((ids, scope_ids_to_cache))
-                })();
-
-                match result {
-                    Ok(pair) => {
-                        conn.execute_batch("RELEASE batch_insert")?;
-                        Ok(pair)
-                    }
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK TO batch_insert");
-                        let _ = conn.execute_batch("RELEASE batch_insert");
-                        Err(e)
-                    }
-                }
+                Self::batch_insert_savepoint(
+                    conn,
+                    facts,
+                    &scope_paths,
+                    &fingerprint,
+                    expected_dim,
+                    dim,
+                )
             })
             .await?;
         // Post-commit HNSW notifications (mirrors engine/ingest.rs batch path).
@@ -697,6 +770,8 @@ impl FactGraph for SqliteBackend {
         for (id, embedding) in ids.iter().zip(embeddings.iter()) {
             self.hnsw_notify_insert(*id, embedding);
         }
+        #[cfg(not(feature = "ann"))]
+        let _ = embeddings; // unused without the HNSW sidecar
         Ok((ids, scope_ids_to_cache))
     }
 
@@ -1126,10 +1201,12 @@ mod tests {
         // Oracle: direct FactStore call with empty slice.
         let oracle: Vec<Fact> = {
             let conn = pool.read().unwrap();
-            FactStore::new(&conn, DIM).list_pinned(&[]).unwrap()
+            FactStore::new(&conn, DIM)
+                .list_pinned(&[], usize::MAX)
+                .unwrap()
         };
         let be = backend(Arc::clone(&pool));
-        let got = be.list_pinned_facts(&[]).await.unwrap();
+        let got = be.list_pinned_facts(&[], None).await.unwrap();
         // Both should return the same 2 rows (empty = ALL scopes).
         assert_eq!(
             got.len(),
@@ -1139,6 +1216,62 @@ mod tests {
         assert_eq!(
             got.iter().map(|f| f.id).collect::<HashSet<_>>(),
             oracle.iter().map(|f| f.id).collect::<HashSet<_>>(),
+        );
+        // #395: the limit is honored through the port — a cap of 1 returns 1 row.
+        let capped = be.list_pinned_facts(&[], Some(1)).await.unwrap();
+        assert_eq!(capped.len(), 1, "limit=1 must cap at one pinned fact");
+    }
+
+    /// #396: `list_due_facts` honors `exclude` + `limit` through the port, and the
+    /// uncapped scheduling shape (`exclude=[]`, `limit=None`) returns every due
+    /// fact — matching the direct `FactStore` oracle.
+    #[tokio::test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "write guard is intentionally held across the seed block"
+    )]
+    async fn list_due_facts_exclude_and_limit_through_port() {
+        use chrono::TimeDelta;
+
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let now = Utc::now();
+        let mut seeded_ids = Vec::new();
+        {
+            let conn = pool.write();
+            let store = FactStore::new(&conn, DIM);
+            // Four due facts (ascending t_valid) + one future (never due).
+            for i in 0..4 {
+                let mut f = fact(&format!("due {i}"), [0.1; DIM]);
+                f.t_valid = Some(now - TimeDelta::hours(i64::from(4 - i)));
+                seeded_ids.push(store.insert(&f).unwrap());
+            }
+            let mut future = fact("future", [0.2; DIM]);
+            future.t_valid = Some(now + TimeDelta::hours(1));
+            store.insert(&future).unwrap();
+        }
+        let be = backend(Arc::clone(&pool));
+
+        // Uncapped scheduling shape through the port.
+        let all_due = be.list_due_facts(now, &[], &[], None).await.unwrap();
+        assert_eq!(all_due.len(), 4, "uncapped port returns all due facts");
+
+        // Exclude the earliest, cap at 2 → the next two in t_valid ASC order.
+        let exclude = vec![seeded_ids[0]];
+        let got = be
+            .list_due_facts(now, &[], &exclude, Some(2))
+            .await
+            .unwrap();
+        let got_ids: Vec<i64> = got.iter().map(|f| f.id).collect();
+        let oracle: Vec<i64> = all_due
+            .iter()
+            .filter(|f| f.id != seeded_ids[0])
+            .take(2)
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(got_ids, oracle, "port exclude+limit must match filter+take");
+        assert!(
+            !got_ids.contains(&seeded_ids[0]),
+            "excluded id must not appear"
         );
     }
 
@@ -1531,6 +1664,23 @@ mod tests {
             let expected_content = ["a", "b", "c"][i];
             assert_eq!(got.content, expected_content);
         }
+    }
+
+    /// Mismatched `facts` / `scope_paths` lengths must return a typed error, not
+    /// panic on an out-of-bounds scope-id index inside the savepoint loop.
+    #[tokio::test]
+    async fn insert_facts_batch_atomic_rejects_length_mismatch() {
+        let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
+        let facts = vec![fact("a", [0.1; DIM]), fact("b", [0.2; DIM])];
+        let paths: Vec<Option<String>> = vec![None]; // one short
+        let err = be
+            .insert_facts_batch_atomic(&facts, &paths, &fp(), DIM)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Internal(ref m) if m.contains("length mismatch")),
+            "expected a length-mismatch Internal error, got {err:?}"
+        );
     }
 
     /// Scope split: a named scope path is resolved inside the savepoint and its id

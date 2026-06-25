@@ -237,6 +237,32 @@ impl Fact {
     /// `0.5` literal. Arbiter implementations may compare against it to detect an
     /// unscored candidate.
     pub const UNSCORED_IMPORTANCE: f64 = 0.5;
+
+    /// Whether this fact is **temporally due** at `now`: it has a concrete
+    /// valid-time start that has arrived (`t_valid` is `Some` and `<= now`) and is
+    /// not yet bi-temporally invalidated (`t_invalid` is `None` or strictly after
+    /// `now`).
+    ///
+    /// This is the single source of truth for the in-Rust due predicate, shared by
+    /// the resume surfacing walk and the `explain` `FactState::Due` classifier so
+    /// the two cannot silently drift (#477). It is the Rust mirror of the SQL
+    /// `WHERE` clause in `FactStore::list_due` / `SchemaManager::statistics` and of
+    /// [`TemporalFilter::ValidDue`](crate::storage::TemporalFilter::ValidDue).
+    ///
+    /// # Scope (what this predicate does NOT cover)
+    ///
+    /// It is purely the *valid-time* test. Callers retain responsibility for the
+    /// orthogonal concerns the SQL bundles in:
+    /// - **System-time liveness** (`t_expired IS NULL`): the resume/explain callers
+    ///   only ever evaluate facts drawn from active-only reads, so the row is
+    ///   already known live. The SQL spells it out because it scans the raw table.
+    /// - **Surfacing state** (`surfaced_at`): the resume walk additionally requires
+    ///   `surfaced_at.is_none()` to pick the *unsurfaced* subset; that is a
+    ///   surfacing concern, not a due concern, and stays at the call site.
+    #[must_use]
+    pub fn is_temporally_due(&self, now: DateTime<Utc>) -> bool {
+        self.t_valid.is_some_and(|tv| tv <= now) && self.t_invalid.is_none_or(|ti| ti > now)
+    }
 }
 
 /// A graph edge between two facts.
