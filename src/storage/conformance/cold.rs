@@ -14,13 +14,17 @@ const HASH: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdead
 /// Manifest entries list oldest-first (`ORDER BY created_at ASC`).
 pub async fn manifest_insert_list_oldest_first<F: ConformanceBackend>(f: &F) {
     let (_storage, cold) = f.make_with_cold().await;
+    // Distinct created_at so "oldest first" tests the ORDER BY created_at contract,
+    // not an insertion-order tie-break SQLite happens to provide but the contract
+    // (and Postgres) does not guarantee for equal keys.
     let now = Utc::now();
+    let later = now + chrono::Duration::seconds(1);
     let id1 = cold
         .insert_archive_manifest("a.pak", now, 10, 5, 1, 10, now, now, 1024, HASH)
         .await
         .expect("insert 1");
     let id2 = cold
-        .insert_archive_manifest("b.pak", now, 10, 5, 11, 20, now, now, 1024, HASH)
+        .insert_archive_manifest("b.pak", later, 10, 5, 11, 20, later, later, 1024, HASH)
         .await
         .expect("insert 2");
     let list = cold.list_archive_manifest().await.expect("list");

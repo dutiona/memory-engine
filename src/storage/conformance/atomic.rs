@@ -123,17 +123,18 @@ pub async fn resolve_conflict_atomic_rollback_leaves_old_active<F: ConformanceBa
         .await
         .expect_err("wrong-dim successor must fault the transaction");
     let after = snapshot(&be).await;
-    assert_eq!(
-        before,
-        after,
-        "[{}] resolve_conflict_atomic Err must leave the store byte-identical",
-        f.name()
-    );
-    // The named F5 predicate, for a readable failure message.
+    // The named F5 predicate FIRST (targeted message for the data-loss class), then the
+    // broad full-state snapshot as the catch-all for any other leak.
     let old = be.get_fact(old_id).await.expect("old fact still present");
     assert!(
         old.t_expired.is_none() && old.t_invalid.is_none(),
         "[{}] F5: rollback must leave the OLD fact active (not expired with no successor), got {err:?}",
+        f.name()
+    );
+    assert_eq!(
+        before,
+        after,
+        "[{}] resolve_conflict_atomic Err must leave the store byte-identical",
         f.name()
     );
 }
@@ -169,28 +170,57 @@ pub async fn prune_atomic_rollback<F: ConformanceBackend>(f: &F) {
     );
 }
 
-/// `apply_cycle_deltas_atomic` whose final config write faults mid-tx ⇒ `Err`, and
-/// NO delta committed — neither the fact quarantine NOR any lineage/event leak
-/// (the review BLOCKER: a partial snapshot would miss the latter).
+/// `apply_cycle_deltas_atomic` whose final config write faults mid-tx ⇒ `Err`, and NO
+/// delta committed across facts, events, AND lineage. The report intentionally writes
+/// all three (`Quarantine` ⇒ facts, `TagOutcome` ⇒ an `OutcomeSignal` event, `Promote`
+/// ⇒ a lineage row) so EVERY rollback assertion is LOAD-BEARING — a non-atomic backend
+/// that committed any delta before the config write faults would leak a fact-expiry, an
+/// event, or a lineage row (the review BLOCKER class a partial snapshot would miss). A
+/// `Quarantine`-only report would make the event/lineage assertions vacuously true.
 ///
-/// Injected by dropping `config` so the final `set_config(last_dream_cycle_at)` inside
-/// the transaction faults, AFTER the Quarantine delta ran on `facts`.
+/// Injected by dropping `config` so the final `set_config(last_dream_cycle_at)` at the
+/// END of the transaction faults, AFTER all deltas have run.
 pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
     use crate::engine::cycle::{
         CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
     };
+    use crate::types::{Outcome, PromotionProvenance};
     let be = f.make().await;
-    let fact_id = seed_facts(&be, &[new_fact("victim")]).await[0];
-    // Inject: drop `config` so the final watermark write inside the tx faults.
+    let ids = seed_facts(&be, &[new_fact("victim"), new_fact("promotable")]).await;
+    let (fact_id, promotable) = (ids[0], ids[1]);
+    // Inject: drop `config` so the final watermark write at tx-end faults.
     be.raw_exec("DROP TABLE config")
         .await
         .expect("drop config (crash injection)");
     let start: chrono::DateTime<Utc> = "2026-06-16T00:00:00Z".parse().expect("parse start");
+    let provenance = PromotionProvenance {
+        source_count: 1,
+        session_count: 1,
+        date_range_start: start,
+        date_range_end: start,
+        confidence: 0.9,
+        method_version: "conformance".into(),
+        representative_ids: vec![promotable],
+        lineage_id: 0,
+    };
     let report = CycleReport {
-        deltas: vec![CycleDelta::Quarantine {
-            fact_id,
-            reason: "conformance".into(),
-        }],
+        deltas: vec![
+            // facts write
+            CycleDelta::Quarantine {
+                fact_id,
+                reason: "conformance".into(),
+            },
+            // event write (OutcomeSignal)
+            CycleDelta::TagOutcome {
+                fact_id,
+                outcome: Outcome::Negative,
+            },
+            // lineage write
+            CycleDelta::Promote {
+                fact_id: promotable,
+                provenance,
+            },
+        ],
         identity: IdentityOutput::empty(),
         metadata: CycleMetadata {
             cycle_id: 1,
@@ -199,9 +229,9 @@ pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
                 start,
                 end: "2026-06-16T01:00:00Z".parse().expect("parse end"),
             },
-            facts_selected: 1,
+            facts_selected: 2,
             method_version: "conformance".into(),
-            processed_ids: vec![fact_id],
+            processed_ids: vec![fact_id, promotable],
         },
     };
     let registry = crate::store::upcaster::UpcasterRegistry::new();

@@ -101,20 +101,28 @@ pub async fn seed_facts(be: &Arc<dyn StorageBackend>, facts: &[NewFact]) -> Vec<
     ids
 }
 
-/// A full-state, port-only capture of the store, canonicalized for total `Eq`.
+/// A port-only capture of the store, canonicalized for total `Eq`.
 ///
 /// Each table is serialized row-by-row (every domain type derives `Serialize`, so
 /// identical values produce identical JSON — capturing timestamps, embeddings, and
-/// flags without hand-rolled bit-casting) and **sorted**, so two captures are equal
-/// iff the observable store state is identical across EVERY table an atomic method
-/// can touch. This is what makes the rollback assertion catch the F5 partial-commit
-/// class (an expired-but-undeleted fact flips `t_expired`) AND a leaked
+/// flags without hand-rolled bit-casting) and **sorted**, so two captures are equal iff
+/// the captured state is identical. It covers facts, edges, summaries, scopes, events,
+/// lineage, the active embedding fingerprint, and the cycle-watermark config keys — the
+/// tables the TYPED-injector atomic methods using it can write (`insert_fact_atomic` /
+/// `insert_facts_batch_atomic` / `resolve_conflict_atomic`). This catches the F5
+/// partial-commit class (an expired-but-undeleted fact flips `t_expired`) AND a leaked
 /// event/lineage/config row (the review BLOCKER).
 ///
+/// **NOT captured:** `fact_vectors` / non-active `embedding_spaces` (#623
+/// reconstruction), `activities` / `checkpoints`, `archive_manifest`. A future
+/// atomic-rollback test over a method that writes those (e.g. `promote_atomic`,
+/// `apply_plan`, the #623 space promotes) MUST extend this struct or read those tables
+/// directly.
+///
 /// Use ONLY for rollback tests that inject via a TYPED fault (wrong-dim embedding,
-/// mismatched fingerprint) — those leave every table readable. A `DROP TABLE`
-/// injection makes that table unreadable afterward, so those tests read the specific
-/// non-dropped tables directly instead.
+/// mismatched fingerprint) — those leave every table readable. A `DROP TABLE` injection
+/// makes that table unreadable afterward, so those tests (prune / apply-cycle / cold)
+/// read the specific non-dropped tables directly instead.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StoreSnapshot {
     facts: Vec<String>,

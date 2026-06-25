@@ -62,31 +62,31 @@ pub async fn list_count_parity<F: ConformanceBackend>(f: &F) {
     assert_eq!(counted, 3, "[{}] count must be 3", f.name());
 }
 
-/// `for_each_event` delivers all rows in scan order, and a callback `Err` at row k
-/// propagates that exact error and stops early.
+/// `for_each_event` delivers every row (asserted as a SET — the trait doc promises no
+/// ordering, so pinning a delivery order would couple to a backend artifact and
+/// false-fail a conforming `PgBackend`), and a callback `Err` at row k propagates that
+/// exact error and stops early.
 pub async fn for_each_order_and_callback_error<F: ConformanceBackend>(f: &F) {
     let be = f.make().await;
+    let mut inserted = std::collections::HashSet::new();
     for i in 0..5 {
-        be.insert_event(&new_event(&format!("s{i}")))
-            .await
-            .expect("insert");
+        inserted.insert(
+            be.insert_event(&new_event(&format!("s{i}")))
+                .await
+                .expect("insert"),
+        );
     }
-    let mut seen = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     be.for_each_event(&mut |e| {
-        seen.push(e.id);
+        seen.insert(e.id);
         Ok(())
     })
     .await
     .expect("for_each_event");
     assert_eq!(
-        seen.len(),
-        5,
-        "[{}] for_each must deliver all rows",
-        f.name()
-    );
-    assert!(
-        seen.windows(2).all(|w| w[0] <= w[1]),
-        "[{}] for_each must deliver in scan order",
+        seen,
+        inserted,
+        "[{}] for_each_event must deliver exactly the inserted events (set membership, not a backend-specific order)",
         f.name()
     );
 
