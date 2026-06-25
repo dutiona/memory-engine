@@ -108,14 +108,17 @@ pub(crate) fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     if fact.is_pinned {
         return FactState::Pinned;
     }
-    if let Some(t_valid) = fact.t_valid {
-        let not_yet_invalid = fact.t_invalid.is_none_or(|t_inv| t_inv > now);
-        if t_valid <= now && not_yet_invalid {
-            return FactState::Due {
-                t_valid,
-                surfaced_at: fact.surfaced_at,
-            };
-        }
+    // Shared valid-time predicate (#477): same `Fact::is_temporally_due` the resume
+    // walk and the SQL `list_due` use, so the classifier cannot drift from them.
+    // (The earlier `t_invalid <= now` early-return already split off Invalidated, so
+    // reaching here with `is_temporally_due` true means a genuinely-due active fact.)
+    if let Some(t_valid) = fact.t_valid
+        && fact.is_temporally_due(now)
+    {
+        return FactState::Due {
+            t_valid,
+            surfaced_at: fact.surfaced_at,
+        };
     }
     FactState::Active
 }

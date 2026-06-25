@@ -2139,6 +2139,83 @@ mod tests {
         assert!(result[0].content.contains("past"));
     }
 
+    /// #477: the SQL `list_due` predicate and the shared in-Rust
+    /// `Fact::is_temporally_due` predicate MUST agree on the same active fact
+    /// population, over a corpus with varied `t_valid`/`t_invalid` combinations.
+    /// This pins the two against silent drift (the resume walk and `explain`'s
+    /// `FactState::Due` both route through `is_temporally_due`).
+    #[test]
+    fn list_due_membership_equals_is_temporally_due_predicate() {
+        // Item-before-statements (clippy::items_after_statements): the alias keeps
+        // the `cases` corpus type readable.
+        type Ts = Option<chrono::DateTime<Utc>>;
+
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+        let past = now - TimeDelta::hours(1);
+        let future = now + TimeDelta::hours(1);
+
+        // A corpus spanning every meaningful (t_valid, t_invalid) combination,
+        // including the boundary instants (== now) the predicate hinges on.
+        let cases: &[(&str, Ts, Ts)] = &[
+            ("no_tvalid", None, None), // t_valid None → never due
+            ("no_tvalid_invalidated", None, Some(future)),
+            ("past_tvalid", Some(past), None),     // due
+            ("tvalid_eq_now", Some(now), None),    // due (boundary: t_valid <= now)
+            ("future_tvalid", Some(future), None), // not yet valid
+            ("past_then_invalid_future", Some(past), Some(future)), // due (invalid still ahead)
+            ("past_then_invalid_past", Some(past), Some(past)), // invalidated
+            ("invalid_eq_now", Some(past), Some(now)), // invalidated (boundary: t_invalid > now is false)
+        ];
+
+        let mut active_facts = Vec::new();
+        for (label, t_valid, t_invalid) in cases {
+            let mut f = make_fact(label, vec![0.1; DIM]);
+            f.t_valid = *t_valid;
+            f.t_invalid = *t_invalid;
+            let id = fs.insert(&f).unwrap();
+            active_facts.push(fs.get(id).unwrap());
+        }
+
+        // Also seed an EXPIRED-but-otherwise-due fact: it must NOT appear in
+        // list_due (system-time filter), and is excluded from the predicate oracle
+        // because is_temporally_due deliberately does not test t_expired (its
+        // documented scope — the caller's active-only read owns that).
+        let mut expired = make_fact("expired_due", vec![0.2; DIM]);
+        expired.t_valid = Some(past);
+        let expired_id = fs.insert(&expired).unwrap();
+        fs.expire(expired_id, now).unwrap();
+
+        // SQL truth set.
+        let sql_ids: std::collections::HashSet<i64> = fs
+            .list_due(now, &[])
+            .unwrap()
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+
+        // Predicate truth set over the ACTIVE corpus only (matches the predicate's
+        // documented scope: valid-time only, system-time liveness owned by caller).
+        let pred_ids: std::collections::HashSet<i64> = active_facts
+            .iter()
+            .filter(|f| f.is_temporally_due(now))
+            .map(|f| f.id)
+            .collect();
+
+        assert_eq!(
+            sql_ids, pred_ids,
+            "SQL list_due and Fact::is_temporally_due must agree on the active corpus"
+        );
+        // The expired-but-due fact must be in NEITHER (SQL filters it, oracle omits it).
+        assert!(
+            !sql_ids.contains(&expired_id),
+            "expired fact must not be due"
+        );
+        // Sanity: the due set is non-empty (3 due cases above).
+        assert_eq!(sql_ids.len(), 3, "exactly the three due cases");
+    }
+
     #[test]
     fn next_due_time_returns_earliest_future_t_valid() {
         let conn = setup();

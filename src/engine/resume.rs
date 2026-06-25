@@ -100,13 +100,14 @@ impl MemoryEngine {
 
         // Step 3: Stamp surfaced_at on ALL due facts across ALL tiers (#93).
         // A fact is "due" if t_valid <= now AND not bi-temporally invalidated,
-        // regardless of which tier claimed it. Matches FactStore::list_due() predicate.
+        // regardless of which tier claimed it. The valid-time test is the shared
+        // `Fact::is_temporally_due` predicate (#477) — the single source of truth
+        // the SQL `list_due` and `explain`'s FactState::Due both mirror, so they
+        // cannot silently drift. Here we additionally require the fact to be
+        // *unsurfaced* (the surfacing concern stays at the call site).
         // Must use write_conn — read connections have query_only = ON.
-        let is_unsurfaced_due = |f: &Fact| -> bool {
-            f.surfaced_at.is_none()
-                && f.t_valid.is_some_and(|tv| tv <= now)
-                && f.t_invalid.is_none_or(|ti| ti > now)
-        };
+        let is_unsurfaced_due =
+            |f: &Fact| -> bool { f.surfaced_at.is_none() && f.is_temporally_due(now) };
         let unsurfaced_ids: Vec<i64> = ctx
             .pinned
             .iter()
