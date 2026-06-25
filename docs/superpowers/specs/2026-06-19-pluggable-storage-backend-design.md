@@ -168,7 +168,7 @@ pub trait StorageBackend:
   scopes partition the graph rather than being an independent concern.
 - **Lineage sits in `ConsolidationStore`** — it is Phase-5 wisdom provenance, a
   consolidation output.
-- **`capabilities()`** is how the BM25-vs-ts_rank tier surfaces _without_
+- **`capabilities()`** is how the BM25-vs-ts*rank tier surfaces \_without*
   leaking dialect (consumed by the engine and benchmark D).
 - The umbrella gives the engine a single `Arc<dyn StorageBackend>`, while the
   bounded traits are what tests mock in isolation (e.g. a forgetting test mocks
@@ -429,11 +429,18 @@ archive  # gates ColdStorage on BOTH backends
 ### Testing strategy
 
 - **A regression gate:** existing suite green with SQLite-behind-traits.
-- **Cross-backend conformance suite (A4):** one parameterized battery running
-  against `SqliteBackend` always and `PgBackend` via testcontainers when
-  `backend-postgres` is on. Encodes the trait _contract_ once (e.g. "expire then
-  query Active excludes it"; "bi-temporal AsOf returns the historical row") so
-  both backends prove the same semantics.
+- **Cross-backend conformance suite (A4) — ✅ implemented (#632):** an in-crate
+  `#[cfg(test)] mod conformance` battery (`src/storage/conformance/`) running against
+  `SqliteBackend` always and an inert, `#[ignore]`d `PgBackend` arm under
+  `backend-postgres` (filled by #633 via testcontainers). A `ConformanceBackend` factory
+  - a tt-muncher `conformance_suite!` macro emit one `#[tokio::test]` per behavior from a
+    single registry; behaviors are written ONCE and seed only through the port (so adding a
+    backend is one factory impl + deleting the `#[ignore]` token). Encodes the trait
+    _contract_ once (e.g. "expire then query Active excludes it"; "bi-temporal AsOf returns
+    the historical row"; the all-or-nothing atomic rollback proven via the #727 `raw_exec`
+    crash-injection seam + a full-state snapshot diff) so both backends prove the same
+    semantics. Storage-PORT level (`Arc<dyn StorageBackend>` directly) — distinct from the
+    engine-facade `tests/eval/conformance/`.
 - **Per-backend golden lexical tests:** tokenizer behavior legitimately differs;
   these stay per-backend, not cross-backend identity.
 - **D benchmark:** quality gate / reporting.

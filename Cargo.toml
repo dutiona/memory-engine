@@ -57,6 +57,13 @@ ann = ["dep:hnsw", "dep:space", "dep:rand"]
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
 archive = ["compress-zstd"]
+# Inert scaffolding for the cross-backend conformance suite (#632): selects the
+# Postgres arm of the in-crate `storage::conformance` battery. No dependencies yet
+# — `tokio-postgres`/`deadpool-postgres`/`testcontainers` and the real `PgBackend`
+# land in #633, which flips the arm's `#[ignore]` off. With the feature on, the
+# conformance battery's `postgres` tests are *discovered but ignored* (the
+# `PgFactory` is `todo!()`), proving the harness already accepts a second backend.
+backend-postgres = []
 # Exposes test-only escape hatches on the storage port (e.g.
 # `SchemaManager::raw_exec`) for cross-crate tests — notably the #632 conformance
 # suite, where every backend must provide the seam for the failure-injection
