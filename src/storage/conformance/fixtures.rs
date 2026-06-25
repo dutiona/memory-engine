@@ -12,7 +12,8 @@ use chrono::Utc;
 use crate::storage::StorageBackend;
 use crate::types::{
     ConsolidationLevel, EmbeddingFingerprint, EventFilter, EventType, FactType,
-    LineageSnapshotEntry, NewActivity, NewEvent, NewFact, NewSummary, SessionCheckpoint,
+    LineageSnapshotEntry, NewActivity, NewEvent, NewFact, NewSummary, OutcomeClass,
+    SessionCheckpoint,
 };
 
 /// The embedding dimension every conformance backend uses (matches the `SQLite` oracle).
@@ -65,7 +66,7 @@ pub fn new_activity(session_id: &str, tool: &str) -> NewActivity {
         args_hash: format!("{tool}-hash"),
         args: serde_json::json!({}),
         result_summary: None,
-        outcome_class: "success".into(),
+        outcome_class: OutcomeClass::Success,
         timestamp: Utc::now(),
         scope_id: 1,
     }

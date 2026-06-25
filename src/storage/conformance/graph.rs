@@ -162,7 +162,7 @@ pub async fn scope_ids_empty_slice_means_all<F: ConformanceBackend>(f: &F) {
         .scope_id(1)
         .is_pinned(true)
         .t_valid(past)
-        .importance(0.9)
+        .base_importance(0.9)
         .build();
     let id = seed_facts(&be, &[fact]).await[0];
     // A future-due fact so `next_due_time` has a candidate (identity now established).
@@ -260,7 +260,7 @@ pub async fn scope_ids_empty_slice_means_none<F: ConformanceBackend>(f: &F) {
     let empty_excl: HashSet<i64> = HashSet::new();
     let fact = NewFact::builder("none-test", vec![0.1_f32; DIM], FactType::Episodic)
         .scope_id(scope)
-        .importance(0.9)
+        .base_importance(0.9)
         .metadata(serde_json::json!({ "marker": 1 }))
         .build();
     let id = seed_facts(&be, &[fact]).await[0];

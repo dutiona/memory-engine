@@ -201,7 +201,6 @@ pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
         confidence: 0.9,
         method_version: "conformance".into(),
         representative_ids: vec![promotable],
-        lineage_id: 0,
     };
     let report = CycleReport {
         deltas: vec![

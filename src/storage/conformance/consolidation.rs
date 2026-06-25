@@ -120,7 +120,6 @@ pub async fn lineage_insert_get_has_delete_sources<F: ConformanceBackend>(f: &F)
         confidence: 0.9,
         method_version: "conformance".into(),
         representative_ids: vec![src_a, src_b],
-        lineage_id: 0,
     };
     be.insert_lineage(&record, &prov)
         .await
