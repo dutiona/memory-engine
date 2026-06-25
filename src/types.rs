@@ -1779,6 +1779,103 @@ mod tests {
         assert!(back.merges.is_empty());
     }
 
+    /// Property-based serde round-trips for the core types whose invariants the
+    /// example tests above only spot-check at one or two fixed inputs (#444).
+    ///
+    /// The example tests pin specific shapes (one `PromotionProvenance`, two
+    /// `Fact` JSON blobs); these assert the round-trip and field-omission
+    /// invariants hold across the *whole* input space — arbitrary counts, scores,
+    /// timestamps, id vectors, and the `surfaced_at` `Some`/`None` axis.
+    mod proptest_serde_roundtrip {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Build a UTC timestamp from a second-offset proptest sample, clamped to a
+        /// representable range so the strategy never produces an out-of-range value.
+        fn ts_from_secs(secs: i64) -> DateTime<Utc> {
+            // chrono's representable range is enormous; this band is more than wide
+            // enough to exercise the serialization without flirting with overflow.
+            let clamped = secs.clamp(-62_135_596_800, 253_402_300_799);
+            DateTime::<Utc>::from_timestamp(clamped, 0).unwrap_or_else(Utc::now)
+        }
+
+        proptest! {
+            /// `PromotionProvenance` is a lossless serde round-trip over arbitrary
+            /// field values, and — post-#402 — no `lineage_id` token ever appears in
+            /// the serialized JSON (the field was removed; the row PK is the
+            /// authoritative id, carried on the companion record, not the envelope).
+            #[test]
+            fn promotion_provenance_roundtrips_and_omits_lineage_id(
+                source_count in any::<u32>(),
+                session_count in any::<u32>(),
+                start_secs in any::<i64>(),
+                end_secs in any::<i64>(),
+                // Confidence is a score in [0, 1] by construction (see
+                // `cluster_provenance`); this also keeps it clear of the
+                // extreme-exponent magnitudes where serde_json's f64 formatting is
+                // not bit-exact — a property of the encoder, not of the type.
+                confidence in 0.0_f64..=1.0,
+                method_version in ".*",
+                representative_ids in proptest::collection::vec(any::<i64>(), 0..8),
+            ) {
+                let prov = PromotionProvenance {
+                    source_count,
+                    session_count,
+                    date_range_start: ts_from_secs(start_secs),
+                    date_range_end: ts_from_secs(end_secs),
+                    confidence,
+                    method_version,
+                    representative_ids,
+                };
+                let value = serde_json::to_value(&prov).unwrap();
+                // The phantom field is gone for good: no `lineage_id` *key* may ever
+                // appear in the serialized object, for any input. Checked on the
+                // parsed object (not a substring of the raw text) so an arbitrary
+                // `method_version` that happens to contain the token cannot fool it.
+                prop_assert!(
+                    value.as_object().is_some_and(|o| !o.contains_key("lineage_id")),
+                    "lineage_id key leaked into serialized provenance"
+                );
+                let back: PromotionProvenance = serde_json::from_value(value).unwrap();
+                prop_assert_eq!(back, prov);
+            }
+
+            /// `Fact.surfaced_at` (a `#[serde(default)] Option<DateTime<Utc>>`)
+            /// round-trips for both the `Some` and `None` arms across arbitrary
+            /// timestamps — the field the example tests exercise with only two fixed
+            /// JSON strings.
+            #[test]
+            fn fact_surfaced_at_roundtrips_over_some_and_none(
+                surfaced_secs in proptest::option::of(any::<i64>()),
+            ) {
+                let surfaced_at = surfaced_secs.map(ts_from_secs);
+                let fact = Fact {
+                    id: 1,
+                    content: "p".into(),
+                    content_hash: "h".into(),
+                    embedding: vec![0.0_f32],
+                    fact_type: FactType::Semantic,
+                    t_created: ts_from_secs(0),
+                    t_expired: None,
+                    t_valid: None,
+                    t_invalid: None,
+                    source_event_id: None,
+                    importance: 0.5,
+                    access_count: 0,
+                    last_accessed: ts_from_secs(0),
+                    metadata: serde_json::json!({}),
+                    scope_id: 1,
+                    is_pinned: false,
+                    importance_score: 0.5,
+                    surfaced_at,
+                };
+                let json = serde_json::to_string(&fact).unwrap();
+                let back: Fact = serde_json::from_str(&json).unwrap();
+                prop_assert_eq!(back.surfaced_at, fact.surfaced_at);
+            }
+        }
+    }
+
     // --- EmbeddingFingerprint (#612) ---
 
     #[test]
