@@ -134,5 +134,8 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(idx.lexical_count_expired("q", None, None).await.unwrap(), 0);
+        // #624: `Dummy` does not override `rebuild_vector_index`, so it inherits the
+        // default no-op — object-safe and callable through `&dyn SearchIndex`.
+        idx.rebuild_vector_index().await.unwrap();
     }
 }

@@ -87,12 +87,13 @@ impl MemoryEngine {
     /// vectors (checked up front).
     ///
     /// After the promote, [`PromoteOutcome::rebuild_index`] is `true`: the active
-    /// vectors changed, so a `SQLite`+HNSW backend's in-memory index is stale until
-    /// the next open (which rebuilds it via `build_from_db`). For a same-dim
-    /// reconstruction the live in-process rebuild hook is **#624**; a different-dim
-    /// reconstruction rebuilds the index on the required reopen. The brute-force
-    /// vector path (default features) reads `facts.embedding` directly and is correct
-    /// immediately (same-dim) or on reopen (different-dim).
+    /// vectors changed. For a **same-dim** reconstruction this method now rebuilds a
+    /// `SQLite`+HNSW backend's in-memory index in place via
+    /// [`SearchIndex::rebuild_vector_index`](crate::storage::SearchIndex::rebuild_vector_index)
+    /// **before returning** (#624), so queries reflect the new model immediately. A
+    /// **different-dim** reconstruction rebuilds the index on the required reopen
+    /// (#742). The brute-force vector path (default features) reads `facts.embedding`
+    /// directly and is correct immediately (same-dim) or on reopen (different-dim).
     ///
     /// # Errors
     ///
@@ -101,6 +102,15 @@ impl MemoryEngine {
     /// before any backfill), [`MemoryError::ReadOnly`] from the write port on a
     /// read-only engine, or any embedding-provider / storage failure surfaced by the
     /// backfill or promote.
+    ///
+    /// **Post-promote rebuild failure (same-dim):** the promote commits *before* the
+    /// in-process index rebuild, so if `rebuild_vector_index` fails this returns the
+    /// error **but the promote is durable** — `facts.embedding` holds the new vectors,
+    /// the identity has flipped, and the brute-force / on-disk read path is correct.
+    /// Only the in-memory HNSW index is left stale (it serves until the next open or a
+    /// retry). The rebuild is idempotent, so the consumer may simply call
+    /// [`reconstruct`](Self::reconstruct) again (it resumes/no-ops the already-promoted
+    /// space) or reopen the engine to recover the index.
     pub async fn reconstruct(
         &self,
         new_fingerprint: &EmbeddingFingerprint,
@@ -141,13 +151,30 @@ impl MemoryEngine {
         let mut outcome = self.storage.promote_space(&space).await?;
         outcome.stragglers_caught = stragglers;
 
-        // 5. A DIFFERENT-dimension promote leaves this handle's cached `embed_dim`
-        //    stale (`facts.embedding` is now `target_dim`-wide while every read
-        //    deserializes at the old dim). Fence the handle: embedding-touching ops
-        //    refuse with `EmbeddingReopenRequired` until the consumer reopens the
-        //    engine at the new dim. A same-dim promote does NOT fence — the cached
-        //    dim stays valid (#623 behavior preserved exactly).
-        if outcome.new_fingerprint.dim != self.embed_dim {
+        // 5. The active vectors all changed — refresh the index. Two mutually
+        //    exclusive cases, gated structurally on the dimension (NOT on
+        //    `outcome.rebuild_index`, which is unconditionally true): a wrong-dim
+        //    rebuild is unreachable by construction because the rebuild arm only runs
+        //    when the dims match.
+        if outcome.new_fingerprint.dim == self.embed_dim {
+            // SAME-dim (#624): the cached dim stays valid (#623 behavior preserved),
+            // so the handle keeps serving — but a live in-process vector index (HNSW)
+            // was built on the now-replaced vectors and is stale. Rebuild it before
+            // returning so queries reflect the new model immediately (a no-op on the
+            // brute-force path, which reads `facts.embedding` directly).
+            //
+            // This is the designated "refresh embedding-derived caches after a same-dim
+            // promote" point: if a persisted associative similarity-edge graph is added
+            // later (a future cognitive-layer feature), its invalidation/recompute
+            // slots in here, alongside the index rebuild.
+            self.storage.rebuild_vector_index().await?;
+        } else {
+            // DIFFERENT-dim (#742): this handle's cached `embed_dim` is now stale
+            // (`facts.embedding` is `target_dim`-wide while every read deserializes at
+            // the old dim). Fence the handle — embedding-touching ops refuse with
+            // `EmbeddingReopenRequired` until the consumer reopens at the new dim,
+            // which rebuilds the index for free on open. (Rebuilding in place here
+            // would read the new D′-wide blobs at the old dim → `EmbeddingDimension`.)
             self.reopen_required
                 .store(outcome.new_fingerprint.dim, Ordering::Release);
         }
@@ -662,5 +689,109 @@ mod tests {
         );
         // Nothing was written: the fact stays un-backfilled.
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 1);
+    }
+
+    // --- #624: same-dim live HNSW rebuild on promote (ann feature) ---
+    #[cfg(feature = "ann")]
+    mod ann_rebuild {
+        use super::*;
+        use crate::search::hybrid::{SearchMode, SearchQuery};
+        use crate::search::strategy::SearchConfig;
+
+        #[tokio::test]
+        async fn same_dim_reconstruct_rebuilds_index_without_fencing() {
+            // #624 wiring guard: with a live HNSW index (ann_threshold=0), a same-dim
+            // reconstruction rebuilds the in-process index and does NOT fence the
+            // handle. The *rigorous* proof that the rebuild refreshes/reclaims the index
+            // is the strategy-level white-box test in `search::ann`
+            // (`rebuild_from_db_reclaims_tombstones_and_matches_live_rows`); at this
+            // corpus size an engine query resolves via re-scoring regardless, so this
+            // test guards: same-dim ⇒ no fence, the rebuild runs cleanly under ann
+            // (a rebuild error would surface as `reconstruct` returning `Err`), and the
+            // engine stays queryable through the HNSW path afterward.
+            let engine = MemoryEngine::builder(DIM)
+                .search_config(SearchConfig { ann_threshold: 0 })
+                .build()
+                .unwrap();
+            let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+                model: "old",
+                value: 0.1,
+                dim: DIM,
+            });
+            let new: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+                model: "new",
+                value: 0.9,
+                dim: DIM,
+            });
+            let new_fp = EmbeddingFingerprint::new("new", "test", DIM);
+
+            let mut ids = Vec::new();
+            for c in ["a", "b", "c"] {
+                ids.push(engine.add_fact(&req(c), old.clone(), None).await.unwrap());
+            }
+
+            let outcome = engine.reconstruct(&new_fp, &new).await.unwrap();
+            assert_eq!(outcome.promoted, 3);
+            assert!(outcome.rebuild_index);
+            // Same-dim ⇒ the handle is NOT fenced (#623 behavior preserved).
+            assert_eq!(engine.reopen_required(), None);
+
+            // Served vectors are the new model's, and the engine remains queryable
+            // through the rebuilt HNSW path (ann_threshold=0 ⇒ HNSW active).
+            for &id in &ids {
+                assert_eq!(
+                    engine.storage().get_fact(id).await.unwrap().embedding,
+                    vec![0.9_f32; DIM]
+                );
+            }
+            let results = engine
+                .query(&SearchQuery {
+                    text: None,
+                    embedding: Some(vec![0.9_f32; DIM]),
+                    mode: SearchMode::Vector,
+                    limit: 5,
+                    rerank_depth: None,
+                    valid_at: None,
+                    fact_type: None,
+                    scope: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 3, "all facts served from the rebuilt index");
+        }
+
+        #[tokio::test]
+        async fn different_dim_reconstruct_fences_and_skips_rebuild() {
+            // #742 preserved under ann: a different-dim reconstruction takes the FENCE
+            // arm, never the same-dim rebuild arm (which would read D′-wide blobs at the
+            // old dim → EmbeddingDimension). It must succeed and set reopen_required.
+            let engine = MemoryEngine::builder(DIM)
+                .search_config(SearchConfig { ann_threshold: 0 })
+                .build()
+                .unwrap();
+            let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+                model: "old",
+                value: 0.1,
+                dim: DIM,
+            });
+            for c in ["a", "b"] {
+                engine.add_fact(&req(c), old.clone(), None).await.unwrap();
+            }
+            let wide: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+                model: "wide",
+                value: 0.9,
+                dim: DIM * 2,
+            });
+            let new_fp = EmbeddingFingerprint::new("wide", "test", DIM * 2);
+
+            let outcome = engine.reconstruct(&new_fp, &wide).await.unwrap();
+            assert_eq!(outcome.promoted, 2);
+            assert_eq!(outcome.new_fingerprint.dim, DIM * 2);
+            assert_eq!(
+                engine.reopen_required(),
+                Some(DIM * 2),
+                "different-dim fences, does not rebuild at the wrong dim"
+            );
+        }
     }
 }

@@ -1098,9 +1098,13 @@ pub struct PromoteOutcome {
     /// their backfill cursor passed). `0` from the storage port's perspective — the
     /// engine orchestration sets this; reserved for the live-write race work (#625).
     pub stragglers_caught: usize,
-    /// The active vectors changed, so a downstream vector index (HNSW) must rebuild.
-    /// Always `true` for a promote — even same-dim, the vectors are new. The engine
-    /// fires a full `build_from_db` until the incremental rebuild hook lands (#624).
+    /// The active vectors all changed, so a live in-process vector index (HNSW) must
+    /// rebuild. Always `true` for a promote — even same-dim, the vectors are new. The
+    /// engine acts on this by calling
+    /// [`SearchIndex::rebuild_vector_index`](crate::storage::SearchIndex::rebuild_vector_index)
+    /// on the **same-dim** path (#624); a **different-dim** promote rebuilds on the
+    /// required reopen (#742). This flag is the operator-facing signal (#689) that the
+    /// active vectors changed — **not** an assertion that the index is currently stale.
     pub rebuild_index: bool,
 }
 
