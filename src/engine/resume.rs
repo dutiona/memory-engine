@@ -59,9 +59,13 @@ impl MemoryEngine {
         // ordering, dedup (`seen`), and caps are preserved verbatim.
         let mut seen: HashSet<i64> = HashSet::new();
 
-        // Tier 1: Pinned facts (always present, cross-scope)
-        let pinned_all = self.storage.list_pinned_facts(&[]).await?;
-        let pinned: Vec<Fact> = pinned_all.into_iter().take(config.pinned_cap).collect();
+        // Tier 1: Pinned facts (always present, cross-scope). The cap is pushed to
+        // SQL (#395) — the DB no longer transmits/deserializes the embedding BLOBs
+        // of pinned facts beyond `pinned_cap` only to discard them in Rust.
+        let pinned = self
+            .storage
+            .list_pinned_facts(&[], config.pinned_cap)
+            .await?;
         seen.extend(pinned.iter().map(|f| f.id));
 
         // Tier 2: High-importance by materialized score

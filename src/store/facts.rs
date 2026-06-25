@@ -569,26 +569,34 @@ impl<'a> FactStore<'a> {
             .map_err(MemoryError::Database)
     }
 
-    /// List active pinned (unforgettable) facts, optionally filtered by scope.
-    /// Pass empty slice to get all pinned facts across all scopes.
-    pub fn list_pinned(&self, scope_ids: &[i64]) -> Result<Vec<Fact>> {
+    /// List active pinned (unforgettable) facts, optionally filtered by scope,
+    /// ordered by `importance_score` DESC and capped at `limit`.
+    ///
+    /// Pass empty `scope_ids` to get pinned facts across all scopes. Pass
+    /// `usize::MAX` for `limit` to retrieve every pinned fact (no cap). The cap is
+    /// pushed down to SQL (`LIMIT ?`) so the DB never transmits or deserializes the
+    /// embedding BLOBs of facts beyond the cap (#395) — matching the pattern of
+    /// `list_by_importance_score`.
+    pub fn list_pinned(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Fact>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let base =
             format!("SELECT {FACT_COLUMNS} FROM facts WHERE t_expired IS NULL AND is_pinned = 1");
         let dim = self.embed_dim;
         if scope_ids.is_empty() {
-            let sql = format!("{base} ORDER BY importance_score DESC");
+            let sql = format!("{base} ORDER BY importance_score DESC LIMIT ?1");
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
+            let rows = stmt.query_map(rusqlite::params![limit_i64], |row| row_to_fact(row, dim))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into)
         } else {
             let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
             let sql = format!(
-                "{base} AND scope_id IN (SELECT value FROM json_each(?1)) ORDER BY importance_score DESC"
+                "{base} AND scope_id IN (SELECT value FROM json_each(?1)) ORDER BY importance_score DESC LIMIT ?2"
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows =
-                stmt.query_map(rusqlite::params![scope_json], |row| row_to_fact(row, dim))?;
+            let rows = stmt.query_map(rusqlite::params![scope_json, limit_i64], |row| {
+                row_to_fact(row, dim)
+            })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(Into::into)
         }
@@ -2107,9 +2115,42 @@ mod tests {
         fs.insert(&make_fact("normal fact", vec![0.2; DIM]))
             .unwrap();
 
-        let result = fs.list_pinned(&[]).unwrap();
+        let result = fs.list_pinned(&[], usize::MAX).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].is_pinned);
+    }
+
+    /// #395: the SQL `LIMIT` returns the SAME set the old Rust
+    /// `list_pinned(..).take(cap)` did — the top-`cap` pinned facts by
+    /// `importance_score` DESC — and `usize::MAX` retrieves all of them.
+    #[test]
+    fn list_pinned_sql_limit_matches_rust_take() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        // Seed five pinned facts with strictly increasing importance_score so the
+        // DESC ordering (and thus the top-N selected by LIMIT) is unambiguous.
+        for i in 0..5 {
+            let mut f = make_fact(&format!("pinned {i}"), vec![0.1; DIM]);
+            f.is_pinned = true;
+            let id = fs.insert(&f).unwrap();
+            fs.update_importance_score(id, f64::from(i) / 10.0).unwrap();
+        }
+        // Oracle: fetch all, then take(cap) in Rust (the pre-#395 behavior).
+        let all = fs.list_pinned(&[], usize::MAX).unwrap();
+        assert_eq!(all.len(), 5, "usize::MAX = no cap");
+        for cap in [0_usize, 1, 3, 5, 99] {
+            let rust_take: Vec<i64> = all.iter().take(cap).map(|f| f.id).collect();
+            let sql_limit: Vec<i64> = fs
+                .list_pinned(&[], cap)
+                .unwrap()
+                .iter()
+                .map(|f| f.id)
+                .collect();
+            assert_eq!(
+                sql_limit, rust_take,
+                "SQL LIMIT {cap} must equal Rust .take({cap}) (same order)"
+            );
+        }
     }
 
     #[test]

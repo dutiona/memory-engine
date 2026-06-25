@@ -292,8 +292,10 @@ impl MemoryEngine {
     /// window `[last_dream_cycle_at, now)`.
     async fn build_cycle_context(&self) -> Result<CycleContext<'_>> {
         let now = Utc::now();
-        // Prior wisdom = active pinned facts (port read).
-        let prior_wisdom = self.storage.list_pinned_facts(&[]).await?;
+        // Prior wisdom = ALL active pinned facts (port read). The dream cycle
+        // genuinely wants the full pinned set as prior wisdom, so it passes
+        // `usize::MAX` (no cap) — the #395 cap is a resume-tier concern only.
+        let prior_wisdom = self.storage.list_pinned_facts(&[], usize::MAX).await?;
         // Watermark: the default window start.
         let start = match self.storage.get_config("last_dream_cycle_at").await? {
             Some(s) => DateTime::parse_from_rfc3339(&s)

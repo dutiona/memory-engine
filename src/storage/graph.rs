@@ -117,7 +117,11 @@ pub trait FactGraph: Send + Sync {
         limit: usize,
         exclude: &HashSet<i64>,
     ) -> Result<Vec<Fact>>;
-    async fn list_pinned_facts(&self, scope_ids: &[i64]) -> Result<Vec<Fact>>;
+    /// List active pinned facts, ordered by `importance_score` DESC, capped at
+    /// `limit` (pushed to the backend so embedding BLOBs past the cap are never
+    /// materialized — #395). Pass `usize::MAX` for `limit` to retrieve all pinned
+    /// facts. `scope_ids` empty = **all scopes** (see the trait-level contract).
+    async fn list_pinned_facts(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Fact>>;
     async fn list_due_facts(&self, now: DateTime<Utc>, scope_ids: &[i64]) -> Result<Vec<Fact>>;
     async fn next_due_time(
         &self,
