@@ -267,6 +267,35 @@ pub fn insert_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()
     Ok(())
 }
 
+/// Idempotently open a `populating` space for #623 reconstruction — supports
+/// crash-resume, so re-running a reconstruction continues an existing populating
+/// space rather than erroring on the `name` collision. By the current state of
+/// `space.name`:
+/// - absent → insert it as `populating` (a fresh reconstruction).
+/// - already `populating` with the **same** fingerprint → no-op (resume).
+/// - any other state (`active`/`deprecated`, or a different fingerprint) → error.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Internal` if the name is taken by an incompatible space,
+/// or `MemoryError::Database` on a write failure.
+pub fn begin_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
+    match find_by_name(conn, &space.name)? {
+        None => insert_populating(conn, space),
+        Some(existing)
+            if existing.status == SpaceStatus::Populating
+                && existing.fingerprint == space.fingerprint =>
+        {
+            Ok(()) // resume an in-progress reconstruction
+        }
+        Some(existing) => Err(MemoryError::Internal(format!(
+            "begin_populating: space {:?} already exists with status {:?}; \
+             cannot reopen as populating",
+            space.name, existing.status
+        ))),
+    }
+}
+
 /// Mark a space `deprecated` — the old active space retained for rollback after a promote,
 /// or a `populating` space being abandoned (#623 mechanism; #689 drives the UX). Idempotent.
 ///

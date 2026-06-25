@@ -251,7 +251,8 @@ impl SchemaManager for SqliteBackend {
             fingerprint: fingerprint.clone(),
             status: embedding_spaces::SpaceStatus::Populating,
         };
-        self.block_write(move |c| embedding_spaces::insert_populating(c, &space))
+        // Idempotent: a crash-resumed reconstruction re-opens the same space.
+        self.block_write(move |c| embedding_spaces::begin_populating(c, &space))
             .await
     }
 
