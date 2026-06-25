@@ -109,6 +109,20 @@ config value into one `active` row, then drops the legacy key. For these:
   migration moves data between tables/keys, audit _all_ raw readers/writers of the old
   location, not just the facade.
 
+### Purely Additive DDL Migrations (DDL delta, no data move)
+
+**v13→v14** (#623, background reconstruction) is the simplest shape: it adds the
+`fact_vectors` table (per-`(fact, space)` vectors for the **non-active** embedding spaces)
+plus `idx_fact_vectors_space`, and moves **no** data — `migrate_v13_to_v14` is a single
+`execute_batch` of the frozen `CREATE` DDL, registered `(_, false)` (no FK disable).
+`facts.embedding` is untouched: it stays the active serving vector, so every existing
+reader is unaffected. Only steps 4–5 apply (the table lives in the fresh-init `TABLES_DDL`
+**and** a frozen snapshot inside `migrate_v13_to_v14`; the DDL oracles —
+`schema_ddl_snapshot_is_stable`, the insta `schema_v*` snapshots, `all_nine_indexes_created`
+= **29**, the dump goldens — guard the shape). There is **no** data-move round-trip test
+because nothing is folded: `migrate_v13_to_v14_idempotent` and
+`fresh_vs_migrated_fact_vectors_converge` (normalized `sqlite_master.sql`) suffice.
+
 ## Event Envelope Versioning
 
 Events in the append-only log carry a per-event-type revision via the `event_revision` column.

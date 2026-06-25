@@ -46,7 +46,12 @@ existing shape cleanly.
   API landed in #622 — schema v12→v13, the `embedding_spaces` table with a `status` enum and a
   partial-unique single-active invariant, `store::embedding_meta` reduced to a facade over it.
   End-to-end coexistence / query-across-spaces / promote-rollback remain Wave 2: #689.)_
-- Background embedding reconstruction (shadow space → backfill → atomic promote). _(#623.)_
+- Background embedding reconstruction (shadow space → backfill → atomic promote). _(**Same-dim
+  reconstruction landed in #623** — schema v13→v14 adds `fact_vectors` (non-active spaces),
+  `MemoryEngine::reconstruct` drives a resumable backfill + an atomic copy-swap promote that keeps
+  `facts.embedding` as the active store. **Different-dim** (engine effective-`embed_dim` transition)
+  is the #742 follow-up; the live HNSW rebuild is #624; operator UX + query-across-spaces is #689.
+  See `docs/advanced/reconstruction.md` and §Design.7.)_
 - Weight-hash identity (slug-level identity only for now).
 - TEI `/info` authoritative-identity probe.
 
@@ -163,8 +168,12 @@ default, batch efficiency is the opt-in.
 
 **None.** No users → start clean: configure ME with Qwen/TEI, fresh DB adopts the new
 fingerprint on first write. The lossless re-embed path (content is stored alongside the
-vector — `facts.content` is source-of-truth, `facts.embedding` is derived) is deferred to
-Wave 2 as reusable tooling for _future_ model swaps.
+vector — `facts.content` is source-of-truth, `facts.embedding` is derived) **landed in #623**
+as reusable tooling for future **same-dim** model swaps: `MemoryEngine::reconstruct` re-embeds
+`facts.content` under the new identity into a `populating` space (schema v13→v14's `fact_vectors`
+table), then atomically copy-swaps it into `facts.embedding` and flips the registry identity in
+one transaction, with the old vectors retained for rollback. Different-dim swaps (a new
+`embed_dim`) are #742. See `docs/advanced/reconstruction.md`.
 
 ## Wave 0 — validation gate (smoke test)
 

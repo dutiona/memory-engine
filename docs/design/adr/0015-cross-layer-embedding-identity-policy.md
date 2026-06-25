@@ -80,14 +80,33 @@ the operation MUST be **hard-rejected**:
   rest of the tuple as available) and are subject to the same rule; a bare vector with no
   declared identity is rejected when a store identity exists.
 
-### 4. Reconstruction (forward-looking)
+### 4. Reconstruction
 
 Changing a store's identity (model/dim swap) is only legitimate via an explicit
 **reconstruction**: re-embed the stored source text under the new identity, then swap the
 identity tuple **atomically** with the vectors and invalidate any cached similarity
-artifacts (vector index, similarity edges/relations). Reconstruction is out of scope for
-the initial implementation in either layer but, when built, MUST preserve the identity
-tuple and mismatch rule above.
+artifacts (vector index, similarity edges/relations). Reconstruction MUST preserve the
+identity tuple and mismatch rule above.
+
+**Memory layer — same-dim reconstruction is implemented (#623).** The mechanism: a
+generalized `fact_vectors(fact_id, space_id, embedding)` table holds the **non-active**
+spaces' vectors (a `populating` space during a resumable, crash-safe background backfill;
+the previous active space retained after a promote for rollback), while `facts.embedding`
+stays the single active serving vector (no read-path change). The promote is one
+transaction — a completeness gate _inside_ the tx, retain-old, an O(N) copy-swap of the
+new vectors into `facts.embedding`, then a demote-then-activate registry flip. **The
+status flip _is_ the identity swap** (`embedding_meta::load` reads the active row's
+fingerprint), so the identity and vectors swap atomically, satisfying this section. The
+post-promote vector-index (HNSW) rebuild is tracked separately (#624); a same-dim swap
+still changes every vector, so a rebuild is required. **Different-dim** reconstruction
+(the engine effective-`embed_dim` transition) is the #742 follow-up — the storage layer is
+already dim-agnostic and the promote surfaces the new dim in its outcome.
+
+> **Cross-repo parity (ADR 0015 is shared verbatim with `knowledge-base`).** This section
+> was updated for the Memory-layer implementation only. The Knowledge layer uses per-space
+> `vec0` tables (same atomic-swap semantics, different physical layout); its copy of this
+> ADR must be reconciled in lockstep when KB reconstruction lands — **do not** edit the KB
+> copy from this repo.
 
 ## Consequences
 

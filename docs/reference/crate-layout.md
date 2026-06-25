@@ -60,7 +60,8 @@ memory_engine (lib.rs)
 
 - `store::schema` -- DDL, migrations, `get_config`/`set_config`.
 - `store::embedding_meta` -- single-active **facade** over `store::embedding_spaces`: typed persistence of the canonical `EmbeddingFingerprint` identity tuple (`load`/`store`/`record_if_absent`), recorded on the first embedding write (ADR 0015). The degenerate single-space case of the Knowledge layer's multi-space registry.
-- `store::embedding_spaces` -- the `embedding_spaces` registry table owner (#622): `SpaceStatus`/`EmbeddingSpace` domain types, the `status` enum (`active`/`populating`/`deprecated`), the partial-unique single-active invariant, and row CRUD (`find_active`/`list_spaces`/`insert_active`/`upsert_active_fingerprint`). Multi-space coexistence/reconstruction is deferred to #623/#624/#689.
+- `store::embedding_spaces` -- the `embedding_spaces` registry table owner (#622): `SpaceStatus`/`EmbeddingSpace` domain types, the `status` enum (`active`/`populating`/`deprecated`), the partial-unique single-active invariant, and row CRUD (`find_active`/`find_by_name`/`list_spaces`/`insert_active`/`upsert_active_fingerprint`). The #623 reconstruction seams live here too: `insert_populating`/`begin_populating` (idempotent open, crash-resume), `activate`, `deprecate`. HNSW reconfig + operator UX stay deferred to #624/#689.
+- `store::fact_vectors` -- per-`(fact, space)` vector rows for the **non-active** embedding spaces (#623): the `populating` space mid-backfill, and a `deprecated` space retained for rollback. The **active** space's vectors stay in `facts.embedding` (no read-path change). Owns the cursorless anti-join backfill window, the idempotent `ON CONFLICT` batch write, `count_unbackfilled`, the atomic copy-swap `promote_space`, and the dump-streaming `for_each`.
 - `store::events` -- `EventStore` (insert, get).
 - `store::facts` -- `FactStore` (insert, get, list_active, expire, update importance).
 - `store::summaries` -- `SummaryStore` (insert, list by level).
@@ -83,6 +84,9 @@ memory_engine (lib.rs)
 
 `engine::conflict`
 : Bi-temporal conflict resolution (`MemoryEngine::resolve_conflict`). Given an existing fact and a candidate, delegates to a `ConflictArbiter` for the decision (`Add`, `Update`, `Delete`, `Noop`). On `Update`, the old fact is expired and a `superseded_by` edge is created in the graph. All mutations run in a single transaction.
+
+`engine::reconstruct`
+: Background reconstruction orchestration (`MemoryEngine::reconstruct`, #623). Re-embeds stored fact content under a new **same-dimension** identity with no downtime: open (or resume) a `populating` space → backfill it off the write lock (embedding under `spawn_blocking`) → catch-up pass → atomic copy-swap promote. The embedder stays engine-side; the backend does pure DB ops. Returns a `PromoteOutcome`. Different-dim is the #742 follow-up; the live HNSW rebuild is #624. See `docs/advanced/reconstruction.md`.
 
 `pool`
 : `ConnectionPool` wrapping SQLite connections. Uses `parking_lot::Mutex` for the single write connection and a bounded pool of read connections. Supports both file-backed and in-memory modes. Configurable read pool size (default: 4). Read-only mode (`open_read_only`) validates schema version without init/migrate and guards all writes with `MemoryError::ReadOnly`. Since #631 the pool is owned by `SqliteBackend` (the `storage` port), not the engine: the engine awaits the backend, which runs pool access on `tokio::task::spawn_blocking`. The engine touches a raw connection only at construction time (open-time validation).
