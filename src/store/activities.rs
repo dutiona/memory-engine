@@ -281,6 +281,48 @@ mod tests {
         assert_eq!(fetched.status, ActivityStatus::Recorded);
     }
 
+    /// Persist every [`OutcomeClass`] variant through the real `SQLite` `TEXT`
+    /// column and read it back, proving the `to_string()` -> column ->
+    /// `from_str()` round-trip in [`row_to_activity`] (the entire #347
+    /// back-compat justification) holds across the persistence seam — not just
+    /// in the isolated `Display`/`FromStr` unit tests.
+    #[test]
+    fn outcome_class_roundtrips_through_sqlite() {
+        let conn = setup();
+        let store = ActivityStore::new(&conn);
+
+        // One row per variant. `args_hash` is varied per variant so the dedup
+        // index never collapses two inserts (the round-trip, not dedup, is what
+        // we are exercising) — each insert is therefore a fresh row.
+        let cases = [
+            OutcomeClass::Success,
+            OutcomeClass::Error,
+            OutcomeClass::TestFailure,
+            OutcomeClass::Other("vendor-x".into()),
+        ];
+
+        for (i, expected) in cases.into_iter().enumerate() {
+            let activity = NewActivity {
+                session_id: "sess-roundtrip".into(),
+                tool_name: "Bash".into(),
+                args_hash: format!("hash{i:028}"),
+                args: serde_json::json!({"cmd": "cargo test"}),
+                result_summary: None,
+                outcome_class: expected.clone(),
+                timestamp: Utc::now(),
+                scope_id: 1,
+            };
+            let (id, deduped) = store.insert_or_dedup(&activity, 300).unwrap();
+            assert!(!deduped, "fresh args_hash must not dedup for {expected:?}");
+
+            let fetched = store.get(id).unwrap();
+            assert_eq!(
+                fetched.outcome_class, expected,
+                "outcome_class did not survive the SQLite round-trip"
+            );
+        }
+    }
+
     #[test]
     fn dedup_within_window() {
         let conn = setup();
