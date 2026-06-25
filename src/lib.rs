@@ -92,6 +92,20 @@
 // panic there is the intended failure signal, not a consumer-facing hazard.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+// Storage-backend gate (#628/#633): at least one backend must be compiled in. SQLite
+// is the default (`backend-sqlite`); `backend-postgres` is opt-in. With neither, the
+// crate has no persistence layer at all — fail loudly at compile time. NOTE: today
+// `backend-sqlite` is a marker (rusqlite is unconditional, the engine hardcodes
+// `SqliteBackend`), so this only fires on an explicit `--no-default-features` with no
+// backend — a forward guard-rail for the future engine-selects-backend wiring, not a
+// live gate yet. The predicate is written against the final feature set, so that
+// future PG-only build needs no change here.
+#[cfg(not(any(feature = "backend-sqlite", feature = "backend-postgres")))]
+compile_error!(
+    "memory-engine requires at least one storage backend feature: \
+     enable `backend-sqlite` (the default) or `backend-postgres`."
+);
+
 // === Public modules (consumer-facing API) ===
 pub mod bootstrap;
 pub mod engine;

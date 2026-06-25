@@ -1,9 +1,11 @@
 //! The `ConformanceBackend` factory trait — the seam a backend implements to gain
 //! the entire cross-backend contract battery (#632).
 //!
-//! `make*` are `async` even though `SqliteBackend` builds synchronously: #633's
-//! `PgBackend` factory spins up a testcontainer (`async`), and the emission macro
-//! `.await`s every `make*`, so the trait's async-ness is what makes #633 a drop-in.
+//! `make*` are `async` even though `SqliteBackend` builds synchronously: the #635
+//! `PgFactory` will spin up a testcontainer (`async`), and the emission macro
+//! `.await`s every `make*`, so the trait's async-ness is what makes that a drop-in.
+//! (#633 added `PgBackend`'s `SchemaManager` + pool + migrations, but `PgBackend` is
+//! not a full `StorageBackend` until #634+#635, so `PgFactory::make()` stays `todo!()`.)
 //!
 //! This is the **only** module in `storage::conformance` permitted to name a
 //! concrete backend type (`SqliteBackend`, `ConnectionPool`, `UpcasterRegistry`).
@@ -21,8 +23,8 @@ use crate::storage::{SqliteBackend, StorageBackend};
 
 use super::fixtures::DIM;
 
-/// A backend's test-construction surface. The one thing #633 implements to gain the
-/// whole battery.
+/// A backend's test-construction surface. The one thing a backend implements to gain
+/// the whole battery (for `PgBackend`, that lands in #635 once it is a full `StorageBackend`).
 #[async_trait]
 pub trait ConformanceBackend: Send + Sync + 'static {
     /// A fresh, empty, **writable** backend, migrated to HEAD, at `DIM`.
@@ -45,7 +47,7 @@ pub trait ConformanceBackend: Send + Sync + 'static {
     /// Default = portable `raw_exec("DROP TABLE facts")`; a backend whose dialect
     /// needs different SQL (e.g. PG `DROP TABLE facts CASCADE` under real FK
     /// constraints) overrides THIS ONE method — keeping crash-injection out of the
-    /// behavior bodies so #633 never edits a body.
+    /// behavior bodies so #635 never edits a body.
     ///
     /// # Errors
     ///
@@ -116,11 +118,13 @@ impl ConformanceBackend for SqliteFactory {
     }
 }
 
-/// The inert Postgres factory (#633 fills the `todo!()`s and deletes the `#[ignore]`).
+/// The inert Postgres factory (#635 fills the `todo!()`s and deletes the `#[ignore]`,
+/// once `PgBackend` implements all six bounded traits and is a full `StorageBackend`;
+/// #633 added only its `SchemaManager` + pool + migrations).
 ///
 /// Compiles under `--features backend-postgres` (the bodies typecheck via the never
 /// type); never runs, because the `postgres` suite's emitted tests are `#[ignore]`d
-/// until #633.
+/// until #635.
 #[cfg(feature = "backend-postgres")]
 pub struct PgFactory;
 
@@ -128,16 +132,16 @@ pub struct PgFactory;
 #[async_trait]
 impl ConformanceBackend for PgFactory {
     async fn make(&self) -> Arc<dyn StorageBackend> {
-        todo!("#633: spin up a postgres testcontainer, migrate, return Arc<PgBackend>")
+        todo!("#635: spin up a postgres testcontainer, migrate, return Arc<PgBackend>")
     }
 
     async fn make_read_only(&self) -> Arc<dyn StorageBackend> {
-        todo!("#633: read-only PG role / transaction-scoped read-only")
+        todo!("#635: read-only PG role / transaction-scoped read-only")
     }
 
     #[cfg(feature = "archive")]
     async fn make_with_cold(&self) -> (Arc<dyn StorageBackend>, Arc<dyn ColdStorage>) {
-        todo!("#633: PG cold storage (or decide PG has no cold tier)")
+        todo!("#635: PG cold storage (or decide PG has no cold tier)")
     }
 
     fn name(&self) -> &'static str {

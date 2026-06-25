@@ -26,18 +26,30 @@ tempfile = "3"
 tracing = "0.1"
 petgraph = "0.7"
 parking_lot = "0.12"
-tokio = { version = "1", features = ["rt", "macros", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "net"] }
 hnsw = { version = "0.11", optional = true }
 space = { version = "0.17", optional = true }
 rand = { version = "0.8", features = ["small_rng"], optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
+# PostgreSQL backend (#633), pulled only by `backend-postgres`. `default-features =
+# false` drops tokio-postgres's TLS/`whoami` (BSL-1.0) fallback — #633 binds no data,
+# so the `with-chrono-0_4`/`with-serde_json-1` type-mapping features are deferred to
+# #634. The `vector(N)`/`pgvector` Rust crate is deferred to #635 (raw DDL needs no crate).
+tokio-postgres = { version = "0.7", default-features = false, optional = true }
+deadpool-postgres = { version = "0.14", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1", features = ["yaml", "redactions"] }
 proptest = "1"
+# Live-PG harness (#633): the gated `storage::postgres` tests spin a throwaway
+# Postgres (the `pgvector/pgvector` image, for `CREATE EXTENSION vector`). Dev-only,
+# but still license-scanned by `cargo deny` (graph all-features = true). Every PG test
+# is `#[ignore]` so `cargo test --all-features` stays green without a Docker daemon.
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 
 [[bench]]
 name = "search_bench"
@@ -52,18 +64,27 @@ harness = false
 # non-optional dependency and there is no `async` feature to toggle (#702). The
 # remaining flags are genuinely optional capabilities.
 [features]
-default = []
+# At least one storage backend must be enabled — enforced by a `compile_error!` in
+# `lib.rs`. SQLite is the default; Postgres (#633) is opt-in.
+default = ["backend-sqlite"]
 ann = ["dep:hnsw", "dep:space", "dep:rand"]
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
 archive = ["compress-zstd"]
-# Inert scaffolding for the cross-backend conformance suite (#632): selects the
-# Postgres arm of the in-crate `storage::conformance` battery. No dependencies yet
-# — `tokio-postgres`/`deadpool-postgres`/`testcontainers` and the real `PgBackend`
-# land in #633, which flips the arm's `#[ignore]` off. With the feature on, the
-# conformance battery's `postgres` tests are *discovered but ignored* (the
-# `PgFactory` is `todo!()`), proving the harness already accepts a second backend.
-backend-postgres = []
+# The default in-process SQLite backend. NOTE (#633): this is a *marker* feature — it
+# does NOT yet gate `mod sqlite` or `rusqlite`. The engine open path hardcodes
+# `SqliteBackend` (`engine::init_from_pool`), so a true PG-only build is not
+# achievable until engine-selects-backend lands. The feature exists so the
+# `compile_error!(neither backend)` guard has a stable predicate and so the future
+# PG-only build can move `rusqlite` behind `dep:rusqlite` here without a guard change.
+# `rusqlite` stays an unconditional dependency for now.
+backend-sqlite = []
+# The PostgreSQL backend (#633): `deadpool-postgres` pool + a fresh v14 migration
+# chain + the `SchemaManager` impl. Data CRUD is #634; lexical+vector search and the
+# conformance-arm flip are #635. With the feature on, `mod storage::postgres` compiles
+# and the conformance battery's `postgres` arm is discovered-but-ignored (`PgFactory`
+# stays `todo!()` until #635).
+backend-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
 # Exposes test-only escape hatches on the storage port (e.g.
 # `SchemaManager::raw_exec`) for cross-crate tests — notably the #632 conformance
 # suite, where every backend must provide the seam for the failure-injection
