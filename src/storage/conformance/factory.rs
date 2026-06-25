@@ -87,7 +87,10 @@ impl ConformanceBackend for SqliteFactory {
             let _rw = ConnectionPool::open(&path, DIM, 2, None).expect("init rw file");
         }
         let ro = ConnectionPool::open_read_only(&path, DIM, 2).expect("reopen read-only");
-        let _kept = dir.keep(); // leak the dir for the process; file persists
+        // `keep()` (tempfile >= 3.27) returns the `PathBuf` directly (NOT a `Result`) and
+        // relinquishes cleanup, so the file outlives this fn — a read-only test
+        // opens -> asserts -> exits and the OS reaps it at process end.
+        let _kept = dir.keep();
         Arc::new(SqliteBackend::from_pool(
             Arc::new(ro),
             Arc::new(crate::store::upcaster::UpcasterRegistry::new()),
