@@ -11,7 +11,7 @@ use memory_engine::traits::{
     ConflictArbiter, CrudDecision, EmbeddingProvider, ForgetPolicy, PersistenceClassifier,
     SummarizableContent, SummaryGenerator,
 };
-use memory_engine::types::{AddFactOptions, AddFactRequest, Fact, FactType};
+use memory_engine::types::{AddFactOptions, AddFactRequest, ClassifierInput, Fact, FactType};
 
 use crate::corpus::CorpusDefinition;
 
@@ -91,8 +91,8 @@ pub struct PinByType {
 }
 
 impl PersistenceClassifier for PinByType {
-    fn should_pin(&self, fact: &Fact) -> bool {
-        fact.fact_type == self.pinned_type
+    fn should_pin(&self, input: &ClassifierInput) -> bool {
+        input.fact_type == self.pinned_type
     }
 }
 

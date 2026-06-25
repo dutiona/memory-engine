@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Datelike, Utc};
 use memory_engine::traits::PersistenceClassifier;
 use memory_engine::{
-    BootstrapConfig, EmbeddingFingerprint, EmbeddingProvider, Fact, KeywordExtractor, MemoryEngine,
-    MemoryError, SessionExtractor,
+    BootstrapConfig, ClassifierInput, EmbeddingFingerprint, EmbeddingProvider, Fact,
+    KeywordExtractor, MemoryEngine, MemoryError, SessionExtractor,
 };
 
 /// Zero-vector embedder (dim 4) — retrieval is irrelevant to this audit.
@@ -37,18 +37,26 @@ impl EmbeddingProvider for TestEmbedder {
     }
 }
 
-/// Records `(content, t_created)` for every fact the engine offers for pinning,
-/// i.e. every bootstrapped fact — with its (backdated) `t_created` intact.
+/// Records `(content, session_id)` for every fact the engine offers for pinning,
+/// i.e. every bootstrapped fact. The classifier sees only the four authorised
+/// fields (`ClassifierInput` — no `t_created`); the per-session discriminator is
+/// the `session_id` the `KeywordExtractor` stamps into each fact's `metadata`,
+/// which is sufficient to confirm the pre-dedup view spans distinct sessions.
+/// (The authoritative `t_created` backdating check is on the stored rows below.)
 #[derive(Default)]
 struct RecordingClassifier {
-    seen: Mutex<Vec<(String, DateTime<Utc>)>>,
+    seen: Mutex<Vec<(String, String)>>,
 }
 impl PersistenceClassifier for RecordingClassifier {
-    fn should_pin(&self, fact: &Fact) -> bool {
+    fn should_pin(&self, input: &ClassifierInput) -> bool {
+        let session_id = input.metadata["session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         self.seen
             .lock()
             .unwrap()
-            .push((fact.content.clone(), fact.t_created));
+            .push((input.content.clone(), session_id));
         false
     }
 }
@@ -221,9 +229,9 @@ async fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
         total_reinforced += report.facts_reinforced;
     }
     println!("TOTAL facts (first pass) = {total_facts}");
-    for (content, t) in recorder.seen.lock().unwrap().iter() {
+    for (content, session_id) in recorder.seen.lock().unwrap().iter() {
         let snippet: String = content.chars().take(90).collect();
-        println!("  fact t_created={t} content={snippet:?}");
+        println!("  fact session_id={session_id} content={snippet:?}");
     }
     // Deterministic yield with dedup-with-reinforcement: sessions 1–4 → 1 created fact
     // each (4); session 5 → its bug turn is created (1) while its convention turn (identical
@@ -274,33 +282,29 @@ async fn dryrun_yield_backdate_idempotency_dedup_reinforce() {
         "skipped sessions must create no facts"
     );
 
-    // --- Backdating: every t_created is the historical session time (2024/2025),
-    //     never Utc::now() (2026+). ---
+    // --- Pre-dedup view: snapshot the recorder's captured facts once into an owned Vec.
     //
-    // Snapshot the recorder's captured facts once into an owned Vec; the
-    // `std::sync::MutexGuard` is released on this line, so nothing holds a thread-affine
-    // guard across the later engine `.await` calls (the engine API is async now). The
-    // owned clone stays in scope for the cross-session dedup checks below.
-    let seen: Vec<(String, DateTime<Utc>)> = recorder.seen.lock().unwrap().clone();
+    // Snapshot the recorder's captured `(content, session_id)` pairs once into an
+    // owned Vec; the `std::sync::MutexGuard` is released on this line, so nothing
+    // holds a thread-affine guard across the later engine `.await` calls (the
+    // engine API is async now). The owned clone stays in scope for the
+    // cross-session dedup checks below. (Backdating of `t_created` is no longer
+    // observable from the classifier — `ClassifierInput` carries only the four
+    // authorised fields — but it is asserted authoritatively on the stored rows
+    // further down.)
+    let seen: Vec<(String, String)> = recorder.seen.lock().unwrap().clone();
     assert!(!seen.is_empty(), "recorder should have captured facts");
-    let now = Utc::now();
-    for (content, t) in &seen {
-        assert!(
-            t.year() < now.year(),
-            "t_created not backdated (year >= current) ({t}) for {content:?}"
-        );
-        assert!(t < &now, "t_created must be historical, got {t}");
-    }
 
     // --- Cross-session dedup-with-reinforcement (#520): the IDENTICAL convention sentence
     //     appears verbatim in sessions 3 and 5. The classifier runs BEFORE the dedup
     //     decision, so it is offered both occurrences across two distinct backdated
-    //     sessions — that is the pre-dedup view, not the stored view. ---
+    //     sessions — that is the pre-dedup view, not the stored view. The per-fact
+    //     `session_id` (stamped into metadata by the extractor) discriminates them. ---
     let classifier_copies = seen.iter().filter(|(c, _)| c.contains(SHARED)).count();
-    let classifier_sessions: std::collections::BTreeSet<i64> = seen
+    let classifier_sessions: std::collections::BTreeSet<&str> = seen
         .iter()
         .filter(|(c, _)| c.contains(SHARED))
-        .map(|(_, t)| t.timestamp())
+        .map(|(_, sid)| sid.as_str())
         .collect();
     println!(
         "shared convention: classifier saw {classifier_copies} copies across {} distinct sessions",

@@ -498,18 +498,18 @@ async fn bootstrap_pins_facts_when_classifier_returns_true() {
     // coverage existed only for should_pin == false (the dryrun recorder), so the
     // is_pinned == true PROPAGATION into a stored bootstrap row was untested.
     // Drive both poles and assert the stored flag follows the classifier.
-    use memory_engine::Fact;
+    use memory_engine::ClassifierInput;
     use memory_engine::traits::PersistenceClassifier;
 
     struct AlwaysPin;
     impl PersistenceClassifier for AlwaysPin {
-        fn should_pin(&self, _fact: &Fact) -> bool {
+        fn should_pin(&self, _input: &ClassifierInput) -> bool {
             true
         }
     }
     struct NeverPin;
     impl PersistenceClassifier for NeverPin {
-        fn should_pin(&self, _fact: &Fact) -> bool {
+        fn should_pin(&self, _input: &ClassifierInput) -> bool {
             false
         }
     }
