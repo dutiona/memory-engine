@@ -249,19 +249,29 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
 /// the streaming snapshot writer. Ordered by `(space_id, fact_id)` for a stable
 /// dump.
 ///
-/// Deserializes each blob at `embed_dim`: same-dim reconstruction (#623) keeps
-/// every non-active space at the engine dimension; the different-dim follow-up
-/// (#742) will thread per-space dims here.
+/// Deserializes each blob at **its own space's recorded dimension** (#742): after
+/// a different-dimension reconstruction the active space is D′ while a retained
+/// `deprecated` space is still D-wide, so a single engine `embed_dim` cannot decode
+/// every row. The per-space dims are read once from `embedding_spaces`; `embed_dim`
+/// is only a fallback for a row whose space is somehow absent (the FK makes that
+/// impossible). This preserves the deprecated space's rollback vectors across a
+/// dump/restore of a reconstructed store (no data loss).
 ///
 /// # Errors
 ///
 /// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on query
 /// failure, [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
-/// if a stored blob is not `embed_dim`-sized, or any error the callback returns.
+/// if a stored blob is not its space's dim, or any error the callback returns.
 pub fn for_each<F>(conn: &Connection, embed_dim: usize, mut cb: F) -> Result<()>
 where
     F: FnMut(i64, String, Vec<f32>) -> Result<()>,
 {
+    // Per-space dims: a non-active space may differ from the active `embed_dim`
+    // after a #742 different-dim reconstruction.
+    let space_dims: std::collections::HashMap<String, usize> = embedding_spaces::list_spaces(conn)?
+        .into_iter()
+        .map(|s| (s.name, s.fingerprint.dim))
+        .collect();
     let mut stmt = conn.prepare(
         "SELECT fact_id, space_id, embedding FROM fact_vectors ORDER BY space_id, fact_id",
     )?;
@@ -270,7 +280,8 @@ where
         let fact_id: i64 = row.get(0)?;
         let space_id: String = row.get(1)?;
         let blob: Vec<u8> = row.get(2)?;
-        let embedding = crate::store::deserialize_embedding(&blob, embed_dim)?;
+        let dim = space_dims.get(&space_id).copied().unwrap_or(embed_dim);
+        let embedding = crate::store::deserialize_embedding(&blob, dim)?;
         cb(fact_id, space_id, embedding)?;
     }
     Ok(())
@@ -708,5 +719,57 @@ mod tests {
         set_active(&conn, "model-a");
         let err = promote_space(&conn, "ghost").expect_err("absent");
         assert!(matches!(err, MemoryError::Internal(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn for_each_decodes_each_space_at_its_own_dim() {
+        // #742 (R6): a dump of a reconstructed store has a deprecated space at the
+        // OLD dim while the active space (engine embed_dim) is the NEW dim. `for_each`
+        // must decode each row at its space's own recorded dim — not the engine dim —
+        // so a dump at the new dim still preserves the deprecated rollback vectors.
+        let conn = fresh_conn();
+        // Active space at the NEW (wide) dim.
+        insert_active(
+            &conn,
+            &EmbeddingSpace::default_active(EmbeddingFingerprint::new("new", "tei", DIM * 2)),
+        )
+        .expect("active wide");
+        // A deprecated space at the OLD dim, holding old-dim retained vectors.
+        insert_active(
+            &conn,
+            &EmbeddingSpace {
+                name: "old".to_string(),
+                fingerprint: EmbeddingFingerprint::new("old", "tei", DIM),
+                status: SpaceStatus::Deprecated,
+            },
+        )
+        .expect("deprecated old");
+        let a = insert_fact(&conn, "alpha");
+        let b = insert_fact(&conn, "beta");
+        write_backfill_batch(
+            &conn,
+            "old",
+            &[(a, vec![0.3_f32; DIM]), (b, vec![0.3_f32; DIM])],
+        )
+        .expect("write old-dim vectors");
+
+        // for_each at the ACTIVE (wide) embed_dim must still decode the old DIM-wide rows.
+        let mut seen: Vec<(i64, String, Vec<f32>)> = Vec::new();
+        for_each(&conn, DIM * 2, |fid, space, emb| {
+            seen.push((fid, space, emb));
+            Ok(())
+        })
+        .expect("for_each across heterogeneous dims");
+
+        assert_eq!(seen.len(), 2);
+        for (_, space, emb) in &seen {
+            assert_eq!(space, "old");
+            assert_eq!(
+                emb.len(),
+                DIM,
+                "decoded at the space's own dim, not the engine dim"
+            );
+            assert_eq!(emb, &vec![0.3_f32; DIM]);
+        }
     }
 }
