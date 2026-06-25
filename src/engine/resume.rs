@@ -80,13 +80,17 @@ impl MemoryEngine {
             .await?;
         seen.extend(high_importance.iter().map(|f| f.id));
 
-        // Tier 3: Due facts (future memory now surfacing)
-        let due_all = self.storage.list_due_facts(now, &scope_ids).await?;
-        let due: Vec<Fact> = due_all
-            .into_iter()
-            .filter(|f| !seen.contains(&f.id))
-            .take(config.due_cap)
-            .collect();
+        // Tier 3: Due facts (future memory now surfacing). The exclude(seen) set
+        // and the cap are pushed to SQL (#396) — the DB no longer materializes (and
+        // decodes the embedding BLOB of) every due fact only to drop the already-seen
+        // ones and truncate to `due_cap` in Rust. json_each exclusion is
+        // order-independent, and `ORDER BY t_valid ASC LIMIT` yields the identical
+        // set the old `.filter(!seen).take(due_cap)` produced.
+        let exclude: Vec<i64> = seen.iter().copied().collect();
+        let due = self
+            .storage
+            .list_due_facts(now, &scope_ids, &exclude, Some(config.due_cap))
+            .await?;
         seen.extend(due.iter().map(|f| f.id));
 
         // Tier 4: Scope-filtered recent

@@ -311,10 +311,17 @@ impl FactGraph for SqliteBackend {
     }
 
     // READ
-    async fn list_due_facts(&self, now: DateTime<Utc>, scope_ids: &[i64]) -> Result<Vec<Fact>> {
+    async fn list_due_facts(
+        &self,
+        now: DateTime<Utc>,
+        scope_ids: &[i64],
+        exclude: &[i64],
+        limit: Option<usize>,
+    ) -> Result<Vec<Fact>> {
         let scope_ids = scope_ids.to_vec();
+        let exclude = exclude.to_vec();
         let dim = self.embed_dim;
-        self.block_read(move |c| FactStore::new(c, dim).list_due(now, &scope_ids))
+        self.block_read(move |c| FactStore::new(c, dim).list_due(now, &scope_ids, &exclude, limit))
             .await
     }
 
@@ -1145,6 +1152,59 @@ mod tests {
         // #395: the limit is honored through the port — a cap of 1 returns 1 row.
         let capped = be.list_pinned_facts(&[], 1).await.unwrap();
         assert_eq!(capped.len(), 1, "limit=1 must cap at one pinned fact");
+    }
+
+    /// #396: `list_due_facts` honors `exclude` + `limit` through the port, and the
+    /// uncapped scheduling shape (`exclude=[]`, `limit=None`) returns every due
+    /// fact — matching the direct `FactStore` oracle.
+    #[tokio::test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "write guard is intentionally held across the seed block"
+    )]
+    async fn list_due_facts_exclude_and_limit_through_port() {
+        use chrono::TimeDelta;
+
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let now = Utc::now();
+        let mut seeded_ids = Vec::new();
+        {
+            let conn = pool.write();
+            let store = FactStore::new(&conn, DIM);
+            // Four due facts (ascending t_valid) + one future (never due).
+            for i in 0..4 {
+                let mut f = fact(&format!("due {i}"), [0.1; DIM]);
+                f.t_valid = Some(now - TimeDelta::hours(i64::from(4 - i)));
+                seeded_ids.push(store.insert(&f).unwrap());
+            }
+            let mut future = fact("future", [0.2; DIM]);
+            future.t_valid = Some(now + TimeDelta::hours(1));
+            store.insert(&future).unwrap();
+        }
+        let be = backend(Arc::clone(&pool));
+
+        // Uncapped scheduling shape through the port.
+        let all_due = be.list_due_facts(now, &[], &[], None).await.unwrap();
+        assert_eq!(all_due.len(), 4, "uncapped port returns all due facts");
+
+        // Exclude the earliest, cap at 2 → the next two in t_valid ASC order.
+        let exclude = vec![seeded_ids[0]];
+        let got = be
+            .list_due_facts(now, &[], &exclude, Some(2))
+            .await
+            .unwrap();
+        let got_ids: Vec<i64> = got.iter().map(|f| f.id).collect();
+        let oracle: Vec<i64> = all_due
+            .iter()
+            .filter(|f| f.id != seeded_ids[0])
+            .take(2)
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(got_ids, oracle, "port exclude+limit must match filter+take");
+        assert!(
+            !got_ids.contains(&seeded_ids[0]),
+            "excluded id must not appear"
+        );
     }
 
     /// `scope_ids=[]` on `list_facts_by_scopes_recent` means NO scopes (empty=NONE).

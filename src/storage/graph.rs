@@ -122,7 +122,19 @@ pub trait FactGraph: Send + Sync {
     /// materialized — #395). Pass `usize::MAX` for `limit` to retrieve all pinned
     /// facts. `scope_ids` empty = **all scopes** (see the trait-level contract).
     async fn list_pinned_facts(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Fact>>;
-    async fn list_due_facts(&self, now: DateTime<Utc>, scope_ids: &[i64]) -> Result<Vec<Fact>>;
+    /// List active facts "due now" (`t_valid <= now`, not bi-temporally
+    /// invalidated), ordered by `t_valid` ASC. `exclude` is an id set removed in
+    /// the backend (empty = no exclusion); `limit` caps the result in the backend
+    /// (`None` = uncapped, the scheduling contract). Pushing both down (#396)
+    /// avoids materializing and decoding embedding BLOBs the caller would discard.
+    /// `scope_ids` empty = **all scopes** (see the trait-level contract).
+    async fn list_due_facts(
+        &self,
+        now: DateTime<Utc>,
+        scope_ids: &[i64],
+        exclude: &[i64],
+        limit: Option<usize>,
+    ) -> Result<Vec<Fact>>;
     async fn next_due_time(
         &self,
         now: DateTime<Utc>,
