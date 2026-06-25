@@ -154,8 +154,11 @@ pub async fn set_config(client: &Client, key: &str, value: &str) -> Result<()> {
 }
 
 async fn config_table_exists(client: &Client) -> Result<bool> {
+    // Schema-qualify `public.config` — a bare `to_regclass('config')` is `search_path`-
+    // sensitive, so a session with a non-default `search_path` would not find the table
+    // and would wrongly attempt a fresh migration on an already-migrated database.
     let row = client
-        .query_one("SELECT to_regclass('config') IS NOT NULL", &[])
+        .query_one("SELECT to_regclass('public.config') IS NOT NULL", &[])
         .await
         .map_err(pg_err)?;
     Ok(row.get::<_, bool>(0))

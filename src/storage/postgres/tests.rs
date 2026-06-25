@@ -230,6 +230,168 @@ async fn facts_columns_match_the_v14_logical_shape() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker/Postgres testcontainer; run with --ignored"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the body is dominated by the exhaustive 12-table v14 column manifest (data, not logic)"
+)]
+async fn every_table_has_its_full_v14_column_set() {
+    // The full v14 column manifest. A future DDL edit that drops, renames, or adds a
+    // column to ANY of the 12 tables fails here — the parity keystone's regression guard.
+    // (`facts_columns_match_the_v14_logical_shape` above checks column *types*, but only
+    // for `facts`; this checks the full column *set* for every table.)
+    const MANIFEST: &[(&str, &[&str])] = &[
+        ("scopes", &["id", "parent_id", "label", "depth"]),
+        (
+            "events",
+            &[
+                "id",
+                "timestamp",
+                "event_type",
+                "payload",
+                "source",
+                "session_id",
+                "scope_id",
+                "origin_node_id",
+                "sequence_id",
+                "created_at",
+                "event_revision",
+            ],
+        ),
+        (
+            "facts",
+            &[
+                "id",
+                "content",
+                "content_hash",
+                "embedding",
+                "fact_type",
+                "t_created",
+                "t_expired",
+                "t_valid",
+                "t_invalid",
+                "source_event_id",
+                "importance",
+                "access_count",
+                "last_accessed",
+                "metadata",
+                "scope_id",
+                "is_pinned",
+                "importance_score",
+                "surfaced_at",
+                "content_tsv",
+            ],
+        ),
+        (
+            "edges",
+            &[
+                "id",
+                "source_fact_id",
+                "target_fact_id",
+                "relation_type",
+                "weight",
+                "t_created",
+                "t_expired",
+                "scope_id",
+            ],
+        ),
+        (
+            "summaries",
+            &[
+                "id",
+                "content",
+                "embedding",
+                "level",
+                "source_fact_ids",
+                "created_at",
+                "scope_id",
+            ],
+        ),
+        ("config", &["key", "value"]),
+        (
+            "archive_manifest",
+            &[
+                "id",
+                "pak_path",
+                "created_at",
+                "fact_count",
+                "edge_count",
+                "fact_id_min",
+                "fact_id_max",
+                "t_created_min",
+                "t_created_max",
+                "size_bytes",
+                "blake3_hash",
+            ],
+        ),
+        (
+            "lineage",
+            &[
+                "lineage_id",
+                "wisdom_fact_id",
+                "source_fact_ids",
+                "provenance",
+            ],
+        ),
+        (
+            "activities",
+            &[
+                "id",
+                "session_id",
+                "tool_name",
+                "args_hash",
+                "args",
+                "result_summary",
+                "outcome_class",
+                "status",
+                "occurrence_count",
+                "first_seen",
+                "last_seen",
+                "scope_id",
+                "promoted_fact_id",
+            ],
+        ),
+        (
+            "session_checkpoints",
+            &[
+                "session_id",
+                "scope_path",
+                "summary",
+                "last_activity_id",
+                "checkpoint_at",
+                "metadata",
+            ],
+        ),
+        (
+            "embedding_spaces",
+            &[
+                "name",
+                "model",
+                "provider",
+                "dim",
+                "matryoshka_base_dim",
+                "element_type",
+                "status",
+                "created_at",
+            ],
+        ),
+        ("fact_vectors", &["fact_id", "space_id", "embedding"]),
+    ];
+    let (_c, _url, be) = migrated_backend().await;
+    for &(table, expected) in MANIFEST {
+        let mut got: Vec<String> = columns(&be, table)
+            .await
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        got.sort();
+        let mut want: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
+        want.sort();
+        assert_eq!(got, want, "column set mismatch for table `{table}`");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker/Postgres testcontainer; run with --ignored"]
 async fn vector_extension_present_and_dim_is_parameterized() {
     let (_c, _url, be) = migrated_backend().await;
     // R5: the pgvector extension is installed.
