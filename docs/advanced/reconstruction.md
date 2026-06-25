@@ -166,11 +166,41 @@ self-heal, to avoid silent-identity-adoption, per #614).
 
 ## PromoteOutcome and index rebuild
 
-`rebuild_index` is always `true`: a promote changes every active vector, so a downstream vector
-index (HNSW) must rebuild. The **live in-process rebuild is #624**; until then, a SQLite+`ann`
-backend's index is stale only between the promote and the next open (which rebuilds it via
-`build_from_db`). The brute-force vector path (default features) reads `facts.embedding` directly and
-is correct immediately.
+`rebuild_index` is always `true`: a promote changes every active vector, so a live in-process vector
+index (HNSW) must rebuild. The engine acts on this at the end of `reconstruct`:
+
+- **Same-dim (#624):** the handle is not fenced and keeps serving, so `reconstruct` rebuilds the
+  in-process index **in place before returning**, via `SearchIndex::rebuild_vector_index` (SQLite+`ann`
+  does a full `build_from_db`-equivalent scan under the index's write lock; the swap is atomic, so a
+  concurrent `vector_search` sees the whole old or whole new index). Queries reflect the new model
+  immediately — no reopen needed.
+- **Different-dim (#742):** the handle is fenced and the consumer reopens at `D′`, which rebuilds the
+  index on open. `reconstruct` does **not** rebuild in place here (it would read the new `D′`-wide
+  blobs at the old dimension → `EmbeddingDimension`).
+
+The brute-force vector path (default features) reads `facts.embedding` directly, so it is correct the
+instant the promote commits (same-dim) or on reopen (different-dim). Durability across reopen is
+independent of the live rebuild: the engine snapshot reads vectors from the DB, so a `close()` after a
+same-dim promote already persists the new vectors regardless.
+
+### Similarity-edge invalidation (N/A in the Memory layer)
+
+Issue #624 also framed this as "invalidate cached similarity graph edges — the analog of the Knowledge
+layer deleting `relation_type = "similar"`." **The Memory layer persists no such edges, by design.**
+Every graph edge is _semantic provenance_ — `co_session`, `supersedes`, `supplements`, `contradicts`
+(session links and arbiter decisions) — which encodes real history and **must survive a model swap**;
+deleting it would destroy lineage. Vector similarity is computed _transiently_ (query-time RRF fusion,
+consolidation/DBSCAN clustering, on-the-fly resonance), never materialized as edges. The **only**
+materialized embedding-similarity cache in the Memory layer is the HNSW proximity graph itself — so
+"invalidate cached similarity edges" collapses to "rebuild the index": the same single action above,
+not a second edge-deletion step. (The Knowledge layer's `DELETE relation_type = "similar"` has no
+Memory-layer counterpart.)
+
+A _persisted_ associative similarity-edge graph — for spreading-activation recall (a fast, high-decay
+"surface recall" vs. a wide, low-decay "deep recall") — is a possible **future** cognitive-layer
+feature. If it lands, its invalidate-and-recompute step slots in alongside the index rebuild at this
+same reconstruction seam; the engine already documents the same-dim branch as the
+"refresh embedding-derived caches" point.
 
 ## Dump / restore
 

@@ -82,24 +82,37 @@ impl HnswStrategy {
         inner.fact_to_hnsw.len()
     }
 
-    /// Build an HNSW index from all active facts in the database.
+    /// Construct an empty `hnsw::Hnsw` with the canonical seed + params.
     ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Database` on query failure, or
-    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
-    ///
-    /// # Panics
-    ///
-    /// Panics if HNSW does not assign sequential IDs starting from 0.
-    pub fn build_from_db(conn: &Connection, embed_dim: usize) -> Result<Self> {
+    /// The single construction point for the index used by every build path
+    /// ([`build_inner`](Self::build_inner) and [`from_snapshot`](Self::from_snapshot)),
+    /// so the deterministic topology (`HNSW_SEED`, `ef_construction(200)`) can never
+    /// drift between a freshly-opened, a rebuilt, and a snapshot-restored index — a
+    /// drift would silently change which neighbors a query proposes.
+    fn new_hnsw_index() -> Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32> {
         use rand::SeedableRng;
 
-        let mut index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32> = Hnsw::new_params_and_prng(
+        Hnsw::new_params_and_prng(
             CosineMetric,
             hnsw::Params::new().ef_construction(200),
             SmallRng::seed_from_u64(HNSW_SEED),
-        );
+        )
+    }
+
+    /// Build a populated [`HnswInner`] from all active facts in `conn`.
+    ///
+    /// The shared core of [`build_from_db`](Self::build_from_db) (wraps it in a fresh
+    /// `RwLock`) and [`rebuild_from_db`](Self::rebuild_from_db) (swaps it into the
+    /// existing lock) — so both produce an index with identical topology from the
+    /// same DB rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure, `MemoryError::Internal` if
+    /// HNSW does not assign sequential IDs starting from 0, or
+    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
+    fn build_inner(conn: &Connection, embed_dim: usize) -> Result<HnswInner> {
+        let mut index = Self::new_hnsw_index();
         let mut searcher: Searcher<u32> = Searcher::default();
         let mut index_to_fact = Vec::new();
 
@@ -126,15 +139,77 @@ impl HnswStrategy {
             fact_to_hnsw.insert(fact_id, hnsw_id);
         }
 
+        Ok(HnswInner {
+            index,
+            index_to_fact,
+            fact_to_hnsw,
+            tombstones: HashSet::new(),
+        })
+    }
+
+    /// Build an HNSW index from all active facts in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure, or
+    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
+    pub fn build_from_db(conn: &Connection, embed_dim: usize) -> Result<Self> {
         Ok(Self {
-            inner: RwLock::new(HnswInner {
-                index,
-                index_to_fact,
-                fact_to_hnsw,
-                tombstones: HashSet::new(),
-            }),
+            inner: RwLock::new(Self::build_inner(conn, embed_dim)?),
             embed_dim,
         })
+    }
+
+    /// Rebuild the index **in place** from the current active facts in `conn`.
+    ///
+    /// Used after a same-dim reconstruction promote (#624): the active vectors were
+    /// rewritten under a new embedding model, so the in-memory graph (built on the
+    /// old vectors) is stale and must be rebuilt. Builds a fresh [`HnswInner`] via a
+    /// full [`build_inner`](Self::build_inner) scan, then swaps it in — all-or-nothing:
+    /// on `Err` the swap never happens (`?` returns before the assignment) and the
+    /// old, stale-but-consistent index stays live.
+    ///
+    /// **The write lock spans the whole build, deliberately.** `notify_insert` /
+    /// `notify_expire` take the *same* lock, so building under it serializes any
+    /// concurrent fact write either *before* the scan (→ included in the rebuild) or
+    /// *after* the swap (→ applied to the new index). Building off-lock and only
+    /// locking for the swap would let a concurrent `notify` land on the
+    /// about-to-be-discarded old index and be silently lost. A same-dim
+    /// reconstruction is a rare, operator-driven event, so briefly blocking
+    /// `vector_search` (which takes the read lock) for the O(N) build is the correct
+    /// trade vs. a dropped index entry.
+    ///
+    /// `&self` interior mutability — the engine holds only `&dyn StorageBackend`
+    /// post-#631, so a `&mut self` rebuild is unreachable. Same-dim only: it reuses
+    /// `self.embed_dim`, so a wrong-dim rebuild is impossible by construction (a
+    /// different-dim reconstruction fences + reopens instead, #742).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure, or
+    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the write lock MUST span the build_inner scan, not just the swap: \
+                  notify_insert/notify_expire take the same lock, so building under it \
+                  serializes concurrent writes either before the scan or after the swap. \
+                  Tightening to build-off-lock-then-swap reintroduces a lost-update window \
+                  where a concurrent notify lands on the discarded old index."
+    )]
+    pub(crate) fn rebuild_from_db(&self, conn: &Connection) -> Result<()> {
+        let mut guard = self.inner.write();
+        *guard = Self::build_inner(conn, self.embed_dim)?;
+        Ok(())
+    }
+
+    /// Number of tombstoned (logically-removed) HNSW slots — test-only white-box
+    /// accessor. A full [`rebuild_from_db`](Self::rebuild_from_db) must reset this to
+    /// `0` (it builds a fresh index with no tombstones), distinguishing a genuine
+    /// rebuild from a `notify_insert`-replay (which only appends + tombstones, never
+    /// reclaims).
+    #[cfg(test)]
+    pub(crate) fn tombstone_count(&self) -> usize {
+        self.inner.read().tombstones.len()
     }
 
     /// Snapshot active embeddings for fast cold-start.
@@ -173,19 +248,14 @@ impl HnswStrategy {
 
     /// Rebuild a compact HNSW index from snapshot data (no DB I/O needed).
     ///
-    /// Uses the same seed and parameters as `build_from_db` for deterministic
-    /// topology.
+    /// Shares [`new_hnsw_index`](Self::new_hnsw_index) with `build_inner` for the
+    /// same seed and parameters, so a snapshot-restored index has the same
+    /// deterministic topology as a freshly-built or rebuilt one.
     pub(crate) fn from_snapshot(
         snap: &crate::engine::snapshot::HnswSnapshot,
         embed_dim: usize,
     ) -> Result<Self> {
-        use rand::SeedableRng;
-
-        let mut index: Hnsw<CosineMetric, Vec<f32>, SmallRng, 16, 32> = Hnsw::new_params_and_prng(
-            CosineMetric,
-            hnsw::Params::new().ef_construction(200),
-            SmallRng::seed_from_u64(HNSW_SEED),
-        );
+        let mut index = Self::new_hnsw_index();
         let mut searcher: Searcher<u32> = Searcher::default();
         let mut index_to_fact = Vec::new();
         let mut fact_to_hnsw = HashMap::new();
@@ -630,6 +700,136 @@ mod tests {
             assert!(
                 !results.iter().any(|r| r.fact_id == ids[0]),
                 "expired fact should be excluded"
+            );
+        }
+
+        // --- #624: rebuild_from_db (live same-dim reconstruction rebuild) ---
+
+        #[test]
+        fn rebuild_from_db_reclaims_tombstones_and_matches_live_rows() {
+            // White-box guard for #624 — the *rigorous* proof that `rebuild_from_db`
+            // produces a fresh index, not a `notify_insert`-replay (which only appends
+            // + tombstones, never reclaims). A black-box query test cannot distinguish
+            // a stale index from a rebuilt one at this corpus size: `search` re-scores
+            // every candidate against the current DB embedding and, with
+            // `DEFAULT_EF_SEARCH = 100` exploring the whole small graph, returns the
+            // correct top-k either way. The tombstone/active-count invariant is the
+            // observable a no-op (or replay) rebuild fails. DO NOT "simplify" this into
+            // a query assertion — it would silently stop guarding the rebuild.
+            let (conn, ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            // Churn the in-memory index so it accumulates tombstones: re-insert one
+            // fact (tombstones its prior slot) and expire another.
+            strategy.notify_insert(ids[0], &[0.5_f32, 0.5, 0.0, 0.0]);
+            strategy.notify_expire(ids[1]);
+            assert!(
+                strategy.tombstone_count() >= 2,
+                "churn must create tombstones, got {}",
+                strategy.tombstone_count()
+            );
+
+            // Expire ids[1] in the DB too, so the rebuild's active scan drops it.
+            conn.execute(
+                "UPDATE facts SET t_expired = datetime('now') WHERE id = ?1",
+                [ids[1]],
+            )
+            .unwrap();
+
+            strategy.rebuild_from_db(&conn).unwrap();
+
+            // A genuine rebuild resets tombstones to 0 and the active set to live rows.
+            assert_eq!(
+                strategy.tombstone_count(),
+                0,
+                "rebuild must reclaim all tombstones"
+            );
+            assert_eq!(
+                strategy.active_count(),
+                2,
+                "active set == live (non-expired) rows: ids[0], ids[2]"
+            );
+        }
+
+        #[test]
+        fn rebuild_from_db_on_empty_db_is_ok() {
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+            strategy.rebuild_from_db(&conn).unwrap();
+            assert_eq!(strategy.active_count(), 0);
+            let results = strategy
+                .search(&conn, &[1.0_f32, 0.0, 0.0, 0.0], DIM, 5, None, None)
+                .unwrap();
+            assert!(results.is_empty(), "rebuilt empty index yields no results");
+        }
+
+        #[test]
+        fn rebuild_from_db_reflects_swapped_embeddings() {
+            // Behavioral companion: after the stored vectors change, a rebuilt index
+            // searches over the NEW vectors. (At this corpus size the query also
+            // resolves correctly on a stale index via re-scoring — the white-box test
+            // above is the rigorous guard; this documents end-to-end intent and that a
+            // rebuild does not break search.)
+            let (conn, ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap(); // graph on OLD vectors
+
+            // Swap stored vectors: ids[2] becomes the e0 match, ids[0] moves to e1.
+            conn.execute(
+                "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    crate::store::serialize_embedding(&[0.0_f32, 1.0, 0.0, 0.0]),
+                    ids[0]
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    crate::store::serialize_embedding(&[1.0_f32, 0.0, 0.0, 0.0]),
+                    ids[2]
+                ],
+            )
+            .unwrap();
+
+            strategy.rebuild_from_db(&conn).unwrap(); // graph on NEW vectors
+
+            let results = strategy
+                .search(&conn, &[1.0_f32, 0.0, 0.0, 0.0], DIM, 1, None, None)
+                .unwrap();
+            assert_eq!(
+                results[0].fact_id, ids[2],
+                "after rebuild, the fact swapped to e0 is the nearest"
+            );
+        }
+
+        #[test]
+        fn rebuild_from_db_dim_mismatch_preserves_old_index() {
+            // All-or-nothing: a rebuild that hits a wrong-width stored embedding errors
+            // and leaves the previous in-memory index untouched (the `?` returns before
+            // the swap assignment).
+            let (conn, ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+            let before = strategy.active_count();
+
+            conn.execute(
+                "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    crate::store::serialize_embedding(&[0.5_f32; DIM + 1]),
+                    ids[0]
+                ],
+            )
+            .unwrap();
+
+            let err = strategy.rebuild_from_db(&conn).unwrap_err();
+            assert!(
+                matches!(err, crate::error::MemoryError::EmbeddingDimension { .. }),
+                "wrong-width stored embedding must abort the rebuild, got {err:?}"
+            );
+            assert_eq!(
+                strategy.active_count(),
+                before,
+                "a failed rebuild must leave the old index intact"
             );
         }
     }

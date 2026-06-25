@@ -62,4 +62,55 @@ pub trait SearchIndex: Send + Sync {
         fact_type: Option<&FactType>,
         scope_ids: Option<&[i64]>,
     ) -> Result<usize>;
+
+    /// Rebuild the in-process vector index from the current active facts, after a
+    /// **same-dim** reconstruction promote (#624).
+    ///
+    /// A same-dim reconstruction rewrites every `facts.embedding` under a new
+    /// embedding model without changing the dimension, so the engine keeps serving on
+    /// the same handle (no reopen). A backend that maintains a *live in-process* ANN
+    /// index (`SQLite` + `ann`) must therefore rebuild it here, because the index was
+    /// built on the now-replaced vectors. (A *different-dim* reconstruction fences the
+    /// handle and the consumer reopens, rebuilding on open — #742 — so it never calls
+    /// this.)
+    ///
+    /// ## Contract — backends with a live index MUST override
+    /// The default is a **no-op**, correct ONLY for backends that need no in-process
+    /// rebuild: the brute-force `SQLite` path reads `facts.embedding` directly per query
+    /// (already correct the instant the promote commits), and a server-side index (a
+    /// future Postgres/`pgvector` backend, #633) is maintained by the database. **Any
+    /// backend that holds a live in-memory similarity index MUST override this** —
+    /// inheriting the no-op would silently serve stale vectors after a model swap.
+    /// (The #632 conformance suite is the place to assert post-swap query correctness
+    /// so a non-overriding backend fails loudly.)
+    ///
+    /// ## Concurrency
+    /// An implementation MUST rebuild atomically: a concurrent `vector_search` must
+    /// observe either the entire old or the entire new index, never a partial graph,
+    /// and a concurrent index mutation (insert/expire) must not be lost to the swap.
+    ///
+    /// ## Similarity-edge invalidation (N/A in this engine — canonical note)
+    /// Issue #624 also asked to "invalidate cached similarity graph edges (the
+    /// analog of the Knowledge layer deleting `relation_type = "similar"`)." **The
+    /// Memory layer persists no such edges.** Every graph edge is *semantic
+    /// provenance* — `co_session` / `supersedes` / `supplements` / `contradicts`,
+    /// i.e. session links and arbiter decisions — which encode real history and MUST
+    /// survive a model swap. Vector similarity is computed transiently (query-time RRF
+    /// fusion, consolidation/DBSCAN clustering, on-the-fly resonance), never
+    /// materialized as edges. The **only** materialized embedding-similarity cache is
+    /// this vector index itself, so "invalidate cached similarity edges" collapses to
+    /// "rebuild the index" — the same single action this method performs, not a
+    /// second edge-deletion step. A persisted associative similarity graph (for
+    /// spreading-activation recall) is a possible *future* cognitive-layer feature; if
+    /// it lands, its invalidation slots in alongside this call at the reconstruction
+    /// seam.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend
+    /// failure, or
+    /// [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+    /// if a stored embedding has the wrong width.
+    async fn rebuild_vector_index(&self) -> Result<()> {
+        Ok(())
+    }
 }

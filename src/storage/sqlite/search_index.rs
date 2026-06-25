@@ -120,6 +120,21 @@ impl SearchIndex for SqliteBackend {
         })
         .await
     }
+
+    /// Rebuild the in-memory HNSW index after a same-dim reconstruction promote
+    /// (#624). With `ann`, delegates to [`hnsw_rebuild_from_db`](SqliteBackend::hnsw_rebuild_from_db)
+    /// (itself a no-op when no HNSW index is active). Without `ann`, the brute-force
+    /// vector path reads `facts.embedding` directly, so there is nothing to rebuild.
+    async fn rebuild_vector_index(&self) -> Result<()> {
+        #[cfg(feature = "ann")]
+        {
+            self.hnsw_rebuild_from_db().await
+        }
+        #[cfg(not(feature = "ann"))]
+        {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -569,6 +584,29 @@ mod tests {
             "AsOf must NOT surface soft-deleted (expired) rows; got {got:?}"
         );
     }
+
+    /// #624: a backend with no active in-process index — no `search_config` (so no
+    /// HNSW even with `ann`) or the `ann` feature off entirely — treats
+    /// `rebuild_vector_index` as a no-op, and the brute-force vector path still ranks
+    /// correctly afterward. Runs under both feature configs.
+    #[tokio::test]
+    async fn rebuild_vector_index_is_noop_without_active_index() {
+        let pool = seeded(&[
+            fact("a", [1.0, 0.0, 0.0, 0.0], false),
+            fact("b", [0.0, 1.0, 0.0, 0.0], false),
+        ]);
+        let be = backend(Arc::clone(&pool));
+        be.rebuild_vector_index().await.unwrap();
+        let got = be
+            .vector_search(&[1.0, 0.0, 0.0, 0.0], &FactFilter::default(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "brute-force search still ranks after a no-op rebuild"
+        );
+    }
 }
 
 // =============================================================================
@@ -982,5 +1020,123 @@ mod hnsw_tests {
                 .collect::<Vec<_>>(),
             "snapshot round-trip must preserve top-k result order"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // #624 — rebuild_vector_index (same-dim live HNSW rebuild on promote)
+    // -------------------------------------------------------------------------
+
+    /// After the stored vectors are swapped (as a same-dim promote does), a rebuild
+    /// makes `vector_search` reflect the NEW vectors, and leaves a clean index (no
+    /// tombstones — the white-box guard, since at this corpus size re-scoring would
+    /// mask staleness in the query result alone).
+    #[tokio::test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "write guard intentionally held across the two UPDATEs"
+    )]
+    async fn rebuild_vector_index_reflects_swapped_vectors() {
+        use crate::store::serialize_embedding;
+
+        let pool = seeded(&[
+            fact("a", [1.0, 0.0, 0.0, 0.0]),
+            fact("b", [0.0, 1.0, 0.0, 0.0]),
+            fact("c", [0.0, 0.0, 1.0, 0.0]),
+        ]);
+        let be = backend_with_ann(Arc::clone(&pool), 0);
+
+        let ids: std::collections::HashMap<String, i64> = {
+            let c = pool.read().unwrap();
+            FactStore::new(&c, DIM)
+                .list_all()
+                .unwrap()
+                .into_iter()
+                .map(|f| (f.content, f.id))
+                .collect()
+        };
+        let (a_id, c_id) = (ids["a"], ids["c"]);
+
+        // Baseline: query e0 → fact "a".
+        let base = be
+            .vector_search(&[1.0, 0.0, 0.0, 0.0], &FactFilter::default(), 1)
+            .await
+            .unwrap();
+        assert_eq!(base[0].0, a_id);
+
+        // Simulate a same-dim promote: swap stored vectors so "c" becomes the e0 match.
+        {
+            let conn = pool.write();
+            conn.execute(
+                "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+                rusqlite::params![serialize_embedding(&[0.0_f32, 0.0, 1.0, 0.0]), a_id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+                rusqlite::params![serialize_embedding(&[1.0_f32, 0.0, 0.0, 0.0]), c_id],
+            )
+            .unwrap();
+        }
+
+        be.rebuild_vector_index().await.unwrap();
+
+        // White-box: a genuine rebuild leaves no tombstones.
+        assert_eq!(be.hnsw.as_ref().unwrap().tombstone_count(), 0);
+        // Behavioral: query e0 now returns "c".
+        let after = be
+            .vector_search(&[1.0, 0.0, 0.0, 0.0], &FactFilter::default(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            after[0].0, c_id,
+            "after rebuild, the fact swapped to e0 is nearest"
+        );
+    }
+
+    /// Concurrent `rebuild_vector_index` and `vector_search` are deadlock-free and
+    /// every search observes a complete index (the atomic off-/under-lock swap).
+    ///
+    /// The no-lost-update guarantee against concurrent inserts is a type-level
+    /// property (`rebuild_from_db` holds the same write lock `notify_insert` takes,
+    /// serializing a concurrent insert into the scan or after the swap — see its
+    /// docs), so this test focuses on the read/rebuild interplay (deadlock + torn-read
+    /// freedom) which is what the locking actually has to get right at runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rebuild_vector_index_concurrent_with_search_is_consistent() {
+        let pool = seeded(&[
+            fact("north", [1.0, 0.0, 0.0, 0.0]),
+            fact("near", [0.9, 0.1, 0.0, 0.0]),
+            fact("east", [0.0, 1.0, 0.0, 0.0]),
+        ]);
+        let be = Arc::new(backend_with_ann(Arc::clone(&pool), 0));
+
+        let mut handles = Vec::new();
+        {
+            let be = Arc::clone(&be);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    be.rebuild_vector_index().await.unwrap();
+                }
+            }));
+        }
+        for _ in 0..3 {
+            let be = Arc::clone(&be);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..20 {
+                    let got = be
+                        .vector_search(&[1.0_f32, 0.0, 0.0, 0.0], &FactFilter::default(), 2)
+                        .await
+                        .unwrap();
+                    // A complete index always yields the full top-k for this corpus.
+                    assert_eq!(got.len(), 2, "search saw a partial/torn index");
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(be.hnsw.as_ref().unwrap().active_count(), 3);
+        assert_eq!(be.hnsw.as_ref().unwrap().tombstone_count(), 0);
     }
 }

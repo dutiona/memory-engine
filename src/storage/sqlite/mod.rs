@@ -352,6 +352,32 @@ impl SqliteBackend {
             hnsw.notify_expire(fact_id);
         }
     }
+
+    /// Rebuild the in-memory HNSW index from the current active facts (#624).
+    ///
+    /// Called after a same-dim reconstruction promote rewrote every
+    /// `facts.embedding` under a new model: the graph (built on the old vectors) is
+    /// stale. Runs the CPU-heavy O(N) rebuild on a blocking thread via
+    /// [`block_read`](Self::block_read); [`HnswStrategy::rebuild_from_db`] builds the
+    /// fresh index under its write lock and swaps it in atomically. No-op when no
+    /// HNSW index is active (brute-force mode reads `facts.embedding` directly and is
+    /// already correct).
+    ///
+    /// The `Arc<HnswStrategy>` is cloned into the `'static` blocking closure (a cheap
+    /// pointer bump), mirroring `vector_search`'s HNSW dispatch.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::Storage`] on a backend failure, or
+    /// [`MemoryError::EmbeddingDimension`] if a stored embedding has the wrong width.
+    #[cfg(feature = "ann")]
+    pub(super) async fn hnsw_rebuild_from_db(&self) -> Result<()> {
+        let Some(hnsw) = self.hnsw.clone() else {
+            return Ok(()); // no HNSW active → brute-force path needs no rebuild
+        };
+        self.block_read(move |conn| hnsw.rebuild_from_db(conn))
+            .await
+    }
 }
 
 /// Map a tokio [`JoinError`](tokio::task::JoinError) (a panic or cancellation in the
