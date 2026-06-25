@@ -140,9 +140,12 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
 /// mid-promote failure can never leave partial state).
 ///
 /// Steps, in order:
-/// 0. **Same-dim guard** — `populating.dim == active.dim`, else
-///    [`MemoryError::EmbeddingDimension`]. Different-dim is the #742 follow-up
-///    (the engine `embed_dim` is frozen at open).
+/// 0. **Resolve** the active + populating spaces (no dim guard — a promote is
+///    dimension-agnostic at the storage layer since the copy-swap is a blob-level
+///    `UPDATE`; #742 allows `populating.dim != active.dim`. The width invariant is
+///    the engine-side `backfill_space` per-vector check against the populating
+///    space's declared dim, and a different-dim promote fences the engine handle
+///    until it reopens at the new dim).
 /// 1. **Completeness gate INSIDE the tx** (no TOCTOU) — every fact must already
 ///    have a populating vector. A non-zero count aborts (a straggler arrived
 ///    after the engine's pre-tx catch-up).
@@ -164,14 +167,20 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::EmbeddingDimension`] on a dim mismatch (different-dim),
-/// [`MemoryError::Internal`] if there is no active space, the populating space is
-/// absent or not `populating`, or the completeness gate fails, or
+/// Returns [`MemoryError::Internal`] if there is no active space, the populating
+/// space is absent or not `populating`, or the completeness gate fails, or
 /// [`MemoryError::Database`] on a write failure (which rolls the transaction back).
 pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutcome> {
     let tx = conn.unchecked_transaction()?;
 
-    // (0) Resolve both spaces and enforce the same-dim guard.
+    // (0) Resolve both spaces. NO dim guard: a promote is dimension-agnostic at the
+    // storage layer (the copy-swap below is a blob-level UPDATE), so #742 allows the
+    // populating space's dim to differ from the active one. The width invariant is
+    // enforced engine-side by `backfill_space`'s per-vector check against the
+    // populating space's declared dim (the sole backstop once this guard is gone),
+    // and a different-dim promote leaves the engine handle fenced until it reopens at
+    // the new dim. The completeness gate (step 1) still guarantees every fact has a
+    // populating vector, so the total copy-swap never nulls `facts.embedding`.
     let active = embedding_spaces::find_active(&tx)?.ok_or_else(|| {
         MemoryError::Internal("promote: no active embedding space to swap over".into())
     })?;
@@ -185,12 +194,6 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
             "promote: space {populating:?} is {:?}, expected populating",
             new.status
         )));
-    }
-    if new.fingerprint.dim != active.fingerprint.dim {
-        return Err(MemoryError::EmbeddingDimension {
-            expected: active.fingerprint.dim,
-            actual: new.fingerprint.dim,
-        });
     }
 
     // (1) Completeness gate INSIDE the tx (no TOCTOU).
@@ -565,9 +568,14 @@ mod tests {
     }
 
     #[test]
-    fn promote_rejects_different_dim() {
+    fn promote_allows_different_dim() {
+        // #742 (inverts promote_rejects_different_dim): the storage promote is
+        // dimension-agnostic — it copy-swaps DIM*2-wide vectors into facts.embedding,
+        // flips identity, and retains the old DIM-wide vectors for rollback.
         let conn = fresh_conn();
-        set_active(&conn, "model-a"); // active dim = DIM
+        set_active(&conn, "model-a"); // active @ DIM; facts seeded @ DIM
+        let a = insert_fact(&conn, "alpha");
+        let b = insert_fact(&conn, "beta");
         insert_populating(
             &conn,
             &EmbeddingSpace {
@@ -577,20 +585,46 @@ mod tests {
             },
         )
         .expect("insert wide");
+        // Backfill the wide space with DIM*2-wide vectors.
+        let wide_rows: Vec<(i64, Vec<f32>)> = [a, b]
+            .iter()
+            .map(|&id| (id, vec![0.9_f32; DIM * 2]))
+            .collect();
+        write_backfill_batch(&conn, "wide", &wide_rows).expect("backfill wide");
 
-        let err = promote_space(&conn, "wide").expect_err("different dim");
-        assert!(
-            matches!(
-                err,
-                MemoryError::EmbeddingDimension { expected, actual }
-                    if expected == DIM && actual == DIM * 2
-            ),
-            "got {err:?}"
-        );
-        // Different-dim is #742; nothing changed here.
+        let outcome = promote_space(&conn, "wide").expect("promote allows different dim");
+        assert_eq!(outcome.promoted, 2);
+        assert_eq!(outcome.new_fingerprint.dim, DIM * 2);
+
+        // facts.embedding is now DIM*2-wide (the new space's vectors).
+        for id in [a, b] {
+            let blob: Vec<u8> = conn
+                .query_row(
+                    "SELECT embedding FROM facts WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .expect("blob");
+            assert_eq!(blob.len(), DIM * 2 * 4, "served vector is now D*2-wide");
+            assert_eq!(
+                deserialize_embedding(&blob, DIM * 2).expect("deserialize"),
+                vec![0.9_f32; DIM * 2]
+            );
+        }
+        // Identity flipped to the wide space; the old "default" is retained @ DIM
+        // for rollback, the populating rows cleaned up.
+        let active = find_active(&conn).expect("find").expect("active");
+        assert_eq!(active.name, "wide");
+        assert_eq!(active.fingerprint.dim, DIM * 2);
         assert_eq!(
-            find_active(&conn).expect("find").expect("active").name,
-            "default"
+            count_vectors(&conn, "default").expect("retained"),
+            2,
+            "old DIM-wide vectors retained for rollback"
+        );
+        assert_eq!(
+            count_vectors(&conn, "wide").expect("cleanup"),
+            0,
+            "populating rows deleted post-promote"
         );
     }
 
