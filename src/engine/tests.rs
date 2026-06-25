@@ -5336,4 +5336,151 @@ mod snapshot_integration {
         // A fenced flush is a clean no-op (not an error).
         assert!(!engine.flush_snapshot().await.unwrap());
     }
+
+    /// The headline #742 test: a file-backed engine reconstructed to a NEW
+    /// dimension, then reopened at that dimension serves the new vectors.
+    #[tokio::test]
+    async fn reconstruct_different_dim_then_reopen_at_new_dim() {
+        const D2: usize = 8; // DIM (4) → 8
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("recon.db");
+        let req = |content: &str| AddFactRequest {
+            content: content.into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        };
+
+        // Session 1: ingest @ DIM, reconstruct to D2, get fenced, flush, drop.
+        let mut ids = Vec::new();
+        {
+            let engine =
+                MemoryEngine::open_from_config(&EngineConfig::new(db_path.clone(), DIM), None)
+                    .unwrap();
+            let old: std::sync::Arc<dyn EmbeddingProvider> =
+                std::sync::Arc::new(MockEmbedder { dim: DIM });
+            for c in ["alpha", "beta", "gamma"] {
+                ids.push(engine.add_fact(&req(c), old.clone(), None).await.unwrap());
+            }
+
+            let new_provider: std::sync::Arc<dyn EmbeddingProvider> =
+                std::sync::Arc::new(MockEmbedder { dim: D2 });
+            let new_fp = EmbeddingFingerprint::new("mock", "test", D2);
+            let outcome = engine.reconstruct(&new_fp, &new_provider).await.unwrap();
+            assert_eq!(outcome.promoted, 3);
+            assert_eq!(outcome.new_fingerprint.dim, D2);
+
+            // Fenced: reads refuse, flush is a clean no-op.
+            assert_eq!(engine.reopen_required(), Some(D2));
+            assert!(matches!(
+                engine.get_fact(ids[0]).await,
+                Err(MemoryError::EmbeddingReopenRequired { new_dim: D2 })
+            ));
+            assert!(!engine.flush_snapshot().await.unwrap());
+        }
+
+        // Session 2: reopen AT THE NEW DIM — validates clean (meta now D2), rebuilds
+        // the index @ D2, and serves the new D2-wide vectors.
+        {
+            let engine =
+                MemoryEngine::open_from_config(&EngineConfig::new(db_path.clone(), D2), None)
+                    .unwrap();
+            assert_eq!(engine.embed_dim(), D2);
+            assert_eq!(
+                engine.reopen_required(),
+                None,
+                "a fresh handle is not fenced"
+            );
+            for &id in &ids {
+                assert_eq!(
+                    engine.get_fact(id).await.unwrap().embedding,
+                    vec![0.5_f32; D2],
+                    "facts.embedding now serves the new D2-wide vectors"
+                );
+            }
+            assert_eq!(
+                engine
+                    .storage()
+                    .load_embedding_fingerprint()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .dim,
+                D2
+            );
+        }
+
+        // Reopening at the OLD dim is now rejected (the recorded identity is D2).
+        let err =
+            MemoryEngine::open_from_config(&EngineConfig::new(db_path, DIM), None).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Migration(MigrationError::EmbedDimMismatch { stored, requested })
+                    if stored == D2 && requested == DIM
+            ),
+            "cold reopen at the old dim must report EmbedDimMismatch, got {err:?}"
+        );
+    }
+
+    /// Fence coverage: every cheap-to-call gated method refuses on a fenced handle.
+    /// (The full 26-method gated set is verified at the source; this exercises the
+    /// representative surface across reads/writes/inspection so a regression that
+    /// drops a guard is caught.)
+    #[tokio::test]
+    async fn fence_covers_representative_gated_surface() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+            std::sync::Arc::new(MockEmbedder { dim: DIM });
+        let req = |content: &str| AddFactRequest {
+            content: content.into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        };
+        engine
+            .add_fact(&req("seed"), embedder.clone(), None)
+            .await
+            .unwrap();
+        engine.force_reopen_fence(8);
+
+        let fenced = |r: Result<()>| {
+            assert!(matches!(
+                r,
+                Err(MemoryError::EmbeddingReopenRequired { new_dim: 8 })
+            ));
+        };
+        fenced(engine.get_fact(1).await.map(|_| ()));
+        fenced(engine.list_active_facts(None).await.map(|_| ()));
+        fenced(
+            engine
+                .list_summaries(&ConsolidationLevel::Cluster)
+                .await
+                .map(|_| ()),
+        );
+        fenced(
+            engine
+                .execute_query(&MemoryQuery::new().text("x"))
+                .await
+                .map(|_| ()),
+        );
+        fenced(
+            engine
+                .add_fact(&req("blocked"), embedder.clone(), None)
+                .await
+                .map(|_| ()),
+        );
+        fenced(engine.explain_fact(1).await.map(|_| ()));
+        fenced(engine.fact_history(1).await.map(|_| ()));
+        fenced(engine.statistics().await.map(|_| ()));
+        fenced(engine.forget(&ForgetPolicy::default()).await.map(|_| ()));
+        fenced(
+            engine
+                .resume_context(&ResumeConfig::default())
+                .await
+                .map(|_| ()),
+        );
+    }
 }
