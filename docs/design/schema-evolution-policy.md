@@ -204,3 +204,13 @@ Three property-based tests verify migration invariants across random inputs:
 Each major schema version has a complete, standalone DDL snapshot in the test module (`init_schema_v1`, `init_schema_v2`, `init_schema_v4`, `init_schema_v5`). These depend on NO live DDL constants, preventing fixture drift when tables evolve.
 
 This allows migration tests to start from any historical version and verify the migration chain produces the correct result.
+
+## PostgreSQL Backend — a Fresh Chain (#633)
+
+The above governs the **SQLite** schema. The `PgBackend` (`backend-postgres` feature, #633) does **not** replay the SQLite per-version migrations. Postgres is born at the **v14 logical shape**, so its migration chain is **fresh**: a single `v0→v1` step (`src/storage/postgres/migrations.rs`) that materializes the current logical schema natively — real FK constraints (no FK-rebuild hack), `GENERATED ALWAYS AS IDENTITY` ids, a `tsvector` `GENERATED` column + GIN index (replacing the FTS5 virtual table + its three sync triggers), `vector(N)` pgvector columns, `timestamptz` / `jsonb` / `boolean`, and the partial single-active-space unique index.
+
+**Version numbering is logical-equivalence, not numeric-equality:** `CURRENT_PG_SCHEMA_VERSION = 1`, **not** 14. SQLite is at 14 because it evolved through 13 prior physical states; PG starts at the v14 _logical_ shape, so its physical chain begins at 1. **Do not "sync" the two numbers.** When the PG schema later evolves, append a `v1→v2` step — never rewrite the frozen v1 DDL (same frozen-snapshot invariant as SQLite). The `storage_epoch` is shared (a logical gate, identical across backends).
+
+Logical equivalence to the live SQLite v14 schema is enforced by a **schema-parity introspection test** (gated, testcontainer-backed) that asserts the table set, per-table column types, the CHECK enumerations, the partial unique index predicate, the `fact_vectors` composite PK + `ON DELETE CASCADE`, the `facts.id` IDENTITY, and the generated `content_tsv` + GIN index against a real Postgres.
+
+> **#635 note:** the v1 chain runs in ONE transaction (Postgres DDL is transactional). `CREATE INDEX CONCURRENTLY` (a natural choice for the deferred HNSW vector index) **cannot** run inside a transaction, so #635 must issue it outside this chain.

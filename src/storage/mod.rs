@@ -32,6 +32,8 @@ pub mod consolidation;
 pub mod event_log;
 pub mod filter;
 pub mod graph;
+#[cfg(feature = "backend-postgres")]
+pub mod postgres;
 pub mod schema;
 pub mod search_index;
 pub mod session;
@@ -50,6 +52,8 @@ pub use consolidation::ConsolidationStore;
 pub use event_log::EventLog;
 pub use filter::{FactFilter, MetadataPredicate, TemporalFilter};
 pub use graph::FactGraph;
+#[cfg(feature = "backend-postgres")]
+pub use postgres::PgBackend;
 pub use schema::SchemaManager;
 pub use search_index::SearchIndex;
 pub use session::SessionStore;

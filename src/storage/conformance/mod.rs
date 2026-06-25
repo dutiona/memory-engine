@@ -14,8 +14,10 @@
 //! One [`ConformanceBackend`](factory::ConformanceBackend) impl in `factory.rs` +
 //! one `mod` block below. Behaviors are written ONCE (generic over the factory) and
 //! run against every backend; seed ONLY through the port (`fixtures.rs`), never via
-//! the SQLite-private `FactStore` / `pool.write()`. #633's `PgBackend` fills the
-//! `PgFactory` `todo!()`s and deletes the `[#[ignore]]` token — **zero behavior edits**.
+//! the SQLite-private `FactStore` / `pool.write()`. #635 fills the `PgFactory`
+//! `todo!()`s and deletes the `[#[ignore]]` token once `PgBackend` is a full
+//! `StorageBackend` (#633 added only its `SchemaManager` + pool + migrations) —
+//! **zero behavior edits**.
 //!
 //! ## Excluded (per-backend golden, NOT cross-backend)
 //!
@@ -122,8 +124,9 @@ macro_rules! cold_behaviors_into {
     };
 }
 
-// One mod block per backend. Adding a backend = one block; #633 deletes the
-// `[#[ignore = …]]` token to turn the postgres arm on.
+// One mod block per backend. Adding a backend = one block; #635 deletes the
+// `[#[ignore = …]]` token to turn the postgres arm on (once `PgBackend` is a full
+// `StorageBackend` — #633 added only its `SchemaManager` + pool + migrations).
 mod sqlite {
     use super::*;
     all_behaviors_into!(factory::SqliteFactory, []);
@@ -132,7 +135,7 @@ mod sqlite {
 #[cfg(feature = "backend-postgres")]
 mod postgres {
     use super::*;
-    all_behaviors_into!(factory::PgFactory, [#[ignore = "#633: PgBackend not implemented"]]);
+    all_behaviors_into!(factory::PgFactory, [#[ignore = "#635: PgBackend is not a full StorageBackend until #634 CRUD + #635 SearchIndex"]]);
 }
 
 #[cfg(feature = "archive")]
@@ -144,5 +147,5 @@ mod sqlite_cold {
 #[cfg(all(feature = "backend-postgres", feature = "archive"))]
 mod postgres_cold {
     use super::*;
-    cold_behaviors_into!(factory::PgFactory, [#[ignore = "#633: PgBackend not implemented"]]);
+    cold_behaviors_into!(factory::PgFactory, [#[ignore = "#635: PgBackend is not a full StorageBackend until #634 CRUD + #635 SearchIndex"]]);
 }
