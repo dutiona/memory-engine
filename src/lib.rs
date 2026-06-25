@@ -147,7 +147,7 @@ pub use traits::{
 // a representative subset, and `cargo build --workspace --all-features` proves
 // the whole list still satisfies every downstream consumer.
 pub use types::{
-    Activity, ActivityStatus, AddFactOptions, AddFactRequest, ConsolidationLevel,
+    Activity, ActivityStatus, AddFactOptions, AddFactRequest, ClassifierInput, ConsolidationLevel,
     ConsolidationProposal, DreamCycleConfig, Edge, EmbeddingFingerprint, Event, EventFilter,
     EventType, Fact, FactId, FactScoringRow, FactType, Insight, LineageId, LineageRecord,
     LineageSnapshotEntry, MergeGroup, NewActivity, NewEdge, NewEvent, NewFact, NewFactBuilder,

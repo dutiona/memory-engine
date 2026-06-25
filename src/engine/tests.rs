@@ -7,8 +7,8 @@ use crate::traits::{
     PersistenceClassifier, SummarizableContent, SummaryGenerator,
 };
 use crate::types::{
-    AddFactOptions, AddFactRequest, EmbeddingFingerprint, EventType, Fact, FactType, NewEvent,
-    NewFact,
+    AddFactOptions, AddFactRequest, ClassifierInput, EmbeddingFingerprint, EventType, Fact,
+    FactType, NewEvent, NewFact,
 };
 
 const DIM: usize = 4;
@@ -2057,8 +2057,8 @@ async fn add_fact_with_explicit_pin() {
 async fn add_fact_with_classifier() {
     struct PinSemantic;
     impl PersistenceClassifier for PinSemantic {
-        fn should_pin(&self, fact: &Fact) -> bool {
-            fact.fact_type == FactType::Semantic
+        fn should_pin(&self, input: &ClassifierInput) -> bool {
+            input.fact_type == FactType::Semantic
         }
     }
 
@@ -2104,7 +2104,7 @@ async fn add_fact_with_classifier() {
 async fn explicit_pin_overrides_classifier() {
     struct AlwaysPin;
     impl PersistenceClassifier for AlwaysPin {
-        fn should_pin(&self, _fact: &Fact) -> bool {
+        fn should_pin(&self, _input: &ClassifierInput) -> bool {
             true
         }
     }
@@ -4150,7 +4150,7 @@ async fn add_facts_batch_with_scopes() {
 async fn add_facts_batch_with_classifier() {
     struct AlwaysPin;
     impl PersistenceClassifier for AlwaysPin {
-        fn should_pin(&self, _fact: &Fact) -> bool {
+        fn should_pin(&self, _input: &ClassifierInput) -> bool {
             true
         }
     }

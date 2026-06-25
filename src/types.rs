@@ -490,6 +490,39 @@ impl NewFact {
     }
 }
 
+/// The owned view a classifier receives at classification time.
+///
+/// Passed to [`PersistenceClassifier::should_pin`](crate::traits::PersistenceClassifier::should_pin),
+/// it carries the *only* fields a classifier is authorised to read: `content`,
+/// `fact_type`, `importance`, and `metadata`.
+///
+/// It deliberately carries **no** `embedding`, `id`, `scope_id`,
+/// `importance_score`, or timestamps: those are either not yet assigned at
+/// classification time (the fact is pre-insert) or off-limits per the trait
+/// contract. Dropping the embedding alone eliminates a per-fact `Vec<f32>` clone
+/// of 384–1536 dimensions (≈1.5–6 KB) that the previous synthetic-`Fact` shim
+/// cloned purely to satisfy the `&Fact` parameter (#388); collapsing the 20-field
+/// shim to these four removes the duplicated literal at every classify site
+/// (#118) and the confusion over which fields matter (#343).
+///
+/// Owned (not a borrowing view) so it can be moved into the
+/// `tokio::task::spawn_blocking` closure that runs a possibly-blocking classifier
+/// off the async executor without borrowing engine-local temporaries across the
+/// `move`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassifierInput {
+    /// The fact's text content (post-redaction, as it will be stored).
+    pub content: String,
+    /// The fact's type tag.
+    pub fact_type: FactType,
+    /// The consumer-supplied base importance prior (the `add_fact` caller hint),
+    /// a finite value normally in `[0.0, 1.0]`. Mirrors [`Fact::importance`] /
+    /// [`NewFact::importance`], **not** the decayed `importance_score`.
+    pub importance: f64,
+    /// The fact's metadata object (post-redaction).
+    pub metadata: serde_json::Value,
+}
+
 /// Fluent builder for [`NewFact`], mirroring the ergonomics of
 /// [`MemoryEngineBuilder`](crate::MemoryEngineBuilder).
 ///

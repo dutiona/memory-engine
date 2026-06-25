@@ -31,7 +31,7 @@ use rusqlite::Connection;
 use crate::error::Result;
 use crate::store::facts::FactStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
-use crate::types::{FactType, NewFact};
+use crate::types::{ClassifierInput, FactType, NewFact};
 
 use super::BootstrapConfig;
 use super::metrics::BootstrapReport;
@@ -359,28 +359,17 @@ fn import_one_memory(
         redactions += redact::redact_json_strings(&mut metadata, &config.denylist);
     }
 
+    // Classifiers read only content/fact_type/importance/metadata — build the
+    // owned `ClassifierInput` view, not a 20-field synthetic `Fact` cloning the
+    // embedding (#118/#343/#388).
     let is_pinned = classifier.is_some_and(|c| {
-        let temp = crate::types::Fact {
-            id: 0,
+        let input = ClassifierInput {
             content: content.clone(),
-            content_hash: String::new(),
-            embedding: embedding.clone(),
             fact_type,
-            t_created: timestamp,
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
             importance: MEMORY_IMPORTANCE,
-            access_count: 0,
-            last_accessed: timestamp,
             metadata: metadata.clone(),
-            scope_id,
-            is_pinned: false,
-            importance_score: MEMORY_IMPORTANCE,
-            surfaced_at: None,
         };
-        c.should_pin(&temp)
+        c.should_pin(&input)
     });
 
     // Bi-temporal note (#521): t_created backdated to the file's date/mtime;
