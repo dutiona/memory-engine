@@ -505,11 +505,12 @@ mod tests {
         // deprecate() flips a space; idempotent.
         deprecate(&conn, "model-b_8").expect("deprecate");
         deprecate(&conn, "model-b_8").expect("deprecate idempotent");
-        let statuses: Vec<_> = list_spaces(&conn)
-            .expect("list")
-            .into_iter()
-            .map(|s| (s.name, s.status))
-            .collect();
-        assert!(statuses.contains(&("model-b_8".to_string(), SpaceStatus::Deprecated)));
+        assert!(
+            list_spaces(&conn)
+                .expect("list")
+                .into_iter()
+                .any(|s| s.name == "model-b_8" && s.status == SpaceStatus::Deprecated),
+            "model-b_8 is now deprecated"
+        );
     }
 }

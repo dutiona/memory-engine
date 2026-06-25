@@ -10,6 +10,7 @@ pub mod edges;
 pub mod embedding_meta;
 pub mod embedding_spaces;
 pub mod events;
+pub mod fact_vectors;
 pub mod facts;
 pub mod lineage;
 pub mod schema;

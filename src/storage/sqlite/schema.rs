@@ -24,8 +24,8 @@ use super::SqliteBackend;
 use crate::error::Result;
 use crate::storage::capabilities::{BackendCapabilities, LexicalRanker};
 use crate::storage::schema::SchemaManager;
-use crate::store::embedding_meta;
 use crate::store::schema::{get_config, migrate, validate_schema_version};
+use crate::store::{embedding_meta, embedding_spaces, fact_vectors};
 use crate::types::EmbeddingFingerprint;
 
 #[async_trait]
@@ -232,6 +232,52 @@ impl SchemaManager for SqliteBackend {
     async fn raw_exec(&self, sql: &str) -> Result<()> {
         let sql = sql.to_owned();
         self.block_write(move |c| c.execute_batch(&sql).map_err(Into::into))
+            .await
+    }
+
+    // -------------------------------------------------------------------------
+    // Background reconstruction (#623) — delegate to the registry seam +
+    // `store::fact_vectors` free functions via the block_read/block_write boundary.
+    // -------------------------------------------------------------------------
+
+    // WRITE
+    async fn begin_populating_space(
+        &self,
+        name: &str,
+        fingerprint: &EmbeddingFingerprint,
+    ) -> Result<()> {
+        let space = embedding_spaces::EmbeddingSpace {
+            name: name.to_owned(),
+            fingerprint: fingerprint.clone(),
+            status: embedding_spaces::SpaceStatus::Populating,
+        };
+        self.block_write(move |c| embedding_spaces::insert_populating(c, &space))
+            .await
+    }
+
+    // READ
+    async fn next_backfill_window(
+        &self,
+        space: &str,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
+        let space = space.to_owned();
+        self.block_read(move |c| fact_vectors::next_backfill_window(c, &space, after_id, limit))
+            .await
+    }
+
+    // WRITE
+    async fn write_backfill_batch(&self, space: &str, rows: Vec<(i64, Vec<f32>)>) -> Result<usize> {
+        let space = space.to_owned();
+        self.block_write(move |c| fact_vectors::write_backfill_batch(c, &space, &rows))
+            .await
+    }
+
+    // READ
+    async fn count_unbackfilled(&self, space: &str) -> Result<usize> {
+        let space = space.to_owned();
+        self.block_read(move |c| fact_vectors::count_unbackfilled(c, &space))
             .await
     }
 }
