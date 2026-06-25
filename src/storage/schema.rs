@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::storage::capabilities::BackendCapabilities;
-use crate::types::EmbeddingFingerprint;
+use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 
 /// Backend lifecycle the engine drives post-open.
 ///
@@ -174,4 +174,98 @@ pub trait SchemaManager: Send + Sync {
     /// on a read-only backend.
     #[cfg(any(test, feature = "test-util"))]
     async fn raw_exec(&self, sql: &str) -> Result<()>;
+
+    // -------------------------------------------------------------------------
+    // Background reconstruction (#623) — shadow-space backfill mechanism.
+    //
+    // Pure DB ops. The engine drives the embedding (off the write lock, under
+    // `spawn_blocking`) and calls these to open / fill / inspect a `populating`
+    // space's `fact_vectors`. The embedder never crosses the port — the backend
+    // does no network/LLM work. The atomic promote + deprecate land in #623 T3.
+    // These sit on `SchemaManager` (not a new supertrait) because reconstruction
+    // *is* the embedding-identity lifecycle this trait already owns.
+    // -------------------------------------------------------------------------
+
+    /// Open a `populating` shadow space `name` carrying `fingerprint` — the
+    /// registry row a background reconstruction backfills before the atomic
+    /// promote. Its status is forced to `populating`, so it coexists with the
+    /// current active space without tripping the single-active partial index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on a
+    /// `name` collision or write failure, or
+    /// [`MemoryError::Internal`](crate::error::MemoryError::Internal) if the
+    /// dimension overflows `i64`.
+    async fn begin_populating_space(
+        &self,
+        name: &str,
+        fingerprint: &EmbeddingFingerprint,
+    ) -> Result<()>;
+
+    /// Next window of facts still lacking a vector in `space` (cursorless
+    /// anti-join): `(fact_id, content)` pairs with `fact_id > after_id`,
+    /// id-ordered, capped at `limit`. An empty window means the space is fully
+    /// backfilled. Covers every fact, expired or not (the homogeneity invariant —
+    /// see [`store::fact_vectors`](crate::store::fact_vectors)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// backend failure, or [`MemoryError::Internal`](crate::error::MemoryError::Internal)
+    /// if `limit` overflows `i64`.
+    async fn next_backfill_window(
+        &self,
+        space: &str,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>>;
+
+    /// Idempotently write a batch of `(fact_id, embedding)` rows into `space`
+    /// (`ON CONFLICT(fact_id, space_id) DO NOTHING`). Returns the number of rows
+    /// **actually inserted** (a conflict counts as 0), so a crash-resume replay
+    /// reports 0 new writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// backend or foreign-key failure (an unregistered `space` or unknown
+    /// `fact_id`).
+    async fn write_backfill_batch(&self, space: &str, rows: Vec<(i64, Vec<f32>)>) -> Result<usize>;
+
+    /// Count facts still lacking a vector in `space`. `0` means fully backfilled —
+    /// the promote completeness gate (#623 D6).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// backend failure.
+    async fn count_unbackfilled(&self, space: &str) -> Result<usize>;
+
+    /// Atomically promote the `populating` space to active (#623 D6): in one
+    /// transaction, retain the old active vectors for rollback, copy-swap the
+    /// populating vectors into `facts.embedding`, and flip the registry status
+    /// (the identity flip). **Same-dim only** this wave — a different-dim
+    /// populating space is rejected (the engine `embed_dim` is frozen at open;
+    /// different-dim is #742).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+    /// for a different-dim populating space,
+    /// [`MemoryError::Internal`](crate::error::MemoryError::Internal) if there is no
+    /// active space, the populating space is missing or not `populating`, or the
+    /// completeness gate fails, or
+    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend
+    /// failure (which rolls the transaction back).
+    async fn promote_space(&self, populating: &str) -> Result<PromoteOutcome>;
+
+    /// Mark `name` `deprecated` — abandon a `populating` space mid-reconstruction
+    /// or retire a space. Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// backend failure.
+    async fn deprecate_space(&self, name: &str) -> Result<()>;
 }

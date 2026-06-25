@@ -7,7 +7,7 @@ use crate::error::{MemoryError, MigrationError, Result};
 mod migrations;
 
 /// Current schema version. Bump when adding migrations.
-pub const CURRENT_SCHEMA_VERSION: u32 = 13;
+pub const CURRENT_SCHEMA_VERSION: u32 = 14;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -184,6 +184,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrations::migrate_v10_to_v11, false),
     (migrations::migrate_v11_to_v12, false),
     (migrations::migrate_v12_to_v13, false),
+    (migrations::migrate_v13_to_v14, false),
 ];
 
 /// Run forward-only migrations from the current schema version to
@@ -581,6 +582,15 @@ CREATE TABLE IF NOT EXISTS embedding_spaces (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_spaces_one_active
     ON embedding_spaces(status) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS fact_vectors (
+    fact_id   INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+    space_id  TEXT    NOT NULL REFERENCES embedding_spaces(name) ON DELETE CASCADE,
+    embedding BLOB    NOT NULL,
+    PRIMARY KEY (fact_id, space_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_fact_vectors_space ON fact_vectors(space_id);
 ";
 
 const SCOPES_DDL: &str = "
@@ -1191,9 +1201,9 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
 
         assert_eq!(
-            get_config(&conn, "schema_version").unwrap().as_deref(),
-            Some("13"),
-            "schema_version bumped to 13"
+            get_config(&conn, "schema_version").unwrap(),
+            Some(CURRENT_SCHEMA_VERSION.to_string()),
+            "schema_version bumped to CURRENT (migrate chains v12→v13→v14)"
         );
         // Exactly one active row, columns identical to the stamped tuple.
         let (name, model, provider, dim, base, elem, status): (
@@ -1256,8 +1266,8 @@ CREATE TABLE IF NOT EXISTS config (
         migrate(&conn, None).unwrap();
 
         assert_eq!(
-            get_config(&conn, "schema_version").unwrap().as_deref(),
-            Some("13")
+            get_config(&conn, "schema_version").unwrap(),
+            Some(CURRENT_SCHEMA_VERSION.to_string())
         );
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM embedding_spaces", [], |r| r.get(0))
@@ -1313,8 +1323,8 @@ CREATE TABLE IF NOT EXISTS config (
                 |r| r.get(0),
             )
             .unwrap();
-        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13)
-        assert_eq!(count, 28);
+        // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13) + 1 fact_vectors space (v14)
+        assert_eq!(count, 29);
     }
 
     // --- Migration framework tests ---
@@ -2160,6 +2170,9 @@ CREATE INDEX idx_events_session ON events(session_id) WHERE session_id IS NOT NU
 -- index: idx_events_timestamp
 CREATE INDEX idx_events_timestamp ON events(timestamp);
 
+-- index: idx_fact_vectors_space
+CREATE INDEX idx_fact_vectors_space ON fact_vectors(space_id);
+
 -- index: idx_facts_created
 CREATE INDEX idx_facts_created ON facts(t_created);
 
@@ -2216,6 +2229,9 @@ CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, prov
 
 -- table: events
 CREATE TABLE events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1 );
+
+-- table: fact_vectors
+CREATE TABLE fact_vectors ( fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE, space_id TEXT NOT NULL REFERENCES embedding_spaces(name) ON DELETE CASCADE, embedding BLOB NOT NULL, PRIMARY KEY (fact_id, space_id) ) WITHOUT ROWID;
 
 -- table: facts
 CREATE TABLE facts ( id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, content_hash TEXT NOT NULL, -- blake3 hex[:16] for dedup embedding BLOB NOT NULL, fact_type TEXT NOT NULL CHECK(fact_type IN ('episodic', 'semantic', 'procedural')), t_created TEXT NOT NULL, t_expired TEXT, t_valid TEXT, t_invalid TEXT, source_event_id INTEGER REFERENCES events(id), importance REAL NOT NULL DEFAULT 0.5, access_count INTEGER NOT NULL DEFAULT 0, last_accessed TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)), scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), is_pinned INTEGER NOT NULL DEFAULT 0, importance_score REAL NOT NULL DEFAULT 0.5, surfaced_at TEXT );
@@ -2866,6 +2882,81 @@ CREATE TRIGGER facts_fts_au AFTER UPDATE ON facts BEGIN INSERT INTO facts_fts(fa
                 .contains("WHERE status = 'active'"),
             "the one-active index must be partial"
         );
+    }
+
+    // --- v13 → v14 (fact_vectors, #623) ---
+
+    /// Roll a fresh DB back to a simulated v13 state: drop the v14 `fact_vectors` table +
+    /// its index and reset `schema_version` to 13.
+    fn simulate_v13(conn: &Connection) {
+        init_schema(conn).unwrap();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_fact_vectors_space;
+             DROP TABLE IF EXISTS fact_vectors;",
+        )
+        .unwrap();
+        set_config(conn, "schema_version", "13").unwrap();
+    }
+
+    #[test]
+    fn migrate_v13_to_v14_creates_empty_fact_vectors() {
+        // Purely additive: the migration creates fact_vectors (empty) and bumps the
+        // version. The active vectors stay in facts.embedding (no data move).
+        let conn = open_memory().unwrap();
+        simulate_v13(&conn);
+        // fact_vectors does not exist at simulated v13.
+        let exists_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fact_vectors'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists_before, 0, "fact_vectors must not exist at v13");
+
+        migrate(&conn, None).unwrap();
+
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some("14")
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_vectors", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "fact_vectors is created empty (no data move)");
+    }
+
+    #[test]
+    fn migrate_v13_to_v14_idempotent() {
+        let conn = open_memory().unwrap();
+        simulate_v13(&conn);
+        migrate(&conn, None).unwrap();
+        // Re-running migrate from v14 is a no-op.
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some("14")
+        );
+    }
+
+    #[test]
+    fn fresh_vs_migrated_fact_vectors_converge() {
+        // Fresh-init DDL and the frozen v13→v14 migration snapshot must produce a
+        // byte-identical fact_vectors table + index.
+        let fresh = open_memory().unwrap();
+        init_schema(&fresh).unwrap();
+
+        let migrated = open_memory().unwrap();
+        simulate_v13(&migrated);
+        migrate(&migrated, None).unwrap();
+
+        for obj in ["fact_vectors", "idx_fact_vectors_space"] {
+            assert_eq!(
+                normalized_object_sql(&fresh, obj),
+                normalized_object_sql(&migrated, obj),
+                "fresh-init and migrated {obj} DDL must converge"
+            );
+        }
     }
 
     #[test]

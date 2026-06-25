@@ -152,7 +152,7 @@ pub use types::{
     EventType, Fact, FactId, FactScoringRow, FactType, Insight, LineageId, LineageRecord,
     LineageSnapshotEntry, MergeGroup, NewActivity, NewEdge, NewEvent, NewFact, NewFactBuilder,
     NewLineageRecord, NewSummary, Outcome, OutcomeCounts, ParseActivityStatusError, ProjectContext,
-    PromoteRequest, PromotionProvenance, PromotionResult, RecordActivityRequest,
+    PromoteOutcome, PromoteRequest, PromotionProvenance, PromotionResult, RecordActivityRequest,
     RecordActivityResult, ScopeNode, ScopeQuery, SessionCheckpoint, SessionFact, Summary,
 };
 

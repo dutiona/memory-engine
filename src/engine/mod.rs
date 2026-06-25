@@ -34,6 +34,7 @@ mod inspect;
 mod lineage;
 mod outcome;
 mod query;
+mod reconstruct;
 mod restore;
 mod resume;
 mod scheduling;

@@ -185,8 +185,16 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
     let scope_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM scopes WHERE id > 1", [], |r| r.get(0))?;
     let lineage_count: i64 = conn.query_row("SELECT COUNT(*) FROM lineage", [], |r| r.get(0))?;
+    let fact_vector_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM fact_vectors", [], |r| r.get(0))?;
 
-    let total = event_count + fact_count + edge_count + summary_count + scope_count + lineage_count;
+    let total = event_count
+        + fact_count
+        + edge_count
+        + summary_count
+        + scope_count
+        + lineage_count
+        + fact_vector_count;
     if total > 0 {
         return Err(MemoryError::Conflict(ConflictError::TargetNotEmpty));
     }
@@ -328,6 +336,24 @@ fn restore_embedding_spaces(conn: &Connection, snapshot: &EngineSnapshot) -> Res
     Ok(())
 }
 
+/// Restore the `fact_vectors` rows (#623): the non-active spaces' per-fact vectors
+/// (a `populating` space mid-reconstruction, or a `deprecated` space retained for
+/// rollback). Pre-#623 snapshots have none — a no-op. MUST run **after**
+/// [`restore_facts`] and [`restore_embedding_spaces`] (the `fact_id` and `space_id`
+/// foreign keys). The active vectors are not here — they ride `facts.embedding`.
+fn restore_fact_vectors(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
+    if snapshot.fact_vectors.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn
+        .prepare("INSERT INTO fact_vectors (fact_id, space_id, embedding) VALUES (?1, ?2, ?3)")?;
+    for fv in &snapshot.fact_vectors {
+        let blob = serialize_embedding(&fv.embedding);
+        stmt.execute(rusqlite::params![fv.fact_id, fv.space_id, blob])?;
+    }
+    Ok(())
+}
+
 /// Write all snapshot data into a connection within a single transaction.
 ///
 /// Uses explicit IDs to preserve foreign key relationships. The connection
@@ -416,6 +442,10 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
 
     // 8b. Restore the embedding-space registry (#622).
     restore_embedding_spaces(&tx, snapshot)?;
+
+    // 8c. Restore the non-active spaces' vectors (#623) — after facts (8b: spaces;
+    //     3-5: facts) so both foreign keys resolve.
+    restore_fact_vectors(&tx, snapshot)?;
 
     // 9. Reset autoincrement sequences so new inserts don't collide.
     reset_autoincrement(
@@ -545,6 +575,7 @@ mod tests {
             events: vec![],
             lineage: vec![],
             embedding_spaces: vec![],
+            fact_vectors: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -564,6 +595,7 @@ mod tests {
             events: vec![],
             lineage: vec![],
             embedding_spaces: vec![],
+            fact_vectors: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -583,6 +615,7 @@ mod tests {
             events: vec![],
             lineage: vec![],
             embedding_spaces: vec![],
+            fact_vectors: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -608,6 +641,7 @@ mod tests {
             events: vec![],
             lineage: vec![],
             embedding_spaces: vec![],
+            fact_vectors: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -627,6 +661,7 @@ mod tests {
             events: vec![],
             lineage: vec![],
             embedding_spaces: vec![],
+            fact_vectors: vec![],
             config: BTreeMap::new(),
         };
         validate_snapshot(&snapshot).unwrap();
@@ -734,6 +769,7 @@ mod tests {
             events: vec![],
             lineage: vec![],
             embedding_spaces: vec![], // pre-#622 dump: identity is in `config`, not here
+            fact_vectors: vec![],     // pre-#623 dump: no shadow vectors
             config,
         };
 
@@ -998,6 +1034,7 @@ mod tests {
             events: vec![],
             lineage: vec![],
             embedding_spaces: vec![],
+            fact_vectors: vec![],
             config: BTreeMap::new(),
         };
 
@@ -1069,5 +1106,101 @@ mod tests {
         let event: crate::types::Event = serde_json::from_str(json).unwrap();
         assert_eq!(event.origin_node_id, "local");
         assert_eq!(event.sequence_id, 0);
+    }
+
+    // --- fact_vectors dump/restore (#623 T5) ---
+
+    #[tokio::test]
+    async fn round_trip_preserves_fact_vectors() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        // Ingest facts (records the active "default" identity in facts.embedding).
+        let mut ids = Vec::new();
+        for c in ["a", "b"] {
+            let id = engine
+                .add_fact(
+                    &AddFactRequest {
+                        content: c.into(),
+                        fact_type: FactType::Semantic,
+                        source_event_id: None,
+                        scope: None,
+                        opts: None,
+                    },
+                    std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                    None,
+                )
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        // Stage a populating space with distinct shadow vectors (an in-progress
+        // reconstruction): fact_vectors now holds non-active rows.
+        let shadow_fp = crate::types::EmbeddingFingerprint::new("shadow-model", "test", DIM);
+        engine
+            .storage()
+            .begin_populating_space("shadow", &shadow_fp)
+            .await
+            .unwrap();
+        let rows: Vec<(i64, Vec<f32>)> = ids.iter().map(|&id| (id, vec![0.7_f32; DIM])).collect();
+        engine
+            .storage()
+            .write_backfill_batch("shadow", rows)
+            .await
+            .unwrap();
+
+        // Dump → the streamed snapshot carries the shadow vectors.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.json");
+        engine
+            .dump_state(&DumpFormat::Json(path.clone()))
+            .await
+            .unwrap();
+        let snapshot = read_snapshot(&path).unwrap();
+        assert_eq!(snapshot.fact_vectors.len(), 2, "shadow vectors captured");
+        assert!(
+            snapshot
+                .fact_vectors
+                .iter()
+                .all(|fv| fv.space_id == "shadow" && fv.embedding == vec![0.7_f32; DIM])
+        );
+
+        // Restore into a fresh DB: the FK order (spaces → facts → fact_vectors) holds.
+        let conn2 = open_memory().unwrap();
+        init_schema(&conn2).unwrap();
+        migrate(&conn2, None).unwrap();
+        restore_snapshot_into(&conn2, &snapshot).unwrap();
+
+        let n: i64 = conn2
+            .query_row(
+                "SELECT COUNT(*) FROM fact_vectors WHERE space_id = 'shadow'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "shadow vectors survived restore");
+        // The active vectors (facts.embedding) round-trip unchanged.
+        let blob: Vec<u8> = conn2
+            .query_row("SELECT embedding FROM facts WHERE id = ?1", [ids[0]], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            crate::store::deserialize_embedding(&blob, DIM).unwrap(),
+            vec![0.1, 0.2, 0.3, 0.4],
+            "active vector unchanged (still in facts.embedding)"
+        );
+    }
+
+    #[test]
+    fn pre_623_snapshot_defaults_empty_fact_vectors() {
+        // A snapshot predating #623 has no `fact_vectors` field — serde(default)
+        // makes it deserialize to empty (the active vectors are in facts[].embedding).
+        let json = r#"{"schema_version":13,"storage_epoch":1,"embed_dim":4,"facts":[],
+            "edges":[],"summaries":[],"scopes":[],"events":[],"lineage":[],
+            "embedding_spaces":[],"config":{}}"#;
+        let snapshot: EngineSnapshot = serde_json::from_str(json).unwrap();
+        assert!(
+            snapshot.fact_vectors.is_empty(),
+            "absent fact_vectors defaults to empty"
+        );
     }
 }
