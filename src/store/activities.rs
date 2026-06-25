@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{MemoryError, Result};
-use crate::types::{Activity, ActivityStatus, NewActivity};
+use crate::types::{Activity, ActivityStatus, NewActivity, OutcomeClass};
 
 use super::parse_timestamp;
 
@@ -48,7 +48,7 @@ impl<'a> ActivityStore<'a> {
                     activity.session_id,
                     activity.tool_name,
                     activity.args_hash,
-                    activity.outcome_class,
+                    activity.outcome_class.to_string(),
                     activity.scope_id,
                     ts,
                     dedup_window_secs,
@@ -86,7 +86,7 @@ impl<'a> ActivityStore<'a> {
                     activity.args_hash,
                     activity.args.to_string(),
                     activity.result_summary,
-                    activity.outcome_class,
+                    activity.outcome_class.to_string(),
                     ts,
                     activity.scope_id,
                 ],
@@ -223,6 +223,10 @@ fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
     })?;
     let first_seen_str: String = row.get("first_seen")?;
     let last_seen_str: String = row.get("last_seen")?;
+    // `OutcomeClass::from_str` is infallible (the open `Other` arm captures any
+    // stored string), so any historical `outcome_class` value round-trips losslessly.
+    let outcome_class_str: String = row.get("outcome_class")?;
+    let Ok(outcome_class) = outcome_class_str.parse::<OutcomeClass>();
 
     Ok(Activity {
         id: row.get("id")?,
@@ -231,7 +235,7 @@ fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
         args_hash: row.get("args_hash")?,
         args,
         result_summary: row.get("result_summary")?,
-        outcome_class: row.get("outcome_class")?,
+        outcome_class,
         status,
         occurrence_count: row.get("occurrence_count")?,
         first_seen: parse_timestamp(&first_seen_str)?,
@@ -263,7 +267,7 @@ mod tests {
             args_hash: "abc123def456abc123def456abc123de".into(),
             args: serde_json::json!({"path": "/foo/bar.rs"}),
             result_summary: Some("200 lines".into()),
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         };
@@ -287,7 +291,7 @@ mod tests {
             args_hash: "abc123def456abc123def456abc123de".into(),
             args: serde_json::json!({"path": "/foo/bar.rs"}),
             result_summary: Some("200 lines".into()),
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         };
@@ -314,12 +318,12 @@ mod tests {
             args_hash: "abc123def456abc123def456abc123de".into(),
             args: serde_json::json!({"cmd": "cargo test"}),
             result_summary: Some("ok".into()),
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         };
         let failure = NewActivity {
-            outcome_class: "error".into(),
+            outcome_class: OutcomeClass::Error,
             result_summary: Some("FAILED".into()),
             ..success.clone()
         };
@@ -341,7 +345,7 @@ mod tests {
                 args_hash: format!("hash{i:032}"),
                 args: serde_json::json!({}),
                 result_summary: None,
-                outcome_class: "success".into(),
+                outcome_class: OutcomeClass::Success,
                 timestamp: Utc::now(),
                 scope_id: 1,
             };
@@ -365,7 +369,7 @@ mod tests {
                 args_hash: format!("hash{i:032}"),
                 args: serde_json::json!({}),
                 result_summary: None,
-                outcome_class: "success".into(),
+                outcome_class: OutcomeClass::Success,
                 timestamp: Utc::now(),
                 scope_id: 1,
             };
@@ -388,7 +392,7 @@ mod tests {
             args_hash: "abc123def456abc123def456abc123de".into(),
             args: serde_json::json!({"cmd": "git commit"}),
             result_summary: Some("committed".into()),
-            outcome_class: "success".into(),
+            outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
         };

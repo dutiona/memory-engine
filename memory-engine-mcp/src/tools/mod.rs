@@ -1636,7 +1636,13 @@ async fn handle_record_activity(
     let result_summary = get_str(args, "result");
     let timestamp = get_datetime(args, "timestamp")?.unwrap_or_else(Utc::now);
     let scope = get_str(args, "scope");
-    let outcome_class = get_str(args, "outcome_class");
+    // `OutcomeClass::from_str` is infallible (the open `Other` arm captures any
+    // value), so an arbitrary JSON string maps cleanly; `None` defers to the
+    // engine's `OutcomeClass::Success` default.
+    let outcome_class = get_str(args, "outcome_class").map(|s| {
+        let Ok(class) = s.parse::<memory_engine::OutcomeClass>();
+        class
+    });
 
     let req = memory_engine::RecordActivityRequest {
         tool_name,

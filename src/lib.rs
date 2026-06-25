@@ -151,9 +151,10 @@ pub use types::{
     ConsolidationProposal, DreamCycleConfig, Edge, EmbeddingFingerprint, Event, EventFilter,
     EventType, Fact, FactId, FactScoringRow, FactType, Insight, LineageId, LineageRecord,
     LineageSnapshotEntry, MergeGroup, NewActivity, NewEdge, NewEvent, NewFact, NewFactBuilder,
-    NewLineageRecord, NewSummary, Outcome, OutcomeCounts, ParseActivityStatusError, ProjectContext,
-    PromoteOutcome, PromoteRequest, PromotionProvenance, PromotionResult, RecordActivityRequest,
-    RecordActivityResult, ScopeNode, ScopeQuery, SessionCheckpoint, SessionFact, Summary,
+    NewLineageRecord, NewSummary, Outcome, OutcomeClass, OutcomeCounts, ParseActivityStatusError,
+    ProjectContext, PromoteOutcome, PromoteRequest, PromotionProvenance, PromotionResult,
+    RecordActivityRequest, RecordActivityResult, ScopeNode, ScopeQuery, SessionCheckpoint,
+    SessionFact, Summary,
 };
 
 // Storage port — tight flat re-export of the umbrella + cross-cutting types only.
