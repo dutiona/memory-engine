@@ -526,7 +526,6 @@ impl ConsolidationStore for SqliteBackend {
                                 confidence: 1.0,
                                 method_version: "synthesize-v1".to_owned(),
                                 representative_ids: sources.iter().take(5).copied().collect(),
-                                lineage_id: 0,
                             };
                             LineageStore::new(&tx).insert(
                                 &NewLineageRecord {
@@ -744,7 +743,6 @@ mod tests {
             confidence: 0.9,
             method_version: "dreamcycle-v1".into(),
             representative_ids: vec![1, 2],
-            lineage_id: 0,
         }
     }
 

@@ -197,7 +197,6 @@ mod tests {
             confidence: 0.9,
             method_version: "test".into(),
             representative_ids: vec![],
-            lineage_id: 0,
         }
     }
 

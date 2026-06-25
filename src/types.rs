@@ -321,11 +321,17 @@ pub enum ScopeQuery {
 /// Lightweight provenance envelope attached to promoted wisdom facts.
 ///
 /// Carries summary statistics about the promotion (how many source facts,
-/// across how many sessions, confidence score). The full source chain lives
-/// in the sidecar `lineage` table, loaded on demand via `lineage_id`.
+/// across how many sessions, confidence score). It is the **serialized envelope**:
+/// every field round-trips through the `lineage.provenance` JSON column and the
+/// promoted fact's `metadata.promotion_provenance` key.
 ///
-/// `lineage_id` is reconstructed from the DB row PK on read and is
-/// **not** persisted in the JSON column (skipped during serialization).
+/// The owning `lineage_id` (DB row PK) is **not** part of this envelope — it is a
+/// property of the row, not of the provenance. Read paths return it alongside the
+/// envelope in the companion [`LineageRecord`] / [`LineageSnapshotEntry`], and the
+/// write path returns it in [`PromotionResult`]. Previously this struct carried a
+/// phantom `lineage_id: i64` with `#[serde(skip_serializing, default)]` that was
+/// always `0` on deserialization and reconstructed from the PK on read — a lying
+/// field with an invisible "0 means not-yet-persisted" invariant. It is removed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromotionProvenance {
     pub source_count: u32,
@@ -336,10 +342,6 @@ pub struct PromotionProvenance {
     pub method_version: String,
     /// 3-5 most representative source fact IDs (for quick human review).
     pub representative_ids: Vec<i64>,
-    /// Foreign key to the `lineage` table for the full source chain.
-    /// Reconstructed from the row PK on read — not stored in the provenance JSON.
-    #[serde(skip_serializing, default)]
-    pub lineage_id: i64,
 }
 
 /// A row in the `lineage` sidecar table (full source chain).
@@ -1716,16 +1718,14 @@ mod tests {
             confidence: 0.87,
             method_version: "dreamcycle-v1".into(),
             representative_ids: vec![10, 20, 30],
-            lineage_id: 42,
         };
         let json = serde_json::to_string(&prov).unwrap();
-        // lineage_id is skip_serializing — should not appear in JSON
+        // The owning lineage_id is no longer a field — it belongs to the row, not
+        // the envelope — so it must never leak into the serialized provenance.
         assert!(!json.contains("lineage_id"));
         let back: PromotionProvenance = serde_json::from_str(&json).unwrap();
-        // lineage_id defaults to 0 on deserialization (not round-tripped)
-        assert_eq!(back.lineage_id, 0);
-        assert_eq!(back.source_count, prov.source_count);
-        assert_eq!(back.method_version, prov.method_version);
+        // Every remaining field is a true, lossless round-trip.
+        assert_eq!(back, prov);
     }
 
     #[test]

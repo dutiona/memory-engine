@@ -22,8 +22,8 @@ impl<'a> LineageStore<'a> {
     /// Validates that the `wisdom_fact_id` references an **active** (non-expired)
     /// fact and that all `source_fact_ids` reference existing facts before
     /// inserting — so a lineage row can never be orphaned against a missing or
-    /// soft-deleted wisdom fact. The `provenance.lineage_id` field is not stored
-    /// in the JSON (`skip_serializing`) — the row PK is authoritative.
+    /// soft-deleted wisdom fact. The row PK is the authoritative `lineage_id`; the
+    /// provenance envelope no longer carries one (see [`PromotionProvenance`]).
     ///
     /// # Errors
     ///
@@ -134,8 +134,9 @@ impl<'a> LineageStore<'a> {
         match result {
             Ok((lineage_id, wfid, source_ids_json, prov_json)) => {
                 let source_fact_ids: Vec<i64> = serde_json::from_str(&source_ids_json)?;
-                let mut provenance: PromotionProvenance = serde_json::from_str(&prov_json)?;
-                provenance.lineage_id = lineage_id;
+                let provenance: PromotionProvenance = serde_json::from_str(&prov_json)?;
+                // The PK is the authoritative lineage_id; it lives on the
+                // companion record, not (re)written onto the envelope.
                 let record = LineageRecord {
                     lineage_id,
                     wisdom_fact_id: wfid,
@@ -224,8 +225,9 @@ impl<'a> LineageStore<'a> {
             let source_ids_json: String = row.get(2)?;
             let prov_json: String = row.get(3)?;
             let source_fact_ids: Vec<i64> = serde_json::from_str(&source_ids_json)?;
-            let mut provenance: PromotionProvenance = serde_json::from_str(&prov_json)?;
-            provenance.lineage_id = lineage_id;
+            let provenance: PromotionProvenance = serde_json::from_str(&prov_json)?;
+            // `lineage_id` lives on the snapshot entry (the row PK), not on the
+            // envelope — no reconstruction onto `provenance` needed.
             f(LineageSnapshotEntry {
                 lineage_id,
                 wisdom_fact_id,
@@ -277,7 +279,6 @@ mod tests {
             confidence: 0.85,
             method_version: "dreamcycle-v1".into(),
             representative_ids: vec![10, 20],
-            lineage_id: 0,
         }
     }
 
@@ -300,7 +301,9 @@ mod tests {
         assert_eq!(prov.source_count, 2);
         assert!((prov.confidence - 0.85).abs() < f64::EPSILON);
         assert_eq!(prov.method_version, "dreamcycle-v1");
-        assert_eq!(prov.lineage_id, lineage_id);
+        // The authoritative lineage_id now lives on the companion record (the row
+        // PK), not reconstructed onto the provenance envelope.
+        assert_eq!(record.lineage_id, lineage_id);
     }
 
     #[test]

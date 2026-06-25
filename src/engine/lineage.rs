@@ -95,7 +95,6 @@ mod tests {
             confidence: 0.85,
             method_version: "dreamcycle-v1".into(),
             representative_ids: vec![],
-            lineage_id: 0,
         }
     }
 
@@ -166,7 +165,8 @@ mod tests {
         assert_eq!(record.wisdom_fact_id, 1);
         assert_eq!(record.source_fact_ids, vec![2, 3]);
         assert_eq!(got_prov.source_count, 2);
-        assert_eq!(got_prov.lineage_id, lineage_id);
+        // The lineage_id is returned on the companion record, not the envelope.
+        assert_eq!(record.lineage_id, lineage_id);
     }
 
     #[tokio::test]
