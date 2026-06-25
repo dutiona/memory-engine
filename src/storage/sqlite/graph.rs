@@ -205,10 +205,12 @@ impl FactGraph for SqliteBackend {
     }
 
     // WRITE
-    async fn update_fact_importance(&self, id: i64, importance: f64) -> Result<()> {
+    async fn update_fact_base_importance(&self, id: i64, base_importance: f64) -> Result<()> {
         let dim = self.embed_dim;
-        self.block_write(move |c| FactStore::new(c, dim).update_importance(id, importance))
-            .await
+        self.block_write(move |c| {
+            FactStore::new(c, dim).update_base_importance(id, base_importance)
+        })
+        .await
     }
 
     // WRITE
@@ -1096,7 +1098,7 @@ mod tests {
             t_invalid: None,
             source_event_id: None,
             scope_id: 1,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),

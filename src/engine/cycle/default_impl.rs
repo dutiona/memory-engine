@@ -185,7 +185,7 @@ impl DreamCycle for DefaultDreamCycle {
             if bucket.len() < MIN_PTS {
                 continue;
             }
-            let importances: Vec<f64> = bucket.iter().map(|f| f.importance).collect();
+            let importances: Vec<f64> = bucket.iter().map(|f| f.base_importance).collect();
             let p75 = percentile(&importances, self.config.promotion_percentile);
 
             let points: Vec<(FactId, &[f32])> = bucket
@@ -198,14 +198,14 @@ impl DreamCycle for DefaultDreamCycle {
                 // input's tie ordering.
                 let Some(&medoid) = cluster.iter().max_by(|a, b| {
                     by_id[a]
-                        .importance
-                        .partial_cmp(&by_id[b].importance)
+                        .base_importance
+                        .partial_cmp(&by_id[b].base_importance)
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| b.cmp(a)) // smaller id wins the tie
                 }) else {
                     continue;
                 };
-                if by_id[&medoid].importance >= p75 {
+                if by_id[&medoid].base_importance >= p75 {
                     deltas.push(CycleDelta::Promote {
                         fact_id: medoid,
                         provenance: cluster_provenance(&cluster, &by_id),
@@ -297,7 +297,7 @@ mod tests {
             source_event_id: None,
             scope: None,
             opts: Some(AddFactOptions {
-                importance: Some(importance),
+                base_importance: Some(importance),
                 ..Default::default()
             }),
         };

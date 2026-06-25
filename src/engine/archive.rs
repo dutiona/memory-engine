@@ -348,7 +348,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),

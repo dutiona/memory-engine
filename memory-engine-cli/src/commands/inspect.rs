@@ -34,8 +34,8 @@ pub async fn run(db: &Path, fact_id: i64, format: OutputFormat) -> anyhow::Resul
                     value: format!("{:?}", fact.fact_type),
                 },
                 FactField {
-                    field: "importance",
-                    value: format!("{:.4}", fact.importance),
+                    field: "base_importance",
+                    value: format!("{:.4}", fact.base_importance),
                 },
                 FactField {
                     field: "importance_score",

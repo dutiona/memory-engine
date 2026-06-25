@@ -37,7 +37,9 @@ pub trait ImportanceInputs {
     fn fact_type(&self) -> &FactType;
     fn last_accessed(&self) -> DateTime<Utc>;
     fn access_count(&self) -> i64;
-    fn importance(&self) -> f64;
+    /// The static base importance prior (the consumer-supplied seed), not the
+    /// computed `importance_score`.
+    fn base_importance(&self) -> f64;
 }
 
 impl ImportanceInputs for Fact {
@@ -50,8 +52,8 @@ impl ImportanceInputs for Fact {
     fn access_count(&self) -> i64 {
         self.access_count
     }
-    fn importance(&self) -> f64 {
-        self.importance
+    fn base_importance(&self) -> f64 {
+        self.base_importance
     }
 }
 
@@ -65,8 +67,8 @@ impl ImportanceInputs for FactScoringRow {
     fn access_count(&self) -> i64 {
         self.access_count
     }
-    fn importance(&self) -> f64 {
-        self.importance
+    fn base_importance(&self) -> f64 {
+        self.base_importance
     }
 }
 
@@ -78,7 +80,7 @@ impl ImportanceInputs for FactScoringRow {
 ///    (100 accesses = full score, chosen as a reasonable ceiling)
 /// 3. **Graph degree**: `ln(degree + 1) / ln(51)` — capped at 1.0
 ///    (50 connections = full score)
-/// 4. **Base importance**: `fact.importance` — already in \[0, 1\]
+/// 4. **Base importance**: `fact.base_importance()` — already in \[0, 1\]
 #[must_use]
 pub fn compute_importance(
     fact: &impl ImportanceInputs,
@@ -116,7 +118,7 @@ pub fn compute_importance(
         .mul_add(recency, policy.frequency_weight * frequency)
         + policy.graph_degree_weight.mul_add(
             connectivity,
-            policy.base_importance_weight * fact.importance(),
+            policy.base_importance_weight * fact.base_importance(),
         )
 }
 
@@ -248,7 +250,7 @@ mod tests {
             t_invalid: None,
             source_event_id: None,
             scope_id: 1,
-            importance: 0.8,
+            base_importance: 0.8,
             access_count: 100,
             last_accessed: now - Duration::hours(1),
             metadata: serde_json::json!({}),
@@ -270,7 +272,7 @@ mod tests {
             t_invalid: None,
             source_event_id: None,
             scope_id: 1,
-            importance: 0.3,
+            base_importance: 0.3,
             access_count: 1,
             last_accessed: now - Duration::days(90),
             metadata: serde_json::json!({}),
@@ -311,7 +313,7 @@ mod tests {
             t_invalid: None,
             source_event_id: None,
             scope_id: 1,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 5,
             last_accessed: now - Duration::days(60),
             metadata: serde_json::json!({}),
@@ -363,7 +365,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.9,
+                base_importance: 0.9,
                 access_count: 50,
                 last_accessed: now,
                 metadata: serde_json::json!({}),
@@ -385,7 +387,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.3,
+                base_importance: 0.3,
                 access_count: 2,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
@@ -407,7 +409,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.1,
+                base_importance: 0.1,
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
@@ -464,7 +466,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.01,
+                base_importance: 0.01,
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
@@ -486,7 +488,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.01,
+                base_importance: 0.01,
                 access_count: 0,
                 last_accessed: old_time,
                 metadata: serde_json::json!({}),
@@ -536,7 +538,7 @@ mod tests {
                 t_invalid: None,
                 source_event_id: None,
                 scope_id: 1,
-                importance: 0.8,
+                base_importance: 0.8,
                 access_count: 10,
                 last_accessed: now,
                 metadata: serde_json::json!({}),
@@ -604,7 +606,7 @@ mod tests {
             t_invalid: None,
             source_event_id: None,
             scope_id: 1,
-            importance: 0.01,
+            base_importance: 0.01,
             access_count: 0,
             last_accessed: old_time,
             metadata: serde_json::json!({}),
@@ -678,7 +680,7 @@ mod tests {
             t_invalid: None,
             source_event_id: None,
             scope_id: 1,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 5,
             last_accessed: now - Duration::days(500),
             metadata: serde_json::json!({}),

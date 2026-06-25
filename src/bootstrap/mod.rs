@@ -253,7 +253,7 @@ fn store_extracted_fact(
         let input = ClassifierInput {
             content: content.clone(),
             fact_type: fact.fact_type,
-            importance: fact.importance,
+            base_importance: fact.importance,
             metadata: metadata.clone(),
         };
         c.should_pin(&input)
@@ -277,7 +277,7 @@ fn store_extracted_fact(
         t_invalid: None,
         source_event_id: Some(marker_event_id),
         scope_id: ctx.scope_id,
-        importance: fact.importance,
+        base_importance: fact.importance,
         access_count: 0,
         last_accessed: effective_created,
         metadata,

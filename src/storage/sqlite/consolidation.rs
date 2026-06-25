@@ -236,13 +236,13 @@ impl ConsolidationStore for SqliteBackend {
                                     });
                                 }
                                 // validate_importance
-                                if !nf.importance.is_finite()
-                                    || !(0.0..=1.0).contains(&nf.importance)
+                                if !nf.base_importance.is_finite()
+                                    || !(0.0..=1.0).contains(&nf.base_importance)
                                 {
                                     return Err(MemoryError::Conflict(
                                         crate::error::ConflictError::PolicyParameter(format!(
-                                            "importance must be in [0, 1], got {}",
-                                            nf.importance
+                                            "base_importance must be in [0, 1], got {}",
+                                            nf.base_importance
                                         )),
                                     ));
                                 }
@@ -294,13 +294,13 @@ impl ConsolidationStore for SqliteBackend {
                                         actual: new_fact.embedding.len(),
                                     });
                                 }
-                                if !new_fact.importance.is_finite()
-                                    || !(0.0..=1.0).contains(&new_fact.importance)
+                                if !new_fact.base_importance.is_finite()
+                                    || !(0.0..=1.0).contains(&new_fact.base_importance)
                                 {
                                     return Err(MemoryError::Conflict(
                                         crate::error::ConflictError::PolicyParameter(format!(
-                                            "importance must be in [0, 1], got {}",
-                                            new_fact.importance
+                                            "base_importance must be in [0, 1], got {}",
+                                            new_fact.base_importance
                                         )),
                                     ));
                                 }
@@ -367,11 +367,11 @@ impl ConsolidationStore for SqliteBackend {
                             adjustment,
                         } => {
                             let store = FactStore::new(&tx, embed_dim);
-                            let current = store.get(*fact_id)?.importance;
+                            let current = store.get(*fact_id)?.base_importance;
                             let new_importance = f64::from(*adjustment)
                                 .mul_add(IMPORTANCE_STEP, current)
                                 .clamp(0.0, 1.0);
-                            store.update_importance(*fact_id, new_importance)?;
+                            store.update_base_importance(*fact_id, new_importance)?;
                             result.scores_adjusted += 1;
                         }
                         CycleDelta::Quarantine { fact_id, reason } => {
@@ -434,7 +434,7 @@ impl ConsolidationStore for SqliteBackend {
                                 t_valid: None,
                                 t_invalid: None,
                                 source_event_id: None,
-                                importance: source.importance,
+                                base_importance: source.base_importance,
                                 access_count: 0,
                                 last_accessed: now,
                                 metadata,
@@ -769,7 +769,7 @@ mod tests {
                         t_invalid: None,
                         source_event_id: None,
                         scope_id: 1,
-                        importance: 0.5,
+                        base_importance: 0.5,
                         access_count: 0,
                         last_accessed: Utc::now(),
                         metadata: serde_json::json!({}),
@@ -1031,7 +1031,7 @@ mod tests {
                     t_invalid: None,
                     source_event_id: None,
                     scope_id: 1,
-                    importance: 0.5,
+                    base_importance: 0.5,
                     access_count: 0,
                     last_accessed: Utc::now(),
                     metadata: serde_json::json!({}),

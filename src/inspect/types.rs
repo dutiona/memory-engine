@@ -68,7 +68,9 @@ pub struct FactProvenance {
     /// The originating event, fetched via upcasted read when `source_event_id`
     /// is `Some`. `None` for facts created without a `source_event_id`.
     pub source_event: Option<Event>,
-    pub importance: f64,
+    /// The fact's base importance prior (mirrors [`crate::types::Fact::base_importance`]).
+    /// Serde key is `base_importance` (#274 export/MCP break).
+    pub base_importance: f64,
     pub importance_score: f64,
     pub is_pinned: bool,
     pub access_count: i64,
@@ -341,7 +343,7 @@ mod tests {
             t_valid: Some(ts(1_500)),
             t_invalid: None,
             source_event_id: Some(3),
-            importance: 0.75,
+            base_importance: 0.75,
             access_count: 12,
             last_accessed: ts(1_800),
             metadata: serde_json::json!({"k": "v", "n": 42}),
@@ -480,7 +482,7 @@ mod tests {
         assert_roundtrip_eq(&FactProvenance {
             source_event_id: Some(3),
             source_event: Some(sample_event()),
-            importance: 0.5,
+            base_importance: 0.5,
             importance_score: 0.4,
             is_pinned: false,
             access_count: 7,
@@ -488,7 +490,7 @@ mod tests {
         assert_roundtrip_eq(&FactProvenance {
             source_event_id: None,
             source_event: None,
-            importance: 0.1,
+            base_importance: 0.1,
             importance_score: 0.2,
             is_pinned: true,
             access_count: 0,
@@ -515,7 +517,7 @@ mod tests {
             provenance: FactProvenance {
                 source_event_id: Some(3),
                 source_event: Some(sample_event()),
-                importance: 0.5,
+                base_importance: 0.5,
                 importance_score: 0.4,
                 is_pinned: false,
                 access_count: 7,

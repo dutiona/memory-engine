@@ -26,7 +26,7 @@ impl MemoryEngine {
 
     /// Validate a caller-supplied `importance` override.
     ///
-    /// `AddFactOptions::importance` is documented as living in `[0, 1]`. We
+    /// `AddFactOptions::base_importance` is documented as living in `[0, 1]`. We
     /// reject out-of-range values (and non-finite ones such as `NaN`/`±inf`)
     /// loudly rather than clamping silently, mirroring the typed
     /// `Conflict(PolicyParameter)` errors raised elsewhere for out-of-range
@@ -52,7 +52,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Conflict(ConflictError::PolicyParameter)` if
-    /// `opts.importance` is set and outside `[0, 1]` (or non-finite); the
+    /// `opts.base_importance` is set and outside `[0, 1]` (or non-finite); the
     /// request is rejected before any embedding, event, or fact is written.
     /// Returns errors from embedding computation, dimension validation, or DB insert.
     pub async fn add_fact(
@@ -116,7 +116,7 @@ impl MemoryEngine {
     /// clone, write). Rejects an out-of-range importance and oversized content/metadata
     /// (issue #572 / L10) so a hostile or malformed request fails fast and cheap.
     fn validate_add_fact_request(req: &AddFactRequest) -> Result<()> {
-        Self::validate_importance(req.opts.as_ref().and_then(|o| o.importance))?;
+        Self::validate_importance(req.opts.as_ref().and_then(|o| o.base_importance))?;
         check_str_size(&req.content, "fact content")?;
         if let Some(metadata) = req.opts.as_ref().and_then(|o| o.metadata.as_ref()) {
             check_json_size(metadata, "fact metadata")?;
@@ -142,12 +142,12 @@ impl MemoryEngine {
         let now = Utc::now();
         let opts = req.opts.clone().unwrap_or_default();
 
-        let base_importance = opts.importance.unwrap_or(0.5);
+        let base_importance = opts.base_importance.unwrap_or(0.5);
         let effective_created = opts.t_created.unwrap_or(now);
         let effective_last_accessed = opts.last_accessed.unwrap_or(now);
 
         // Classify off the async executor (a classifier may be a blocking LLM/HTTP
-        // call). Classifiers read only content/fact_type/importance/metadata.
+        // call). Classifiers read only content/fact_type/base_importance/metadata.
         let is_pinned = match opts.pinned {
             Some(p) => p,
             None => match classifier {
@@ -160,7 +160,7 @@ impl MemoryEngine {
                     let input = ClassifierInput {
                         content: req.content.clone(),
                         fact_type: req.fact_type,
-                        importance: base_importance,
+                        base_importance,
                         metadata: opts
                             .metadata
                             .clone()
@@ -195,7 +195,7 @@ impl MemoryEngine {
             t_invalid: opts.t_invalid,
             source_event_id: req.source_event_id,
             scope_id,
-            importance: opts.importance.unwrap_or(0.5),
+            base_importance,
             access_count: 0,
             last_accessed: effective_last_accessed,
             metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
@@ -227,7 +227,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Conflict(ConflictError::PolicyParameter)` if any
-    /// entry's `opts.importance` is set and outside `[0, 1]` (or non-finite);
+    /// entry's `opts.base_importance` is set and outside `[0, 1]` (or non-finite);
     /// the whole batch is rejected up front, so no entry is embedded or written.
     /// Returns errors from batch embedding, dimension validation, or DB insert.
     /// Returns `MemoryError::Internal` if the embedder returns a different
@@ -398,7 +398,7 @@ impl MemoryEngine {
                 t_invalid: opts.t_invalid,
                 source_event_id: entry.source_event_id,
                 scope_id: 1, // placeholder — patched from scope_paths below the seam
-                importance: opts.importance.unwrap_or(0.5),
+                base_importance: opts.base_importance.unwrap_or(0.5),
                 access_count: 0,
                 last_accessed: opts.last_accessed.unwrap_or(now),
                 metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
@@ -461,7 +461,7 @@ impl MemoryEngine {
                     pending.push(ClassifierInput {
                         content: entry.content.clone(),
                         fact_type: entry.fact_type,
-                        importance: opts.importance.unwrap_or(0.5),
+                        base_importance: opts.base_importance.unwrap_or(0.5),
                         metadata: opts
                             .metadata
                             .clone()

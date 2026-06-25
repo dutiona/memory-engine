@@ -1,16 +1,15 @@
 ---
 source: memory-engine-mcp/tests/depth_shaping.rs
-assertion_line: 404
 expression: body
 ---
 due: []
 high_importance: []
 pinned:
   - access_count: 0
+    base_importance: 0.95
     content: Critical pinned fact
     fact_type: Semantic
     id: 1
-    importance: 0.95
     importance_score: 0.95
     is_pinned: true
     last_accessed: "[REDACTED]"

@@ -1,13 +1,12 @@
 ---
 source: memory-engine-mcp/tests/depth_shaping.rs
-assertion_line: 139
 expression: body
 ---
 access_count: 0
+base_importance: 0.5
 content: Rust is a systems programming language with zero-cost abstractions
 fact_type: Semantic
 id: 1
-importance: 0.5
 importance_score: 0.5
 is_pinned: false
 last_accessed: "[REDACTED]"

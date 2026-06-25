@@ -8,7 +8,15 @@ use crate::types::{Edge, Fact};
 ///
 /// Bump this when the `.pak` payload layout changes in a way that requires
 /// version-gated reading. The value is stamped into [`ArchivePak::pak_version`].
-pub const CURRENT_PAK_VERSION: u32 = 1;
+///
+/// v2 (#274): `ArchivePak` embeds `facts: Vec<Fact>`, and `Fact`'s `importance`
+/// field was renamed to `base_importance` with no `#[serde(alias)]` (clean break).
+/// A v1 archive's `"importance"`-keyed facts can no longer be deserialized — the
+/// no-default `base_importance` field makes `read_pak` reject them with a hard
+/// "missing field" error rather than silently defaulting. The bump also gives a
+/// clean forward-rejection: an older library reading a v2 archive fails the
+/// `pak_version > CURRENT_PAK_VERSION` check instead of mis-parsing it.
+pub const CURRENT_PAK_VERSION: u32 = 2;
 
 /// Contents of a `.pak` archive file — zstd-compressed JSON.
 ///

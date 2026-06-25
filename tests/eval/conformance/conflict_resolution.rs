@@ -28,7 +28,7 @@ fn make_new_fact(content: &str) -> NewFact {
         t_invalid: None,
         source_event_id: None,
         scope_id: 1,
-        importance: 0.5,
+        base_importance: 0.5,
         access_count: 0,
         last_accessed: now,
         metadata: serde_json::json!({}),

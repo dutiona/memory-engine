@@ -194,7 +194,7 @@ pub struct Fact {
     pub t_invalid: Option<DateTime<Utc>>,
     pub source_event_id: Option<i64>,
     /// **Base importance** — the consumer-supplied prior set once at insertion
-    /// (via [`AddFactOptions::importance`], default `0.5`), a finite value in
+    /// (via [`AddFactOptions::base_importance`], default `0.5`), a finite value in
     /// `[0.0, 1.0]`. The [`add_fact`](crate::MemoryEngine::add_fact) /
     /// `add_facts_batch` entry points validate this range (#571); a few
     /// direct-insert paths (bootstrap, snapshot restore) do not yet enforce it
@@ -202,7 +202,10 @@ pub struct Fact {
     /// It is a *static* hint that never decays; the engine only reads it. It feeds the materialized
     /// [`importance_score`](Self::importance_score) as one of four signals (weight
     /// `base_importance_weight`). Do not confuse with the decayed score below.
-    pub importance: f64,
+    ///
+    /// Maps to the DB column `importance` (unrenamed for on-disk compatibility);
+    /// the serde key, however, is `base_importance` (snapshot/export break, #274).
+    pub base_importance: f64,
     pub access_count: i64,
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
@@ -212,11 +215,11 @@ pub struct Fact {
     pub is_pinned: bool,
     /// **Materialized importance score** — the *computed, decaying* score the
     /// engine ranks and forgets by, normally in `[0.0, 1.0]` (seeded from the
-    /// [`importance`](Self::importance) prior, which the `add_fact` entry points
+    /// [`base_importance`](Self::base_importance) prior, which the `add_fact` entry points
     /// validate to that range — #571). It is the weighted sum of
     /// four signals (recency via Ebbinghaus decay, access frequency, graph
-    /// degree, and the static [`importance`](Self::importance) prior); see
-    /// `forgetting::compute_importance`. Seeded to `importance` at ingest, then
+    /// degree, and the static [`base_importance`](Self::base_importance) prior); see
+    /// `forgetting::compute_importance`. Seeded to `base_importance` at ingest, then
     /// recomputed over the fact's lifetime by the forgetting pass and `DreamCycle`,
     /// so it drifts away from the base value as the fact ages and is accessed.
     /// `#[serde(default)]` (0.0) keeps pre-v?-column archives readable.
@@ -408,14 +411,14 @@ pub struct LineageSnapshotEntry {
 /// Optional parameters for [`crate::engine::MemoryEngine::add_fact`].
 ///
 /// All fields default to `None`, which uses the engine's defaults
-/// (importance=0.5, metadata={}, no temporal bounds).
+/// (`base_importance=0.5`, metadata={}, no temporal bounds).
 #[derive(Debug, Clone, Default)]
 pub struct AddFactOptions {
-    /// Override default importance (0.5). Must be in [0, 1]; an out-of-range
+    /// Override default base importance (0.5). Must be in [0, 1]; an out-of-range
     /// or non-finite value is rejected with `Conflict(PolicyParameter)` by
     /// [`add_fact`](crate::engine::MemoryEngine::add_fact) and
     /// [`add_facts_batch`](crate::engine::MemoryEngine::add_facts_batch).
-    pub importance: Option<f64>,
+    pub base_importance: Option<f64>,
     /// Override default metadata (empty object).
     pub metadata: Option<serde_json::Value>,
     /// Set the real-world validity start time.
@@ -449,7 +452,7 @@ pub struct AddFactRequest {
     pub source_event_id: Option<i64>,
     /// Scope path (e.g., `"project/sub"`). `None` → root scope.
     pub scope: Option<String>,
-    /// Optional overrides (importance, metadata, temporal bounds, pinned).
+    /// Optional overrides (`base_importance`, metadata, temporal bounds, pinned).
     pub opts: Option<AddFactOptions>,
 }
 
@@ -487,7 +490,9 @@ pub struct NewFact {
     pub t_valid: Option<DateTime<Utc>>,
     pub t_invalid: Option<DateTime<Utc>>,
     pub source_event_id: Option<i64>,
-    pub importance: f64,
+    /// **Base importance** prior. Maps to the DB column `importance` (unrenamed
+    /// for on-disk compatibility); the serde key is `base_importance` (#274).
+    pub base_importance: f64,
     pub access_count: i64,
     pub last_accessed: DateTime<Utc>,
     pub metadata: serde_json::Value,
@@ -504,10 +509,10 @@ impl NewFact {
     /// use memory_engine::types::{FactType, NewFact};
     ///
     /// let fact = NewFact::builder("user prefers terse replies", vec![0.1; 384], FactType::Semantic)
-    ///     .importance(0.8)
+    ///     .base_importance(0.8)
     ///     .scope_id(1)
     ///     .build();
-    /// assert_eq!(fact.importance, 0.8);
+    /// assert_eq!(fact.base_importance, 0.8);
     /// ```
     pub fn builder(
         content: impl Into<String>,
@@ -522,7 +527,7 @@ impl NewFact {
 ///
 /// Passed to [`PersistenceClassifier::should_pin`](crate::traits::PersistenceClassifier::should_pin),
 /// it carries the *only* fields a classifier is authorised to read: `content`,
-/// `fact_type`, `importance`, and `metadata`.
+/// `fact_type`, `base_importance`, and `metadata`.
 ///
 /// It deliberately carries **no** `embedding`, `id`, `scope_id`,
 /// `importance_score`, or timestamps: those are either not yet assigned at
@@ -544,9 +549,9 @@ pub struct ClassifierInput {
     /// The fact's type tag.
     pub fact_type: FactType,
     /// The consumer-supplied base importance prior (the `add_fact` caller hint),
-    /// a finite value normally in `[0.0, 1.0]`. Mirrors [`Fact::importance`] /
-    /// [`NewFact::importance`], **not** the decayed `importance_score`.
-    pub importance: f64,
+    /// a finite value normally in `[0.0, 1.0]`. Mirrors [`Fact::base_importance`] /
+    /// [`NewFact::base_importance`], **not** the decayed `importance_score`.
+    pub base_importance: f64,
     /// The fact's metadata object (post-redaction).
     pub metadata: serde_json::Value,
 }
@@ -565,7 +570,7 @@ pub struct ClassifierInput {
 /// | `t_valid`         | `None` (valid since creation)                            |
 /// | `t_invalid`       | `None` (still valid)                                     |
 /// | `source_event_id` | `None`                                                   |
-/// | `importance`      | `0.5` (neutral prior; finite `[0, 1]` — not validated on this direct-insert path, #584) |
+/// | `base_importance` | `0.5` (neutral prior; finite `[0, 1]` — not validated on this direct-insert path, #584) |
 /// | `access_count`    | `0`                                                      |
 /// | `last_accessed`   | the resolved `t_created` (coherent for backdated facts)  |
 /// | `metadata`        | `{}` (empty JSON object)                                 |
@@ -586,7 +591,7 @@ pub struct NewFactBuilder {
     t_valid: Option<DateTime<Utc>>,
     t_invalid: Option<DateTime<Utc>>,
     source_event_id: Option<i64>,
-    importance: f64,
+    base_importance: f64,
     access_count: i64,
     last_accessed: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
@@ -608,7 +613,7 @@ impl NewFactBuilder {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: None,
             metadata: serde_json::json!({}),
@@ -658,8 +663,8 @@ impl NewFactBuilder {
     /// Set the base importance prior (default `0.5`), finite in `[0, 1]`. A
     /// `NewFact` built here is inserted directly, bypassing the `add_fact`
     /// range check (#571), so the value is stored verbatim — not validated (#584).
-    pub const fn importance(mut self, importance: f64) -> Self {
-        self.importance = importance;
+    pub const fn base_importance(mut self, base_importance: f64) -> Self {
+        self.base_importance = base_importance;
         self
     }
 
@@ -713,7 +718,7 @@ impl NewFactBuilder {
             t_valid: self.t_valid,
             t_invalid: self.t_invalid,
             source_event_id: self.source_event_id,
-            importance: self.importance,
+            base_importance: self.base_importance,
             access_count: self.access_count,
             last_accessed: self.last_accessed.unwrap_or(t_created),
             metadata: self.metadata,
@@ -1183,7 +1188,8 @@ pub struct FactScoringRow {
     pub fact_type: FactType,
     pub last_accessed: DateTime<Utc>,
     pub access_count: i64,
-    pub importance: f64,
+    /// Base importance prior (DB column `importance`); see [`Fact::base_importance`].
+    pub base_importance: f64,
     pub is_pinned: bool,
 }
 
@@ -1602,7 +1608,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: Some(1),
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),
@@ -1629,7 +1635,7 @@ mod tests {
             "t_valid": null,
             "t_invalid": null,
             "source_event_id": null,
-            "importance": 0.5,
+            "base_importance": 0.5,
             "access_count": 0,
             "last_accessed": "2026-01-01T00:00:00Z",
             "metadata": {},
@@ -1655,7 +1661,7 @@ mod tests {
             "t_valid": null,
             "t_invalid": null,
             "source_event_id": null,
-            "importance": 0.7,
+            "base_importance": 0.7,
             "access_count": 1,
             "last_accessed": "2026-01-01T00:00:00Z",
             "metadata": {},
@@ -1687,7 +1693,7 @@ mod tests {
             "t_valid": null,
             "t_invalid": null,
             "source_event_id": null,
-            "importance": 0.9,
+            "base_importance": 0.9,
             "access_count": 0,
             "last_accessed": "2024-01-01T00:00:00Z",
             "metadata": {}
@@ -1706,6 +1712,43 @@ mod tests {
                 "missing importance_score defaults to 0.0"
             );
         }
+    }
+
+    #[test]
+    fn serde_fact_rejects_legacy_importance_key_no_silent_default() {
+        // #274 safety invariant: `base_importance` carries NO `#[serde(default)]`,
+        // so a pre-rename payload keyed on the legacy `"importance"` field (and
+        // lacking `"base_importance"`) MUST hard-error on deserialize rather than
+        // silently load with `base_importance = 0.0`. This is the entire safety of
+        // the clean break (no `#[serde(alias)]`), and it guards EVERY Fact-bearing
+        // serialized projection — `.pak` archives, the JSON dump/restore path, and
+        // import — since all embed `Vec<Fact>`. If this test ever fails, a stray
+        // default was added and stale archives would deserialize with a wrong 0.0
+        // base importance instead of being rejected.
+        let legacy_json = r#"{
+            "id": 1,
+            "content": "legacy",
+            "content_hash": "abc",
+            "embedding": [0.1],
+            "fact_type": "Semantic",
+            "t_created": "2024-01-01T00:00:00Z",
+            "t_expired": null,
+            "t_valid": null,
+            "t_invalid": null,
+            "source_event_id": null,
+            "importance": 0.9,
+            "access_count": 0,
+            "last_accessed": "2024-01-01T00:00:00Z",
+            "metadata": {}
+        }"#;
+        let result: Result<Fact, _> = serde_json::from_str(legacy_json);
+        let err = result.expect_err(
+            "a legacy \"importance\"-keyed Fact must be rejected, not silently defaulted",
+        );
+        assert!(
+            err.to_string().contains("base_importance"),
+            "rejection should name the missing `base_importance` field, got: {err}"
+        );
     }
 
     #[test]
@@ -1860,7 +1903,7 @@ mod tests {
                     t_valid: None,
                     t_invalid: None,
                     source_event_id: None,
-                    importance: 0.5,
+                    base_importance: 0.5,
                     access_count: 0,
                     last_accessed: ts_from_secs(0),
                     metadata: serde_json::json!({}),

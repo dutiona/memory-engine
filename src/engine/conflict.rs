@@ -63,7 +63,7 @@ impl MemoryEngine {
             t_invalid: new_fact.t_invalid,
             source_event_id: new_fact.source_event_id,
             scope_id: new_fact.scope_id,
-            importance: new_fact.importance,
+            base_importance: new_fact.base_importance,
             access_count: new_fact.access_count,
             last_accessed: new_fact.last_accessed,
             metadata: new_fact.metadata.clone(),

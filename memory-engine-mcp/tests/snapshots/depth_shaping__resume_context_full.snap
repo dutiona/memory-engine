@@ -1,18 +1,17 @@
 ---
 source: memory-engine-mcp/tests/depth_shaping.rs
-assertion_line: 436
 expression: body
 ---
 due: []
 high_importance: []
 pinned:
   - access_count: 0
+    base_importance: 0.95
     content: Critical pinned fact
     content_hash: 2e54b5958121f71d211e17dfbbafd88d
     embedding_dim: 8
     fact_type: Semantic
     id: 1
-    importance: 0.95
     importance_score: 0.95
     is_pinned: true
     last_accessed: "[REDACTED]"

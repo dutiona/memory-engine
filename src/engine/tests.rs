@@ -992,7 +992,7 @@ async fn forget_prunes_stale_facts() {
             .content_hash("h_ancient")
             .t_created(old_time)
             .last_accessed(old_time)
-            .importance(0.01)
+            .base_importance(0.01)
             .build(),
     )
     .await;
@@ -1117,7 +1117,7 @@ async fn add_fact_with_custom_importance() {
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
         std::sync::Arc::new(MockEmbedder { dim: DIM });
     let opts = AddFactOptions {
-        importance: Some(0.9),
+        base_importance: Some(0.9),
         ..Default::default()
     };
     let id = engine
@@ -1135,7 +1135,7 @@ async fn add_fact_with_custom_importance() {
         .await
         .unwrap();
     let fact = engine.get_fact(id).await.unwrap();
-    assert!((fact.importance - 0.9).abs() < f64::EPSILON);
+    assert!((fact.base_importance - 0.9).abs() < f64::EPSILON);
 }
 
 #[tokio::test]
@@ -1211,7 +1211,7 @@ async fn add_fact_none_opts_uses_defaults() {
         .await
         .unwrap();
     let fact = engine.get_fact(id).await.unwrap();
-    assert!((fact.importance - 0.5).abs() < f64::EPSILON);
+    assert!((fact.base_importance - 0.5).abs() < f64::EPSILON);
     assert!(fact.t_valid.is_none());
 }
 
@@ -1380,7 +1380,7 @@ async fn resume_with_facts() {
 
     // Add a pinned fact (appears in tier 1)
     let opts_pinned = AddFactOptions {
-        importance: Some(0.95),
+        base_importance: Some(0.95),
         pinned: Some(true),
         ..Default::default()
     };
@@ -1401,7 +1401,7 @@ async fn resume_with_facts() {
 
     // Add a low-importance root fact (recent tier)
     let opts_low = AddFactOptions {
-        importance: Some(0.1),
+        base_importance: Some(0.1),
         ..Default::default()
     };
     engine
@@ -1487,7 +1487,7 @@ async fn resume_stamps_surfaced_at_on_pinned_due_fact() {
                 opts: Some(AddFactOptions {
                     pinned: Some(true),
                     t_valid: Some(past),
-                    importance: Some(0.9),
+                    base_importance: Some(0.9),
                     ..Default::default()
                 }),
             },
@@ -1534,7 +1534,7 @@ async fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
                 source_event_id: None,
                 scope: None,
                 opts: Some(AddFactOptions {
-                    importance: Some(0.9),
+                    base_importance: Some(0.9),
                     t_valid: Some(past),
                     ..Default::default()
                 }),
@@ -1585,7 +1585,7 @@ async fn resume_does_not_stamp_invalidated_pinned_due_fact() {
                     pinned: Some(true),
                     t_valid: Some(past),
                     t_invalid: Some(past_invalid),
-                    importance: Some(0.9),
+                    base_importance: Some(0.9),
                     ..Default::default()
                 }),
             },
@@ -1773,7 +1773,7 @@ async fn resume_with_existing_scope_path_excludes_sibling_scope() {
             source_event_id: None,
             scope: Some(scope.into()),
             opts: Some(AddFactOptions {
-                importance: Some(importance),
+                base_importance: Some(importance),
                 ..Default::default()
             }),
         };
@@ -2390,11 +2390,11 @@ async fn execute_query_importance_threshold() {
         std::sync::Arc::new(MockEmbedder { dim: DIM });
 
     let opts_low = AddFactOptions {
-        importance: Some(0.1),
+        base_importance: Some(0.1),
         ..Default::default()
     };
     let opts_high = AddFactOptions {
-        importance: Some(0.9),
+        base_importance: Some(0.9),
         ..Default::default()
     };
     engine
@@ -2669,11 +2669,11 @@ async fn execute_query_composed_filters() {
         std::sync::Arc::new(MockEmbedder { dim: DIM });
 
     let opts_high = AddFactOptions {
-        importance: Some(0.9),
+        base_importance: Some(0.9),
         ..Default::default()
     };
     let opts_low = AddFactOptions {
-        importance: Some(0.1),
+        base_importance: Some(0.1),
         ..Default::default()
     };
 
@@ -4963,7 +4963,7 @@ async fn add_fact_rejects_out_of_range_importance() {
         source_event_id: None,
         scope: None,
         opts: Some(AddFactOptions {
-            importance: Some(importance),
+            base_importance: Some(importance),
             ..Default::default()
         }),
     };
@@ -5008,9 +5008,9 @@ async fn add_fact_rejects_out_of_range_importance() {
         .expect("in-range importance 0.8 must succeed");
     let fact = engine.get_fact(id).await.unwrap();
     assert!(
-        (fact.importance - 0.8).abs() < f64::EPSILON,
+        (fact.base_importance - 0.8).abs() < f64::EPSILON,
         "in-range importance stored verbatim: got {}",
-        fact.importance
+        fact.base_importance
     );
     assert!(
         (fact.importance_score - 0.8).abs() < f64::EPSILON,

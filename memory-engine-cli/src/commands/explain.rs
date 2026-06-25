@@ -37,7 +37,8 @@ pub async fn run(db: &Path, fact_id: i64, format: OutputFormat) -> anyhow::Resul
                     aspect: "importance",
                     detail: format!(
                         "base={:.4}  composite={:.4}",
-                        explanation.provenance.importance, explanation.provenance.importance_score,
+                        explanation.provenance.base_importance,
+                        explanation.provenance.importance_score,
                     ),
                 },
                 ExplainRow {

@@ -112,7 +112,7 @@ impl CorpusBuilder {
         let mut ids = Vec::with_capacity(corpus.facts.len());
         for fact in &corpus.facts {
             let opts = fact.opts.as_ref().map(|o| AddFactOptions {
-                importance: o.importance,
+                base_importance: o.importance,
                 pinned: o.pinned,
                 t_valid: o.t_valid,
                 t_invalid: o.t_invalid,

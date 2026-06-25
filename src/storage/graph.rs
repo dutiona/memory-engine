@@ -62,7 +62,7 @@ pub trait FactGraph: Send + Sync {
     /// post-commit HNSW `notify_expire`, like [`expire_fact`](Self::expire_fact).
     async fn expire_and_invalidate_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()>;
     async fn set_fact_pinned(&self, id: i64, pinned: bool) -> Result<()>;
-    async fn update_fact_importance(&self, id: i64, importance: f64) -> Result<()>;
+    async fn update_fact_base_importance(&self, id: i64, base_importance: f64) -> Result<()>;
     async fn update_fact_importance_score(&self, id: i64, score: f64) -> Result<()>;
     async fn increment_fact_access(&self, id: i64, now: DateTime<Utc>) -> Result<()>;
     async fn merge_fact_metadata(&self, id: i64, patch: &serde_json::Value) -> Result<()>;

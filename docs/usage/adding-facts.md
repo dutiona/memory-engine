@@ -43,13 +43,13 @@ pub struct AddFactRequest {
 }
 ```
 
-| Field             | Description                                                                                      |
-| ----------------- | ------------------------------------------------------------------------------------------------ |
-| `content`         | The textual content of the fact.                                                                 |
-| `fact_type`       | `Episodic`, `Semantic`, or `Procedural`.                                                         |
-| `source_event_id` | Optional link back to the originating event for provenance.                                      |
-| `scope`           | Optional hierarchical scope path (e.g., `"user:michael/project:demo"`). `None` means root scope. |
-| `opts`            | Optional `AddFactOptions` with overrides for importance, metadata, temporal bounds, and pinning. |
+| Field             | Description                                                                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------------- |
+| `content`         | The textual content of the fact.                                                                      |
+| `fact_type`       | `Episodic`, `Semantic`, or `Procedural`.                                                              |
+| `source_event_id` | Optional link back to the originating event for provenance.                                           |
+| `scope`           | Optional hierarchical scope path (e.g., `"user:michael/project:demo"`). `None` means root scope.      |
+| `opts`            | Optional `AddFactOptions` with overrides for base importance, metadata, temporal bounds, and pinning. |
 
 The remaining parameters on `add_fact` itself:
 
@@ -114,7 +114,7 @@ Override defaults by passing `AddFactOptions`:
 
 ```rust
 pub struct AddFactOptions {
-    pub importance: Option<f64>,
+    pub base_importance: Option<f64>,
     pub metadata: Option<serde_json::Value>,
     pub t_valid: Option<DateTime<Utc>>,
     pub t_invalid: Option<DateTime<Utc>>,
@@ -124,7 +124,7 @@ pub struct AddFactOptions {
 
 All fields are `Option` and default to `None`. When `None`:
 
-- `importance` defaults to `0.5`
+- `base_importance` defaults to `0.5`
 - `metadata` defaults to `{}`
 - `t_valid` and `t_invalid` are unset (the fact is valid for all time)
 - `pinned` uses the classifier's decision (or `false` if no classifier is provided). Setting `pinned: Some(true)` overrides the classifier.
@@ -136,7 +136,7 @@ use chrono::Utc;
 use memory_engine::types::AddFactOptions;
 
 let opts = AddFactOptions {
-    importance: Some(0.9),
+    base_importance: Some(0.9),
     metadata: Some(serde_json::json!({
         "source": "deployment-pipeline",
         "confidence": 0.95

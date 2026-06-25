@@ -116,13 +116,13 @@ impl<'a> FactStore<'a> {
                 t_valid,
                 t_invalid,
                 fact.source_event_id,
-                fact.importance,
+                fact.base_importance, // -> DB column `importance`
                 fact.access_count,
                 last_accessed,
                 metadata_str,
                 fact.scope_id,
                 i64::from(fact.is_pinned),
-                fact.importance, // seed importance_score from base importance
+                fact.base_importance, // seed importance_score from base importance
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -141,9 +141,9 @@ impl<'a> FactStore<'a> {
     /// id. Otherwise it inserts a new row.
     ///
     /// Reinforcement also keeps the **strongest** per-occurrence signal: `is_pinned`
-    /// and `importance` move to the max across occurrences (a fact later judged pinned
-    /// or more important stays so). Frequency does not inflate `importance` — only the
-    /// independent per-occurrence score does.
+    /// and `base_importance` move to the max across occurrences (a fact later judged
+    /// pinned or more important stays so). Frequency does not inflate `base_importance`
+    /// — only the independent per-occurrence score does.
     ///
     /// This instantiates "memory decays unless reinforced": a re-mention strengthens
     /// the recency/frequency signal rather than spawning a duplicate. It is
@@ -204,7 +204,7 @@ impl<'a> FactStore<'a> {
                         t_created,
                         last_accessed,
                         i64::from(fact.is_pinned),
-                        fact.importance,
+                        fact.base_importance,
                         id
                     ],
                 )?;
@@ -480,15 +480,16 @@ impl<'a> FactStore<'a> {
         Ok(())
     }
 
-    /// Update the importance score for a fact.
+    /// Update the base importance prior (DB column `importance`) for a fact.
+    /// This is the static seed, not the computed `importance_score`.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if no rows affected.
-    pub fn update_importance(&self, id: i64, importance: f64) -> Result<()> {
+    pub fn update_base_importance(&self, id: i64, base_importance: f64) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE facts SET importance = ?1 WHERE id = ?2",
-            params![importance, id],
+            params![base_importance, id],
         )?;
         if changed == 0 {
             return Err(MemoryError::NotFound(format!("fact {id}")));
@@ -1339,7 +1340,7 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
         t_valid,
         t_invalid,
         source_event_id: row.get("source_event_id")?,
-        importance: row.get("importance")?,
+        base_importance: row.get("importance")?,
         access_count: row.get("access_count")?,
         last_accessed,
         metadata,
@@ -1366,7 +1367,7 @@ fn row_to_scoring_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FactScoringRo
         fact_type,
         last_accessed,
         access_count: row.get("access_count")?,
-        importance: row.get("importance")?,
+        base_importance: row.get("importance")?,
         is_pinned: is_pinned_i64 != 0,
     })
 }
@@ -1396,7 +1397,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),
@@ -1872,30 +1873,30 @@ mod tests {
         let store = FactStore::new(&conn, DIM);
         let mut weak = make_fact("shared note", vec![0.1; DIM]);
         weak.is_pinned = false;
-        weak.importance = 0.3;
+        weak.base_importance = 0.3;
         let (id, _) = store.insert_or_reinforce(&weak).unwrap();
 
         // A later occurrence judged pinned + more important — the strongest signal wins.
         let mut strong = make_fact("shared note", vec![0.1; DIM]);
         strong.is_pinned = true;
-        strong.importance = 0.9;
+        strong.base_importance = 0.9;
         store.insert_or_reinforce(&strong).unwrap();
         let got = store.get(id).unwrap();
         assert!(got.is_pinned, "is_pinned rises to pinned on reinforcement");
         assert!(
-            (got.importance - 0.9).abs() < f64::EPSILON,
+            (got.base_importance - 0.9).abs() < f64::EPSILON,
             "importance rises to the max"
         );
 
         // A weaker later occurrence lowers neither signal.
         let mut weaker = make_fact("shared note", vec![0.1; DIM]);
         weaker.is_pinned = false;
-        weaker.importance = 0.2;
+        weaker.base_importance = 0.2;
         store.insert_or_reinforce(&weaker).unwrap();
         let got = store.get(id).unwrap();
         assert!(got.is_pinned, "pin is not lost by a weaker reinforcement");
         assert!(
-            (got.importance - 0.9).abs() < f64::EPSILON,
+            (got.base_importance - 0.9).abs() < f64::EPSILON,
             "importance does not drop"
         );
     }
@@ -2037,7 +2038,7 @@ mod tests {
         let mut pinned = make_fact("pinned semantic", vec![0.1; DIM]);
         pinned.fact_type = FactType::Semantic;
         pinned.is_pinned = true;
-        pinned.importance = 0.9;
+        pinned.base_importance = 0.9;
         pinned.access_count = 7;
         let pinned_id = store.insert(&pinned).unwrap();
 
@@ -2052,7 +2053,7 @@ mod tests {
         let pinned_row = rows.iter().find(|r| r.id == pinned_id).unwrap();
         assert_eq!(pinned_row.fact_type, FactType::Semantic);
         assert!(pinned_row.is_pinned);
-        assert!((pinned_row.importance - 0.9).abs() < f64::EPSILON);
+        assert!((pinned_row.base_importance - 0.9).abs() < f64::EPSILON);
         assert_eq!(pinned_row.access_count, 7);
 
         let plain_row = rows.iter().find(|r| r.id == plain_id).unwrap();
@@ -2127,9 +2128,9 @@ mod tests {
         let conn = setup();
         let store = FactStore::new(&conn, DIM);
         let id = store.insert(&make_fact("test", vec![0.1; DIM])).unwrap();
-        store.update_importance(id, 0.9).unwrap();
+        store.update_base_importance(id, 0.9).unwrap();
         let fact = store.get(id).unwrap();
-        assert!((fact.importance - 0.9).abs() < f64::EPSILON);
+        assert!((fact.base_importance - 0.9).abs() < f64::EPSILON);
     }
 
     #[test]

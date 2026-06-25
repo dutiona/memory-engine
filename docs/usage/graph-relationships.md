@@ -147,7 +147,7 @@ The forgetting system uses graph connectivity as one of four signals for computi
 importance = recency * decay
            + frequency * log(access_count + 1)
            + graph_degree * log(edges + 1)
-           + base * fact.importance
+           + base * fact.base_importance
 ```
 
 High-degree facts (many connections) are more resistant to pruning. This prevents the forgetting system from removing facts that serve as important connectors in the knowledge graph.

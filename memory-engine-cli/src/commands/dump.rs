@@ -38,7 +38,7 @@ struct FactRow {
     #[tabled(rename = "Pinned")]
     pinned: &'static str,
     #[tabled(rename = "Score")]
-    importance: String,
+    importance_score: String,
     #[tabled(rename = "Created")]
     created: String,
     #[tabled(rename = "Content")]
@@ -108,7 +108,7 @@ async fn dump_facts(
                     id: f.id,
                     fact_type: format!("{:?}", f.fact_type),
                     pinned: if f.is_pinned { "yes" } else { "" },
-                    importance: format!("{:.2}", f.importance_score),
+                    importance_score: format!("{:.2}", f.importance_score),
                     created: f.t_created.format("%Y-%m-%d %H:%M").to_string(),
                     content: truncate_str(&f.content, 60),
                 })

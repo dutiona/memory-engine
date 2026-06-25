@@ -242,7 +242,7 @@ mod tests {
             "t_valid": null,
             "t_invalid": null,
             "source_event_id": null,
-            "importance": 0.5,
+            "base_importance": 0.5,
             "access_count": 0,
             "last_accessed": "2026-06-16T00:00:00Z",
             "metadata": {}

@@ -21,7 +21,7 @@ async fn ebbinghaus_decay_ordering_old_before_young() {
         FactType::Episodic,
         None,
         AddFactOptions {
-            importance: Some(0.3),
+            base_importance: Some(0.3),
             t_created: Some(days_ago(120)),
             last_accessed: Some(days_ago(120)),
             ..Default::default()
@@ -36,7 +36,7 @@ async fn ebbinghaus_decay_ordering_old_before_young() {
         FactType::Episodic,
         None,
         AddFactOptions {
-            importance: Some(0.3),
+            base_importance: Some(0.3),
             ..Default::default()
         },
     )
@@ -86,7 +86,7 @@ async fn half_life_override_episodic_decays_faster() {
         FactType::Episodic,
         None,
         AddFactOptions {
-            importance: Some(0.3),
+            base_importance: Some(0.3),
             t_created: Some(days_ago(45)),
             last_accessed: Some(days_ago(45)),
             ..Default::default()
@@ -102,7 +102,7 @@ async fn half_life_override_episodic_decays_faster() {
         FactType::Semantic,
         None,
         AddFactOptions {
-            importance: Some(0.3),
+            base_importance: Some(0.3),
             t_created: Some(days_ago(45)),
             last_accessed: Some(days_ago(45)),
             ..Default::default()
@@ -155,7 +155,7 @@ async fn importance_scoring_monotonicity() {
         FactType::Episodic,
         None,
         AddFactOptions {
-            importance: Some(0.9),
+            base_importance: Some(0.9),
             t_created: Some(days_ago(60)),
             last_accessed: Some(days_ago(60)),
             ..Default::default()
@@ -170,7 +170,7 @@ async fn importance_scoring_monotonicity() {
         FactType::Episodic,
         None,
         AddFactOptions {
-            importance: Some(0.1),
+            base_importance: Some(0.1),
             t_created: Some(days_ago(60)),
             last_accessed: Some(days_ago(60)),
             ..Default::default()
@@ -216,7 +216,7 @@ async fn pin_immunity_survives_aggressive_forget() {
         FactType::Episodic,
         None,
         AddFactOptions {
-            importance: Some(0.05),
+            base_importance: Some(0.05),
             pinned: Some(true),
             t_created: Some(days_ago(365)),
             last_accessed: Some(days_ago(365)),
@@ -232,7 +232,7 @@ async fn pin_immunity_survives_aggressive_forget() {
         FactType::Episodic,
         None,
         AddFactOptions {
-            importance: Some(0.05),
+            base_importance: Some(0.05),
             t_created: Some(days_ago(365)),
             last_accessed: Some(days_ago(365)),
             ..Default::default()

@@ -11,12 +11,12 @@ diagnostics:
   vector_candidates: 0
 results:
   - access_count: 0
+    base_importance: 0.5
     content: Neural networks learn representations
     content_hash: 7abe56521634402afac5a6f961d4f700
     embedding_dim: 8
     fact_type: Semantic
     id: 1
-    importance: 0.5
     importance_score: 0.5
     is_pinned: false
     last_accessed: "[REDACTED]"

@@ -429,7 +429,7 @@ async fn resume_context_sparse() {
     let engine = make_engine();
     let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let opts = memory_engine::types::AddFactOptions {
-        importance: Some(0.95),
+        base_importance: Some(0.95),
         pinned: Some(true),
         ..Default::default()
     };
@@ -469,7 +469,7 @@ async fn resume_context_standard() {
     let engine = make_engine();
     let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let opts = memory_engine::types::AddFactOptions {
-        importance: Some(0.95),
+        base_importance: Some(0.95),
         pinned: Some(true),
         ..Default::default()
     };
@@ -509,7 +509,7 @@ async fn resume_context_full() {
     let engine = make_engine();
     let emb: Arc<dyn EmbeddingProvider> = Arc::new(TestEmbedder { dim: DIM });
     let opts = memory_engine::types::AddFactOptions {
-        importance: Some(0.95),
+        base_importance: Some(0.95),
         pinned: Some(true),
         ..Default::default()
     };

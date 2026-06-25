@@ -129,7 +129,7 @@ mod tests {
     }
 
     async fn importance_of(engine: &MemoryEngine, id: i64) -> f64 {
-        engine.storage().get_fact(id).await.unwrap().importance
+        engine.storage().get_fact(id).await.unwrap().base_importance
     }
 
     fn meta(processed: Vec<i64>) -> CycleMetadata {
@@ -171,7 +171,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: "2026-06-16T00:30:00Z".parse().unwrap(),
             metadata: serde_json::json!({}),
@@ -411,7 +411,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: "2026-06-16T00:30:00Z".parse().unwrap(),
             metadata: serde_json::json!({}),
@@ -776,7 +776,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: "2026-06-16T00:30:00Z".parse().unwrap(),
             metadata: serde_json::json!({}),
@@ -822,7 +822,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: "2026-06-16T00:30:00Z".parse().unwrap(),
             metadata: serde_json::json!({}),
@@ -904,7 +904,7 @@ mod tests {
             t_valid: None,
             t_invalid: None,
             source_event_id: None,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: "2026-06-16T00:30:00Z".parse().unwrap(),
             metadata: serde_json::json!({}),
@@ -927,7 +927,7 @@ mod tests {
     async fn add_fact_out_of_range_importance_rejected() {
         let engine = engine().await;
         let nf = NewFact::builder("hostile", vec![0.1, 0.2, 0.3, 0.4], FactType::Semantic)
-            .importance(5.0) // outside [0, 1]
+            .base_importance(5.0) // outside [0, 1]
             .scope_id(1)
             .build();
         let err = engine
@@ -1003,7 +1003,7 @@ mod tests {
     #[tokio::test]
     async fn adjust_after_quarantine_in_same_report_is_rejected() {
         // AdjustScore on a fact quarantined earlier in the SAME report must be rejected
-        // in validation — otherwise update_importance (no t_expired guard) would
+        // in validation — otherwise update_base_importance (no t_expired guard) would
         // silently mutate an expired row.
         let engine = engine().await;
         let id = add(&engine, "f").await;

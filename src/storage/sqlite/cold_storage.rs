@@ -164,7 +164,7 @@ mod tests {
             t_invalid: None,
             source_event_id: None,
             scope_id: 1,
-            importance: 0.5,
+            base_importance: 0.5,
             access_count: 0,
             last_accessed: Utc::now(),
             metadata: serde_json::json!({}),

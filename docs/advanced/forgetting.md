@@ -53,7 +53,7 @@ connectivity = ln(degree + 1) / ln(51)
 
 ### Signal 4: Base Importance
 
-The `fact.importance` field, set at insertion time (default 0.5, configurable via `AddFactOptions`). Already in [0, 1].
+The `fact.base_importance` field, set at insertion time (default 0.5, configurable via `AddFactOptions`). Already in [0, 1].
 
 ## ForgetPolicy
 

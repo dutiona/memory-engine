@@ -61,7 +61,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                     "fact_type": { "type": "string", "enum": ["Episodic", "Semantic", "Procedural"], "default": "Semantic" },
                     "source_event_id": { "type": "integer", "description": "Link to source event" },
                     "scope": { "type": "string", "description": "Scope path" },
-                    "importance": { "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5 },
+                    "base_importance": { "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5 },
                     "metadata": { "description": "Arbitrary JSON metadata" },
                     "t_valid": { "type": "string", "format": "date-time", "description": "Real-world validity start (future = scheduled memory)" },
                     "t_invalid": { "type": "string", "format": "date-time", "description": "Real-world validity end" },
@@ -184,7 +184,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                                 "content": { "type": "string" },
                                 "fact_type": { "type": "string", "enum": ["Episodic", "Semantic", "Procedural"], "default": "Semantic" },
                                 "scope": { "type": "string" },
-                                "importance": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                                "base_importance": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
                                 "metadata": { "description": "Arbitrary JSON metadata" }
                             },
                             "required": ["content"]
@@ -712,7 +712,7 @@ async fn handle_add_fact(
     let scope = get_str(args, "scope");
 
     // Validate importance range
-    let importance = get_f64(args, "importance");
+    let importance = get_f64(args, "base_importance");
     if let Some(imp) = importance
         && !(0.0..=1.0).contains(&imp)
     {
@@ -750,7 +750,7 @@ async fn handle_add_fact(
         source_event_id,
         scope,
         opts: Some(AddFactOptions {
-            importance,
+            base_importance: importance,
             metadata,
             t_valid,
             t_invalid,
@@ -1069,7 +1069,7 @@ async fn handle_flush_insights(
         };
 
         let scope = get_str(obj, "scope");
-        let importance = get_f64(obj, "importance");
+        let importance = get_f64(obj, "base_importance");
 
         if let Some(imp) = importance
             && !(0.0..=1.0).contains(&imp)
@@ -1101,7 +1101,7 @@ async fn handle_flush_insights(
         );
 
         let opts = AddFactOptions {
-            importance,
+            base_importance: importance,
             metadata: Some(Value::Object(metadata)),
             ..Default::default()
         };

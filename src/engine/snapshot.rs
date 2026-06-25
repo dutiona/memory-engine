@@ -26,7 +26,20 @@ use crate::types::ScopeNode;
 
 /// Current snapshot format version. Bump on breaking changes to the snapshot
 /// layout or type definitions.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// v2: defensive/conservative increment accompanying the #274
+/// `Fact::importance` → `Fact::base_importance` rename. NOTE: the sidecar
+/// payload ([`SnapshotPayload`]) does **not** serialize `Fact` — it holds only
+/// the graph edges, the scope tree, and HNSW embeddings (`fact_id` + vector),
+/// all of which are unaffected by the rename; the `facts` table is rebuilt from
+/// the DB on load. So the sidecar wire format is technically unchanged. The bump
+/// exists purely so a pre-#274 sidecar is discarded (→ `None` → full rebuild
+/// from the DB) on the version mismatch, keeping the cache invariant trivially
+/// sound across the type-shape change. The *real* Fact-bearing serialized
+/// projections — `.pak` cold archives ([`crate::archive`]) and the JSON
+/// dump/restore path ([`crate::inspect`]) — guard the break independently
+/// (see `CURRENT_PAK_VERSION` and the no-default `base_importance` invariant).
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Size of the blake3 checksum appended to the file.
 const BLAKE3_LEN: usize = 32;

@@ -47,7 +47,7 @@ async fn full_lifecycle_pinned_and_future_memory() {
     // 1. Add pinned identity fact
     let opts_pin = AddFactOptions {
         pinned: Some(true),
-        importance: Some(0.95),
+        base_importance: Some(0.95),
         ..Default::default()
     };
     let pin_id = engine
@@ -238,7 +238,7 @@ async fn resume_context_4_tier_integration() {
     // Tier 1: Pinned fact
     let opts_pin = AddFactOptions {
         pinned: Some(true),
-        importance: Some(0.95),
+        base_importance: Some(0.95),
         ..Default::default()
     };
     engine

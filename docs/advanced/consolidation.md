@@ -30,9 +30,9 @@ let similarity = cosine_similarity(&new_fact.embedding, &candidate.embedding);
 if candidate.is_pinned { continue; }  // pinned candidates are also protected
 
 if similarity >= threshold {  // >= so threshold 1.0 merges exact duplicates
-    let expire_id = if new_fact.importance < candidate.importance {
+    let expire_id = if new_fact.base_importance < candidate.base_importance {
         new_fact.id
-    } else if new_fact.importance > candidate.importance {
+    } else if new_fact.base_importance > candidate.base_importance {
         candidate.id
     } else {
         new_fact.id.max(candidate.id) // equal importance: newer expires

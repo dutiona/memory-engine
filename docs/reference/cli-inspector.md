@@ -122,13 +122,13 @@ memory-engine-cli batch-ingest --file facts.jsonl \
 Bulk-ingests facts from a JSONL file (or stdin with `--file -`). Each line is a JSON object:
 
 ```json
-{"content": "User moved to Istanbul in March", "fact_type": "episodic", "t_valid": "2026-03-01T00:00:00Z", "t_invalid": "2026-06-01T00:00:00Z", "importance": 0.7, "metadata": {"source": "beam-conv-3"}}
-{"content": "The capital of France is Paris", "fact_type": "semantic", "importance": 0.9}
+{"content": "User moved to Istanbul in March", "fact_type": "episodic", "t_valid": "2026-03-01T00:00:00Z", "t_invalid": "2026-06-01T00:00:00Z", "base_importance": 0.7, "metadata": {"source": "beam-conv-3"}}
+{"content": "The capital of France is Paris", "fact_type": "semantic", "base_importance": 0.9}
 ```
 
 **Required fields:** `content` (string), `fact_type` (`episodic`, `semantic`, or `procedural`).
 
-**Optional fields:** `importance` (float 0-1), `t_valid`/`t_invalid` (ISO 8601), `metadata` (JSON object), `scope` (string), `pinned` (bool), `source_event_id` (int), `t_created`, `last_accessed`.
+**Optional fields:** `base_importance` (float 0-1), `t_valid`/`t_invalid` (ISO 8601), `metadata` (JSON object), `scope` (string), `pinned` (bool), `source_event_id` (int), `t_created`, `last_accessed`.
 
 **Flags:**
 

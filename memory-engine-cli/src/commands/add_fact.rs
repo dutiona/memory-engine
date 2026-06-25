@@ -30,9 +30,10 @@ pub struct AddFactArgs {
     #[arg(long, value_parser = parse_datetime)]
     t_invalid: Option<DateTime<Utc>>,
 
-    /// Importance score in [0, 1] (default: 0.5)
+    /// Base importance prior in [0, 1] (default: 0.5). The static seed for the
+    /// computed `importance_score`, exposed as `--base-importance`.
     #[arg(long)]
-    importance: Option<f64>,
+    base_importance: Option<f64>,
 
     /// Scope path (e.g., "project/sub"). Auto-creates missing segments. Default: root
     #[arg(long)]
@@ -58,10 +59,10 @@ pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow:
     anyhow::ensure!(!embedding.is_empty(), "embedding must not be empty");
 
     // Validate importance
-    if let Some(imp) = args.importance {
+    if let Some(imp) = args.base_importance {
         anyhow::ensure!(
             (0.0..=1.0).contains(&imp),
-            "importance must be in [0, 1], got {imp}"
+            "base_importance must be in [0, 1], got {imp}"
         );
     }
 
@@ -108,7 +109,7 @@ pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow:
         source_event_id: args.source_event_id,
         scope: args.scope.clone(),
         opts: Some(AddFactOptions {
-            importance: args.importance,
+            base_importance: args.base_importance,
             metadata,
             t_valid: args.t_valid,
             t_invalid: args.t_invalid,
@@ -128,9 +129,9 @@ pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow:
             output::print_json(&fact)?;
         }
         OutputFormat::Table => {
-            let importance = args.importance.unwrap_or(0.5);
+            let base_importance = args.base_importance.unwrap_or(0.5);
             eprintln!(
-                "Created fact {fact_id} ({fact_type}, importance={importance:.2}{})",
+                "Created fact {fact_id} ({fact_type}, base_importance={base_importance:.2}{})",
                 if args.pinned { ", pinned" } else { "" }
             );
         }
