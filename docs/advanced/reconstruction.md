@@ -9,10 +9,17 @@ rollback. It is the only legitimate way to change a store's embedding identity (
 identity tuple and the vectors swap together, so retrieval is never served from a mixed vector
 space.
 
-Today's scope is **same-dimension**. A different-dimension swap (a new `embed_dim`) needs the
-engine effective-dimension transition (pool / dim-validation / vector index at the new dim) and is
-the [#742](https://github.com/dutiona/memory-engine/issues/742) follow-up; the storage layer here
-is already dimension-agnostic.
+Two flavors:
+
+- **Same-dimension** (#623) — a model/quantization swap at the same `embed_dim`. Zero downtime:
+  the engine keeps serving across the promote.
+- **Different-dimension** (#742) — a swap to a new `embed_dim`. Also supported, but because the
+  engine's `embed_dim` is consumer-passed and cached immutably at open, a different-dim promote
+  cannot take effect on the live handle. The promote **fences** the handle, and the consumer
+  **reopens the engine at the new dimension** (a brief downtime — see
+  [Different-dimension reconstruction](#different-dimension-reconstruction-reopen-at-d) below). A
+  truly in-place, no-reopen dimension transition is a separate, larger effort (it would need
+  `embed_dim` interior-mutable across the engine + an in-place vector-index swap) and is deferred.
 
 ## Why content is the source of truth
 
@@ -89,7 +96,10 @@ re-embedding expired facts is the cheap price.
 The promote is a **single** `block_write` transaction, never decomposed (any `?` before `commit`
 drops the transaction and rolls back, so a mid-promote failure cannot leave partial state):
 
-0. **Same-dim guard** — `populating.dim == active.dim`, else error (different-dim → #742).
+0. **Resolve** the active + populating spaces. No dim guard — a promote is dimension-agnostic at the
+   storage layer (the copy-swap is a blob-level `UPDATE`), so `populating.dim` may differ from
+   `active.dim` (#742). The width invariant is the engine-side per-vector backfill check; a
+   different-dim promote fences the handle (below).
 1. **Completeness gate _inside_ the tx** — every fact must already have a populating vector. This
    runs inside the transaction (not before it), so a straggler that lands after the catch-up pass
    is caught here rather than silently dropped (no TOCTOU).
@@ -117,7 +127,44 @@ Because the promote **retains** the previous active vectors in `fact_vectors[old
 ones back into `facts.embedding`, and flip the status. This is the mechanism #689 surfaces as
 operator UX.
 
-## (PromoteOutcome)
+## Different-dimension reconstruction (reopen-at-D′)
+
+A different-dimension reconstruction (a new `embed_dim`, D→D′) runs the same lifecycle — the storage
+layer is dimension-agnostic — but the engine's `embed_dim` is consumer-passed and **frozen at open**,
+threaded immutably into the connection pool, the vector index, and every `deserialize_embedding` read
+site. So once the promote makes `facts.embedding` D′-wide, the live handle (still holding D) cannot
+serve it.
+
+The handle is therefore **fenced** at the promote: `MemoryEngine.reopen_required` is set to D′, and
+every embedding-touching method returns `MemoryError::EmbeddingReopenRequired { new_dim }` (the push
+channel) while `MemoryEngine::reopen_required()` reports `Some(D′)` (the pull channel). A read on a
+fenced handle never deserializes a D′ blob at D — and even if a gated method were missed, the checked
+`deserialize_embedding` returns a loud `EmbeddingDimension`, never silent corruption. The fence
+upgrades that to an actionable error.
+
+The consumer then **reopens at D′**:
+
+```text
+let outcome = engine.reconstruct(&new_fp /* dim D′ */, &embedder_at_Dprime).await?;
+// engine.reopen_required() == Some(D′); embedding-touching reads now refuse.
+engine.flush_snapshot().await?;                      // fenced → clean no-op (no stale-dim sidecar)
+drop(engine);
+let engine = MemoryEngine::open(EngineConfig::new(path, Dprime) …)?;  // validates clean, rebuilds @ D′
+```
+
+Reopen re-runs the open path: `validate_embed_dim_against_meta` passes because the active identity is
+now D′, and the vector index is rebuilt at D′ from the freshly-promoted `facts.embedding` — so #624's
+live in-process rebuild is **not** needed for the different-dim path (the reopen rebuilds for free).
+The brief window between promote-commit and reopen is the accepted downtime; a truly in-place,
+no-reopen transition (interior-mutable `embed_dim` + a live index swap) is deferred.
+
+**In-memory engines** have no file to reopen, so a different-dim reconstruction leaves an in-memory
+handle permanently fenced (build a fresh engine and re-ingest). **Crash recovery:** if a crash leaves
+the DB promoted at D′ but the consumer reopens with the old-D config, the open is rejected with
+`EmbedDimMismatch { stored: D′, requested: D }` — the consumer updates its config to D′ (no engine
+self-heal, to avoid silent-identity-adoption, per #614).
+
+## PromoteOutcome and index rebuild
 
 `rebuild_index` is always `true`: a promote changes every active vector, so a downstream vector
 index (HNSW) must rebuild. The **live in-process rebuild is #624**; until then, a SQLite+`ann`
@@ -133,15 +180,22 @@ Restore writes them after `embedding_spaces` and `facts` (foreign-key order). A 
 no `fact_vectors` field and defaults to empty; `facts[].embedding` is unchanged, so an old snapshot
 loses nothing.
 
+After a **different-dimension** reconstruction (#742) the active space is D′ while a retained
+`deprecated` space is still D-wide, so a single engine `embed_dim` cannot decode every row. The dump
+therefore decodes each `fact_vectors` row at **its own space's recorded dimension** (read from
+`embedding_spaces`), and restore re-serializes dimension-agnostically — so a reconstructed store
+round-trips with its deprecated rollback vectors intact, no data loss.
+
 ## Scope and dependencies
 
-| Concern                                                | Where       |
-| ------------------------------------------------------ | ----------- |
-| Same-dim reconstruction (this page)                    | **#623** ✅ |
-| Different-dim transition (new `embed_dim`)             | #742        |
-| Live in-process HNSW / similarity-edge rebuild         | #624        |
-| Live-write race during the promote window              | #625        |
-| Operator UX (CLI/MCP) + query-across-spaces / rollback | #689        |
+| Concern                                                      | Where       |
+| ------------------------------------------------------------ | ----------- |
+| Same-dim reconstruction                                      | **#623** ✅ |
+| Different-dim transition (new `embed_dim`, via reopen-at-D′) | **#742** ✅ |
+| In-place (no-reopen) live dimension transition               | deferred    |
+| Live in-process HNSW / similarity-edge rebuild (same-dim)    | #624        |
+| Live-write race during the promote window                    | #625        |
+| Operator UX (CLI/MCP) + query-across-spaces / rollback       | #689        |
 
 ## See also
 
