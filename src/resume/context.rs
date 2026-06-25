@@ -44,7 +44,7 @@ impl ResumeConfig {
     /// Validate configuration parameters.
     ///
     /// `high_importance_min` is a materialized-score threshold that flows
-    /// directly into [`FactStore::list_by_importance_score`]'s `min_score`
+    /// directly into `FactStore::list_by_importance_score`'s `min_score`
     /// comparison; it must be finite and within `[0.0, 1.0]` — a value like
     /// `2.0` would silently yield an empty high-importance tier with no
     /// diagnostic. The four tier caps must each be non-zero, since a `0` cap
