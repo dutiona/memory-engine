@@ -16,6 +16,7 @@ scopes:
 events: []
 lineage: []
 embedding_spaces: []
+fact_vectors: []
 config:
   schema_version: "14"
   storage_epoch: "1"

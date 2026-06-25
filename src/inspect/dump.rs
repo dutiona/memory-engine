@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::error::{ConflictError, MemoryError, Result};
-use crate::inspect::types::EmbeddingSpaceSnapshot;
+use crate::inspect::types::{EmbeddingSpaceSnapshot, FactVectorSnapshot};
 use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
@@ -85,6 +85,21 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
         .collect();
     write!(writer, r#","embedding_spaces":"#)?;
     serde_json::to_writer(&mut *writer, &spaces)?;
+
+    // fact_vectors (#623): the non-active spaces' per-fact vectors (a populating
+    // space mid-reconstruction, or a deprecated space retained for rollback).
+    // Streamed row-by-row — a deprecated space holds one vector per fact, so this
+    // can be O(N). The active vectors are already in `facts[].embedding`.
+    write!(writer, r#","fact_vectors":"#)?;
+    stream_for_each(writer, |mut cb| {
+        crate::store::fact_vectors::for_each(conn, embed_dim, |fact_id, space_id, embedding| {
+            cb(FactVectorSnapshot {
+                fact_id,
+                space_id,
+                embedding,
+            })
+        })
+    })?;
 
     // Config is always small — serialize directly.
     let config = list_config(conn)?;

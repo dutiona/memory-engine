@@ -241,6 +241,38 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
     })
 }
 
+/// Stream every `fact_vectors` row (all non-active spaces) for the dump, yielding
+/// `(fact_id, space_id, embedding)` one row at a time — O(1) peak memory, matching
+/// the streaming snapshot writer. Ordered by `(space_id, fact_id)` for a stable
+/// dump.
+///
+/// Deserializes each blob at `embed_dim`: same-dim reconstruction (#623) keeps
+/// every non-active space at the engine dimension; the different-dim follow-up
+/// (#742) will thread per-space dims here.
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on query
+/// failure, [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+/// if a stored blob is not `embed_dim`-sized, or any error the callback returns.
+pub fn for_each<F>(conn: &Connection, embed_dim: usize, mut cb: F) -> Result<()>
+where
+    F: FnMut(i64, String, Vec<f32>) -> Result<()>,
+{
+    let mut stmt = conn.prepare(
+        "SELECT fact_id, space_id, embedding FROM fact_vectors ORDER BY space_id, fact_id",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let fact_id: i64 = row.get(0)?;
+        let space_id: String = row.get(1)?;
+        let blob: Vec<u8> = row.get(2)?;
+        let embedding = crate::store::deserialize_embedding(&blob, embed_dim)?;
+        cb(fact_id, space_id, embedding)?;
+    }
+    Ok(())
+}
+
 /// Count the vectors stored for `space_id`. Test-only inspection helper (the
 /// promote and dump paths read `fact_vectors` with their own queries); gated so it
 /// never reaches the lib target as dead code. Un-gate if a production caller needs

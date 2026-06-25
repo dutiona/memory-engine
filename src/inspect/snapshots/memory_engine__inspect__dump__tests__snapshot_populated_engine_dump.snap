@@ -41,4 +41,5 @@ embedding_spaces:
     dim: 4
     matryoshka_base_dim: ~
     element_type: float32
+fact_vectors: []
 config: "{}"

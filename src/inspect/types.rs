@@ -174,6 +174,24 @@ pub struct EmbeddingSpaceSnapshot {
     pub fingerprint: EmbeddingFingerprint,
 }
 
+/// One `fact_vectors` row in a snapshot (#623 background reconstruction).
+///
+/// Carries a **non-active** space's per-fact vector: the `populating` space's
+/// vectors mid-reconstruction, or a `deprecated` space's vectors retained for
+/// rollback after a promote. The **active** space's vectors stay in
+/// `facts[].embedding` (the [`EngineSnapshot::facts`] rows are unchanged), so this
+/// section is purely additive — a pre-#623 snapshot has no `fact_vectors` field
+/// and restore defaults it empty.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactVectorSnapshot {
+    /// Owning fact id (FK → `facts.id`).
+    pub fact_id: i64,
+    /// Owning space name (FK → `embedding_spaces.name`).
+    pub space_id: String,
+    /// The stored vector.
+    pub embedding: Vec<f32>,
+}
+
 /// Complete snapshot of engine state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineSnapshot {
@@ -194,6 +212,11 @@ pub struct EngineSnapshot {
     /// config value.
     #[serde(default)]
     pub embedding_spaces: Vec<EmbeddingSpaceSnapshot>,
+    /// `fact_vectors` rows for the non-active embedding spaces (#623). Absent in
+    /// pre-#623 snapshots — defaults to empty (the active vectors live in
+    /// `facts[].embedding`, so an old snapshot loses nothing).
+    #[serde(default)]
+    pub fact_vectors: Vec<FactVectorSnapshot>,
     pub config: BTreeMap<String, String>,
 }
 
@@ -679,6 +702,7 @@ mod tests {
             events: vec![sample_event()],
             lineage: vec![sample_lineage()],
             embedding_spaces: vec![],
+            fact_vectors: vec![],
             config,
         };
         // EngineSnapshot is intentionally not `PartialEq`: `PromotionProvenance`
