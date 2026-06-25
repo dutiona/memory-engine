@@ -56,6 +56,18 @@ impl SqliteBackend {
         expected_dim: usize,
         dim: usize,
     ) -> Result<BatchInsertResult> {
+        // Defensive precondition: the insert loop indexes `per_entry_scope_ids`
+        // (built 1:1 from `scope_paths`) by fact position, so the two MUST be the
+        // same length. Reject a mismatch with a typed error rather than panicking
+        // on an out-of-bounds index (or silently dropping facts via a zip).
+        if facts.len() != scope_paths.len() {
+            return Err(crate::error::MemoryError::Internal(format!(
+                "batch insert: facts ({}) and scope_paths ({}) length mismatch",
+                facts.len(),
+                scope_paths.len()
+            )));
+        }
+
         // Verbatim body of ingest.rs:397-476: savepoint wrapping stamp +
         // scope-resolve + per-fact insert.
         conn.execute_batch("SAVEPOINT batch_insert")?;
@@ -1652,6 +1664,23 @@ mod tests {
             let expected_content = ["a", "b", "c"][i];
             assert_eq!(got.content, expected_content);
         }
+    }
+
+    /// Mismatched `facts` / `scope_paths` lengths must return a typed error, not
+    /// panic on an out-of-bounds scope-id index inside the savepoint loop.
+    #[tokio::test]
+    async fn insert_facts_batch_atomic_rejects_length_mismatch() {
+        let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
+        let facts = vec![fact("a", [0.1; DIM]), fact("b", [0.2; DIM])];
+        let paths: Vec<Option<String>> = vec![None]; // one short
+        let err = be
+            .insert_facts_batch_atomic(&facts, &paths, &fp(), DIM)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Internal(ref m) if m.contains("length mismatch")),
+            "expected a length-mismatch Internal error, got {err:?}"
+        );
     }
 
     /// Scope split: a named scope path is resolved inside the savepoint and its id
