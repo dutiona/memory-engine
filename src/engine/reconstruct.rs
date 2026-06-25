@@ -107,10 +107,12 @@ impl MemoryEngine {
     /// in-process index rebuild, so if `rebuild_vector_index` fails this returns the
     /// error **but the promote is durable** — `facts.embedding` holds the new vectors,
     /// the identity has flipped, and the brute-force / on-disk read path is correct.
-    /// Only the in-memory HNSW index is left stale (it serves until the next open or a
-    /// retry). The rebuild is idempotent, so the consumer may simply call
-    /// [`reconstruct`](Self::reconstruct) again (it resumes/no-ops the already-promoted
-    /// space) or reopen the engine to recover the index.
+    /// Only the in-memory HNSW index is left stale. **To recover, reopen the engine:**
+    /// open rebuilds the index from `facts.embedding` (the new vectors), so the next
+    /// handle serves correctly. Note that re-calling [`reconstruct`](Self::reconstruct)
+    /// does **not** recover the index — the promote already flipped the target space to
+    /// `active`, so a second `reconstruct` to the same identity is rejected by
+    /// `begin_populating_space` (the space is no longer `populating`).
     pub async fn reconstruct(
         &self,
         new_fingerprint: &EmbeddingFingerprint,
