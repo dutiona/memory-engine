@@ -23,7 +23,6 @@
 //! deferred HNSW vector index) **cannot** run inside a transaction — it must be issued
 //! outside this chain.
 
-use deadpool_postgres::Object;
 use tokio_postgres::Client;
 
 use crate::error::{MemoryError, MigrationError, Result};
@@ -49,8 +48,13 @@ const PGVECTOR_MAX_DIM: usize = 16_000;
 ///
 /// Returns [`MemoryError::Migration`] if `embed_dim` is outside pgvector's range, the
 /// stored version is newer than supported, or the stored epoch is from the future;
-/// [`MemoryError::Storage`] on a backend failure (which rolls the transaction back).
-pub async fn migrate(client: &mut Object, embed_dim: usize) -> Result<()> {
+/// [`MemoryError::EmbeddingDimension`] if reopening an existing store at a different
+/// dimension than its `vector(N)` columns were built with; [`MemoryError::Storage`] on a
+/// backend failure (which rolls the transaction back).
+///
+/// Takes `&mut Client` (not the pool's `Object`) so the migration logic is decoupled from
+/// the connection-pool implementation.
+pub async fn migrate(client: &mut Client, embed_dim: usize) -> Result<()> {
     if !(1..=PGVECTOR_MAX_DIM).contains(&embed_dim) {
         return Err(MigrationError::Incompatible(format!(
             "embed_dim {embed_dim} is outside the pgvector range 1..={PGVECTOR_MAX_DIM}"
@@ -77,7 +81,11 @@ pub async fn migrate(client: &mut Object, embed_dim: usize) -> Result<()> {
             .into());
         }
         // version == CURRENT (the only other reachable value for a one-step chain) — at
-        // HEAD, nothing to do.
+        // HEAD. Guard a reopen at a different dimension: the `vector(N)` columns were
+        // baked at the original `embed_dim`, so reopening at a different dim would
+        // silently mis-deserialize every vector. Caught here at open (review: gemini +
+        // codex both flagged the missing reopen-dim check).
+        check_stored_dim(client, embed_dim).await?;
         return Ok(());
     }
 
@@ -97,8 +105,9 @@ pub async fn migrate(client: &mut Object, embed_dim: usize) -> Result<()> {
 ///
 /// Returns [`MemoryError::Migration`] if the database is uninitialized, needs migration,
 /// or is from a newer version; [`MemoryError::UnsupportedEpoch`] for a future epoch;
-/// [`MemoryError::Storage`] on a backend failure.
-pub async fn validate_schema_version(client: &Client) -> Result<()> {
+/// [`MemoryError::EmbeddingDimension`] if `embed_dim` disagrees with the store's
+/// `vector(N)` width; [`MemoryError::Storage`] on a backend failure.
+pub async fn validate_schema_version(client: &Client, embed_dim: usize) -> Result<()> {
     if !config_table_exists(client).await? {
         return Err(MigrationError::Incompatible(
             "database has no config table; cannot open read-only on an uninitialized database"
@@ -127,6 +136,38 @@ pub async fn validate_schema_version(client: &Client) -> Result<()> {
             target: CURRENT_PG_SCHEMA_VERSION,
         }
         .into());
+    }
+    check_stored_dim(client, embed_dim).await?;
+    Ok(())
+}
+
+/// Reject a reopen whose `embed_dim` disagrees with the `vector(N)` width baked into the
+/// schema at first migrate. Parses the stored dimension from `facts.embedding`'s typmod
+/// (`format_type` → e.g. `vector(4)`); a schema without the column (shouldn't happen at
+/// HEAD) passes silently.
+async fn check_stored_dim(client: &Client, embed_dim: usize) -> Result<()> {
+    let row = client
+        .query_opt(
+            "SELECT format_type(atttypid, atttypmod) FROM pg_attribute \
+             WHERE attrelid = 'public.facts'::regclass AND attname = 'embedding'",
+            &[],
+        )
+        .await
+        .map_err(pg_err)?;
+    let Some(stored) = row.and_then(|r| {
+        let formatted: String = r.get(0);
+        formatted
+            .strip_prefix("vector(")
+            .and_then(|s| s.strip_suffix(')'))
+            .and_then(|n| n.parse::<usize>().ok())
+    }) else {
+        return Ok(());
+    };
+    if stored != embed_dim {
+        return Err(MemoryError::EmbeddingDimension {
+            expected: stored,
+            actual: embed_dim,
+        });
     }
     Ok(())
 }

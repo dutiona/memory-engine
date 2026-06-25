@@ -128,11 +128,14 @@ impl PgBackend {
     /// is from a newer/incompatible version.
     pub async fn connect_read_only(conn: &str, embed_dim: usize) -> Result<Self> {
         let backend = Self::from_pool(PgPool::connect_read_only(conn, embed_dim)?);
-        // Read-only open path: validate compatibility (epoch + version) but never
-        // migrate — a read-only handle cannot write. Mirrors SQLite's read-only open,
-        // which runs `validate_schema_version` rather than `migrate`.
+        // Read-only open path: validate compatibility (epoch + version + the vector(N)
+        // dimension) but never migrate — a read-only handle cannot write. Mirrors
+        // SQLite's read-only open, which runs `validate_schema_version` rather than
+        // `migrate`.
         backend
-            .with_client(|client| async move { migrations::validate_schema_version(&client).await })
+            .with_client(move |client| async move {
+                migrations::validate_schema_version(&client, embed_dim).await
+            })
             .await?;
         Ok(backend)
     }

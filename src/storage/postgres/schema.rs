@@ -44,8 +44,11 @@ impl SchemaManager for PgBackend {
     }
 
     async fn validate_schema_version(&self) -> Result<()> {
-        self.with_client(|client| async move { migrations::validate_schema_version(&client).await })
-            .await
+        let embed_dim = self.embed_dim;
+        self.with_client(move |client| async move {
+            migrations::validate_schema_version(&client, embed_dim).await
+        })
+        .await
     }
 
     fn capabilities(&self) -> BackendCapabilities {

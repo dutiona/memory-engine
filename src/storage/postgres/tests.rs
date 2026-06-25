@@ -543,6 +543,30 @@ async fn rejects_out_of_range_embed_dim() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker/Postgres testcontainer; run with --ignored"]
+async fn reopen_at_a_different_dim_is_rejected() {
+    // A store migrated at DIM (=4) has vector(4) columns; reopening at a different dim
+    // must be rejected, not silently mis-deserialize vectors (review: gemini + codex).
+    let (_c, url, _be) = migrated_backend().await;
+    match PgBackend::connect(&url, 8).await {
+        Err(MemoryError::EmbeddingDimension {
+            expected: 4,
+            actual: 8,
+        }) => {}
+        Err(other) => panic!("expected EmbeddingDimension on RW reopen, got {other:?}"),
+        Ok(_) => panic!("reopen (RW) at dim 8 must be rejected"),
+    }
+    match PgBackend::connect_read_only(&url, 8).await {
+        Err(MemoryError::EmbeddingDimension {
+            expected: 4,
+            actual: 8,
+        }) => {}
+        Err(other) => panic!("expected EmbeddingDimension on RO reopen, got {other:?}"),
+        Ok(_) => panic!("reopen (read-only) at dim 8 must be rejected"),
+    }
+}
+
 // =========================================================================
 // Phase 3 — SchemaManager core: capabilities, config, fingerprint, read-only
 // =========================================================================
