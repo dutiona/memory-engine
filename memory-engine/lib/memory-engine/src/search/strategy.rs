@@ -39,7 +39,19 @@ pub trait VectorSearchStrategy: Send + Sync {
 
     /// Called after a fact is inserted. Strategies that maintain an in-memory
     /// index should add the vector. Default: no-op.
-    fn notify_insert(&self, _fact_id: i64, _embedding: &[f32]) {}
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::IndexInconsistent`](crate::error::MemoryError::IndexInconsistent)
+    /// if the strategy's in-memory index detects a structural invariant violation
+    /// while incorporating the new vector (e.g. the HNSW backend assigning a
+    /// non-sequential ID — index corruption). The default no-op never errors.
+    /// Callers fire this **post-commit**, so the fact is already durably
+    /// persisted; a returned error signals a stale in-memory index that should be
+    /// **rebuilt**, *not* a failed write to be retried.
+    fn notify_insert(&self, _fact_id: i64, _embedding: &[f32]) -> Result<()> {
+        Ok(())
+    }
 
     /// Called after a fact is expired (soft-deleted). Strategies that maintain
     /// an in-memory index should mark it for exclusion. Default: no-op.
@@ -206,8 +218,9 @@ mod tests {
     #[test]
     fn brute_force_lifecycle_hooks_are_noop() {
         let bf = BruteForce;
-        // These should compile and do nothing.
-        bf.notify_insert(1, &[1.0, 0.0, 0.0]);
+        // These should compile and do nothing; the default insert hook is
+        // infallible (returns `Ok(())`).
+        bf.notify_insert(1, &[1.0, 0.0, 0.0]).unwrap();
         bf.notify_expire(1);
     }
 
