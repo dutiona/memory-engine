@@ -91,6 +91,13 @@ pub trait ConsolidationStore: Send + Sync {
     ///
     /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
     ///
+    /// **Exactly one exception:** `Err(MemoryError::IndexInconsistent)` is returned
+    /// *after* the cycle deltas are durably committed — it signals the durable write
+    /// succeeded but a post-commit in-memory vector (HNSW) index update tripped a
+    /// structural invariant (rebuild the index; do **not** retry the write, which would
+    /// duplicate the applied deltas). Every *other* `Err` variant preserves the
+    /// byte-identical guarantee (nothing was written).
+    ///
     /// The caller is responsible for:
     /// - `CycleError` business validation (pure-Rust, no conn needed)
     /// - HNSW `notify_insert`/`notify_expire` (fired post-commit, engine-side)
@@ -170,6 +177,13 @@ pub trait ConsolidationStore: Send + Sync {
     /// # Contract
     ///
     /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
+    ///
+    /// **Exactly one exception:** `Err(MemoryError::IndexInconsistent)` is returned
+    /// *after* the promoted fact + lineage are durably committed — it signals the
+    /// durable write succeeded but the post-commit in-memory vector (HNSW) index update
+    /// tripped a structural invariant (rebuild the index; do **not** retry the write,
+    /// which would duplicate the promotion). Every *other* `Err` variant preserves the
+    /// byte-identical guarantee (nothing was written).
     ///
     /// # Returns
     ///

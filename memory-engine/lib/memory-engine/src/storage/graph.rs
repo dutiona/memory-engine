@@ -236,6 +236,13 @@ pub trait FactGraph: Send + Sync {
     ///
     /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
     ///
+    /// **Exactly one exception:** `Err(MemoryError::IndexInconsistent)` is returned
+    /// *after* the fact is durably committed — it signals the durable write succeeded
+    /// but the post-commit in-memory vector (HNSW) index update tripped a structural
+    /// invariant (rebuild the index; do **not** retry the write, which would duplicate
+    /// the fact). Every *other* `Err` variant preserves the byte-identical guarantee
+    /// (nothing was written).
+    ///
     /// The `stamp_fn` closure is called **inside** the transaction before the
     /// fact is inserted — it must either record-if-absent or verify the identity,
     /// depending on the call site (live provider vs precomputed fingerprint). A
@@ -265,6 +272,13 @@ pub trait FactGraph: Send + Sync {
     /// # Contract
     ///
     /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (savepoint rolled back)`.
+    ///
+    /// **Exactly one exception:** `Err(MemoryError::IndexInconsistent)` is returned
+    /// *after* the whole batch is durably committed — it signals the durable write
+    /// succeeded but a post-commit in-memory vector (HNSW) index update tripped a
+    /// structural invariant (rebuild the index; do **not** retry the write, which
+    /// would duplicate the batch). Every *other* `Err` variant preserves the
+    /// byte-identical guarantee (nothing was written).
     ///
     /// # Returns
     ///
@@ -331,6 +345,13 @@ pub trait FactGraph: Send + Sync {
     /// Any HNSW sidecar notification fires **post-commit** inside the impl. The
     /// engine mirrors the in-memory graph from the returned ids **after** this
     /// returns `Ok` (no lock held across the await).
+    ///
+    /// **Exactly one exception to byte-identical:** `Err(MemoryError::IndexInconsistent)`
+    /// is returned *after* the write is durably committed — it signals the durable
+    /// write (Add/Update insert) succeeded but the post-commit in-memory vector (HNSW)
+    /// index update tripped a structural invariant (rebuild the index; do **not** retry
+    /// the write, which would duplicate the fact). Every *other* `Err` variant preserves
+    /// the byte-identical guarantee (nothing was written).
     ///
     /// # Returns
     ///

@@ -726,7 +726,11 @@ impl FactGraph for SqliteBackend {
                 Ok(id)
             })
             .await?;
-        // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238).
+        // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238). The fact
+        // is already durably committed, so this `?` is the SOLE carve-out to this
+        // method's `Err ⟹ byte-identical` contract: it can only surface
+        // `IndexInconsistent` (the write SUCCEEDED, only the in-memory index is now
+        // stale — rebuild it, do NOT retry the write, which would duplicate the fact).
         #[cfg(feature = "ann")]
         self.hnsw_notify_insert(id, &embedding)?;
         Ok(id)
@@ -773,9 +777,19 @@ impl FactGraph for SqliteBackend {
         // partial index. The whole batch landed in SQLite, so on an
         // `IndexInconsistent` invariant breach the recovery is to rebuild the
         // index, not to retry the write — collect the first error and return it
-        // after the loop.
+        // after the loop. This returned error is the SOLE carve-out to this
+        // method's `Err ⟹ byte-identical` contract: the batch SUCCEEDED durably,
+        // only the in-memory index is stale (rebuild it, do NOT retry the write).
         #[cfg(feature = "ann")]
         {
+            // `ids` and `embeddings` are co-constructed by `batch_insert_savepoint`
+            // and are always 1:1 by construction; the `zip` below would silently
+            // truncate if a future change desynced them. Guard the invariant.
+            debug_assert_eq!(
+                ids.len(),
+                embeddings.len(),
+                "batch insert: ids/embeddings co-constructed, must be 1:1"
+            );
             let mut index_err = None;
             for (id, embedding) in ids.iter().zip(embeddings.iter()) {
                 if let Err(e) = self.hnsw_notify_insert(*id, embedding) {
@@ -922,6 +936,9 @@ impl FactGraph for SqliteBackend {
         // Post-commit HNSW sidecar notifications — mirror the per-call port methods the
         // engine previously invoked: Update/Delete expired the old fact (notify_expire),
         // Add/Update inserted a new one (notify_insert). Fired only after the commit.
+        // `notify_expire` is infallible; the `notify_insert` `?` is the SOLE carve-out
+        // to this method's `Err ⟹ byte-identical` contract: the write SUCCEEDED durably,
+        // only the in-memory index is stale (rebuild it, do NOT retry — would duplicate).
         #[cfg(feature = "ann")]
         {
             if matches!(decision, CrudDecision::Update | CrudDecision::Delete) {

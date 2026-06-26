@@ -596,6 +596,9 @@ impl ConsolidationStore for SqliteBackend {
             // the expired (quarantined / superseded) facts' tombstones, leaving
             // their stale vectors searchable. Collect the first index error, run
             // the full cleanup, then surface it. `notify_expire` is infallible.
+            // The returned error is the SOLE carve-out to this method's
+            // `Err ⟹ byte-identical` contract: the cycle deltas SUCCEEDED durably,
+            // only the in-memory index is stale (rebuild it, do NOT retry the write).
             let mut index_err = None;
             for (id, emb) in &result_tuple.3 {
                 if let Err(e) = self.hnsw_notify_insert(*id, emb) {
@@ -699,6 +702,11 @@ impl ConsolidationStore for SqliteBackend {
             })
             .await?;
 
+        // Post-commit HNSW notify. The fact + lineage are already durably committed,
+        // so this `?` is the SOLE carve-out to this method's `Err ⟹ byte-identical`
+        // contract: it can only surface `IndexInconsistent` (the write SUCCEEDED, only
+        // the in-memory index is stale — rebuild it, do NOT retry the write, which would
+        // duplicate the promotion).
         #[cfg(feature = "ann")]
         self.hnsw_notify_insert(result.fact_id, &embedding)?;
 
