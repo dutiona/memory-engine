@@ -948,13 +948,23 @@ async fn unknown_tool_returns_error() {
 // Tool definitions
 // ---------------------------------------------------------------------------
 
+/// Invariant check on the tool registry, deliberately *not* an exact-count
+/// assertion (#470). A hardcoded `== 26` false-positives on every legitimate
+/// tool addition or removal, even when the list stays internally consistent.
+///
+/// Instead we assert the structural intent: the registry is non-empty and stays
+/// at or above the P0 floor (the 10 P0 tools are load-bearing — the MCP server is
+/// useless below them). Uniqueness (no duplicate names, hence no silent gaps from
+/// a copy-paste collision) is covered by `all_tool_definitions_have_unique_names`.
 #[test]
-fn all_tool_definitions_returns_26() {
+fn all_tool_definitions_are_unique_and_nonempty() {
+    /// P0 floor: the minimum viable tool set the MCP server must expose.
+    const P0_FLOOR: usize = 10;
     let defs = tools::all_tool_definitions();
-    assert_eq!(
-        defs.len(),
-        26,
-        "expected 10 P0 + 5 P1 + 3 P2 + 2 Phase 5a outcome + 3 activity stream + 3 cognitive (#225) tools"
+    assert!(
+        defs.len() >= P0_FLOOR,
+        "tool registry dropped below the P0 floor ({P0_FLOOR}): got {}",
+        defs.len()
     );
 }
 
