@@ -206,8 +206,13 @@ pub use engine::cycle::{
 ///   FTS5 `MATCH` path on a seeded in-memory DB (the store/schema setup it needs is
 ///   `pub(crate)`, so the seam owns it).
 ///
-/// `inspect::restore::read_snapshot` (the JSON import path) is already public, so
-/// it is fuzzed directly without going through this seam.
+/// `inspect::restore::read_snapshot` (the JSON import path) is fuzzed directly,
+/// without going through this seam. When #276 narrowed the other `inspect`
+/// submodules (`dump`/`explain`/`replay`/`statistics`) to `pub(crate)`,
+/// `inspect::restore` was deliberately kept `pub mod` for exactly this reason: the
+/// `fuzz` crate is a detached workspace excluded from `cargo build --workspace`, so
+/// CI cannot catch a regression if that path stops compiling. Keeping `restore`
+/// public is the seam — narrowing it would silently break the fuzz build.
 ///
 /// This module compiles to nothing on a normal build, so it adds no public API
 /// to the shipped crate.

@@ -100,7 +100,12 @@ impl MemoryGraph {
     /// scans O(E) and removes at most one edge. Short-circuits after the
     /// first match.
     ///
-    /// Used after expiring an edge in `SQLite` to keep the graph in sync.
+    /// Intended for the edge-expiry graph-sync path (keep the in-memory graph in
+    /// step after `EdgeStore::expire`), but that wiring is not yet landed, so the
+    /// only current caller is the unit test below — hence `#[cfg(test)]` to keep
+    /// the lint honest without an `#[allow(dead_code)]` mask. Drop the gate when a
+    /// production caller is added (tracked as a follow-up to #276).
+    #[cfg(test)]
     pub fn remove_edge_by_id(&mut self, edge_id: i64) {
         if let Some(ei) = self
             .graph
