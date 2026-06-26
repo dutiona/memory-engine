@@ -44,40 +44,17 @@ fn create_dump_tmp(tmp: &Path) -> std::io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // `O_NOFOLLOW`: open fails with ELOOP if the final path component is a
-        // symlink. The value is platform-specific (Linux `0o400000`, macOS
-        // `0x100`, …); `libc` is not a dependency of this crate, so the constant
-        // is resolved per-target below.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        const O_NOFOLLOW: i32 = 0o400000;
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "dragonfly",
-            target_os = "openbsd",
-            target_os = "netbsd"
-        ))]
-        const O_NOFOLLOW: i32 = 0x0100;
-        // Fallback for other Unix targets: 0 leaves behavior identical to a
-        // plain create rather than risk a wrong flag value.
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "dragonfly",
-            target_os = "openbsd",
-            target_os = "netbsd"
-        )))]
-        const O_NOFOLLOW: i32 = 0;
-
+        // `O_NOFOLLOW`: the open fails with `ELOOP` if the final path component
+        // is a symlink. The flag value is arch-specific (e.g. `0x20000` on
+        // x86_64 but `0x8000` on aarch64), so we take it from `libc`, which the
+        // toolchain resolves correctly per target. A hand-maintained constant
+        // hardcoded the x86_64 value and silently disabled the guard on ARM64
+        // Linux (CWE-59 / CWE-367; part of the #296 / #354 / #414 hardening).
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .custom_flags(O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(tmp)
     }
     #[cfg(not(unix))]
