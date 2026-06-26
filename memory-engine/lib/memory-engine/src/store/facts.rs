@@ -66,20 +66,33 @@ fn content_hash(content: &str) -> String {
     hash.to_hex()[..32].to_string()
 }
 
-/// Collect the set of active fact ids (`SELECT id FROM facts WHERE t_expired IS
-/// NULL`).
+/// Collect the set of **existing** fact ids (`SELECT id FROM facts`, any
+/// `t_expired`).
 ///
 /// A free function — it needs neither a configured `embed_dim` nor a full
 /// [`FactStore`], only the id column — used by snapshot referential validation
-/// (#257) to reject any edge endpoint that does not reference a live fact (a
-/// phantom-node injection). The returned set is exactly the population whose
-/// edges the `SQLite` foreign key would honor on a full `load_from_db` rebuild.
+/// (#257) to reject any edge endpoint that does not reference a fact that exists
+/// (a phantom-node injection).
+///
+/// This set is *exactly* the population whose edges the `SQLite` foreign key
+/// (`edges.source_fact_id/target_fact_id REFERENCES facts(id)`) honors on a full
+/// [`load_from_db`](crate::graph::MemoryGraph::load_from_db) rebuild — and that
+/// is *all* facts, not just active ones. `load_from_db` loads every *active edge*
+/// (`edges.t_expired IS NULL`), and an active edge can legitimately point at an
+/// *expired* fact: the conflict-resolution `contradicts` edge `new → old` is
+/// created active in the same transaction the `old` fact is expired, and the
+/// dream-cycle `supersedes` edge `synthetic → src` stays active while every
+/// source `src` is expired. The FK guarantees the endpoint fact *exists*, never
+/// that it is active (`SQLite` FKs cannot be conditional on `t_expired`).
+/// Restricting this set to active-only would therefore be *stricter* than
+/// `load_from_db`'s trust boundary and would falsely reject a snapshot that
+/// faithfully mirrors a real rebuild.
 ///
 /// # Errors
 ///
 /// Returns `MemoryError::Database` on query failure.
-pub fn active_fact_ids(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM facts WHERE t_expired IS NULL")?;
+pub fn existing_fact_ids(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM facts")?;
     let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
     let mut ids = std::collections::HashSet::new();
     for row in rows {
@@ -1426,6 +1439,40 @@ mod tests {
             scope_id: 1,
             is_pinned: false,
         }
+    }
+
+    /// #257 regression: the snapshot referential-validation set MUST include
+    /// **expired** facts, because that is exactly the fact population
+    /// `MemoryGraph::load_from_db` trusts. `load_from_db` loads every *active*
+    /// edge (`edges.t_expired IS NULL`), and an active edge can legitimately point
+    /// at an *expired* fact — e.g. the conflict-resolution `contradicts` edge
+    /// `new → old` (the old fact is expired in the same transaction the edge is
+    /// created) and the dream-cycle `supersedes` edge `synthetic → src` (every
+    /// source is expired). The `edges.source_fact_id/target_fact_id REFERENCES
+    /// facts(id)` foreign key guarantees the endpoint fact *exists*, not that it is
+    /// active (`SQLite` FKs cannot be conditional on `t_expired`). Validating against
+    /// the active-only set would therefore be *stricter* than `load_from_db` and
+    /// would falsely reject a snapshot that faithfully mirrors a real rebuild.
+    #[test]
+    fn existing_fact_ids_includes_expired_facts() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        let active_id = store.insert(&make_fact("active", vec![0.1; DIM])).unwrap();
+        let expired_id = store.insert(&make_fact("expired", vec![0.2; DIM])).unwrap();
+        store.expire(expired_id, Utc::now()).unwrap();
+
+        let ids = existing_fact_ids(&conn).unwrap();
+        assert!(
+            ids.contains(&active_id),
+            "the active fact must be in the validation set"
+        );
+        assert!(
+            ids.contains(&expired_id),
+            "the EXPIRED fact must also be in the validation set: load_from_db's \
+             active edges can reference it, so excluding it would falsely reject a \
+             legitimate snapshot edge (the #257 over-strict regression)"
+        );
     }
 
     /// #659: `count_active` counts exactly the rows `list_active` would return

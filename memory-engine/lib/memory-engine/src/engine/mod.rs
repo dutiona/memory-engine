@@ -362,18 +362,23 @@ impl MemoryEngine {
 
         let conn = pool.read()?;
         let current_fp = snapshot::read_fingerprint(&conn)?;
-        // Referential-validation set (#257): the live set of active fact ids, used
-        // below to reject any snapshot edge whose endpoint references a fact that
-        // does not exist (a phantom-node injection). Queried once from the same
-        // authoritative connection that validated the fingerprint, so it reflects
-        // exactly the facts `load_from_db` would honor via the SQLite foreign key.
-        let active_fact_ids = crate::store::facts::active_fact_ids(&conn)?;
-        drop(conn);
 
         if header.fingerprint != current_fp {
             tracing::info!("snapshot stale (fingerprint mismatch), falling back to full rebuild");
             return Ok(None);
         }
+
+        // Referential-validation set (#257): the live set of *existing* fact ids
+        // (any `t_expired`), used below to reject any snapshot edge whose endpoint
+        // references a fact that does not exist (a phantom-node injection). This is
+        // the same population `load_from_db` honors via the SQLite foreign key — all
+        // facts, not active-only: an active edge can legitimately point at an expired
+        // fact (see `existing_fact_ids` / `MemoryGraph::from_snapshot`). Queried once
+        // from the authoritative connection that validated the fingerprint, *after*
+        // the fingerprint check (perf #499): on the common stale-snapshot path the
+        // early return above skips this full-table scan entirely.
+        let existing_fact_ids = crate::store::facts::existing_fact_ids(&conn)?;
+        drop(conn);
 
         // Defense in depth (#412): the fingerprint now matches the live DB, so the
         // sidecar's edge list MUST hold exactly `active_edge_count` edges. A
@@ -396,7 +401,7 @@ impl MemoryEngine {
         // Bound + revalidate the snapshot edge set (#412, #499). On any violation,
         // discard the (rebuildable) sidecar and fall back to a full rebuild from
         // the authoritative DB rather than failing the open.
-        let graph = match MemoryGraph::from_snapshot(&payload.graph, &active_fact_ids) {
+        let graph = match MemoryGraph::from_snapshot(&payload.graph, &existing_fact_ids) {
             Ok(g) => g,
             Err(e) => {
                 tracing::warn!(
