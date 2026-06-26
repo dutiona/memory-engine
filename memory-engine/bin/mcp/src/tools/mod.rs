@@ -58,10 +58,12 @@ pub const MAX_BOOTSTRAP_BYTES: usize = 50 * 1024 * 1024;
 /// use memory_engine_mcp::tools;
 ///
 /// let defs = tools::all_tool_definitions();
+/// assert!(!defs.is_empty());
 /// // Every tool is namespaced under the `memory_` prefix.
 /// assert!(defs.iter().all(|t| t.name.starts_with("memory_")));
-/// // The full catalog is exposed (P0 + P1 + P2 + Phase-5a + cognitive + activity).
-/// assert_eq!(defs.len(), 26);
+/// // The exact count and name-uniqueness are pinned in the integration tests,
+/// // not here — a doc comment should illustrate the contract, not hardcode a
+/// // number that drifts every time a tool is added.
 /// ```
 #[must_use]
 #[allow(

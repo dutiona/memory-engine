@@ -571,4 +571,54 @@ mod tests {
             }
         }
     }
+
+    // --- FactExplanation shaping tests ------------------------------------
+
+    fn make_test_explanation(state: memory_engine::inspect_types::FactState) -> FactExplanation {
+        use memory_engine::inspect_types::{FactProvenance, GraphContext};
+        FactExplanation {
+            fact_id: 42,
+            state,
+            provenance: FactProvenance {
+                source_event_id: Some(10),
+                source_event: None,
+                base_importance: 0.8,
+                importance_score: 0.85,
+                is_pinned: false,
+                access_count: 5,
+            },
+            graph_context: GraphContext {
+                degree: 2,
+                neighbor_ids: vec![1, 2],
+                component_size: 4,
+            },
+            scope_path: "project/test".into(),
+        }
+    }
+
+    /// Regression guard for the serde-vs-`Debug` serialization of a
+    /// **data-carrying** `FactState` variant. All other shaping tests use unit
+    /// variants (`Active`/`Fts`/`Created`) where `format!("{:?}", _)` and serde
+    /// coincide; this is the one that diverges. The expected shape is the
+    /// externally-tagged serde encoding of
+    /// `FactState::Expired { reason: ExpiredReason::Forgotten }` —
+    /// `{"Expired": {"reason": "Forgotten"}}`, where the inner unit variant
+    /// `ExpiredReason::Forgotten` serializes to the string `"Forgotten"`.
+    /// Reverting `to_value` to `format!("{:?}", _)` would instead yield the
+    /// unstable Debug string `"Expired { reason: Forgotten }"`, failing this test.
+    #[test]
+    fn shape_explanation_serializes_data_carrying_state_via_serde() {
+        use memory_engine::inspect_types::{ExpiredReason, FactState};
+        let explanation = make_test_explanation(FactState::Expired {
+            reason: ExpiredReason::Forgotten,
+        });
+        let shaped = shape_explanation(&explanation, Depth::Sparse).unwrap();
+        // Externally-tagged enum: variant name is the key, struct fields nest under it.
+        assert_eq!(shaped["state"]["Expired"]["reason"], json!("Forgotten"));
+        // A `format!("{:?}", _)` regression would make `state` a plain string,
+        // so the structured lookup above would be `Value::Null` and the assert
+        // would fail. Pin the structural shape explicitly too.
+        assert!(shaped["state"].is_object());
+        assert!(!shaped["state"].is_string());
+    }
 }
