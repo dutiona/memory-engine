@@ -609,6 +609,27 @@ mod tests {
         make_fact_with(content, embedding, FactType::Episodic)
     }
 
+    /// Like [`make_fact`], but lets a fixture carry explicit valid-time bounds.
+    ///
+    /// `make_fact`/`make_fact_with` hardcode `t_valid: None, t_invalid: None`, so
+    /// the temporal post-filter in [`assemble_results`] is never exercised by the
+    /// other unit tests (the `Utc::now()` cutoff never excludes a `None`-bounded
+    /// fact). This override is the seam the bi-temporal tests need to drive a fact
+    /// that is future-dated (`t_valid > cutoff`) or already invalidated
+    /// (`t_invalid <= cutoff`).
+    fn make_fact_temporal(
+        content: &str,
+        embedding: Vec<f32>,
+        t_valid: Option<DateTime<Utc>>,
+        t_invalid: Option<DateTime<Utc>>,
+    ) -> NewFact {
+        NewFact {
+            t_valid,
+            t_invalid,
+            ..make_fact(content, embedding)
+        }
+    }
+
     /// Stage C parity oracle: the async `port_hybrid_search` (driving the
     /// channels through `SqliteBackend`) must be **bit-identical** to the sync
     /// `hybrid_search` (raw `&Connection` + `BruteForce`) on the same data,
@@ -766,6 +787,48 @@ mod tests {
         assert_eq!(merged[0].0, 1);
     }
 
+    // --- rrf_merge edge cases (#478) ---
+
+    #[test]
+    fn rrf_merge_both_empty() {
+        // Nothing in either list → empty fusion (no panic, no spurious entry).
+        let fts: Vec<(i64, f64)> = vec![];
+        let vec_results: Vec<(i64, f32)> = vec![];
+        assert_eq!(rrf_merge(&fts, &vec_results, 60), vec![]);
+    }
+
+    #[test]
+    fn rrf_merge_k_zero() {
+        // k=0 is a valid smoothing constant: the denominator is `0 + rank + 1`,
+        // so the rank-0 item scores `1/(0+0+1) = 1.0`. The proptest range starts
+        // at 1, so this boundary is otherwise unexercised.
+        let fts = vec![(1_i64, -1.0_f64)];
+        let vec_results: Vec<(i64, f32)> = vec![];
+        let merged = rrf_merge(&fts, &vec_results, 0);
+        assert_eq!(merged.len(), 1);
+        assert!((merged[0].1 - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rrf_merge_duplicate_ids_within_one_list() {
+        // Documents the accumulator behavior: a duplicate id inside ONE input
+        // list is NOT deduplicated before scoring — `scores.entry(id)` is hit
+        // once per occurrence, so the id's RRF score is the SUM of both ranks'
+        // contributions (an unintended double-count, intentionally captured here
+        // so a future dedup change is a visible, reviewed behavior break). The
+        // HashMap still collapses the id to a single output row.
+        let fts = vec![(1_i64, -1.0_f64), (1, -2.0)];
+        let vec_results: Vec<(i64, f32)> = vec![];
+        let merged = rrf_merge(&fts, &vec_results, 60);
+        // Single output row (deduped by the HashMap)...
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].0, 1);
+        // ...but its score is rank-0 + rank-1 contributions summed:
+        // 1/(60+0+1) + 1/(60+1+1) = 1/61 + 1/62.
+        let expected = 1.0 / 61.0 + 1.0 / 62.0;
+        assert!((merged[0].1 - expected).abs() < 1e-10);
+    }
+
     // --- hybrid_search integration tests ---
 
     #[test]
@@ -877,6 +940,206 @@ mod tests {
         assert_eq!(results[0].fact.fact_type, FactType::Semantic);
     }
 
+    // --- bi-temporal post-filter tests (#325) ---
+    //
+    // The `t_valid`/`t_invalid` post-filter in `assemble_results` (the only place
+    // `hybrid_search` enforces valid-time semantics) is otherwise never exercised
+    // by the unit tests: every other fixture is `t_valid: None, t_invalid: None`,
+    // so the `Utc::now()` cutoff never excludes anything. `make_fact_temporal`
+    // supplies the explicit bounds these three branches need.
+
+    #[test]
+    fn hybrid_search_excludes_future_t_valid() {
+        // A fact whose valid-time starts in the future (`t_valid > cutoff`) is a
+        // scheduled/not-yet-true fact: it must NOT surface in a regular query
+        // (valid_at = None → cutoff = now).
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let future = Utc::now() + chrono::Duration::hours(1);
+        store
+            .insert(&make_fact("present rust fact", vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        store
+            .insert(&make_fact_temporal(
+                "future rust fact",
+                vec![0.9, 0.1, 0.0, 0.0],
+                Some(future),
+                None,
+            ))
+            .unwrap();
+
+        let query = SearchQuery::new(SearchMode::Fts, 10).text("rust");
+
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        // The future-dated fact is filtered out; only the present one survives.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "present rust fact");
+    }
+
+    #[test]
+    fn hybrid_search_excludes_past_t_invalid() {
+        // A fact invalidated in the past (`t_invalid <= cutoff`) is no longer
+        // true at query time and must be excluded.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let past = Utc::now() - chrono::Duration::hours(1);
+        store
+            .insert(&make_fact("current rust fact", vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        store
+            .insert(&make_fact_temporal(
+                "stale rust fact",
+                vec![0.9, 0.1, 0.0, 0.0],
+                None,
+                Some(past),
+            ))
+            .unwrap();
+
+        let query = SearchQuery::new(SearchMode::Fts, 10).text("rust");
+
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "current rust fact");
+    }
+
+    #[test]
+    fn hybrid_search_valid_at_time_travel() {
+        // Time-travel: an explicit `valid_at` in the future moves the cutoff so a
+        // future-dated fact (`t_valid <= valid_at`) becomes visible, while the
+        // same fact stays invisible to a now-cutoff query (proved by the
+        // `excludes_future_t_valid` test above).
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let future_valid = Utc::now() + chrono::Duration::hours(1);
+        let travel_to = future_valid + chrono::Duration::seconds(1);
+        store
+            .insert(&make_fact_temporal(
+                "scheduled rust fact",
+                vec![1.0, 0.0, 0.0, 0.0],
+                Some(future_valid),
+                None,
+            ))
+            .unwrap();
+
+        let query = SearchQuery::new(SearchMode::Fts, 10)
+            .text("rust")
+            .valid_at(travel_to);
+
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        // With the cutoff advanced past `t_valid`, the future fact is now visible.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "scheduled rust fact");
+    }
+
+    #[test]
+    fn hybrid_search_present_survives_overfetch_attrition() {
+        // Overfetch boundary: the source queries widen to `overfetch =
+        // effective_target * 3` candidates, and the temporal post-filter runs
+        // *after* that widening. Seed many more than `3 * limit` future/stale
+        // facts (all post-filter-excluded) plus one present (valid) fact; the
+        // present fact must still surface. This pins that the post-filter and
+        // the overfetch widening interact correctly when nearly every fetched
+        // candidate is filtered out — the survivor is not lost to attrition.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let future = Utc::now() + chrono::Duration::hours(1);
+        let past = Utc::now() - chrono::Duration::hours(1);
+
+        // limit = 3 ⇒ overfetch = 9; seed 20 excluded candidates (> 3 * limit)
+        // so the post-filter would empty the pool without the present fact.
+        for i in 0..10 {
+            store
+                .insert(&make_fact_temporal(
+                    &format!("future rust fact {i}"),
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    Some(future),
+                    None,
+                ))
+                .unwrap();
+            store
+                .insert(&make_fact_temporal(
+                    &format!("stale rust fact {i}"),
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    None,
+                    Some(past),
+                ))
+                .unwrap();
+        }
+        store
+            .insert(&make_fact("present rust fact", vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+
+        let query = SearchQuery::new(SearchMode::Fts, 3).text("rust");
+
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        // Every future/stale candidate is filtered out; only the present one survives.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "present rust fact");
+    }
+
+    // --- rerank_depth widening tests (#480) ---
+    //
+    // Invariant: `effective_limit = rerank_depth.unwrap_or(limit).max(limit)` —
+    // the candidate pool can only widen, never shrink. The existing coverage is a
+    // full-engine test; these drive the invariant directly through `hybrid_search`.
+
+    #[test]
+    fn rerank_depth_smaller_than_limit_clamped_to_limit() {
+        // rerank_depth (1) < limit (3): the `.max(limit)` clamps the effective
+        // limit back up to `limit`, so the result count is NOT shrunk to 1.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        for i in 0..5 {
+            store
+                .insert(&make_fact(
+                    &format!("rust fact number {i}"),
+                    vec![1.0, 0.0, 0.0, 0.0],
+                ))
+                .unwrap();
+        }
+
+        let query = SearchQuery::new(SearchMode::Fts, 3)
+            .text("rust")
+            .rerank_depth(1);
+
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        // Clamped UP to limit (3), not shrunk to rerank_depth (1).
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn rerank_depth_larger_than_limit_widens_pool() {
+        // rerank_depth (9) > limit (3): the effective limit widens to 9, so up to
+        // 9 candidates pass the assemble truncation (here 5 distinct facts match).
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        for i in 0..5 {
+            store
+                .insert(&make_fact(
+                    &format!("rust fact number {i}"),
+                    vec![1.0, 0.0, 0.0, 0.0],
+                ))
+                .unwrap();
+        }
+
+        // Baseline: limit=3, no rerank_depth → truncated to 3.
+        let base_query = SearchQuery::new(SearchMode::Fts, 3).text("rust");
+        let (base_results, _) = hybrid_search(&conn, &base_query, DIM, None, &BruteForce).unwrap();
+        assert_eq!(base_results.len(), 3, "baseline truncates to limit");
+
+        // Widened: limit=3, rerank_depth=9 → effective limit 9 admits all 5.
+        let widened_query = SearchQuery::new(SearchMode::Fts, 3)
+            .text("rust")
+            .rerank_depth(9);
+        let (widened_results, _) =
+            hybrid_search(&conn, &widened_query, DIM, None, &BruteForce).unwrap();
+        assert_eq!(
+            widened_results.len(),
+            5,
+            "rerank_depth widens the candidate pool above limit before truncation"
+        );
+    }
+
     mod proptest_rrf {
         use super::*;
         use proptest::prelude::*;
@@ -894,7 +1157,7 @@ mod tests {
             fn all_input_ids_appear_in_output(
                 fts in fts_list(32),
                 vec_results in vec_list(32),
-                k in 1..120u32,
+                k in 0..120u32,
             ) {
                 let merged = rrf_merge(&fts, &vec_results, k);
                 let merged_ids: std::collections::HashSet<i64> =
@@ -913,7 +1176,7 @@ mod tests {
             fn descending_order(
                 fts in fts_list(16),
                 vec_results in vec_list(16),
-                k in 1..120u32,
+                k in 0..120u32,
             ) {
                 let merged = rrf_merge(&fts, &vec_results, k);
                 for window in merged.windows(2) {
@@ -926,7 +1189,7 @@ mod tests {
             fn scores_are_positive(
                 fts in fts_list(16),
                 vec_results in vec_list(16),
-                k in 1..120u32,
+                k in 0..120u32,
             ) {
                 let merged = rrf_merge(&fts, &vec_results, k);
                 for &(id, score) in &merged {
