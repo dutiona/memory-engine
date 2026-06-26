@@ -181,17 +181,18 @@ pub fn fuzz_fts_query(query: &str) {
 
     const DIM: usize = 4;
 
-    // A panic here would be an environment failure (out of memory etc.), not a
-    // finding about the query path, so bail quietly instead of aborting.
-    let Ok(conn) = open_memory() else { return };
-    if init_schema(&conn).is_err() {
-        return;
-    }
+    // These are fuzzer-setup invariants, not the fuzzed input: a failure here is a
+    // broken fuzzing environment (out of memory, missing FTS5 build, etc.), not a
+    // finding about the query path. Panic loudly so a broken env halts the fuzzer
+    // instead of silently running empty iterations and masking a dead test.
+    let conn = open_memory().expect("fuzzer DB setup failed: open_memory");
+    init_schema(&conn).expect("fuzzer DB setup failed: init_schema");
 
     let store = FactStore::new(&conn, DIM);
-    // Seed a couple of rows so the FTS5 index is non-empty: an empty index can
-    // short-circuit before the MATCH expression is fully evaluated, hiding
-    // parser-level panics in the query string.
+    // Seed a couple of rows so the FTS5 index is non-empty: seeding a non-empty
+    // index exercises the full row-materialisation + BM25 scoring path rather than
+    // an empty-result fast path, so any parser-level panic in the query string is
+    // reachable.
     for content in [
         "Rust systems programming language",
         "Python machine learning",
@@ -213,17 +214,26 @@ pub fn fuzz_fts_query(query: &str) {
             metadata: serde_json::json!({}),
             is_pinned: false,
         };
-        if store.insert(&fact).is_err() {
-            return;
-        }
+        store
+            .insert(&fact)
+            .expect("fuzzer DB setup failed: seed insert");
     }
 
     // Drive the untrusted query through every public MATCH entry point: the
     // active-only search, the filtered variant (with a fact-type + scope
     // filter exercising the extra bind ordering), and the expired-count probe.
-    let _ = fts_search(&conn, query, 10, None, None);
-    let _ = fts_search(&conn, query, 10, Some(&FactType::Episodic), Some(&[1]));
-    let _ = fts_count_expired(&conn, query, None, None);
+    //
+    // The fuzzed property is the *total* contract: every query string — balanced
+    // or malformed — must map to `Ok`, never propagate. FTS5 syntax errors are
+    // caught at `query_map`/`query_row` time and folded into an empty result
+    // (`Ok(vec![])` / `Ok(0)`), so `Err` here would be a real regression of that
+    // guarantee (or a genuine non-FTS5 DB fault) — assert it loudly.
+    fts_search(&conn, query, 10, None, None)
+        .expect("malformed query must map to Ok, not propagate");
+    fts_search(&conn, query, 10, Some(&FactType::Episodic), Some(&[1]))
+        .expect("malformed query must map to Ok, not propagate");
+    fts_count_expired(&conn, query, None, None)
+        .expect("malformed query must map to Ok, not propagate");
 }
 
 #[cfg(test)]
