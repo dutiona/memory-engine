@@ -671,13 +671,23 @@ fn parse_search_mode(s: &str) -> Result<SearchMode, ErrorData> {
     }
 }
 
+/// Parse an MCP `event_type` tool parameter into the core [`EventType`].
+///
+/// Delegates to core's canonical [`EventType::from_str`] (the single source of
+/// truth, #353/#678), so casing is reconciled across surfaces: the JSON schemas
+/// advertise `PascalCase` (`"Interaction"`), but `snake_case` is also accepted.
+///
+/// One MCP-specific narrowing: [`EventType::OutcomeSignal`] is **rejected** here.
+/// It is a system-generated event (emitted by `record_outcome`), not a
+/// user-ingestible type — the `ingest` / `replay` JSON schemas deliberately omit
+/// it. The core parser is complete (it accepts every variant); this boundary gate
+/// preserves the schema contract without re-implementing the variant mapping.
 fn parse_event_type(s: &str) -> Result<EventType, ValidationError> {
-    match s {
-        "Interaction" => Ok(EventType::Interaction),
-        "ToolCall" => Ok(EventType::ToolCall),
-        "MemoryOp" => Ok(EventType::MemoryOp),
-        "SystemEvent" => Ok(EventType::SystemEvent),
-        other => Err(ValidationError::UnknownEventType(other.to_owned())),
+    match s.parse() {
+        Ok(EventType::OutcomeSignal) | Err(_) => {
+            Err(ValidationError::UnknownEventType(s.to_owned()))
+        }
+        Ok(et) => Ok(et),
     }
 }
 
@@ -1736,16 +1746,18 @@ async fn handle_bootstrap_session(
 // Phase 5a: Outcome tracking handlers
 // ---------------------------------------------------------------------------
 
+/// Parse an MCP `outcome` tool parameter into the core [`Outcome`].
+///
+/// Delegates to core's canonical [`Outcome::from_str`] (the single source of
+/// truth, #353/#678), so casing is reconciled across surfaces: the JSON schema
+/// advertises `PascalCase` (`"Positive"`), but lowercase is also accepted.
 fn parse_outcome(s: &str) -> Result<Outcome, ErrorData> {
-    match s {
-        "Positive" => Ok(Outcome::Positive),
-        "Negative" => Ok(Outcome::Negative),
-        "Neutral" => Ok(Outcome::Neutral),
-        other => Err(ErrorData::invalid_params(
-            format!("invalid outcome: {other} (expected Positive, Negative, or Neutral)"),
+    s.parse().map_err(|_| {
+        ErrorData::invalid_params(
+            format!("invalid outcome: {s} (expected Positive, Negative, or Neutral)"),
             None,
-        )),
-    }
+        )
+    })
 }
 
 async fn handle_record_outcome(
@@ -1999,9 +2011,9 @@ async fn handle_get_recent_insights(
 mod tests {
     use super::{
         default_dump_name, default_dump_path, get_usize, parse_consolidate_config, parse_embedding,
-        parse_fact_type, validate_dump_path,
+        parse_event_type, parse_fact_type, parse_outcome, validate_dump_path,
     };
-    use memory_engine::types::FactType;
+    use memory_engine::types::{EventType, FactType, Outcome};
     use serde_json::json;
     use std::collections::HashSet;
 
@@ -2078,6 +2090,69 @@ mod tests {
         // ValidationError is a thiserror enum; the offending token is preserved
         // in its Display string.
         assert!(err.to_string().contains("wisdom"), "{err}");
+    }
+
+    #[test]
+    fn parse_event_type_accepts_schema_pascal_case() {
+        // The JSON schemas advertise these four PascalCase tokens — all must parse.
+        assert_eq!(
+            parse_event_type("Interaction").unwrap(),
+            EventType::Interaction
+        );
+        assert_eq!(parse_event_type("ToolCall").unwrap(), EventType::ToolCall);
+        assert_eq!(parse_event_type("MemoryOp").unwrap(), EventType::MemoryOp);
+        assert_eq!(
+            parse_event_type("SystemEvent").unwrap(),
+            EventType::SystemEvent
+        );
+    }
+
+    #[test]
+    fn parse_event_type_reconciles_snake_case() {
+        // After delegating to core's canonical FromStr, the MCP surface also
+        // accepts the snake_case casing (#353/#678 reconciliation).
+        assert_eq!(parse_event_type("tool_call").unwrap(), EventType::ToolCall);
+        assert_eq!(
+            parse_event_type("interaction").unwrap(),
+            EventType::Interaction
+        );
+    }
+
+    #[test]
+    fn parse_event_type_rejects_outcome_signal() {
+        // OutcomeSignal is a system-generated event, deliberately omitted from the
+        // ingest/replay JSON schemas. Even though core's FromStr parses it, the MCP
+        // boundary must keep rejecting it (with the token preserved).
+        let err = parse_event_type("OutcomeSignal").unwrap_err();
+        assert!(err.to_string().contains("OutcomeSignal"), "{err}");
+    }
+
+    #[test]
+    fn parse_event_type_rejects_unknown_preserving_token() {
+        let err = parse_event_type("WisdomOp").unwrap_err();
+        assert!(err.to_string().contains("WisdomOp"), "{err}");
+    }
+
+    #[test]
+    fn parse_outcome_accepts_schema_pascal_case() {
+        // The JSON schema advertises PascalCase tokens — these must parse.
+        assert_eq!(parse_outcome("Positive").unwrap(), Outcome::Positive);
+        assert_eq!(parse_outcome("Negative").unwrap(), Outcome::Negative);
+        assert_eq!(parse_outcome("Neutral").unwrap(), Outcome::Neutral);
+    }
+
+    #[test]
+    fn parse_outcome_reconciles_lowercase() {
+        // After delegating to core's canonical FromStr, lowercase also parses.
+        assert_eq!(parse_outcome("positive").unwrap(), Outcome::Positive);
+        assert_eq!(parse_outcome("neutral").unwrap(), Outcome::Neutral);
+    }
+
+    #[test]
+    fn parse_outcome_rejects_unknown_preserving_token() {
+        let err = parse_outcome("mixed").unwrap_err();
+        // ErrorData carries the offending token in its message.
+        assert!(err.message.contains("mixed"), "{}", err.message);
     }
 
     #[test]
