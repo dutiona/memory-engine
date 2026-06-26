@@ -12,7 +12,20 @@ pub const fn level_to_str(level: &ConsolidationLevel) -> &'static str {
     }
 }
 
-fn str_to_level(s: &str) -> rusqlite::Result<ConsolidationLevel> {
+/// Parse a stored `level` string back into a [`ConsolidationLevel`].
+///
+/// This is the single fallible parser for the persisted level encoding produced
+/// by [`level_to_str`]; it is the inverse of that function. Both the summary
+/// row mapper and [`crate::inspect::statistics::compute_statistics`] route
+/// through it so an unrecognised level (a corrupted row, or a new variant that
+/// missed an encoding update) surfaces as an error instead of being silently
+/// dropped from the `by_level` histogram (#337).
+///
+/// # Errors
+///
+/// Returns [`rusqlite::Error::FromSqlConversionFailure`] if `s` is not one of
+/// the encodings produced by [`level_to_str`].
+pub fn str_to_level(s: &str) -> rusqlite::Result<ConsolidationLevel> {
     match s {
         "local" => Ok(ConsolidationLevel::Local),
         "cluster" => Ok(ConsolidationLevel::Cluster),
