@@ -179,7 +179,7 @@ Implementation example:
 
 ```rust
 use memory_engine::traits::Reranker;
-use memory_engine::search::hybrid::SearchResult;
+use memory_engine::search::SearchResult;
 
 struct CrossEncoderReranker {
     client: reqwest::blocking::Client,

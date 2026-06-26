@@ -51,7 +51,7 @@ fn main() -> Result<(), MemoryError> {
     )?;
 
     // Query with hybrid search
-    use memory_engine::search::hybrid::{SearchQuery, SearchMode};
+    use memory_engine::search::{SearchQuery, SearchMode};
     let results = engine.query(&SearchQuery {
         text: Some("ownership data races".into()),
         embedding: Some(embedder.embed("ownership data races")?),
