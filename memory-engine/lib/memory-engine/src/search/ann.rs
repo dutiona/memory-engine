@@ -111,9 +111,18 @@ impl HnswStrategy {
     /// `entries` yields already-deserialized embeddings: each caller is
     /// responsible for materializing its source (DB blob decode, snapshot clone)
     /// before handing the vector over. The kernel enforces `embedding.len() ==
-    /// embed_dim` itself, so a wrong-width entry from *either* source is rejected
-    /// identically (closing the historical divergence where only `from_snapshot`
-    /// checked the dimension).
+    /// embed_dim` itself.
+    ///
+    /// This guard is **only materially load-bearing for the snapshot path**: the
+    /// DB path is already dim-checked upstream — [`build_inner`](Self::build_inner)
+    /// runs each blob through [`deserialize_embedding`], which returns
+    /// `EmbeddingDimension` on a width mismatch and otherwise yields a `Vec<f32>`
+    /// of exactly `embed_dim` elements, so the kernel's check can never fire on a
+    /// DB row (it is redundant defense-in-depth there). [`from_snapshot`](Self::from_snapshot),
+    /// by contrast, clones `entry.embedding` straight through with no prior check,
+    /// so this is the *sole* gate rejecting a wrong-width snapshot entry. Keeping
+    /// the check in the shared kernel means both sources are rejected identically
+    /// without the snapshot path needing its own bespoke guard.
     ///
     /// # Errors
     ///
@@ -177,10 +186,17 @@ impl HnswStrategy {
             Ok((id, blob))
         })?;
 
-        // Decode each blob up front so the shared kernel sees a clean
-        // `(fact_id, Vec<f32>)` stream. Collecting first keeps the error
-        // handling (rusqlite row error, dimension decode) outside the kernel's
-        // infallible iterator contract.
+        // Decode every blob up front into a `Vec<(fact_id, Vec<f32>)>`, then hand
+        // the whole materialized stream to the kernel. This is a deliberate
+        // peak-memory trade: the kernel's iterator is infallible, but row decode
+        // is not (a rusqlite row error or a wrong-width blob from `deserialize_embedding`),
+        // so we keep the fallible `?` outside the kernel's contract. Collecting
+        // first holds all active embeddings resident at once (vs. the old
+        // one-at-a-time streaming insert) — acceptable because a full rebuild is a
+        // rare, operator-driven event and the active set already fits in memory by
+        // construction (the HNSW graph itself holds every vector). The alternative
+        // (a fallible iterator threaded into the kernel) would re-fork the build
+        // paths this refactor unified.
         let mut decoded = Vec::new();
         for row in rows {
             let (fact_id, blob) = row?;
@@ -254,6 +270,21 @@ impl HnswStrategy {
     #[cfg(test)]
     pub(crate) fn tombstone_count(&self) -> usize {
         self.inner.read().tombstones.len()
+    }
+
+    /// Snapshot of the internal id↔hnsw mappings — test-only white-box accessor.
+    ///
+    /// Returns `(index_to_fact.clone(), fact_to_hnsw.clone())`. These are the
+    /// mappings the build kernel fills in lock-step (`index_to_fact[hnsw_id] ==
+    /// fact_id` and `fact_to_hnsw[fact_id] == hnsw_id`); comparing them across two
+    /// independently-built indices proves a rebuild reproduced the *exact* graph
+    /// membership and slot assignment — a dropped, duplicated, or mis-mapped entry
+    /// shows up here even when a small-N black-box `search` cannot distinguish the
+    /// topologies (it re-scores candidates against the live DB).
+    #[cfg(test)]
+    pub(crate) fn mapping_snapshot(&self) -> (Vec<i64>, HashMap<i64, usize>) {
+        let inner = self.inner.read();
+        (inner.index_to_fact.clone(), inner.fact_to_hnsw.clone())
     }
 
     /// Snapshot active embeddings for fast cold-start.
@@ -1317,14 +1348,23 @@ mod tests {
             // #499 (`search/testing-hnsw-snapshot-roundtrip`): the snapshot path is a
             // cold-start optimization — `to_snapshot` dumps active embeddings, and
             // `from_snapshot` rebuilds a fresh compact index from them with NO DB I/O.
-            // This proves the round-trip is correct end-to-end: the rebuilt index
-            // returns the SAME top-k for a probe query as the original `build_from_db`
-            // index. Both build paths now share `build_hnsw_inner`, so identical
-            // topology (same seed/params + insert order) guarantees identical results.
+            //
+            // WHITE-BOX guard (mirrors the #624 `rebuild_from_db` test above). A
+            // black-box query CANNOT validate the round-trip at this corpus size:
+            // `search` re-scores every candidate against the live DB embedding and
+            // falls back to a brute-force DB scan, so the top-k it returns is
+            // topology-independent — a reviewer proved that building the snapshot
+            // index on all-zero vectors OR in reversed insertion order still passes a
+            // pure-query assertion. The load-bearing observable is the internal
+            // id↔hnsw mapping the build kernel fills: a dropped, duplicated, or
+            // mis-mapped entry would diverge here. So we assert the rebuilt index'
+            // `index_to_fact` / `fact_to_hnsw` (and tombstone count) reproduce the
+            // original's exactly. The search block below is CORROBORATING only — it
+            // documents end-to-end intent, it is not the guard.
             let (conn, ids) = setup_with_facts();
             let original = HnswStrategy::build_from_db(&conn, DIM).unwrap();
 
-            // Probe the original index for the full top-k ordering.
+            // Probe the original index for the full top-k ordering (corroborating).
             let query = [1.0_f32, 0.0, 0.0, 0.0];
             let before = original.search(&conn, &query, DIM, 3, None, None).unwrap();
             assert_eq!(before.len(), 3, "fixture has 3 active facts");
@@ -1338,14 +1378,37 @@ mod tests {
             );
             let restored = HnswStrategy::from_snapshot(&snap, DIM).unwrap();
 
-            // Search-equivalence: same active count + byte-identical top-k ordering
-            // AND scores. A rebuilt index that lost/reordered entries would diverge
-            // here even though both call `search` against the same live DB rows.
+            // --- White-box: the rebuilt mappings must equal the original's. ---
+            // These depend on the rebuild being correct (right membership, right slot
+            // assignment, no drift) and would catch a dropped/duplicated/mis-mapped
+            // entry that the maskable black-box query cannot.
             assert_eq!(
                 restored.active_count(),
                 original.active_count(),
                 "round-trip must preserve the active set size"
             );
+            assert_eq!(
+                restored.tombstone_count(),
+                original.tombstone_count(),
+                "a fresh snapshot rebuild carries no tombstones (both are 0)"
+            );
+            let (orig_i2f, orig_f2h) = original.mapping_snapshot();
+            let (rest_i2f, rest_f2h) = restored.mapping_snapshot();
+            assert_eq!(
+                rest_i2f, orig_i2f,
+                "round-trip must reproduce index_to_fact exactly (slot order + membership): \
+                 {rest_i2f:?} vs {orig_i2f:?}"
+            );
+            assert_eq!(
+                rest_f2h, orig_f2h,
+                "round-trip must reproduce the fact_to_hnsw id↔slot mapping exactly: \
+                 {rest_f2h:?} vs {orig_f2h:?}"
+            );
+
+            // --- Corroborating (NOT the guard): end-to-end search still returns the
+            // same top-k. See the header comment — at this corpus size `search`
+            // re-scores against the live DB and cannot distinguish topologies, so a
+            // pass here proves nothing about the rebuild on its own. ---
             let after = restored.search(&conn, &query, DIM, 3, None, None).unwrap();
             assert_eq!(
                 after.len(),
