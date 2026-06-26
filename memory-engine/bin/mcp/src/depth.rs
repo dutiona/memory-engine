@@ -2,8 +2,24 @@ use memory_engine::ResumeContext;
 use memory_engine::inspect_types::{FactExplanation, FactHistory};
 use memory_engine::search::hybrid::{QueryDiagnostics, SearchResult};
 use memory_engine::types::{Activity, Event, Fact, ProjectContext, SessionCheckpoint};
+use rmcp::model::ErrorData;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// Serialize a value into a [`serde_json::Value`], mapping a serialization
+/// failure to an MCP internal error instead of silently degrading the output.
+///
+/// The shapers below embed enum variants (`MatchType`, `FactState`,
+/// `HistoryEventKind`) into the response JSON. Using `serde_json::to_value`
+/// rather than `format!("{:?}", _)` keeps the wire shape tied to the type's
+/// serde contract (stable across compiler versions, and structurally correct
+/// for data-carrying variants such as `FactState::Expired { reason }`). The
+/// fallible result is propagated to the caller — a serialize error surfaces as
+/// a tool error rather than emitting `null` or an unstable `Debug` string.
+fn to_value<T: Serialize>(value: &T) -> Result<Value, ErrorData> {
+    serde_json::to_value(value)
+        .map_err(|e| ErrorData::internal_error(format!("serialization error: {e}"), None))
+}
 
 /// Tiered retrieval depth for MCP responses.
 ///
@@ -92,31 +108,39 @@ pub fn shape_fact(fact: &Fact, depth: Depth, scope_path: Option<&str>) -> Value 
 }
 
 /// Shape a [`SearchResult`] according to the requested depth.
-#[must_use]
-pub fn shape_search_result(result: &SearchResult, depth: Depth, scope_path: Option<&str>) -> Value {
+///
+/// Fallible: `match_type` is serialized via the type's serde contract (not
+/// `Debug`), so a serialization failure is propagated rather than masked.
+pub fn shape_search_result(
+    result: &SearchResult,
+    depth: Depth,
+    scope_path: Option<&str>,
+) -> Result<Value, ErrorData> {
     let mut shaped = shape_fact(&result.fact, depth, scope_path);
     if let Value::Object(ref mut map) = shaped {
         map.insert("score".to_owned(), json!(result.score));
-        map.insert(
-            "match_type".to_owned(),
-            json!(format!("{:?}", result.match_type)),
-        );
+        map.insert("match_type".to_owned(), to_value(&result.match_type)?);
     }
-    shaped
+    Ok(shaped)
 }
 
 /// Shape a [`FactExplanation`] according to the requested depth.
-#[must_use]
-pub fn shape_explanation(explanation: &FactExplanation, depth: Depth) -> Value {
+///
+/// Fallible: the `state` field (and, at [`Depth::Full`], the whole explanation)
+/// is serialized via the type's serde contract, so a serialization failure is
+/// propagated to the caller rather than masked as `null` or an unstable `Debug`
+/// string. [`FactState`](memory_engine::inspect_types::FactState) is a
+/// data-carrying enum, so `Debug` and serde diverge for non-`Active` variants.
+pub fn shape_explanation(explanation: &FactExplanation, depth: Depth) -> Result<Value, ErrorData> {
     match depth {
-        Depth::Sparse => json!({
+        Depth::Sparse => Ok(json!({
             "fact_id": explanation.fact_id,
-            "state": format!("{:?}", explanation.state),
+            "state": to_value(&explanation.state)?,
             "scope_path": explanation.scope_path,
-        }),
-        Depth::Standard => json!({
+        })),
+        Depth::Standard => Ok(json!({
             "fact_id": explanation.fact_id,
-            "state": explanation.state,
+            "state": to_value(&explanation.state)?,
             "scope_path": explanation.scope_path,
             "provenance": {
                 "source_event_id": explanation.provenance.source_event_id,
@@ -129,18 +153,12 @@ pub fn shape_explanation(explanation: &FactExplanation, depth: Depth) -> Value {
                 "degree": explanation.graph_context.degree,
                 "component_size": explanation.graph_context.component_size,
             },
-        }),
-        Depth::Full => {
-            // Full: serialize the entire explanation including source_event.
-            // On the rare serialization failure (e.g. non-finite float in a
-            // nested field), we log the error and return JSON null rather than
-            // propagating — the MCP call still succeeds with a degraded result,
-            // which is preferable to an unrecoverable tool error for the caller.
-            serde_json::to_value(explanation).unwrap_or_else(|e| {
-                tracing::error!("failed to serialize FactExplanation: {e}");
-                json!(null)
-            })
-        }
+        })),
+        // Full: serialize the entire explanation including source_event. A
+        // serialization failure (e.g. a non-finite float in a nested field) is
+        // propagated as an MCP internal error — surfacing the fault is preferable
+        // to silently emitting `null` for what the caller asked to inspect.
+        Depth::Full => to_value(explanation),
     }
 }
 
@@ -221,28 +239,31 @@ pub fn shape_diagnostics(diagnostics: &QueryDiagnostics, depth: Depth) -> Value 
 }
 
 /// Shape a [`FactHistory`] according to the requested depth.
-#[must_use]
-pub fn shape_fact_history(history: &FactHistory, depth: Depth) -> Value {
+///
+/// Fallible: each timeline entry's `kind` is serialized via the type's serde
+/// contract (not `Debug`), so a serialization failure is propagated rather than
+/// masked.
+pub fn shape_fact_history(history: &FactHistory, depth: Depth) -> Result<Value, ErrorData> {
     match depth {
-        Depth::Sparse => json!({
+        Depth::Sparse => Ok(json!({
             "fact_id": history.fact_id,
             "event_count": history.timeline.len(),
-        }),
+        })),
         Depth::Standard | Depth::Full => {
             let timeline: Vec<Value> = history
                 .timeline
                 .iter()
                 .map(|entry| {
-                    json!({
+                    Ok(json!({
                         "timestamp": entry.timestamp,
-                        "kind": format!("{:?}", entry.kind),
-                    })
+                        "kind": to_value(&entry.kind)?,
+                    }))
                 })
-                .collect();
-            json!({
+                .collect::<Result<_, ErrorData>>()?;
+            Ok(json!({
                 "fact_id": history.fact_id,
                 "timeline": timeline,
-            })
+            }))
         }
     }
 }
@@ -407,10 +428,12 @@ mod tests {
             score: 0.95,
             match_type: MatchType::Fts,
         };
-        let shaped = shape_search_result(&result, Depth::Sparse, None);
+        let shaped = shape_search_result(&result, Depth::Sparse, None).unwrap();
         let obj = shaped.as_object().unwrap();
         assert!(obj.contains_key("score"));
         assert!(obj.contains_key("match_type"));
+        // serde serialization of the unit variant is a plain string, not Debug.
+        assert_eq!(obj["match_type"], "Fts");
     }
 
     #[test]
@@ -501,7 +524,7 @@ mod tests {
     #[test]
     fn shape_fact_history_sparse_only_count() {
         let history = make_test_history();
-        let shaped = shape_fact_history(&history, Depth::Sparse);
+        let shaped = shape_fact_history(&history, Depth::Sparse).unwrap();
         let obj = shaped.as_object().unwrap();
         assert_eq!(obj.len(), 2);
         assert_eq!(obj["fact_id"], 42);
@@ -512,11 +535,12 @@ mod tests {
     #[test]
     fn shape_fact_history_standard_includes_timeline() {
         let history = make_test_history();
-        let shaped = shape_fact_history(&history, Depth::Standard);
+        let shaped = shape_fact_history(&history, Depth::Standard).unwrap();
         let obj = shaped.as_object().unwrap();
         assert_eq!(obj["fact_id"], 42);
         let timeline = obj["timeline"].as_array().unwrap();
         assert_eq!(timeline.len(), 2);
+        // serde serialization of the unit variants is a plain string, not Debug.
         assert_eq!(timeline[0]["kind"], "Created");
         assert_eq!(timeline[1]["kind"], "BecameValid");
     }
@@ -546,5 +570,55 @@ mod tests {
                 proptest::prop_assert!(next > max, "backed off further than necessary");
             }
         }
+    }
+
+    // --- FactExplanation shaping tests ------------------------------------
+
+    fn make_test_explanation(state: memory_engine::inspect_types::FactState) -> FactExplanation {
+        use memory_engine::inspect_types::{FactProvenance, GraphContext};
+        FactExplanation {
+            fact_id: 42,
+            state,
+            provenance: FactProvenance {
+                source_event_id: Some(10),
+                source_event: None,
+                base_importance: 0.8,
+                importance_score: 0.85,
+                is_pinned: false,
+                access_count: 5,
+            },
+            graph_context: GraphContext {
+                degree: 2,
+                neighbor_ids: vec![1, 2],
+                component_size: 4,
+            },
+            scope_path: "project/test".into(),
+        }
+    }
+
+    /// Regression guard for the serde-vs-`Debug` serialization of a
+    /// **data-carrying** `FactState` variant. All other shaping tests use unit
+    /// variants (`Active`/`Fts`/`Created`) where `format!("{:?}", _)` and serde
+    /// coincide; this is the one that diverges. The expected shape is the
+    /// externally-tagged serde encoding of
+    /// `FactState::Expired { reason: ExpiredReason::Forgotten }` —
+    /// `{"Expired": {"reason": "Forgotten"}}`, where the inner unit variant
+    /// `ExpiredReason::Forgotten` serializes to the string `"Forgotten"`.
+    /// Reverting `to_value` to `format!("{:?}", _)` would instead yield the
+    /// unstable Debug string `"Expired { reason: Forgotten }"`, failing this test.
+    #[test]
+    fn shape_explanation_serializes_data_carrying_state_via_serde() {
+        use memory_engine::inspect_types::{ExpiredReason, FactState};
+        let explanation = make_test_explanation(FactState::Expired {
+            reason: ExpiredReason::Forgotten,
+        });
+        let shaped = shape_explanation(&explanation, Depth::Sparse).unwrap();
+        // Externally-tagged enum: variant name is the key, struct fields nest under it.
+        assert_eq!(shaped["state"]["Expired"]["reason"], json!("Forgotten"));
+        // A `format!("{:?}", _)` regression would make `state` a plain string,
+        // so the structured lookup above would be `Value::Null` and the assert
+        // would fail. Pin the structural shape explicitly too.
+        assert!(shaped["state"].is_object());
+        assert!(!shaped["state"].is_string());
     }
 }

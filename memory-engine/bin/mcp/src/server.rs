@@ -31,6 +31,20 @@ pub struct MemoryMcpServer {
 }
 
 impl MemoryMcpServer {
+    /// Construct a server over an already-opened [`MemoryEngine`].
+    ///
+    /// # Activity filter
+    ///
+    /// The activity-stream filter (`memory_record_activity` dedup window plus the
+    /// ignore/promote tool-name patterns) is **hardwired** to the Claude Code
+    /// defaults from [`activity_policy::default_filter_config`] — this constructor
+    /// takes no filter argument. The `filter_config` field is `pub(crate)`, so an
+    /// external consumer that needs a different policy (other tool names, a
+    /// different dedup window) cannot override it today; doing so requires adding a
+    /// constructor parameter or builder. Tracked as a follow-up; in-crate callers
+    /// (e.g. tests) can set the field directly.
+    ///
+    /// [`activity_policy::default_filter_config`]: crate::activity_policy::default_filter_config
     pub fn new(
         engine: Arc<MemoryEngine>,
         embedder: Option<Arc<HttpEmbeddingProvider>>,
