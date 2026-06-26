@@ -295,9 +295,32 @@ mod tests {
     // real `SummaryStore`, so the persisted `level` encoding and the
     // `str_to_level` round-trip are both covered.
 
+    use crate::store::edges::EdgeStore;
     use crate::store::schema::{init_schema, open_memory};
     use crate::store::summaries::SummaryStore;
-    use crate::types::{ConsolidationLevel, NewSummary};
+    use crate::types::{ConsolidationLevel, NewEdge, NewSummary};
+
+    /// Insert a minimal valid `facts` row and return its id. Bi-temporal columns
+    /// (`t_expired`, `t_valid`, `t_invalid`) are bound verbatim so the
+    /// `due`-predicate boundaries can be pinned deterministically.
+    fn insert_raw_fact(
+        conn: &rusqlite::Connection,
+        content: &str,
+        t_expired: Option<&str>,
+        t_valid: Option<&str>,
+        t_invalid: Option<&str>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO facts \
+                (content, content_hash, embedding, fact_type, t_created, t_expired, \
+                 t_valid, t_invalid, importance, access_count, last_accessed, metadata) \
+             VALUES (?1, ?2, X'00000000', 'episodic', '2020-01-01T00:00:00+00:00', \
+                     ?3, ?4, ?5, 0.5, 0, '2020-01-01T00:00:00+00:00', '{}')",
+            rusqlite::params![content, content, t_expired, t_valid, t_invalid],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
 
     fn level_fixture(level: ConsolidationLevel, n: i64) -> NewSummary {
         NewSummary {
@@ -400,6 +423,149 @@ mod tests {
         assert!(
             matches!(err, crate::error::MemoryError::Database(_)),
             "expected a Database error from the unknown level, got: {err:?}"
+        );
+        // Pin the *cause*, not just the variant: the #337 guard must surface the
+        // `str_to_level` failure ("unknown consolidation level: bogus"), so a
+        // future refactor that swallows the parse error into a generic Database
+        // failure (or routes through a different, non-level SQL path) is caught.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown consolidation level"),
+            "error must name the unparseable level as its cause, got: {msg}"
+        );
+    }
+
+    // --- edges conditional-aggregation path (#394) ------------------------
+    //
+    // Every other test leaves the `edges` table empty, so the edges aggregate
+    // (total / active / expired) had zero positive coverage: a tuple-order swap
+    // in the row mapper, or a flipped active/expired predicate, would still pass.
+    // This pins all three counts to *pairwise-distinct* nonzero values
+    // (total=3, active=2, expired=1) — crucially active != expired, so an
+    // active<->expired tuple swap or an IS NULL / IS NOT NULL predicate flip is
+    // observable (it could not be if both were 1). Any such mutation fails at
+    // least one assertion.
+
+    #[test]
+    fn edges_total_active_expired_are_distinct_and_correctly_partitioned() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        // Two facts to satisfy the edges FK constraints.
+        let f1 = insert_raw_fact(&conn, "edge fact 1", None, None, None);
+        let f2 = insert_raw_fact(&conn, "edge fact 2", None, None, None);
+
+        let store = EdgeStore::new(&conn);
+        let active_edge = |rel: &str| NewEdge {
+            source_fact_id: f1,
+            target_fact_id: f2,
+            relation_type: rel.to_owned(),
+            weight: 1.0,
+            t_created: chrono::Utc::now(),
+            t_expired: None,
+            scope_id: 1,
+        };
+        // Two active edges (t_expired IS NULL) ...
+        store.insert(&active_edge("active_a")).unwrap();
+        store.insert(&active_edge("active_b")).unwrap();
+        // ... and one expired edge (t_expired IS NOT NULL).
+        store
+            .insert(&NewEdge {
+                source_fact_id: f2,
+                target_fact_id: f1,
+                relation_type: "expired_rel".into(),
+                weight: 1.0,
+                t_created: chrono::Utc::now(),
+                t_expired: Some(chrono::Utc::now()),
+                scope_id: 1,
+            })
+            .unwrap();
+
+        let stats = super::compute_statistics(&conn, None).unwrap();
+
+        // Pairwise-distinct values defeat a tuple-order swap (active<->expired)
+        // in the row mapper and a flipped IS NULL / IS NOT NULL predicate: each
+        // count is the only one that holds its value.
+        assert_eq!(stats.edges.total, 3, "all three edges counted");
+        assert_eq!(stats.edges.active, 2, "exactly the t_expired IS NULL edges");
+        assert_eq!(
+            stats.edges.expired, 1,
+            "exactly the t_expired IS NOT NULL edge"
+        );
+        assert_eq!(
+            stats.edges.active + stats.edges.expired,
+            stats.edges.total,
+            "active + expired partitions total"
+        );
+    }
+
+    // --- facts `due` predicate (#394) -------------------------------------
+    //
+    // `due` is the most complex refactored predicate (the only one binding ?1
+    // and reading the t_valid/t_invalid window). Until now it was only ever
+    // observed as 0, so the whole window logic was unverified. This pins every
+    // boundary in one statistics call. Crucially, TWO facts are due while only
+    // ONE has a future t_valid: that asymmetry makes the `t_valid <= ?1`
+    // comparison observable — flipping it to `>=` would count the single future
+    // fact (1) instead of the two past ones (2), so the count itself changes,
+    // not merely *which* rows match.
+
+    #[test]
+    fn due_predicate_counts_only_facts_in_the_valid_window() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        // Due (1): active, t_valid in the past, t_invalid NULL (open-ended window).
+        insert_raw_fact(
+            &conn,
+            "due now",
+            None,
+            Some("2000-01-01T00:00:00+00:00"),
+            None,
+        );
+        // Due (2): active, t_valid in the past, t_invalid in the future (still in
+        // window). A second due fact so the due count (2) differs from the count
+        // of future-t_valid facts (1) — pins the direction of the `<= ?1` bound.
+        insert_raw_fact(
+            &conn,
+            "due, closes later",
+            None,
+            Some("2000-01-01T00:00:00+00:00"),
+            Some("2999-01-01T00:00:00+00:00"),
+        );
+        // Not due: t_valid in the far future (window not yet open).
+        insert_raw_fact(
+            &conn,
+            "future valid",
+            None,
+            Some("2999-01-01T00:00:00+00:00"),
+            None,
+        );
+        // Not due: invalidated in the past (window already closed).
+        insert_raw_fact(
+            &conn,
+            "invalidated",
+            None,
+            Some("2000-01-01T00:00:00+00:00"),
+            Some("2001-01-01T00:00:00+00:00"),
+        );
+        // Not due: in-window by time but expired (soft-deleted facts never due).
+        insert_raw_fact(
+            &conn,
+            "expired but in window",
+            Some("2010-01-01T00:00:00+00:00"),
+            Some("2000-01-01T00:00:00+00:00"),
+            None,
+        );
+        // Not due: no t_valid at all (the predicate requires t_valid IS NOT NULL).
+        insert_raw_fact(&conn, "no valid time", None, None, None);
+
+        let stats = super::compute_statistics(&conn, None).unwrap();
+
+        assert_eq!(stats.facts.total, 6);
+        assert_eq!(
+            stats.facts.due, 2,
+            "exactly the two active, past-t_valid, non-invalidated facts are due"
         );
     }
 }
