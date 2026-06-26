@@ -5,6 +5,8 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use serde::Serialize;
+use serde::Serializer as _;
+use serde::ser::SerializeMap as _;
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::inspect::types::{EmbeddingSpaceSnapshot, FactVectorSnapshot};
@@ -18,10 +20,22 @@ use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
 
 /// Build a sibling temporary path for atomic write-then-rename.
-fn tmp_path(path: &Path) -> std::path::PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Internal`] if `path` has no final component — i.e.
+/// `Path::file_name()` is `None`, which happens for the root `/`, `..`, and `.`
+/// (a trailing slash is normalized away, so `/var/data/` still reports `data`).
+/// Falling back to an empty file name in that case would silently produce a
+/// `.tmp` sibling in the *parent* directory rather than next to the intended
+/// target, breaking the atomic write-then-rename invariant.
+fn tmp_path(path: &Path) -> Result<std::path::PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        MemoryError::Internal(format!("dump path has no file name: {}", path.display()))
+    })?;
+    let mut name = name.to_os_string();
     name.push(".tmp");
-    path.with_file_name(name)
+    Ok(path.with_file_name(name))
 }
 
 /// Create (or truncate) the dump's temporary write target, refusing to follow a
@@ -124,41 +138,9 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    // Scalar header fields.
-    //
-    // INVARIANT: `embed_dim` MUST stay among these leading scalar fields, before
-    // the streamed collections below. `memory-engine-cli`'s `import` peeks it from
-    // the head of the snapshot under a small byte cap (`peek_embed_dim_from_reader`)
-    // to auto-detect the dimension; moving `embed_dim` after `facts`/`edges`/… would
-    // push it past that cap and silently break auto-detection on large snapshots.
-    write!(
-        writer,
-        r#"{{"schema_version":{schema_version},"storage_epoch":{storage_epoch},"embed_dim":{embed_dim}"#
-    )?;
-
-    // Stream each collection row-by-row
-
-    write!(writer, r#","facts":"#)?;
-    stream_for_each(writer, |cb| FactStore::new(conn, embed_dim).for_each(cb))?;
-
-    write!(writer, r#","edges":"#)?;
-    stream_for_each(writer, |cb| EdgeStore::new(conn).for_each(cb))?;
-
-    write!(writer, r#","summaries":"#)?;
-    stream_for_each(writer, |cb| SummaryStore::new(conn, embed_dim).for_each(cb))?;
-
-    write!(writer, r#","scopes":"#)?;
-    stream_for_each(writer, |cb| ScopeStore::new(conn).for_each(cb))?;
-
-    write!(writer, r#","events":"#)?;
-    stream_for_each(writer, |cb| EventStore::new(conn, &registry).for_each(cb))?;
-
-    write!(writer, r#","lineage":"#)?;
-    stream_for_each(writer, |cb| LineageStore::new(conn).for_each(cb))?;
-
     // Embedding-space registry (#622): the identity left the `config` table for its own
     // table, so dump it explicitly or a restore would come up with no identity. Always
-    // small (one active row today).
+    // small (one active row today), so materialize it directly.
     let spaces: Vec<EmbeddingSpaceSnapshot> = crate::store::embedding_spaces::list_spaces(conn)?
         .into_iter()
         .map(|s| EmbeddingSpaceSnapshot {
@@ -167,57 +149,236 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
             fingerprint: s.fingerprint,
         })
         .collect();
-    write!(writer, r#","embedding_spaces":"#)?;
-    serde_json::to_writer(&mut *writer, &spaces)?;
 
-    // fact_vectors (#623): the non-active spaces' per-fact vectors (a populating
-    // space mid-reconstruction, or a deprecated space retained for rollback).
-    // Streamed row-by-row — a deprecated space holds one vector per fact, so this
-    // can be O(N). The active vectors are already in `facts[].embedding`.
-    write!(writer, r#","fact_vectors":"#)?;
-    stream_for_each(writer, |mut cb| {
-        crate::store::fact_vectors::for_each(conn, embed_dim, |fact_id, space_id, embedding| {
-            cb(FactVectorSnapshot {
-                fact_id,
-                space_id,
-                embedding,
-            })
-        })
-    })?;
-
-    // Config is always small — serialize directly.
+    // Config is always small — materialize directly.
     let config = list_config(conn)?;
-    write!(writer, r#","config":"#)?;
-    serde_json::to_writer(&mut *writer, &config)?;
 
-    write!(writer, "}}")?;
+    // Serialize the whole snapshot object through serde's `SerializeMap` rather
+    // than hand-assembling JSON braces and field names. Each `serialize_entry`
+    // key below is a string literal that must mirror an [`EngineSnapshot`] field:
+    // because the keys are literals (not derived from the struct), the compiler
+    // CANNOT catch a rename/reorder that drifts this writer from the struct.
+    // That drift is caught only at RUNTIME by the tests —
+    // `streaming_output_matches_snapshot_schema` (a renamed/dropped key fails the
+    // round-trip deserialize) and `streaming_header_keeps_embed_dim_leading` (a
+    // reordered leading scalar fails the order assertion). Keep both green when
+    // editing the keys or order here.
+    //
+    // The collections are serialized row-by-row via [`SeqStreamer`] adapters, so
+    // peak memory stays O(1) per collection — the same streaming guarantee the
+    // previous `write!`/`stream_for_each` code provided.
+    //
+    // INVARIANT: the three leading scalar entries (`schema_version`,
+    // `storage_epoch`, `embed_dim`) MUST stay first, in this order, before the
+    // streamed collections. `memory-engine-cli`'s `import` peeks `embed_dim` from
+    // the head of the snapshot under a small byte cap (`peek_embed_dim_from_reader`)
+    // to auto-detect the dimension; moving `embed_dim` after `facts`/`edges`/…
+    // would push it past that cap and silently break auto-detection on large
+    // snapshots. A `SerializeMap` refactor must preserve this entry ORDER, not just
+    // the names.
+    //
+    // Shared sink for the *original* store/DB `MemoryError` surfaced by any
+    // `SeqStreamer`. serde's `serialize_entry` can only return the serializer's
+    // own `serde_json::Error`, so a store error reaches us as a serde error that
+    // would otherwise `?`-convert to `MemoryError::Serialization`, dropping its
+    // typed variant (`Database`/`Io`/…). Each `SeqStreamer` stashes the original
+    // here before funneling through serde; on a serde failure we prefer the
+    // stashed cause, recovering the true variant and preserving the `dump_json`
+    // error contract (#258).
+    let store_err: std::cell::RefCell<Option<MemoryError>> = std::cell::RefCell::new(None);
+
+    // Drive the whole serialization in a closure that yields the raw
+    // `serde_json::Error`, so a store error stashed in `store_err` can be
+    // recovered as the true cause instead of the serde wrapper.
+    let mut serialize_all = || -> std::result::Result<(), serde_json::Error> {
+        let mut ser = serde_json::Serializer::new(&mut *writer);
+        let mut map = ser.serialize_map(None)?;
+
+        map.serialize_entry("schema_version", &schema_version)?;
+        map.serialize_entry("storage_epoch", &storage_epoch)?;
+        map.serialize_entry("embed_dim", &embed_dim)?;
+
+        map.serialize_entry(
+            "facts",
+            &SeqStreamer::new(&store_err, |cb| {
+                FactStore::new(conn, embed_dim).for_each(cb)
+            }),
+        )?;
+        map.serialize_entry(
+            "edges",
+            &SeqStreamer::new(&store_err, |cb| EdgeStore::new(conn).for_each(cb)),
+        )?;
+        map.serialize_entry(
+            "summaries",
+            &SeqStreamer::new(&store_err, |cb| {
+                SummaryStore::new(conn, embed_dim).for_each(cb)
+            }),
+        )?;
+        map.serialize_entry(
+            "scopes",
+            &SeqStreamer::new(&store_err, |cb| ScopeStore::new(conn).for_each(cb)),
+        )?;
+        map.serialize_entry(
+            "events",
+            &SeqStreamer::new(&store_err, |cb| {
+                EventStore::new(conn, &registry).for_each(cb)
+            }),
+        )?;
+        map.serialize_entry(
+            "lineage",
+            &SeqStreamer::new(&store_err, |cb| LineageStore::new(conn).for_each(cb)),
+        )?;
+
+        map.serialize_entry("embedding_spaces", &spaces)?;
+
+        // fact_vectors (#623): the non-active spaces' per-fact vectors (a populating
+        // space mid-reconstruction, or a deprecated space retained for rollback).
+        // Streamed row-by-row — a deprecated space holds one vector per fact, so this
+        // can be O(N). The active vectors are already in `facts[].embedding`.
+        map.serialize_entry(
+            "fact_vectors",
+            &SeqStreamer::new(&store_err, |cb| {
+                crate::store::fact_vectors::for_each(
+                    conn,
+                    embed_dim,
+                    |fact_id, space_id, embedding| {
+                        cb(FactVectorSnapshot {
+                            fact_id,
+                            space_id,
+                            embedding,
+                        })
+                    },
+                )
+            }),
+        )?;
+
+        map.serialize_entry("config", &config)?;
+
+        map.end()
+    };
+
+    if let Err(serde_err) = serialize_all() {
+        // Prefer the original typed store/DB error stashed by a `SeqStreamer`
+        // over the serde wrapper, so `Database`/`Io` survive the dump's error
+        // contract instead of collapsing to `MemoryError::Serialization`.
+        return Err(store_err
+            .into_inner()
+            .unwrap_or_else(|| MemoryError::Serialization(serde_err)));
+    }
+
     writer.flush()?;
     Ok(())
 }
 
-/// Write a JSON array by streaming entities through a `for_each`-style callback.
+/// A [`Serialize`] adapter that streams a JSON array out of a `for_each`-style
+/// callback without materializing the whole collection.
 ///
-/// `iterate` must call the provided closure once per entity.  Each entity is
-/// serialized to the writer immediately, then dropped — only one `T` is live
-/// at a time.
-fn stream_for_each<W, T, F>(writer: &mut W, iterate: F) -> Result<()>
+/// `iterate` is invoked once during serialization; it must call the `&mut dyn
+/// FnMut` it is handed exactly once per entity. Each entity is serialized into
+/// the sequence immediately and then dropped, so only one `T` is live at a time
+/// — preserving the O(1)-per-collection peak-memory guarantee of the snapshot
+/// dump. The callback is passed by mutable reference (`&mut dyn FnMut`) rather
+/// than a `Box<dyn FnMut>`, so there is **no per-collection heap allocation**
+/// for the trampoline — the closure lives on the serializer's stack frame.
+///
+/// # Error bridging
+///
+/// The store callbacks fail with [`MemoryError`], whereas serde's sequence API
+/// fails with the serializer's own `S::Error`. The two are reconciled inside
+/// [`Serialize::serialize`]:
+///
+/// * A serde *element* error is stashed locally and re-raised verbatim as the
+///   true cause (the placeholder [`MemoryError`] used to abort `iterate` never
+///   escapes).
+/// * A genuine *store/DB* error ([`MemoryError::Database`], [`MemoryError::Io`],
+///   …) is funneled through [`serde::ser::Error::custom`] so it can abort the
+///   serializer — but the **original typed [`MemoryError`]** is *also* stashed
+///   into the shared `store_err` cell so the caller ([`stream_snapshot`]) can
+///   recover it and return the original variant. Without that recovery the
+///   typed variant would be lost: `serde_json`'s `custom` only retains the
+///   `Display` string, and the resulting `serde_json::Error` would convert to
+///   [`MemoryError::Serialization`] at the `?`, regressing the `dump_json`
+///   error contract.
+struct SeqStreamer<'e, T, F> {
+    iterate: std::cell::RefCell<Option<F>>,
+    /// Shared sink for the *original* store/DB [`MemoryError`], so the typed
+    /// variant survives the round-trip through serde's `custom` error funnel.
+    /// Borrowed from [`stream_snapshot`], which inspects it after serialization.
+    store_err: &'e std::cell::RefCell<Option<MemoryError>>,
+    _item: std::marker::PhantomData<fn(T)>,
+}
+
+impl<'e, T, F> SeqStreamer<'e, T, F>
 where
-    W: Write,
-    T: Serialize,
-    F: FnOnce(Box<dyn FnMut(T) -> Result<()> + '_>) -> Result<()>,
+    F: FnOnce(&mut (dyn FnMut(T) -> Result<()> + '_)) -> Result<()>,
 {
-    writer.write_all(b"[")?;
-    let mut first = true;
-    iterate(Box::new(|item: T| {
-        if !first {
-            writer.write_all(b",")?;
+    fn new(store_err: &'e std::cell::RefCell<Option<MemoryError>>, iterate: F) -> Self {
+        Self {
+            iterate: std::cell::RefCell::new(Some(iterate)),
+            store_err,
+            _item: std::marker::PhantomData,
         }
-        first = false;
-        serde_json::to_writer(&mut *writer, &item)?;
-        Ok(())
-    }))?;
-    writer.write_all(b"]")?;
-    Ok(())
+    }
+}
+
+impl<T, F> Serialize for SeqStreamer<'_, T, F>
+where
+    T: Serialize,
+    F: FnOnce(&mut (dyn FnMut(T) -> Result<()> + '_)) -> Result<()>,
+{
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error as _;
+        use serde::ser::SerializeSeq as _;
+
+        // `serialize` takes `&self`, but the `FnOnce` consumer must be moved out;
+        // serde calls `serialize` exactly once per value, so the `Option` is
+        // always `Some` here.
+        let iterate = self
+            .iterate
+            .borrow_mut()
+            .take()
+            .expect("SeqStreamer::serialize is called exactly once by serde");
+
+        let mut seq = serializer.serialize_seq(None)?;
+
+        // Stash any serde element error so it can be re-raised as the real cause
+        // after `iterate` is aborted via the sentinel `MemoryError` below. The
+        // closure is invoked through a `&mut dyn FnMut` (no `Box`), so the
+        // trampoline incurs no heap allocation.
+        let mut ser_err: Option<S::Error> = None;
+        let mut cb = |item: T| {
+            if let Err(e) = seq.serialize_element(&item) {
+                ser_err = Some(e);
+                // Abort `for_each` early; the value is a placeholder — the real
+                // error is the captured `ser_err`.
+                return Err(MemoryError::Internal(
+                    "snapshot element serialization failed".to_string(),
+                ));
+            }
+            Ok(())
+        };
+        let iter_result = iterate(&mut cb);
+
+        if let Some(e) = ser_err {
+            // A serde serialization error: surface the true serializer error.
+            return Err(e);
+        }
+        // Otherwise a genuine store/DB error (or success). Stash the ORIGINAL
+        // typed `MemoryError` so `stream_snapshot` can recover it (the `custom`
+        // funnel below keeps only its `Display` string and would otherwise
+        // collapse the variant to `MemoryError::Serialization`), then funnel it
+        // through serde's error type to abort the serializer.
+        if let Err(e) = iter_result {
+            let msg = e.to_string();
+            *self.store_err.borrow_mut() = Some(e);
+            return Err(S::Error::custom(msg));
+        }
+
+        seq.end()
+    }
 }
 
 /// Dump engine state to a JSON file.
@@ -231,7 +392,7 @@ where
 /// [`MemoryError::Io`] on filesystem failure, or
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let tmp = tmp_path(path);
+    let tmp = tmp_path(path)?;
     let file = create_dump_tmp(&tmp)?;
     let mut buf = BufWriter::new(file);
     match stream_snapshot(conn, embed_dim, &mut buf) {
@@ -255,7 +416,7 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-gzip")]
 pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let tmp = tmp_path(path);
+    let tmp = tmp_path(path)?;
     let file = create_dump_tmp(&tmp)?;
     let mut encoder =
         flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::default());
@@ -281,7 +442,7 @@ pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-zstd")]
 pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let tmp = tmp_path(path);
+    let tmp = tmp_path(path)?;
     let file = create_dump_tmp(&tmp)?;
     let mut encoder = zstd::Encoder::new(BufWriter::new(file), zstd::DEFAULT_COMPRESSION_LEVEL)?;
     match stream_snapshot(conn, embed_dim, &mut encoder) {
@@ -725,6 +886,79 @@ mod tests {
         );
     }
 
+    /// `tmp_path` must build a `.tmp` sibling next to a normal target path.
+    #[test]
+    fn tmp_path_builds_sibling_for_normal_path() {
+        let p = Path::new("/var/data/dump.json");
+        let tmp = tmp_path(p).unwrap();
+        assert_eq!(tmp, Path::new("/var/data/dump.json.tmp"));
+    }
+
+    /// `tmp_path` must reject paths with no final component instead of silently
+    /// degrading to a `.tmp` file in the parent directory (which would break the
+    /// atomic write-then-rename invariant). The paths that yield
+    /// `Path::file_name() == None` are the root `/`, `..`, and `.` (Rust
+    /// normalizes a trailing slash away, so `/var/data/` still reports `data`).
+    #[test]
+    fn tmp_path_rejects_paths_without_file_name() {
+        for raw in ["/", "..", "."] {
+            let result = tmp_path(Path::new(raw));
+            assert!(
+                matches!(result, Err(MemoryError::Internal(_))),
+                "path {raw:?} with no file name must be rejected, got {result:?}"
+            );
+        }
+    }
+
+    /// Issue #352 invariant: `embed_dim` must appear as a leading scalar in the
+    /// streamed header, before the large streamed collections, so the CLI's
+    /// byte-capped `peek_embed_dim_from_reader` can find it. After the move to a
+    /// `serialize_map`-based writer, assert both that the first three keys are the
+    /// expected scalars in order AND that `embed_dim` sits within a tiny byte cap.
+    #[tokio::test]
+    async fn streaming_header_keeps_embed_dim_leading() {
+        use crate::store::schema::{init_schema, migrate, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+
+        let sv = text
+            .find("\"schema_version\"")
+            .expect("schema_version present");
+        let se = text
+            .find("\"storage_epoch\"")
+            .expect("storage_epoch present");
+        let ed = text.find("\"embed_dim\"").expect("embed_dim present");
+        let facts = text.find("\"facts\"").expect("facts present");
+
+        assert!(
+            sv < se && se < ed && ed < facts,
+            "header field order must be schema_version < storage_epoch < embed_dim < facts; \
+             got sv={sv} se={se} ed={ed} facts={facts} in: {head}",
+            head = &text[..text.len().min(120)]
+        );
+
+        // The object must literally begin with `schema_version`.
+        assert!(
+            text.starts_with(r#"{"schema_version":"#),
+            "snapshot must begin with schema_version, got: {head}",
+            head = &text[..text.len().min(80)]
+        );
+
+        // Defense-in-depth against the CLI byte cap: `embed_dim` must sit well
+        // within the first 64 bytes for an empty DB (its real-world position is
+        // fixed regardless of collection size since it precedes them).
+        assert!(
+            ed < 64,
+            "embed_dim must stay near the head (byte {ed}); the CLI peek caps its scan"
+        );
+    }
+
     /// A symlink resolving to a directory must also be refused — `is_dir()`
     /// follows the link, so the guard is not bypassed by indirection.
     #[cfg(unix)]
@@ -771,7 +1005,7 @@ mod tests {
         // must not be tricked into overwriting.
         let victim = dir.path().join("victim.txt");
         std::fs::write(&victim, b"do not clobber").unwrap();
-        let tmp = tmp_path(&target);
+        let tmp = tmp_path(&target).unwrap();
         std::os::unix::fs::symlink(&victim, &tmp).unwrap();
 
         let result = dump_json(&conn, DIM, &target);
@@ -833,5 +1067,166 @@ mod tests {
             .query_row("SELECT count(*) FROM facts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "fresh in-memory db dumps an empty facts table");
+    }
+
+    /// #623 dump coverage: a non-active embedding space plus its `fact_vectors`
+    /// rows MUST survive the streaming dump. Every other dump test leaves both
+    /// tables empty, so the `embedding_spaces` materialization and the
+    /// `fact_vectors` `SeqStreamer` adapter were never exercised with real rows —
+    /// a writer that silently dropped either section would pass all of them. This
+    /// test populates a `populating` space with per-fact vectors, streams, and
+    /// asserts the snapshot carries both, including the exact `(fact_id, space_id,
+    /// embedding)` payloads.
+    #[tokio::test]
+    async fn streaming_carries_embedding_spaces_and_fact_vectors() {
+        use crate::store::embedding_spaces::{EmbeddingSpace, SpaceStatus, insert_populating};
+        use crate::store::fact_vectors::write_backfill_batch;
+        use crate::store::schema::{init_schema, migrate, open_memory};
+        use crate::store::serialize_embedding;
+        use crate::types::EmbeddingFingerprint;
+
+        const SPACE: &str = "shadow";
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        // Two facts (raw SQL — the FK target for fact_vectors).
+        let emb = serialize_embedding(&[0.1, 0.2, 0.3, 0.4]);
+        let now = chrono::Utc::now().to_rfc3339();
+        for (content, hash) in [("alpha", "h1"), ("beta", "h2")] {
+            conn.execute(
+                "INSERT INTO facts (content, content_hash, embedding, fact_type,
+                        t_created, last_accessed, metadata, scope_id, is_pinned, importance_score)
+                 VALUES (?1, ?2, ?3, 'semantic', ?4, ?4, '{}', 1, 0, 0.0)",
+                rusqlite::params![content, hash, emb, now],
+            )
+            .unwrap();
+        }
+        let a: i64 = conn
+            .query_row("SELECT id FROM facts WHERE content = 'alpha'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let b: i64 = conn
+            .query_row("SELECT id FROM facts WHERE content = 'beta'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        // A NON-active (populating) space, dim = DIM, plus its per-fact vectors.
+        // `facts.embedding` (the active vectors) lives in `facts[].embedding`; this
+        // exercises the additive `fact_vectors` snapshot section specifically.
+        insert_populating(
+            &conn,
+            &EmbeddingSpace {
+                name: SPACE.to_string(),
+                fingerprint: EmbeddingFingerprint::new("model-b", "tei", DIM),
+                status: SpaceStatus::Populating,
+            },
+        )
+        .unwrap();
+        let va = vec![0.5_f32; DIM];
+        let vb = vec![0.6_f32; DIM];
+        write_backfill_batch(&conn, SPACE, &[(a, va.clone()), (b, vb.clone())]).unwrap();
+
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+        let snapshot: EngineSnapshot =
+            serde_json::from_slice(&buf).expect("streaming output must be valid EngineSnapshot");
+
+        // The populating space round-tripped (not silently dropped).
+        assert_eq!(
+            snapshot.embedding_spaces.len(),
+            1,
+            "the populating space must appear in the snapshot"
+        );
+        let space = &snapshot.embedding_spaces[0];
+        assert_eq!(space.name, SPACE);
+        assert_eq!(space.status, "populating");
+        assert_eq!(space.fingerprint.model, "model-b");
+        assert_eq!(space.fingerprint.dim, DIM);
+
+        // The fact_vectors rows round-tripped with their exact payloads — ordered
+        // by (space_id, fact_id), which here is fact-id order within one space.
+        assert_eq!(
+            snapshot.fact_vectors.len(),
+            2,
+            "both per-fact vectors must appear in the snapshot"
+        );
+        let mut rows: Vec<&FactVectorSnapshot> = snapshot.fact_vectors.iter().collect();
+        rows.sort_by_key(|r| r.fact_id);
+        assert_eq!(rows[0].fact_id, a);
+        assert_eq!(rows[0].space_id, SPACE);
+        assert_eq!(rows[0].embedding, va);
+        assert_eq!(rows[1].fact_id, b);
+        assert_eq!(rows[1].space_id, SPACE);
+        assert_eq!(rows[1].embedding, vb);
+    }
+
+    /// `SeqStreamer` error-bridging contract: when the store/DB callback aborts
+    /// with a real [`MemoryError`] (here an `Io` error carrying a unique sentinel),
+    /// the streamer must (a) funnel the cause through `S::Error::custom` so the
+    /// serde error message carries the sentinel — not the internal `"snapshot
+    /// element serialization failed"` placeholder (reserved for the
+    /// serde-element-failure path) — AND (b) **stash the ORIGINAL typed
+    /// `MemoryError` in the shared `store_err` cell** so the caller can recover
+    /// the exact variant (`MemoryError::Io(_)`) instead of the lossy
+    /// `MemoryError::Serialization` wrapper serde would otherwise yield (#258).
+    ///
+    /// This is the only direct coverage of the `ser_err` stash / `S::Error::custom`
+    /// funnel / `store_err` recovery / `RefCell` single-take logic — the most
+    /// intricate part of the streaming refactor. Deleting the `S::Error::custom`
+    /// funnel would make serialization wrongly succeed (the error swallowed),
+    /// failing the substring assertion; dropping the `store_err` stash would lose
+    /// the typed variant, failing the `matches!` assertion below.
+    #[test]
+    fn seq_streamer_surfaces_true_store_error() {
+        const SENTINEL: &str = "disk-fell-over-7f3a";
+
+        // Shared sink the streamer stashes the original `MemoryError` into — the
+        // same cell `stream_snapshot` owns and recovers from.
+        let store_err: std::cell::RefCell<Option<MemoryError>> = std::cell::RefCell::new(None);
+
+        // An iterate closure that emits one serializable element successfully (so the
+        // `ser_err` stash stays `None` and the sequence is genuinely entered), then
+        // aborts with a real store error — the store/DB-error branch of the bridge.
+        let streamer = SeqStreamer::new(
+            &store_err,
+            |cb: &mut (dyn FnMut(i32) -> Result<()> + '_)| {
+                cb(1)?; // element serializes cleanly
+                Err(MemoryError::Io(std::io::Error::other(SENTINEL)))
+            },
+        );
+
+        let err = serde_json::to_string(&streamer)
+            .expect_err("a store error in the iterate closure must abort serialization");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(SENTINEL),
+            "the true store-error cause ({SENTINEL:?}) must surface via S::Error::custom, \
+             got: {msg:?}"
+        );
+        assert!(
+            !msg.contains("snapshot element serialization failed"),
+            "the internal element-failure placeholder must NOT leak as the cause; got: {msg:?}"
+        );
+
+        // The ORIGINAL typed error must be recoverable from the stash — the
+        // variant (`Io`), not just the message, survives. This is the #258 fix:
+        // without the stash the caller would only see `MemoryError::Serialization`.
+        let recovered = store_err
+            .into_inner()
+            .expect("the original store error must be stashed for the caller to recover");
+        assert!(
+            matches!(recovered, MemoryError::Io(_)),
+            "the stashed cause must preserve the original MemoryError::Io variant, \
+             got: {recovered:?}"
+        );
+        assert!(
+            recovered.to_string().contains(SENTINEL),
+            "the recovered error must still carry the sentinel ({SENTINEL:?}), got: {recovered}"
+        );
     }
 }
