@@ -8,6 +8,41 @@ use rusqlite::Connection;
 use crate::error::Result;
 use crate::store::edges::EdgeStore;
 
+/// Hard upper bound on the number of edges accepted from a single snapshot
+/// sidecar (50M).
+///
+/// Defense in depth (CWE-400 / CWE-770). [`MemoryGraph::from_snapshot`] iterates
+/// the deserialized `snap.edges` and, per edge, allocates a petgraph edge plus up
+/// to two nodes and two `HashMap` entries. The on-disk size of the sidecar is
+/// already gated by `MAX_SNAPSHOT_BYTES` (512 MiB) and serde's cautious
+/// preallocation bounds in-band length prefixes, so a *small* crafted file cannot
+/// force a giant allocation. This cap is the residual guard for a sidecar that is
+/// large-but-under-the-byte-cap yet still claims an implausible edge count — and
+/// it makes the bound on `from_snapshot` explicit rather than implicit. It is
+/// chosen consistent with `MAX_SNAPSHOT_BYTES`: a 512 MiB sidecar of `MessagePack`
+/// edge records cannot encode anywhere near 50M edges, so this never rejects a
+/// legitimate corpus.
+///
+/// The primary, tighter bound is the call-site cross-check against the
+/// already-validated `DbFingerprint::active_edge_count` (see
+/// `MemoryEngine::try_load_snapshot`); this constant is the floor that holds even
+/// without a fingerprint in hand.
+const MAX_SNAPSHOT_EDGES: usize = 50_000_000;
+
+/// Reject a snapshot edge count that exceeds [`MAX_SNAPSHOT_EDGES`].
+///
+/// Extracted as a free function so the bound is unit-testable without
+/// materializing tens of millions of edge descriptors.
+fn check_edge_count_bound(count: usize) -> Result<()> {
+    if count > MAX_SNAPSHOT_EDGES {
+        return Err(crate::error::MemoryError::Internal(format!(
+            "snapshot edge count {count} exceeds the maximum of {MAX_SNAPSHOT_EDGES}; \
+             discarding sidecar and rebuilding from the database"
+        )));
+    }
+    Ok(())
+}
+
 /// Edge weight stored in the petgraph `DiGraph`.
 #[derive(Debug, Clone)]
 pub struct EdgeData {
@@ -269,10 +304,46 @@ impl MemoryGraph {
         GraphSnapshot { edges }
     }
 
-    /// Rebuild graph from a snapshot (same logic as `load_from_db`).
-    pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::GraphSnapshot) -> Self {
+    /// Rebuild graph from a snapshot, bounding and revalidating the edge set.
+    ///
+    /// The `.snapshot` sidecar is an untrusted input: its blake3 checksum is
+    /// *unkeyed* (a corruption check, not an authenticity control), so a local
+    /// actor able to write the sidecar — or plain on-disk corruption — can present
+    /// a structurally-invalid edge list. This builds the same edge-only graph as
+    /// [`load_from_db`](Self::load_from_db), but with two defense-in-depth gates
+    /// (#412, #499):
+    ///
+    /// 1. **Count bound** — reject more than [`MAX_SNAPSHOT_EDGES`] edges before
+    ///    any per-edge allocation (CWE-400 / CWE-770: unbounded petgraph/`HashMap`
+    ///    growth at cold start). The caller applies a tighter cross-check against
+    ///    the validated `DbFingerprint::active_edge_count`; this is the floor that
+    ///    holds with no fingerprint in hand.
+    /// 2. **Endpoint revalidation** — every `source`, `target`, and `edge_id` is a
+    ///    `SQLite` rowid and is therefore strictly positive. A non-positive value
+    ///    is a dangling/absent-node reference that cannot correspond to a real fact
+    ///    or edge; reject rather than silently materialize a phantom node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Internal`](crate::error::MemoryError::Internal) when
+    /// the edge count exceeds the cap or any edge carries a non-positive
+    /// `source`/`target`/`edge_id`. The caller treats this as "discard the sidecar
+    /// and rebuild from the authoritative database"; it never panics.
+    pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::GraphSnapshot) -> Result<Self> {
+        check_edge_count_bound(snap.edges.len())?;
+
         let mut graph = Self::new();
         for edge in &snap.edges {
+            if edge.source <= 0 || edge.target <= 0 || edge.edge_id <= 0 {
+                return Err(crate::error::MemoryError::Internal(format!(
+                    "snapshot edge {edge_id} references a non-positive endpoint \
+                     (source={source}, target={target}); discarding sidecar and \
+                     rebuilding from the database",
+                    edge_id = edge.edge_id,
+                    source = edge.source,
+                    target = edge.target,
+                )));
+            }
             graph.add_edges_from_iter(
                 edge.source,
                 edge.target,
@@ -281,7 +352,7 @@ impl MemoryGraph {
                 edge.weight,
             );
         }
-        graph
+        Ok(graph)
     }
 
     /// Shared edge-insertion kernel used by `load_from_db` and `from_snapshot`.
@@ -569,6 +640,97 @@ mod tests {
         assert_eq!(e.target, 3);
         assert_eq!(e.relation_type, "survivor");
         assert!((e.weight - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn from_snapshot_accepts_valid_edges() {
+        // Baseline: a well-formed snapshot (positive ids, within the cap) builds
+        // the graph faithfully — the revalidation does not reject good data.
+        let snap = crate::engine::snapshot::GraphSnapshot {
+            edges: vec![
+                crate::engine::snapshot::GraphEdgeSnapshot {
+                    edge_id: 1,
+                    source: 10,
+                    target: 20,
+                    relation_type: "supplements".into(),
+                    weight: 0.5,
+                },
+                crate::engine::snapshot::GraphEdgeSnapshot {
+                    edge_id: 2,
+                    source: 20,
+                    target: 30,
+                    relation_type: "related".into(),
+                    weight: 1.0,
+                },
+            ],
+        };
+        let g = MemoryGraph::from_snapshot(&snap).expect("valid snapshot must build");
+        assert_eq!(g.edge_count(), 2);
+        assert_eq!(g.neighbors(10), vec![20]);
+        assert_eq!(g.neighbors(20), vec![30]);
+    }
+
+    #[test]
+    fn from_snapshot_rejects_nonpositive_endpoint() {
+        // #499 (graph/data-integrity-trusts-snapshot-edges): fact ids are SQLite
+        // rowids and are always positive. An edge whose source/target is <= 0
+        // cannot reference a real fact — it is a dangling/absent-node reference
+        // (corruption or tamper) and must be rejected with a typed error, not
+        // silently materialized into a phantom node.
+        for (source, target) in [(0, 20), (-1, 20), (10, 0), (10, -5)] {
+            let snap = crate::engine::snapshot::GraphSnapshot {
+                edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+                    edge_id: 1,
+                    source,
+                    target,
+                    relation_type: "x".into(),
+                    weight: 1.0,
+                }],
+            };
+            assert!(
+                matches!(
+                    MemoryGraph::from_snapshot(&snap),
+                    Err(crate::error::MemoryError::Internal(_))
+                ),
+                "non-positive endpoint ({source}, {target}) must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn from_snapshot_rejects_nonpositive_edge_id() {
+        // An edge_id is a SQLite rowid too; <= 0 signals a corrupt/tampered
+        // edge record.
+        let snap = crate::engine::snapshot::GraphSnapshot {
+            edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+                edge_id: 0,
+                source: 10,
+                target: 20,
+                relation_type: "x".into(),
+                weight: 1.0,
+            }],
+        };
+        assert!(matches!(
+            MemoryGraph::from_snapshot(&snap),
+            Err(crate::error::MemoryError::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn from_snapshot_rejects_over_cap_edge_count() {
+        // Defense-in-depth bound: a snapshot claiming more edges than
+        // MAX_SNAPSHOT_EDGES is rejected before any per-edge allocation, so a
+        // tampered sidecar cannot drive unbounded petgraph/HashMap growth at
+        // cold start (CWE-400/770). We assert the *length gate* fires using a
+        // tiny stand-in cap via the testable kernel, without allocating 50M
+        // edges.
+        // The cap is generously large; materializing cap+1 edge descriptors is
+        // infeasible, so we exercise the bound-check kernel directly: exactly the
+        // cap is accepted, one over is rejected.
+        assert!(check_edge_count_bound(MAX_SNAPSHOT_EDGES).is_ok());
+        let err = check_edge_count_bound(MAX_SNAPSHOT_EDGES + 1)
+            .expect_err("over-cap edge count must be rejected");
+        assert!(matches!(err, crate::error::MemoryError::Internal(_)));
     }
 
     #[test]
