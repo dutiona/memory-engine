@@ -316,7 +316,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "jsonl_data": { "type": "string", "maxLength": 52_428_800, "description": "Raw JSONL session log content (max 50 MB)" },
+                    "jsonl_data": { "type": "string", "maxLength": 52_428_800, "description": "Raw JSONL session log content. The server enforces a hard 50 MB (52,428,800-byte) limit; the schema maxLength is an approximate character-count hint (JSON Schema has no byte-length keyword), so the authoritative cap is byte-based." },
                     "scope": { "type": "string", "description": "Scope path for imported facts" },
                     "max_turns": { "type": "integer", "minimum": 0, "default": 0, "description": "Max turns to process (0 = unlimited)" },
                     "skip_existing": { "type": "boolean", "default": true, "description": "Skip sessions already bootstrapped" }

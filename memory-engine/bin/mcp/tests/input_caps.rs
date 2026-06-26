@@ -125,8 +125,10 @@ async fn bootstrap_session_rejects_oversized_jsonl() {
 #[tokio::test]
 async fn replay_events_limit_zero_is_unbounded_not_capped() {
     let engine = make_engine();
-    // Seed 3 events so an unbounded replay returns all of them.
-    for i in 0..3 {
+    // Seed 105 events — more than the absent-limit default cap of 100 — so the
+    // assertion distinguishes "limit=0 is unbounded" from "limit=0 silently fell
+    // back to the default 100". With only 3 events both behaviours return 3.
+    for i in 0..105 {
         let _ = tools::dispatch(
             "memory_ingest",
             args(json!({
@@ -159,8 +161,8 @@ async fn replay_events_limit_zero_is_unbounded_not_capped() {
     let body = call_result_json(&result);
     assert_eq!(
         body["count"].as_u64().expect("count"),
-        3,
-        "limit=0 means unbounded: all 3 events should return"
+        105,
+        "limit=0 means unbounded: all 105 events return (not capped to the default 100)"
     );
 }
 
