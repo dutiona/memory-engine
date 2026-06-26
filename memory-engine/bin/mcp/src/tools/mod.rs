@@ -573,7 +573,7 @@ fn parse_embedding(
 ) -> Result<Option<Vec<f32>>, ErrorData> {
     match args.get("embedding") {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::Array(arr)) => {
+        Some(v @ Value::Array(arr)) => {
             // Length gate FIRST: reject the wrong-dimension array before allocating it.
             if arr.len() != expected_dim {
                 return Err(ValidationError::EmbeddingDimension {
@@ -582,7 +582,11 @@ fn parse_embedding(
                 }
                 .into());
             }
-            serde_json::from_value::<Vec<f32>>(Value::Array(arr.clone()))
+            // Deserialize from the borrowed `Value` — no `arr.clone()` of the whole
+            // JSON array. The length gate above still runs before any `Vec<f32>`
+            // allocation, so the pre-alloc DoS guard is preserved (#498
+            // `mcp/performance-parse-embedding-clone`).
+            <Vec<f32> as serde::Deserialize>::deserialize(v)
                 .map(Some)
                 .map_err(|e| ErrorData::invalid_params(format!("invalid embedding: {e}"), None))
         }
@@ -1647,7 +1651,12 @@ async fn handle_bootstrap_session(
     engine: &MemoryEngine,
     embedder: Option<&Arc<HttpEmbeddingProvider>>,
 ) -> Result<CallToolResult, ErrorData> {
-    let jsonl_data = get_str(args, "jsonl_data")
+    // Borrow the raw JSONL out of `args` — no owned `String` yet. The byte-length
+    // cap is enforced on the BORROW so an over-cap payload is rejected *before* the
+    // large `.to_owned()` allocation the cap is meant to prevent (Codex #834:1571).
+    let jsonl_data = args
+        .get("jsonl_data")
+        .and_then(Value::as_str)
         .ok_or_else(|| ErrorData::invalid_params("missing jsonl_data", None))?;
 
     // #267/#355 (CWE-400/770): cap the raw JSONL byte length before `into_bytes()` /
@@ -1664,6 +1673,9 @@ async fn handle_bootstrap_session(
             None,
         ));
     }
+    // Only now — after the cap passes — materialize the owned `String` the pipeline
+    // consumes via `into_bytes()` below.
+    let jsonl_data = jsonl_data.to_owned();
 
     let emb = embedder.ok_or_else(|| {
         ErrorData::invalid_params(
