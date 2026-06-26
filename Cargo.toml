@@ -10,6 +10,13 @@ members = [
 # scratch git worktrees. Neither is a member here.
 exclude = [".worktrees", "fuzz"]
 
+# Workspace MSRV — the single source of truth the CI "verify rust-version" job greps
+# from this root manifest (`grep '^rust-version' Cargo.toml`). Members keep their own
+# `rust-version = "1.88"`; this also lets future crates inherit via
+# `rust-version.workspace = true`.
+[workspace.package]
+rust-version = "1.88"
+
 # `[profile.*]` is honoured ONLY in the workspace-root manifest of a virtual workspace
 # (Cargo ignores — with a warning — any profile set in a member). Moved here verbatim
 # from the former root package manifest when it became this virtual root.

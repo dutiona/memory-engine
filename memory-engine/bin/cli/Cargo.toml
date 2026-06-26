@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.88"
 description = "CLI inspector for memory-engine — operator tool for querying, inspecting, and managing agent memory"
 license = "MIT OR Apache-2.0"
+# Binary application, not a published library: `publish = false` states that intent and
+# (being private) lets its version-less intra-workspace path deps pass cargo-deny's
+# wildcard check — `allow-wildcard-paths` applies only to private crates.
+publish = false
 
 [[bin]]
 name = "memory-engine-cli"

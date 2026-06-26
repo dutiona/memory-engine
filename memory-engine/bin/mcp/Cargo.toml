@@ -6,6 +6,10 @@ rust-version = "1.88"
 description = "MCP server for memory-engine — exposes agent memory as MCP tools over stdio"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"
+# Binary application, not a published library: `publish = false` states that intent and
+# (being private) lets its version-less intra-workspace path deps pass cargo-deny's
+# wildcard check — `allow-wildcard-paths` applies only to private crates.
+publish = false
 
 [lib]
 name = "memory_engine_mcp"
