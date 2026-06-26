@@ -24,6 +24,26 @@ use crate::embedding::HttpEmbeddingProvider;
 use crate::error::{ValidationError, to_mcp_error};
 
 // ---------------------------------------------------------------------------
+// Trust-boundary input-size caps (#266/#267/#355/#294)
+// ---------------------------------------------------------------------------
+//
+// The MCP server consumes untrusted JSON-RPC input. Several handlers materialize
+// client-controlled collections before validating them, which is a pre-allocation
+// DoS surface (CWE-400 resource exhaustion / CWE-770 allocation without limit).
+// These caps are deliberately GENEROUS: each sits orders of magnitude above any
+// realistic legitimate payload, so they reject only absurd input while never
+// breaking large-but-reasonable use. They are also mirrored as `maxItems` /
+// `maxLength` in the tool JSON schemas so a schema-aware client is warned up front.
+
+/// Max number of insights accepted by `memory_flush_insights` in a single call.
+/// A pre-compaction flush realistically carries at most a few hundred insights.
+pub const MAX_FLUSH_INSIGHTS: usize = 10_000;
+
+/// Max raw `jsonl_data` byte length accepted by `memory_bootstrap_session`.
+/// 50 MB is far above any realistic Claude Code session log.
+pub const MAX_BOOTSTRAP_BYTES: usize = 50 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
 // Tool definitions (JSON schemas)
 // ---------------------------------------------------------------------------
 
@@ -178,6 +198,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                 "properties": {
                     "insights": {
                         "type": "array",
+                        "maxItems": 10000,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -295,7 +316,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "jsonl_data": { "type": "string", "description": "Raw JSONL session log content" },
+                    "jsonl_data": { "type": "string", "maxLength": 52_428_800, "description": "Raw JSONL session log content. The server enforces a hard 50 MB (52,428,800-byte) limit; the schema maxLength is an approximate character-count hint (JSON Schema has no byte-length keyword), so the authoritative cap is byte-based." },
                     "scope": { "type": "string", "description": "Scope path for imported facts" },
                     "max_turns": { "type": "integer", "minimum": 0, "default": 0, "description": "Max turns to process (0 = unlimited)" },
                     "skip_existing": { "type": "boolean", "default": true, "description": "Skip sessions already bootstrapped" }
@@ -448,7 +469,7 @@ pub async fn dispatch(
     match name {
         "memory_ingest" => handle_ingest(args, engine).await,
         "memory_add_fact" => handle_add_fact(args, engine, embedder, embed_dim).await,
-        "memory_query" => handle_query(args, engine, embedder).await,
+        "memory_query" => handle_query(args, engine, embedder, embed_dim).await,
         "memory_resume_context" => handle_resume_context(args, engine).await,
         "memory_list_due" => handle_list_due(args, engine).await,
         "memory_next_due_time" => handle_next_due_time(args, engine).await,
@@ -539,12 +560,41 @@ fn get_depth(args: &Map<String, Value>) -> Result<Depth, ErrorData> {
 }
 
 /// Parse an embedding from a JSON value, returning an error if present but malformed.
-fn parse_embedding(args: &Map<String, Value>) -> Result<Option<Vec<f32>>, ErrorData> {
+///
+/// #294 (CWE-400/770 pre-allocation DoS): the array's length is checked against
+/// `expected_dim` BEFORE `serde_json::from_value` materializes a `Vec<f32>`, so a
+/// hostile client cannot force the server to allocate an arbitrarily large vector
+/// only to reject it afterward. A wrong-length array is rejected on its length
+/// alone — this doubles as the query-path dimension check that previously existed
+/// only on the add-fact path.
+fn parse_embedding(
+    args: &Map<String, Value>,
+    expected_dim: usize,
+) -> Result<Option<Vec<f32>>, ErrorData> {
     match args.get("embedding") {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => serde_json::from_value::<Vec<f32>>(v.clone())
-            .map(Some)
-            .map_err(|e| ErrorData::invalid_params(format!("invalid embedding: {e}"), None)),
+        Some(v @ Value::Array(arr)) => {
+            // Length gate FIRST: reject the wrong-dimension array before allocating it.
+            if arr.len() != expected_dim {
+                return Err(ValidationError::EmbeddingDimension {
+                    expected: expected_dim,
+                    actual: arr.len(),
+                }
+                .into());
+            }
+            // Deserialize from the borrowed `Value` — no `arr.clone()` of the whole
+            // JSON array. The length gate above still runs before any `Vec<f32>`
+            // allocation, so the pre-alloc DoS guard is preserved (#498
+            // `mcp/performance-parse-embedding-clone`).
+            <Vec<f32> as serde::Deserialize>::deserialize(v)
+                .map(Some)
+                .map_err(|e| ErrorData::invalid_params(format!("invalid embedding: {e}"), None))
+        }
+        // Present but not an array (e.g. a string or number): malformed input.
+        Some(v) => Err(ErrorData::invalid_params(
+            format!("invalid embedding: expected an array of numbers, got {v}"),
+            None,
+        )),
     }
 }
 
@@ -741,18 +791,9 @@ async fn handle_add_fact(
     let pinned = get_bool(args, "pinned");
     let metadata = args.get("metadata").cloned();
 
-    // Pre-computed embedding or server-side embedding
-    let pre_computed = parse_embedding(args)?;
-
-    if let Some(ref emb) = pre_computed
-        && emb.len() != embed_dim
-    {
-        return Err(ValidationError::EmbeddingDimension {
-            expected: embed_dim,
-            actual: emb.len(),
-        }
-        .into());
-    }
+    // Pre-computed embedding or server-side embedding. `parse_embedding` rejects a
+    // wrong-`embed_dim` array up front (#294), so no separate length check is needed.
+    let pre_computed = parse_embedding(args, embed_dim)?;
 
     let req = AddFactRequest {
         content,
@@ -801,6 +842,7 @@ async fn handle_query(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
     embedder: Option<&Arc<HttpEmbeddingProvider>>,
+    embed_dim: usize,
 ) -> Result<CallToolResult, ErrorData> {
     let depth_level = get_depth(args)?;
 
@@ -817,8 +859,10 @@ async fn handle_query(
         None => None,
     };
 
-    // Parse embedding (with proper error on malformed input)
-    let pre_emb = parse_embedding(args)?;
+    // Parse embedding (with proper error on malformed input). A wrong-length array
+    // is rejected before allocation against the store's `embed_dim` (#294) — this
+    // also closes the query path's previously-missing dimension check.
+    let pre_emb = parse_embedding(args, embed_dim)?;
 
     // §Design.3 (#615): a pre-computed query embedding must declare the model that
     // produced it; verify that declaration against the store's identity before using the
@@ -1048,6 +1092,19 @@ async fn handle_flush_insights(
         .get("insights")
         .and_then(Value::as_array)
         .ok_or_else(|| ErrorData::invalid_params("missing insights array", None))?;
+
+    // #266 (CWE-400/770): cap the untrusted array length before materializing per-entry
+    // `AddFactRequest`s. The bound is generous — a real pre-compaction flush carries at
+    // most a few hundred insights — so it rejects only absurd input, never legitimate use.
+    if insights.len() > MAX_FLUSH_INSIGHTS {
+        return Err(ErrorData::invalid_params(
+            format!(
+                "too many insights: {} exceeds the cap of {MAX_FLUSH_INSIGHTS}",
+                insights.len()
+            ),
+            None,
+        ));
+    }
 
     let emb = embedder.ok_or_else(|| {
         ErrorData::invalid_params(
@@ -1538,7 +1595,12 @@ async fn handle_replay_events(
         Some(s) => Some(parse_event_type(&s)?),
         None => None,
     };
-    // 0 = no limit (unbounded), absent = default cap of 100
+    // limit semantics (intentional, #319): `0` means UNBOUNDED (no cap), `absent`
+    // defaults to a cap of 100. `0` is the explicit opt-out escape hatch for a full
+    // replay; it is NOT clamped to a hidden ceiling here. The unbounded path is gated
+    // by the caller's own filters (since/until/id_range/session) and downstream
+    // streaming, so a deliberate `0` does not itself constitute the trust-boundary
+    // DoS surface the array/byte caps above address.
     let limit = match get_usize(args, "limit")? {
         Some(0) => None,
         Some(n) => Some(n),
@@ -1589,8 +1651,31 @@ async fn handle_bootstrap_session(
     engine: &MemoryEngine,
     embedder: Option<&Arc<HttpEmbeddingProvider>>,
 ) -> Result<CallToolResult, ErrorData> {
-    let jsonl_data = get_str(args, "jsonl_data")
+    // Borrow the raw JSONL out of `args` — no owned `String` yet. The byte-length
+    // cap is enforced on the BORROW so an over-cap payload is rejected *before* the
+    // large `.to_owned()` allocation the cap is meant to prevent (Codex #834:1571).
+    let jsonl_data = args
+        .get("jsonl_data")
+        .and_then(Value::as_str)
         .ok_or_else(|| ErrorData::invalid_params("missing jsonl_data", None))?;
+
+    // #267/#355 (CWE-400/770): cap the raw JSONL byte length before `into_bytes()` /
+    // `Cursor` feed it to the bootstrap pipeline. 50 MB is generous — far above any
+    // realistic Claude Code session log — so it rejects only pathological payloads.
+    // (The library-level `max_session_bytes`/`max_entries` of #293 still apply inside
+    // the pipeline; this is the outer trust-boundary guard before that work begins.)
+    if jsonl_data.len() > MAX_BOOTSTRAP_BYTES {
+        return Err(ErrorData::invalid_params(
+            format!(
+                "jsonl_data too large: {} bytes exceeds the cap of {MAX_BOOTSTRAP_BYTES} bytes",
+                jsonl_data.len()
+            ),
+            None,
+        ));
+    }
+    // Only now — after the cap passes — materialize the owned `String` the pipeline
+    // consumes via `into_bytes()` below.
+    let jsonl_data = jsonl_data.to_owned();
 
     let emb = embedder.ok_or_else(|| {
         ErrorData::invalid_params(
@@ -1913,12 +1998,63 @@ async fn handle_get_recent_insights(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_dump_name, default_dump_path, get_usize, parse_consolidate_config, parse_fact_type,
-        validate_dump_path,
+        default_dump_name, default_dump_path, get_usize, parse_consolidate_config, parse_embedding,
+        parse_fact_type, validate_dump_path,
     };
     use memory_engine::types::FactType;
     use serde_json::json;
     use std::collections::HashSet;
+
+    /// Build an argument map carrying only an `embedding` value.
+    fn emb_args(embedding: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("embedding".to_owned(), embedding);
+        m
+    }
+
+    #[test]
+    fn parse_embedding_absent_is_none() {
+        let m = serde_json::Map::new();
+        assert!(parse_embedding(&m, 8).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_embedding_null_is_none() {
+        let args = emb_args(json!(null));
+        assert!(parse_embedding(&args, 8).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_embedding_correct_length_round_trips() {
+        // A correctly-sized array deserializes verbatim.
+        let v: Vec<f32> = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7].to_vec();
+        let args = emb_args(json!(v));
+        let got = parse_embedding(&args, 8).unwrap().expect("present");
+        assert_eq!(got.len(), 8);
+        for (a, b) in got.iter().zip(v.iter()) {
+            assert!((a - b).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn parse_embedding_wrong_length_rejected_before_alloc() {
+        // #294: a wrong-length array is rejected on its *length* BEFORE any
+        // `Vec<f32>` materialization (pre-alloc DoS guard, CWE-400/770).
+        let args = emb_args(json!(vec![0.1_f32; 16]));
+        let err = parse_embedding(&args, 8).unwrap_err();
+        assert!(
+            err.message.contains("expected 8") && err.message.contains("got 16"),
+            "error should name expected vs got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_embedding_non_array_rejected() {
+        // A present-but-non-array value is malformed input, not a silent None.
+        let args = emb_args(json!("not-an-array"));
+        assert!(parse_embedding(&args, 8).is_err());
+    }
 
     #[test]
     fn parse_fact_type_accepts_schema_pascal_case() {
