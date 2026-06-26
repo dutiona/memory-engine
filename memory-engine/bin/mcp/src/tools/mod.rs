@@ -804,6 +804,11 @@ async fn handle_query(
 ) -> Result<CallToolResult, ErrorData> {
     let depth_level = get_depth(args)?;
 
+    // Validate the cheap scalar param up front, before the (potentially network-bound)
+    // query embedding below — a malformed `limit` should be rejected without first
+    // burning an `embed_query` call whose result we would only discard.
+    let limit = get_usize(args, "limit")?;
+
     let mut query = memory_engine::MemoryQuery::new();
 
     // Parse and validate search mode (if explicit)
@@ -924,7 +929,7 @@ async fn handle_query(
     if get_bool(args, "pinned_only").unwrap_or(false) {
         query = query.pinned_only();
     }
-    if let Some(limit) = get_usize(args, "limit")? {
+    if let Some(limit) = limit {
         query = query.limit(limit);
     }
     if get_bool(args, "include_expired_probe").unwrap_or(false) {
