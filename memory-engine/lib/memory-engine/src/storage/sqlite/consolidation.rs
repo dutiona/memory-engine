@@ -592,7 +592,7 @@ impl ConsolidationStore for SqliteBackend {
         #[cfg(feature = "ann")]
         {
             for (id, emb) in &result_tuple.3 {
-                self.hnsw_notify_insert(*id, emb);
+                self.hnsw_notify_insert(*id, emb)?;
             }
             for &id in &result_tuple.2 {
                 self.hnsw_notify_expire(id);
@@ -689,7 +689,7 @@ impl ConsolidationStore for SqliteBackend {
             .await?;
 
         #[cfg(feature = "ann")]
-        self.hnsw_notify_insert(result.fact_id, &embedding);
+        self.hnsw_notify_insert(result.fact_id, &embedding)?;
 
         Ok((result, scope_ids_to_cache))
     }

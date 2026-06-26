@@ -333,11 +333,20 @@ impl SqliteBackend {
     /// and the write lock has been released (matching the engine's ordering).
     ///
     /// No-op when the `ann` feature is disabled or when no HNSW index is active.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Internal` if the HNSW strategy detects a corrupt
+    /// index (non-sequential ID) while incorporating the vector. Callers fire
+    /// this **post-commit**, so the fact is already durably persisted; an error
+    /// here surfaces an inconsistent in-memory index rather than a failed write,
+    /// mirroring the same invariant enforced by `build_from_db`/`from_snapshot`.
     #[cfg(feature = "ann")]
-    pub(super) fn hnsw_notify_insert(&self, fact_id: i64, embedding: &[f32]) {
+    pub(super) fn hnsw_notify_insert(&self, fact_id: i64, embedding: &[f32]) -> Result<()> {
         if let Some(ref hnsw) = self.hnsw {
-            hnsw.notify_insert(fact_id, embedding);
+            hnsw.notify_insert(fact_id, embedding)?;
         }
+        Ok(())
     }
 
     /// Notify the HNSW index that a fact was expired or hard-deleted (post-commit).

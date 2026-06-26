@@ -398,8 +398,45 @@ impl VectorSearchStrategy for HnswStrategy {
         "hnsw"
     }
 
-    fn notify_insert(&self, fact_id: i64, embedding: &[f32]) {
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Internal` if `hnsw` assigns a non-sequential ID —
+    /// the same sequential-ID invariant [`build_inner`](Self::build_inner) and
+    /// [`from_snapshot`](Self::from_snapshot) already enforce. This would
+    /// indicate a bug in the `hnsw` crate or a concurrent modification; the
+    /// `index_to_fact` / `fact_to_hnsw` mappings rely on `hnsw` handing out IDs
+    /// equal to the current `index_to_fact.len()`. The invariant is checked
+    /// **before** the graph is mutated (see below), so the error path leaves the
+    /// index unchanged rather than orphaning a graph entry. Callers fire this
+    /// post-commit, so an error here means a corrupt in-memory index, not a
+    /// failed write — the durable fact already landed.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the write guard MUST span the whole read-check-mutate critical \
+                  section: the sequential-ID precondition (index.len() == \
+                  index_to_fact.len()) and the subsequent index.insert + mappings \
+                  push must be atomic under one lock, or a concurrent notify could \
+                  observe / wedge a half-updated index. The early `return Err` arms \
+                  also still borrow `inner`, so a tail `drop(inner)` is unreachable."
+    )]
+    fn notify_insert(&self, fact_id: i64, embedding: &[f32]) -> Result<()> {
         let mut inner = self.inner.write();
+        // Check the sequential-ID invariant against the *next* ID `hnsw` will
+        // assign — `Hnsw::insert` hands out `len()` and grows by one — BEFORE
+        // mutating the graph. `build_inner`/`from_snapshot` validate the same
+        // invariant post-insert; here we validate pre-insert so a violation
+        // aborts cleanly with no orphaned graph entry (the graph's len is the
+        // ID the next insert returns, an `hnsw` 0.11 guarantee mirrored by
+        // those build paths' `hnsw_id == index_to_fact.len()` checks).
+        let expected_id = inner.index_to_fact.len();
+        if inner.index.len() != expected_id {
+            return Err(crate::error::MemoryError::Internal(format!(
+                "HNSW sequential ID invariant violated on insert: index has {} \
+                 nodes, expected {expected_id}. This indicates a bug in the hnsw \
+                 crate or a concurrent modification.",
+                inner.index.len()
+            )));
+        }
         // Tombstone the old HNSW entry for this fact_id (if any) so the
         // stale embedding is excluded from future searches.
         if let Some(&old_hnsw_id) = inner.fact_to_hnsw.get(&fact_id) {
@@ -408,16 +445,21 @@ impl VectorSearchStrategy for HnswStrategy {
         let vec = embedding.to_vec();
         let mut searcher: Searcher<u32> = Searcher::default();
         let hnsw_id = inner.index.insert(vec, &mut searcher);
-        assert_eq!(
-            hnsw_id,
-            inner.index_to_fact.len(),
-            "HNSW sequential ID invariant violated on insert: got {hnsw_id}, \
-             expected {}. This indicates a bug in the hnsw crate or a \
-             concurrent modification. Index is now corrupt.",
-            inner.index_to_fact.len()
-        );
+        // Defense in depth: the pre-check guarantees this holds, but assert the
+        // post-condition without panicking — if `hnsw` ever broke the contract
+        // mid-insert, surface it as an error rather than silently desyncing the
+        // mappings (the graph already grew, but the mappings have not, so the
+        // index is consistent enough to keep serving reads from prior entries).
+        if hnsw_id != expected_id {
+            return Err(crate::error::MemoryError::Internal(format!(
+                "HNSW sequential ID invariant violated on insert: got {hnsw_id}, \
+                 expected {expected_id}. This indicates a bug in the hnsw crate \
+                 or a concurrent modification."
+            )));
+        }
         inner.index_to_fact.push(fact_id);
         inner.fact_to_hnsw.insert(fact_id, hnsw_id);
+        Ok(())
     }
 
     fn notify_expire(&self, fact_id: i64) {
@@ -628,7 +670,7 @@ mod tests {
                 is_pinned: false,
             };
             let new_id = store.insert(&new_fact).unwrap();
-            strategy.notify_insert(new_id, &new_emb);
+            strategy.notify_insert(new_id, &new_emb).unwrap();
 
             let query = [1.0_f32, 0.0, 0.0, 0.0];
             let results = strategy.search(&conn, &query, DIM, 3, None, None).unwrap();
@@ -641,6 +683,44 @@ mod tests {
             assert!(
                 found_ids.contains(&ids[0]),
                 "original closest fact should still appear"
+            );
+        }
+
+        #[test]
+        fn hnsw_strategy_notify_insert_invariant_violation_errors_without_panic() {
+            // #295: a violated sequential-ID invariant must return
+            // `MemoryError::Internal`, NOT panic — a panic in this embedded lib
+            // aborts the consumer's process and leaves an orphaned graph entry.
+            //
+            // White-box setup: desync `index_to_fact` from the graph so the
+            // sequential-ID precondition (`index.len() == index_to_fact.len()`)
+            // no longer holds. Pushing a phantom `index_to_fact` slot makes
+            // `expected_id` one ahead of the graph's node count, so the
+            // pre-mutation check fires.
+            let (conn, _ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            let graph_len_before = {
+                let mut inner = strategy.inner.write();
+                inner.index_to_fact.push(9999); // phantom slot: desync the mappings
+                inner.index.len()
+            };
+
+            // Must return Err, not panic.
+            let err = strategy
+                .notify_insert(42, &[0.1_f32, 0.2, 0.3, 0.4])
+                .expect_err("desynced index must surface an Internal error");
+            assert!(
+                matches!(err, crate::error::MemoryError::Internal(_)),
+                "expected MemoryError::Internal, got {err:?}"
+            );
+
+            // The error path left the graph UNMUTATED — no orphaned entry: the
+            // pre-check ran before `index.insert`, so the node count is unchanged.
+            assert_eq!(
+                strategy.inner.read().index.len(),
+                graph_len_before,
+                "error path must not have mutated the HNSW graph (no orphan)"
             );
         }
 
@@ -721,7 +801,9 @@ mod tests {
 
             // Churn the in-memory index so it accumulates tombstones: re-insert one
             // fact (tombstones its prior slot) and expire another.
-            strategy.notify_insert(ids[0], &[0.5_f32, 0.5, 0.0, 0.0]);
+            strategy
+                .notify_insert(ids[0], &[0.5_f32, 0.5, 0.0, 0.0])
+                .unwrap();
             strategy.notify_expire(ids[1]);
             assert!(
                 strategy.tombstone_count() >= 2,

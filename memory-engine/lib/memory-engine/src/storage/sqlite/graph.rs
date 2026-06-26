@@ -158,7 +158,7 @@ impl FactGraph for SqliteBackend {
             .await?;
         // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238).
         #[cfg(feature = "ann")]
-        self.hnsw_notify_insert(id, &embedding);
+        self.hnsw_notify_insert(id, &embedding)?;
         Ok(id)
     }
 
@@ -173,7 +173,7 @@ impl FactGraph for SqliteBackend {
             .await?;
         // Notify on any write that changes the active vector set (insert or reinforce).
         #[cfg(feature = "ann")]
-        self.hnsw_notify_insert(result.0, &embedding);
+        self.hnsw_notify_insert(result.0, &embedding)?;
         Ok(result)
     }
 
@@ -728,7 +728,7 @@ impl FactGraph for SqliteBackend {
             .await?;
         // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238).
         #[cfg(feature = "ann")]
-        self.hnsw_notify_insert(id, &embedding);
+        self.hnsw_notify_insert(id, &embedding)?;
         Ok(id)
     }
 
@@ -770,7 +770,7 @@ impl FactGraph for SqliteBackend {
         // Post-commit HNSW notifications (mirrors engine/ingest.rs batch path).
         #[cfg(feature = "ann")]
         for (id, embedding) in ids.iter().zip(embeddings.iter()) {
-            self.hnsw_notify_insert(*id, embedding);
+            self.hnsw_notify_insert(*id, embedding)?;
         }
         #[cfg(not(feature = "ann"))]
         let _ = embeddings; // unused without the HNSW sidecar
@@ -914,7 +914,7 @@ impl FactGraph for SqliteBackend {
                 self.hnsw_notify_expire(old_id);
             }
             if let Some(nid) = new_id {
-                self.hnsw_notify_insert(nid, &embedding);
+                self.hnsw_notify_insert(nid, &embedding)?;
             }
         }
 
