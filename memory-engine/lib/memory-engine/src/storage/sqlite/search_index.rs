@@ -68,20 +68,20 @@ impl SearchIndex for SqliteBackend {
                     .expect("should_use_hnsw() is true only when hnsw is Some"),
             );
             // The read guard (`conn`) must be held for the entire HNSW search because
-            // per-candidate DB reads (`check_fact_filters`, `load_embedding`) all use
-            // the same connection. Dropping it early would require a separate `pool.read()`
-            // per candidate, which is both more expensive and semantically inconsistent.
+            // the batched candidate fetch (one query per widening attempt) uses the
+            // same connection. Dropping it early would require a separate `pool.read()`
+            // per attempt, which is both more expensive and semantically inconsistent.
             #[allow(
                 clippy::significant_drop_tightening,
                 reason = "conn guard must outlive the HNSW search; early drop would \
-                          require a separate connection per candidate lookup"
+                          require a separate connection per candidate-fetch query"
             )]
             let out = tokio::task::spawn_blocking(move || {
                 use crate::search::strategy::VectorSearchStrategy as _;
                 let conn = pool.read()?;
-                // `HnswStrategy::search` post-filters each HNSW candidate via
-                // `check_fact_filters` (t_expired IS NULL + fact_type + scope_id),
-                // then exact-scores via `load_embedding` — all inside the closure.
+                // `HnswStrategy::search` post-filters + exact-scores all HNSW
+                // candidates in ONE batched query per widening attempt (#288/#362):
+                // `t_expired IS NULL` + fact_type + scope_id, then cosine in Rust.
                 let results =
                     hnsw.search(&conn, &q, dim, k, fact_type.as_ref(), scope_ids.as_deref())?;
                 // Widen f32 → f64 at the backend boundary (value-exact, order-preserving).
@@ -713,7 +713,7 @@ mod hnsw_tests {
             .unwrap();
         assert_eq!(hnsw_result.len(), 2, "HNSW must return 2 results");
 
-        // IDs and scores must match exactly (HNSW exact-rescores via load_embedding).
+        // IDs and scores must match exactly (HNSW exact-rescores via the batched fetch).
         assert_eq!(
             hnsw_result.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             oracle.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
