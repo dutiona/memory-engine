@@ -424,6 +424,81 @@ mod tests {
     }
 
     #[test]
+    fn remove_node_in_loop_keeps_map_consistent() {
+        // The single-removal test above exercises `remove_node`'s re-index guard
+        // exactly once, so it cannot catch a regression that only COMPOUNDS over
+        // a sequence of removals — the documented loop-safe contract. This test
+        // removes two non-last nodes in sequence, and crucially the SECOND node
+        // removed is one that was itself DISPLACED (swap-relocated) by the first
+        // removal. A stale-map regression therefore compounds: the first removal
+        // leaves a wrong index that the second removal then builds another
+        // wrong index on top of.
+        //
+        // Layout (verified against petgraph 0.7 swap-remove order):
+        //   insertion order fixes NodeIndex: 1→idx0, 2→idx1, 3→idx2, 4→idx3,
+        //   5→idx4. Edges form a chain 1→2→3→4→5 plus a shortcut 1→5.
+        //
+        //   remove_node(1) frees idx0; petgraph swaps the last node (fact 5 at
+        //   idx4) into idx0. The guard rewrites node_map[5]=idx0.
+        //   remove_node(5) — fact 5 now lives at idx0 (it was displaced) — frees
+        //   idx0 again; petgraph swaps the new last node (fact 4 at idx3) into
+        //   idx0. The guard must rewrite node_map[4]=idx0.
+        //
+        // Without the guard, node_map[4] keeps its stale original idx3. After two
+        // swap-removes idx3 no longer holds fact 4, so neighbors(4)/degree(4)
+        // resolve against the wrong slot — empirically reporting a phantom 4→5
+        // edge that should be gone. The assertions below pin the correct (guarded)
+        // state and fail under that regression.
+        let mut g = MemoryGraph::new();
+        g.add_edge(1, 2, make_edge_data(10, "a")); // 1→idx0, 2→idx1
+        g.add_edge(2, 3, make_edge_data(20, "b")); // 3→idx2
+        g.add_edge(3, 4, make_edge_data(30, "c")); // 4→idx3
+        g.add_edge(4, 5, make_edge_data(40, "d")); // 5→idx4
+        g.add_edge(1, 5, make_edge_data(50, "e")); // shortcut
+        assert_eq!(g.node_count(), 5);
+
+        // --- First removal: a non-last node, displacing fact 5 into its slot. ---
+        g.remove_node(1);
+        assert!(!g.has_node(1));
+        assert_eq!(g.node_count(), 4);
+        // Every survivor still resolves to its correct neighbors after removal #1.
+        assert_eq!(g.neighbors(2), vec![3]);
+        assert_eq!(g.neighbors(3), vec![4]);
+        assert_eq!(g.neighbors(4), vec![5]);
+        assert!(g.neighbors(5).is_empty());
+        // Fact 5 was the displaced node; the 4→5 edge must still be visible.
+        assert_eq!(g.degree(5), 1);
+
+        // --- Second removal: the DISPLACED node itself, compounding the swap. ---
+        g.remove_node(5);
+        assert!(!g.has_node(5));
+        assert_eq!(g.node_count(), 3);
+
+        // After the loop, the whole map must be consistent. Fact 4 (the node now
+        // swapped into the freed slot) is the canary: its only out-edge (4→5) is
+        // gone with fact 5, so its outgoing neighbors are empty. Under the stale-
+        // map regression this wrongly reports a phantom [5].
+        assert_eq!(g.neighbors(4), Vec::<i64>::new());
+        // 4 still has its incoming edge 3→4, so total degree is the inbound 1.
+        assert_eq!(g.degree(4), 1);
+
+        // The untouched interior nodes resolve correctly end to end.
+        assert!(g.has_node(2));
+        assert!(g.has_node(3));
+        assert!(g.has_node(4));
+        assert_eq!(g.neighbors(2), vec![3]);
+        assert_eq!(g.neighbors(3), vec![4]);
+        assert_eq!(g.degree(2), 1);
+        assert_eq!(g.degree(3), 2); // 2→3 (in) + 3→4 (out)
+
+        // The surviving chain 2→3→4 is one connected component, nothing leaked.
+        let mut comp = g.connected_component(2);
+        comp.sort_unstable();
+        assert_eq!(comp, vec![2, 3, 4]);
+        assert_eq!(g.edge_count(), 2); // only 2→3 and 3→4 remain
+    }
+
+    #[test]
     fn remove_edges_by_fact_with_self_loop() {
         let mut g = MemoryGraph::new();
         // Self-loop on fact 1, plus a genuine edge 1→2 and an unrelated edge 3→4.
