@@ -124,6 +124,12 @@ impl FromStr for Outcome {
     /// JSON schema advertises (`"Positive"`) and the `snake_case`/lowercase
     /// [`Display`] form (`"positive"`); [`Outcome::to_string`] round-trips through
     /// it. Parsing reconciles every casing to one canonical enum.
+    ///
+    /// Note: this is orthogonal to the strict DB serialization — the serde
+    /// `Deserialize` derive and the exact-match outcome-count SQL in
+    /// `storage::sqlite::event_log` (matching `"positive"`/`"negative"`/`"neutral"`
+    /// verbatim) do NOT route through this `FromStr`. The "SSOT" claim is therefore
+    /// scoped to the consumer-facing parse boundary, not the persistence path.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Zero-allocation case-insensitive match (no temporary lowercased String).
         if s.eq_ignore_ascii_case("positive") {
