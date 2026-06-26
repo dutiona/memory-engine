@@ -1031,6 +1031,52 @@ mod tests {
         assert_eq!(results[0].fact.content, "scheduled rust fact");
     }
 
+    #[test]
+    fn hybrid_search_present_survives_overfetch_attrition() {
+        // Overfetch boundary: the source queries widen to `overfetch =
+        // effective_target * 3` candidates, and the temporal post-filter runs
+        // *after* that widening. Seed many more than `3 * limit` future/stale
+        // facts (all post-filter-excluded) plus one present (valid) fact; the
+        // present fact must still surface. This pins that the post-filter and
+        // the overfetch widening interact correctly when nearly every fetched
+        // candidate is filtered out — the survivor is not lost to attrition.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let future = Utc::now() + chrono::Duration::hours(1);
+        let past = Utc::now() - chrono::Duration::hours(1);
+
+        // limit = 3 ⇒ overfetch = 9; seed 20 excluded candidates (> 3 * limit)
+        // so the post-filter would empty the pool without the present fact.
+        for i in 0..10 {
+            store
+                .insert(&make_fact_temporal(
+                    &format!("future rust fact {i}"),
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    Some(future),
+                    None,
+                ))
+                .unwrap();
+            store
+                .insert(&make_fact_temporal(
+                    &format!("stale rust fact {i}"),
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    None,
+                    Some(past),
+                ))
+                .unwrap();
+        }
+        store
+            .insert(&make_fact("present rust fact", vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+
+        let query = SearchQuery::new(SearchMode::Fts, 3).text("rust");
+
+        let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
+        // Every future/stale candidate is filtered out; only the present one survives.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].fact.content, "present rust fact");
+    }
+
     // --- rerank_depth widening tests (#480) ---
     //
     // Invariant: `effective_limit = rerank_depth.unwrap_or(limit).max(limit)` —
