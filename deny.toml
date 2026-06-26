@@ -16,10 +16,14 @@ all-features = true
 
 # --- Security advisories (RustSec) — the #418 gate ---------------------------------
 [advisories]
-# Keep `ignore` empty so every advisory is actioned, never silently suppressed.
+# Policy: action every advisory; never silently suppress. The single tracked exception
+# below is an *unmaintained* notice (not a vulnerability) and carries a removal issue.
 # RUSTSEC-2026-0009 (time 0.3.45 DoS) was *fixed* — time bumped to 0.3.47, which
 # requires Rust 1.88, so the workspace MSRV was raised accordingly — not ignored.
-ignore = []
+# RUSTSEC-2026-0173: proc-macro-error2 is unmaintained (not a vuln), pulled via
+# tabled_derive <- tabled in memory-engine-cli. Documented exception; to be removed
+# once tabled is upgraded/replaced. Tracking: #815.
+ignore = ["RUSTSEC-2026-0173"]
 
 # --- License compliance ------------------------------------------------------------
 [licenses]
