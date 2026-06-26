@@ -1047,6 +1047,110 @@ mod tests {
         }
 
         #[test]
+        fn hnsw_strategy_one_batched_query_per_widening_attempt_forces_widening() {
+            // #288 / #362, INFO coverage: the previous test only exercises the
+            // single-attempt path, so it cannot distinguish "one query per attempt"
+            // from "one query total". Here we build a fixture that FORCES the widen
+            // loop to take a second attempt and assert the batch-query count tracks
+            // attempts (2 attempts → 2 batched queries), proving the per-attempt
+            // invariant rather than the by-construction single-attempt case.
+            //
+            // Construction: the `OVERFETCH_FACTOR * limit` candidates HNSW returns on
+            // the first attempt are all `Procedural` (filtered out by the `Semantic`
+            // query), so attempt 1 underfills (0 < 1) and the loop widens; the wider
+            // overfetch on attempt 2 reaches a farther `Semantic` fact that survives.
+            // (We filter on `fact_type` rather than `scope_id` to avoid seeding a
+            // second scope row — `init_schema` only provides the default scope 1.)
+            use rusqlite::trace::{TraceEvent, TraceEventCodes};
+            use std::cell::Cell;
+
+            thread_local! {
+                static BATCH_QUERIES: Cell<usize> = const { Cell::new(0) };
+            }
+            #[allow(
+                clippy::needless_pass_by_value,
+                reason = "signature is fixed by `Connection::trace_v2`, which takes a \
+                          bare `fn(TraceEvent)` — a reference param would not match"
+            )]
+            fn on_stmt(ev: TraceEvent<'_>) {
+                if let TraceEvent::Stmt(_, sql) = ev
+                    && sql.contains("json_each")
+                {
+                    BATCH_QUERIES.with(|c| c.set(c.get() + 1));
+                }
+            }
+
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            let store = FactStore::new(&conn, DIM);
+
+            // Helper: insert a fact at `emb` of `fact_type`, returning its id.
+            let insert = |emb: Vec<f32>, fact_type: FactType| -> i64 {
+                let fact = NewFact {
+                    content: "fact".into(),
+                    content_hash: String::new(),
+                    embedding: emb,
+                    fact_type,
+                    t_created: Utc::now(),
+                    t_expired: None,
+                    t_valid: None,
+                    t_invalid: None,
+                    source_event_id: None,
+                    scope_id: 1,
+                    base_importance: 0.5,
+                    access_count: 0,
+                    last_accessed: Utc::now(),
+                    metadata: serde_json::json!({}),
+                    is_pinned: false,
+                };
+                store.insert(&fact).unwrap()
+            };
+
+            // Query is [1,0,0,0]. `limit = 1` → first overfetch = OVERFETCH_FACTOR = 3.
+            // The 3 nearest facts are `Procedural` (excluded by the `Semantic` query);
+            // a 4th, farther fact is the only `Semantic` match, reachable only once
+            // overfetch widens to >= 4. We seed > OVERFETCH_FACTOR `Procedural` facts so
+            // the first attempt's candidate window is entirely `Procedural` and
+            // genuinely underfills the `Semantic` request.
+            let procedural_near = vec![
+                vec![1.0_f32, 0.0, 0.0, 0.0],
+                vec![0.99_f32, 0.01, 0.0, 0.0],
+                vec![0.98_f32, 0.02, 0.0, 0.0],
+                vec![0.97_f32, 0.03, 0.0, 0.0],
+            ];
+            for emb in procedural_near {
+                insert(emb, FactType::Procedural);
+            }
+            // The lone `Semantic` match: farther than every `Procedural` fact, so HNSW
+            // only surfaces it after the overfetch window widens on the second attempt.
+            let semantic_id = insert(vec![0.0_f32, 1.0, 0.0, 0.0], FactType::Semantic);
+
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            BATCH_QUERIES.with(|c| c.set(0));
+            conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(on_stmt));
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy
+                .search(&conn, &query, DIM, 1, Some(&FactType::Semantic), None)
+                .unwrap();
+
+            conn.trace_v2(TraceEventCodes::empty(), None);
+
+            assert_eq!(results.len(), 1, "the lone `Semantic` fact must be found");
+            assert_eq!(
+                results[0].fact_id, semantic_id,
+                "the surviving result is the `Semantic` fact, reached only after widening"
+            );
+            assert_eq!(
+                BATCH_QUERIES.with(Cell::get),
+                2,
+                "two widening attempts must issue exactly two batched candidate \
+                 queries — one per attempt, never 2N per-candidate round-trips"
+            );
+        }
+
+        #[test]
         fn hnsw_strategy_notify_expire_excludes_from_results() {
             let (conn, ids) = setup_with_facts();
             let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
