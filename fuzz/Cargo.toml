@@ -25,11 +25,17 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 serde_json = "1"
 tempfile = "3"
+# `dispatch` is `async`; the dispatch target drives it on a reused
+# current-thread runtime, so only the `rt` feature is needed.
+tokio = { version = "1", features = ["rt"] }
 
 # Exercise the compressed-snapshot and HNSW restore branches as well as the
 # plain path, so the snapshot/restore targets cover every deserialization route.
 memory-engine = { path = "../memory-engine/lib/memory-engine", features = ["ann", "compress-gzip", "compress-zstd", "archive"] }
 memory-engine-embed = { path = "../memory-engine/lib/embed" }
+# Drives the MCP tool dispatcher (`tools::dispatch`), the server's primary
+# untrusted-input entry point (#321). The crate's lib.rs re-exports `tools`.
+memory-engine-mcp = { path = "../memory-engine/bin/mcp" }
 
 # Detach from the parent workspace: an empty `[workspace]` makes this its own
 # workspace root, so the repo-root `cargo build --workspace` ignores it.
@@ -83,6 +89,13 @@ bench = false
 [[bin]]
 name = "fts_query"
 path = "fuzz_targets/fts_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dispatch"
+path = "fuzz_targets/dispatch.rs"
 test = false
 doc = false
 bench = false
