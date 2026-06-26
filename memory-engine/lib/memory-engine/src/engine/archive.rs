@@ -30,6 +30,22 @@ impl MemoryEngine {
     /// source of truth, so the cache is reconciled to it rather than mutated in
     /// place (#332).
     ///
+    /// # Concurrency
+    ///
+    /// The in-memory graph reconciliation is **not serialized** with concurrent
+    /// graph mutators. The post-commit rebuild reads `list_active_edges`
+    /// *without* holding the graph write lock and only then swaps the rebuilt
+    /// graph in (the read must not hold a lock across the `.await`). A graph
+    /// mutator (`prune`, conflict resolution, edge insertion) that commits to
+    /// the DB in the window between that read and the swap has its in-memory
+    /// edge **lost from the cache** — overwritten by the rebuilt graph that
+    /// predates it. This is the same non-serializable in-memory reconciliation
+    /// contract as `consolidate`'s read→compute→write split: the DB remains the
+    /// source of truth, so the lost edge still persists on disk and is recovered
+    /// by the next graph rebuild (the next `open`/restart, or the next archive
+    /// or consolidate pass). No write is dropped from the durable store; only
+    /// the derived in-memory cache may briefly lag the DB until the next rebuild.
+    ///
     /// # Panics
     ///
     /// Panics if the constructed `.pak` path has no filename component.
@@ -115,6 +131,14 @@ impl MemoryEngine {
         // self-healing under an external kill (the next `open` rebuilds from the
         // exact same committed state). The port read happens *before* taking the
         // write guard so no lock is held across the `.await`.
+        //
+        // Because the read is unlocked, this rebuild is **not serialized** with
+        // concurrent graph mutators (see the `# Concurrency` section above): a
+        // mutator that commits to the DB in the read→swap window has its
+        // in-memory edge overwritten by the rebuilt graph and lost from the
+        // cache. The DB stays the source of truth — that edge persists on disk
+        // and returns on the next rebuild — so this is a deliberate, documented
+        // last-writer-wins on the *derived* cache, not a durable lost update.
         let active_edges = self.storage.list_active_edges().await?;
         *self.graph.write() = MemoryGraph::from_active_edges(&active_edges);
 
