@@ -1356,6 +1356,18 @@ fn default_dump_path(base_dir: &std::path::Path, ext: &str) -> PathBuf {
 ///   the destination with `O_NOFOLLOW` to fail atomically if a symlink leaf is
 ///   raced into place between this check and the write.
 fn validate_dump_path(p: &std::path::Path) -> Result<PathBuf, ErrorData> {
+    // Make the client path absolute FIRST, resolving it against the process cwd.
+    // `std::path::absolute` is purely lexical — it does NOT touch the filesystem
+    // (no canonicalization, no symlink resolution), it just guarantees a parent
+    // component exists. Without it, a bare leaf like `"dump.json"` has
+    // `parent() == Some("")`, and `canonicalize("")` fails with a confusing
+    // "No such file or directory" instead of the intended containment rejection.
+    // A cwd-relative path that resolves outside temp is still rejected by the
+    // `starts_with` check below — that is the correct outcome.
+    let p = std::path::absolute(p)
+        .map_err(|e| ValidationError::Other(format!("cannot resolve dump path: {e}")))?;
+    let p = p.as_path();
+
     // Canonicalize the temp root so the containment check compares resolved
     // paths on both sides. Fall back to the raw value if canonicalize fails
     // (e.g. a platform that does not pre-create the temp dir).
@@ -1895,6 +1907,7 @@ async fn handle_get_recent_insights(
 mod tests {
     use super::{
         default_dump_name, default_dump_path, get_usize, parse_consolidate_config, parse_fact_type,
+        validate_dump_path,
     };
     use memory_engine::types::FactType;
     use serde_json::json;
@@ -2109,5 +2122,58 @@ mod tests {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap();
             assert!(name.starts_with("memory-dump-"), "unexpected name: {name}");
         }
+    }
+
+    /// Finding-1 regression (Gemini #836): a client path with no directory
+    /// component (a bare leaf such as `"dump.json"`) must NOT trip the confusing
+    /// `canonicalize("")` parent failure. `validate_dump_path` makes the path
+    /// absolute against cwd *first* (`std::path::absolute`, purely lexical), so a
+    /// bare leaf gains a real parent and is then judged by the *containment*
+    /// check — accepted when cwd is inside temp, rejected (with the temp-dir
+    /// error) when it is not. Both branches are asserted under one `set_current_dir`
+    /// guard because cwd is process-global; this is the only test that mutates it.
+    #[test]
+    fn validate_dump_path_handles_bare_relative_leaf() {
+        // Canonicalize temp so the asserted prefix matches `validate_dump_path`'s
+        // own canonical comparison (e.g. macOS `/tmp -> /private/tmp`).
+        let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let outside = std::env::current_dir().expect("cargo runs tests from the crate dir");
+        debug_assert!(
+            !outside.starts_with(&temp),
+            "test precondition: the crate dir must be outside temp"
+        );
+
+        let saved = std::env::current_dir().ok();
+
+        // (a) cwd OUTSIDE temp → the bare leaf resolves outside the jail and is
+        //     rejected by containment, with the temp-directory error (NOT a
+        //     parent-resolution error).
+        std::env::set_current_dir(&outside).unwrap();
+        let rejected = validate_dump_path(std::path::Path::new("dump.json"));
+
+        // (b) cwd INSIDE temp → the same bare leaf resolves into the jail and is
+        //     accepted, resolving to a path under temp.
+        std::env::set_current_dir(&temp).unwrap();
+        let accepted = validate_dump_path(std::path::Path::new("relative-dump.json"));
+
+        if let Some(prev) = saved {
+            let _ = std::env::set_current_dir(prev);
+        }
+
+        let err = rejected.expect_err("a bare leaf under a non-temp cwd must be rejected");
+        assert!(
+            err.message.contains("temp"),
+            "a relative leaf must be rejected by the temp-containment check, not a \
+             parent-resolution error; got: {}",
+            err.message
+        );
+
+        let resolved = accepted.expect("a relative leaf resolving into temp must be accepted");
+        assert!(
+            resolved.starts_with(&temp),
+            "resolved path {} must be inside temp {}",
+            resolved.display(),
+            temp.display()
+        );
     }
 }

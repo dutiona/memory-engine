@@ -63,6 +63,51 @@ fn create_dump_tmp(tmp: &Path) -> std::io::Result<File> {
     }
 }
 
+/// Mint a fresh, empty, server-named sibling temp file as the `VACUUM INTO`
+/// target, never following a symlink at the leaf.
+///
+/// `VACUUM INTO` follows a symlink at its destination leaf, so writing it
+/// directly at the caller-supplied `path` leaves a TOCTOU window (CWE-59 /
+/// CWE-367): the mcp-level guard lstat-rejects a symlink leaf, but an attacker
+/// with write access to the directory can race a symlink into place *after* the
+/// check and *before* the `VACUUM INTO`. We close that by VACUUM-ing into an
+/// **unpredictably-named** sibling created with `O_NOFOLLOW | O_EXCL`
+/// (`create_new`) — the open fails atomically if the name is a symlink or
+/// already exists — and then atomically `rename` it onto `path`. `rename`
+/// replaces a destination symlink rather than following it, so the final move is
+/// safe; this mirrors the symlink-safe JSON write-then-rename path.
+///
+/// `VACUUM INTO` accepts an *empty* target file (`SQLite` requirement: the
+/// `INTO` file must not previously exist or must be empty), so the empty file
+/// minted here is a valid `VACUUM` destination.
+///
+/// On non-Unix targets `O_NOFOLLOW` is unavailable, so this degrades to a plain
+/// `create_new` (still `O_EXCL` + an unpredictable name); the mcp-level
+/// `symlink_metadata` rejection remains the guard there.
+fn mint_sqlite_vacuum_tmp(dir: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix(".dump-")
+        .suffix(".db.tmp")
+        .make_in(dir, |p| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(p)
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(p)
+            }
+        })
+}
+
 /// Stream engine state as JSON to `writer`, one entity at a time.
 ///
 /// Produces the same JSON format as [`super::types::EngineSnapshot`] but never
@@ -256,15 +301,23 @@ pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 ///
 /// Works for both file-backed and in-memory databases (`SQLite` 3.27+).
 ///
-/// # Trusted-path contract
+/// # Symlink safety
 ///
-/// `path` is treated as a caller-controlled destination. The function probes
-/// the path and then writes to it, leaving an inherent check-then-act (TOCTOU)
-/// window; it does **not** defend against an adversary racing the filesystem to
-/// swap `path` between the probe and the write. Callers must not direct dumps at
-/// a location writable by an untrusted party. The guards below turn the common
-/// *mistakes* (live DB, a directory) into clear errors — they are not a defense
-/// against a concurrent attacker.
+/// `path` is a caller-controlled destination, but the symlink-leaf race that
+/// `VACUUM INTO` would otherwise open is closed: rather than VACUUM-ing straight
+/// at `path` (which follows a symlink at the leaf), we VACUUM into an
+/// unpredictably-named sibling temp file created with `O_NOFOLLOW | O_EXCL`
+/// (see [`mint_sqlite_vacuum_tmp`]) and then atomically `rename` it onto `path`.
+/// `rename` *replaces* a destination symlink rather than following it, so an
+/// attacker who swaps `path` to a symlink between the guards and the move cannot
+/// redirect the write outside the directory (CWE-59 / CWE-367; #296 / #354 /
+/// #414 hardening — symmetric with the JSON write-then-rename path).
+///
+/// Residual: this does not confine *where* `path` itself points (a caller can
+/// still name a destination outside any sandbox); the mcp-level
+/// `validate_dump_path` guard handles that containment. The live-DB and
+/// directory checks below remain best-effort probes that turn the common
+/// *mistakes* into clear typed errors.
 ///
 /// # Errors
 ///
@@ -295,43 +348,45 @@ pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
         }
     }
 
-    // Re-run support: `VACUUM INTO` refuses to write to a path that already
-    // exists, so a prior dump file must be unlinked first.
-    //
-    // Trusted-path contract: `path` is a caller-controlled dump destination. A
-    // residual check-then-act window remains between this probe and the
-    // `VACUUM INTO` below (a classic TOCTOU); the engine does *not* defend
-    // against an adversary racing the filesystem in that window, so callers
-    // MUST NOT direct dumps at a location writable by an untrusted party.
-    //
-    // What this guard *does* enforce: probe with `symlink_metadata` (which does
-    // not follow symlinks, unlike the previous `path.exists()`) and only ever
-    // unlink a non-directory. A directory target is rejected with a clear typed
-    // error instead of the opaque "Is a directory" I/O failure.
+    // Best-effort *mistake* guard (not a security boundary): reject an existing
+    // directory at `path` with a clear typed error instead of letting the final
+    // `rename` fail opaquely. `is_dir()` follows symlinks, so this also refuses a
+    // symlink that resolves to a directory. A regular file or absent leaf is the
+    // normal case and is replaced atomically by the rename below.
     match std::fs::symlink_metadata(path) {
-        Ok(_) => {
-            // `is_dir()` follows symlinks, so this refuses both a real directory
-            // and a symlink that resolves to one — neither is a valid VACUUM INTO
-            // target and we must never unlink a directory. A symlink to a regular
-            // file (or a broken symlink) is removed as the link itself.
-            if path.is_dir() {
-                return Err(MemoryError::Conflict(ConflictError::DumpTargetIsDirectory));
-            }
-            std::fs::remove_file(path)?;
+        Ok(_) if path.is_dir() => {
+            return Err(MemoryError::Conflict(ConflictError::DumpTargetIsDirectory));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // absent: nothing to remove
+        Ok(_) => {} // regular file / file-symlink: replaced by rename
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // absent: nothing to do
         Err(e) => return Err(MemoryError::Io(e)),
     }
 
-    let escaped = path.to_string_lossy().replace('\'', "''");
+    // The rename target dir is `path`'s parent; the temp must be a sibling there
+    // so the final `rename` is intra-directory (atomic, no cross-device copy).
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = dir.unwrap_or_else(|| Path::new("."));
+
+    // VACUUM INTO a fresh, symlink-safe, server-named sibling temp, then
+    // atomically rename it onto `path`. This closes the symlink-leaf TOCTOU
+    // (`VACUUM INTO` follows a destination symlink; `rename` replaces it).
+    let tmp = mint_sqlite_vacuum_tmp(dir).map_err(MemoryError::Io)?;
+    let tmp_path = tmp.path().to_path_buf();
+
+    let escaped = tmp_path.to_string_lossy().replace('\'', "''");
     if escaped.contains('\0') {
         return Err(MemoryError::Internal(
-            "dump path contains null byte".to_string(),
+            "dump temp path contains null byte".to_string(),
         ));
     }
     let sql = format!("VACUUM INTO '{escaped}'");
     conn.execute_batch(&sql)
         .map_err(|e| MemoryError::Internal(format!("VACUUM INTO failed: {e}")))?;
+
+    // Atomic publish: `persist` renames the temp onto `path`, replacing any
+    // existing file (or symlink leaf) without following it. On failure the
+    // `NamedTempFile` drop removes the temp, leaving `path` untouched.
+    tmp.persist(path).map_err(|e| MemoryError::Io(e.error))?;
 
     Ok(())
 }
@@ -729,5 +784,54 @@ mod tests {
             b"do not clobber",
             "the symlink target must NOT have been overwritten"
         );
+    }
+
+    /// `SQLite`-path symlink safety (#296 / #354 / #414): if the final dump
+    /// target is a pre-planted symlink to a file we must not clobber,
+    /// `dump_sqlite` must not follow it. It VACUUM-s into a fresh
+    /// `O_NOFOLLOW | O_EXCL` sibling temp and `rename`s onto the target —
+    /// `rename` replaces the symlink (operating on the link, not its referent),
+    /// so the victim stays intact and the target path becomes a real `SQLite`
+    /// file. This closes the `VACUUM INTO` symlink-leaf TOCTOU that the mcp
+    /// lstat-reject alone left racy.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dump_sqlite_replaces_symlinked_target_without_following() {
+        use crate::store::schema::{init_schema, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"do not clobber").unwrap();
+
+        // The dump target is a symlink pointing at the victim.
+        let target = dir.path().join("dump.db");
+        std::os::unix::fs::symlink(&victim, &target).unwrap();
+
+        dump_sqlite(&conn, &target).expect("dump must succeed by replacing the symlink");
+
+        // The victim referent is untouched: the write did not follow the link.
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"do not clobber",
+            "the symlink target must NOT have been overwritten"
+        );
+        // The target is now a real (non-symlink) SQLite file containing the dump.
+        let meta = std::fs::symlink_metadata(&target).unwrap();
+        assert!(
+            !meta.file_type().is_symlink(),
+            "dump target must be a regular file after the rename, not a symlink"
+        );
+        let dump_conn = rusqlite::Connection::open_with_flags(
+            &target,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("dumped target must be a valid SQLite database");
+        let n: i64 = dump_conn
+            .query_row("SELECT count(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "fresh in-memory db dumps an empty facts table");
     }
 }
