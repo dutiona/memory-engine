@@ -28,8 +28,8 @@ tempfile = "3"
 
 # Exercise the compressed-snapshot and HNSW restore branches as well as the
 # plain path, so the snapshot/restore targets cover every deserialization route.
-memory-engine = { path = "..", features = ["ann", "compress-gzip", "compress-zstd", "archive"] }
-memory-engine-embed = { path = "../memory-engine-embed" }
+memory-engine = { path = "../memory-engine/lib/memory-engine", features = ["ann", "compress-gzip", "compress-zstd", "archive"] }
+memory-engine-embed = { path = "../memory-engine/lib/embed" }
 
 # Detach from the parent workspace: an empty `[workspace]` makes this its own
 # workspace root, so the repo-root `cargo build --workspace` ignores it.

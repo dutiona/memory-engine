@@ -16,10 +16,14 @@ all-features = true
 
 # --- Security advisories (RustSec) — the #418 gate ---------------------------------
 [advisories]
-# Keep `ignore` empty so every advisory is actioned, never silently suppressed.
+# Policy: action every advisory; never silently suppress. The single tracked exception
+# below is an *unmaintained* notice (not a vulnerability) and carries a removal issue.
 # RUSTSEC-2026-0009 (time 0.3.45 DoS) was *fixed* — time bumped to 0.3.47, which
 # requires Rust 1.88, so the workspace MSRV was raised accordingly — not ignored.
-ignore = []
+# RUSTSEC-2026-0173: proc-macro-error2 is unmaintained (not a vuln), pulled via
+# tabled_derive <- tabled in memory-engine-cli. Documented exception; to be removed
+# once tabled is upgraded/replaced. Tracking: #815.
+ignore = ["RUSTSEC-2026-0173"]
 
 # --- License compliance ------------------------------------------------------------
 [licenses]
@@ -51,6 +55,12 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 # Reject `version = "*"` requirements — they defeat reproducible, auditable builds.
 wildcards = "deny"
+# ...but the intra-workspace path deps (memory-engine, memory-engine-embed) carry no
+# version requirement, which cargo-deny counts as a wildcard. After the bin/lib reorg
+# the core crate moved from the workspace ROOT package to a regular member, so these
+# first-party path deps are now flagged. Allow wildcard *paths* (first-party only)
+# while still denying real `*` version reqs on crates.io dependencies.
+allow-wildcard-paths = true
 
 # --- Source registries -------------------------------------------------------------
 [sources]

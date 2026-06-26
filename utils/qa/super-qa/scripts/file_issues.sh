@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Super-QA issue filer. Idempotent, resumable, reuses scripts/github-pm/lib.sh.
+# Super-QA issue filer. Idempotent, resumable, reuses utils/scripts/github-pm/lib.sh.
 # Phases: labels | epics | findings | dupes | observers | relabel | all
 # Env: DRY=1 (no writes), GH_PM_THROTTLE (default bumped to 1.0s for issue creation).
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(git -C "$DIR" rev-parse --show-toplevel)"
 export GH_PM_THROTTLE="${GH_PM_THROTTLE:-1.0}"
-source "$ROOT/scripts/github-pm/lib.sh"
+source "$ROOT/utils/scripts/github-pm/lib.sh"
 # Inputs default to the 2026-06-01 run; override RUN_DIR (or MANIFEST/STATE) for another round.
 RUN_DIR="${RUN_DIR:-$DIR/../runs/2026-06-01}"
 MANIFEST="${MANIFEST:-$RUN_DIR/issue_manifest.json}"

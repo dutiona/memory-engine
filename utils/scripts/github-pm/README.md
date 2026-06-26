@@ -12,7 +12,7 @@ destructive step is fenced behind the green gate.
 ## Layout
 
 ```
-scripts/github-pm/
+utils/scripts/github-pm/
 ├── README.md                                # this file
 ├── lib.sh                                   # throttle/retry/upsert/rename/field/subissue helpers (sourced everywhere)
 ├── manifests/
@@ -77,8 +77,8 @@ Source `lib.sh` is loaded by each script. Run from the repo root. Stop at the ga
 Reverses changes from a backup snapshot in `backups/<ts>/` (default `backups/latest`).
 
 ```bash
-bash scripts/github-pm/restore.sh                 # full rollback from backups/latest
-bash scripts/github-pm/restore.sh --labels-only   # labels only (used by the Task 4 smoke-test)
+bash utils/scripts/github-pm/restore.sh                 # full rollback from backups/latest
+bash utils/scripts/github-pm/restore.sh --labels-only   # labels only (used by the Task 4 smoke-test)
 ```
 
 What it restores:
@@ -100,7 +100,7 @@ durable record the workflow renders from).
 The core taxonomy is split from the per-repo `area:*` manifest so another repo
 (e.g. `reify`, `coraly`) can adopt the suite by swapping one file. To reuse:
 
-1. **Copy the directory** `scripts/github-pm/` into the target repo.
+1. **Copy the directory** `utils/scripts/github-pm/` into the target repo.
 2. **Swap `labels.area.<repo>.json`** — replace `labels.area.memory-engine.json` with
    a per-repo `area:*` manifest reflecting that repo's subsystems
    (`labels.core.json` is cross-repo — keep it byte-identical).

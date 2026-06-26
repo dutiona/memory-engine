@@ -8,7 +8,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"
 
 [dependencies]
-memory-engine = { path = ".." }
+# Publishable library: the intra-workspace dep carries a version (not a bare path)
+# so it is not a cargo-deny wildcard and the crate stays crates.io-publishable.
+memory-engine = { path = "../memory-engine", version = "0.1.0" }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
