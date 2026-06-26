@@ -48,6 +48,21 @@ pub const MAX_BOOTSTRAP_BYTES: usize = 50 * 1024 * 1024;
 // ---------------------------------------------------------------------------
 
 /// Returns all tool definitions (P0, P1, P2, Phase 5) with JSON schemas.
+///
+/// The returned list is what the server advertises via the MCP `list_tools`
+/// request; each [`Tool`] carries its name, description, and input JSON schema.
+///
+/// # Examples
+///
+/// ```
+/// use memory_engine_mcp::tools;
+///
+/// let defs = tools::all_tool_definitions();
+/// // Every tool is namespaced under the `memory_` prefix.
+/// assert!(defs.iter().all(|t| t.name.starts_with("memory_")));
+/// // The full catalog is exposed (P0 + P1 + P2 + Phase-5a + cognitive + activity).
+/// assert_eq!(defs.len(), 26);
+/// ```
 #[must_use]
 #[allow(
     clippy::too_many_lines,
@@ -1012,7 +1027,7 @@ async fn handle_query(
         .results
         .iter()
         .map(|r| depth::shape_search_result(r, depth_level, None))
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     let diagnostics = depth::shape_diagnostics(&response.diagnostics, depth_level);
 
@@ -1083,7 +1098,7 @@ async fn handle_explain_fact(
     let depth_level = get_depth(args)?;
 
     let explanation: FactExplanation = engine.explain_fact(fact_id).await.map_err(to_mcp_error)?;
-    let shaped = depth::shape_explanation(&explanation, depth_level);
+    let shaped = depth::shape_explanation(&explanation, depth_level)?;
 
     ok_json(shaped)
 }
@@ -1667,7 +1682,7 @@ async fn handle_fact_history(
     let depth_level = get_depth(args)?;
 
     let history = engine.fact_history(fact_id).await.map_err(to_mcp_error)?;
-    let shaped = depth::shape_fact_history(&history, depth_level);
+    let shaped = depth::shape_fact_history(&history, depth_level)?;
 
     ok_json(shaped)
 }
