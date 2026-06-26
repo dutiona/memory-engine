@@ -389,7 +389,7 @@ impl VectorSearchStrategy for HnswStrategy {
 
         // If HNSW widening couldn't satisfy, fall back to brute-force.
         if results.len() < limit {
-            return crate::search::vector_search(
+            return crate::search::vector::vector_search(
                 conn,
                 query_embedding,
                 self.embed_dim,

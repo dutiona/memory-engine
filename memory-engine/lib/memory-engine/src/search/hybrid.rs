@@ -58,17 +58,21 @@ pub enum MatchType {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
-    pub text: Option<String>,
-    pub embedding: Option<Vec<f32>>,
-    pub mode: SearchMode,
-    pub limit: usize,
+    // Fields are `pub(crate)`: external callers MUST use the builder
+    // (`SearchQuery::new(..)` + the chainable setters), which `#[non_exhaustive]`
+    // already enforces for construction. Intra-crate the engine still constructs
+    // via `new()` and writes fields directly (see `engine::query`).
+    pub(crate) text: Option<String>,
+    pub(crate) embedding: Option<Vec<f32>>,
+    pub(crate) mode: SearchMode,
+    pub(crate) limit: usize,
     /// How many candidates to pass to the reranker before truncating to `limit`.
     /// Clamped to at least `limit` — can only widen the candidate pool, never shrink it.
     /// When `None`, falls back to `limit` (no over-fetch).
-    pub rerank_depth: Option<usize>,
-    pub valid_at: Option<DateTime<Utc>>,
-    pub fact_type: Option<FactType>,
-    pub scope: Option<crate::types::ScopeQuery>,
+    pub(crate) rerank_depth: Option<usize>,
+    pub(crate) valid_at: Option<DateTime<Utc>>,
+    pub(crate) fact_type: Option<FactType>,
+    pub(crate) scope: Option<crate::types::ScopeQuery>,
 }
 
 impl SearchQuery {
@@ -243,7 +247,16 @@ pub fn rrf_merge(fts: &[(i64, f64)], vec: &[(i64, f32)], k: u32) -> Vec<(i64, f6
 /// Returns `MemoryError::Database` on query failure.
 /// Returns `MemoryError::EmbeddingDimension` if the query embedding or a stored
 /// embedding does not match the configured dimension during vector search.
-pub fn hybrid_search(
+//
+// Test-only oracle: the engine's live path is the async [`port_hybrid_search`]
+// (#631 Stage C); this synchronous twin survives only as the in-process
+// reference the `search` unit tests fuse against. It is `dead_code` in a release
+// build, so suppress the lint there rather than ship/widen it.
+#[cfg_attr(not(test), allow(dead_code))]
+// `search` is a crate-private module, so `pub(crate)` is the honest visibility;
+// the lint only fires because the module isn't `pub`.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn hybrid_search(
     conn: &Connection,
     query: &SearchQuery,
     embed_dim: usize,
