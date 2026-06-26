@@ -688,6 +688,111 @@ mod tests {
     }
 
     #[test]
+    fn remove_edges_by_fact_noop_on_unknown_fact() {
+        // #456: the no-op path. A fact id that is not in the graph must leave
+        // every existing edge untouched and must not panic — `remove_edges_by_fact`
+        // is called by conflict resolution and archival on ids that may already be
+        // absent from the in-memory mirror.
+        let mut g = MemoryGraph::new();
+        g.add_edge(1, 2, make_edge_data(10, "a"));
+        g.add_edge(2, 3, make_edge_data(20, "b"));
+        assert_eq!(g.edge_count(), 2);
+
+        g.remove_edges_by_fact(99); // unknown fact id — must be a no-op
+
+        assert_eq!(g.edge_count(), 2);
+        assert_eq!(g.neighbors(1), vec![2]);
+        assert_eq!(g.neighbors(2), vec![3]);
+    }
+
+    #[test]
+    fn remove_edges_by_fact_keeps_node_and_drops_both_directions() {
+        // #456: the documented post-condition. After removing all edges touching a
+        // fact that has BOTH an incoming and an outgoing edge, the node itself must
+        // survive (only its edges are gone) while neither neighbor retains a dangling
+        // reference to it. Complements #833's multi-edge/self-loop cases, which do not
+        // assert node survival explicitly.
+        let mut g = MemoryGraph::new();
+        g.add_edge(2, 5, make_edge_data(10, "out")); // 2 has an outgoing edge
+        g.add_edge(1, 2, make_edge_data(20, "in")); // 2 has an incoming edge
+        assert_eq!(g.edge_count(), 2);
+
+        g.remove_edges_by_fact(2);
+
+        // Both directions gone, fact 2 fully disconnected…
+        assert_eq!(g.edge_count(), 0);
+        assert_eq!(g.degree(2), 0);
+        // …but the node itself stays in the graph.
+        assert!(g.has_node(2));
+        // Neighbors no longer reference fact 2 through it.
+        assert!(g.neighbors(1).is_empty());
+        assert!(g.neighbors(2).is_empty());
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_topology_and_edge_data() {
+        // #457: a graph-level `to_snapshot` -> `from_snapshot` roundtrip. The
+        // engine save/restore path relies on this cycle preserving topology AND
+        // per-edge data (edge_id, relation_type, weight). The existing
+        // `engine/snapshot.rs` test only exercises file-level MessagePack of the
+        // `GraphSnapshot` struct — a weight-mangling or edge-drop regression inside
+        // `MemoryGraph::{to,from}_snapshot` would be invisible to it.
+        let mut g = MemoryGraph::new();
+        g.add_edge(
+            10,
+            20,
+            EdgeData {
+                edge_id: 1,
+                relation_type: "contradicts".into(),
+                weight: 0.75,
+            },
+        );
+        g.add_edge(
+            20,
+            30,
+            EdgeData {
+                edge_id: 2,
+                relation_type: "supplements".into(),
+                weight: 0.5,
+            },
+        );
+
+        let snap = g.to_snapshot();
+        // `from_snapshot` validates endpoints against the live existing-fact set
+        // (#866 signature change); thread the fixture's fact ids through it.
+        let existing: HashSet<i64> = [10, 20, 30].into_iter().collect();
+        let g2 =
+            MemoryGraph::from_snapshot(&snap, &existing).expect("valid roundtrip snapshot builds");
+
+        // Topology survives the petgraph projection.
+        assert_eq!(g2.node_count(), g.node_count());
+        assert_eq!(g2.edge_count(), g.edge_count());
+        assert_eq!(g2.neighbors(10), vec![20]);
+        assert_eq!(g2.neighbors(20), vec![30]);
+
+        // Per-edge data (edge_id, relation_type, weight) survives — re-snapshot and
+        // compare against the reprojected graph, sorting by edge_id for determinism
+        // (edge_references order is not contractual).
+        let mut snap2 = g2.to_snapshot();
+        snap2.edges.sort_by_key(|e| e.edge_id);
+        assert_eq!(snap2.edges.len(), 2);
+
+        let e0 = &snap2.edges[0];
+        assert_eq!(e0.edge_id, 1);
+        assert_eq!(e0.source, 10);
+        assert_eq!(e0.target, 20);
+        assert_eq!(e0.relation_type, "contradicts");
+        assert!((e0.weight - 0.75).abs() < f64::EPSILON);
+
+        let e1 = &snap2.edges[1];
+        assert_eq!(e1.edge_id, 2);
+        assert_eq!(e1.source, 20);
+        assert_eq!(e1.target, 30);
+        assert_eq!(e1.relation_type, "supplements");
+        assert!((e1.weight - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn from_snapshot_accepts_valid_edges() {
         // Baseline: a well-formed snapshot (positive ids, within the cap, all
         // endpoints present in the existing fact set) builds the graph faithfully —
@@ -905,6 +1010,98 @@ mod tests {
         let _ = id1; // used for insert, graph has it as EdgeData.edge_id
     }
 
+    #[test]
+    fn load_from_db_empty_edges_table() {
+        // #499 (graph/testing-load-from-db-edge-cases): an edges table with no
+        // active rows yields an empty graph — no nodes, no edges, no panic.
+        let conn = setup_db();
+        let graph = MemoryGraph::load_from_db(&conn).unwrap();
+        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(graph.node_count(), 0);
+        assert!(!graph.has_node(1));
+    }
+
+    #[test]
+    fn load_from_db_preserves_edge_weight() {
+        // #499: weight preservation through the DB load path. Insert an edge with a
+        // distinctive non-unit weight and assert it round-trips into the loaded
+        // graph's `EdgeData.weight` (observed via the snapshot projection).
+        let conn = setup_db();
+        let store = EdgeStore::new(&conn);
+        let now = Utc::now();
+        store
+            .insert(&NewEdge {
+                source_fact_id: 1,
+                target_fact_id: 2,
+                relation_type: "weighted".to_string(),
+                weight: 0.625,
+                scope_id: 1,
+                t_created: now,
+                t_expired: None,
+            })
+            .unwrap();
+
+        let graph = MemoryGraph::load_from_db(&conn).unwrap();
+        assert_eq!(graph.edge_count(), 1);
+
+        let snap = graph.to_snapshot();
+        assert_eq!(snap.edges.len(), 1);
+        let e = &snap.edges[0];
+        assert_eq!(e.source, 1);
+        assert_eq!(e.target, 2);
+        assert_eq!(e.relation_type, "weighted");
+        assert!((e.weight - 0.625).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn load_from_db_parallel_edges() {
+        // #499: two active edges with the same (source, target) are both loaded —
+        // petgraph is a multigraph, so a parallel edge must not collapse. Each
+        // edge keeps its own edge_id/relation_type.
+        let conn = setup_db();
+        let store = EdgeStore::new(&conn);
+        let now = Utc::now();
+        store
+            .insert(&NewEdge {
+                source_fact_id: 1,
+                target_fact_id: 2,
+                relation_type: "first".to_string(),
+                weight: 1.0,
+                scope_id: 1,
+                t_created: now,
+                t_expired: None,
+            })
+            .unwrap();
+        store
+            .insert(&NewEdge {
+                source_fact_id: 1,
+                target_fact_id: 2,
+                relation_type: "second".to_string(),
+                weight: 1.0,
+                scope_id: 1,
+                t_created: now,
+                t_expired: None,
+            })
+            .unwrap();
+
+        let graph = MemoryGraph::load_from_db(&conn).unwrap();
+        // Both parallel edges survive (multigraph), but only one node pair.
+        assert_eq!(graph.edge_count(), 2);
+        assert_eq!(graph.node_count(), 2);
+        // 1 → 2 appears twice in the outgoing neighbor list.
+        assert_eq!(graph.neighbors(1), vec![2, 2]);
+        assert_eq!(graph.degree(1), 2);
+        assert_eq!(graph.degree(2), 2);
+
+        // Both relation types are present, edge_ids distinct.
+        let snap = graph.to_snapshot();
+        let mut rels: Vec<_> = snap.edges.iter().map(|e| e.relation_type.clone()).collect();
+        rels.sort();
+        assert_eq!(rels, vec!["first".to_string(), "second".to_string()]);
+        let ids: HashSet<i64> = snap.edges.iter().map(|e| e.edge_id).collect();
+        assert_eq!(ids.len(), 2);
+    }
+
     fn setup_db() -> Connection {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
@@ -917,5 +1114,111 @@ mod tests {
             ).unwrap();
         }
         conn
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    //! Property-based invariants for [`MemoryGraph`] (#499
+    //! `graph/testing-proptest-graph-invariants`).
+    //!
+    //! Example-based tests pin specific topologies; these assert structural laws
+    //! that must hold for *any* sequence of edge insertions.
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A directed edge generator over a small fact-id domain, so randomly
+    /// generated edges densely revisit the same nodes (exercising multi-edges,
+    /// self-loops, and shared endpoints) rather than scattering across a sparse id
+    /// space. `edge_id` is kept positive and unique per edge by the caller.
+    fn edge_strategy() -> impl Strategy<Value = (i64, i64)> {
+        (1i64..8, 1i64..8)
+    }
+
+    /// Build a graph from a list of `(source, target)` pairs, assigning each a
+    /// distinct positive `edge_id`.
+    fn build_graph(edges: &[(i64, i64)]) -> MemoryGraph {
+        let mut g = MemoryGraph::new();
+        for (i, &(s, t)) in edges.iter().enumerate() {
+            // edge_id must be strictly positive and unique.
+            let edge_id = i64::try_from(i).expect("test edge count fits in i64") + 1;
+            g.add_edge(
+                s,
+                t,
+                EdgeData {
+                    edge_id,
+                    relation_type: "rel".to_string(),
+                    weight: 1.0,
+                },
+            );
+        }
+        g
+    }
+
+    proptest! {
+        /// `degree(v)` equals the number of outgoing plus incoming edges incident
+        /// to `v`, counted independently from the raw edge list. A self-loop
+        /// contributes to both counts.
+        #[test]
+        fn degree_equals_in_plus_out(edges in prop::collection::vec(edge_strategy(), 0..40)) {
+            let g = build_graph(&edges);
+            for node in 1i64..8 {
+                if !g.has_node(node) {
+                    continue;
+                }
+                let out = edges.iter().filter(|&&(s, _)| s == node).count();
+                let inc = edges.iter().filter(|&&(_, t)| t == node).count();
+                prop_assert_eq!(g.degree(node), out + inc);
+            }
+        }
+
+        /// Connectivity is symmetric: if `b` is in the connected component of `a`,
+        /// then `a` is in the connected component of `b`. The component is treated
+        /// as an undirected relation, so it must be an equivalence class.
+        #[test]
+        fn connected_component_symmetric(edges in prop::collection::vec(edge_strategy(), 0..40)) {
+            let g = build_graph(&edges);
+            for a in 1i64..8 {
+                if !g.has_node(a) {
+                    continue;
+                }
+                let comp_a: HashSet<i64> = g.connected_component(a).into_iter().collect();
+                for &b in &comp_a {
+                    let comp_b: HashSet<i64> = g.connected_component(b).into_iter().collect();
+                    prop_assert!(
+                        comp_b.contains(&a),
+                        "component symmetry violated: {} reaches {} but not back",
+                        a,
+                        b
+                    );
+                    // Equivalence: same membership both ways.
+                    prop_assert_eq!(&comp_a, &comp_b);
+                }
+            }
+        }
+
+        /// Removing all edges incident to a fact decreases `edge_count` by exactly
+        /// that fact's distinct incident-edge count, and never below zero. (A
+        /// self-loop is a single edge even though it is both incoming and
+        /// outgoing.)
+        #[test]
+        fn remove_edges_by_fact_edge_count_consistent(
+            edges in prop::collection::vec(edge_strategy(), 0..40),
+            victim in 1i64..8,
+        ) {
+            let mut g = build_graph(&edges);
+            let before = g.edge_count();
+            // Distinct edges touching `victim` (self-loops counted once).
+            let incident = edges
+                .iter()
+                .filter(|&&(s, t)| s == victim || t == victim)
+                .count();
+
+            g.remove_edges_by_fact(victim);
+
+            prop_assert_eq!(g.edge_count(), before - incident);
+            // `victim` is now fully disconnected.
+            prop_assert_eq!(g.degree(victim), 0);
+        }
     }
 }

@@ -1,4 +1,9 @@
-//! In-memory knowledge graph backed by `petgraph`, loaded from `SQLite` edge table.
+//! In-memory graph backed by `petgraph`, mirroring the active edges in `SQLite`.
+//!
+//! Node weights are fact ids; edge weights are [`EdgeData`]. Only active
+//! (non-expired) edges are represented, and the graph is edge-only — isolated
+//! facts with no active edge are not materialized as nodes (matching
+//! [`MemoryGraph::load_from_db`] semantics).
 
 mod memory_graph;
 
