@@ -5484,3 +5484,117 @@ mod snapshot_integration {
         );
     }
 }
+
+/// End-to-end coverage for the `include_expired_probe` diagnostics contract
+/// (issue #324). These tests drive the full `execute_query` path — the only
+/// place that calls `lexical_count_expired` and writes
+/// `QueryDiagnostics::expired_matches` — rather than just the builder setter.
+///
+/// The contract (engine/query.rs, search/hybrid.rs): `expired_matches` is
+/// `Some(count)` ONLY when the probe is opted in AND the query carries text;
+/// it stays `None` when the probe is off, and `None` for a vector-only query
+/// (no FTS5 terms to probe — the documented limitation in `search/hybrid.rs`).
+mod expired_probe_e2e {
+    use super::*;
+
+    /// Add a fact through the engine's normal write path (which indexes it into
+    /// FTS5, so the expired probe's `MATCH` query can find it) and return its id.
+    async fn add_indexed_fact(engine: &MemoryEngine, content: &str) -> i64 {
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+            std::sync::Arc::new(MockEmbedder { dim: DIM });
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: content.into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                embedder,
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    /// A text query with the probe enabled must populate `expired_matches` with
+    /// a non-zero count once a matching fact has been expired.
+    #[tokio::test]
+    async fn text_query_with_probe_counts_expired_matches() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+
+        // Two facts share the keyword; one stays active, one gets expired.
+        add_indexed_fact(&engine, "quasar emits intense radiation").await;
+        let expired_id = add_indexed_fact(&engine, "quasar discovered last year").await;
+        engine
+            .storage()
+            .expire_fact(expired_id, Utc::now())
+            .await
+            .unwrap();
+
+        let query = MemoryQuery::new().text("quasar").include_expired_probe();
+        let response = engine.execute_query(&query).await.unwrap();
+
+        // The probe ran (Some) and saw exactly the one expired match.
+        assert_eq!(
+            response.diagnostics.expired_matches,
+            Some(1),
+            "probe must report the single expired 'quasar' fact"
+        );
+        // Only the still-active fact is returned in results.
+        assert_eq!(response.results.len(), 1);
+        assert!(response.results[0].fact.content.contains("intense"));
+    }
+
+    /// Without `include_expired_probe`, the probe must not run: `expired_matches`
+    /// stays `None` even when matching expired facts exist.
+    #[tokio::test]
+    async fn text_query_without_probe_leaves_expired_matches_none() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+
+        add_indexed_fact(&engine, "pulsar spins rapidly").await;
+        let expired_id = add_indexed_fact(&engine, "pulsar timing glitch").await;
+        engine
+            .storage()
+            .expire_fact(expired_id, Utc::now())
+            .await
+            .unwrap();
+
+        // Same query, probe NOT enabled.
+        let query = MemoryQuery::new().text("pulsar");
+        let response = engine.execute_query(&query).await.unwrap();
+
+        assert_eq!(
+            response.diagnostics.expired_matches, None,
+            "probe must stay off when not opted in"
+        );
+    }
+
+    /// A vector-only query (no text) with the probe set must still leave
+    /// `expired_matches` as `None` — there are no FTS5 terms to probe. This is
+    /// the documented limitation in `search/hybrid.rs`.
+    #[tokio::test]
+    async fn vector_only_query_with_probe_leaves_expired_matches_none() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+
+        add_indexed_fact(&engine, "nebula glows faintly").await;
+        let expired_id = add_indexed_fact(&engine, "nebula collapses inward").await;
+        engine
+            .storage()
+            .expire_fact(expired_id, Utc::now())
+            .await
+            .unwrap();
+
+        // No text — embedding only — yet the probe flag is set.
+        let query = MemoryQuery::new()
+            .embedding(vec![0.5; DIM])
+            .include_expired_probe();
+        let response = engine.execute_query(&query).await.unwrap();
+
+        assert_eq!(
+            response.diagnostics.expired_matches, None,
+            "vector-only query has no FTS5 terms — probe must be a no-op"
+        );
+    }
+}
