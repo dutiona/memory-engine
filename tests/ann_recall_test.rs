@@ -14,9 +14,9 @@ use std::collections::HashSet;
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::search::SearchConfig;
-use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, FactType};
+use memory_engine::{SearchMode, SearchQuery};
 
 const DIM: usize = 32;
 const N: usize = 5_000;
@@ -102,16 +102,7 @@ async fn hnsw_recall_at_k_exceeds_threshold() {
     let mut recalls = Vec::new();
     for query_text in &queries {
         let query_emb = embedder.embed(query_text).unwrap();
-        let query = SearchQuery {
-            text: None,
-            embedding: Some(query_emb),
-            mode: SearchMode::Vector,
-            limit: K,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        };
+        let query = SearchQuery::new(SearchMode::Vector, K).embedding(query_emb);
 
         let bf_results = engine_bf.query(&query).await.unwrap();
         let ann_results = engine_ann.query(&query).await.unwrap();

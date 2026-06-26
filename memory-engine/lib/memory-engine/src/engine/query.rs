@@ -250,16 +250,12 @@ impl MemoryEngine {
 
         // hybrid_search already does its own 3x overfetch internally (line 87),
         // so we pass the raw limit here — no double inflation.
-        let search_query = SearchQuery {
-            text: query.text.clone(),
-            embedding: query.embedding.clone(),
-            mode,
-            limit,
-            rerank_depth: None,
-            valid_at: search_cutoff,
-            fact_type: query.fact_type,
-            scope: query.scope.clone(),
-        };
+        let mut search_query = SearchQuery::new(mode, limit);
+        search_query.text = query.text.clone();
+        search_query.embedding = query.embedding.clone();
+        search_query.valid_at = search_cutoff;
+        search_query.fact_type = query.fact_type;
+        search_query.scope = query.scope.clone();
 
         let (mut results, mut diagnostics) =
             port_hybrid_search(&*self.storage, &search_query, scope_ids).await?;

@@ -747,16 +747,7 @@ mod tests {
                 );
             }
             let results = engine
-                .query(&SearchQuery {
-                    text: None,
-                    embedding: Some(vec![0.9_f32; DIM]),
-                    mode: SearchMode::Vector,
-                    limit: 5,
-                    rerank_depth: None,
-                    valid_at: None,
-                    fact_type: None,
-                    scope: None,
-                })
+                .query(&SearchQuery::new(SearchMode::Vector, 5).embedding(vec![0.9_f32; DIM]))
                 .await
                 .unwrap();
             assert_eq!(results.len(), 3, "all facts served from the rebuilt index");

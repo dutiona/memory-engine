@@ -8,9 +8,9 @@ use chrono::{Duration, Utc};
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
-use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
+use memory_engine::{SearchMode, SearchQuery};
 
 struct DummyEmbedder;
 
@@ -90,16 +90,12 @@ async fn main() -> Result<(), MemoryError> {
 
     // Query: what's valid RIGHT NOW?
     let results_now = engine
-        .query(&SearchQuery {
-            text: Some("deadline meeting review".into()),
-            embedding: Some(vec![0.1; 4]),
-            mode: SearchMode::Hybrid,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: Some(now),
-            fact_type: None,
-            scope: None,
-        })
+        .query(
+            &SearchQuery::new(SearchMode::Hybrid, 10)
+                .text("deadline meeting review")
+                .embedding(vec![0.1; 4])
+                .valid_at(now),
+        )
         .await?;
 
     println!("Facts valid NOW ({}):", now.format("%Y-%m-%d"));
@@ -110,16 +106,12 @@ async fn main() -> Result<(), MemoryError> {
     // Query: what was valid 3 days ago?
     let past = now - Duration::days(3);
     let results_past = engine
-        .query(&SearchQuery {
-            text: Some("deadline meeting review".into()),
-            embedding: Some(vec![0.1; 4]),
-            mode: SearchMode::Hybrid,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: Some(past),
-            fact_type: None,
-            scope: None,
-        })
+        .query(
+            &SearchQuery::new(SearchMode::Hybrid, 10)
+                .text("deadline meeting review")
+                .embedding(vec![0.1; 4])
+                .valid_at(past),
+        )
         .await?;
 
     println!("\nFacts valid 3 days ago ({}):", past.format("%Y-%m-%d"));
@@ -130,16 +122,12 @@ async fn main() -> Result<(), MemoryError> {
     // Query: what will be valid in 2 weeks?
     let future = now + Duration::days(14);
     let results_future = engine
-        .query(&SearchQuery {
-            text: Some("deadline meeting review".into()),
-            embedding: Some(vec![0.1; 4]),
-            mode: SearchMode::Hybrid,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: Some(future),
-            fact_type: None,
-            scope: None,
-        })
+        .query(
+            &SearchQuery::new(SearchMode::Hybrid, 10)
+                .text("deadline meeting review")
+                .embedding(vec![0.1; 4])
+                .valid_at(future),
+        )
         .await?;
 
     println!("\nFacts valid in 2 weeks ({}):", future.format("%Y-%m-%d"));

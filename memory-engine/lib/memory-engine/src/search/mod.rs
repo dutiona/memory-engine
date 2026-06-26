@@ -1,13 +1,13 @@
 //! Hybrid search: FTS5 (BM25) + vector (cosine) + Reciprocal Rank Fusion.
 
 #[cfg(feature = "ann")]
-pub mod ann;
-pub mod filter_sql;
-pub mod fts;
-pub mod hybrid;
-pub mod query;
-pub mod strategy;
-pub mod vector;
+pub(crate) mod ann;
+pub(crate) mod filter_sql;
+pub(crate) mod fts;
+pub(crate) mod hybrid;
+pub(crate) mod query;
+pub(crate) mod strategy;
+pub(crate) mod vector;
 
 #[cfg(feature = "ann")]
 pub use ann::HnswStrategy;

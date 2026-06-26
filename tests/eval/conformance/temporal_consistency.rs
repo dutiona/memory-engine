@@ -6,7 +6,7 @@
 
 use chrono::{Duration, Utc};
 
-use memory_engine::search::query::MemoryQuery;
+use memory_engine::MemoryQuery;
 use memory_engine::types::{AddFactOptions, EventType, FactType, NewEvent};
 
 use crate::helpers::{add_fact_with_opts, days_ago, eval_engine};

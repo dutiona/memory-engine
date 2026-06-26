@@ -1,9 +1,8 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use memory_engine::MemoryQuery;
-use memory_engine::search::hybrid::MatchType;
 use memory_engine::traits::EmbeddingProvider;
+use memory_engine::{MatchType, MemoryQuery};
 use tabled::{Table, Tabled};
 
 use crate::commands::embedding_args::EmbeddingArgs;

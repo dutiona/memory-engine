@@ -25,13 +25,13 @@ pub struct VectorResult {
 ///
 /// Kept equal to the default [`SearchConfig::ann_threshold`](crate::search::strategy::SearchConfig)
 /// (50,000) — the documented fact count at which ANN should take over.
-pub(crate) const BRUTE_FORCE_WARN_THRESHOLD: usize = 50_000;
+pub const BRUTE_FORCE_WARN_THRESHOLD: usize = 50_000;
 
 /// Whether a brute-force candidate set is large enough to warrant the scaling
 /// warning. Split out as a pure predicate so the boundary is unit-testable
 /// without materializing a 50k-fact corpus.
 #[must_use]
-pub(crate) const fn brute_force_scan_is_oversized(candidates: usize) -> bool {
+pub const fn brute_force_scan_is_oversized(candidates: usize) -> bool {
     candidates > BRUTE_FORCE_WARN_THRESHOLD
 }
 

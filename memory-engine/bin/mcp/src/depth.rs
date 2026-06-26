@@ -1,7 +1,7 @@
 use memory_engine::ResumeContext;
 use memory_engine::inspect_types::{FactExplanation, FactHistory};
-use memory_engine::search::hybrid::{QueryDiagnostics, SearchResult};
 use memory_engine::types::{Activity, Event, Fact, ProjectContext, SessionCheckpoint};
+use memory_engine::{QueryDiagnostics, SearchResult};
 use rmcp::model::ErrorData;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn search_result_adds_score_and_match_type() {
-        use memory_engine::search::hybrid::MatchType;
+        use memory_engine::MatchType;
         let result = SearchResult {
             fact: make_test_fact(),
             score: 0.95,

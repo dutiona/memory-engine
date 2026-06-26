@@ -7,9 +7,9 @@
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
-use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, EventType, FactType, NewEvent};
+use memory_engine::{SearchMode, SearchQuery};
 
 /// Zero-vector embedder for examples (no external model needed).
 struct DummyEmbedder;
@@ -78,16 +78,11 @@ async fn main() -> Result<(), MemoryError> {
 
     // 3. Query with hybrid search
     let results = engine
-        .query(&SearchQuery {
-            text: Some("Rust programming".into()),
-            embedding: Some(vec![0.1; 4]),
-            mode: SearchMode::Hybrid,
-            limit: 5,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(
+            &SearchQuery::new(SearchMode::Hybrid, 5)
+                .text("Rust programming")
+                .embedding(vec![0.1; 4]),
+        )
         .await?;
 
     println!("\nSearch results:");
