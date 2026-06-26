@@ -5529,7 +5529,7 @@ mod expired_probe_e2e {
         let expired_id = add_indexed_fact(&engine, "quasar discovered last year").await;
         engine
             .storage()
-            .expire_fact(expired_id, Utc::now())
+            .expire_fact(expired_id, Utc::now() - chrono::Duration::hours(1))
             .await
             .unwrap();
 
@@ -5557,7 +5557,7 @@ mod expired_probe_e2e {
         let expired_id = add_indexed_fact(&engine, "pulsar timing glitch").await;
         engine
             .storage()
-            .expire_fact(expired_id, Utc::now())
+            .expire_fact(expired_id, Utc::now() - chrono::Duration::hours(1))
             .await
             .unwrap();
 
@@ -5582,7 +5582,7 @@ mod expired_probe_e2e {
         let expired_id = add_indexed_fact(&engine, "nebula collapses inward").await;
         engine
             .storage()
-            .expire_fact(expired_id, Utc::now())
+            .expire_fact(expired_id, Utc::now() - chrono::Duration::hours(1))
             .await
             .unwrap();
 
@@ -5595,6 +5595,35 @@ mod expired_probe_e2e {
         assert_eq!(
             response.diagnostics.expired_matches, None,
             "vector-only query has no FTS5 terms — probe must be a no-op"
+        );
+    }
+
+    /// The probe must be FTS-restricted to the query term, not a blanket count of
+    /// all expired facts. Expire a fact that does NOT match the query term, then
+    /// probe for a different term: `Some(0)` proves the probe RAN (not `None`) yet
+    /// found zero matches (not `>= 1`) because the expired fact is off-term.
+    #[tokio::test]
+    async fn probe_is_fts_restricted_to_query_term() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+
+        // The expired fact shares no keyword with the query.
+        let expired_id = add_indexed_fact(&engine, "pulsar spins rapidly").await;
+        engine
+            .storage()
+            .expire_fact(expired_id, Utc::now() - chrono::Duration::hours(1))
+            .await
+            .unwrap();
+
+        // Probe for a DIFFERENT term — no expired 'quasar' fact exists.
+        let query = MemoryQuery::new().text("quasar").include_expired_probe();
+        let response = engine.execute_query(&query).await.unwrap();
+
+        // Some(0): the probe ran (not None) but is FTS-restricted to 'quasar',
+        // so the off-term expired 'pulsar' fact is not counted (not >= 1).
+        assert_eq!(
+            response.diagnostics.expired_matches,
+            Some(0),
+            "probe must run yet be restricted to the query term, not count all expired facts"
         );
     }
 }
