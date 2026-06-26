@@ -1353,8 +1353,15 @@ fn default_dump_path(base_dir: &std::path::Path, ext: &str) -> PathBuf {
 /// - **CWE-367 (TOCTOU):** the *resolved* path is returned and handed to the
 ///   engine, so the value that is validated is the value that is opened — the
 ///   original unresolved path is never used past this point. The lib then opens
-///   the destination with `O_NOFOLLOW` to fail atomically if a symlink leaf is
+///   the destination with `O_NOFOLLOW` to fail atomically if a symlink *leaf* is
 ///   raced into place between this check and the write.
+///
+///   **Residual (tracked in #851):** `O_NOFOLLOW` guards only the leaf, so a
+///   *parent directory* component swapped to a symlink after this check is still
+///   followed by the open. The default dump path's only parent is the temp root
+///   (sticky-bit-protected), so exposure is limited to a client-supplied
+///   *multi-level* path with an attacker-writable intermediate dir. The airtight
+///   fix is fd-relative opens (`openat`/`cap-std`), deferred to #851.
 fn validate_dump_path(p: &std::path::Path) -> Result<PathBuf, ErrorData> {
     // Make the client path absolute FIRST, resolving it against the process cwd.
     // `std::path::absolute` is purely lexical — it does NOT touch the filesystem
