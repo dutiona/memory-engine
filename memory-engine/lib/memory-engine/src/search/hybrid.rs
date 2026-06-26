@@ -4,8 +4,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::search::fts::fts_search;
+use crate::search::fts::{FtsResult, fts_search};
 use crate::search::strategy::VectorSearchStrategy;
+use crate::search::vector::VectorResult;
 use crate::store::facts::FactStore;
 use crate::types::{Fact, FactType};
 
@@ -157,6 +158,60 @@ pub fn hybrid_search(
     // for meaningful rank fusion.
     let overfetch = effective_target.saturating_mul(3).max(effective_target);
 
+    let (fts_results, vec_results) = collect_candidates(
+        conn,
+        query,
+        embed_dim,
+        scope_ids,
+        vector_strategy,
+        overfetch,
+    )?;
+
+    let fts_candidate_count = fts_results.len();
+    let vec_candidate_count = vec_results.len();
+
+    // Build ID sets for match_type determination
+    let fts_ids: HashSet<i64> = fts_results.iter().map(|r| r.fact_id).collect();
+    let vec_ids: HashSet<i64> = vec_results.iter().map(|r| r.fact_id).collect();
+
+    let ranked = rank_candidates(query.mode, &fts_results, &vec_results);
+
+    // Load full facts (t_expired/fact_type/scope are SQL-level filters; only
+    // valid_at remains a post-filter). Batch-materialize all ranked ids in one
+    // round-trip; `assemble_results` re-orders to ranked order, applies the
+    // temporal post-filter + match_type, and truncates to the effective limit.
+    let ranked_ids: Vec<i64> = ranked.iter().map(|&(id, _)| id).collect();
+    let facts_by_id = FactStore::new(conn, embed_dim).get_many(&ranked_ids)?;
+    Ok(assemble_results(
+        query,
+        ranked,
+        &fts_ids,
+        &vec_ids,
+        fts_candidate_count,
+        vec_candidate_count,
+        facts_by_id,
+    ))
+}
+
+/// Candidate-collection stage of [`hybrid_search`]: run the FTS5 and vector
+/// source queries for the active `SearchMode`, pushing the `t_expired` /
+/// `fact_type` / `scope` filters into SQL via `overfetch`. A source query is
+/// skipped (returning an empty vec) when the mode excludes it or its query
+/// input (`text` / `embedding`) is absent — exactly the inline behavior this
+/// extraction replaces.
+///
+/// # Errors
+///
+/// Propagates `MemoryError::Database` on query failure and
+/// `MemoryError::EmbeddingDimension` on a wrong-length embedding (vector path).
+fn collect_candidates(
+    conn: &Connection,
+    query: &SearchQuery,
+    embed_dim: usize,
+    scope_ids: Option<&[i64]>,
+    vector_strategy: &dyn VectorSearchStrategy,
+    overfetch: usize,
+) -> Result<(Vec<FtsResult>, Vec<VectorResult>)> {
     let fact_type_ref = query.fact_type.as_ref();
 
     // Collect FTS results (t_expired, fact_type, scope pushed into SQL)
@@ -181,15 +236,20 @@ pub fn hybrid_search(
         vec![]
     };
 
-    let fts_candidate_count = fts_results.len();
-    let vec_candidate_count = vec_results.len();
+    Ok((fts_results, vec_results))
+}
 
-    // Build ID sets for match_type determination
-    let fts_ids: HashSet<i64> = fts_results.iter().map(|r| r.fact_id).collect();
-    let vec_ids: HashSet<i64> = vec_results.iter().map(|r| r.fact_id).collect();
-
-    // Determine ranked IDs with scores
-    let ranked: Vec<(i64, f64)> = match query.mode {
+/// Ranking stage of [`hybrid_search`]: dispatch on `SearchMode` to produce the
+/// ranked `(fact_id, score)` list. `Fts`/`Vector` modes map their single source
+/// straight through (vector scores widened `f32`→`f64`); `Hybrid` fuses both
+/// rank lists with [`rrf_merge`]. Pure — no I/O — so it mirrors the per-source
+/// projections the inline code performed.
+fn rank_candidates(
+    mode: SearchMode,
+    fts_results: &[FtsResult],
+    vec_results: &[VectorResult],
+) -> Vec<(i64, f64)> {
+    match mode {
         SearchMode::Fts => fts_results.iter().map(|r| (r.fact_id, r.score)).collect(),
         SearchMode::Vector => vec_results
             .iter()
@@ -202,23 +262,7 @@ pub fn hybrid_search(
                 vec_results.iter().map(|r| (r.fact_id, r.score)).collect();
             rrf_merge(&fts_pairs, &vec_pairs, RRF_K)
         }
-    };
-
-    // Load full facts (t_expired/fact_type/scope are SQL-level filters; only
-    // valid_at remains a post-filter). Batch-materialize all ranked ids in one
-    // round-trip; `assemble_results` re-orders to ranked order, applies the
-    // temporal post-filter + match_type, and truncates to the effective limit.
-    let ranked_ids: Vec<i64> = ranked.iter().map(|&(id, _)| id).collect();
-    let facts_by_id = FactStore::new(conn, embed_dim).get_many(&ranked_ids)?;
-    Ok(assemble_results(
-        query,
-        ranked,
-        &fts_ids,
-        &vec_ids,
-        fts_candidate_count,
-        vec_candidate_count,
-        facts_by_id,
-    ))
+    }
 }
 
 /// Pure fusion stage shared by the sync (`hybrid_search`) and async
