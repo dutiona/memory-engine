@@ -154,11 +154,15 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
     let config = list_config(conn)?;
 
     // Serialize the whole snapshot object through serde's `SerializeMap` rather
-    // than hand-assembling JSON braces and field names. Field names and ordering
-    // now track [`EngineSnapshot`]'s serde representation by construction: each
-    // `serialize_entry` key below mirrors a field there, so a rename/reorder of
-    // the struct that drifts from this writer is caught here, not only by the
-    // `streaming_output_matches_snapshot_schema` round-trip test.
+    // than hand-assembling JSON braces and field names. Each `serialize_entry`
+    // key below is a string literal that must mirror an [`EngineSnapshot`] field:
+    // because the keys are literals (not derived from the struct), the compiler
+    // CANNOT catch a rename/reorder that drifts this writer from the struct.
+    // That drift is caught only at RUNTIME by the tests —
+    // `streaming_output_matches_snapshot_schema` (a renamed/dropped key fails the
+    // round-trip deserialize) and `streaming_header_keeps_embed_dim_leading` (a
+    // reordered leading scalar fails the order assertion). Keep both green when
+    // editing the keys or order here.
     //
     // The collections are serialized row-by-row via [`SeqStreamer`] adapters, so
     // peak memory stays O(1) per collection — the same streaming guarantee the
@@ -1000,5 +1004,140 @@ mod tests {
             .query_row("SELECT count(*) FROM facts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "fresh in-memory db dumps an empty facts table");
+    }
+
+    /// #623 dump coverage: a non-active embedding space plus its `fact_vectors`
+    /// rows MUST survive the streaming dump. Every other dump test leaves both
+    /// tables empty, so the `embedding_spaces` materialization and the
+    /// `fact_vectors` `SeqStreamer` adapter were never exercised with real rows —
+    /// a writer that silently dropped either section would pass all of them. This
+    /// test populates a `populating` space with per-fact vectors, streams, and
+    /// asserts the snapshot carries both, including the exact `(fact_id, space_id,
+    /// embedding)` payloads.
+    #[tokio::test]
+    async fn streaming_carries_embedding_spaces_and_fact_vectors() {
+        use crate::store::embedding_spaces::{EmbeddingSpace, SpaceStatus, insert_populating};
+        use crate::store::fact_vectors::write_backfill_batch;
+        use crate::store::schema::{init_schema, migrate, open_memory};
+        use crate::store::serialize_embedding;
+        use crate::types::EmbeddingFingerprint;
+
+        const SPACE: &str = "shadow";
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        // Two facts (raw SQL — the FK target for fact_vectors).
+        let emb = serialize_embedding(&[0.1, 0.2, 0.3, 0.4]);
+        let now = chrono::Utc::now().to_rfc3339();
+        for (content, hash) in [("alpha", "h1"), ("beta", "h2")] {
+            conn.execute(
+                "INSERT INTO facts (content, content_hash, embedding, fact_type,
+                        t_created, last_accessed, metadata, scope_id, is_pinned, importance_score)
+                 VALUES (?1, ?2, ?3, 'semantic', ?4, ?4, '{}', 1, 0, 0.0)",
+                rusqlite::params![content, hash, emb, now],
+            )
+            .unwrap();
+        }
+        let a: i64 = conn
+            .query_row("SELECT id FROM facts WHERE content = 'alpha'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let b: i64 = conn
+            .query_row("SELECT id FROM facts WHERE content = 'beta'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        // A NON-active (populating) space, dim = DIM, plus its per-fact vectors.
+        // `facts.embedding` (the active vectors) lives in `facts[].embedding`; this
+        // exercises the additive `fact_vectors` snapshot section specifically.
+        insert_populating(
+            &conn,
+            &EmbeddingSpace {
+                name: SPACE.to_string(),
+                fingerprint: EmbeddingFingerprint::new("model-b", "tei", DIM),
+                status: SpaceStatus::Populating,
+            },
+        )
+        .unwrap();
+        let va = vec![0.5_f32; DIM];
+        let vb = vec![0.6_f32; DIM];
+        write_backfill_batch(&conn, SPACE, &[(a, va.clone()), (b, vb.clone())]).unwrap();
+
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+        let snapshot: EngineSnapshot =
+            serde_json::from_slice(&buf).expect("streaming output must be valid EngineSnapshot");
+
+        // The populating space round-tripped (not silently dropped).
+        assert_eq!(
+            snapshot.embedding_spaces.len(),
+            1,
+            "the populating space must appear in the snapshot"
+        );
+        let space = &snapshot.embedding_spaces[0];
+        assert_eq!(space.name, SPACE);
+        assert_eq!(space.status, "populating");
+        assert_eq!(space.fingerprint.model, "model-b");
+        assert_eq!(space.fingerprint.dim, DIM);
+
+        // The fact_vectors rows round-tripped with their exact payloads — ordered
+        // by (space_id, fact_id), which here is fact-id order within one space.
+        assert_eq!(
+            snapshot.fact_vectors.len(),
+            2,
+            "both per-fact vectors must appear in the snapshot"
+        );
+        let mut rows: Vec<&FactVectorSnapshot> = snapshot.fact_vectors.iter().collect();
+        rows.sort_by_key(|r| r.fact_id);
+        assert_eq!(rows[0].fact_id, a);
+        assert_eq!(rows[0].space_id, SPACE);
+        assert_eq!(rows[0].embedding, va);
+        assert_eq!(rows[1].fact_id, b);
+        assert_eq!(rows[1].space_id, SPACE);
+        assert_eq!(rows[1].embedding, vb);
+    }
+
+    /// `SeqStreamer` error-bridging contract: when the store/DB callback aborts
+    /// with a real [`MemoryError`] (here an `Io` error carrying a unique sentinel),
+    /// the serializer must surface THAT true cause via `S::Error::custom` — not the
+    /// internal `"snapshot element serialization failed"` placeholder (which is
+    /// reserved for the serde-element-failure path and re-raised as the stashed
+    /// `ser_err`), and not a generic "serialize called once" wrapper.
+    ///
+    /// This is the only coverage of the `ser_err` stash / `S::Error::custom` funnel
+    /// / `RefCell` single-take logic — the most intricate part of the streaming
+    /// refactor. Deleting the `iter_result.map_err(S::Error::custom)?` line would
+    /// make serialization wrongly succeed (the error swallowed), failing this test;
+    /// leaking the placeholder instead of the cause would fail the substring
+    /// assertion.
+    #[test]
+    fn seq_streamer_surfaces_true_store_error() {
+        const SENTINEL: &str = "disk-fell-over-7f3a";
+
+        // An iterate closure that emits one serializable element successfully (so the
+        // `ser_err` stash stays `None` and the sequence is genuinely entered), then
+        // aborts with a real store error — the store/DB-error branch of the bridge.
+        let streamer = SeqStreamer::new(|mut cb: Box<dyn FnMut(i32) -> Result<()> + '_>| {
+            cb(1)?; // element serializes cleanly
+            Err(MemoryError::Io(std::io::Error::other(SENTINEL)))
+        });
+
+        let err = serde_json::to_string(&streamer)
+            .expect_err("a store error in the iterate closure must abort serialization");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(SENTINEL),
+            "the true store-error cause ({SENTINEL:?}) must surface via S::Error::custom, \
+             got: {msg:?}"
+        );
+        assert!(
+            !msg.contains("snapshot element serialization failed"),
+            "the internal element-failure placeholder must NOT leak as the cause; got: {msg:?}"
+        );
     }
 }
