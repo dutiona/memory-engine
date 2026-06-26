@@ -122,6 +122,19 @@ impl MemoryGraph {
                 .edges_directed(idx, Direction::Incoming)
                 .map(|e| e.id()),
         );
+        // petgraph's `remove_edge` swap-removes: it relocates the current last
+        // edge into the freed slot, invalidating any still-pending cached
+        // `EdgeIndex` that pointed at that last slot. Removing highest-index
+        // first guarantees each edge we remove is always the current last edge,
+        // so swap-remove never relocates anything still in `to_remove`.
+        //
+        // The descending sort also groups duplicate indices adjacently so
+        // `dedup` can collapse them: a self-loop (source == target) is yielded
+        // by BOTH the Outgoing and Incoming iterators, pushing the same
+        // `EdgeIndex` twice. Without dedup the second `remove_edge` would delete
+        // an innocent relocated edge.
+        to_remove.sort_unstable_by(|a, b| b.cmp(a));
+        to_remove.dedup();
         for ei in to_remove {
             self.graph.remove_edge(ei);
         }
@@ -408,6 +421,79 @@ mod tests {
         let mut comp = g.connected_component(3);
         comp.sort_unstable();
         assert_eq!(comp, vec![2, 3]);
+    }
+
+    #[test]
+    fn remove_edges_by_fact_with_self_loop() {
+        let mut g = MemoryGraph::new();
+        // Self-loop on fact 1, plus a genuine edge 1→2 and an unrelated edge 3→4.
+        // The self-loop is yielded by BOTH the Outgoing and Incoming iterators,
+        // so its EdgeIndex is collected twice — without dedup the second remove
+        // would swap-delete an innocent edge.
+        g.add_edge(1, 1, make_edge_data(10, "self"));
+        g.add_edge(1, 2, make_edge_data(20, "a"));
+        g.add_edge(3, 4, make_edge_data(30, "unrelated"));
+        assert_eq!(g.edge_count(), 3);
+
+        // Must not panic (the double-collected self-loop would otherwise try to
+        // remove an already-relocated index).
+        g.remove_edges_by_fact(1);
+
+        // The self-loop (1→1) and the fact's edge (1→2) are gone.
+        assert_eq!(g.edge_count(), 1);
+        assert_eq!(g.degree(1), 0);
+        assert!(g.neighbors(1).is_empty());
+
+        // The unrelated edge 3→4 must survive intact, right endpoints and all.
+        assert_eq!(g.neighbors(3), vec![4]);
+        assert_eq!(g.degree(3), 1);
+        assert_eq!(g.degree(4), 1);
+    }
+
+    #[test]
+    fn remove_edges_by_fact_multi_edge_preserves_others() {
+        let mut g = MemoryGraph::new();
+        // This exact layout reproduces the swap-remove invalidation against real
+        // petgraph 0.7: removing fact 2's edges frees a non-last slot, so
+        // petgraph swap-relocates the current last edge into it, invalidating a
+        // still-pending cached EdgeIndex in `to_remove`. The buggy
+        // collection-order removal then either skips that stale (now
+        // out-of-bounds) index — LEAKING a fact-2 edge that should be gone — or
+        // deletes the wrong relocated edge. Verified empirically: under the bug,
+        // edge 13 (3→2) survives; the fix removes all of fact 2's edges and
+        // leaves only the genuine survivor 11 (1→3).
+        //
+        // Edges touching fact 2: 1→2 (in), 2→1 (out), 3→2 (in).
+        // The only edge NOT touching fact 2: 1→3 (must survive verbatim).
+        g.add_edge(1, 2, make_edge_data(10, "drop_in")); // EdgeIndex 0
+        g.add_edge(1, 3, make_edge_data(11, "survivor")); // EdgeIndex 1
+        g.add_edge(2, 1, make_edge_data(12, "drop_out")); // EdgeIndex 2
+        g.add_edge(3, 2, make_edge_data(13, "drop_in2")); // EdgeIndex 3
+        assert_eq!(g.edge_count(), 4);
+
+        g.remove_edges_by_fact(2);
+
+        // Exactly one edge survives — the only one not touching fact 2.
+        assert_eq!(g.edge_count(), 1);
+
+        // Fact 2 is fully disconnected: none of its three edges leaked.
+        assert_eq!(g.degree(2), 0);
+        assert!(g.neighbors(2).is_empty());
+
+        // The survivor 1→3 resolves to the correct endpoints/degree.
+        assert_eq!(g.neighbors(1), vec![3]);
+        assert_eq!(g.degree(1), 1);
+        assert_eq!(g.degree(3), 1);
+
+        // Cross-check via the snapshot: exactly the survivor, all data intact.
+        let snap = g.to_snapshot();
+        assert_eq!(snap.edges.len(), 1);
+        let e = &snap.edges[0];
+        assert_eq!(e.edge_id, 11);
+        assert_eq!(e.source, 1);
+        assert_eq!(e.target, 3);
+        assert_eq!(e.relation_type, "survivor");
+        assert!((e.weight - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
