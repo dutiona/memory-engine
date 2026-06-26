@@ -336,10 +336,11 @@ impl SqliteBackend {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Internal` if the HNSW strategy detects a corrupt
-    /// index (non-sequential ID) while incorporating the vector. Callers fire
-    /// this **post-commit**, so the fact is already durably persisted; an error
-    /// here surfaces an inconsistent in-memory index rather than a failed write,
+    /// Returns [`MemoryError::IndexInconsistent`](crate::error::MemoryError::IndexInconsistent)
+    /// if the HNSW strategy detects a corrupt index (non-sequential ID) while
+    /// incorporating the vector. Callers fire this **post-commit**, so the fact
+    /// is already durably persisted; an error here surfaces an inconsistent
+    /// in-memory index that should be **rebuilt** (not a failed write to retry),
     /// mirroring the same invariant enforced by `build_from_db`/`from_snapshot`.
     #[cfg(feature = "ann")]
     pub(super) fn hnsw_notify_insert(&self, fact_id: i64, embedding: &[f32]) -> Result<()> {

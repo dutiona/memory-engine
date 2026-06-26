@@ -42,12 +42,13 @@ pub trait VectorSearchStrategy: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Internal` if the strategy's in-memory index detects
-    /// a structural invariant violation while incorporating the new vector (e.g.
-    /// the HNSW backend assigning a non-sequential ID — index corruption). The
-    /// default no-op never errors. Callers fire this post-commit, so the fact is
-    /// already durably persisted; a returned error signals a corrupt in-memory
-    /// index, not a failed write.
+    /// Returns [`MemoryError::IndexInconsistent`](crate::error::MemoryError::IndexInconsistent)
+    /// if the strategy's in-memory index detects a structural invariant violation
+    /// while incorporating the new vector (e.g. the HNSW backend assigning a
+    /// non-sequential ID — index corruption). The default no-op never errors.
+    /// Callers fire this **post-commit**, so the fact is already durably
+    /// persisted; a returned error signals a stale in-memory index that should be
+    /// **rebuilt**, *not* a failed write to be retried.
     fn notify_insert(&self, _fact_id: i64, _embedding: &[f32]) -> Result<()> {
         Ok(())
     }

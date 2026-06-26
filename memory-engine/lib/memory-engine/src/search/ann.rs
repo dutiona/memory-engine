@@ -400,16 +400,21 @@ impl VectorSearchStrategy for HnswStrategy {
 
     /// # Errors
     ///
-    /// Returns `MemoryError::Internal` if `hnsw` assigns a non-sequential ID —
-    /// the same sequential-ID invariant [`build_inner`](Self::build_inner) and
-    /// [`from_snapshot`](Self::from_snapshot) already enforce. This would
-    /// indicate a bug in the `hnsw` crate or a concurrent modification; the
-    /// `index_to_fact` / `fact_to_hnsw` mappings rely on `hnsw` handing out IDs
-    /// equal to the current `index_to_fact.len()`. The invariant is checked
-    /// **before** the graph is mutated (see below), so the error path leaves the
-    /// index unchanged rather than orphaning a graph entry. Callers fire this
-    /// post-commit, so an error here means a corrupt in-memory index, not a
-    /// failed write — the durable fact already landed.
+    /// Returns [`MemoryError::IndexInconsistent`] if the sequential-ID invariant
+    /// (`index.len() == index_to_fact.len()`) does not hold — the same invariant
+    /// [`build_inner`](Self::build_inner) and [`from_snapshot`](Self::from_snapshot)
+    /// enforce. This would indicate a bug in the `hnsw` crate or a concurrent
+    /// modification; the `index_to_fact` / `fact_to_hnsw` mappings rely on `hnsw`
+    /// handing out IDs equal to the current `index_to_fact.len()`.
+    ///
+    /// The invariant is checked **before** the graph is mutated, so the error
+    /// path leaves the index unchanged — neither orphaning a graph entry nor
+    /// wedging future inserts. Crucially, callers fire this **post-commit**: an
+    /// `Err` here means the durable write already succeeded and only the
+    /// in-memory vector index is now inconsistent. The correct recovery is to
+    /// **rebuild the index** (e.g. reopen the engine), **not** to retry the
+    /// write — which is exactly the [`IndexInconsistent`](MemoryError::IndexInconsistent)
+    /// contract.
     #[allow(
         clippy::significant_drop_tightening,
         reason = "the write guard MUST span the whole read-check-mutate critical \
@@ -430,12 +435,20 @@ impl VectorSearchStrategy for HnswStrategy {
         // those build paths' `hnsw_id == index_to_fact.len()` checks).
         let expected_id = inner.index_to_fact.len();
         if inner.index.len() != expected_id {
-            return Err(crate::error::MemoryError::Internal(format!(
-                "HNSW sequential ID invariant violated on insert: index has {} \
-                 nodes, expected {expected_id}. This indicates a bug in the hnsw \
-                 crate or a concurrent modification.",
-                inner.index.len()
-            )));
+            // Clean guard: fires BEFORE any mutation, so the index is left
+            // untouched (no orphan, not wedged). Post-commit semantics — the
+            // durable write already landed, so this surfaces as
+            // `IndexInconsistent` ("rebuild the index, do not retry the write"),
+            // never as a write failure.
+            return Err(crate::error::MemoryError::IndexInconsistent {
+                fact_id,
+                detail: format!(
+                    "HNSW sequential ID invariant violated on insert: index has {} \
+                     nodes, expected {expected_id}. This indicates a bug in the hnsw \
+                     crate or a concurrent modification.",
+                    inner.index.len()
+                ),
+            });
         }
         // Tombstone the old HNSW entry for this fact_id (if any) so the
         // stale embedding is excluded from future searches.
@@ -445,18 +458,19 @@ impl VectorSearchStrategy for HnswStrategy {
         let vec = embedding.to_vec();
         let mut searcher: Searcher<u32> = Searcher::default();
         let hnsw_id = inner.index.insert(vec, &mut searcher);
-        // Defense in depth: the pre-check guarantees this holds, but assert the
-        // post-condition without panicking — if `hnsw` ever broke the contract
-        // mid-insert, surface it as an error rather than silently desyncing the
-        // mappings (the graph already grew, but the mappings have not, so the
-        // index is consistent enough to keep serving reads from prior entries).
-        if hnsw_id != expected_id {
-            return Err(crate::error::MemoryError::Internal(format!(
-                "HNSW sequential ID invariant violated on insert: got {hnsw_id}, \
-                 expected {expected_id}. This indicates a bug in the hnsw crate \
-                 or a concurrent modification."
-            )));
-        }
+        // The pre-check + `hnsw` 0.11's deterministic `len()` guarantee
+        // `hnsw_id == expected_id`, so the mappings ALWAYS grow in lock-step with
+        // the graph. Push unconditionally to keep the index internally consistent
+        // (`index.len() == index_to_fact.len()` stays true). The earlier code
+        // returned `Err` here when they differed, but that left the graph grown
+        // while the mappings were not — permanently wedging the index (every
+        // future insert would fail the pre-check). A `debug_assert_eq!` instead
+        // catches a hypothetical `hnsw` contract break in dev/CI without panicking
+        // or wedging in release.
+        debug_assert_eq!(
+            hnsw_id, expected_id,
+            "hnsw broke its sequential-id contract mid-insert: got {hnsw_id}, expected {expected_id}"
+        );
         inner.index_to_fact.push(fact_id);
         inner.fact_to_hnsw.insert(fact_id, hnsw_id);
         Ok(())
@@ -688,9 +702,12 @@ mod tests {
 
         #[test]
         fn hnsw_strategy_notify_insert_invariant_violation_errors_without_panic() {
-            // #295: a violated sequential-ID invariant must return
-            // `MemoryError::Internal`, NOT panic — a panic in this embedded lib
-            // aborts the consumer's process and leaves an orphaned graph entry.
+            // #295 / #257 (Option C): a violated sequential-ID invariant on a
+            // POST-COMMIT index update must return
+            // `MemoryError::IndexInconsistent`, NOT panic — a panic in this
+            // embedded lib aborts the consumer's process and leaves an orphaned
+            // graph entry. The distinct variant tells the caller "the durable
+            // write succeeded; rebuild the index, do not retry the write".
             //
             // White-box setup: desync `index_to_fact` from the graph so the
             // sequential-ID precondition (`index.len() == index_to_fact.len()`)
@@ -706,13 +723,16 @@ mod tests {
                 inner.index.len()
             };
 
-            // Must return Err, not panic.
+            // Must return Err, not panic — and the new typed variant, not Internal.
             let err = strategy
                 .notify_insert(42, &[0.1_f32, 0.2, 0.3, 0.4])
-                .expect_err("desynced index must surface an Internal error");
+                .expect_err("desynced index must surface an IndexInconsistent error");
             assert!(
-                matches!(err, crate::error::MemoryError::Internal(_)),
-                "expected MemoryError::Internal, got {err:?}"
+                matches!(
+                    err,
+                    crate::error::MemoryError::IndexInconsistent { fact_id: 42, .. }
+                ),
+                "expected MemoryError::IndexInconsistent {{ fact_id: 42, .. }}, got {err:?}"
             );
 
             // The error path left the graph UNMUTATED — no orphaned entry: the
@@ -722,6 +742,42 @@ mod tests {
                 graph_len_before,
                 "error path must not have mutated the HNSW graph (no orphan)"
             );
+
+            // The index is NOT wedged: undo the artificial desync (pop the phantom
+            // slot to restore `index.len() == index_to_fact.len()`), and a real
+            // post-commit `notify_insert` succeeds again. This proves the clean
+            // pre-check guard never poisons future inserts (the wedge the old
+            // post-insert `Err` arm would have caused).
+            strategy.inner.write().index_to_fact.pop();
+            assert_eq!(
+                strategy.inner.read().index.len(),
+                strategy.inner.read().index_to_fact.len(),
+                "invariant restored: graph and mappings are back in lock-step"
+            );
+
+            let new_emb = vec![0.99_f32, 0.01, 0.0, 0.0];
+            let store = FactStore::new(&conn, DIM);
+            let new_fact = NewFact {
+                content: "post-recovery fact".into(),
+                content_hash: String::new(),
+                embedding: new_emb.clone(),
+                fact_type: FactType::Semantic,
+                t_created: Utc::now(),
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                scope_id: 1,
+                base_importance: 0.5,
+                access_count: 0,
+                last_accessed: Utc::now(),
+                metadata: serde_json::json!({}),
+                is_pinned: false,
+            };
+            let new_id = store.insert(&new_fact).unwrap();
+            strategy
+                .notify_insert(new_id, &new_emb)
+                .expect("a valid insert must still succeed — the index is not wedged");
         }
 
         #[test]

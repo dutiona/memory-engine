@@ -591,11 +591,22 @@ impl ConsolidationStore for SqliteBackend {
         // graph mirror) + `expired_ids` from the returned tuple.
         #[cfg(feature = "ann")]
         {
+            // The expire/cleanup loop MUST always run, even if an insert trips the
+            // post-commit `IndexInconsistent` invariant — an early `?` would leak
+            // the expired (quarantined / superseded) facts' tombstones, leaving
+            // their stale vectors searchable. Collect the first index error, run
+            // the full cleanup, then surface it. `notify_expire` is infallible.
+            let mut index_err = None;
             for (id, emb) in &result_tuple.3 {
-                self.hnsw_notify_insert(*id, emb)?;
+                if let Err(e) = self.hnsw_notify_insert(*id, emb) {
+                    index_err.get_or_insert(e);
+                }
             }
             for &id in &result_tuple.2 {
                 self.hnsw_notify_expire(id);
+            }
+            if let Some(e) = index_err {
+                return Err(e);
             }
         }
         Ok(result_tuple)

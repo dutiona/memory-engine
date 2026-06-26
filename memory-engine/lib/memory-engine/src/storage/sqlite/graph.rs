@@ -768,9 +768,23 @@ impl FactGraph for SqliteBackend {
             })
             .await?;
         // Post-commit HNSW notifications (mirrors engine/ingest.rs batch path).
+        // Attempt every insert before surfacing an error: an early `?` would skip
+        // indexing the rest of an already-durably-committed batch, leaving a
+        // partial index. The whole batch landed in SQLite, so on an
+        // `IndexInconsistent` invariant breach the recovery is to rebuild the
+        // index, not to retry the write — collect the first error and return it
+        // after the loop.
         #[cfg(feature = "ann")]
-        for (id, embedding) in ids.iter().zip(embeddings.iter()) {
-            self.hnsw_notify_insert(*id, embedding)?;
+        {
+            let mut index_err = None;
+            for (id, embedding) in ids.iter().zip(embeddings.iter()) {
+                if let Err(e) = self.hnsw_notify_insert(*id, embedding) {
+                    index_err.get_or_insert(e);
+                }
+            }
+            if let Some(e) = index_err {
+                return Err(e);
+            }
         }
         #[cfg(not(feature = "ann"))]
         let _ = embeddings; // unused without the HNSW sidecar

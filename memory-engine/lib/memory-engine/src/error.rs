@@ -483,6 +483,30 @@ pub enum MemoryError {
     #[error("internal error: {0}")]
     Internal(String),
 
+    /// The durable write **succeeded**, but maintaining the in-memory vector
+    /// (HNSW) index for it afterwards detected a structural invariant violation,
+    /// so the index is now inconsistent with the source of truth.
+    ///
+    /// This is a **post-commit** failure: incremental index maintenance runs
+    /// *after* the `SQLite` transaction has durably committed (the index is a
+    /// rebuildable cache; `SQLite` is authoritative). It only fires on a
+    /// should-never-happen invariant breach (an `hnsw`-crate bug or concurrent
+    /// corruption) caught by a pre-insert guard — never on ordinary input.
+    ///
+    /// **Recovery is distinct from a write failure: do NOT retry the write** (the
+    /// fact already landed, so a retry would duplicate it). Instead **rebuild the
+    /// vector index** from the durable store (e.g. reopen the engine, which
+    /// reconstructs the index). `fact_id` names the fact whose post-commit
+    /// indexing tripped the invariant; `detail` carries the specific breach for
+    /// logging. Surfaced as its own variant — not [`Internal`](MemoryError::Internal)
+    /// — precisely so callers can tell "the store is fine, the cache is stale"
+    /// apart from a genuine write failure.
+    #[error(
+        "fact {fact_id} was durably written, but the in-memory vector index is now \
+         inconsistent and must be rebuilt (do not retry the write): {detail}"
+    )]
+    IndexInconsistent { fact_id: i64, detail: String },
+
     /// A filesystem I/O operation (read, write, copy, canonicalize, …) failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -929,6 +953,23 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "internal error: scope cache out of sync with store"
+        );
+    }
+
+    #[test]
+    fn index_inconsistent_display() {
+        // Post-commit index-maintenance failure: the message must make the
+        // durable-write-succeeded / rebuild-don't-retry contract explicit, and
+        // interpolate both the fact id and the detail.
+        let err = MemoryError::IndexInconsistent {
+            fact_id: 42,
+            detail: "HNSW assigned non-sequential id".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "fact 42 was durably written, but the in-memory vector index is now \
+             inconsistent and must be rebuilt (do not retry the write): \
+             HNSW assigned non-sequential id"
         );
     }
 
