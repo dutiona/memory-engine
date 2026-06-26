@@ -9,6 +9,39 @@ pub struct ArchiveManifestStore<'a> {
     conn: &'a Connection,
 }
 
+/// Parameter object for [`ArchiveManifestStore::insert`].
+///
+/// Bundles the ten columns of a new `archive_manifest` row so call sites pass a
+/// single named-field value instead of a long positional argument list. This
+/// removes the argument-order footgun and the `clippy::too_many_arguments`
+/// suppression on `insert`.
+///
+/// The two string fields borrow (`&'a str`) — the manifest insert does not retain
+/// them past the call, so no allocation is forced on the caller.
+#[derive(Debug, Clone, Copy)]
+pub struct NewArchiveManifest<'a> {
+    /// Relative path of the `.pak` file (unique key).
+    pub pak_path: &'a str,
+    /// System time the archive was created.
+    pub created_at: DateTime<Utc>,
+    /// Number of facts archived into the `.pak`.
+    pub fact_count: i64,
+    /// Number of edges archived into the `.pak`.
+    pub edge_count: i64,
+    /// Smallest archived fact id.
+    pub fact_id_min: i64,
+    /// Largest archived fact id.
+    pub fact_id_max: i64,
+    /// Earliest `t_created` across the archived facts.
+    pub t_created_min: DateTime<Utc>,
+    /// Latest `t_created` across the archived facts.
+    pub t_created_max: DateTime<Utc>,
+    /// Size of the `.pak` file in bytes.
+    pub size_bytes: i64,
+    /// BLAKE3 hash of the `.pak` file contents.
+    pub blake3_hash: &'a str,
+}
+
 impl<'a> ArchiveManifestStore<'a> {
     /// Create a new `ArchiveManifestStore` borrowing the given connection.
     #[must_use]
@@ -23,35 +56,22 @@ impl<'a> ArchiveManifestStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on SQL failure (e.g. duplicate `pak_path`).
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert(
-        &self,
-        pak_path: &str,
-        created_at: DateTime<Utc>,
-        fact_count: i64,
-        edge_count: i64,
-        fact_id_min: i64,
-        fact_id_max: i64,
-        t_created_min: DateTime<Utc>,
-        t_created_max: DateTime<Utc>,
-        size_bytes: i64,
-        blake3_hash: &str,
-    ) -> Result<i64> {
+    pub fn insert(&self, m: &NewArchiveManifest<'_>) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO archive_manifest (pak_path, created_at, fact_count, edge_count,
               fact_id_min, fact_id_max, t_created_min, t_created_max, size_bytes, blake3_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
-                pak_path,
-                created_at.to_rfc3339(),
-                fact_count,
-                edge_count,
-                fact_id_min,
-                fact_id_max,
-                t_created_min.to_rfc3339(),
-                t_created_max.to_rfc3339(),
-                size_bytes,
-                blake3_hash,
+                m.pak_path,
+                m.created_at.to_rfc3339(),
+                m.fact_count,
+                m.edge_count,
+                m.fact_id_min,
+                m.fact_id_max,
+                m.t_created_min.to_rfc3339(),
+                m.t_created_max.to_rfc3339(),
+                m.size_bytes,
+                m.blake3_hash,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -131,33 +151,20 @@ mod tests {
         conn
     }
 
-    type EntryArgs = (
-        String,
-        DateTime<Utc>,
-        i64,
-        i64,
-        i64,
-        i64,
-        DateTime<Utc>,
-        DateTime<Utc>,
-        i64,
-        String,
-    );
-
-    fn make_entry(pak_path: &str) -> EntryArgs {
+    fn make_entry(pak_path: &str) -> NewArchiveManifest<'_> {
         let now = Utc::now();
-        (
-            pak_path.to_string(),
-            now,
-            10,
-            5,
-            1,
-            10,
-            now,
-            now,
-            1024,
-            "deadbeefdeadbeefdeadbeefdeadbeef".to_string(),
-        )
+        NewArchiveManifest {
+            pak_path,
+            created_at: now,
+            fact_count: 10,
+            edge_count: 5,
+            fact_id_min: 1,
+            fact_id_max: 10,
+            t_created_min: now,
+            t_created_max: now,
+            size_bytes: 1024,
+            blake3_hash: "deadbeefdeadbeefdeadbeefdeadbeef",
+        }
     }
 
     #[test]
@@ -167,33 +174,9 @@ mod tests {
 
         assert!(store.list().unwrap().is_empty());
 
-        let (
-            pak_path,
-            created_at,
-            fact_count,
-            edge_count,
-            fact_id_min,
-            fact_id_max,
-            t_created_min,
-            t_created_max,
-            size_bytes,
-            blake3_hash,
-        ) = make_entry("archives/2026-01.pak");
+        let entry = make_entry("archives/2026-01.pak");
 
-        let id = store
-            .insert(
-                &pak_path,
-                created_at,
-                fact_count,
-                edge_count,
-                fact_id_min,
-                fact_id_max,
-                t_created_min,
-                t_created_max,
-                size_bytes,
-                &blake3_hash,
-            )
-            .unwrap();
+        let id = store.insert(&entry).unwrap();
         assert!(id > 0);
 
         let entries = store.list().unwrap();
@@ -213,47 +196,12 @@ mod tests {
     fn insert_duplicate_pak_path_fails() {
         let conn = setup();
         let store = ArchiveManifestStore::new(&conn);
-        let (
-            pak_path,
-            created_at,
-            fact_count,
-            edge_count,
-            fact_id_min,
-            fact_id_max,
-            t_created_min,
-            t_created_max,
-            size_bytes,
-            blake3_hash,
-        ) = make_entry("archives/dup.pak");
+        let entry = make_entry("archives/dup.pak");
 
-        store
-            .insert(
-                &pak_path,
-                created_at,
-                fact_count,
-                edge_count,
-                fact_id_min,
-                fact_id_max,
-                t_created_min,
-                t_created_max,
-                size_bytes,
-                &blake3_hash,
-            )
-            .unwrap();
+        store.insert(&entry).unwrap();
 
         // Second insert with same path must fail (UNIQUE INDEX)
-        let result = store.insert(
-            &pak_path,
-            created_at,
-            fact_count,
-            edge_count,
-            fact_id_min,
-            fact_id_max,
-            t_created_min,
-            t_created_max,
-            size_bytes,
-            &blake3_hash,
-        );
+        let result = store.insert(&entry);
         assert!(result.is_err(), "duplicate pak_path should be rejected");
     }
 
@@ -262,33 +210,9 @@ mod tests {
         let conn = setup();
         let store = ArchiveManifestStore::new(&conn);
 
-        let (
-            pak_path,
-            created_at,
-            fact_count,
-            edge_count,
-            fact_id_min,
-            fact_id_max,
-            t_created_min,
-            t_created_max,
-            size_bytes,
-            blake3_hash,
-        ) = make_entry("archives/to_delete.pak");
+        let entry = make_entry("archives/to_delete.pak");
 
-        let id = store
-            .insert(
-                &pak_path,
-                created_at,
-                fact_count,
-                edge_count,
-                fact_id_min,
-                fact_id_max,
-                t_created_min,
-                t_created_max,
-                size_bytes,
-                &blake3_hash,
-            )
-            .unwrap();
+        let id = store.insert(&entry).unwrap();
 
         assert_eq!(store.list().unwrap().len(), 1);
 

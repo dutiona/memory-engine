@@ -12,7 +12,7 @@ use super::SqliteBackend;
 use crate::archive::ArchiveManifestEntry;
 use crate::error::Result;
 use crate::storage::cold_storage::ColdStorage;
-use crate::store::archive_manifest::ArchiveManifestStore;
+use crate::store::archive_manifest::{ArchiveManifestStore, NewArchiveManifest};
 
 #[async_trait]
 impl ColdStorage for SqliteBackend {
@@ -34,8 +34,8 @@ impl ColdStorage for SqliteBackend {
         let pak_path = pak_path.to_owned();
         let blake3_hash = blake3_hash.to_owned();
         self.block_write(move |c| {
-            ArchiveManifestStore::new(c).insert(
-                &pak_path,
+            ArchiveManifestStore::new(c).insert(&NewArchiveManifest {
+                pak_path: &pak_path,
                 created_at,
                 fact_count,
                 edge_count,
@@ -44,8 +44,8 @@ impl ColdStorage for SqliteBackend {
                 t_created_min,
                 t_created_max,
                 size_bytes,
-                &blake3_hash,
-            )
+                blake3_hash: &blake3_hash,
+            })
         })
         .await
     }
@@ -103,18 +103,18 @@ impl ColdStorage for SqliteBackend {
                 ArchiveError::Transaction(format!("failed to begin transaction: {e}"))
             })?;
 
-            ArchiveManifestStore::new(&tx).insert(
-                &pak_filename,
-                now,
+            ArchiveManifestStore::new(&tx).insert(&NewArchiveManifest {
+                pak_path: &pak_filename,
+                created_at: now,
                 fact_count,
                 edge_count,
                 fact_id_min,
                 fact_id_max,
                 t_created_min,
                 t_created_max,
-                pak_size_bytes,
-                &blake3_hash,
-            )?;
+                size_bytes: pak_size_bytes,
+                blake3_hash: &blake3_hash,
+            })?;
 
             // Delete edges first (FK safety), then facts.
             EdgeStore::new(&tx).hard_delete_by_facts(&fact_ids)?;
