@@ -31,9 +31,10 @@ pub struct ArchiveSearchResult {
 /// candidate scores higher. This bounds retained results to `limit` instead of
 /// accumulating every match across all paks (#342).
 ///
-/// NaN scores collapse to `Ordering::Equal` (cosine can never produce NaN here —
-/// `cosine_similarity` guards zero-magnitude — but the wrapper must still be a
-/// total order to satisfy `Ord`).
+/// Ordering uses [`f64::total_cmp`], a robust total order defined for every
+/// `f64` including NaN (cosine can never produce NaN here — `cosine_similarity`
+/// guards zero-magnitude — but the wrapper must still be a total order to
+/// satisfy `Ord`, and `total_cmp` provides that unconditionally).
 struct MinScored(SearchResult);
 
 impl PartialEq for MinScored {
@@ -52,12 +53,10 @@ impl PartialOrd for MinScored {
 
 impl Ord for MinScored {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse so the *smallest* score is the heap's max (popped first).
-        self.0
-            .score
-            .partial_cmp(&other.0.score)
-            .unwrap_or(Ordering::Equal)
-            .reverse()
+        // `total_cmp` is a robust total order over all `f64` (including NaN), so
+        // `Ord` holds unconditionally without a `partial_cmp` fallback. Reverse
+        // so the *smallest* score is the heap's max (popped first).
+        self.0.score.total_cmp(&other.0.score).reverse()
     }
 }
 
@@ -153,7 +152,10 @@ pub fn search_archives(
             continue;
         }
         let pak_path = archive_dir.join(&entry.pak_path);
-        if !pak_path.exists() {
+        // `is_file` (not `exists`): a path occupied by a directory is treated as
+        // an absent pak and skipped, rather than handed to `read_pak` only to
+        // fail with a generic open error.
+        if !pak_path.is_file() {
             continue;
         }
 
