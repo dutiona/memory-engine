@@ -362,6 +362,12 @@ impl MemoryEngine {
 
         let conn = pool.read()?;
         let current_fp = snapshot::read_fingerprint(&conn)?;
+        // Referential-validation set (#257): the live set of active fact ids, used
+        // below to reject any snapshot edge whose endpoint references a fact that
+        // does not exist (a phantom-node injection). Queried once from the same
+        // authoritative connection that validated the fingerprint, so it reflects
+        // exactly the facts `load_from_db` would honor via the SQLite foreign key.
+        let active_fact_ids = crate::store::facts::active_fact_ids(&conn)?;
         drop(conn);
 
         if header.fingerprint != current_fp {
@@ -390,7 +396,7 @@ impl MemoryEngine {
         // Bound + revalidate the snapshot edge set (#412, #499). On any violation,
         // discard the (rebuildable) sidecar and fall back to a full rebuild from
         // the authoritative DB rather than failing the open.
-        let graph = match MemoryGraph::from_snapshot(&payload.graph) {
+        let graph = match MemoryGraph::from_snapshot(&payload.graph, &active_fact_ids) {
             Ok(g) => g,
             Err(e) => {
                 tracing::warn!(

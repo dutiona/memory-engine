@@ -66,6 +66,28 @@ fn content_hash(content: &str) -> String {
     hash.to_hex()[..32].to_string()
 }
 
+/// Collect the set of active fact ids (`SELECT id FROM facts WHERE t_expired IS
+/// NULL`).
+///
+/// A free function — it needs neither a configured `embed_dim` nor a full
+/// [`FactStore`], only the id column — used by snapshot referential validation
+/// (#257) to reject any edge endpoint that does not reference a live fact (a
+/// phantom-node injection). The returned set is exactly the population whose
+/// edges the `SQLite` foreign key would honor on a full `load_from_db` rebuild.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on query failure.
+pub fn active_fact_ids(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM facts WHERE t_expired IS NULL")?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    let mut ids = std::collections::HashSet::new();
+    for row in rows {
+        ids.insert(row?);
+    }
+    Ok(ids)
+}
+
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> FactStore<'a> {
     /// Create a new `FactStore` borrowing the given connection.

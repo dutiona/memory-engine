@@ -13,20 +13,18 @@ use crate::store::edges::EdgeStore;
 ///
 /// Defense in depth (CWE-400 / CWE-770). [`MemoryGraph::from_snapshot`] iterates
 /// the deserialized `snap.edges` and, per edge, allocates a petgraph edge plus up
-/// to two nodes and two `HashMap` entries. The on-disk size of the sidecar is
-/// already gated by `MAX_SNAPSHOT_BYTES` (512 MiB) and serde's cautious
-/// preallocation bounds in-band length prefixes, so a *small* crafted file cannot
-/// force a giant allocation. This cap is the residual guard for a sidecar that is
-/// large-but-under-the-byte-cap yet still claims an implausible edge count — and
-/// it makes the bound on `from_snapshot` explicit rather than implicit. It is
-/// chosen consistent with `MAX_SNAPSHOT_BYTES`: a 512 MiB sidecar of `MessagePack`
-/// edge records cannot encode anywhere near 50M edges, so this never rejects a
-/// legitimate corpus.
+/// to two nodes and two `HashMap` entries.
 ///
-/// The primary, tighter bound is the call-site cross-check against the
-/// already-validated `DbFingerprint::active_edge_count` (see
-/// `MemoryEngine::try_load_snapshot`); this constant is the floor that holds even
-/// without a fingerprint in hand.
+/// This 50M cap is a **cheap, fingerprint-less function-level invariant — not the
+/// primary runtime defense.** At runtime it is subsumed twice over: the on-disk
+/// sidecar is already gated by `MAX_SNAPSHOT_BYTES` (512 MiB, which bounds a
+/// `MessagePack` edge stream to an ~9.4M-edge ceiling — well under this cap), and
+/// the sole caller (`MemoryEngine::try_load_snapshot`) additionally cross-checks
+/// the edge count against the already-validated `DbFingerprint::active_edge_count`
+/// and discards on any disagreement. This constant is therefore the residual guard
+/// that still holds for a caller with **no fingerprint in hand**, and it makes the
+/// bound on `from_snapshot` explicit rather than implicit. It is chosen consistent
+/// with `MAX_SNAPSHOT_BYTES`, so it never rejects a legitimate corpus.
 const MAX_SNAPSHOT_EDGES: usize = 50_000_000;
 
 /// Reject a snapshot edge count that exceeds [`MAX_SNAPSHOT_EDGES`].
@@ -304,41 +302,72 @@ impl MemoryGraph {
         GraphSnapshot { edges }
     }
 
-    /// Rebuild graph from a snapshot, bounding and revalidating the edge set.
+    /// Rebuild graph from a snapshot, bounding and revalidating the edge set
+    /// against the live set of active fact ids.
     ///
     /// The `.snapshot` sidecar is an untrusted input: its blake3 checksum is
     /// *unkeyed* (a corruption check, not an authenticity control), so a local
     /// actor able to write the sidecar — or plain on-disk corruption — can present
     /// a structurally-invalid edge list. This builds the same edge-only graph as
-    /// [`load_from_db`](Self::load_from_db), but with two defense-in-depth gates
-    /// (#412, #499):
+    /// [`load_from_db`](Self::load_from_db), and is now **at least as strict** as
+    /// that path: `load_from_db` reads edges whose endpoints the `SQLite` foreign
+    /// key guarantees to exist, and this requires the same of every snapshot edge
+    /// via the `active_fact_ids` set the caller queries from the authoritative DB.
+    ///
+    /// Three defense-in-depth gates (#257, #412, #499):
     ///
     /// 1. **Count bound** — reject more than [`MAX_SNAPSHOT_EDGES`] edges before
     ///    any per-edge allocation (CWE-400 / CWE-770: unbounded petgraph/`HashMap`
-    ///    growth at cold start). The caller applies a tighter cross-check against
-    ///    the validated `DbFingerprint::active_edge_count`; this is the floor that
-    ///    holds with no fingerprint in hand.
-    /// 2. **Endpoint revalidation** — every `source`, `target`, and `edge_id` is a
+    ///    growth at cold start). This is a cheap, fingerprint-less function-level
+    ///    invariant, *not* the primary runtime defense: at runtime the on-disk
+    ///    `MAX_SNAPSHOT_BYTES` byte cap (512 MiB, an ~9.4M-edge ceiling for
+    ///    `MessagePack` edge records) plus the caller's tighter cross-check against
+    ///    the validated `DbFingerprint::active_edge_count` already subsume it. It
+    ///    is the floor that still holds for a caller with no fingerprint in hand.
+    /// 2. **Endpoint positivity** — every `source`, `target`, and `edge_id` is a
     ///    `SQLite` rowid and is therefore strictly positive. A non-positive value
-    ///    is a dangling/absent-node reference that cannot correspond to a real fact
-    ///    or edge; reject rather than silently materialize a phantom node.
+    ///    is structurally impossible (corruption or tamper); reject it. This is a
+    ///    cheap pre-filter for gate 3.
+    /// 3. **Referential validation** (#257) — every edge `source`/`target` MUST be
+    ///    present in `active_fact_ids` (the live `SELECT id FROM facts WHERE
+    ///    t_expired IS NULL` set). A positive-but-absent endpoint is a phantom-node
+    ///    injection: it would otherwise materialize a node for a fact that does not
+    ///    exist. This mirrors the FK guarantee `load_from_db` enjoys and closes the
+    ///    gap the positivity check alone left open.
     ///
     /// # Errors
     ///
     /// Returns [`MemoryError::Internal`](crate::error::MemoryError::Internal) when
-    /// the edge count exceeds the cap or any edge carries a non-positive
-    /// `source`/`target`/`edge_id`. The caller treats this as "discard the sidecar
-    /// and rebuild from the authoritative database"; it never panics.
-    pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::GraphSnapshot) -> Result<Self> {
+    /// the edge count exceeds the cap, any edge carries a non-positive
+    /// `source`/`target`/`edge_id`, or any edge `source`/`target` is absent from
+    /// `active_fact_ids`. The caller treats this as "discard the sidecar and
+    /// rebuild from the authoritative database"; it never panics.
+    pub(crate) fn from_snapshot(
+        snap: &crate::engine::snapshot::GraphSnapshot,
+        active_fact_ids: &HashSet<i64>,
+    ) -> Result<Self> {
         check_edge_count_bound(snap.edges.len())?;
 
         let mut graph = Self::new();
         for edge in &snap.edges {
+            // Gate 2: cheap structural pre-filter — rowids are strictly positive.
             if edge.source <= 0 || edge.target <= 0 || edge.edge_id <= 0 {
                 return Err(crate::error::MemoryError::Internal(format!(
-                    "snapshot edge {edge_id} references a non-positive endpoint \
-                     (source={source}, target={target}); discarding sidecar and \
-                     rebuilding from the database",
+                    "snapshot edge {edge_id} carries a non-positive rowid \
+                     (source={source}, target={target}, edge_id={edge_id}); \
+                     discarding sidecar and rebuilding from the database",
+                    edge_id = edge.edge_id,
+                    source = edge.source,
+                    target = edge.target,
+                )));
+            }
+            // Gate 3: referential validation — both endpoints must reference an
+            // active fact. A positive-but-absent id is a phantom-node injection.
+            if !active_fact_ids.contains(&edge.source) || !active_fact_ids.contains(&edge.target) {
+                return Err(crate::error::MemoryError::Internal(format!(
+                    "snapshot edge {edge_id} references a fact id absent from the \
+                     active set (source={source}, target={target}); discarding \
+                     sidecar and rebuilding from the database",
                     edge_id = edge.edge_id,
                     source = edge.source,
                     target = edge.target,
@@ -644,8 +673,9 @@ mod tests {
 
     #[test]
     fn from_snapshot_accepts_valid_edges() {
-        // Baseline: a well-formed snapshot (positive ids, within the cap) builds
-        // the graph faithfully — the revalidation does not reject good data.
+        // Baseline: a well-formed snapshot (positive ids, within the cap, all
+        // endpoints present in the active fact set) builds the graph faithfully —
+        // the revalidation does not reject good data.
         let snap = crate::engine::snapshot::GraphSnapshot {
             edges: vec![
                 crate::engine::snapshot::GraphEdgeSnapshot {
@@ -664,10 +694,58 @@ mod tests {
                 },
             ],
         };
-        let g = MemoryGraph::from_snapshot(&snap).expect("valid snapshot must build");
+        let active: HashSet<i64> = [10, 20, 30].into_iter().collect();
+        let g = MemoryGraph::from_snapshot(&snap, &active).expect("valid snapshot must build");
         assert_eq!(g.edge_count(), 2);
         assert_eq!(g.neighbors(10), vec![20]);
         assert_eq!(g.neighbors(20), vec![30]);
+    }
+
+    #[test]
+    fn from_snapshot_rejects_phantom_node_reference() {
+        // #257 (true referential validation): an edge endpoint that is *positive*
+        // but absent from the live active fact set is a phantom-node injection —
+        // the positivity pre-filter alone cannot catch it. The snapshot path must
+        // be at least as strict as `load_from_db` (whose endpoints are guaranteed
+        // present by the DB foreign key), so such an edge is rejected with a typed
+        // error rather than silently materializing a node that does not exist.
+        let active: HashSet<i64> = [10, 20].into_iter().collect();
+
+        // Phantom target (30 not active).
+        let snap_target = crate::engine::snapshot::GraphSnapshot {
+            edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+                edge_id: 1,
+                source: 10,
+                target: 30,
+                relation_type: "x".into(),
+                weight: 1.0,
+            }],
+        };
+        assert!(
+            matches!(
+                MemoryGraph::from_snapshot(&snap_target, &active),
+                Err(crate::error::MemoryError::Internal(_))
+            ),
+            "positive-but-absent target must be rejected as a phantom node"
+        );
+
+        // Phantom source (99 not active).
+        let snap_source = crate::engine::snapshot::GraphSnapshot {
+            edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+                edge_id: 1,
+                source: 99,
+                target: 20,
+                relation_type: "x".into(),
+                weight: 1.0,
+            }],
+        };
+        assert!(
+            matches!(
+                MemoryGraph::from_snapshot(&snap_source, &active),
+                Err(crate::error::MemoryError::Internal(_))
+            ),
+            "positive-but-absent source must be rejected as a phantom node"
+        );
     }
 
     #[test]
@@ -676,7 +754,9 @@ mod tests {
         // rowids and are always positive. An edge whose source/target is <= 0
         // cannot reference a real fact — it is a dangling/absent-node reference
         // (corruption or tamper) and must be rejected with a typed error, not
-        // silently materialized into a phantom node.
+        // silently materialized into a phantom node. The cheap positivity check
+        // fires before the set membership lookup, so an empty active set suffices.
+        let active: HashSet<i64> = HashSet::new();
         for (source, target) in [(0, 20), (-1, 20), (10, 0), (10, -5)] {
             let snap = crate::engine::snapshot::GraphSnapshot {
                 edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
@@ -689,7 +769,7 @@ mod tests {
             };
             assert!(
                 matches!(
-                    MemoryGraph::from_snapshot(&snap),
+                    MemoryGraph::from_snapshot(&snap, &active),
                     Err(crate::error::MemoryError::Internal(_))
                 ),
                 "non-positive endpoint ({source}, {target}) must be rejected"
@@ -700,7 +780,8 @@ mod tests {
     #[test]
     fn from_snapshot_rejects_nonpositive_edge_id() {
         // An edge_id is a SQLite rowid too; <= 0 signals a corrupt/tampered
-        // edge record.
+        // edge record. Endpoints are valid + active so only the edge_id triggers.
+        let active: HashSet<i64> = [10, 20].into_iter().collect();
         let snap = crate::engine::snapshot::GraphSnapshot {
             edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
                 edge_id: 0,
@@ -711,7 +792,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            MemoryGraph::from_snapshot(&snap),
+            MemoryGraph::from_snapshot(&snap, &active),
             Err(crate::error::MemoryError::Internal(_))
         ));
     }
