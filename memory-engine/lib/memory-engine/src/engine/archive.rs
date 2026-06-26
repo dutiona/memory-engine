@@ -1,8 +1,8 @@
 //! Archival compression orchestration for [`MemoryEngine`].
 //!
 //! Moves expired, non-pinned facts into `.pak` files (zstd + blake3),
-//! records a manifest row, hard-deletes from `SQLite`, and prunes the
-//! in-memory graph — all in a crash-safe sequence.
+//! records a manifest row, hard-deletes from `SQLite`, and rebuilds the
+//! in-memory graph cache from the committed DB — all in a crash-safe sequence.
 
 use std::path::PathBuf;
 
@@ -14,6 +14,7 @@ use crate::archive::types::{
     CURRENT_PAK_VERSION,
 };
 use crate::error::{ArchiveError, MemoryError, Result};
+use crate::graph::MemoryGraph;
 use crate::store::schema::CURRENT_SCHEMA_VERSION;
 use crate::types::{Edge, Fact};
 
@@ -24,8 +25,10 @@ impl MemoryEngine {
     ///
     /// Returns `None` if fewer than `policy.min_facts` candidates exist.
     /// Otherwise writes the `.pak`, inserts a manifest row, hard-deletes
-    /// facts and edges from `SQLite` (single transaction), and updates the
-    /// in-memory graph.
+    /// facts and edges from `SQLite` (single transaction), then rebuilds the
+    /// in-memory graph cache from the committed active edge set — the DB is the
+    /// source of truth, so the cache is reconciled to it rather than mutated in
+    /// place (#332).
     ///
     /// # Panics
     ///
@@ -93,14 +96,27 @@ impl MemoryEngine {
             let _ = std::fs::remove_file(&pak_path);
         })?;
 
-        // Update in-memory graph
-        {
-            let mut graph = self.graph.write();
-            for &fid in &fact_ids {
-                graph.remove_edges_by_fact(fid);
-                graph.remove_node(fid);
-            }
-        }
+        // Reconcile the in-memory graph cache to the now-committed DB (#332).
+        //
+        // This is the second phase of an inherent two-phase update: the DB
+        // (above, atomic) is the source of truth; the in-memory graph is a
+        // *derived cache* rebuilt from the active edge set on every `open`
+        // (`MemoryGraph::load_from_db`). Rather than mutate the cache node by
+        // node — which is both (a) vulnerable to a process kill in the window
+        // between the commit and the mutation, leaving stale nodes for the rest
+        // of the session, and (b) unsafe for *surviving* nodes (petgraph's
+        // `Graph::remove_node` swaps the last node into the freed slot,
+        // invalidating an unrelated `NodeIndex` the cache still holds) — we
+        // rebuild the cache wholesale from the committed `list_active_edges`.
+        //
+        // This is the same source-of-truth-driven reconciliation that
+        // `consolidate` uses after a bulk expiry: correct by construction (no
+        // stale indices), panic-safe (one port read + one assignment), and
+        // self-healing under an external kill (the next `open` rebuilds from the
+        // exact same committed state). The port read happens *before* taking the
+        // write guard so no lock is held across the `.await`.
+        let active_edges = self.storage.list_active_edges().await?;
+        *self.graph.write() = MemoryGraph::from_active_edges(&active_edges);
 
         Ok(Some(ArchiveStats {
             facts_archived: candidate_facts.len(),
@@ -333,7 +349,7 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    use crate::types::{FactType, NewFact};
+    use crate::types::{FactType, NewEdge, NewFact};
 
     const DIM: usize = 8;
 
@@ -354,6 +370,27 @@ mod tests {
             metadata: serde_json::json!({}),
             scope_id: 1,
             is_pinned: false,
+        }
+    }
+
+    /// An active (non-expired), non-pinned fact — a *survivor* that archival
+    /// must leave in both the DB and the in-memory graph.
+    fn make_active_fact(content: &str) -> NewFact {
+        NewFact {
+            t_expired: None,
+            ..make_expired_fact(content, Utc::now())
+        }
+    }
+
+    fn make_edge(source: i64, target: i64) -> NewEdge {
+        NewEdge {
+            source_fact_id: source,
+            target_fact_id: target,
+            relation_type: "related".into(),
+            weight: 1.0,
+            t_created: Utc::now(),
+            t_expired: None,
+            scope_id: 1,
         }
     }
 
@@ -417,6 +454,126 @@ mod tests {
         assert!(
             orphans.is_empty(),
             "commit_archive failure left orphan .pak file(s): {orphans:?}"
+        );
+    }
+
+    /// #332: after a *successful* archive, the in-memory graph cache must match
+    /// the committed DB — archived facts' nodes (and their incident edges) are
+    /// gone, while survivor nodes and their edges remain intact. This proves the
+    /// post-commit rebuild-from-`list_active_edges` reconciliation leaves no
+    /// stale nodes and no dangling references to archived ids. A regression to
+    /// the old node-by-node prune would fail assertion 2: petgraph's
+    /// `remove_node` swaps the last node into the freed slot, silently
+    /// invalidating a surviving node's cached `NodeIndex`.
+    #[tokio::test]
+    async fn archive_keeps_in_memory_graph_consistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.path().join("graph.db"))
+            .build()
+            .unwrap();
+
+        // Two survivors (active) that must outlive the archive.
+        let survivor_a = engine
+            .storage()
+            .insert_fact(&make_active_fact("survivor a"))
+            .await
+            .unwrap();
+        let survivor_b = engine
+            .storage()
+            .insert_fact(&make_active_fact("survivor b"))
+            .await
+            .unwrap();
+
+        // Expired, non-pinned facts — the archive candidates.
+        let expired_at = Utc::now() - Duration::hours(1);
+        let mut archived_ids = Vec::new();
+        for i in 0..20 {
+            archived_ids.push(
+                engine
+                    .storage()
+                    .insert_fact(&make_expired_fact(&format!("doomed {i}"), expired_at))
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        // Edges the prune must handle on the success path:
+        //  - internal: archived -> archived  (both endpoints archived; archive
+        //    hard-deletes them from the DB and prunes the nodes from the graph)
+        //  - survivor: survivor -> survivor  (must be left untouched)
+        //
+        // Boundary edges (exactly one archived endpoint) are deliberately *not*
+        // exercised here: they are an orthogonal, pre-existing DB-side concern
+        // (archive's `hard_delete_by_facts` only removes edges with *both*
+        // endpoints archived, so a surviving boundary edge trips the facts FK on
+        // hard-delete). That is unrelated to #332's in-memory two-phase update.
+        engine
+            .storage()
+            .insert_edge(&make_edge(archived_ids[0], archived_ids[1]))
+            .await
+            .unwrap();
+        engine
+            .storage()
+            .insert_edge(&make_edge(survivor_a, survivor_b))
+            .await
+            .unwrap();
+
+        // Seed the in-memory graph from the DB exactly as `open` does, so the
+        // cache starts in sync before we exercise the prune.
+        {
+            let active_edges = engine.storage().list_active_edges().await.unwrap();
+            *engine.graph.write() = MemoryGraph::from_active_edges(&active_edges);
+        }
+        // Sanity: every node above is present before the archive.
+        assert!(engine.graph_has_node(archived_ids[0]));
+        assert!(engine.graph_has_node(survivor_a));
+        assert!(engine.graph_has_node(survivor_b));
+
+        let policy = ArchivePolicy {
+            expired_before: Utc::now() + Duration::hours(1),
+            min_facts: 1,
+        };
+        let stats = engine
+            .archive(&policy)
+            .await
+            .unwrap()
+            .expect("archive should run with candidates present");
+        assert_eq!(stats.facts_archived, archived_ids.len());
+
+        // 1. No archived fact retains a graph node.
+        for &id in &archived_ids {
+            assert!(
+                !engine.graph_has_node(id),
+                "archived fact {id} still has a stale node after archive"
+            );
+        }
+
+        // 2. Survivors keep their nodes and their survivor<->survivor edge.
+        assert!(engine.graph_has_node(survivor_a), "survivor_a node lost");
+        assert!(engine.graph_has_node(survivor_b), "survivor_b node lost");
+        assert_eq!(
+            engine.graph_neighbors(survivor_a),
+            vec![survivor_b],
+            "survivor_a should still point at survivor_b only"
+        );
+
+        // 3. No survivor query returns a reference to an archived id — the
+        //    archived nodes must be fully gone, not just detached.
+        let component = engine.graph_component(survivor_a);
+        for &id in &archived_ids {
+            assert!(
+                !component.contains(&id),
+                "survivor's component still references archived fact {id}"
+            );
+        }
+
+        // 4. The graph is internally consistent: node_count equals the number
+        //    of live (survivor) nodes, with no orphaned index left behind.
+        let (node_count, _edge_count) = engine.graph_stats();
+        assert_eq!(
+            node_count, 2,
+            "graph should hold exactly the two survivor nodes, found {node_count}"
         );
     }
 }
