@@ -1119,6 +1119,91 @@ mod tests {
         assert_eq!(snapshot.embed_dim, 4);
     }
 
+    /// Inclusive-cap boundary companion to
+    /// [`read_snapshot_accepts_exactly_cap_sized_plain`]: a plain snapshot one
+    /// byte OVER the cap (`cap = L - 1` for a file of length `L`) must be rejected
+    /// with the distinct [`MemoryError::SnapshotTooLarge`] carrying that exact
+    /// `cap`. Mirrors `read_pak_one_byte_over_cap_rejected` in `archive::pak`.
+    ///
+    /// For the plain (uncompressed) path the on-disk size *is* the decompressed
+    /// size, so this trips the up-front file-size guard (`metadata.len() > cap`).
+    /// Pairing accept-at-`cap` with reject-at-`cap + 1` pins the acceptance window
+    /// to a single byte wide on the plain path — the inclusive contract.
+    #[test]
+    fn read_snapshot_caps_decompressed_one_byte_over_plain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("over.json");
+        let json = padded_snapshot_json(200);
+        let len = u64::try_from(json.len()).unwrap();
+        assert!(
+            len >= 2,
+            "fixture must be >=2 bytes so cap = len - 1 is positive"
+        );
+        std::fs::write(&path, &json).unwrap();
+
+        // cap = L - 1: the file is exactly one byte over the cap.
+        let cap = len - 1;
+        let err = read_snapshot_capped(&path, cap).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::SnapshotTooLarge { cap: c } if c == cap),
+            "expected SnapshotTooLarge {{ cap: {cap} }} one byte over the cap, got {err:?}"
+        );
+    }
+
+    /// Mutation-proof companion to
+    /// [`read_snapshot_accepts_exactly_cap_sized_plain`] for the **decompressed**
+    /// cap: a gzip snapshot whose *decompressed* length is `L`, read with
+    /// `cap = L - 1`, is one byte over the cap and must be rejected with the
+    /// distinct [`MemoryError::SnapshotTooLarge`]. The compressed file is tiny, so
+    /// it clears the up-front file-size guard and the trip must come from
+    /// `read_capped`'s `limit() == 0` check on the decompressed stream — exactly
+    /// the [`std::io::Read::take`] slack under test.
+    ///
+    /// This is what pins the slack to *exactly* `+1`: under a regression that
+    /// widened it to `+2`, the `take(cap + 2)` would read all `L = cap + 1`
+    /// decompressed bytes without exhausting (leaving `limit() == 1`), serde would
+    /// parse the complete valid JSON, and the read would wrongly succeed — failing
+    /// this test. (The plain companion above cannot witness that mutation: its
+    /// file-size guard short-circuits before `read_capped` runs.)
+    #[cfg(feature = "compress-gzip")]
+    #[test]
+    fn read_snapshot_caps_decompressed_one_byte_over_gzip() {
+        use flate2::Compression as GzLevel;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let payload = padded_snapshot_json(200);
+        let decompressed_len = u64::try_from(payload.len()).unwrap();
+        assert!(
+            decompressed_len >= 2,
+            "fixture must decompress to >=2 bytes so cap = len - 1 is positive"
+        );
+
+        let mut enc = GzEncoder::new(Vec::new(), GzLevel::best());
+        enc.write_all(payload.as_bytes()).unwrap();
+        let compressed = enc.finish().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("over.json.gz");
+        std::fs::write(&path, &compressed).unwrap();
+
+        // cap = decompressed_len - 1: the decompressed stream is one byte over the
+        // cap, while the compressed file is tiny and clears the file-size guard.
+        let cap = decompressed_len - 1;
+        let compressed_len = u64::try_from(compressed.len()).unwrap();
+        assert!(
+            compressed_len <= cap,
+            "test precondition: compressed ({compressed_len}) must clear the file-size guard \
+             (cap {cap}) so the *decompressed* cap is what trips"
+        );
+        let err = read_snapshot_capped(&path, cap).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::SnapshotTooLarge { cap: c } if c == cap),
+            "expected SnapshotTooLarge {{ cap: {cap} }} one byte over the decompressed cap, \
+             got {err:?}"
+        );
+    }
+
     // --- Embedding-dimension validation tests (#413) ---
 
     fn snapshot_with(
