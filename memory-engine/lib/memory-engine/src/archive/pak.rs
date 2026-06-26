@@ -76,17 +76,27 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 ///   [`ArchiveError::Io`] — the file cannot be opened (e.g. it does not exist or
 ///   is unreadable).
 /// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
-///   [`ArchiveError::Codec`] — the zstd decoder cannot be created (e.g. the bytes
-///   are not a valid zstd stream).
+///   [`ArchiveError::Codec`] — a zstd framing error detected *eagerly* at
+///   `Decoder::new` (e.g. the bytes are not a zstd stream at all, so the frame
+///   header is rejected up front). Note that zstd validates the *body*
+///   incrementally: a corrupt or truncated stream whose header parses is usually
+///   not caught here — it surfaces mid-read as `Serialization` (see below).
 /// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::PakTooLarge`] — the decompressed stream exceeds the 4 GiB
 ///   cap (a possible decompression bomb, CWE-409). Reported as a *distinct*
-///   variant (not a [`Codec`](ArchiveError::Codec) error and not a truncated-JSON
-///   parse error) so callers can tell a "too large" trip apart from genuine
-///   corruption programmatically (#333).
+///   variant so callers can tell a "too large" trip apart from an ordinary
+///   parse/read failure programmatically (#333). It does **not** distinguish a
+///   too-large pak from corruption in general: a corrupt stream that happens to
+///   decompress past the cap is reported here, while one that fails earlier
+///   surfaces as `Serialization`.
 /// - [`MemoryError::Serialization`](crate::error::MemoryError::Serialization) —
-///   the decompressed bytes are not valid JSON for an [`ArchivePak`] (including a
-///   stale v1 layout missing the renamed `base_importance` field).
+///   either the decompressed bytes are not valid JSON for an [`ArchivePak`]
+///   (including a stale v1 layout missing the renamed `base_importance` field),
+///   **or** the zstd stream is corrupt/truncated in a way zstd only detects
+///   incrementally during the read. Because the decode is lazy, mid-stream zstd
+///   corruption is wrapped by `serde_json` and bubbles up as `Serialization`,
+///   not as [`Codec`](ArchiveError::Codec) — so this variant is *not* a reliable
+///   "bad JSON vs. corrupt stream" discriminator.
 /// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::PakVersionUnsupported`] — the archive's `pak_version` is
 ///   newer than this build supports (forward-incompatible).
