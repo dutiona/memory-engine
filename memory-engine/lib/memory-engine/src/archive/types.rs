@@ -217,23 +217,25 @@ mod tests {
             DateTime::<Utc>::from_timestamp(clamped, 0).unwrap_or_else(Utc::now)
         }
 
-        // serde_json (without the `float_roundtrip` feature, which this crate does
-        // not enable) parses f64/f32 with a fast path that can land 1 ULP off the
-        // serialized value — a property of the JSON pipeline, not of our serde
-        // derives. So we draw floats as *scaled small integers* (e.g. n/1000),
-        // whose short-decimal serialization round-trips bit-for-bit, and still
-        // sweep sign, magnitude, fractional, and zero. Exact-value float coverage
-        // is locked separately by `archive_pak_roundtrip_serde_populated`.
+        // serde_json (default features, which this crate uses) serializes f32 with
+        // Grisu/Ryū shortest-decimal and parses with a *correctly-rounded* path:
+        // an exhaustive 2^32 sweep of every finite f32 round-trips bit-for-bit
+        // (verified by brute force, #420 — the earlier "1 ULP fast-path loss"
+        // premise was wrong). So the embedding strategy draws arbitrary *finite*
+        // f32 directly and asserts EXACT equality, restoring the full-coverage the
+        // finding asked for instead of the discretized n/1000 proxy.
 
         /// An f64 in `[0, 1]` with three decimals — the importance-field band.
         fn arb_importance() -> impl Strategy<Value = f64> {
             (0u32..=1000).prop_map(|n| f64::from(n) / 1000.0)
         }
 
-        /// A bounded f32 embedding component with three decimals, both signs.
-        /// Drawn from `i16` so `f32::from` is exact (no `cast_precision_loss`).
+        /// An arbitrary *finite* f32 embedding component (full value space).
+        /// NaN/±∞ are excluded because `serde_json` maps them to JSON `null`
+        /// (documented behavior, not a precision loss), which would fail the
+        /// exact-equality round-trip for reasons unrelated to float fidelity.
         fn arb_embed_component() -> impl Strategy<Value = f32> {
-            any::<i16>().prop_map(|n| f32::from(n) / 1000.0)
+            any::<f32>().prop_filter("finite", |x| x.is_finite())
         }
 
         prop_compose! {
