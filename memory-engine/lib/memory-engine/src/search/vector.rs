@@ -287,8 +287,10 @@ mod tests {
     #[test]
     fn cosine_empty_slices_return_zero() {
         // Empty zip -> norm 0 -> denom 0 -> returns 0.0 (NaN-avoidance promise).
-        assert_eq!(cosine_similarity(&[], &[]), 0.0);
-        assert_eq!(cosine_similarity(&[], &[1.0]), 0.0);
+        // Use abs-epsilon (not assert_eq!) to satisfy clippy::float_cmp under the
+        // CI `-D warnings` gate, matching the sibling zero-vector test convention.
+        assert!(cosine_similarity(&[], &[]).abs() < f32::EPSILON);
+        assert!(cosine_similarity(&[], &[1.0]).abs() < f32::EPSILON);
     }
 
     #[test]
