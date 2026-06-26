@@ -176,60 +176,95 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
     // would push it past that cap and silently break auto-detection on large
     // snapshots. A `SerializeMap` refactor must preserve this entry ORDER, not just
     // the names.
-    let mut ser = serde_json::Serializer::new(&mut *writer);
-    let mut map = ser.serialize_map(None)?;
+    //
+    // Shared sink for the *original* store/DB `MemoryError` surfaced by any
+    // `SeqStreamer`. serde's `serialize_entry` can only return the serializer's
+    // own `serde_json::Error`, so a store error reaches us as a serde error that
+    // would otherwise `?`-convert to `MemoryError::Serialization`, dropping its
+    // typed variant (`Database`/`Io`/…). Each `SeqStreamer` stashes the original
+    // here before funneling through serde; on a serde failure we prefer the
+    // stashed cause, recovering the true variant and preserving the `dump_json`
+    // error contract (#258).
+    let store_err: std::cell::RefCell<Option<MemoryError>> = std::cell::RefCell::new(None);
 
-    map.serialize_entry("schema_version", &schema_version)?;
-    map.serialize_entry("storage_epoch", &storage_epoch)?;
-    map.serialize_entry("embed_dim", &embed_dim)?;
+    // Drive the whole serialization in a closure that yields the raw
+    // `serde_json::Error`, so a store error stashed in `store_err` can be
+    // recovered as the true cause instead of the serde wrapper.
+    let mut serialize_all = || -> std::result::Result<(), serde_json::Error> {
+        let mut ser = serde_json::Serializer::new(&mut *writer);
+        let mut map = ser.serialize_map(None)?;
 
-    map.serialize_entry(
-        "facts",
-        &SeqStreamer::new(|cb| FactStore::new(conn, embed_dim).for_each(cb)),
-    )?;
-    map.serialize_entry(
-        "edges",
-        &SeqStreamer::new(|cb| EdgeStore::new(conn).for_each(cb)),
-    )?;
-    map.serialize_entry(
-        "summaries",
-        &SeqStreamer::new(|cb| SummaryStore::new(conn, embed_dim).for_each(cb)),
-    )?;
-    map.serialize_entry(
-        "scopes",
-        &SeqStreamer::new(|cb| ScopeStore::new(conn).for_each(cb)),
-    )?;
-    map.serialize_entry(
-        "events",
-        &SeqStreamer::new(|cb| EventStore::new(conn, &registry).for_each(cb)),
-    )?;
-    map.serialize_entry(
-        "lineage",
-        &SeqStreamer::new(|cb| LineageStore::new(conn).for_each(cb)),
-    )?;
+        map.serialize_entry("schema_version", &schema_version)?;
+        map.serialize_entry("storage_epoch", &storage_epoch)?;
+        map.serialize_entry("embed_dim", &embed_dim)?;
 
-    map.serialize_entry("embedding_spaces", &spaces)?;
+        map.serialize_entry(
+            "facts",
+            &SeqStreamer::new(&store_err, |cb| {
+                FactStore::new(conn, embed_dim).for_each(cb)
+            }),
+        )?;
+        map.serialize_entry(
+            "edges",
+            &SeqStreamer::new(&store_err, |cb| EdgeStore::new(conn).for_each(cb)),
+        )?;
+        map.serialize_entry(
+            "summaries",
+            &SeqStreamer::new(&store_err, |cb| {
+                SummaryStore::new(conn, embed_dim).for_each(cb)
+            }),
+        )?;
+        map.serialize_entry(
+            "scopes",
+            &SeqStreamer::new(&store_err, |cb| ScopeStore::new(conn).for_each(cb)),
+        )?;
+        map.serialize_entry(
+            "events",
+            &SeqStreamer::new(&store_err, |cb| {
+                EventStore::new(conn, &registry).for_each(cb)
+            }),
+        )?;
+        map.serialize_entry(
+            "lineage",
+            &SeqStreamer::new(&store_err, |cb| LineageStore::new(conn).for_each(cb)),
+        )?;
 
-    // fact_vectors (#623): the non-active spaces' per-fact vectors (a populating
-    // space mid-reconstruction, or a deprecated space retained for rollback).
-    // Streamed row-by-row — a deprecated space holds one vector per fact, so this
-    // can be O(N). The active vectors are already in `facts[].embedding`.
-    map.serialize_entry(
-        "fact_vectors",
-        &SeqStreamer::new(|mut cb| {
-            crate::store::fact_vectors::for_each(conn, embed_dim, |fact_id, space_id, embedding| {
-                cb(FactVectorSnapshot {
-                    fact_id,
-                    space_id,
-                    embedding,
-                })
-            })
-        }),
-    )?;
+        map.serialize_entry("embedding_spaces", &spaces)?;
 
-    map.serialize_entry("config", &config)?;
+        // fact_vectors (#623): the non-active spaces' per-fact vectors (a populating
+        // space mid-reconstruction, or a deprecated space retained for rollback).
+        // Streamed row-by-row — a deprecated space holds one vector per fact, so this
+        // can be O(N). The active vectors are already in `facts[].embedding`.
+        map.serialize_entry(
+            "fact_vectors",
+            &SeqStreamer::new(&store_err, |cb| {
+                crate::store::fact_vectors::for_each(
+                    conn,
+                    embed_dim,
+                    |fact_id, space_id, embedding| {
+                        cb(FactVectorSnapshot {
+                            fact_id,
+                            space_id,
+                            embedding,
+                        })
+                    },
+                )
+            }),
+        )?;
 
-    map.end()?;
+        map.serialize_entry("config", &config)?;
+
+        map.end()
+    };
+
+    if let Err(serde_err) = serialize_all() {
+        // Prefer the original typed store/DB error stashed by a `SeqStreamer`
+        // over the serde wrapper, so `Database`/`Io` survive the dump's error
+        // contract instead of collapsing to `MemoryError::Serialization`.
+        return Err(store_err
+            .into_inner()
+            .unwrap_or_else(|| MemoryError::Serialization(serde_err)));
+    }
 
     writer.flush()?;
     Ok(())
@@ -238,40 +273,58 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
 /// A [`Serialize`] adapter that streams a JSON array out of a `for_each`-style
 /// callback without materializing the whole collection.
 ///
-/// `iterate` is invoked once during serialization; it must call the closure it
-/// is handed exactly once per entity. Each entity is serialized into the
-/// sequence immediately and then dropped, so only one `T` is live at a time —
-/// preserving the O(1)-per-collection peak-memory guarantee of the snapshot
-/// dump.
+/// `iterate` is invoked once during serialization; it must call the `&mut dyn
+/// FnMut` it is handed exactly once per entity. Each entity is serialized into
+/// the sequence immediately and then dropped, so only one `T` is live at a time
+/// — preserving the O(1)-per-collection peak-memory guarantee of the snapshot
+/// dump. The callback is passed by mutable reference (`&mut dyn FnMut`) rather
+/// than a `Box<dyn FnMut>`, so there is **no per-collection heap allocation**
+/// for the trampoline — the closure lives on the serializer's stack frame.
 ///
 /// # Error bridging
 ///
 /// The store callbacks fail with [`MemoryError`], whereas serde's sequence API
 /// fails with the serializer's own `S::Error`. The two are reconciled inside
-/// [`Serialize::serialize`]: a serde element error is stashed and re-raised as
-/// the true cause, and a store/DB error is funneled through
-/// [`serde::ser::Error::custom`].
-struct SeqStreamer<T, F> {
+/// [`Serialize::serialize`]:
+///
+/// * A serde *element* error is stashed locally and re-raised verbatim as the
+///   true cause (the placeholder [`MemoryError`] used to abort `iterate` never
+///   escapes).
+/// * A genuine *store/DB* error ([`MemoryError::Database`], [`MemoryError::Io`],
+///   …) is funneled through [`serde::ser::Error::custom`] so it can abort the
+///   serializer — but the **original typed [`MemoryError`]** is *also* stashed
+///   into the shared `store_err` cell so the caller ([`stream_snapshot`]) can
+///   recover it and return the original variant. Without that recovery the
+///   typed variant would be lost: `serde_json`'s `custom` only retains the
+///   `Display` string, and the resulting `serde_json::Error` would convert to
+///   [`MemoryError::Serialization`] at the `?`, regressing the `dump_json`
+///   error contract.
+struct SeqStreamer<'e, T, F> {
     iterate: std::cell::RefCell<Option<F>>,
+    /// Shared sink for the *original* store/DB [`MemoryError`], so the typed
+    /// variant survives the round-trip through serde's `custom` error funnel.
+    /// Borrowed from [`stream_snapshot`], which inspects it after serialization.
+    store_err: &'e std::cell::RefCell<Option<MemoryError>>,
     _item: std::marker::PhantomData<fn(T)>,
 }
 
-impl<T, F> SeqStreamer<T, F>
+impl<'e, T, F> SeqStreamer<'e, T, F>
 where
-    F: FnOnce(Box<dyn FnMut(T) -> Result<()> + '_>) -> Result<()>,
+    F: FnOnce(&mut (dyn FnMut(T) -> Result<()> + '_)) -> Result<()>,
 {
-    fn new(iterate: F) -> Self {
+    fn new(store_err: &'e std::cell::RefCell<Option<MemoryError>>, iterate: F) -> Self {
         Self {
             iterate: std::cell::RefCell::new(Some(iterate)),
+            store_err,
             _item: std::marker::PhantomData,
         }
     }
 }
 
-impl<T, F> Serialize for SeqStreamer<T, F>
+impl<T, F> Serialize for SeqStreamer<'_, T, F>
 where
     T: Serialize,
-    F: FnOnce(Box<dyn FnMut(T) -> Result<()> + '_>) -> Result<()>,
+    F: FnOnce(&mut (dyn FnMut(T) -> Result<()> + '_)) -> Result<()>,
 {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -292,9 +345,11 @@ where
         let mut seq = serializer.serialize_seq(None)?;
 
         // Stash any serde element error so it can be re-raised as the real cause
-        // after `iterate` is aborted via the sentinel `MemoryError` below.
+        // after `iterate` is aborted via the sentinel `MemoryError` below. The
+        // closure is invoked through a `&mut dyn FnMut` (no `Box`), so the
+        // trampoline incurs no heap allocation.
         let mut ser_err: Option<S::Error> = None;
-        let iter_result = iterate(Box::new(|item: T| {
+        let mut cb = |item: T| {
             if let Err(e) = seq.serialize_element(&item) {
                 ser_err = Some(e);
                 // Abort `for_each` early; the value is a placeholder — the real
@@ -304,15 +359,23 @@ where
                 ));
             }
             Ok(())
-        }));
+        };
+        let iter_result = iterate(&mut cb);
 
         if let Some(e) = ser_err {
             // A serde serialization error: surface the true serializer error.
             return Err(e);
         }
-        // Otherwise a genuine store/DB error (or success). Funnel a store error
-        // through serde's error type.
-        iter_result.map_err(S::Error::custom)?;
+        // Otherwise a genuine store/DB error (or success). Stash the ORIGINAL
+        // typed `MemoryError` so `stream_snapshot` can recover it (the `custom`
+        // funnel below keeps only its `Display` string and would otherwise
+        // collapse the variant to `MemoryError::Serialization`), then funnel it
+        // through serde's error type to abort the serializer.
+        if let Err(e) = iter_result {
+            let msg = e.to_string();
+            *self.store_err.borrow_mut() = Some(e);
+            return Err(S::Error::custom(msg));
+        }
 
         seq.end()
     }
@@ -1103,28 +1166,38 @@ mod tests {
 
     /// `SeqStreamer` error-bridging contract: when the store/DB callback aborts
     /// with a real [`MemoryError`] (here an `Io` error carrying a unique sentinel),
-    /// the serializer must surface THAT true cause via `S::Error::custom` — not the
-    /// internal `"snapshot element serialization failed"` placeholder (which is
-    /// reserved for the serde-element-failure path and re-raised as the stashed
-    /// `ser_err`), and not a generic "serialize called once" wrapper.
+    /// the streamer must (a) funnel the cause through `S::Error::custom` so the
+    /// serde error message carries the sentinel — not the internal `"snapshot
+    /// element serialization failed"` placeholder (reserved for the
+    /// serde-element-failure path) — AND (b) **stash the ORIGINAL typed
+    /// `MemoryError` in the shared `store_err` cell** so the caller can recover
+    /// the exact variant (`MemoryError::Io(_)`) instead of the lossy
+    /// `MemoryError::Serialization` wrapper serde would otherwise yield (#258).
     ///
-    /// This is the only coverage of the `ser_err` stash / `S::Error::custom` funnel
-    /// / `RefCell` single-take logic — the most intricate part of the streaming
-    /// refactor. Deleting the `iter_result.map_err(S::Error::custom)?` line would
-    /// make serialization wrongly succeed (the error swallowed), failing this test;
-    /// leaking the placeholder instead of the cause would fail the substring
-    /// assertion.
+    /// This is the only direct coverage of the `ser_err` stash / `S::Error::custom`
+    /// funnel / `store_err` recovery / `RefCell` single-take logic — the most
+    /// intricate part of the streaming refactor. Deleting the `S::Error::custom`
+    /// funnel would make serialization wrongly succeed (the error swallowed),
+    /// failing the substring assertion; dropping the `store_err` stash would lose
+    /// the typed variant, failing the `matches!` assertion below.
     #[test]
     fn seq_streamer_surfaces_true_store_error() {
         const SENTINEL: &str = "disk-fell-over-7f3a";
 
+        // Shared sink the streamer stashes the original `MemoryError` into — the
+        // same cell `stream_snapshot` owns and recovers from.
+        let store_err: std::cell::RefCell<Option<MemoryError>> = std::cell::RefCell::new(None);
+
         // An iterate closure that emits one serializable element successfully (so the
         // `ser_err` stash stays `None` and the sequence is genuinely entered), then
         // aborts with a real store error — the store/DB-error branch of the bridge.
-        let streamer = SeqStreamer::new(|mut cb: Box<dyn FnMut(i32) -> Result<()> + '_>| {
-            cb(1)?; // element serializes cleanly
-            Err(MemoryError::Io(std::io::Error::other(SENTINEL)))
-        });
+        let streamer = SeqStreamer::new(
+            &store_err,
+            |cb: &mut (dyn FnMut(i32) -> Result<()> + '_)| {
+                cb(1)?; // element serializes cleanly
+                Err(MemoryError::Io(std::io::Error::other(SENTINEL)))
+            },
+        );
 
         let err = serde_json::to_string(&streamer)
             .expect_err("a store error in the iterate closure must abort serialization");
@@ -1138,6 +1211,22 @@ mod tests {
         assert!(
             !msg.contains("snapshot element serialization failed"),
             "the internal element-failure placeholder must NOT leak as the cause; got: {msg:?}"
+        );
+
+        // The ORIGINAL typed error must be recoverable from the stash — the
+        // variant (`Io`), not just the message, survives. This is the #258 fix:
+        // without the stash the caller would only see `MemoryError::Serialization`.
+        let recovered = store_err
+            .into_inner()
+            .expect("the original store error must be stashed for the caller to recover");
+        assert!(
+            matches!(recovered, MemoryError::Io(_)),
+            "the stashed cause must preserve the original MemoryError::Io variant, \
+             got: {recovered:?}"
+        );
+        assert!(
+            recovered.to_string().contains(SENTINEL),
+            "the recovered error must still carry the sentinel ({SENTINEL:?}), got: {recovered}"
         );
     }
 }
