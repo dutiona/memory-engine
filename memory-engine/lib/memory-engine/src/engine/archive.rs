@@ -14,7 +14,6 @@ use crate::archive::types::{
     CURRENT_PAK_VERSION,
 };
 use crate::error::{ArchiveError, MemoryError, Result};
-use crate::graph::MemoryGraph;
 use crate::store::schema::CURRENT_SCHEMA_VERSION;
 use crate::types::{Edge, Fact};
 
@@ -25,26 +24,22 @@ impl MemoryEngine {
     ///
     /// Returns `None` if fewer than `policy.min_facts` candidates exist.
     /// Otherwise writes the `.pak`, inserts a manifest row, hard-deletes
-    /// facts and edges from `SQLite` (single transaction), then rebuilds the
-    /// in-memory graph cache from the committed active edge set — the DB is the
-    /// source of truth, so the cache is reconciled to it rather than mutated in
-    /// place (#332).
+    /// facts and edges from `SQLite` (single transaction), then prunes the
+    /// archived facts' nodes from the in-memory graph cache (#332).
     ///
-    /// # Concurrency
-    ///
-    /// The in-memory graph reconciliation is **not serialized** with concurrent
-    /// graph mutators. The post-commit rebuild reads `list_active_edges`
-    /// *without* holding the graph write lock and only then swaps the rebuilt
-    /// graph in (the read must not hold a lock across the `.await`). A graph
-    /// mutator (`prune`, conflict resolution, edge insertion) that commits to
-    /// the DB in the window between that read and the swap has its in-memory
-    /// edge **lost from the cache** — overwritten by the rebuilt graph that
-    /// predates it. This is the same non-serializable in-memory reconciliation
-    /// contract as `consolidate`'s read→compute→write split: the DB remains the
-    /// source of truth, so the lost edge still persists on disk and is recovered
-    /// by the next graph rebuild (the next `open`/restart, or the next archive
-    /// or consolidate pass). No write is dropped from the durable store; only
-    /// the derived in-memory cache may briefly lag the DB until the next rebuild.
+    /// The in-memory graph is a *derived cache* of the active edge set: the DB
+    /// is the source of truth and the cache is rebuilt from it on every `open`
+    /// ([`crate::graph::MemoryGraph::load_from_db`]). After the atomic commit
+    /// succeeds, the archived facts' nodes are removed in place under a single
+    /// graph write guard — an O(N) prune held across no `.await`, so it is
+    /// atomic with respect to any other graph mutator.
+    /// [`crate::graph::MemoryGraph::remove_node`] is
+    /// loop-safe: petgraph's swap-remove relocates the former last node into the
+    /// freed slot, and `remove_node` re-indexes `node_map` for that displaced
+    /// node, so surviving nodes keep resolving to their correct indices across
+    /// the whole loop (#833). If the process is killed mid-prune, the cache
+    /// self-heals: the next `open` rebuilds it wholesale from the committed DB,
+    /// which already reflects the hard-delete.
     ///
     /// # Panics
     ///
@@ -112,35 +107,28 @@ impl MemoryEngine {
             let _ = std::fs::remove_file(&pak_path);
         })?;
 
-        // Reconcile the in-memory graph cache to the now-committed DB (#332).
+        // Prune the archived facts from the in-memory graph cache (#332).
         //
-        // This is the second phase of an inherent two-phase update: the DB
-        // (above, atomic) is the source of truth; the in-memory graph is a
-        // *derived cache* rebuilt from the active edge set on every `open`
-        // (`MemoryGraph::load_from_db`). Rather than mutate the cache node by
-        // node — which is both (a) vulnerable to a process kill in the window
-        // between the commit and the mutation, leaving stale nodes for the rest
-        // of the session, and (b) unsafe for *surviving* nodes (petgraph's
-        // `Graph::remove_node` swaps the last node into the freed slot,
-        // invalidating an unrelated `NodeIndex` the cache still holds) — we
-        // rebuild the cache wholesale from the committed `list_active_edges`.
+        // The in-memory graph is a *derived cache* of the active edge set; the
+        // DB (committed atomically above) is the source of truth. The whole
+        // prune runs under one graph write guard with no `.await` inside, so it
+        // is atomic with respect to any concurrent graph mutator — there is no
+        // off-lock read and therefore no lost-update window. The removal is O(N)
+        // in the number of archived facts rather than O(|E|) for a full reload.
         //
-        // This is the same source-of-truth-driven reconciliation that
-        // `consolidate` uses after a bulk expiry: correct by construction (no
-        // stale indices), panic-safe (one port read + one assignment), and
-        // self-healing under an external kill (the next `open` rebuilds from the
-        // exact same committed state). The port read happens *before* taking the
-        // write guard so no lock is held across the `.await`.
-        //
-        // Because the read is unlocked, this rebuild is **not serialized** with
-        // concurrent graph mutators (see the `# Concurrency` section above): a
-        // mutator that commits to the DB in the read→swap window has its
-        // in-memory edge overwritten by the rebuilt graph and lost from the
-        // cache. The DB stays the source of truth — that edge persists on disk
-        // and returns on the next rebuild — so this is a deliberate, documented
-        // last-writer-wins on the *derived* cache, not a durable lost update.
-        let active_edges = self.storage.list_active_edges().await?;
-        *self.graph.write() = MemoryGraph::from_active_edges(&active_edges);
+        // `MemoryGraph::remove_node` is loop-safe (#833): petgraph's swap-remove
+        // relocates the former last node into the freed slot, and `remove_node`
+        // re-indexes `node_map` for that displaced node, so surviving nodes keep
+        // resolving correctly across every iteration. If the process is killed
+        // mid-prune, the cache self-heals — the next `open` rebuilds it from the
+        // committed DB via `MemoryGraph::load_from_db`.
+        {
+            let mut graph = self.graph.write();
+            for &fid in &fact_ids {
+                graph.remove_edges_by_fact(fid);
+                graph.remove_node(fid);
+            }
+        }
 
         Ok(Some(ArchiveStats {
             facts_archived: candidate_facts.len(),
@@ -373,6 +361,7 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
+    use crate::graph::MemoryGraph;
     use crate::types::{FactType, NewEdge, NewFact};
 
     const DIM: usize = 8;
@@ -484,11 +473,16 @@ mod tests {
     /// #332: after a *successful* archive, the in-memory graph cache must match
     /// the committed DB — archived facts' nodes (and their incident edges) are
     /// gone, while survivor nodes and their edges remain intact. This proves the
-    /// post-commit rebuild-from-`list_active_edges` reconciliation leaves no
-    /// stale nodes and no dangling references to archived ids. A regression to
-    /// the old node-by-node prune would fail assertion 2: petgraph's
-    /// `remove_node` swaps the last node into the freed slot, silently
-    /// invalidating a surviving node's cached `NodeIndex`.
+    /// post-commit in-place node-by-node prune (under one graph write guard)
+    /// leaves no stale nodes and no dangling references to archived ids.
+    ///
+    /// The prune is loop-safe because `MemoryGraph::remove_node` re-indexes
+    /// `node_map` for the node petgraph's swap-remove relocates into the freed
+    /// slot (#833); without that re-indexing a survivor's cached `NodeIndex`
+    /// would silently alias a removed slot and assertion 2 would fail. The
+    /// unit test `remove_node_in_loop_keeps_map_consistent` covers the
+    /// `MemoryGraph` contract directly; this test exercises it through the full
+    /// archive path.
     #[tokio::test]
     async fn archive_keeps_in_memory_graph_consistent() {
         let dir = tempfile::tempdir().unwrap();
