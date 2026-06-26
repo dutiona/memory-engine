@@ -20,7 +20,7 @@ name = "tools"
 path = "tests/tools.rs"
 
 [dependencies]
-memory-engine = { path = ".." }
+memory-engine = { path = "../../lib/memory-engine" }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 serde = { version = "1", features = ["derive"] }
@@ -28,7 +28,7 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
-memory-engine-embed = { path = "../memory-engine-embed" }
+memory-engine-embed = { path = "../../lib/embed" }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 rusqlite = { version = "0.34", features = ["bundled"] }
 tracing = "0.1"

@@ -83,7 +83,7 @@ For deeper context, read these files (only when working on the relevant area):
 
 ## Issue Labeling Convention
 
-This repository is managed with a label-routed GitHub Projects-v2 system. Every issue you open or triage MUST follow this contract. The canonical label lists live in `scripts/github-pm/manifests/labels.core.json` (cross-repo) and `scripts/github-pm/manifests/labels.area.memory-engine.json` (per-repo); the operator guide is `docs/reference/project-management.md`.
+This repository is managed with a label-routed GitHub Projects-v2 system. Every issue you open or triage MUST follow this contract. The canonical label lists live in `utils/scripts/github-pm/manifests/labels.core.json` (cross-repo) and `utils/scripts/github-pm/manifests/labels.area.memory-engine.json` (per-repo); the operator guide is `docs/reference/project-management.md`.
 
 ### Title format
 

@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"
 
 [dependencies]
-memory-engine = { path = ".." }
+memory-engine = { path = "../memory-engine" }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -58,9 +58,9 @@ uv.lock
 # super-plan ephemeral lens drafts
 docs/plans/*-drafts/
 # github-pm tooling runtime (created during plan execution)
-scripts/github-pm/state.json
-scripts/github-pm/backups/
-scripts/github-pm/manifests/open-issues.json
+utils/scripts/github-pm/state.json
+utils/scripts/github-pm/backups/
+utils/scripts/github-pm/manifests/open-issues.json
 
 # redaction denylist — real secret literals for the #51/#53 backfill gate.
 # NEVER commit. Default path that ME_REDACT_DENYLIST_FILE may point at; the

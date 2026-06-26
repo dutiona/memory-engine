@@ -1,6 +1,6 @@
 # Project Management
 
-This repository is managed with a reproducible, label-routed **GitHub Projects-v2** system. Issues and PRs are classified by a canonical label taxonomy, then auto-routed onto three project boards. The tooling lives under `scripts/github-pm/` as a desired-state reconciler: target facts are version-controlled manifests; idempotent module scripts converge GitHub to them (`query → diff → apply`), and `03-verify.sh` is the fail-loud acceptance gate.
+This repository is managed with a reproducible, label-routed **GitHub Projects-v2** system. Issues and PRs are classified by a canonical label taxonomy, then auto-routed onto three project boards. The tooling lives under `utils/scripts/github-pm/` as a desired-state reconciler: target facts are version-controlled manifests; idempotent module scripts converge GitHub to them (`query → diff → apply`), and `03-verify.sh` is the fail-loud acceptance gate.
 
 The agent-facing labelling contract (what every issue MUST carry) is duplicated byte-identically into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` under the `<!-- pm-contract:* -->` markers. This page is the operator's reference: the full taxonomy, the project/field schema, the token prerequisite, and the one-time UI steps that the GraphQL API cannot perform.
 
@@ -10,8 +10,8 @@ Plan tracking issue: **#239**.
 
 The label set is split so other repos (`reify`, `coraly`) can adopt the suite by swapping a single per-repo file:
 
-- **Core (cross-repo), 25 labels** — `scripts/github-pm/manifests/labels.core.json`: `type:*` (11), `severity:*` (5), `status:*` (3), `priority:*` (2 convenience), `super-qa*` (4).
-- **Area (per-repo), 14 labels** — `scripts/github-pm/manifests/labels.area.memory-engine.json`: `area:*`.
+- **Core (cross-repo), 25 labels** — `utils/scripts/github-pm/manifests/labels.core.json`: `type:*` (11), `severity:*` (5), `status:*` (3), `priority:*` (2 convenience), `super-qa*` (4).
+- **Area (per-repo), 14 labels** — `utils/scripts/github-pm/manifests/labels.area.memory-engine.json`: `area:*`.
 
 ### Hard rule
 
@@ -126,5 +126,5 @@ Area filters (one Table each): `area:core` · `area:storage` · `area:retrieval`
 Re-run any reconciler script: it should converge to zero changes and exit 0. The acceptance gate:
 
 ```bash
-scripts/github-pm/03-verify.sh --full   # exit 0 == label set matches manifest, every issue has type:*+area:*, no phase-*/deferred
+utils/scripts/github-pm/03-verify.sh --full   # exit 0 == label set matches manifest, every issue has type:*+area:*, no phase-*/deferred
 ```
