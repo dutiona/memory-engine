@@ -26,9 +26,9 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::search::cosine_similarity;
-use memory_engine::search::hybrid::{SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, FactType, ScopeQuery};
+use memory_engine::{SearchMode, SearchQuery};
 
 const DIM: usize = 128;
 
@@ -208,16 +208,7 @@ fn bench_vector_search(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     engine
-                        .query(&SearchQuery {
-                            text: None,
-                            embedding: Some(emb.clone()),
-                            mode: SearchMode::Vector,
-                            limit: 10,
-                            rerank_depth: None,
-                            valid_at: None,
-                            fact_type: None,
-                            scope: None,
-                        })
+                        .query(&SearchQuery::new(SearchMode::Vector, 10).embedding(emb.clone()))
                         .await
                         .unwrap();
                 });
@@ -244,16 +235,7 @@ fn bench_vector_search_dims(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     engine
-                        .query(&SearchQuery {
-                            text: None,
-                            embedding: Some(emb.clone()),
-                            mode: SearchMode::Vector,
-                            limit: 10,
-                            rerank_depth: None,
-                            valid_at: None,
-                            fact_type: None,
-                            scope: None,
-                        })
+                        .query(&SearchQuery::new(SearchMode::Vector, 10).embedding(emb.clone()))
                         .await
                         .unwrap();
                 });
@@ -278,16 +260,7 @@ fn bench_fts_search(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     engine
-                        .query(&SearchQuery {
-                            text: Some("Rust memory safety".into()),
-                            embedding: None,
-                            mode: SearchMode::Fts,
-                            limit: 10,
-                            rerank_depth: None,
-                            valid_at: None,
-                            fact_type: None,
-                            scope: None,
-                        })
+                        .query(&SearchQuery::new(SearchMode::Fts, 10).text("Rust memory safety"))
                         .await
                         .unwrap();
                 });
@@ -313,16 +286,11 @@ fn bench_hybrid_search(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     engine
-                        .query(&SearchQuery {
-                            text: Some("Rust memory".into()),
-                            embedding: Some(emb.clone()),
-                            mode: SearchMode::Hybrid,
-                            limit: 10,
-                            rerank_depth: None,
-                            valid_at: None,
-                            fact_type: None,
-                            scope: None,
-                        })
+                        .query(
+                            &SearchQuery::new(SearchMode::Hybrid, 10)
+                                .text("Rust memory")
+                                .embedding(emb.clone()),
+                        )
                         .await
                         .unwrap();
                 });
@@ -349,16 +317,11 @@ fn bench_scoped_search(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 engine
-                    .query(&SearchQuery {
-                        text: Some("scoped fact".into()),
-                        embedding: Some(emb.clone()),
-                        mode: SearchMode::Hybrid,
-                        limit: 10,
-                        rerank_depth: None,
-                        valid_at: None,
-                        fact_type: None,
-                        scope: None,
-                    })
+                    .query(
+                        &SearchQuery::new(SearchMode::Hybrid, 10)
+                            .text("scoped fact")
+                            .embedding(emb.clone()),
+                    )
                     .await
                     .unwrap();
             });
@@ -369,16 +332,12 @@ fn bench_scoped_search(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 engine
-                    .query(&SearchQuery {
-                        text: Some("scoped fact".into()),
-                        embedding: Some(emb.clone()),
-                        mode: SearchMode::Hybrid,
-                        limit: 10,
-                        rerank_depth: None,
-                        valid_at: None,
-                        fact_type: None,
-                        scope: Some(ScopeQuery::Exact("user:alice/project:alpha".into())),
-                    })
+                    .query(
+                        &SearchQuery::new(SearchMode::Hybrid, 10)
+                            .text("scoped fact")
+                            .embedding(emb.clone())
+                            .scope(ScopeQuery::Exact("user:alice/project:alpha".into())),
+                    )
                     .await
                     .unwrap();
             });
@@ -389,16 +348,12 @@ fn bench_scoped_search(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 engine
-                    .query(&SearchQuery {
-                        text: Some("scoped fact".into()),
-                        embedding: Some(emb.clone()),
-                        mode: SearchMode::Hybrid,
-                        limit: 10,
-                        rerank_depth: None,
-                        valid_at: None,
-                        fact_type: None,
-                        scope: Some(ScopeQuery::Subtree("user:alice".into())),
-                    })
+                    .query(
+                        &SearchQuery::new(SearchMode::Hybrid, 10)
+                            .text("scoped fact")
+                            .embedding(emb.clone())
+                            .scope(ScopeQuery::Subtree("user:alice".into())),
+                    )
                     .await
                     .unwrap();
             });
@@ -463,16 +418,7 @@ fn bench_hnsw_search(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     engine
-                        .query(&SearchQuery {
-                            text: None,
-                            embedding: Some(emb.clone()),
-                            mode: SearchMode::Vector,
-                            limit: 10,
-                            rerank_depth: None,
-                            valid_at: None,
-                            fact_type: None,
-                            scope: None,
-                        })
+                        .query(&SearchQuery::new(SearchMode::Vector, 10).embedding(emb.clone()))
                         .await
                         .unwrap();
                 });

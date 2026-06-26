@@ -62,7 +62,15 @@ pub trait VectorSearchStrategy: Send + Sync {
 ///
 /// This is the default strategy and serves as the correctness oracle when
 /// testing approximate strategies.
-pub struct BruteForce;
+//
+// Crate-internal test oracle: only the `search` unit tests construct it (the
+// engine's live vector path uses `vector_search` / `HnswStrategy` directly), so
+// it is `dead_code` in a release build — suppress there rather than widen it.
+#[cfg_attr(not(test), allow(dead_code))]
+// `search` is a crate-private module, so `pub(crate)` is the honest visibility;
+// the lint only fires because the module isn't `pub`.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) struct BruteForce;
 
 impl VectorSearchStrategy for BruteForce {
     fn search(

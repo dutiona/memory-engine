@@ -146,7 +146,9 @@ mod tests {
     use super::super::SqliteBackend;
     use crate::error::MemoryError;
     use crate::pool::ConnectionPool;
-    use crate::search::{fts_count_expired, fts_search, vector_search};
+    use crate::search::fts::fts_search;
+    use crate::search::fts_count_expired;
+    use crate::search::vector::vector_search;
     use crate::storage::{FactFilter, SearchIndex};
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;

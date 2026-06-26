@@ -212,16 +212,7 @@ async fn query_returns_results_after_adding_facts() {
         .await
         .unwrap();
 
-    let query = SearchQuery {
-        text: Some("Rust".into()),
-        embedding: None,
-        mode: SearchMode::Fts,
-        limit: 10,
-        rerank_depth: None,
-        valid_at: None,
-        fact_type: None,
-        scope: None,
-    };
+    let query = SearchQuery::new(SearchMode::Fts, 10).text("Rust");
     let results = engine.query(&query).await.unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0].fact.content.contains("Rust"));
@@ -267,16 +258,7 @@ async fn vector_query_ranks_closest_embedding_first() {
 
     // Query embedded as the "cats" axis — orthogonal to dogs/birds.
     let results = engine
-        .query(&SearchQuery {
-            text: None,
-            embedding: Some(embedder.axis("cats")),
-            mode: SearchMode::Vector,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Vector, 10).embedding(embedder.axis("cats")))
         .await
         .unwrap();
 
@@ -323,16 +305,7 @@ async fn vector_query_ranking_follows_query_axis() {
     }
 
     let results = engine
-        .query(&SearchQuery {
-            text: None,
-            embedding: Some(embedder.axis("dogs")),
-            mode: SearchMode::Vector,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Vector, 10).embedding(embedder.axis("dogs")))
         .await
         .unwrap();
 
@@ -1265,16 +1238,7 @@ async fn engine_concurrent_reads() {
         let e = engine.clone();
         handles.push(tokio::spawn(async move {
             let results = e
-                .query(&SearchQuery {
-                    text: Some("Rust".into()),
-                    embedding: None,
-                    mode: SearchMode::Fts,
-                    limit: 10,
-                    rerank_depth: None,
-                    valid_at: None,
-                    fact_type: None,
-                    scope: None,
-                })
+                .query(&SearchQuery::new(SearchMode::Fts, 10).text("Rust"))
                 .await
                 .unwrap();
             assert_eq!(results.len(), 1);
@@ -1290,16 +1254,7 @@ async fn engine_concurrent_reads() {
 // reader and the terminal check issue exactly the same query.
 #[cfg(test)]
 fn concurrent_probe_query() -> SearchQuery {
-    SearchQuery {
-        text: Some("Concurrent".into()),
-        embedding: None,
-        mode: SearchMode::Fts,
-        limit: 10,
-        rerank_depth: None,
-        valid_at: None,
-        fact_type: None,
-        scope: None,
-    }
+    SearchQuery::new(SearchMode::Fts, 10).text("Concurrent")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1875,16 +1830,9 @@ async fn query_nonexistent_scope_returns_empty() {
         .unwrap();
 
     // Query with a scope path that doesn't exist
-    let query = SearchQuery {
-        text: Some("visible".into()),
-        embedding: None,
-        mode: SearchMode::Fts,
-        limit: 10,
-        rerank_depth: None,
-        valid_at: None,
-        fact_type: None,
-        scope: Some(ScopeQuery::Exact("nonexistent/scope".into())),
-    };
+    let query = SearchQuery::new(SearchMode::Fts, 10)
+        .text("visible")
+        .scope(ScopeQuery::Exact("nonexistent/scope".into()));
     let results = engine.query(&query).await.unwrap();
     assert!(
         results.is_empty(),
@@ -1966,16 +1914,7 @@ async fn list_due_returns_scheduled_facts() {
 
     // Future-dated facts should be invisible to regular search (no valid_at)
     let search = engine
-        .query(&SearchQuery {
-            text: Some("future check".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("future check"))
         .await
         .unwrap();
     assert!(
@@ -1985,16 +1924,7 @@ async fn list_due_returns_scheduled_facts() {
 
     // But past-due facts should be visible
     let search2 = engine
-        .query(&SearchQuery {
-            text: Some("check release".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("check release"))
         .await
         .unwrap();
     assert_eq!(search2.len(), 1, "past-due facts should appear in search");
@@ -2861,16 +2791,7 @@ async fn reranker_none_results_unchanged() {
         .unwrap();
 
     let results = engine
-        .query(&SearchQuery {
-            text: Some("fact".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("fact"))
         .await
         .unwrap();
 
@@ -2946,30 +2867,12 @@ async fn reranker_reverses_order() {
         .unwrap();
 
     let baseline = baseline_engine
-        .query(&SearchQuery {
-            text: Some("fact".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("fact"))
         .await
         .unwrap();
 
     let reranked = engine
-        .query(&SearchQuery {
-            text: Some("fact".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("fact"))
         .await
         .unwrap();
 
@@ -3018,16 +2921,7 @@ async fn reranker_skipped_for_vector_only_no_text() {
         .unwrap();
 
     let results = engine
-        .query(&SearchQuery {
-            text: None,
-            embedding: Some(vec![0.5; DIM]),
-            mode: SearchMode::Vector,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Vector, 10).embedding(vec![0.5; DIM]))
         .await
         .unwrap();
 
@@ -3075,16 +2969,7 @@ async fn reranker_applies_to_fts_only_mode() {
 
     // FTS-only with text → reranker should fire
     let results = engine
-        .query(&SearchQuery {
-            text: Some("fact".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("fact"))
         .await
         .unwrap();
 
@@ -3131,16 +3016,11 @@ async fn reranker_applies_to_vector_mode_with_text() {
 
     // Vector mode WITH text → reranker should fire
     let results = engine
-        .query(&SearchQuery {
-            text: Some("alpha".into()),
-            embedding: Some(vec![0.5; DIM]),
-            mode: SearchMode::Vector,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(
+            &SearchQuery::new(SearchMode::Vector, 10)
+                .text("alpha")
+                .embedding(vec![0.5; DIM]),
+        )
         .await
         .unwrap();
 
@@ -3178,16 +3058,11 @@ async fn rerank_depth_overfetches_then_truncates() {
     }
 
     let results = engine
-        .query(&SearchQuery {
-            text: Some("rerank test fact".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 3,
-            rerank_depth: Some(8),
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(
+            &SearchQuery::new(SearchMode::Fts, 3)
+                .text("rerank test fact")
+                .rerank_depth(8),
+        )
         .await
         .unwrap();
 
@@ -3241,16 +3116,7 @@ async fn reranker_error_propagates() {
         .unwrap();
 
     let result = engine
-        .query(&SearchQuery {
-            text: Some("test".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("test"))
         .await;
 
     assert!(result.is_err());
@@ -3309,16 +3175,7 @@ async fn rerank_depth_none_falls_back_to_limit() {
     }
 
     let results = engine
-        .query(&SearchQuery {
-            text: Some("limit test fact".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 5,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 5).text("limit test fact"))
         .await
         .unwrap();
 
@@ -3647,16 +3504,7 @@ async fn reranker_rejects_out_of_bounds_index() {
         .unwrap();
 
     let result = engine
-        .query(&SearchQuery {
-            text: Some("real".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("real"))
         .await;
 
     assert!(result.is_err(), "should reject out-of-bounds index");
@@ -3712,16 +3560,7 @@ async fn reranker_rejects_duplicates() {
         .unwrap();
 
     let result = engine
-        .query(&SearchQuery {
-            text: Some("dup".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("dup"))
         .await;
 
     assert!(result.is_err(), "should reject duplicates");
@@ -3778,16 +3617,7 @@ async fn reranker_allows_valid_subset() {
         .unwrap();
 
     let result = engine
-        .query(&SearchQuery {
-            text: Some("guard".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("guard"))
         .await;
 
     assert!(
@@ -3851,16 +3681,7 @@ async fn reranker_allows_filtering_subset() {
         .unwrap();
 
     let result = engine
-        .query(&SearchQuery {
-            text: Some("filterable".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("filterable"))
         .await;
 
     assert!(
@@ -3909,16 +3730,7 @@ async fn reranker_rejects_non_finite_score() {
         .unwrap();
 
     let result = engine
-        .query(&SearchQuery {
-            text: Some("score".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("score"))
         .await;
 
     assert!(result.is_err(), "should reject NaN score");
@@ -3984,16 +3796,7 @@ async fn reranker_rejects_output_too_long() {
         .unwrap();
 
     let result = engine
-        .query(&SearchQuery {
-            text: Some("length".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("length"))
         .await;
 
     assert!(result.is_err(), "should reject output longer than input");
@@ -4381,16 +4184,9 @@ async fn add_facts_batch_rollback_on_insert_failure() {
     assert!(result.is_err());
 
     // Verify rollback: no facts should be in the DB
-    let query = SearchQuery {
-        text: Some("rollback test".into()),
-        embedding: Some(vec![0.5; DIM]),
-        limit: 10,
-        mode: SearchMode::Hybrid,
-        rerank_depth: None,
-        valid_at: None,
-        fact_type: None,
-        scope: None,
-    };
+    let query = SearchQuery::new(SearchMode::Hybrid, 10)
+        .text("rollback test")
+        .embedding(vec![0.5; DIM]);
     let results = engine.query(&query).await.unwrap();
     assert!(
         results.is_empty(),

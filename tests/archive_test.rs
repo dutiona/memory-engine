@@ -267,7 +267,7 @@ async fn archive_search_finds_archived_facts() {
     for r in &response.results {
         assert_eq!(
             r.match_type,
-            memory_engine::search::hybrid::MatchType::Archive,
+            memory_engine::MatchType::Archive,
             "expected MatchType::Archive for all results"
         );
     }

@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use memory_engine::search::hybrid::MatchType;
-use memory_engine::search::query::MemoryQuery;
+use memory_engine::MatchType;
+use memory_engine::MemoryQuery;
 use memory_engine::traits::EmbeddingProvider;
 
 use crate::corpus::{CorpusQuery, golden_corpus};
@@ -25,7 +25,7 @@ struct QueryMetrics {
 async fn run_fts_query(
     engine: &memory_engine::engine::MemoryEngine,
     query: &CorpusQuery,
-) -> (Vec<i64>, memory_engine::search::hybrid::QueryDiagnostics) {
+) -> (Vec<i64>, memory_engine::QueryDiagnostics) {
     let mut mq = MemoryQuery::new().text(query.text).limit(20);
 
     if let Some(scope) = query.scope {

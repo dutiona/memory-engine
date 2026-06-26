@@ -3,7 +3,7 @@
 //! Verifies that scope-based queries enforce strict isolation:
 //! facts in one scope never leak into queries targeting another scope.
 
-use memory_engine::search::query::MemoryQuery;
+use memory_engine::MemoryQuery;
 use memory_engine::types::FactType;
 
 use crate::helpers::{add_scoped_fact, eval_engine};

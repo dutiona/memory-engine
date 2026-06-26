@@ -25,11 +25,18 @@ pub struct VectorResult {
 ///
 /// Kept equal to the default [`SearchConfig::ann_threshold`](crate::search::strategy::SearchConfig)
 /// (50,000) — the documented fact count at which ANN should take over.
+// `search` is a crate-private module, so `pub(crate)` is the honest visibility;
+// the `redundant_pub_crate` lint fires only because nothing here is `pub`, but
+// the marker documents intent (vs widening to `pub` to dodge the lint).
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) const BRUTE_FORCE_WARN_THRESHOLD: usize = 50_000;
 
 /// Whether a brute-force candidate set is large enough to warrant the scaling
 /// warning. Split out as a pure predicate so the boundary is unit-testable
 /// without materializing a 50k-fact corpus.
+// `pub(crate)` is honest (crate-private module); `#[allow]` keeps the lint quiet
+// without widening visibility.
+#[allow(clippy::redundant_pub_crate)]
 #[must_use]
 pub(crate) const fn brute_force_scan_is_oversized(candidates: usize) -> bool {
     candidates > BRUTE_FORCE_WARN_THRESHOLD
@@ -75,7 +82,16 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Returns `MemoryError::Database` on query failure, or
 /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
-pub fn vector_search(
+//
+// The live SQLite path goes through `vector_search_filtered`; this unfiltered
+// convenience wrapper is reached only by the `ann` brute-force fallback and by
+// tests, so it is `dead_code` in a no-`ann` release build — suppress the lint
+// there rather than widen visibility.
+#[cfg_attr(not(any(test, feature = "ann")), allow(dead_code))]
+// `search` is a crate-private module, so `pub(crate)` is the honest visibility;
+// the lint only fires because the module isn't `pub`.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn vector_search(
     conn: &Connection,
     query_embedding: &[f32],
     embed_dim: usize,

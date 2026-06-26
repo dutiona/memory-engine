@@ -84,7 +84,7 @@ let fact_id = engine.add_fact(
 ## 5. Query
 
 ```rust
-use memory_engine::search::hybrid::{SearchQuery, SearchMode};
+use memory_engine::search::{SearchQuery, SearchMode};
 
 let results = engine.query(&SearchQuery {
     text: Some("systems programming safety".into()),

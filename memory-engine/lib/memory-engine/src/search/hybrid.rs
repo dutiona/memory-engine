@@ -13,8 +13,15 @@ use crate::types::{Fact, FactType};
 /// How to combine search sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
+    /// Lexical-only: FTS5 BM25 ranking over the query text. Requires `text`;
+    /// ignores any `embedding`. Best for exact-term and keyword recall.
     Fts,
+    /// Semantic-only: cosine similarity over the query `embedding`. Requires
+    /// `embedding`; ignores any `text`. Best for paraphrase and concept recall.
     Vector,
+    /// Both lexical and semantic, fused with Reciprocal Rank Fusion (see
+    /// [`rrf_merge`]). Uses whichever of `text`/`embedding` are present. The
+    /// default, balancing keyword precision with semantic recall.
     Hybrid,
 }
 
@@ -33,19 +40,117 @@ pub enum MatchType {
 }
 
 /// A unified search query across FTS5 and vector sources.
+///
+/// Construct with the fluent builder rather than a struct literal: the type is
+/// `#[non_exhaustive]`, so struct-literal construction is forbidden outside this
+/// crate. Start from [`SearchQuery::new`] (the two required fields — `mode` and
+/// `limit`) and chain the optional setters:
+///
+/// ```ignore
+/// let q = SearchQuery::new(SearchMode::Hybrid, 10)
+///     .text("rust ownership")
+///     .fact_type(FactType::Semantic);
+/// ```
+///
+/// This mirrors [`MemoryQuery`](crate::MemoryQuery)'s builder style and is
+/// misuse- and forward-compatibility-resistant: adding a field is a non-breaking
+/// change for callers, who never had to spell out the `None` defaults.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
-    pub text: Option<String>,
-    pub embedding: Option<Vec<f32>>,
-    pub mode: SearchMode,
-    pub limit: usize,
+    // Fields are `pub(crate)`: external callers MUST use the builder
+    // (`SearchQuery::new(..)` + the chainable setters), which `#[non_exhaustive]`
+    // already enforces for construction. Intra-crate the engine still constructs
+    // via `new()` and writes fields directly (see `engine::query`).
+    pub(crate) text: Option<String>,
+    pub(crate) embedding: Option<Vec<f32>>,
+    pub(crate) mode: SearchMode,
+    pub(crate) limit: usize,
     /// How many candidates to pass to the reranker before truncating to `limit`.
     /// Clamped to at least `limit` — can only widen the candidate pool, never shrink it.
     /// When `None`, falls back to `limit` (no over-fetch).
-    pub rerank_depth: Option<usize>,
-    pub valid_at: Option<DateTime<Utc>>,
-    pub fact_type: Option<FactType>,
-    pub scope: Option<crate::types::ScopeQuery>,
+    pub(crate) rerank_depth: Option<usize>,
+    pub(crate) valid_at: Option<DateTime<Utc>>,
+    pub(crate) fact_type: Option<FactType>,
+    pub(crate) scope: Option<crate::types::ScopeQuery>,
+}
+
+impl SearchQuery {
+    /// Create a query for the given [`SearchMode`] and result `limit`.
+    ///
+    /// `mode` and `limit` are the only required parameters; all other filters
+    /// default to `None`. Refine the query with the chainable setters
+    /// ([`text`](Self::text), [`embedding`](Self::embedding), etc.).
+    #[must_use]
+    pub const fn new(mode: SearchMode, limit: usize) -> Self {
+        Self {
+            text: None,
+            embedding: None,
+            mode,
+            limit,
+            rerank_depth: None,
+            valid_at: None,
+            fact_type: None,
+            scope: None,
+        }
+    }
+
+    /// Set the FTS5 query text.
+    #[must_use]
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+
+    /// Set the embedding vector for vector similarity search.
+    #[must_use]
+    pub fn embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.embedding = Some(embedding);
+        self
+    }
+
+    /// Override the search mode.
+    #[must_use]
+    pub const fn mode(mut self, mode: SearchMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Override the result limit.
+    #[must_use]
+    pub const fn limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    /// Set how many candidates to over-fetch for the reranker before truncating
+    /// to `limit`. Clamped to at least `limit` at query time.
+    #[must_use]
+    pub const fn rerank_depth(mut self, depth: usize) -> Self {
+        self.rerank_depth = Some(depth);
+        self
+    }
+
+    /// Set the point-in-time temporal cutoff.
+    #[must_use]
+    pub const fn valid_at(mut self, at: DateTime<Utc>) -> Self {
+        self.valid_at = Some(at);
+        self
+    }
+
+    /// Filter by fact type.
+    #[must_use]
+    pub const fn fact_type(mut self, fact_type: FactType) -> Self {
+        self.fact_type = Some(fact_type);
+        self
+    }
+
+    /// Filter by scope.
+    #[must_use]
+    pub fn scope(mut self, scope: crate::types::ScopeQuery) -> Self {
+        self.scope = Some(scope);
+        self
+    }
 }
 
 /// A search result with the full fact, combined score, and match source.
@@ -142,7 +247,16 @@ pub fn rrf_merge(fts: &[(i64, f64)], vec: &[(i64, f32)], k: u32) -> Vec<(i64, f6
 /// Returns `MemoryError::Database` on query failure.
 /// Returns `MemoryError::EmbeddingDimension` if the query embedding or a stored
 /// embedding does not match the configured dimension during vector search.
-pub fn hybrid_search(
+//
+// Test-only oracle: the engine's live path is the async [`port_hybrid_search`]
+// (#631 Stage C); this synchronous twin survives only as the in-process
+// reference the `search` unit tests fuse against. It is `dead_code` in a release
+// build, so suppress the lint there rather than ship/widen it.
+#[cfg_attr(not(test), allow(dead_code))]
+// `search` is a crate-private module, so `pub(crate)` is the honest visibility;
+// the lint only fires because the module isn't `pub`.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn hybrid_search(
     conn: &Connection,
     query: &SearchQuery,
     embed_dim: usize,
@@ -431,6 +545,46 @@ mod tests {
         conn
     }
 
+    #[test]
+    fn search_query_new_defaults_all_optionals_to_none() {
+        let q = SearchQuery::new(SearchMode::Hybrid, 7);
+        assert_eq!(q.mode, SearchMode::Hybrid);
+        assert_eq!(q.limit, 7);
+        assert!(q.text.is_none());
+        assert!(q.embedding.is_none());
+        assert!(q.rerank_depth.is_none());
+        assert!(q.valid_at.is_none());
+        assert!(q.fact_type.is_none());
+        assert!(q.scope.is_none());
+    }
+
+    #[test]
+    fn search_query_builder_chains_set_every_field() {
+        let at = chrono::Utc::now();
+        let q = SearchQuery::new(SearchMode::Fts, 3)
+            .text("rust")
+            .embedding(vec![1.0, 0.0, 0.0, 0.0])
+            .mode(SearchMode::Hybrid)
+            .limit(9)
+            .rerank_depth(20)
+            .valid_at(at)
+            .fact_type(FactType::Semantic)
+            .scope(crate::types::ScopeQuery::Exact("user:alice".into()));
+
+        assert_eq!(q.text.as_deref(), Some("rust"));
+        assert_eq!(q.embedding, Some(vec![1.0, 0.0, 0.0, 0.0]));
+        // `mode`/`limit` setters override the `new` arguments (last write wins).
+        assert_eq!(q.mode, SearchMode::Hybrid);
+        assert_eq!(q.limit, 9);
+        assert_eq!(q.rerank_depth, Some(20));
+        assert_eq!(q.valid_at, Some(at));
+        assert_eq!(q.fact_type, Some(FactType::Semantic));
+        assert_eq!(
+            q.scope,
+            Some(crate::types::ScopeQuery::Exact("user:alice".into()))
+        );
+    }
+
     fn make_fact_with(content: &str, embedding: Vec<f32>, fact_type: FactType) -> NewFact {
         NewFact {
             content: content.into(),
@@ -504,16 +658,9 @@ mod tests {
             SqliteBackend::from_pool(Arc::clone(&pool), Arc::new(UpcasterRegistry::new()));
 
         for mode in [SearchMode::Fts, SearchMode::Vector, SearchMode::Hybrid] {
-            let query = SearchQuery {
-                text: Some("rust".into()),
-                embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
-                mode,
-                limit: 10,
-                rerank_depth: None,
-                valid_at: None,
-                fact_type: None,
-                scope: None,
-            };
+            let query = SearchQuery::new(mode, 10)
+                .text("rust")
+                .embedding(vec![1.0, 0.0, 0.0, 0.0]);
 
             let (sync_results, sync_diag) = {
                 let conn = pool.read().unwrap();
@@ -653,16 +800,9 @@ mod tests {
             ))
             .unwrap();
 
-        let query = SearchQuery {
-            text: Some("Rust".into()),
-            embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
-            mode: SearchMode::Hybrid,
-            limit: 3,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        };
+        let query = SearchQuery::new(SearchMode::Hybrid, 3)
+            .text("Rust")
+            .embedding(vec![1.0, 0.0, 0.0, 0.0]);
 
         let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert!(!results.is_empty());
@@ -683,16 +823,7 @@ mod tests {
             .insert(&make_fact("Python language", vec![0.0, 1.0, 0.0, 0.0]))
             .unwrap();
 
-        let query = SearchQuery {
-            text: Some("Rust".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        };
+        let query = SearchQuery::new(SearchMode::Fts, 10).text("Rust");
 
         let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);
@@ -710,16 +841,7 @@ mod tests {
             .insert(&make_fact("fact two", vec![0.0, 1.0, 0.0, 0.0]))
             .unwrap();
 
-        let query = SearchQuery {
-            text: None,
-            embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
-            mode: SearchMode::Vector,
-            limit: 1,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        };
+        let query = SearchQuery::new(SearchMode::Vector, 1).embedding(vec![1.0, 0.0, 0.0, 0.0]);
 
         let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);
@@ -746,16 +868,9 @@ mod tests {
             ))
             .unwrap();
 
-        let query = SearchQuery {
-            text: Some("fact".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: Some(FactType::Semantic),
-            scope: None,
-        };
+        let query = SearchQuery::new(SearchMode::Fts, 10)
+            .text("fact")
+            .fact_type(FactType::Semantic);
 
         let (results, _diag) = hybrid_search(&conn, &query, DIM, None, &BruteForce).unwrap();
         assert_eq!(results.len(), 1);

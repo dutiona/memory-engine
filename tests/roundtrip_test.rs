@@ -4,9 +4,9 @@ use chrono::Utc;
 use memory_engine::EmbeddingFingerprint;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
-use memory_engine::search::hybrid::{MatchType, SearchMode, SearchQuery};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, EventType, FactType, NewEvent};
+use memory_engine::{MatchType, SearchMode, SearchQuery};
 
 /// Mock embedder that returns a vector pointing in the direction
 /// determined by a simple hash of the text, so different texts
@@ -111,16 +111,7 @@ async fn full_roundtrip() {
 
     // 3. Query via FTS — "Rust" should match facts 1 and 2
     let fts_results = engine
-        .query(&SearchQuery {
-            text: Some("Rust".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Fts, 10).text("Rust"))
         .await
         .unwrap();
     assert_eq!(fts_results.len(), 2);
@@ -130,16 +121,7 @@ async fn full_roundtrip() {
     // 4. Query via vector — use the embedding of "Rust systems programming"
     let query_emb = embedder.embed("Rust systems programming").unwrap();
     let vec_results = engine
-        .query(&SearchQuery {
-            text: None,
-            embedding: Some(query_emb),
-            mode: SearchMode::Vector,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(&SearchQuery::new(SearchMode::Vector, 10).embedding(query_emb))
         .await
         .unwrap();
     assert!(!vec_results.is_empty());
@@ -152,16 +134,11 @@ async fn full_roundtrip() {
     // 5. Query via hybrid — combine text and embedding
     let hybrid_emb = embedder.embed("Rust programming language").unwrap();
     let hybrid_results = engine
-        .query(&SearchQuery {
-            text: Some("Rust".into()),
-            embedding: Some(hybrid_emb),
-            mode: SearchMode::Hybrid,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: None,
-            scope: None,
-        })
+        .query(
+            &SearchQuery::new(SearchMode::Hybrid, 10)
+                .text("Rust")
+                .embedding(hybrid_emb),
+        )
         .await
         .unwrap();
     assert!(!hybrid_results.is_empty());
@@ -177,16 +154,11 @@ async fn full_roundtrip() {
 
     // 6. Verify fact_type filter
     let semantic_only = engine
-        .query(&SearchQuery {
-            text: Some("Rust".into()),
-            embedding: None,
-            mode: SearchMode::Fts,
-            limit: 10,
-            rerank_depth: None,
-            valid_at: None,
-            fact_type: Some(FactType::Semantic),
-            scope: None,
-        })
+        .query(
+            &SearchQuery::new(SearchMode::Fts, 10)
+                .text("Rust")
+                .fact_type(FactType::Semantic),
+        )
         .await
         .unwrap();
     assert!(

@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use memory_engine::ResumeConfig;
+use memory_engine::SearchMode;
 use memory_engine::bootstrap::{BootstrapConfig, KeywordExtractor};
 use memory_engine::engine::MemoryEngine;
 use memory_engine::inspect_types::{DumpFormat, FactExplanation, ReplayFilter, ReplayOrder};
-use memory_engine::search::hybrid::SearchMode;
 use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummaryGenerator,
 };
