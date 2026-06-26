@@ -2066,9 +2066,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_embedding_wrong_length_rejected_before_alloc() {
+    fn parse_embedding_rejects_wrong_length() {
         // #294: a wrong-length array is rejected on its *length* BEFORE any
-        // `Vec<f32>` materialization (pre-alloc DoS guard, CWE-400/770).
+        // `Vec<f32>` materialization (pre-alloc DoS guard, CWE-400/770). This
+        // test only verifies *that* a wrong-length array is rejected with an
+        // informative message; the BEFORE-alloc ordering is enforced by the code
+        // (length check precedes the `Vec` build) and documented there.
         let args = emb_args(json!(vec![0.1_f32; 16]));
         let err = parse_embedding(&args, 8).unwrap_err();
         assert!(
@@ -2111,12 +2114,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_event_type_rejects_unknown_preserving_token() {
-        let err = parse_event_type("Telepathy").unwrap_err();
-        // ValidationError preserves the offending token in its Display string.
-        assert!(err.to_string().contains("Telepathy"), "{err}");
-    }
+    // `parse_event_type_rejects_unknown_preserving_token` lives in the #353 block above.
 
     // --- parse_outcome (#317) ---
 
@@ -2127,11 +2125,7 @@ mod tests {
         assert_eq!(parse_outcome("Neutral").unwrap(), Outcome::Neutral);
     }
 
-    #[test]
-    fn parse_outcome_rejects_unknown_preserving_token() {
-        let err = parse_outcome("Mixed").unwrap_err();
-        assert!(err.message.contains("Mixed"), "{}", err.message);
-    }
+    // `parse_outcome_rejects_unknown_preserving_token` lives in the #353 block above.
 
     // --- get_datetime (#317) ---
 

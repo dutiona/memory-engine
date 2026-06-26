@@ -524,19 +524,27 @@ mod tests {
     // --- Property-based tests (#471) ---
 
     proptest::proptest! {
-        /// `truncate` must never exceed `max` bytes and must always cut on a valid
-        /// UTF-8 char boundary, for *any* input string and any cap in 0..500. This
-        /// covers the contract the byte-boundary back-off loop exists to uphold —
-        /// slicing on a non-boundary would panic at runtime.
+        /// `truncate` must return the *longest valid char-boundary prefix* of `s`
+        /// that fits within `max` bytes, for *any* input string and any cap in
+        /// 0..500. Pinning prefix-maximality — not merely `len <= max` + boundary,
+        /// both of which an always-empty / off-by-one mutant would satisfy — is what
+        /// kills those mutants. The byte-boundary back-off loop exists precisely to
+        /// uphold this contract; slicing on a non-boundary would panic at runtime.
         #[test]
         fn truncate_respects_cap_and_char_boundary(s in ".*", max in 0_usize..500) {
             let out = truncate(&s, max);
             proptest::prop_assert!(out.len() <= max, "len {} > max {}", out.len(), max);
-            proptest::prop_assert!(
-                s.is_char_boundary(out.len()),
-                "output end {} is not a char boundary of the input",
-                out.len()
-            );
+            proptest::prop_assert!(s.starts_with(out), "output is not a prefix of input");
+            if s.len() <= max {
+                // Fits: returned verbatim, no truncation.
+                proptest::prop_assert_eq!(out, &s[..]);
+            } else {
+                // Truncated: the prefix is maximal — appending the next char of the
+                // input would overflow `max`, so we did not back off further than
+                // necessary.
+                let next = out.len() + s[out.len()..].chars().next().map_or(0, char::len_utf8);
+                proptest::prop_assert!(next > max, "backed off further than necessary");
+            }
         }
     }
 }
