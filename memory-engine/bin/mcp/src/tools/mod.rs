@@ -2026,8 +2026,9 @@ async fn handle_get_recent_insights(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_dump_name, default_dump_path, get_usize, parse_consolidate_config, parse_embedding,
-        parse_event_type, parse_fact_type, parse_outcome, validate_dump_path,
+        default_dump_name, default_dump_path, get_datetime, get_usize, parse_consolidate_config,
+        parse_embedding, parse_event_type, parse_fact_type, parse_outcome, require_f64_if_present,
+        validate_dump_path,
     };
     use memory_engine::types::{EventType, FactType, Outcome};
     use serde_json::json;
@@ -2082,6 +2083,110 @@ mod tests {
         // A present-but-non-array value is malformed input, not a silent None.
         let args = emb_args(json!("not-an-array"));
         assert!(parse_embedding(&args, 8).is_err());
+    }
+
+    #[test]
+    fn parse_embedding_non_numeric_element_rejected() {
+        // #317: a correctly-sized array whose elements are not all numeric passes
+        // the length gate but fails the `Vec<f32>` deserialization — it must be a
+        // typed error, not a silent coercion.
+        let args = emb_args(json!([0.0, "oops", 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]));
+        let err = parse_embedding(&args, 8).unwrap_err();
+        assert!(err.message.contains("invalid embedding"), "{}", err.message);
+    }
+
+    // --- parse_event_type (#317) ---
+
+    #[test]
+    fn parse_event_type_accepts_known_variants() {
+        assert_eq!(
+            parse_event_type("Interaction").unwrap(),
+            EventType::Interaction
+        );
+        assert_eq!(parse_event_type("ToolCall").unwrap(), EventType::ToolCall);
+        assert_eq!(parse_event_type("MemoryOp").unwrap(), EventType::MemoryOp);
+        assert_eq!(
+            parse_event_type("SystemEvent").unwrap(),
+            EventType::SystemEvent
+        );
+    }
+
+    #[test]
+    fn parse_event_type_rejects_unknown_preserving_token() {
+        let err = parse_event_type("Telepathy").unwrap_err();
+        // ValidationError preserves the offending token in its Display string.
+        assert!(err.to_string().contains("Telepathy"), "{err}");
+    }
+
+    // --- parse_outcome (#317) ---
+
+    #[test]
+    fn parse_outcome_accepts_known_variants() {
+        assert_eq!(parse_outcome("Positive").unwrap(), Outcome::Positive);
+        assert_eq!(parse_outcome("Negative").unwrap(), Outcome::Negative);
+        assert_eq!(parse_outcome("Neutral").unwrap(), Outcome::Neutral);
+    }
+
+    #[test]
+    fn parse_outcome_rejects_unknown_preserving_token() {
+        let err = parse_outcome("Mixed").unwrap_err();
+        assert!(err.message.contains("Mixed"), "{}", err.message);
+    }
+
+    // --- get_datetime (#317) ---
+
+    #[test]
+    fn get_datetime_absent_is_ok_none() {
+        let args = cfg_args(&[]);
+        assert!(get_datetime(&args, "timestamp").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_datetime_valid_iso_round_trips() {
+        let args = cfg_args(&[("timestamp", json!("2026-06-26T12:00:00Z"))]);
+        let dt = get_datetime(&args, "timestamp").unwrap().expect("present");
+        assert_eq!(dt.to_rfc3339(), "2026-06-26T12:00:00+00:00");
+    }
+
+    #[test]
+    fn get_datetime_malformed_non_empty_rejected() {
+        // A present, non-empty, but unparseable ISO string is malformed input — it
+        // must surface as an invalid-params error rather than silently defaulting.
+        let args = cfg_args(&[("timestamp", json!("not-a-timestamp"))]);
+        let err = get_datetime(&args, "timestamp").unwrap_err();
+        assert!(err.message.contains("invalid timestamp"), "{}", err.message);
+    }
+
+    // --- require_f64_if_present (#317) ---
+
+    #[test]
+    fn require_f64_if_present_absent_is_ok_none() {
+        let args = cfg_args(&[]);
+        assert!(
+            require_f64_if_present(&args, "half_life_days")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn require_f64_if_present_numeric_value_passes() {
+        let args = cfg_args(&[("half_life_days", json!(42.0))]);
+        let v = require_f64_if_present(&args, "half_life_days").unwrap();
+        assert_eq!(v, Some(42.0));
+    }
+
+    #[test]
+    fn require_f64_if_present_string_value_rejected() {
+        // The exact regression this guard exists for: a numeric-looking *string*
+        // (`"1"`) must be rejected, not silently coerced or dropped to the default.
+        let args = cfg_args(&[("half_life_days", json!("1"))]);
+        let err = require_f64_if_present(&args, "half_life_days").unwrap_err();
+        assert!(
+            err.message.contains("half_life_days must be a number"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -2355,6 +2460,28 @@ mod tests {
             assert_eq!(p.extension().and_then(|e| e.to_str()), Some("json"));
             let name = p.file_name().and_then(|n| n.to_str()).unwrap();
             assert!(name.starts_with("memory-dump-"), "unexpected name: {name}");
+        }
+    }
+
+    // --- Property-based tests (#471) ---
+
+    proptest::proptest! {
+        /// Round-trip: any fixed-dimension `Vec<f32>` of finite values serializes to
+        /// a JSON array, parses back through `parse_embedding(args, D)`, and equals
+        /// the input bit-for-bit. serde_json widens each f32 to f64 for the JSON text
+        /// and narrows on the way back; that round-trip is exact for every finite f32
+        /// (f64 represents all f32 values losslessly), so a strict equality check is
+        /// the right contract. Non-finite values are excluded — serde_json cannot
+        /// represent NaN/±inf as JSON numbers (they would serialize to null).
+        #[test]
+        fn parse_embedding_round_trips_fixed_dim(
+            v in proptest::collection::vec(proptest::num::f32::NORMAL | proptest::num::f32::ZERO | proptest::num::f32::SUBNORMAL, 8..=8)
+        ) {
+            let args = emb_args(json!(v));
+            let got = parse_embedding(&args, 8)
+                .expect("a finite, correctly-sized array must parse")
+                .expect("present");
+            proptest::prop_assert_eq!(got, v);
         }
     }
 

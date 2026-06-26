@@ -520,4 +520,23 @@ mod tests {
         assert_eq!(timeline[0]["kind"], "Created");
         assert_eq!(timeline[1]["kind"], "BecameValid");
     }
+
+    // --- Property-based tests (#471) ---
+
+    proptest::proptest! {
+        /// `truncate` must never exceed `max` bytes and must always cut on a valid
+        /// UTF-8 char boundary, for *any* input string and any cap in 0..500. This
+        /// covers the contract the byte-boundary back-off loop exists to uphold —
+        /// slicing on a non-boundary would panic at runtime.
+        #[test]
+        fn truncate_respects_cap_and_char_boundary(s in ".*", max in 0_usize..500) {
+            let out = truncate(&s, max);
+            proptest::prop_assert!(out.len() <= max, "len {} > max {}", out.len(), max);
+            proptest::prop_assert!(
+                s.is_char_boundary(out.len()),
+                "output end {} is not a char boundary of the input",
+                out.len()
+            );
+        }
+    }
 }
