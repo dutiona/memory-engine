@@ -24,6 +24,68 @@ fn tmp_path(path: &Path) -> std::path::PathBuf {
     path.with_file_name(name)
 }
 
+/// Create (or truncate) the dump's temporary write target, refusing to follow a
+/// symlink at the leaf.
+///
+/// The JSON dumps write to a sibling `<path>.tmp` and then atomically
+/// `rename` it onto `path`. `rename` does not follow a symlink at the
+/// destination (it replaces the link), but the create of the `.tmp` leaf would,
+/// so an attacker who pre-plants `<path>.tmp` as a symlink could redirect the
+/// write outside the intended directory. On Unix we open with `O_NOFOLLOW`, so
+/// such a leaf fails the open *atomically* — closing the check-then-use (TOCTOU)
+/// window that an out-of-band `symlink_metadata` probe would leave open
+/// (CWE-59 / CWE-367; part of the #296 / #354 / #414 hardening). The
+/// caller-facing path guard in `memory-engine-mcp` confines the destination to
+/// the temp directory; this is the in-engine backstop at the open site.
+///
+/// On non-Unix targets `O_NOFOLLOW` is unavailable, so this degrades to a plain
+/// create and the mcp-level `symlink_metadata` rejection remains the guard.
+fn create_dump_tmp(tmp: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // `O_NOFOLLOW`: open fails with ELOOP if the final path component is a
+        // symlink. The value is platform-specific (Linux `0o400000`, macOS
+        // `0x100`, …); `libc` is not a dependency of this crate, so the constant
+        // is resolved per-target below.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const O_NOFOLLOW: i32 = 0o400000;
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        const O_NOFOLLOW: i32 = 0x0100;
+        // Fallback for other Unix targets: 0 leaves behavior identical to a
+        // plain create rather than risk a wrong flag value.
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        )))]
+        const O_NOFOLLOW: i32 = 0;
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(tmp)
+    }
+    #[cfg(not(unix))]
+    {
+        File::create(tmp)
+    }
+}
+
 /// Stream engine state as JSON to `writer`, one entity at a time.
 ///
 /// Produces the same JSON format as [`super::types::EngineSnapshot`] but never
@@ -148,7 +210,7 @@ where
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
     let tmp = tmp_path(path);
-    let file = File::create(&tmp)?;
+    let file = create_dump_tmp(&tmp)?;
     let mut buf = BufWriter::new(file);
     match stream_snapshot(conn, embed_dim, &mut buf) {
         Ok(()) => {
@@ -172,7 +234,7 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
 #[cfg(feature = "compress-gzip")]
 pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
     let tmp = tmp_path(path);
-    let file = File::create(&tmp)?;
+    let file = create_dump_tmp(&tmp)?;
     let mut encoder =
         flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::default());
     match stream_snapshot(conn, embed_dim, &mut encoder) {
@@ -198,7 +260,7 @@ pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 #[cfg(feature = "compress-zstd")]
 pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
     let tmp = tmp_path(path);
-    let file = File::create(&tmp)?;
+    let file = create_dump_tmp(&tmp)?;
     let mut encoder = zstd::Encoder::new(BufWriter::new(file), zstd::DEFAULT_COMPRESSION_LEVEL)?;
     match stream_snapshot(conn, embed_dim, &mut encoder) {
         Ok(()) => {
@@ -654,6 +716,41 @@ mod tests {
                 Err(MemoryError::Conflict(ConflictError::DumpTargetIsDirectory))
             ),
             "a symlink to a directory must be refused, got {result:?}"
+        );
+    }
+
+    /// `O_NOFOLLOW` backstop (#296 / #354 / #414): if the sibling `<path>.tmp`
+    /// write target is a pre-planted symlink, `dump_json` must fail at the open
+    /// rather than follow the link and clobber its target. This closes the
+    /// in-engine TOCTOU window beneath the mcp-level path guard.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dump_json_refuses_symlinked_tmp_leaf() {
+        use crate::store::schema::{init_schema, migrate, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dump.json");
+
+        // Pre-plant the `.tmp` write target as a symlink pointing at a file we
+        // must not be tricked into overwriting.
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"do not clobber").unwrap();
+        let tmp = tmp_path(&target);
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+
+        let result = dump_json(&conn, DIM, &target);
+        assert!(
+            result.is_err(),
+            "dump_json must refuse to follow a symlinked .tmp leaf, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"do not clobber",
+            "the symlink target must NOT have been overwritten"
         );
     }
 }

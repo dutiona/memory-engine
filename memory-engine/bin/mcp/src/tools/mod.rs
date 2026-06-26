@@ -1334,6 +1334,76 @@ fn default_dump_path(base_dir: &std::path::Path, ext: &str) -> PathBuf {
     base_dir.join(default_dump_name(&timestamp, pid, seq, ext))
 }
 
+/// Validate and resolve a client-supplied dump destination, confining it to the
+/// system temp directory.
+///
+/// Without this, an MCP client could direct a dump at an arbitrary path and
+/// overwrite host files. The hardening closes three lenses on one flaw
+/// (issues #296 / #354 / #414):
+///
+/// - **CWE-22 (path traversal):** both the temp root and the target are
+///   canonicalized, so the `starts_with` check compares fully-resolved paths.
+///   Canonicalizing the temp root also stops *false rejects* on platforms where
+///   the temp dir is itself a symlink (e.g. macOS `/tmp -> /private/tmp`).
+/// - **CWE-59 (symlink-leaf follow):** the *full* target is resolved — not just
+///   its parent — and a leaf that is itself a symlink is rejected outright via
+///   `symlink_metadata` (lstat, which does not follow the link). A parent-only
+///   guard would wave through a leaf symlink that escapes temp, and the
+///   downstream `File::create`/`VACUUM INTO` would follow it.
+/// - **CWE-367 (TOCTOU):** the *resolved* path is returned and handed to the
+///   engine, so the value that is validated is the value that is opened — the
+///   original unresolved path is never used past this point. The lib then opens
+///   the destination with `O_NOFOLLOW` to fail atomically if a symlink leaf is
+///   raced into place between this check and the write.
+fn validate_dump_path(p: &std::path::Path) -> Result<PathBuf, ErrorData> {
+    // Canonicalize the temp root so the containment check compares resolved
+    // paths on both sides. Fall back to the raw value if canonicalize fails
+    // (e.g. a platform that does not pre-create the temp dir).
+    let temp = std::env::temp_dir();
+    let canonical_temp = std::fs::canonicalize(&temp).unwrap_or(temp);
+
+    // Reject a leaf that is itself a symlink. `symlink_metadata` (lstat) does
+    // NOT follow the link, so this distinguishes a malicious leaf symlink
+    // (which a later `File::create`/`VACUUM INTO` would follow out of the jail)
+    // from a benign regular file. A non-existent leaf is fine — the common case.
+    match std::fs::symlink_metadata(p) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(
+                ValidationError::Other("dump path must not be a symlink".to_owned()).into(),
+            );
+        }
+        Ok(_) | Err(_) => {} // regular file / absent → resolve below
+    }
+
+    // Resolve the FULL target with parent symlinks collapsed. If the leaf
+    // exists, canonicalize the whole path; otherwise canonicalize the parent
+    // (resolving any symlinked components) and rejoin the leaf name.
+    let resolved = if p.exists() {
+        std::fs::canonicalize(p)
+            .map_err(|e| ValidationError::Other(format!("cannot resolve dump path: {e}")))?
+    } else {
+        let parent = p.parent().ok_or_else(|| {
+            ValidationError::Other("dump path has no parent directory".to_owned())
+        })?;
+        let file_name = p
+            .file_name()
+            .ok_or_else(|| ValidationError::Other("dump path has no file name".to_owned()))?;
+        let canonical_parent = std::fs::canonicalize(parent)
+            .map_err(|e| ValidationError::Other(format!("cannot resolve dump path parent: {e}")))?;
+        canonical_parent.join(file_name)
+    };
+
+    if !resolved.starts_with(&canonical_temp) {
+        return Err(ValidationError::Other(format!(
+            "dump path must be within the temp directory ({})",
+            canonical_temp.display()
+        ))
+        .into());
+    }
+
+    Ok(resolved)
+}
+
 async fn handle_dump_state(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
@@ -1349,24 +1419,7 @@ async fn handle_dump_state(
     };
 
     let path = match get_str(args, "path") {
-        Some(p) => {
-            let p = PathBuf::from(p);
-            // Security: restrict client-supplied paths to the system temp directory.
-            // Without this, an MCP client could overwrite arbitrary files.
-            let temp = std::env::temp_dir();
-            let canonical = p
-                .parent()
-                .and_then(|parent| std::fs::canonicalize(parent).ok())
-                .unwrap_or_default();
-            if !canonical.starts_with(&temp) {
-                return Err(ValidationError::Other(format!(
-                    "dump path must be within the temp directory ({})",
-                    temp.display()
-                ))
-                .into());
-            }
-            p
-        }
+        Some(p) => validate_dump_path(&PathBuf::from(p))?,
         None => default_dump_path(&std::env::temp_dir(), ext),
     };
 
