@@ -24,17 +24,22 @@ A whitened projection of the active Qwen3 embedding space is introduced as a **d
 
 The specific post-processing algorithm (mean-centering, All-but-the-Top, or full whitening) is left to the implementing epic pending PoC #1 (anisotropy audit: measure mean random-pair cosine on the live store, sweep correction variants, measure recall@k before and after). All-but-the-Top is a standard technique; its primary citation carries a verification conflict (see `37-geometric-associative-memory-bibliography.md` §7.x) and must be validated empirically before being locked. The `use-now` tier rests on whitening/mean-centering as textbook operations, independently of any single citation; Ethayarajh (2019) grounds the existence of the anisotropy, not the specific correction.
 
-### (b) Persisted kNN similarity-edge graph, DerivedStructureRegistry with content fingerprints, and dream-cycle MaterializationScheduler
+**Global `W` by default (scope-orthogonal).** Although derived structures are registered per `scope × space` (§(b)), the whitening map `W`/`μ` is fit **once globally per embedding space**, not per scope. One global `W` preserves the single shared faithful metric ADR-0017 requires and the cross-layer (knowledge-base) parity that rests on it: a per-scope `W` fits a different linear map per scope, leaving cross-scope similarity undefined and breaking ME↔KB metric parity (`W`/`μ` lie outside ADR-0015's identity tuple, so the divergence is invisible to the identity check). Per-scope `W` is a **deferred, opt-in** option for a future scope that is provably metric-isolated; it is not the default (#763; ADR-0017 §5–§6).
+
+### (b) Persisted kNN similarity-edge graph, DerivedStructureRegistry with two-gate freshness, and dream-cycle MaterializationScheduler
 
 The existing typed-edge graph (`edges` table) is too sparse for a connected graph Laplacian. A **persisted kNN similarity-edge graph** (`similarity_edges`, relation tag `similarity_knn`) is introduced at blocking tier, built from whitened-space HNSW top-k neighbors on each ingest and stored as ordinary `edges` rows. This graph must strictly consume whitened vectors, never raw Qwen3 vectors, to avoid propagating the anisotropy bias into every downstream spectral and curvature structure.
 
 A **DerivedStructureRegistry** (one DB row per structure kind × scope × space) tracks every derived artifact — similarity graph, ORC cache, eigenbasis, diffusion kernel, GW coupling cache, etc. — with:
 
-- a `dirty_since` timestamp,
-- a `status` field (`fresh` / `dirty` / `rebuilding`),
-- a **content fingerprint** — a hash of `{epoch, W-version, sim-graph k, scope-row-count-bucket}` — not merely the space-epoch counter.
+- a **metric fingerprint** — a hash of `{epoch, W-version, sim-graph k}` — not merely the space-epoch counter,
+- a `dirty_since` marker, flipped by the ingest/expire notifier on **every** corpus write,
+- a `status` field (`fresh` / `dirty` / `rebuilding`).
 
-The epoch counter (`space_epoch` config row, bumped inside the promote transaction) guards model-swap invalidation. The content fingerprint is required in addition because edge weights change when the whitening matrix `W` or the similarity graph `k` is retuned without a model swap; epoch-only tracking produces "looks fresh, is corrupt" eigenbases and ORC caches, the single most dangerous failure mode.
+These are **two orthogonal freshness gates** (mirroring the cross-layer contract, ADR-0017 §3). A structure is **fresh iff its stored metric fingerprint equals the space's current fingerprint AND it has not been dirtied by a write since it was materialized**; otherwise it is stale and must be refused or rebuilt. The two gates catch different changes and **both** are required:
+
+- The **metric fingerprint** catches a changed _metric_. The epoch counter (`space_epoch` config row, bumped inside the promote transaction) guards model-swap invalidation; the fingerprint adds `W-version` and sim-graph `k` because edge weights change when the whitening matrix `W` or the similarity graph `k` is retuned **without** a model swap (the epoch never moves). Epoch-only tracking produces "looks fresh, is corrupt" eigenbases and ORC caches, the single most dangerous failure mode.
+- The **`dirty_since` marker** catches changed _corpus content_. An incremental ingest leaves `epoch`/`W-version`/`k` unchanged yet still stales a kNN graph or ORC cache built before it; folding a coarse `scope-row-count-bucket` into the fingerprint does **not** fix this, because an ingest within the same bucket still reads fresh. Content-freshness is therefore the dirty marker's job, not the fingerprint's. Material corpus _growth_ is handled separately: when growth crosses a threshold, `W` is re-fit, which bumps `W-version` and so flips the fingerprint through the normal path.
 
 A **MaterializationScheduler** runs as a dream-cycle sub-step: it claims dirty registry rows (`status = 'rebuilding'`), dispatches CPU-heavy builds via `spawn_blocking`, and flips `status = 'fresh'` on completion. Two startup consistency guards are mandatory: re-dirty any row with `last_computed_at < MAX(facts.t_created)` (crash between commit and notify) and reset `status = 'dirty'` where `status = 'rebuilding'` (crash mid-build).
 
@@ -94,6 +99,6 @@ Storing all pairwise cosine similarities, or a dense kNN matrix, as the persiste
 
 - **Curvature-protected forgetting is a derived policy.** The existing prune pass gains a guard: a memory whose only outgoing edges are negative-curvature bridge edges (by FRC on the hot path; ORC when the batch cache is fresh) is not expired, because forgetting it severs cross-domain reachability. This composes with the Ebbinghaus + LID decay signals rather than replacing them.
 
-- **Content-fingerprint invalidation is a maintenance obligation.** Every future operator that caches derived structure must register a row in the DerivedStructureRegistry and include its relevant parameters in the content fingerprint. A cache that uses epoch-only staleness detection and silently produces wrong results on parameter drift (e.g., retuned whitening matrix or sim-graph k) is a correctness bug, not a performance trade-off.
+- **Two-gate freshness is a maintenance obligation.** Every future operator that caches derived structure must register a row in the DerivedStructureRegistry, include its metric-defining parameters in the metric fingerprint, and honor the `dirty_since` marker. A cache that uses epoch-only (or fingerprint-only) staleness detection and silently produces wrong results on parameter drift (a retuned whitening matrix or sim-graph k) or on an in-bucket ingest is a correctness bug, not a performance trade-off.
 
 - **Operator arithmetic that was previously rejected must not be resurrected.** Relation-as-offset for abstract-relation cross-domain transfer is permanently closed. Any future proposal that relies on cosine vector arithmetic for structural analogy between domains must demonstrate that it is not in the same failure class before being accepted.
