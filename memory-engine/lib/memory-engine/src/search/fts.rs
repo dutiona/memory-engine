@@ -156,6 +156,76 @@ pub fn fts_count_expired(
     }
 }
 
+/// Fuzz-only seam (`--cfg fuzzing`, set only by `cargo fuzz`).
+///
+/// Drives an arbitrary, attacker-controlled query string through the full FTS5
+/// `MATCH` path on a freshly-seeded in-memory SQLite database. The seam owns the
+/// DB setup so the harness can stay a thin `&[u8] -> ()` wrapper while still
+/// reaching the crate-internal store/schema helpers (both `pub(crate)`).
+///
+/// The contract under test is total: any UTF-8 query string — balanced or not,
+/// containing FTS5 operators, column filters, quotes, NUL bytes, or arbitrary
+/// Unicode — must either return rows or be caught as an FTS5 syntax error and
+/// mapped to an empty result. It must NEVER panic and never propagate an error
+/// for a syntax-malformed query.
+///
+/// Compiled solely under `cargo fuzz` (`#[cfg(fuzzing)]`); adds nothing to the
+/// shipped crate.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_fts_query(query: &str) {
+    use crate::store::facts::FactStore;
+    use crate::store::schema::{init_schema, open_memory};
+    use crate::types::{FactType, NewFact};
+    use chrono::Utc;
+
+    const DIM: usize = 4;
+
+    // A panic here would be an environment failure (out of memory etc.), not a
+    // finding about the query path, so bail quietly instead of aborting.
+    let Ok(conn) = open_memory() else { return };
+    if init_schema(&conn).is_err() {
+        return;
+    }
+
+    let store = FactStore::new(&conn, DIM);
+    // Seed a couple of rows so the FTS5 index is non-empty: an empty index can
+    // short-circuit before the MATCH expression is fully evaluated, hiding
+    // parser-level panics in the query string.
+    for content in [
+        "Rust systems programming language",
+        "Python machine learning",
+    ] {
+        let fact = NewFact {
+            content: content.into(),
+            content_hash: String::new(),
+            embedding: vec![0.1; DIM],
+            fact_type: FactType::Episodic,
+            t_created: Utc::now(),
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            scope_id: 1,
+            base_importance: 0.5,
+            access_count: 0,
+            last_accessed: Utc::now(),
+            metadata: serde_json::json!({}),
+            is_pinned: false,
+        };
+        if store.insert(&fact).is_err() {
+            return;
+        }
+    }
+
+    // Drive the untrusted query through every public MATCH entry point: the
+    // active-only search, the filtered variant (with a fact-type + scope
+    // filter exercising the extra bind ordering), and the expired-count probe.
+    let _ = fts_search(&conn, query, 10, None, None);
+    let _ = fts_search(&conn, query, 10, Some(&FactType::Episodic), Some(&[1]));
+    let _ = fts_count_expired(&conn, query, None, None);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -199,6 +199,9 @@ pub use engine::cycle::{
 /// - [`bootstrap::parse::parse_session_file`] /
 ///   [`bootstrap::parse::parse_content_blocks`] — the crate-internal JSONL session
 ///   parsers (`pub fn` inside a `pub(crate) mod`, so not reachable downstream).
+/// - [`search::fts::fuzz_fts_query`] — drives an untrusted query string through the
+///   FTS5 `MATCH` path on a seeded in-memory DB (the store/schema setup it needs is
+///   `pub(crate)`, so the seam owns it).
 ///
 /// `inspect::restore::read_snapshot` (the JSON import path) is already public, so
 /// it is fuzzed directly without going through this seam.
@@ -210,6 +213,7 @@ pub use engine::cycle::{
 pub mod fuzz_seam {
     pub use crate::bootstrap::parse::{parse_content_blocks, parse_session_file};
     pub use crate::engine::snapshot::{fuzz_wrap_payload, load_from_file};
+    pub use crate::search::fts::fuzz_fts_query;
 }
 
 #[cfg(test)]
