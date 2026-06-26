@@ -198,6 +198,21 @@ pub enum ArchiveError {
     #[error("{0}")]
     Codec(String),
 
+    /// Reading a `.pak` file's decompressed stream exceeded the size cap — a
+    /// possible decompression bomb (CWE-409). Distinct from
+    /// [`Codec`](ArchiveError::Codec) (a genuinely corrupt zstd stream) and from
+    /// [`Serialization`](MemoryError::Serialization) (a truncated-JSON parse
+    /// failure) so callers can tell "too large" apart from "corrupt"
+    /// programmatically (#333). `cap` is the inclusive byte ceiling that was
+    /// exceeded.
+    #[error(
+        "pak decompressed size exceeded the {cap}-byte cap (possible decompression bomb); refusing to read further"
+    )]
+    PakTooLarge {
+        /// The inclusive decompressed-size cap (in bytes) that was exceeded.
+        cap: u64,
+    },
+
     /// A filesystem operation on a `.pak` file or the archive directory failed
     /// (create, open, read, rename, stat, mkdir, path resolution). The string
     /// carries the underlying I/O message.

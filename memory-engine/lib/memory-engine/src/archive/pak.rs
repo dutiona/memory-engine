@@ -64,15 +64,87 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
     write_result
 }
 
-/// Read and decompress a `.pak` file. Caps at 4 GiB decompressed.
+/// Read and decompress a `.pak` file. Caps the decompressed stream at
+/// [`MAX_PAK_DECOMPRESSED_SIZE`] (4 GiB) to defend against decompression bombs
+/// (CWE-409).
+///
+/// # Errors
+///
+/// Returns a [`MemoryError`](crate::error::MemoryError) in these cases:
+///
+/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+///   [`ArchiveError::Io`] — the file cannot be opened (e.g. it does not exist or
+///   is unreadable).
+/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+///   [`ArchiveError::Codec`] — a zstd framing error detected *eagerly* at
+///   `Decoder::new` (e.g. the bytes are not a zstd stream at all, so the frame
+///   header is rejected up front). Note that zstd validates the *body*
+///   incrementally: a corrupt or truncated stream whose header parses is usually
+///   not caught here — it surfaces mid-read as `Serialization` (see below).
+/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+///   [`ArchiveError::PakTooLarge`] — the decompressed stream exceeds the 4 GiB
+///   cap (a possible decompression bomb, CWE-409). Reported as a *distinct*
+///   variant so callers can tell a "too large" trip apart from an ordinary
+///   parse/read failure programmatically (#333). It does **not** distinguish a
+///   too-large pak from corruption in general: a corrupt stream that happens to
+///   decompress past the cap is reported here, while one that fails earlier
+///   surfaces as `Serialization`.
+/// - [`MemoryError::Serialization`](crate::error::MemoryError::Serialization) —
+///   either the decompressed bytes are not valid JSON for an [`ArchivePak`]
+///   (including a stale v1 layout missing the renamed `base_importance` field),
+///   **or** the zstd stream is corrupt/truncated in a way zstd only detects
+///   incrementally during the read. Because the decode is lazy, mid-stream zstd
+///   corruption is wrapped by `serde_json` and bubbles up as `Serialization`,
+///   not as [`Codec`](ArchiveError::Codec) — so this variant is *not* a reliable
+///   "bad JSON vs. corrupt stream" discriminator.
+/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+///   [`ArchiveError::PakVersionUnsupported`] — the archive's `pak_version` is
+///   newer than this build supports (forward-incompatible).
+/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+///   [`ArchiveError::SchemaVersionUnsupported`] — the archive's
+///   `engine_schema_version` is newer than this build supports.
+///
+/// Older `pak_version` / `engine_schema_version` values are accepted
+/// (backward-compatible read); only newer ones are rejected.
 pub fn read_pak(path: &Path) -> Result<ArchivePak> {
+    read_pak_capped(path, MAX_PAK_DECOMPRESSED_SIZE)
+}
+
+/// Cap-parameterized core of [`read_pak`].
+///
+/// Splitting the byte cap out as a parameter lets the cap-firing path be tested
+/// with a tiny limit instead of a real 4 GiB payload (#299). [`read_pak`] is the
+/// only non-test caller and always passes [`MAX_PAK_DECOMPRESSED_SIZE`].
+fn read_pak_capped(path: &Path, cap: u64) -> Result<ArchivePak> {
     let file = fs::File::open(path).map_err(|e| {
         ArchiveError::Io(format!("failed to open pak file {}: {e}", path.display()))
     })?;
     let decoder = zstd::Decoder::new(file)
         .map_err(|e| ArchiveError::Codec(format!("failed to create zstd decoder: {e}")))?;
-    let limited = std::io::Read::take(decoder, MAX_PAK_DECOMPRESSED_SIZE);
-    let pak: ArchivePak = serde_json::from_reader(limited)?;
+    // Read up to `cap + 1` bytes. The documented contract is *inclusive* — a pak
+    // whose decompressed size is exactly `cap` bytes is valid and must read. With
+    // a bare `take(decoder, cap)` such a pak consumes all `cap` bytes, leaving
+    // `limit() == 0`, and the post-parse check below would falsely reject it
+    // (off-by-one). The one-byte slack lets a legitimately exactly-`cap` payload
+    // through (it leaves `limit() == 1`) while still bounding memory, so the
+    // `limit() == 0` check below now trips *only* when MORE than `cap` bytes were
+    // decompressed — a genuine overflow.
+    let mut limited = std::io::Read::take(decoder, cap.saturating_add(1));
+    let parsed: serde_json::Result<ArchivePak> = serde_json::from_reader(&mut limited);
+
+    // Check the cap *before* propagating any serde error. When a decompression
+    // bomb exceeds the cap, `Take` returns EOF and `serde_json` fails with a
+    // truncated-input error indistinguishable from genuine corruption — exactly
+    // the deficiency this guards (#333, CWE-409). By inspecting the cap first we
+    // surface the bomb as a *distinct* [`ArchiveError::PakTooLarge`] error
+    // regardless of whether serde happened to parse a complete prefix or choked
+    // on the truncation. Because we read `cap + 1` bytes, `limit() == 0` means
+    // strictly MORE than `cap` bytes were consumed (an inclusive cap was
+    // exceeded), so a valid exactly-`cap` pak never reaches this branch.
+    if limited.limit() == 0 {
+        return Err(ArchiveError::PakTooLarge { cap }.into());
+    }
+    let pak = parsed?;
 
     // Validate versions after deserialize, mirroring `validate_schema_version`
     // (store/schema.rs): reject archives written by a *newer* library, but
@@ -284,5 +356,173 @@ mod tests {
             read_pak(&older_path).is_ok(),
             "older versions must still read (backward-compat)"
         );
+    }
+
+    // --- read_pak error paths (#299) ---
+
+    #[test]
+    fn read_pak_nonexistent_path_errors_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let ghost = dir.path().join("ghost.pak");
+        let err = read_pak(&ghost).unwrap_err();
+        let display = err.to_string();
+        match err {
+            MemoryError::Archive(ArchiveError::Io(msg)) => {
+                assert!(
+                    msg.contains("failed to open pak file"),
+                    "expected open-failure message, got {msg:?}"
+                );
+            }
+            other => panic!("expected Archive(Io), got {other:?}"),
+        }
+        assert!(
+            display.contains("failed to open pak file"),
+            "display must name the open failure, got {display:?}"
+        );
+    }
+
+    #[test]
+    fn read_pak_non_zstd_bytes_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("garbage.pak");
+        std::fs::write(&p, b"this is plainly not a zstd stream").unwrap();
+        let err = read_pak(&p).unwrap_err();
+        // `zstd::Decoder::new` does NOT eagerly validate the frame header — the
+        // bad magic surfaces *lazily* on the first read, inside
+        // `serde_json::from_reader`, which wraps the decoder I/O error as a serde
+        // error → MemoryError::Serialization. Either way `read_pak` reliably
+        // errors on non-zstd input (the property #299 case 2 asks for); we assert
+        // the actual variant so a future eager-validation change is caught.
+        assert!(
+            matches!(err, MemoryError::Serialization(_)),
+            "non-zstd bytes must error (surfaced as Serialization via the lazy \
+             decoder), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_pak_valid_zstd_invalid_json_errors_serialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("badjson.pak");
+        // A well-formed zstd stream whose decompressed payload is not valid JSON
+        // for an ArchivePak — must surface as Serialization, NOT Codec/Io.
+        let file = std::fs::File::create(&p).unwrap();
+        let mut enc = zstd::Encoder::new(file, 3).unwrap();
+        enc.write_all(b"this is not json").unwrap();
+        enc.finish().unwrap();
+
+        let err = read_pak(&p).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Serialization(_)),
+            "expected Serialization for invalid JSON, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_pak_cap_fires_distinct_pak_too_large_error() {
+        // The decompression-bomb cap (#333): a valid pak whose decompressed JSON
+        // exceeds a (tiny, test-injected) cap must surface as a *distinct*
+        // PakTooLarge error — proving the limit-exceeded case is no longer
+        // indistinguishable from an ordinary truncated-JSON Serialization error,
+        // nor conflated with a Codec (corrupt-zstd) error.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bomb.pak");
+        write_pak(&empty_pak(), &p).unwrap();
+
+        // empty_pak()'s JSON is well over 1 byte, so a 1-byte cap trips reliably.
+        let err = read_pak_capped(&p, 1).unwrap_err();
+        match err {
+            MemoryError::Archive(ArchiveError::PakTooLarge { cap }) => {
+                assert_eq!(cap, 1, "PakTooLarge must carry the cap that was exceeded");
+            }
+            other => panic!("expected Archive(PakTooLarge) for the cap trip, got {other:?}"),
+        }
+
+        // Sanity: the SAME file reads fine under the real (4 GiB) cap, so the error
+        // above is purely the cap firing — not a corrupt fixture.
+        assert!(
+            read_pak(&p).is_ok(),
+            "fixture must read fine under the production cap"
+        );
+    }
+
+    /// FIX 1 boundary (#258, HIGH off-by-one): the cap is documented as
+    /// *inclusive* ("caps at N bytes"), so a pak whose decompressed size is
+    /// EXACTLY the cap must read successfully. Before the `cap + 1` slack, such a
+    /// pak consumed all `cap` bytes (leaving `limit() == 0`) and was falsely
+    /// rejected as a decompression bomb.
+    #[test]
+    fn read_pak_exactly_cap_bytes_reads_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("exact.pak");
+        write_pak(&empty_pak(), &p).unwrap();
+
+        // Measure the exact decompressed length of this pak by decompressing it
+        // through the same zstd decoder the reader uses.
+        let decompressed_len = {
+            let file = std::fs::File::open(&p).unwrap();
+            let mut decoder = zstd::Decoder::new(file).unwrap();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut buf).unwrap();
+            u64::try_from(buf.len()).unwrap()
+        };
+        assert!(decompressed_len > 0, "fixture must decompress to >0 bytes");
+
+        // A cap set to EXACTLY the decompressed length must read successfully —
+        // the inclusive contract. This is the assertion that FAILS under the
+        // pre-fix `take(decoder, cap)` (it would trip the bomb guard at limit 0).
+        let restored = read_pak_capped(&p, decompressed_len)
+            .expect("a pak whose size equals the cap must read (inclusive cap)");
+        assert_eq!(restored.pak_version, CURRENT_PAK_VERSION);
+    }
+
+    /// FIX 1 boundary companion: a pak one byte OVER the cap must still be
+    /// rejected as [`PakTooLarge`](ArchiveError::PakTooLarge) — proving the
+    /// `cap + 1` slack widened the acceptance window by exactly one byte (the
+    /// inclusive boundary) and not more.
+    #[test]
+    fn read_pak_one_byte_over_cap_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("over.pak");
+        write_pak(&empty_pak(), &p).unwrap();
+
+        let decompressed_len = {
+            let file = std::fs::File::open(&p).unwrap();
+            let mut decoder = zstd::Decoder::new(file).unwrap();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut buf).unwrap();
+            u64::try_from(buf.len()).unwrap()
+        };
+        assert!(
+            decompressed_len >= 2,
+            "fixture must decompress to >=2 bytes so cap = len - 1 is a real (positive) cap"
+        );
+
+        // cap = len - 1 means the payload is exactly one byte over the cap.
+        let cap = decompressed_len - 1;
+        let err = read_pak_capped(&p, cap).unwrap_err();
+        match err {
+            MemoryError::Archive(ArchiveError::PakTooLarge { cap: reported }) => {
+                assert_eq!(reported, cap, "PakTooLarge must carry the exceeded cap");
+            }
+            other => panic!("expected Archive(PakTooLarge) one byte over the cap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_pak_nonexistent_parent_dir_errors_io() {
+        let dir = tempfile::tempdir().unwrap();
+        // Parent directory `missing/` was never created.
+        let p = dir.path().join("missing").join("out.pak");
+        let err = write_pak_and_hash(&empty_pak(), &p).unwrap_err();
+        match err {
+            MemoryError::Archive(ArchiveError::Io(msg)) => {
+                assert!(
+                    msg.contains("failed to create temp pak file"),
+                    "expected temp-file create failure, got {msg:?}"
+                );
+            }
+            other => panic!("expected Archive(Io), got {other:?}"),
+        }
     }
 }
