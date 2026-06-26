@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{TimeDelta, Utc};
 use memory_engine::MemoryEngine;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
@@ -398,8 +398,8 @@ async fn fact_history_validity_window_yields_full_lifecycle() {
     // Set the bi-temporal real-world validity window so the derived timeline
     // carries the became-valid / became-invalid lifecycle transitions — the
     // "after adding/modifying a fact" path of #318.
-    let t_valid = Utc::now() - Duration::days(2);
-    let t_invalid = Utc::now() - Duration::days(1);
+    let t_valid = Utc::now() - TimeDelta::days(2);
+    let t_invalid = Utc::now() - TimeDelta::days(1);
     let opts = AddFactOptions {
         t_valid: Some(t_valid),
         t_invalid: Some(t_invalid),
@@ -422,14 +422,14 @@ async fn fact_history_validity_window_yields_full_lifecycle() {
         .iter()
         .map(|e| e["kind"].as_str().unwrap())
         .collect();
-    // Sorted by timestamp: created (now) is latest; valid/invalid are backdated.
-    assert!(kinds.contains(&"Created"), "kinds: {kinds:?}");
-    assert!(kinds.contains(&"BecameValid"), "kinds: {kinds:?}");
-    assert!(kinds.contains(&"BecameInvalid"), "kinds: {kinds:?}");
+    // The engine sorts the timeline ascending by timestamp
+    // (`fact_history_from_fact`: `timeline.sort_by_key(|e| e.timestamp)`). Here
+    // t_valid (now-2d) < t_invalid (now-1d) < t_created (now, unset opt → now), so
+    // the exact, deterministic order is BecameValid → BecameInvalid → Created.
     assert_eq!(
-        kinds.len(),
-        3,
-        "exactly created + valid + invalid: {kinds:?}"
+        kinds,
+        ["BecameValid", "BecameInvalid", "Created"],
+        "timeline must be sorted ascending by timestamp: {kinds:?}"
     );
 }
 
