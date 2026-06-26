@@ -59,7 +59,9 @@ fn detect_compression(file: &mut File) -> Result<Compression> {
 // Snapshot reading
 // ---------------------------------------------------------------------------
 
-/// Maximum snapshot file size (4 GiB). Prevents OOM from crafted snapshots.
+/// Maximum snapshot size (4 GiB). Caps both the on-disk (compressed) file and
+/// the **decompressed** stream, so a small gzip/zstd file that inflates past the
+/// cap is rejected as a decompression bomb (CWE-409, #141).
 const MAX_SNAPSHOT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Deserialize an [`EngineSnapshot`] from a (possibly compressed) JSON file.
@@ -67,56 +69,105 @@ const MAX_SNAPSHOT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 /// Auto-detects compression from magic bytes. Returns a clear error if the
 /// file uses a compression format whose feature is not enabled.
 ///
+/// Both the on-disk (compressed) size and the **decompressed** stream are capped
+/// at [`MAX_SNAPSHOT_SIZE`]: the file-size check alone is insufficient because a
+/// tiny gzip/zstd file can inflate far past the cap (a decompression bomb,
+/// CWE-409). The decompressed cap is enforced by wrapping the decoder in
+/// [`std::io::Read::take`], and tripping it surfaces a *distinct*
+/// [`MemoryError::SnapshotTooLarge`] rather than the opaque truncated-input
+/// [`MemoryError::Serialization`] a bare `take` would otherwise produce (#141).
+///
 /// # Errors
 ///
 /// - [`MemoryError::Io`] on file access failure.
 /// - [`MemoryError::Serialization`] on malformed JSON.
 /// - [`MemoryError::NotImplemented`] if compression detected but feature disabled.
-/// - [`MemoryError::Internal`] if the file exceeds 4 GiB or if zstd decoder
-///   initialization fails.
+/// - [`MemoryError::SnapshotTooLarge`] if the compressed file or the decompressed
+///   stream exceeds 4 GiB (a possible decompression bomb).
+/// - [`MemoryError::Internal`] if zstd decoder initialization fails.
 pub fn read_snapshot(path: &Path) -> Result<EngineSnapshot> {
+    read_snapshot_capped(path, MAX_SNAPSHOT_SIZE)
+}
+
+/// Cap-parameterized core of [`read_snapshot`].
+///
+/// Splitting the byte cap out as a parameter lets the cap-firing path be tested
+/// with a tiny limit instead of a real 4 GiB payload (mirrors `read_pak_capped`
+/// in `archive::pak`). [`read_snapshot`] is the only non-test caller and always
+/// passes [`MAX_SNAPSHOT_SIZE`].
+///
+/// The `cap` bounds the **decompressed** stream. The compressed file is also
+/// rejected up front when its on-disk size already exceeds `cap` (no point
+/// decompressing a too-large file), which keeps the plain (uncompressed) path
+/// equivalent — for `Compression::None` the on-disk size *is* the decompressed
+/// size.
+fn read_snapshot_capped(path: &Path, cap: u64) -> Result<EngineSnapshot> {
     // Open the file once and perform all checks on the handle to avoid TOCTOU.
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
-    if metadata.len() > MAX_SNAPSHOT_SIZE {
-        return Err(MemoryError::Internal(format!(
-            "snapshot file too large: {} bytes (max {MAX_SNAPSHOT_SIZE})",
-            metadata.len()
-        )));
+    if metadata.len() > cap {
+        return Err(MemoryError::SnapshotTooLarge { cap });
     }
 
     let compression = detect_compression(&mut file)?;
     let reader = BufReader::new(file);
 
     match compression {
-        Compression::None => Ok(serde_json::from_reader(reader)?),
-        Compression::Gzip => read_gzip(reader),
-        Compression::Zstd => read_zstd(reader),
+        Compression::None => read_capped(reader, cap),
+        Compression::Gzip => read_gzip(reader, cap),
+        Compression::Zstd => read_zstd(reader, cap),
     }
 }
 
+/// Deserialize an [`EngineSnapshot`] from a reader, capping the consumed bytes at
+/// `cap` and surfacing a decompression-bomb overflow as a distinct
+/// [`MemoryError::SnapshotTooLarge`].
+///
+/// Reads up to `cap + 1` bytes. The cap is *inclusive* — a stream whose size is
+/// exactly `cap` bytes is valid and must read. With a bare `take(reader, cap)`
+/// such a stream consumes all `cap` bytes, leaving `limit() == 0`, and the
+/// post-parse check would falsely reject it (off-by-one). The one-byte slack lets
+/// an exactly-`cap` payload through (it leaves `limit() == 1`) while still
+/// bounding memory, so the `limit() == 0` check trips *only* when MORE than `cap`
+/// bytes were consumed — a genuine overflow. Same shape as `read_pak_capped`.
+fn read_capped(reader: impl Read, cap: u64) -> Result<EngineSnapshot> {
+    let mut limited = std::io::Read::take(reader, cap.saturating_add(1));
+    let parsed: serde_json::Result<EngineSnapshot> = serde_json::from_reader(&mut limited);
+
+    // Check the cap *before* propagating any serde error. When the decompressed
+    // stream exceeds the cap, `Take` returns EOF and `serde_json` fails with a
+    // truncated-input error indistinguishable from genuine corruption — exactly
+    // the deficiency this guards (#141, CWE-409). By inspecting the cap first we
+    // surface the bomb as a distinct `SnapshotTooLarge` regardless of whether
+    // serde parsed a complete prefix or choked on the truncation.
+    if limited.limit() == 0 {
+        return Err(MemoryError::SnapshotTooLarge { cap });
+    }
+    Ok(parsed?)
+}
+
 #[cfg(feature = "compress-gzip")]
-fn read_gzip(reader: impl Read) -> Result<EngineSnapshot> {
+fn read_gzip(reader: impl Read, cap: u64) -> Result<EngineSnapshot> {
     let decoder = flate2::read::GzDecoder::new(reader);
-    Ok(serde_json::from_reader(decoder)?)
+    read_capped(decoder, cap)
 }
 
 #[cfg(not(feature = "compress-gzip"))]
-fn read_gzip(_reader: impl Read) -> Result<EngineSnapshot> {
+fn read_gzip(_reader: impl Read, _cap: u64) -> Result<EngineSnapshot> {
     Err(MemoryError::NotImplemented(
         "gzip-compressed snapshot detected but `compress-gzip` feature is not enabled".into(),
     ))
 }
 
 #[cfg(feature = "compress-zstd")]
-fn read_zstd(reader: impl Read) -> Result<EngineSnapshot> {
+fn read_zstd(reader: impl Read, cap: u64) -> Result<EngineSnapshot> {
     let decoder =
         zstd::Decoder::new(reader).map_err(|e| MemoryError::Internal(format!("zstd init: {e}")))?;
-    Ok(serde_json::from_reader(decoder)?)
+    read_capped(decoder, cap)
 }
 
 #[cfg(not(feature = "compress-zstd"))]
-fn read_zstd(_reader: impl Read) -> Result<EngineSnapshot> {
+fn read_zstd(_reader: impl Read, _cap: u64) -> Result<EngineSnapshot> {
     Err(MemoryError::NotImplemented(
         "zstd-compressed snapshot detected but `compress-zstd` feature is not enabled".into(),
     ))
@@ -128,14 +179,17 @@ fn read_zstd(_reader: impl Read) -> Result<EngineSnapshot> {
 
 /// Validate a snapshot against the current engine version.
 ///
-/// Checks schema compatibility, storage epoch, embedding dimension, and the
-/// root scope invariant required by [`crate::scope::ScopeTree`].
+/// Checks schema compatibility, storage epoch, embedding dimension, the
+/// per-embedding length invariant, and the root scope invariant required by
+/// [`crate::scope::ScopeTree`].
 ///
 /// # Errors
 ///
 /// - [`MemoryError::Migration`] if `schema_version` is from a newer schema.
 /// - [`MemoryError::UnsupportedEpoch`] if `storage_epoch` doesn't match.
 /// - [`MemoryError::Internal`] if `embed_dim` is zero or root scope is missing.
+/// - [`MemoryError::EmbeddingDimension`] if any fact, summary, or `fact_vectors`
+///   embedding length does not equal the snapshot's `embed_dim` (#413).
 pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
     if snapshot.schema_version > CURRENT_SCHEMA_VERSION {
         return Err(MigrationError::Incompatible(format!(
@@ -152,6 +206,64 @@ pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
     }
     if snapshot.embed_dim == 0 {
         return Err(MemoryError::Internal("snapshot embed_dim is 0".into()));
+    }
+
+    // Per-embedding length invariant (#413): every persisted embedding is read
+    // back via `deserialize_embedding`, which hard-errors with `EmbeddingDimension`
+    // when a blob's length is not `dim * 4` bytes. A restore that trusts the
+    // snapshot's lengths blindly would persist corrupt-dimension blobs that then
+    // fail every subsequent read. Reject them here, before the write transaction,
+    // with the same typed error the read path uses — a crafted/corrupt snapshot is
+    // refused atomically rather than partially imported. The sidecar `.snapshot`
+    // path already does the equivalent per-`HnswEntry` check (#411); the JSON
+    // dump/restore path was missing it.
+    //
+    // The **active** vectors (`facts[].embedding` and `summaries[].embedding`)
+    // belong to the active space, so they must match the snapshot's `embed_dim`.
+    let expected = snapshot.embed_dim;
+    for fact in &snapshot.facts {
+        if fact.embedding.len() != expected {
+            return Err(MemoryError::EmbeddingDimension {
+                expected,
+                actual: fact.embedding.len(),
+            });
+        }
+    }
+    for summary in &snapshot.summaries {
+        if summary.embedding.len() != expected {
+            return Err(MemoryError::EmbeddingDimension {
+                expected,
+                actual: summary.embedding.len(),
+            });
+        }
+    }
+
+    // The non-active `fact_vectors` rows belong to *other* embedding spaces
+    // (a `populating` space mid-reconstruction, or a `deprecated` one kept for
+    // rollback). A different-dimension reconstruction (#742) legitimately stores
+    // vectors at a dimension other than the active `embed_dim`, so each row must be
+    // checked against **its owning space's** dimension — taken from the matching
+    // `embedding_spaces` fingerprint — not the active dim. A row referencing an
+    // unknown space is rejected early (it would otherwise fail the `fact_vectors`
+    // FK at insert with an opaque database error).
+    for fv in &snapshot.fact_vectors {
+        let space_dim = snapshot
+            .embedding_spaces
+            .iter()
+            .find(|s| s.name == fv.space_id)
+            .map(|s| s.fingerprint.dim)
+            .ok_or_else(|| {
+                MemoryError::Internal(format!(
+                    "snapshot fact_vectors row references unknown embedding space '{}'",
+                    fv.space_id
+                ))
+            })?;
+        if fv.embedding.len() != space_dim {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: space_dim,
+                actual: fv.embedding.len(),
+            });
+        }
     }
 
     // Root scope invariant: ScopeTree hardcodes root id=1, parent_id=None.
@@ -895,6 +1007,331 @@ mod tests {
         std::fs::write(&path, "not valid json{{{").unwrap();
         let err = read_snapshot(&path).unwrap_err();
         assert!(matches!(err, MemoryError::Serialization(_)));
+    }
+
+    // --- Decompression-bomb cap tests (#141, CWE-409) ---
+
+    /// A minimal but valid `EngineSnapshot` JSON whose decompressed size is
+    /// padded by `pad` config bytes — large enough to overflow a tiny test cap
+    /// while compressing to a handful of bytes (the decompression-bomb shape).
+    fn padded_snapshot_json(pad: usize) -> String {
+        let filler = "x".repeat(pad);
+        format!(
+            r#"{{"schema_version":{CURRENT_SCHEMA_VERSION},"storage_epoch":{STORAGE_EPOCH},
+            "embed_dim":4,"facts":[],"edges":[],"summaries":[],"scopes":[],"events":[],
+            "lineage":[],"embedding_spaces":[],"fact_vectors":[],"config":{{"pad":"{filler}"}}}}"#
+        )
+    }
+
+    /// The on-disk (compressed) cap still rejects an uncompressed file that is
+    /// itself larger than the cap — and now surfaces the distinct
+    /// `SnapshotTooLarge`, not the old opaque `Internal`.
+    #[test]
+    fn read_snapshot_rejects_oversized_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.json");
+        std::fs::write(&path, padded_snapshot_json(4096)).unwrap();
+        // Cap below the on-disk size: the up-front file-size guard fires.
+        let err = read_snapshot_capped(&path, 64).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::SnapshotTooLarge { cap: 64 }),
+            "expected SnapshotTooLarge, got {err:?}"
+        );
+    }
+
+    #[cfg(feature = "compress-gzip")]
+    #[test]
+    fn read_snapshot_caps_decompressed_gzip_bomb() {
+        use flate2::Compression as GzLevel;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        // A payload that decompresses to >> the cap but compresses to a few bytes
+        // (highly-repetitive filler → the classic decompression-bomb shape).
+        let payload = padded_snapshot_json(100_000);
+        let mut enc = GzEncoder::new(Vec::new(), GzLevel::best());
+        enc.write_all(payload.as_bytes()).unwrap();
+        let compressed = enc.finish().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bomb.json.gz");
+        std::fs::write(&path, &compressed).unwrap();
+
+        // The compressed file is tiny — it clears the on-disk file-size guard,
+        // so the trip must come from the *decompressed* cap, not the file cap.
+        let cap: u64 = 1024;
+        let compressed_len = u64::try_from(compressed.len()).unwrap();
+        assert!(
+            compressed_len <= cap,
+            "test precondition: compressed ({compressed_len}) must fit under the cap ({cap}) so \
+             the decompressed cap is what trips"
+        );
+        let err = read_snapshot_capped(&path, cap).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::SnapshotTooLarge { cap: c } if c == cap),
+            "expected distinct SnapshotTooLarge (not an opaque serde EOF), got {err:?}"
+        );
+    }
+
+    #[cfg(feature = "compress-zstd")]
+    #[test]
+    fn read_snapshot_caps_decompressed_zstd_bomb() {
+        let payload = padded_snapshot_json(100_000);
+        let compressed = zstd::encode_all(payload.as_bytes(), 19).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bomb.json.zst");
+        std::fs::write(&path, &compressed).unwrap();
+
+        let cap: u64 = 1024;
+        let compressed_len = u64::try_from(compressed.len()).unwrap();
+        assert!(
+            compressed_len <= cap,
+            "test precondition: compressed ({compressed_len}) must fit under the cap ({cap})"
+        );
+        let err = read_snapshot_capped(&path, cap).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::SnapshotTooLarge { cap: c } if c == cap),
+            "expected distinct SnapshotTooLarge (not an opaque serde EOF), got {err:?}"
+        );
+    }
+
+    /// Inclusive-cap boundary: a plain snapshot whose decompressed size is exactly
+    /// `cap` bytes must still read (the `+1` slack in `read_capped`), proving the
+    /// cap does not falsely reject a legitimately maximal payload.
+    #[test]
+    fn read_snapshot_accepts_exactly_cap_sized_plain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.json");
+        // Build a valid snapshot, then pad its config filler so the file length is
+        // exactly some `cap`. We discover the base length, then size the filler.
+        let base = padded_snapshot_json(0);
+        let base_len = base.len();
+        let target_filler = 200;
+        let json = padded_snapshot_json(target_filler);
+        let json_len = json.len();
+        let cap = u64::try_from(json_len).unwrap();
+        assert!(json_len > base_len);
+        std::fs::write(&path, &json).unwrap();
+        // cap == file size: the file-size guard (`> cap`) does not fire, and the
+        // decompressed cap (`cap + 1` take) reads the whole exactly-`cap` payload.
+        let snapshot = read_snapshot_capped(&path, cap).unwrap();
+        assert_eq!(snapshot.embed_dim, 4);
+    }
+
+    // --- Embedding-dimension validation tests (#413) ---
+
+    fn snapshot_with(
+        facts: Vec<crate::types::Fact>,
+        summaries: Vec<crate::types::Summary>,
+        embedding_spaces: Vec<crate::inspect::types::EmbeddingSpaceSnapshot>,
+        fact_vectors: Vec<crate::inspect::types::FactVectorSnapshot>,
+    ) -> EngineSnapshot {
+        EngineSnapshot {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            storage_epoch: STORAGE_EPOCH,
+            embed_dim: 4,
+            facts,
+            edges: vec![],
+            summaries,
+            scopes: vec![],
+            events: vec![],
+            lineage: vec![],
+            embedding_spaces,
+            fact_vectors,
+            config: BTreeMap::new(),
+        }
+    }
+
+    fn fact_with_embedding(id: i64, embedding: Vec<f32>) -> crate::types::Fact {
+        use chrono::Utc;
+        crate::types::Fact {
+            id,
+            content: format!("f{id}"),
+            content_hash: format!("h{id}"),
+            embedding,
+            fact_type: crate::types::FactType::Semantic,
+            t_created: Utc::now(),
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            base_importance: 0.0,
+            access_count: 0,
+            last_accessed: Utc::now(),
+            metadata: serde_json::json!({}),
+            scope_id: 1,
+            is_pinned: false,
+            importance_score: 0.0,
+            surfaced_at: None,
+        }
+    }
+
+    fn summary_with_embedding(id: i64, embedding: Vec<f32>) -> crate::types::Summary {
+        use chrono::Utc;
+        crate::types::Summary {
+            id,
+            content: format!("s{id}"),
+            embedding,
+            level: crate::types::ConsolidationLevel::Local,
+            source_fact_ids: vec![],
+            created_at: Utc::now(),
+            scope_id: 1,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_fact_dim_mismatch() {
+        // embed_dim is 4 but the fact carries a 3-vector.
+        let snapshot = snapshot_with(
+            vec![fact_with_embedding(1, vec![0.1, 0.2, 0.3])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let err = validate_snapshot(&snapshot).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::EmbeddingDimension {
+                    expected: 4,
+                    actual: 3
+                }
+            ),
+            "expected EmbeddingDimension{{4,3}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_summary_dim_mismatch() {
+        let snapshot = snapshot_with(
+            vec![],
+            vec![summary_with_embedding(1, vec![0.1, 0.2, 0.3, 0.4, 0.5])],
+            vec![],
+            vec![],
+        );
+        let err = validate_snapshot(&snapshot).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::EmbeddingDimension {
+                    expected: 4,
+                    actual: 5
+                }
+            ),
+            "expected EmbeddingDimension{{4,5}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_matching_dims() {
+        let snapshot = snapshot_with(
+            vec![fact_with_embedding(1, vec![0.1, 0.2, 0.3, 0.4])],
+            vec![summary_with_embedding(1, vec![0.5, 0.6, 0.7, 0.8])],
+            vec![],
+            vec![],
+        );
+        validate_snapshot(&snapshot).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_fact_vector_dim_mismatch_against_its_space() {
+        use crate::inspect::types::{EmbeddingSpaceSnapshot, FactVectorSnapshot};
+        // The "shadow" space declares dim 4, but its fact_vectors row is a 2-vector.
+        let snapshot = snapshot_with(
+            vec![fact_with_embedding(1, vec![0.1, 0.2, 0.3, 0.4])],
+            vec![],
+            vec![EmbeddingSpaceSnapshot {
+                name: "shadow".into(),
+                status: "populating".into(),
+                fingerprint: crate::types::EmbeddingFingerprint::new("shadow-model", "test", 4),
+            }],
+            vec![FactVectorSnapshot {
+                fact_id: 1,
+                space_id: "shadow".into(),
+                embedding: vec![0.7, 0.7],
+            }],
+        );
+        let err = validate_snapshot(&snapshot).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::EmbeddingDimension {
+                    expected: 4,
+                    actual: 2
+                }
+            ),
+            "expected EmbeddingDimension{{4,2}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_different_dim_fact_vector_space() {
+        // #742: a populating space may legitimately have a *different* dimension
+        // than the active `embed_dim`. The fact_vectors row must be validated
+        // against ITS space's dim (8), not the active dim (4) — so this snapshot,
+        // whose shadow vectors are 8-wide for an 8-dim shadow space, must pass.
+        use crate::inspect::types::{EmbeddingSpaceSnapshot, FactVectorSnapshot};
+        let snapshot = snapshot_with(
+            vec![fact_with_embedding(1, vec![0.1, 0.2, 0.3, 0.4])],
+            vec![],
+            vec![EmbeddingSpaceSnapshot {
+                name: "shadow8".into(),
+                status: "populating".into(),
+                fingerprint: crate::types::EmbeddingFingerprint::new("big-model", "test", 8),
+            }],
+            vec![FactVectorSnapshot {
+                fact_id: 1,
+                space_id: "shadow8".into(),
+                embedding: vec![0.0; 8],
+            }],
+        );
+        validate_snapshot(&snapshot).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_fact_vector_unknown_space() {
+        use crate::inspect::types::FactVectorSnapshot;
+        let snapshot = snapshot_with(
+            vec![fact_with_embedding(1, vec![0.1, 0.2, 0.3, 0.4])],
+            vec![],
+            vec![], // no embedding_spaces — the fact_vectors space is unresolvable
+            vec![FactVectorSnapshot {
+                fact_id: 1,
+                space_id: "ghost".into(),
+                embedding: vec![0.7; 4],
+            }],
+        );
+        let err = validate_snapshot(&snapshot).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Internal(ref m) if m.contains("unknown embedding space")),
+            "expected unknown-space Internal error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn restore_rejects_dim_mismatch_end_to_end() {
+        // The whole restore path refuses a dim-mismatched snapshot up front,
+        // before any row is written (atomic refusal, not a partial import).
+        let snapshot = snapshot_with(
+            vec![fact_with_embedding(1, vec![0.1, 0.2, 0.3])], // 3 != embed_dim 4
+            vec![],
+            vec![],
+            vec![],
+        );
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        let err = restore_snapshot_into(&conn, &snapshot).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingDimension { .. }),
+            "expected EmbeddingDimension, got {err:?}"
+        );
+        // Nothing was imported.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "no facts should be written on a rejected restore");
     }
 
     // --- Persisted-format serialization tests (super-qa #505) ---

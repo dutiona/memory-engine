@@ -488,6 +488,26 @@ pub enum MemoryError {
     )]
     UnsupportedEpoch { db_epoch: u16, supported_epoch: u16 },
 
+    /// Reading a snapshot's **decompressed** stream exceeded the size cap — a
+    /// possible decompression bomb (CWE-409). The on-disk (compressed) size of a
+    /// gzip/zstd snapshot can be tiny while the decompressed payload is enormous,
+    /// so the compressed-size guard alone is insufficient; this variant fires when
+    /// the *decompressed* byte count exceeds the cap. Reported as a distinct
+    /// variant (not the opaque truncated-input
+    /// [`Serialization`](MemoryError::Serialization) error a bare `take` would
+    /// otherwise surface, and not the generic [`Internal`](MemoryError::Internal)
+    /// used for the compressed-size guard) so callers can tell a "decompression
+    /// bomb" trip apart from ordinary parse/read failures programmatically (#141).
+    /// `cap` is the inclusive byte ceiling that was exceeded. Mirrors
+    /// [`ArchiveError::PakTooLarge`].
+    #[error(
+        "snapshot decompressed size exceeded the {cap}-byte cap (possible decompression bomb); refusing to read further"
+    )]
+    SnapshotTooLarge {
+        /// The inclusive decompressed-size cap (in bytes) that was exceeded.
+        cap: u64,
+    },
+
     /// An invariant was violated inside the engine — a bug or corrupted state
     /// that the caller cannot meaningfully recover from.
     ///
