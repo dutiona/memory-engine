@@ -683,11 +683,27 @@ fn parse_search_mode(s: &str) -> Result<SearchMode, ErrorData> {
 /// it. The core parser is complete (it accepts every variant); this boundary gate
 /// preserves the schema contract without re-implementing the variant mapping.
 fn parse_event_type(s: &str) -> Result<EventType, ValidationError> {
-    match s.parse() {
-        Ok(EventType::OutcomeSignal) | Err(_) => {
-            Err(ValidationError::UnknownEventType(s.to_owned()))
-        }
-        Ok(et) => Ok(et),
+    // The system-only-reject arm and the unparseable arm share a body, but keeping
+    // them separate is deliberate: it documents the two distinct rejection reasons
+    // and keeps the `EventType` match exhaustive (no `Ok(_)` catch-all), so a new
+    // variant forces a deliberate allow/reject decision here at compile time.
+    #[allow(clippy::match_same_arms)]
+    match s.parse::<EventType>() {
+        // User-facing types — accepted at the MCP ingest/replay boundary. These are
+        // exactly the variants the `ingest` / `replay` JSON schemas advertise.
+        Ok(
+            et @ (EventType::Interaction
+            | EventType::ToolCall
+            | EventType::MemoryOp
+            | EventType::SystemEvent),
+        ) => Ok(et),
+        // System-generated only — emitted internally by `record_outcome`, never
+        // user-ingestible; the schemas deliberately omit it.
+        Ok(EventType::OutcomeSignal) => Err(ValidationError::UnknownEventType(s.to_owned())),
+        // NOTE: intentionally NO catch-all `Ok(_)`. Adding a new `EventType` variant
+        // must force a deliberate allow/reject decision here — the compiler flags
+        // the non-exhaustive match instead of silently making it user-ingestible.
+        Err(_) => Err(ValidationError::UnknownEventType(s.to_owned())),
     }
 }
 
