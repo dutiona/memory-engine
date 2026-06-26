@@ -55,9 +55,17 @@ pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
 /// here. Stored values are written as `snake_case` via [`fact_type_to_str`]; the
 /// canonical parser accepts that (and is case-insensitive), so the DB round-trip
 /// is unaffected.
+///
+/// A value that does not parse is therefore **data-integrity corruption**, not a
+/// missing row: the store always writes a canonical token, so an unparseable one
+/// means the `fact_type` column was tampered with or otherwise corrupted. It maps
+/// to [`MemoryError::Internal`] (a terminal "this shouldn't happen" / corrupt
+/// state, #560), **not** [`MemoryError::NotFound`] — `NotFound` means "the
+/// requested row is absent", a semantically distinct, recoverable condition
+/// (#366). The message embeds the offending token verbatim for diagnostics.
 fn str_to_fact_type(s: &str) -> Result<FactType> {
     s.parse::<FactType>()
-        .map_err(|e| MemoryError::NotFound(e.to_string()))
+        .map_err(|e| MemoryError::Internal(format!("corrupt stored fact_type: {e}")))
 }
 
 /// Compute blake3 hex hash of content, truncated to first 32 characters (128 bits).
@@ -1439,6 +1447,29 @@ mod tests {
             scope_id: 1,
             is_pinned: false,
         }
+    }
+
+    #[test]
+    fn str_to_fact_type_rejects_unknown_as_internal() {
+        // A `fact_type` string read back from the DB that names no known variant
+        // is a data-integrity failure (the store wrote it via `fact_type_to_str`,
+        // so a value that does not parse means the row is corrupt) — NOT a
+        // missing-row condition. It must map to `MemoryError::Internal`, never
+        // `MemoryError::NotFound` (#366).
+        let err = str_to_fact_type("bogus").unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+        // The message stays greppable: it carries the offending token verbatim.
+        assert!(
+            err.to_string().contains("bogus"),
+            "message must include the offending string, got {err}"
+        );
+        assert!(
+            !matches!(err, MemoryError::NotFound(_)),
+            "an unparseable stored enum is not a NotFound condition"
+        );
     }
 
     /// #257 regression: the snapshot referential-validation set MUST include

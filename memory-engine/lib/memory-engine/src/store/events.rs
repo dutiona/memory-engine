@@ -26,6 +26,16 @@ pub const fn event_type_to_str(et: &EventType) -> &'static str {
     }
 }
 
+/// Parse an `event_type` string read back from the store into the core
+/// [`EventType`].
+///
+/// Values are written via [`event_type_to_str`], so a token that names no known
+/// variant is **data-integrity corruption** (the `event_type` column was tampered
+/// with or otherwise corrupted), not a missing row. It maps to
+/// [`MemoryError::Internal`] (a terminal "this shouldn't happen" / corrupt state,
+/// #560), **not** [`MemoryError::NotFound`] — `NotFound` means "the requested row
+/// is absent", a semantically distinct, recoverable condition (#366). The message
+/// embeds the offending token verbatim for diagnostics.
 fn str_to_event_type(s: &str) -> Result<EventType> {
     match s {
         "Interaction" => Ok(EventType::Interaction),
@@ -33,8 +43,8 @@ fn str_to_event_type(s: &str) -> Result<EventType> {
         "MemoryOp" => Ok(EventType::MemoryOp),
         "SystemEvent" => Ok(EventType::SystemEvent),
         "OutcomeSignal" => Ok(EventType::OutcomeSignal),
-        other => Err(MemoryError::NotFound(format!(
-            "unknown event type: {other}"
+        other => Err(MemoryError::Internal(format!(
+            "corrupt stored event_type: {other}"
         ))),
     }
 }
@@ -380,6 +390,29 @@ mod tests {
         let store = EventStore::new(&conn, &registry);
         let err = store.get(999).unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
+    }
+
+    #[test]
+    fn str_to_event_type_rejects_unknown_as_internal() {
+        // An `event_type` string read back from the DB that names no known
+        // variant is a data-integrity failure (the store wrote it via
+        // `event_type_to_str`, so a value that does not parse means the row is
+        // corrupt) — NOT a missing-row condition. It must map to
+        // `MemoryError::Internal`, never `MemoryError::NotFound` (#366).
+        let err = str_to_event_type("Bogus").unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+        // The message stays greppable: it carries the offending token verbatim.
+        assert!(
+            err.to_string().contains("Bogus"),
+            "message must include the offending string, got {err}"
+        );
+        assert!(
+            !matches!(err, MemoryError::NotFound(_)),
+            "an unparseable stored enum is not a NotFound condition"
+        );
     }
 
     #[test]
