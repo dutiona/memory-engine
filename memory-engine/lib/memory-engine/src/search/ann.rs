@@ -99,35 +99,43 @@ impl HnswStrategy {
         )
     }
 
-    /// Build a populated [`HnswInner`] from all active facts in `conn`.
+    /// Build a populated [`HnswInner`] from an `(fact_id, embedding)` stream.
     ///
-    /// The shared core of [`build_from_db`](Self::build_from_db) (wraps it in a fresh
-    /// `RwLock`) and [`rebuild_from_db`](Self::rebuild_from_db) (swaps it into the
-    /// existing lock) — so both produce an index with identical topology from the
-    /// same DB rows.
+    /// The single insert-loop kernel shared by every index-construction path —
+    /// [`build_inner`](Self::build_inner) (DB rows) and
+    /// [`from_snapshot`](Self::from_snapshot) (snapshot entries) — so the
+    /// dimension check, the sequential-ID invariant, and the
+    /// `index_to_fact` / `fact_to_hnsw` mapping fill can never drift between them.
+    /// Both callers supply their own source as an iterator; this owns the loop.
+    ///
+    /// `entries` yields already-deserialized embeddings: each caller is
+    /// responsible for materializing its source (DB blob decode, snapshot clone)
+    /// before handing the vector over. The kernel enforces `embedding.len() ==
+    /// embed_dim` itself, so a wrong-width entry from *either* source is rejected
+    /// identically (closing the historical divergence where only `from_snapshot`
+    /// checked the dimension).
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure, `MemoryError::Internal` if
-    /// HNSW does not assign sequential IDs starting from 0, or
-    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
-    fn build_inner(conn: &Connection, embed_dim: usize) -> Result<HnswInner> {
+    /// Returns `MemoryError::EmbeddingDimension` if any embedding has the wrong
+    /// size, or `MemoryError::Internal` if HNSW does not assign sequential IDs
+    /// starting from 0.
+    fn build_hnsw_inner(
+        entries: impl IntoIterator<Item = (i64, Vec<f32>)>,
+        embed_dim: usize,
+    ) -> Result<HnswInner> {
         let mut index = Self::new_hnsw_index();
         let mut searcher: Searcher<u32> = Searcher::default();
         let mut index_to_fact = Vec::new();
-
-        let mut stmt =
-            conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")?;
-        let rows = stmt.query_map([], |row| {
-            let id: i64 = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((id, blob))
-        })?;
-
         let mut fact_to_hnsw = HashMap::new();
-        for row in rows {
-            let (fact_id, blob) = row?;
-            let embedding = deserialize_embedding(&blob, embed_dim)?;
+
+        for (fact_id, embedding) in entries {
+            if embedding.len() != embed_dim {
+                return Err(crate::error::MemoryError::EmbeddingDimension {
+                    expected: embed_dim,
+                    actual: embedding.len(),
+                });
+            }
             let hnsw_id = index.insert(embedding, &mut searcher);
             if hnsw_id != index_to_fact.len() {
                 return Err(crate::error::MemoryError::Internal(format!(
@@ -145,6 +153,42 @@ impl HnswStrategy {
             fact_to_hnsw,
             tombstones: HashSet::new(),
         })
+    }
+
+    /// Build a populated [`HnswInner`] from all active facts in `conn`.
+    ///
+    /// The shared core of [`build_from_db`](Self::build_from_db) (wraps it in a fresh
+    /// `RwLock`) and [`rebuild_from_db`](Self::rebuild_from_db) (swaps it into the
+    /// existing lock) — so both produce an index with identical topology from the
+    /// same DB rows. Decodes each row's embedding blob, then delegates the actual
+    /// graph build to the shared [`build_hnsw_inner`](Self::build_hnsw_inner) kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure, `MemoryError::Internal` if
+    /// HNSW does not assign sequential IDs starting from 0, or
+    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
+    fn build_inner(conn: &Connection, embed_dim: usize) -> Result<HnswInner> {
+        let mut stmt =
+            conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+
+        // Decode each blob up front so the shared kernel sees a clean
+        // `(fact_id, Vec<f32>)` stream. Collecting first keeps the error
+        // handling (rusqlite row error, dimension decode) outside the kernel's
+        // infallible iterator contract.
+        let mut decoded = Vec::new();
+        for row in rows {
+            let (fact_id, blob) = row?;
+            let embedding = deserialize_embedding(&blob, embed_dim)?;
+            decoded.push((fact_id, embedding));
+        }
+
+        Self::build_hnsw_inner(decoded, embed_dim)
     }
 
     /// Build an HNSW index from all active facts in the database.
@@ -217,6 +261,11 @@ impl HnswStrategy {
     /// Reads embeddings from DB (vectors are not kept in memory). Returns
     /// compact data: only active facts, ordered by `fact_id`. On load,
     /// `from_snapshot` rebuilds a fresh compact HNSW index from this data.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure, or
+    /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     #[allow(
         clippy::unused_self,
         reason = "future versions will read self.inner metadata (e.g. ef_construction) to store in the snapshot; keeping &self avoids an API break"
@@ -248,43 +297,29 @@ impl HnswStrategy {
 
     /// Rebuild a compact HNSW index from snapshot data (no DB I/O needed).
     ///
-    /// Shares [`new_hnsw_index`](Self::new_hnsw_index) with `build_inner` for the
-    /// same seed and parameters, so a snapshot-restored index has the same
-    /// deterministic topology as a freshly-built or rebuilt one.
+    /// Delegates the insert loop to the shared
+    /// [`build_hnsw_inner`](Self::build_hnsw_inner) kernel (which also constructs the
+    /// empty index via [`new_hnsw_index`](Self::new_hnsw_index)), so a
+    /// snapshot-restored index has the same deterministic topology, the same
+    /// dimension check, and the same sequential-ID invariant as a freshly-built or
+    /// rebuilt one.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::EmbeddingDimension` if a snapshot entry's embedding has
+    /// the wrong size, or `MemoryError::Internal` if HNSW does not assign sequential
+    /// IDs starting from 0.
     pub(crate) fn from_snapshot(
         snap: &crate::engine::snapshot::HnswSnapshot,
         embed_dim: usize,
     ) -> Result<Self> {
-        let mut index = Self::new_hnsw_index();
-        let mut searcher: Searcher<u32> = Searcher::default();
-        let mut index_to_fact = Vec::new();
-        let mut fact_to_hnsw = HashMap::new();
-
-        for entry in &snap.entries {
-            if entry.embedding.len() != embed_dim {
-                return Err(crate::error::MemoryError::EmbeddingDimension {
-                    expected: embed_dim,
-                    actual: entry.embedding.len(),
-                });
-            }
-            let hnsw_id = index.insert(entry.embedding.clone(), &mut searcher);
-            if hnsw_id != index_to_fact.len() {
-                return Err(crate::error::MemoryError::Internal(format!(
-                    "HNSW index must assign sequential IDs (got {hnsw_id}, expected {})",
-                    index_to_fact.len()
-                )));
-            }
-            index_to_fact.push(entry.fact_id);
-            fact_to_hnsw.insert(entry.fact_id, hnsw_id);
-        }
+        let entries = snap
+            .entries
+            .iter()
+            .map(|entry| (entry.fact_id, entry.embedding.clone()));
 
         Ok(Self {
-            inner: RwLock::new(HnswInner {
-                index,
-                index_to_fact,
-                fact_to_hnsw,
-                tombstones: HashSet::new(),
-            }),
+            inner: RwLock::new(Self::build_hnsw_inner(entries, embed_dim)?),
             embed_dim,
         })
     }
@@ -1272,6 +1307,90 @@ mod tests {
             assert_eq!(
                 results[0].fact_id, ids[2],
                 "after rebuild, the fact swapped to e0 is the nearest"
+            );
+        }
+
+        // --- #499: to_snapshot / from_snapshot round-trip (search-equivalence) ---
+
+        #[test]
+        fn snapshot_roundtrip_preserves_search_results() {
+            // #499 (`search/testing-hnsw-snapshot-roundtrip`): the snapshot path is a
+            // cold-start optimization — `to_snapshot` dumps active embeddings, and
+            // `from_snapshot` rebuilds a fresh compact index from them with NO DB I/O.
+            // This proves the round-trip is correct end-to-end: the rebuilt index
+            // returns the SAME top-k for a probe query as the original `build_from_db`
+            // index. Both build paths now share `build_hnsw_inner`, so identical
+            // topology (same seed/params + insert order) guarantees identical results.
+            let (conn, ids) = setup_with_facts();
+            let original = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            // Probe the original index for the full top-k ordering.
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let before = original.search(&conn, &query, DIM, 3, None, None).unwrap();
+            assert_eq!(before.len(), 3, "fixture has 3 active facts");
+
+            // Round-trip: snapshot the active embeddings, then rebuild from them.
+            let snap = original.to_snapshot(&conn, DIM).unwrap();
+            assert_eq!(
+                snap.entries.len(),
+                ids.len(),
+                "snapshot must capture every active fact"
+            );
+            let restored = HnswStrategy::from_snapshot(&snap, DIM).unwrap();
+
+            // Search-equivalence: same active count + byte-identical top-k ordering
+            // AND scores. A rebuilt index that lost/reordered entries would diverge
+            // here even though both call `search` against the same live DB rows.
+            assert_eq!(
+                restored.active_count(),
+                original.active_count(),
+                "round-trip must preserve the active set size"
+            );
+            let after = restored.search(&conn, &query, DIM, 3, None, None).unwrap();
+            assert_eq!(
+                after.len(),
+                before.len(),
+                "round-trip must return the same number of results"
+            );
+            for (a, b) in after.iter().zip(before.iter()) {
+                assert_eq!(
+                    a.fact_id, b.fact_id,
+                    "round-trip must preserve the top-k ordering: {after:?} vs {before:?}"
+                );
+                assert!(
+                    (a.score - b.score).abs() < f32::EPSILON,
+                    "round-trip must preserve scores: {} vs {}",
+                    a.score,
+                    b.score
+                );
+            }
+        }
+
+        #[test]
+        fn from_snapshot_dim_mismatch_errors() {
+            // The shared `build_hnsw_inner` kernel enforces the dimension check for
+            // the snapshot path identically to the DB path: a wrong-width entry must
+            // surface `EmbeddingDimension`, not corrupt the index.
+            use crate::engine::snapshot::{HnswEntry, HnswSnapshot};
+
+            let snap = HnswSnapshot {
+                entries: vec![HnswEntry {
+                    fact_id: 1,
+                    embedding: vec![1.0_f32, 0.0], // len 2, DIM is 4
+                }],
+            };
+            // `HnswStrategy` (the `Ok` variant) has no `Debug` impl, so
+            // `unwrap_err()` is unavailable; match on the result explicitly.
+            let result = HnswStrategy::from_snapshot(&snap, DIM);
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::error::MemoryError::EmbeddingDimension {
+                        expected: 4,
+                        actual: 2
+                    })
+                ),
+                "wrong-width snapshot entry must surface EmbeddingDimension"
             );
         }
 
