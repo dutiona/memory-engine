@@ -82,11 +82,25 @@ impl MemoryGraph {
     ///
     /// No-op if the fact id is not in the graph.
     /// Used by archival after hard-deleting facts from `SQLite`.
+    ///
+    /// petgraph's [`DiGraph::remove_node`] uses swap-remove: the former last
+    /// node is relocated into the freed slot, which invalidates that node's
+    /// cached [`NodeIndex`]. This method handles that re-indexing — after the
+    /// removal it rewrites `node_map` for the displaced node so every surviving
+    /// node still resolves to its correct index. Callers may therefore remove
+    /// nodes in a loop (e.g. archival) without corrupting the map.
     pub fn remove_node(&mut self, fact_id: i64) {
         let Some(idx) = self.node_map.remove(&fact_id) else {
             return;
         };
         self.graph.remove_node(idx);
+        // Swap-remove relocated the former last node into `idx`. Its weight is
+        // the displaced fact id; rewrite its `node_map` entry to point at `idx`.
+        // `node_weight` returns `None` when the removed node *was* the last slot
+        // (no displacement), making the guard a no-op in that case.
+        if let Some(&displaced_fact_id) = self.graph.node_weight(idx) {
+            self.node_map.insert(displaced_fact_id, idx);
+        }
     }
 
     /// Remove all edges involving a given fact id (as source or target).
@@ -362,6 +376,38 @@ mod tests {
         g.remove_edge_by_id(10);
         assert_eq!(g.edge_count(), 1);
         assert!(g.neighbors(1) == vec![3]);
+    }
+
+    #[test]
+    fn remove_node_keeps_surviving_nodes_accessible() {
+        let mut g = MemoryGraph::new();
+        // Build a chain so petgraph assigns: 1→NodeIndex(0), 2→NodeIndex(1),
+        // 3→NodeIndex(2). Removing node 1 (NodeIndex(0)) makes petgraph
+        // swap-remove the last node (3, at NodeIndex(2)) into slot 0, so
+        // node_map[3] would point at the now-removed last slot without the fix.
+        g.add_edge(1, 2, make_edge_data(10, "a"));
+        g.add_edge(2, 3, make_edge_data(20, "b"));
+        assert_eq!(g.node_count(), 3);
+
+        // Remove a NON-last node to force a displacement.
+        g.remove_node(1);
+
+        // Node 1 is gone.
+        assert!(!g.has_node(1));
+        assert_eq!(g.node_count(), 2);
+
+        // The displaced node (3) and the untouched node (2) must still resolve
+        // to their correct edges/neighbors — the edge 2→3 survives.
+        assert!(g.has_node(2));
+        assert!(g.has_node(3));
+        assert_eq!(g.neighbors(2), vec![3]);
+        assert_eq!(g.degree(2), 1);
+        assert_eq!(g.degree(3), 1);
+
+        // Connectivity of the surviving component must be intact.
+        let mut comp = g.connected_component(3);
+        comp.sort_unstable();
+        assert_eq!(comp, vec![2, 3]);
     }
 
     #[test]
