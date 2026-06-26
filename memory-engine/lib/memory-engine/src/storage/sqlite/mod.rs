@@ -237,14 +237,14 @@ impl SqliteBackend {
     /// this is always `false` (brute-force).
     ///
     /// The extra guard `filter_is_hnsw_compatible` ensures the filter does not
-    /// carry predicates that HNSW's `check_fact_filters` cannot honour (pinned,
+    /// carry predicates that HNSW's batched candidate fetch cannot honour (pinned,
     /// metadata, ids, non-Active temporal). In those cases the richer brute-force
     /// SQL path is used so no result is incorrectly included or excluded.
     #[cfg(feature = "ann")]
     fn should_use_hnsw(&self, filter: &crate::storage::FactFilter) -> bool {
         use crate::storage::TemporalFilter;
         // Replication of `engine/mod.rs:379-387` + filter-compatibility guard.
-        // HNSW's `check_fact_filters` only handles:
+        // HNSW's batched candidate fetch only handles:
         //   t_expired IS NULL  +  fact_type  +  scope_ids
         // Any extra dimension (pinned, metadata, ids, non-Active temporal) must
         // fall through to the full brute-force SQL path.

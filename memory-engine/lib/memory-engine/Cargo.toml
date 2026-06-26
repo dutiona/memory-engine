@@ -47,6 +47,11 @@ deadpool-postgres = { version = "0.14", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+# `trace`: additive, zero-runtime-cost rusqlite feature (compiles in
+# `Connection::trace`); used ONLY by the ANN batched-fetch round-trip count test
+# (#288/#362). Cargo feature-unifies this dev entry into the test build only, so
+# the shipped library (and crates linking it) never enables `trace`. No new crates.
+rusqlite = { version = "0.34", features = ["trace"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1", features = ["yaml", "redactions"] }

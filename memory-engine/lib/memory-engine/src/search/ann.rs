@@ -350,17 +350,32 @@ impl VectorSearchStrategy for HnswStrategy {
                 cands
             }; // Read lock released here
 
-            // Phase 2: Post-filter and exact-score ALL candidates via DB
+            // Phase 2: Post-filter + exact-score ALL candidates in ONE batched
+            // query (#288/#362). The old per-candidate `check_fact_filters` +
+            // `load_embedding` pair issued 2N round-trips; a single query over the
+            // candidate id set returns only the surviving rows (passing the SAME
+            // expiry/fact_type/scope predicates) with their embeddings.
+            let surviving = fetch_candidate_embeddings(
+                conn,
+                &candidates,
+                fact_type,
+                scope_ids,
+                self.embed_dim,
+            )?;
+
             results.clear();
-            results.reserve(candidates.len());
-            for fact_id in candidates {
-                let passes = check_fact_filters(conn, fact_id, fact_type, scope_ids)?;
-                if !passes {
-                    continue;
+            results.reserve(surviving.len());
+            // Iterate `candidates` in HNSW-neighbor order so the pre-sort order is
+            // identical to the old per-candidate loop (the final `sort_by` is
+            // stable, so this preserves equal-score tie-breaking exactly).
+            for fact_id in &candidates {
+                if let Some(stored_emb) = surviving.get(fact_id) {
+                    let score = crate::search::cosine_similarity(query_embedding, stored_emb);
+                    results.push(VectorResult {
+                        fact_id: *fact_id,
+                        score,
+                    });
                 }
-                let stored_emb = load_embedding(conn, fact_id, self.embed_dim)?;
-                let score = crate::search::cosine_similarity(query_embedding, &stored_emb);
-                results.push(VectorResult { fact_id, score });
             }
 
             if results.len() >= limit {
@@ -484,38 +499,70 @@ impl VectorSearchStrategy for HnswStrategy {
     }
 }
 
-fn check_fact_filters(
+/// Fetch the embeddings of all `candidate_ids` that survive the HNSW post-filters
+/// (active + `fact_type` + scope), in a **single** batched query (#288/#362).
+///
+/// Replaces the old per-candidate `check_fact_filters` (EXISTS) + `load_embedding`
+/// (SELECT embedding) pair, which issued two round-trips per candidate — a `2N`
+/// N+1 pattern across up to [`MAX_WIDEN_ATTEMPTS`] widening passes. The predicates
+/// are byte-for-byte the same ones those two helpers enforced:
+///
+/// - `t_expired IS NULL` (active only),
+/// - `?2 IS NULL OR fact_type = ?2` (optional `fact_type` filter),
+/// - `?3 IS NULL OR scope_id IN (json_each(?3))` (optional scope filter).
+///
+/// The candidate id list is passed as a JSON array expanded via `json_each` — the
+/// same binding technique the scope filter already uses, so a large candidate set
+/// is one parameter, not `N` placeholders. Rows not matching the filters (or absent
+/// — e.g. a stale HNSW graph entry whose fact was expired) are simply omitted from
+/// the returned map, so the caller drops them exactly as the old EXISTS check did.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Database` on query failure, `MemoryError::Serialization`
+/// if the id/scope JSON cannot be built, or `MemoryError::EmbeddingDimension` if a
+/// stored embedding has the wrong width.
+fn fetch_candidate_embeddings(
     conn: &Connection,
-    fact_id: i64,
+    candidate_ids: &[i64],
     fact_type: Option<&FactType>,
     scope_ids: Option<&[i64]>,
-) -> Result<bool> {
+    embed_dim: usize,
+) -> Result<HashMap<i64, Vec<f32>>> {
     use crate::search::serialize_scope_ids;
     use crate::store::facts::fact_type_to_str;
 
+    if candidate_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let ids_json =
+        serde_json::to_string(candidate_ids).map_err(crate::error::MemoryError::Serialization)?;
     let scope_json = serialize_scope_ids(scope_ids)?;
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM facts
-            WHERE id = ?1
-            AND t_expired IS NULL
-            AND (?2 IS NULL OR fact_type = ?2)
-            AND (?3 IS NULL OR scope_id IN (SELECT value FROM json_each(?3)))
-        )",
-        rusqlite::params![fact_id, fact_type.map(fact_type_to_str), scope_json,],
-        |row| row.get(0),
+
+    let mut stmt = conn.prepare(
+        "SELECT id, embedding FROM facts
+         WHERE id IN (SELECT value FROM json_each(?1))
+           AND t_expired IS NULL
+           AND (?2 IS NULL OR fact_type = ?2)
+           AND (?3 IS NULL OR scope_id IN (SELECT value FROM json_each(?3)))",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![ids_json, fact_type.map(fact_type_to_str), scope_json],
+        |row| {
+            let id: i64 = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        },
     )?;
 
-    Ok(exists)
-}
-
-fn load_embedding(conn: &Connection, fact_id: i64, embed_dim: usize) -> Result<Vec<f32>> {
-    let blob: Vec<u8> = conn.query_row(
-        "SELECT embedding FROM facts WHERE id = ?1",
-        [fact_id],
-        |row| row.get(0),
-    )?;
-    deserialize_embedding(&blob, embed_dim)
+    let mut out = HashMap::with_capacity(candidate_ids.len());
+    for row in rows {
+        let (fact_id, blob) = row?;
+        let embedding = deserialize_embedding(&blob, embed_dim)?;
+        out.insert(fact_id, embedding);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -817,13 +864,300 @@ mod tests {
         }
 
         #[test]
+        #[allow(
+            clippy::too_many_lines,
+            reason = "exhaustive filter-matrix test: 5 fixture facts (one per excluded \
+                      dimension) + per-result score verification; splitting would scatter \
+                      the single behavioral assertion"
+        )]
+        fn hnsw_strategy_batched_fetch_respects_filters_and_expiry() {
+            // #288 / #362: Phase 2 now fetches all surviving candidates in ONE
+            // batched query per widening attempt (was 2 round-trips per candidate).
+            // This proves the batched path preserves the exact filter semantics the
+            // old per-candidate `check_fact_filters` + `load_embedding` pair enforced:
+            // (a) fact_type filter, (b) scope filter, (c) expiry exclusion, and that
+            // the scores match an independent cosine computation.
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            let store = FactStore::new(&conn, DIM);
+
+            // scope 1 (root) exists by default; create scope 2 for the wrong-scope fact
+            // (facts.scope_id has a FK to scopes.id).
+            let scope_store = crate::store::scopes::ScopeStore::new(&conn);
+            let scope2 = scope_store.insert(1, "other", 1).unwrap().id;
+
+            let make =
+                |content: &str, emb: Vec<f32>, ft: FactType, scope: i64, expired: bool| -> i64 {
+                    let fact = NewFact {
+                        content: content.into(),
+                        content_hash: String::new(),
+                        embedding: emb,
+                        fact_type: ft,
+                        t_created: Utc::now(),
+                        t_expired: if expired { Some(Utc::now()) } else { None },
+                        t_valid: None,
+                        t_invalid: None,
+                        source_event_id: None,
+                        scope_id: scope,
+                        base_importance: 0.5,
+                        access_count: 0,
+                        last_accessed: Utc::now(),
+                        metadata: serde_json::json!({}),
+                        is_pinned: false,
+                    };
+                    store.insert(&fact).unwrap()
+                };
+
+            // Near-query semantic facts in scope 1 (the wanted matches).
+            let near_a = make(
+                "near a",
+                vec![1.0, 0.0, 0.0, 0.0],
+                FactType::Semantic,
+                1,
+                false,
+            );
+            let near_b = make(
+                "near b",
+                vec![0.9, 0.1, 0.0, 0.0],
+                FactType::Semantic,
+                1,
+                false,
+            );
+            // Same scope/type but must be filtered OUT by expiry.
+            let expired = make(
+                "expired",
+                vec![0.95, 0.05, 0.0, 0.0],
+                FactType::Semantic,
+                1,
+                true,
+            );
+            // Wrong fact_type — excluded by the fact_type filter.
+            let wrong_type = make(
+                "wrong type",
+                vec![0.98, 0.02, 0.0, 0.0],
+                FactType::Episodic,
+                1,
+                false,
+            );
+            // Wrong scope — excluded by the scope filter.
+            let wrong_scope = make(
+                "wrong scope",
+                vec![0.97, 0.03, 0.0, 0.0],
+                FactType::Semantic,
+                scope2,
+                false,
+            );
+
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+            // The HNSW build scans `t_expired IS NULL`, so `expired` was never indexed;
+            // re-insert its (still-active-in-graph) embedding so a stale graph entry
+            // could surface it — the batched query's `t_expired IS NULL` must still drop it.
+            strategy
+                .notify_insert(expired, &[0.95_f32, 0.05, 0.0, 0.0])
+                .unwrap();
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy
+                .search(&conn, &query, DIM, 2, Some(&FactType::Semantic), Some(&[1]))
+                .unwrap();
+
+            let found: Vec<i64> = results.iter().map(|r| r.fact_id).collect();
+            assert!(
+                found.contains(&near_a) && found.contains(&near_b),
+                "both in-scope, in-type, active facts must be returned, got {found:?}"
+            );
+            assert!(
+                !found.contains(&expired),
+                "expired fact must be excluded by t_expired IS NULL"
+            );
+            assert!(
+                !found.contains(&wrong_type),
+                "wrong fact_type must be excluded by the fact_type filter"
+            );
+            assert!(
+                !found.contains(&wrong_scope),
+                "wrong scope must be excluded by the scope filter"
+            );
+
+            // Scores must equal an independent cosine computation over the stored vector.
+            for r in &results {
+                let blob: Vec<u8> = conn
+                    .query_row(
+                        "SELECT embedding FROM facts WHERE id = ?1",
+                        [r.fact_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let emb = deserialize_embedding(&blob, DIM).unwrap();
+                let expected = crate::search::cosine_similarity(&query, &emb);
+                assert!(
+                    (r.score - expected).abs() < f32::EPSILON,
+                    "score for {} must match cosine, got {} expected {expected}",
+                    r.fact_id,
+                    r.score
+                );
+            }
+        }
+
+        #[test]
+        fn hnsw_strategy_one_batched_query_per_widening_attempt() {
+            // #288 / #362: the batched candidate fetch must issue exactly ONE
+            // candidate query (the `json_each` batch) per widening attempt — never
+            // 2N per-candidate round-trips. We trace SQL statements during `search`
+            // and count those that touch the batch query (identified by `json_each`).
+            use rusqlite::trace::{TraceEvent, TraceEventCodes};
+            use std::cell::Cell;
+
+            // `trace_v2` takes a bare `fn` pointer (no captures), so the counter
+            // lives in a thread-local the callback bumps. Single-threaded test.
+            thread_local! {
+                static BATCH_QUERIES: Cell<usize> = const { Cell::new(0) };
+            }
+            #[allow(
+                clippy::needless_pass_by_value,
+                reason = "signature is fixed by `Connection::trace_v2`, which takes a \
+                          bare `fn(TraceEvent)` — a reference param would not match"
+            )]
+            fn on_stmt(ev: TraceEvent<'_>) {
+                if let TraceEvent::Stmt(_, sql) = ev
+                    && sql.contains("json_each")
+                {
+                    BATCH_QUERIES.with(|c| c.set(c.get() + 1));
+                }
+            }
+
+            let (conn, _ids) = setup_with_facts();
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            BATCH_QUERIES.with(|c| c.set(0));
+            conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(on_stmt));
+
+            // A request the index can satisfy without widening: limit 2 over 3 facts,
+            // no filters → first attempt yields >= limit, loop breaks after one pass.
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy.search(&conn, &query, DIM, 2, None, None).unwrap();
+
+            conn.trace_v2(TraceEventCodes::empty(), None);
+            assert_eq!(results.len(), 2, "search must satisfy the request");
+            assert_eq!(
+                BATCH_QUERIES.with(Cell::get),
+                1,
+                "exactly one batched candidate query per widening attempt (1 attempt here)"
+            );
+        }
+
+        #[test]
+        fn hnsw_strategy_one_batched_query_per_widening_attempt_forces_widening() {
+            // #288 / #362, INFO coverage: the previous test only exercises the
+            // single-attempt path, so it cannot distinguish "one query per attempt"
+            // from "one query total". Here we build a fixture that FORCES the widen
+            // loop to take a second attempt and assert the batch-query count tracks
+            // attempts (2 attempts → 2 batched queries), proving the per-attempt
+            // invariant rather than the by-construction single-attempt case.
+            //
+            // Construction: the `OVERFETCH_FACTOR * limit` candidates HNSW returns on
+            // the first attempt are all `Procedural` (filtered out by the `Semantic`
+            // query), so attempt 1 underfills (0 < 1) and the loop widens; the wider
+            // overfetch on attempt 2 reaches a farther `Semantic` fact that survives.
+            // (We filter on `fact_type` rather than `scope_id` to avoid seeding a
+            // second scope row — `init_schema` only provides the default scope 1.)
+            use rusqlite::trace::{TraceEvent, TraceEventCodes};
+            use std::cell::Cell;
+
+            thread_local! {
+                static BATCH_QUERIES: Cell<usize> = const { Cell::new(0) };
+            }
+            #[allow(
+                clippy::needless_pass_by_value,
+                reason = "signature is fixed by `Connection::trace_v2`, which takes a \
+                          bare `fn(TraceEvent)` — a reference param would not match"
+            )]
+            fn on_stmt(ev: TraceEvent<'_>) {
+                if let TraceEvent::Stmt(_, sql) = ev
+                    && sql.contains("json_each")
+                {
+                    BATCH_QUERIES.with(|c| c.set(c.get() + 1));
+                }
+            }
+
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            let store = FactStore::new(&conn, DIM);
+
+            // Helper: insert a fact at `emb` of `fact_type`, returning its id.
+            let insert = |emb: Vec<f32>, fact_type: FactType| -> i64 {
+                let fact = NewFact {
+                    content: "fact".into(),
+                    content_hash: String::new(),
+                    embedding: emb,
+                    fact_type,
+                    t_created: Utc::now(),
+                    t_expired: None,
+                    t_valid: None,
+                    t_invalid: None,
+                    source_event_id: None,
+                    scope_id: 1,
+                    base_importance: 0.5,
+                    access_count: 0,
+                    last_accessed: Utc::now(),
+                    metadata: serde_json::json!({}),
+                    is_pinned: false,
+                };
+                store.insert(&fact).unwrap()
+            };
+
+            // Query is [1,0,0,0]. `limit = 1` → first overfetch = OVERFETCH_FACTOR = 3.
+            // The 3 nearest facts are `Procedural` (excluded by the `Semantic` query);
+            // a 4th, farther fact is the only `Semantic` match, reachable only once
+            // overfetch widens to >= 4. We seed > OVERFETCH_FACTOR `Procedural` facts so
+            // the first attempt's candidate window is entirely `Procedural` and
+            // genuinely underfills the `Semantic` request.
+            let procedural_near = vec![
+                vec![1.0_f32, 0.0, 0.0, 0.0],
+                vec![0.99_f32, 0.01, 0.0, 0.0],
+                vec![0.98_f32, 0.02, 0.0, 0.0],
+                vec![0.97_f32, 0.03, 0.0, 0.0],
+            ];
+            for emb in procedural_near {
+                insert(emb, FactType::Procedural);
+            }
+            // The lone `Semantic` match: farther than every `Procedural` fact, so HNSW
+            // only surfaces it after the overfetch window widens on the second attempt.
+            let semantic_id = insert(vec![0.0_f32, 1.0, 0.0, 0.0], FactType::Semantic);
+
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            BATCH_QUERIES.with(|c| c.set(0));
+            conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(on_stmt));
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy
+                .search(&conn, &query, DIM, 1, Some(&FactType::Semantic), None)
+                .unwrap();
+
+            conn.trace_v2(TraceEventCodes::empty(), None);
+
+            assert_eq!(results.len(), 1, "the lone `Semantic` fact must be found");
+            assert_eq!(
+                results[0].fact_id, semantic_id,
+                "the surviving result is the `Semantic` fact, reached only after widening"
+            );
+            assert_eq!(
+                BATCH_QUERIES.with(Cell::get),
+                2,
+                "two widening attempts must issue exactly two batched candidate \
+                 queries — one per attempt, never 2N per-candidate round-trips"
+            );
+        }
+
+        #[test]
         fn hnsw_strategy_notify_expire_excludes_from_results() {
             let (conn, ids) = setup_with_facts();
             let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
 
             // Tombstone in HNSW index
             strategy.notify_expire(ids[0]);
-            // Also expire in DB so check_fact_filters excludes it
+            // Also expire in DB so the batched candidate fetch excludes it
             conn.execute(
                 "UPDATE facts SET t_expired = datetime('now') WHERE id = ?1",
                 [ids[0]],
