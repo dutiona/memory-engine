@@ -17,7 +17,7 @@ TS = "2026-06-01"
 ROOT = subprocess.check_output(
     ["git", "rev-parse", "--show-toplevel"], text=True
 ).strip()
-RUN = f"{ROOT}/qa/super-qa/runs/{TS}"
+RUN = f"{ROOT}/utils/qa/super-qa/runs/{TS}"
 ded = json.load(open(f"{RUN}/consolidated.json"))
 SEV = ["blocker", "critical", "high", "medium", "low", "info"]
 

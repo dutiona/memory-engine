@@ -7,13 +7,13 @@ Versioned record of `/super-qa` codebase-audit rounds, kept so future rounds can
 ## Layout
 
 ```
-qa/super-qa/
+utils/qa/super-qa/
 ├── README.md                       # this file
 ├── scripts/
 │   ├── stats.py                    # stats over any run's consolidated.json   (reusable)
 │   ├── diff.py                     # heuristic diff between two runs           (reusable)
 │   ├── gen_manifest.py             # consolidated.json -> GitHub issue manifest (as-run; dupe-map is run-specific)
-│   └── file_issues.sh              # manifest -> GitHub issues (idempotent; reuses scripts/github-pm/lib.sh)
+│   └── file_issues.sh              # manifest -> GitHub issues (idempotent; reuses utils/scripts/github-pm/lib.sh)
 └── runs/
     ├── 2026-03-22/                 # prior round (findings only)
     └── 2026-06-01/                 # this round
@@ -68,7 +68,7 @@ tunes strictness. (The 2026-03-22 round predates `consolidated.json`; it only ha
   each round (the auto-heuristic under-matches; manual review of candidates wins).
 
 `file_issues.sh` (idempotent, resumable; `DRY=1` to preview) creates/links via the
-repo's own `scripts/github-pm/lib.sh` (`subissue_link` = native `addSubIssue`,
+repo's own `utils/scripts/github-pm/lib.sh` (`subissue_link` = native `addSubIssue`,
 query-first so reruns are no-ops). State lives in `issue_state.json`
 (`key -> issue#`); override inputs with `RUN_DIR` / `MANIFEST` / `STATE` env.
 Phases: `labels | epics | findings | dupes | observers | relabel | all`.
