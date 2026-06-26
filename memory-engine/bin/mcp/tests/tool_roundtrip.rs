@@ -957,7 +957,7 @@ async fn unknown_tool_returns_error() {
 /// useless below them). Uniqueness (no duplicate names, hence no silent gaps from
 /// a copy-paste collision) is covered by `all_tool_definitions_have_unique_names`.
 #[test]
-fn all_tool_definitions_are_unique_and_nonempty() {
+fn all_tool_definitions_meet_p0_floor() {
     /// P0 floor: the minimum viable tool set the MCP server must expose.
     const P0_FLOOR: usize = 10;
     let defs = tools::all_tool_definitions();
