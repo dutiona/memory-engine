@@ -79,3 +79,10 @@ path = "fuzz_targets/embed_parse_response.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fts_query"
+path = "fuzz_targets/fts_query.rs"
+test = false
+doc = false
+bench = false
