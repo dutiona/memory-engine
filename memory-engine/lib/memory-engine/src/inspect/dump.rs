@@ -5,6 +5,8 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use serde::Serialize;
+use serde::Serializer as _;
+use serde::ser::SerializeMap as _;
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::inspect::types::{EmbeddingSpaceSnapshot, FactVectorSnapshot};
@@ -18,10 +20,22 @@ use crate::store::scopes::ScopeStore;
 use crate::store::summaries::SummaryStore;
 
 /// Build a sibling temporary path for atomic write-then-rename.
-fn tmp_path(path: &Path) -> std::path::PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
+///
+/// # Errors
+///
+/// Returns [`MemoryError::Internal`] if `path` has no final component — i.e.
+/// `Path::file_name()` is `None`, which happens for the root `/`, `..`, and `.`
+/// (a trailing slash is normalized away, so `/var/data/` still reports `data`).
+/// Falling back to an empty file name in that case would silently produce a
+/// `.tmp` sibling in the *parent* directory rather than next to the intended
+/// target, breaking the atomic write-then-rename invariant.
+fn tmp_path(path: &Path) -> Result<std::path::PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        MemoryError::Internal(format!("dump path has no file name: {}", path.display()))
+    })?;
+    let mut name = name.to_os_string();
     name.push(".tmp");
-    path.with_file_name(name)
+    Ok(path.with_file_name(name))
 }
 
 /// Create (or truncate) the dump's temporary write target, refusing to follow a
@@ -124,41 +138,9 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    // Scalar header fields.
-    //
-    // INVARIANT: `embed_dim` MUST stay among these leading scalar fields, before
-    // the streamed collections below. `memory-engine-cli`'s `import` peeks it from
-    // the head of the snapshot under a small byte cap (`peek_embed_dim_from_reader`)
-    // to auto-detect the dimension; moving `embed_dim` after `facts`/`edges`/… would
-    // push it past that cap and silently break auto-detection on large snapshots.
-    write!(
-        writer,
-        r#"{{"schema_version":{schema_version},"storage_epoch":{storage_epoch},"embed_dim":{embed_dim}"#
-    )?;
-
-    // Stream each collection row-by-row
-
-    write!(writer, r#","facts":"#)?;
-    stream_for_each(writer, |cb| FactStore::new(conn, embed_dim).for_each(cb))?;
-
-    write!(writer, r#","edges":"#)?;
-    stream_for_each(writer, |cb| EdgeStore::new(conn).for_each(cb))?;
-
-    write!(writer, r#","summaries":"#)?;
-    stream_for_each(writer, |cb| SummaryStore::new(conn, embed_dim).for_each(cb))?;
-
-    write!(writer, r#","scopes":"#)?;
-    stream_for_each(writer, |cb| ScopeStore::new(conn).for_each(cb))?;
-
-    write!(writer, r#","events":"#)?;
-    stream_for_each(writer, |cb| EventStore::new(conn, &registry).for_each(cb))?;
-
-    write!(writer, r#","lineage":"#)?;
-    stream_for_each(writer, |cb| LineageStore::new(conn).for_each(cb))?;
-
     // Embedding-space registry (#622): the identity left the `config` table for its own
     // table, so dump it explicitly or a restore would come up with no identity. Always
-    // small (one active row today).
+    // small (one active row today), so materialize it directly.
     let spaces: Vec<EmbeddingSpaceSnapshot> = crate::store::embedding_spaces::list_spaces(conn)?
         .into_iter()
         .map(|s| EmbeddingSpaceSnapshot {
@@ -167,57 +149,169 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
             fingerprint: s.fingerprint,
         })
         .collect();
-    write!(writer, r#","embedding_spaces":"#)?;
-    serde_json::to_writer(&mut *writer, &spaces)?;
+
+    // Config is always small — materialize directly.
+    let config = list_config(conn)?;
+
+    // Serialize the whole snapshot object through serde's `SerializeMap` rather
+    // than hand-assembling JSON braces and field names. Field names and ordering
+    // now track [`EngineSnapshot`]'s serde representation by construction: each
+    // `serialize_entry` key below mirrors a field there, so a rename/reorder of
+    // the struct that drifts from this writer is caught here, not only by the
+    // `streaming_output_matches_snapshot_schema` round-trip test.
+    //
+    // The collections are serialized row-by-row via [`SeqStreamer`] adapters, so
+    // peak memory stays O(1) per collection — the same streaming guarantee the
+    // previous `write!`/`stream_for_each` code provided.
+    //
+    // INVARIANT: the three leading scalar entries (`schema_version`,
+    // `storage_epoch`, `embed_dim`) MUST stay first, in this order, before the
+    // streamed collections. `memory-engine-cli`'s `import` peeks `embed_dim` from
+    // the head of the snapshot under a small byte cap (`peek_embed_dim_from_reader`)
+    // to auto-detect the dimension; moving `embed_dim` after `facts`/`edges`/…
+    // would push it past that cap and silently break auto-detection on large
+    // snapshots. A `SerializeMap` refactor must preserve this entry ORDER, not just
+    // the names.
+    let mut ser = serde_json::Serializer::new(&mut *writer);
+    let mut map = ser.serialize_map(None)?;
+
+    map.serialize_entry("schema_version", &schema_version)?;
+    map.serialize_entry("storage_epoch", &storage_epoch)?;
+    map.serialize_entry("embed_dim", &embed_dim)?;
+
+    map.serialize_entry(
+        "facts",
+        &SeqStreamer::new(|cb| FactStore::new(conn, embed_dim).for_each(cb)),
+    )?;
+    map.serialize_entry(
+        "edges",
+        &SeqStreamer::new(|cb| EdgeStore::new(conn).for_each(cb)),
+    )?;
+    map.serialize_entry(
+        "summaries",
+        &SeqStreamer::new(|cb| SummaryStore::new(conn, embed_dim).for_each(cb)),
+    )?;
+    map.serialize_entry(
+        "scopes",
+        &SeqStreamer::new(|cb| ScopeStore::new(conn).for_each(cb)),
+    )?;
+    map.serialize_entry(
+        "events",
+        &SeqStreamer::new(|cb| EventStore::new(conn, &registry).for_each(cb)),
+    )?;
+    map.serialize_entry(
+        "lineage",
+        &SeqStreamer::new(|cb| LineageStore::new(conn).for_each(cb)),
+    )?;
+
+    map.serialize_entry("embedding_spaces", &spaces)?;
 
     // fact_vectors (#623): the non-active spaces' per-fact vectors (a populating
     // space mid-reconstruction, or a deprecated space retained for rollback).
     // Streamed row-by-row — a deprecated space holds one vector per fact, so this
     // can be O(N). The active vectors are already in `facts[].embedding`.
-    write!(writer, r#","fact_vectors":"#)?;
-    stream_for_each(writer, |mut cb| {
-        crate::store::fact_vectors::for_each(conn, embed_dim, |fact_id, space_id, embedding| {
-            cb(FactVectorSnapshot {
-                fact_id,
-                space_id,
-                embedding,
+    map.serialize_entry(
+        "fact_vectors",
+        &SeqStreamer::new(|mut cb| {
+            crate::store::fact_vectors::for_each(conn, embed_dim, |fact_id, space_id, embedding| {
+                cb(FactVectorSnapshot {
+                    fact_id,
+                    space_id,
+                    embedding,
+                })
             })
-        })
-    })?;
+        }),
+    )?;
 
-    // Config is always small — serialize directly.
-    let config = list_config(conn)?;
-    write!(writer, r#","config":"#)?;
-    serde_json::to_writer(&mut *writer, &config)?;
+    map.serialize_entry("config", &config)?;
 
-    write!(writer, "}}")?;
+    map.end()?;
+
     writer.flush()?;
     Ok(())
 }
 
-/// Write a JSON array by streaming entities through a `for_each`-style callback.
+/// A [`Serialize`] adapter that streams a JSON array out of a `for_each`-style
+/// callback without materializing the whole collection.
 ///
-/// `iterate` must call the provided closure once per entity.  Each entity is
-/// serialized to the writer immediately, then dropped — only one `T` is live
-/// at a time.
-fn stream_for_each<W, T, F>(writer: &mut W, iterate: F) -> Result<()>
+/// `iterate` is invoked once during serialization; it must call the closure it
+/// is handed exactly once per entity. Each entity is serialized into the
+/// sequence immediately and then dropped, so only one `T` is live at a time —
+/// preserving the O(1)-per-collection peak-memory guarantee of the snapshot
+/// dump.
+///
+/// # Error bridging
+///
+/// The store callbacks fail with [`MemoryError`], whereas serde's sequence API
+/// fails with the serializer's own `S::Error`. The two are reconciled inside
+/// [`Serialize::serialize`]: a serde element error is stashed and re-raised as
+/// the true cause, and a store/DB error is funneled through
+/// [`serde::ser::Error::custom`].
+struct SeqStreamer<T, F> {
+    iterate: std::cell::RefCell<Option<F>>,
+    _item: std::marker::PhantomData<fn(T)>,
+}
+
+impl<T, F> SeqStreamer<T, F>
 where
-    W: Write,
+    F: FnOnce(Box<dyn FnMut(T) -> Result<()> + '_>) -> Result<()>,
+{
+    fn new(iterate: F) -> Self {
+        Self {
+            iterate: std::cell::RefCell::new(Some(iterate)),
+            _item: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T, F> Serialize for SeqStreamer<T, F>
+where
     T: Serialize,
     F: FnOnce(Box<dyn FnMut(T) -> Result<()> + '_>) -> Result<()>,
 {
-    writer.write_all(b"[")?;
-    let mut first = true;
-    iterate(Box::new(|item: T| {
-        if !first {
-            writer.write_all(b",")?;
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error as _;
+        use serde::ser::SerializeSeq as _;
+
+        // `serialize` takes `&self`, but the `FnOnce` consumer must be moved out;
+        // serde calls `serialize` exactly once per value, so the `Option` is
+        // always `Some` here.
+        let iterate = self
+            .iterate
+            .borrow_mut()
+            .take()
+            .expect("SeqStreamer::serialize is called exactly once by serde");
+
+        let mut seq = serializer.serialize_seq(None)?;
+
+        // Stash any serde element error so it can be re-raised as the real cause
+        // after `iterate` is aborted via the sentinel `MemoryError` below.
+        let mut ser_err: Option<S::Error> = None;
+        let iter_result = iterate(Box::new(|item: T| {
+            if let Err(e) = seq.serialize_element(&item) {
+                ser_err = Some(e);
+                // Abort `for_each` early; the value is a placeholder — the real
+                // error is the captured `ser_err`.
+                return Err(MemoryError::Internal(
+                    "snapshot element serialization failed".to_string(),
+                ));
+            }
+            Ok(())
+        }));
+
+        if let Some(e) = ser_err {
+            // A serde serialization error: surface the true serializer error.
+            return Err(e);
         }
-        first = false;
-        serde_json::to_writer(&mut *writer, &item)?;
-        Ok(())
-    }))?;
-    writer.write_all(b"]")?;
-    Ok(())
+        // Otherwise a genuine store/DB error (or success). Funnel a store error
+        // through serde's error type.
+        iter_result.map_err(S::Error::custom)?;
+
+        seq.end()
+    }
 }
 
 /// Dump engine state to a JSON file.
@@ -231,7 +325,7 @@ where
 /// [`MemoryError::Io`] on filesystem failure, or
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let tmp = tmp_path(path);
+    let tmp = tmp_path(path)?;
     let file = create_dump_tmp(&tmp)?;
     let mut buf = BufWriter::new(file);
     match stream_snapshot(conn, embed_dim, &mut buf) {
@@ -255,7 +349,7 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-gzip")]
 pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let tmp = tmp_path(path);
+    let tmp = tmp_path(path)?;
     let file = create_dump_tmp(&tmp)?;
     let mut encoder =
         flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::default());
@@ -281,7 +375,7 @@ pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-zstd")]
 pub fn dump_json_zstd(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
-    let tmp = tmp_path(path);
+    let tmp = tmp_path(path)?;
     let file = create_dump_tmp(&tmp)?;
     let mut encoder = zstd::Encoder::new(BufWriter::new(file), zstd::DEFAULT_COMPRESSION_LEVEL)?;
     match stream_snapshot(conn, embed_dim, &mut encoder) {
@@ -725,6 +819,79 @@ mod tests {
         );
     }
 
+    /// `tmp_path` must build a `.tmp` sibling next to a normal target path.
+    #[test]
+    fn tmp_path_builds_sibling_for_normal_path() {
+        let p = Path::new("/var/data/dump.json");
+        let tmp = tmp_path(p).unwrap();
+        assert_eq!(tmp, Path::new("/var/data/dump.json.tmp"));
+    }
+
+    /// `tmp_path` must reject paths with no final component instead of silently
+    /// degrading to a `.tmp` file in the parent directory (which would break the
+    /// atomic write-then-rename invariant). The paths that yield
+    /// `Path::file_name() == None` are the root `/`, `..`, and `.` (Rust
+    /// normalizes a trailing slash away, so `/var/data/` still reports `data`).
+    #[test]
+    fn tmp_path_rejects_paths_without_file_name() {
+        for raw in ["/", "..", "."] {
+            let result = tmp_path(Path::new(raw));
+            assert!(
+                matches!(result, Err(MemoryError::Internal(_))),
+                "path {raw:?} with no file name must be rejected, got {result:?}"
+            );
+        }
+    }
+
+    /// Issue #352 invariant: `embed_dim` must appear as a leading scalar in the
+    /// streamed header, before the large streamed collections, so the CLI's
+    /// byte-capped `peek_embed_dim_from_reader` can find it. After the move to a
+    /// `serialize_map`-based writer, assert both that the first three keys are the
+    /// expected scalars in order AND that `embed_dim` sits within a tiny byte cap.
+    #[tokio::test]
+    async fn streaming_header_keeps_embed_dim_leading() {
+        use crate::store::schema::{init_schema, migrate, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+
+        let sv = text
+            .find("\"schema_version\"")
+            .expect("schema_version present");
+        let se = text
+            .find("\"storage_epoch\"")
+            .expect("storage_epoch present");
+        let ed = text.find("\"embed_dim\"").expect("embed_dim present");
+        let facts = text.find("\"facts\"").expect("facts present");
+
+        assert!(
+            sv < se && se < ed && ed < facts,
+            "header field order must be schema_version < storage_epoch < embed_dim < facts; \
+             got sv={sv} se={se} ed={ed} facts={facts} in: {head}",
+            head = &text[..text.len().min(120)]
+        );
+
+        // The object must literally begin with `schema_version`.
+        assert!(
+            text.starts_with(r#"{"schema_version":"#),
+            "snapshot must begin with schema_version, got: {head}",
+            head = &text[..text.len().min(80)]
+        );
+
+        // Defense-in-depth against the CLI byte cap: `embed_dim` must sit well
+        // within the first 64 bytes for an empty DB (its real-world position is
+        // fixed regardless of collection size since it precedes them).
+        assert!(
+            ed < 64,
+            "embed_dim must stay near the head (byte {ed}); the CLI peek caps its scan"
+        );
+    }
+
     /// A symlink resolving to a directory must also be refused — `is_dir()`
     /// follows the link, so the guard is not bypassed by indirection.
     #[cfg(unix)]
@@ -771,7 +938,7 @@ mod tests {
         // must not be tricked into overwriting.
         let victim = dir.path().join("victim.txt");
         std::fs::write(&victim, b"do not clobber").unwrap();
-        let tmp = tmp_path(&target);
+        let tmp = tmp_path(&target).unwrap();
         std::os::unix::fs::symlink(&victim, &tmp).unwrap();
 
         let result = dump_json(&conn, DIM, &target);
