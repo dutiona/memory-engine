@@ -79,14 +79,23 @@ impl<'a> EdgeStore<'a> {
 
     /// Expire an edge (soft-delete).
     ///
+    /// Idempotency guard (`t_expired IS NULL`): only an active edge is affected,
+    /// so a successful `Ok(())` always means *this* call transitioned an active
+    /// edge to expired. Mirrors [`FactStore::expire`](crate::store::facts::FactStore::expire).
+    ///
     /// # Errors
     ///
+    /// Returns `MemoryError::NotFound` if no active edge with `id` exists (the id
+    /// is unknown, or the edge was already expired) — the UPDATE affected 0 rows.
     /// Returns `MemoryError::Database` on SQL failure.
     pub fn expire(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
-        self.conn.execute(
-            "UPDATE edges SET t_expired = ?1 WHERE id = ?2",
+        let changed = self.conn.execute(
+            "UPDATE edges SET t_expired = ?1 WHERE id = ?2 AND t_expired IS NULL",
             params![now.to_rfc3339(), id],
         )?;
+        if changed == 0 {
+            return Err(MemoryError::NotFound(format!("edge {id}")));
+        }
         Ok(())
     }
 
@@ -396,6 +405,41 @@ mod tests {
         store.expire(id, Utc::now()).unwrap();
         let got = store.get(id).unwrap();
         assert!(got.t_expired.is_some());
+    }
+
+    #[test]
+    fn expire_nonexistent_edge_is_not_found() {
+        // #330: expiring an id that matches no row is an error, not a silent
+        // no-op. `Ok(())` must mean an edge was actually expired — mirroring
+        // `FactStore::expire`'s rows-affected contract.
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+        let err = store
+            .expire(9999, Utc::now())
+            .expect_err("expiring a nonexistent edge id must return NotFound");
+        assert!(
+            matches!(err, MemoryError::NotFound(_)),
+            "expected MemoryError::NotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn expire_already_expired_edge_is_not_found() {
+        // The `t_expired IS NULL` guard makes re-expiring an already-expired
+        // edge a no-op at the SQL level, which the rows-affected check surfaces
+        // as NotFound — identical to `FactStore::expire`. This keeps `Ok(())`
+        // meaning "this call transitioned an active edge to expired".
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+        let id = store.insert(&make_edge(1, 2, "test")).unwrap();
+        store.expire(id, Utc::now()).unwrap();
+        let err = store
+            .expire(id, Utc::now())
+            .expect_err("re-expiring an already-expired edge must return NotFound");
+        assert!(
+            matches!(err, MemoryError::NotFound(_)),
+            "expected MemoryError::NotFound, got {err:?}"
+        );
     }
 
     #[test]

@@ -187,6 +187,15 @@ pub trait FactGraph: Send + Sync {
     // --- edges ---
     async fn insert_edge(&self, edge: &NewEdge) -> Result<i64>;
     async fn get_edge(&self, id: i64) -> Result<Edge>;
+    /// Soft-expire a single edge by setting its `t_expired`. Idempotency guard:
+    /// only an *active* edge is affected, so `Ok(())` always means this call
+    /// transitioned an active edge to expired.
+    ///
+    /// Returns [`MemoryError::NotFound`](crate::error::MemoryError::NotFound) if
+    /// no active edge with `id` exists (unknown id, or already expired) — the
+    /// write affected 0 rows. Mirrors [`expire_fact`](Self::expire_fact); a
+    /// backend MUST honor this rows-affected contract (the #632 conformance suite
+    /// pins it).
     async fn expire_edge(&self, id: i64, now: DateTime<Utc>) -> Result<()>;
     async fn expire_edges_by_fact(&self, fact_id: i64, now: DateTime<Utc>) -> Result<usize>;
     async fn list_all_edges(&self) -> Result<Vec<Edge>>;
