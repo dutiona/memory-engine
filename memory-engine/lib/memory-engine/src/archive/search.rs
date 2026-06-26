@@ -76,7 +76,16 @@ impl Ord for MinScored {
 /// This is checked *before* `read_pak`, needs no filesystem access (so it works
 /// for not-yet-existing files), and is purely lexical — no `canonicalize`, no
 /// TOCTOU window.
-fn is_within_archive_dir(pak_path: &str) -> bool {
+///
+/// Exposed `pub(crate)` as the **shared archive path-containment guard**: the
+/// sibling `verify_archives` (engine/archive.rs) has the same lexical-prefix
+/// weakness and reuses this helper rather than re-deriving the check (#292).
+// `archive::search` is a private module, so `redundant_pub_crate` (nursery) sees
+// the `pub(crate)` as redundant. It is not: the widened visibility is the point —
+// it lets the sibling `engine::archive` module import this guard (#292). Suppress
+// the lint rather than narrow back to `fn`.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) fn is_within_archive_dir(pak_path: &str) -> bool {
     Path::new(pak_path)
         .components()
         .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
@@ -682,6 +691,48 @@ mod tests {
         assert_eq!(out.paks_scanned, 1);
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].fact.id, 42);
+    }
+
+    #[test]
+    fn t_created_outside_valid_time_window_is_not_pruned() {
+        // The cross-axis trap (#387): a fact whose *system* time (`t_created`,
+        // the only temporal axis the manifest carries) lies WELL OUTSIDE the
+        // query period, but whose *valid* time falls INSIDE it. Pruning a
+        // `t_created` range against a valid-time window would silently drop this
+        // real match. The fixture in `no_entry_is_pruned_without_a_sound_filter`
+        // keeps `t_created = now` (inside the period), so it cannot expose such a
+        // prune — this case can, and asserts the fact is still found.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+
+        // Created long ago (800 days back), but valid *now* (inside the window).
+        let mut early_fact = fact(7, "needle", FactType::Episodic, vec![]);
+        early_fact.t_created = now - chrono::Duration::days(800);
+        early_fact.t_valid = Some(now);
+
+        let pak = pak_with(vec![early_fact]);
+        let entry = write_entry(dir.path(), "cross-axis.pak", &pak);
+
+        // The manifest's `t_created_{min,max}` now sit entirely before the query
+        // period, so any `t_created`-vs-period prune would skip this pak.
+        assert!(entry.t_created_max < now - chrono::Duration::days(365));
+
+        let query = MemoryQuery::new().text("needle").period(
+            now - chrono::Duration::days(365),
+            now + chrono::Duration::days(365),
+        );
+
+        // No sound prune is expressible (#387), and pruning on the system-time
+        // axis against a valid-time window is unsound — the fact must survive.
+        assert!(!entry_is_prunable(&entry, &query));
+
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        assert_eq!(
+            out.paks_scanned, 1,
+            "the pak must still be read, not pruned"
+        );
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].fact.id, 7);
     }
 
     // --- MinScored ordering: BinaryHeap behaves as a min-heap on score ---
