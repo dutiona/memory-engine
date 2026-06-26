@@ -285,6 +285,13 @@ mod tests {
     }
 
     #[test]
+    fn cosine_empty_slices_return_zero() {
+        // Empty zip -> norm 0 -> denom 0 -> returns 0.0 (NaN-avoidance promise).
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(cosine_similarity(&[], &[1.0]), 0.0);
+    }
+
+    #[test]
     fn vector_search_rejects_wrong_query_dimension() {
         let conn = setup();
         let wrong_dim_query = [1.0_f32, 0.0]; // DIM is 4, query is 2
