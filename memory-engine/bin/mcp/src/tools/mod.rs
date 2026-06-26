@@ -508,8 +508,18 @@ fn get_bool(args: &Map<String, Value>, key: &str) -> Option<bool> {
     args.get(key).and_then(Value::as_bool)
 }
 
-fn get_usize(args: &Map<String, Value>, key: &str) -> Option<usize> {
-    get_i64(args, key).and_then(|v| usize::try_from(v).ok())
+/// Read an optional non-negative integer parameter.
+///
+/// Distinguishes *absent* (`Ok(None)`) from *present-but-invalid* (`Err`). A
+/// present-but-negative value is rejected with `invalid_params` rather than
+/// silently dropped (#339): dropping it would let the engine fall back to its
+/// own default — e.g. returning more results than an untrusted caller asked for.
+fn get_usize(args: &Map<String, Value>, key: &str) -> Result<Option<usize>, ErrorData> {
+    get_i64(args, key).map_or(Ok(None), |v| {
+        usize::try_from(v).map(Some).map_err(|_| {
+            ErrorData::invalid_params(format!("{key} must be a non-negative integer"), None)
+        })
+    })
 }
 
 fn get_datetime(args: &Map<String, Value>, key: &str) -> Result<Option<DateTime<Utc>>, ErrorData> {
@@ -914,7 +924,7 @@ async fn handle_query(
     if get_bool(args, "pinned_only").unwrap_or(false) {
         query = query.pinned_only();
     }
-    if let Some(limit) = get_usize(args, "limit") {
+    if let Some(limit) = get_usize(args, "limit")? {
         query = query.limit(limit);
     }
     if get_bool(args, "include_expired_probe").unwrap_or(false) {
@@ -943,11 +953,11 @@ async fn handle_resume_context(
     let config = ResumeConfig {
         scope_path: get_str(args, "scope"),
         now: Some(Utc::now()),
-        pinned_cap: get_usize(args, "pinned_cap").unwrap_or(50),
-        high_importance_cap: get_usize(args, "high_importance_cap").unwrap_or(20),
+        pinned_cap: get_usize(args, "pinned_cap")?.unwrap_or(50),
+        high_importance_cap: get_usize(args, "high_importance_cap")?.unwrap_or(20),
         high_importance_min: get_f64(args, "high_importance_min").unwrap_or(0.7),
-        due_cap: get_usize(args, "due_cap").unwrap_or(10),
-        recent_cap: get_usize(args, "recent_cap").unwrap_or(10),
+        due_cap: get_usize(args, "due_cap")?.unwrap_or(10),
+        recent_cap: get_usize(args, "recent_cap")?.unwrap_or(10),
     };
 
     let ctx = engine.resume_context(&config).await.map_err(to_mcp_error)?;
@@ -1179,7 +1189,7 @@ fn parse_consolidate_config(args: &Map<String, Value>) -> Result<ConsolidationCo
         ));
     }
 
-    let min_cluster_size = get_usize(args, "min_cluster_size").unwrap_or(3);
+    let min_cluster_size = get_usize(args, "min_cluster_size")?.unwrap_or(3);
     if min_cluster_size < 2 {
         return Err(ErrorData::invalid_params(
             format!("min_cluster_size must be >= 2, got {min_cluster_size}"),
@@ -1452,7 +1462,7 @@ async fn handle_replay_events(
         None => None,
     };
     // 0 = no limit (unbounded), absent = default cap of 100
-    let limit = match get_usize(args, "limit") {
+    let limit = match get_usize(args, "limit")? {
         Some(0) => None,
         Some(n) => Some(n),
         None => Some(100),
@@ -1532,7 +1542,7 @@ async fn handle_bootstrap_session(
     };
     let config = BootstrapConfig {
         scope: get_str(args, "scope"),
-        max_turns: get_usize(args, "max_turns").unwrap_or(0),
+        max_turns: get_usize(args, "max_turns")?.unwrap_or(0),
         skip_existing: get_bool(args, "skip_existing").unwrap_or(true),
         redact: true,
         denylist,
@@ -1698,8 +1708,8 @@ async fn handle_load_context(
 ) -> Result<CallToolResult, ErrorData> {
     let scope =
         get_str(args, "scope").ok_or_else(|| ErrorData::invalid_params("missing scope", None))?;
-    let activity_limit = get_usize(args, "activity_limit").unwrap_or(20);
-    let fact_limit = get_usize(args, "fact_limit").unwrap_or(10);
+    let activity_limit = get_usize(args, "activity_limit")?.unwrap_or(20);
+    let fact_limit = get_usize(args, "fact_limit")?.unwrap_or(10);
     let depth_level = get_depth(args)?;
 
     let ctx = engine
@@ -1825,7 +1835,9 @@ async fn handle_get_recent_insights(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_dump_name, default_dump_path, parse_consolidate_config, parse_fact_type};
+    use super::{
+        default_dump_name, default_dump_path, get_usize, parse_consolidate_config, parse_fact_type,
+    };
     use memory_engine::types::FactType;
     use serde_json::json;
     use std::collections::HashSet;
@@ -1852,6 +1864,53 @@ mod tests {
         // ValidationError is a thiserror enum; the offending token is preserved
         // in its Display string.
         assert!(err.to_string().contains("wisdom"), "{err}");
+    }
+
+    #[test]
+    fn get_usize_rejects_negative_value() {
+        // #339: a present-but-negative integer must be an ERROR, not silently
+        // dropped (which would let the engine apply its own default and return
+        // more results than the untrusted caller asked for).
+        let err = get_usize(&cfg_args(&[("limit", json!(-1))]), "limit").unwrap_err();
+        assert!(
+            err.message.contains("limit must be a non-negative integer"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn get_usize_accepts_non_negative_value() {
+        let v = get_usize(&cfg_args(&[("limit", json!(7))]), "limit").unwrap();
+        assert_eq!(v, Some(7));
+
+        // Zero is a valid non-negative usize (callers ascribe their own meaning,
+        // e.g. replay's 0 = "no limit").
+        let z = get_usize(&cfg_args(&[("limit", json!(0))]), "limit").unwrap();
+        assert_eq!(z, Some(0));
+    }
+
+    #[test]
+    fn get_usize_absent_key_is_ok_none() {
+        // Absent must be distinguished from present-but-invalid: Ok(None), so the
+        // caller can fall back to its default.
+        let v = get_usize(&cfg_args(&[]), "limit").unwrap();
+        assert_eq!(v, None);
+    }
+
+    #[test]
+    fn parse_consolidate_config_rejects_negative_min_cluster_size() {
+        // Dispatch-level (#339): a negative `min_cluster_size` routed through a
+        // real handler config-parse path must surface as an invalid-params error,
+        // not be silently coerced to the default.
+        let err =
+            parse_consolidate_config(&cfg_args(&[("min_cluster_size", json!(-5))])).unwrap_err();
+        assert!(
+            err.message
+                .contains("min_cluster_size must be a non-negative integer"),
+            "{}",
+            err.message
+        );
     }
 
     /// Build a `memory_consolidate` argument map from key/value pairs.
