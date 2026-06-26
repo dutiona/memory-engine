@@ -99,7 +99,7 @@ impl HnswStrategy {
         )
     }
 
-    /// Build a populated [`HnswInner`] from an `(fact_id, embedding)` stream.
+    /// Build a populated [`HnswInner`] from a fallible `(fact_id, embedding)` stream.
     ///
     /// The single insert-loop kernel shared by every index-construction path —
     /// [`build_inner`](Self::build_inner) (DB rows) and
@@ -108,9 +108,15 @@ impl HnswStrategy {
     /// `index_to_fact` / `fact_to_hnsw` mapping fill can never drift between them.
     /// Both callers supply their own source as an iterator; this owns the loop.
     ///
-    /// `entries` yields already-deserialized embeddings: each caller is
-    /// responsible for materializing its source (DB blob decode, snapshot clone)
-    /// before handing the vector over. The kernel enforces `embedding.len() ==
+    /// `entries` yields **fallible** items: each `Result<(fact_id, embedding)>` is
+    /// unwrapped with `?` inside the loop, so a per-item error (a rusqlite row
+    /// error or a wrong-width blob from [`deserialize_embedding`]) short-circuits
+    /// the build with the right [`MemoryError`] without the kernel ever holding the
+    /// whole decoded set resident. The DB path ([`build_inner`](Self::build_inner))
+    /// streams a lazy decode straight in — one row decoded at a time, exactly like
+    /// the pre-refactor loop, so there is no peak-memory regression — while the
+    /// snapshot path ([`from_snapshot`](Self::from_snapshot)) wraps each
+    /// already-decoded entry in `Ok(...)`. The kernel enforces `embedding.len() ==
     /// embed_dim` itself.
     ///
     /// This guard is **only materially load-bearing for the snapshot path**: the
@@ -130,7 +136,7 @@ impl HnswStrategy {
     /// size, or `MemoryError::Internal` if HNSW does not assign sequential IDs
     /// starting from 0.
     fn build_hnsw_inner(
-        entries: impl IntoIterator<Item = (i64, Vec<f32>)>,
+        entries: impl IntoIterator<Item = Result<(i64, Vec<f32>)>>,
         embed_dim: usize,
     ) -> Result<HnswInner> {
         let mut index = Self::new_hnsw_index();
@@ -138,7 +144,8 @@ impl HnswStrategy {
         let mut index_to_fact = Vec::new();
         let mut fact_to_hnsw = HashMap::new();
 
-        for (fact_id, embedding) in entries {
+        for entry in entries {
+            let (fact_id, embedding) = entry?;
             if embedding.len() != embed_dim {
                 return Err(crate::error::MemoryError::EmbeddingDimension {
                     expected: embed_dim,
@@ -169,8 +176,14 @@ impl HnswStrategy {
     /// The shared core of [`build_from_db`](Self::build_from_db) (wraps it in a fresh
     /// `RwLock`) and [`rebuild_from_db`](Self::rebuild_from_db) (swaps it into the
     /// existing lock) — so both produce an index with identical topology from the
-    /// same DB rows. Decodes each row's embedding blob, then delegates the actual
-    /// graph build to the shared [`build_hnsw_inner`](Self::build_hnsw_inner) kernel.
+    /// same DB rows. Builds a **lazy** decode iterator that maps each rusqlite row
+    /// to a `Result<(fact_id, Vec<f32>)>` (propagating row errors and the
+    /// `EmbeddingDimension` from [`deserialize_embedding`]) and hands it straight to
+    /// the shared [`build_hnsw_inner`](Self::build_hnsw_inner) kernel — no
+    /// intermediate fully-decoded `Vec`. Each row is decoded one-at-a-time as the
+    /// kernel pulls it, so the peak-memory profile matches the pre-refactor
+    /// streaming insert (only the live HNSW graph holds every vector, never a second
+    /// resident copy).
     ///
     /// # Errors
     ///
@@ -180,29 +193,20 @@ impl HnswStrategy {
     fn build_inner(conn: &Connection, embed_dim: usize) -> Result<HnswInner> {
         let mut stmt =
             conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")?;
+        // The mapped-rows iterator borrows `stmt`, which is owned here and outlives
+        // the `build_hnsw_inner` call below — so the kernel can pull rows lazily.
+        // Each item is fallible: a rusqlite row error or a wrong-width blob is
+        // threaded through as `Err`, and `build_hnsw_inner` short-circuits on it.
         let rows = stmt.query_map([], |row| {
             let id: i64 = row.get(0)?;
             let blob: Vec<u8> = row.get(1)?;
             Ok((id, blob))
         })?;
-
-        // Decode every blob up front into a `Vec<(fact_id, Vec<f32>)>`, then hand
-        // the whole materialized stream to the kernel. This is a deliberate
-        // peak-memory trade: the kernel's iterator is infallible, but row decode
-        // is not (a rusqlite row error or a wrong-width blob from `deserialize_embedding`),
-        // so we keep the fallible `?` outside the kernel's contract. Collecting
-        // first holds all active embeddings resident at once (vs. the old
-        // one-at-a-time streaming insert) — acceptable because a full rebuild is a
-        // rare, operator-driven event and the active set already fits in memory by
-        // construction (the HNSW graph itself holds every vector). The alternative
-        // (a fallible iterator threaded into the kernel) would re-fork the build
-        // paths this refactor unified.
-        let mut decoded = Vec::new();
-        for row in rows {
+        let decoded = rows.map(|row| {
             let (fact_id, blob) = row?;
             let embedding = deserialize_embedding(&blob, embed_dim)?;
-            decoded.push((fact_id, embedding));
-        }
+            Ok((fact_id, embedding))
+        });
 
         Self::build_hnsw_inner(decoded, embed_dim)
     }
@@ -344,10 +348,12 @@ impl HnswStrategy {
         snap: &crate::engine::snapshot::HnswSnapshot,
         embed_dim: usize,
     ) -> Result<Self> {
+        // Snapshot entries are already decoded, so each is infallible — wrap in
+        // `Ok(...)` to match the kernel's `Item = Result<...>` contract.
         let entries = snap
             .entries
             .iter()
-            .map(|entry| (entry.fact_id, entry.embedding.clone()));
+            .map(|entry| Ok((entry.fact_id, entry.embedding.clone())));
 
         Ok(Self {
             inner: RwLock::new(Self::build_hnsw_inner(entries, embed_dim)?),
