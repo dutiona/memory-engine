@@ -1334,6 +1334,95 @@ fn default_dump_path(base_dir: &std::path::Path, ext: &str) -> PathBuf {
     base_dir.join(default_dump_name(&timestamp, pid, seq, ext))
 }
 
+/// Validate and resolve a client-supplied dump destination, confining it to the
+/// system temp directory.
+///
+/// Without this, an MCP client could direct a dump at an arbitrary path and
+/// overwrite host files. The hardening closes three lenses on one flaw
+/// (issues #296 / #354 / #414):
+///
+/// - **CWE-22 (path traversal):** both the temp root and the target are
+///   canonicalized, so the `starts_with` check compares fully-resolved paths.
+///   Canonicalizing the temp root also stops *false rejects* on platforms where
+///   the temp dir is itself a symlink (e.g. macOS `/tmp -> /private/tmp`).
+/// - **CWE-59 (symlink-leaf follow):** the *full* target is resolved — not just
+///   its parent — and a leaf that is itself a symlink is rejected outright via
+///   `symlink_metadata` (lstat, which does not follow the link). A parent-only
+///   guard would wave through a leaf symlink that escapes temp, and the
+///   downstream `File::create`/`VACUUM INTO` would follow it.
+/// - **CWE-367 (TOCTOU):** the *resolved* path is returned and handed to the
+///   engine, so the value that is validated is the value that is opened — the
+///   original unresolved path is never used past this point. The lib then opens
+///   the destination with `O_NOFOLLOW` to fail atomically if a symlink *leaf* is
+///   raced into place between this check and the write.
+///
+///   **Residual (tracked in #851):** `O_NOFOLLOW` guards only the leaf, so a
+///   *parent directory* component swapped to a symlink after this check is still
+///   followed by the open. The default dump path's only parent is the temp root
+///   (sticky-bit-protected), so exposure is limited to a client-supplied
+///   *multi-level* path with an attacker-writable intermediate dir. The airtight
+///   fix is fd-relative opens (`openat`/`cap-std`), deferred to #851.
+fn validate_dump_path(p: &std::path::Path) -> Result<PathBuf, ErrorData> {
+    // Make the client path absolute FIRST, resolving it against the process cwd.
+    // `std::path::absolute` is purely lexical — it does NOT touch the filesystem
+    // (no canonicalization, no symlink resolution), it just guarantees a parent
+    // component exists. Without it, a bare leaf like `"dump.json"` has
+    // `parent() == Some("")`, and `canonicalize("")` fails with a confusing
+    // "No such file or directory" instead of the intended containment rejection.
+    // A cwd-relative path that resolves outside temp is still rejected by the
+    // `starts_with` check below — that is the correct outcome.
+    let p = std::path::absolute(p)
+        .map_err(|e| ValidationError::Other(format!("cannot resolve dump path: {e}")))?;
+    let p = p.as_path();
+
+    // Canonicalize the temp root so the containment check compares resolved
+    // paths on both sides. Fall back to the raw value if canonicalize fails
+    // (e.g. a platform that does not pre-create the temp dir).
+    let temp = std::env::temp_dir();
+    let canonical_temp = std::fs::canonicalize(&temp).unwrap_or(temp);
+
+    // Reject a leaf that is itself a symlink. `symlink_metadata` (lstat) does
+    // NOT follow the link, so this distinguishes a malicious leaf symlink
+    // (which a later `File::create`/`VACUUM INTO` would follow out of the jail)
+    // from a benign regular file. A non-existent leaf is fine — the common case.
+    match std::fs::symlink_metadata(p) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(
+                ValidationError::Other("dump path must not be a symlink".to_owned()).into(),
+            );
+        }
+        Ok(_) | Err(_) => {} // regular file / absent → resolve below
+    }
+
+    // Resolve the FULL target with parent symlinks collapsed. If the leaf
+    // exists, canonicalize the whole path; otherwise canonicalize the parent
+    // (resolving any symlinked components) and rejoin the leaf name.
+    let resolved = if p.exists() {
+        std::fs::canonicalize(p)
+            .map_err(|e| ValidationError::Other(format!("cannot resolve dump path: {e}")))?
+    } else {
+        let parent = p.parent().ok_or_else(|| {
+            ValidationError::Other("dump path has no parent directory".to_owned())
+        })?;
+        let file_name = p
+            .file_name()
+            .ok_or_else(|| ValidationError::Other("dump path has no file name".to_owned()))?;
+        let canonical_parent = std::fs::canonicalize(parent)
+            .map_err(|e| ValidationError::Other(format!("cannot resolve dump path parent: {e}")))?;
+        canonical_parent.join(file_name)
+    };
+
+    if !resolved.starts_with(&canonical_temp) {
+        return Err(ValidationError::Other(format!(
+            "dump path must be within the temp directory ({})",
+            canonical_temp.display()
+        ))
+        .into());
+    }
+
+    Ok(resolved)
+}
+
 async fn handle_dump_state(
     args: &Map<String, Value>,
     engine: &MemoryEngine,
@@ -1349,24 +1438,7 @@ async fn handle_dump_state(
     };
 
     let path = match get_str(args, "path") {
-        Some(p) => {
-            let p = PathBuf::from(p);
-            // Security: restrict client-supplied paths to the system temp directory.
-            // Without this, an MCP client could overwrite arbitrary files.
-            let temp = std::env::temp_dir();
-            let canonical = p
-                .parent()
-                .and_then(|parent| std::fs::canonicalize(parent).ok())
-                .unwrap_or_default();
-            if !canonical.starts_with(&temp) {
-                return Err(ValidationError::Other(format!(
-                    "dump path must be within the temp directory ({})",
-                    temp.display()
-                ))
-                .into());
-            }
-            p
-        }
+        Some(p) => validate_dump_path(&PathBuf::from(p))?,
         None => default_dump_path(&std::env::temp_dir(), ext),
     };
 
@@ -1842,6 +1914,7 @@ async fn handle_get_recent_insights(
 mod tests {
     use super::{
         default_dump_name, default_dump_path, get_usize, parse_consolidate_config, parse_fact_type,
+        validate_dump_path,
     };
     use memory_engine::types::FactType;
     use serde_json::json;
@@ -2056,5 +2129,58 @@ mod tests {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap();
             assert!(name.starts_with("memory-dump-"), "unexpected name: {name}");
         }
+    }
+
+    /// Finding-1 regression (Gemini #836): a client path with no directory
+    /// component (a bare leaf such as `"dump.json"`) must NOT trip the confusing
+    /// `canonicalize("")` parent failure. `validate_dump_path` makes the path
+    /// absolute against cwd *first* (`std::path::absolute`, purely lexical), so a
+    /// bare leaf gains a real parent and is then judged by the *containment*
+    /// check — accepted when cwd is inside temp, rejected (with the temp-dir
+    /// error) when it is not. Both branches are asserted under one `set_current_dir`
+    /// guard because cwd is process-global; this is the only test that mutates it.
+    #[test]
+    fn validate_dump_path_handles_bare_relative_leaf() {
+        // Canonicalize temp so the asserted prefix matches `validate_dump_path`'s
+        // own canonical comparison (e.g. macOS `/tmp -> /private/tmp`).
+        let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let outside = std::env::current_dir().expect("cargo runs tests from the crate dir");
+        debug_assert!(
+            !outside.starts_with(&temp),
+            "test precondition: the crate dir must be outside temp"
+        );
+
+        let saved = std::env::current_dir().ok();
+
+        // (a) cwd OUTSIDE temp → the bare leaf resolves outside the jail and is
+        //     rejected by containment, with the temp-directory error (NOT a
+        //     parent-resolution error).
+        std::env::set_current_dir(&outside).unwrap();
+        let rejected = validate_dump_path(std::path::Path::new("dump.json"));
+
+        // (b) cwd INSIDE temp → the same bare leaf resolves into the jail and is
+        //     accepted, resolving to a path under temp.
+        std::env::set_current_dir(&temp).unwrap();
+        let accepted = validate_dump_path(std::path::Path::new("relative-dump.json"));
+
+        if let Some(prev) = saved {
+            let _ = std::env::set_current_dir(prev);
+        }
+
+        let err = rejected.expect_err("a bare leaf under a non-temp cwd must be rejected");
+        assert!(
+            err.message.contains("temp"),
+            "a relative leaf must be rejected by the temp-containment check, not a \
+             parent-resolution error; got: {}",
+            err.message
+        );
+
+        let resolved = accepted.expect("a relative leaf resolving into temp must be accepted");
+        assert!(
+            resolved.starts_with(&temp),
+            "resolved path {} must be inside temp {}",
+            resolved.display(),
+            temp.display()
+        );
     }
 }

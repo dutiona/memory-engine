@@ -41,6 +41,11 @@ zstd = { version = "0.13", optional = true }
 tokio-postgres = { version = "0.7", default-features = false, optional = true }
 deadpool-postgres = { version = "0.14", optional = true }
 
+# `libc::O_NOFOLLOW` for the symlink-safe dump open (#296/#354/#414). Unix-only;
+# already in the dependency graph transitively, so this adds no new crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
