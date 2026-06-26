@@ -42,6 +42,17 @@ static BRUTE_FORCE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 /// Compute the cosine similarity between two vectors.
 ///
 /// Returns 0.0 if either vector has zero magnitude (avoids NaN).
+///
+/// # Length mismatch
+///
+/// When `a.len() != b.len()` the similarity is computed over the first
+/// `min(a.len(), b.len())` components — the `zip` silently truncates to the
+/// shorter slice, so any trailing components of the longer slice are ignored.
+/// This function performs no length check; the **caller is responsible for
+/// passing equal-length vectors**. In-engine callers already enforce dimension
+/// uniformity at the store/query layer (e.g. [`vector_search_filtered`] rejects
+/// a wrongly-sized query, and stored embeddings are validated against
+/// `embed_dim`), so the truncation never fires on the real read path.
 #[must_use]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let (mut dot, mut norm_a, mut norm_b) = (0.0_f32, 0.0_f32, 0.0_f32);
@@ -233,6 +244,33 @@ mod tests {
         let b = [-1.0_f32, 0.0];
         let sim = cosine_similarity(&a, &b);
         assert!((sim - (-1.0)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cosine_mismatched_length_truncates_to_shorter() {
+        // Documented behavior (#479): `zip` truncates to the shorter slice, so
+        // the trailing component of `a` (9.9) is ignored and the result equals
+        // the equal-length computation over the common prefix.
+        let truncated = cosine_similarity(&[1.0_f32, 0.0, 9.9], &[1.0_f32, 0.0]);
+        let control = cosine_similarity(&[1.0_f32, 0.0], &[1.0_f32, 0.0]);
+        assert!(
+            (truncated - control).abs() < f32::EPSILON,
+            "trailing component of the longer slice must be ignored: \
+             truncated={truncated}, control={control}"
+        );
+        // The common prefix [1,0] vs [1,0] is identical, so the score is 1.0.
+        assert!((truncated - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cosine_mismatched_length_symmetric_truncation() {
+        // Truncation is independent of which argument is longer: swapping the
+        // operands yields the same prefix-only score.
+        let a_longer = cosine_similarity(&[1.0_f32, 2.0, 7.0], &[1.0_f32, 2.0]);
+        let b_longer = cosine_similarity(&[1.0_f32, 2.0], &[1.0_f32, 2.0, 7.0]);
+        let control = cosine_similarity(&[1.0_f32, 2.0], &[1.0_f32, 2.0]);
+        assert!((a_longer - control).abs() < f32::EPSILON);
+        assert!((b_longer - control).abs() < f32::EPSILON);
     }
 
     #[test]
