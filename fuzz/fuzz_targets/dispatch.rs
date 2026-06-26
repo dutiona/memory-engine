@@ -33,6 +33,18 @@ const DIM: usize = 8;
 /// Every tool name `dispatch` routes (plus one off-list name to drive the
 /// `unknown tool` arm). The first input byte selects which name to invoke, so
 /// the fuzzer can reach every handler's validation path rather than just one.
+///
+/// `memory_dump_state` is **deliberately excluded**: it is the only dispatch
+/// handler with a filesystem side effect. On otherwise-valid (even empty) args
+/// it falls through to a temp-dir default path and `engine.dump_state()` writes
+/// a real dump file — so fuzzing it would create a file on *every* selection of
+/// that index, polluting the temp dir and throttling throughput across a long
+/// run, all while re-exercising parsing the rest of the corpus already covers.
+/// Its arg-parsing and path-validation are unit-tested directly in
+/// `memory-engine-mcp`'s `tests/dump_path_security.rs`, which is the right place
+/// for that surface. (`dump_state` is the *sole* filesystem-writing handler:
+/// every other write-side tool — bootstrap, consolidate, flush, checkpoint,
+/// dream-cycle — only touches the in-memory SQLite store.)
 const TOOL_NAMES: &[&str] = &[
     "memory_ingest",
     "memory_add_fact",
@@ -46,7 +58,6 @@ const TOOL_NAMES: &[&str] = &[
     "memory_flush_insights",
     "memory_consolidate",
     "memory_forget",
-    "memory_dump_state",
     "memory_pin_fact",
     "memory_unpin_fact",
     "memory_replay_events",
@@ -77,14 +88,25 @@ fuzz_target!(|data: &[u8]| {
         .map_or((0u8, data), |(b, rest)| (*b, rest));
     let name = TOOL_NAMES[selector as usize % TOOL_NAMES.len()];
 
-    // Interpret the remainder as a JSON value; only an Object is a valid args map
-    // (the MCP framework only ever hands `dispatch` an object). Anything else —
-    // non-UTF-8, non-JSON, or a non-object JSON value — is uninteresting input.
-    let Ok(value) = serde_json::from_slice::<Value>(json_bytes) else {
-        return;
-    };
-    let Value::Object(args) = value else {
-        return;
+    // Interpret the remainder as the args map. The MCP framework only ever hands
+    // `dispatch` an object, so only an Object (or *no* remainder at all) is a
+    // valid args shape.
+    //
+    // An empty remainder — a zero-length input or a lone selector byte — maps to
+    // an empty `Map`, so dispatch IS still called with empty args. That drives
+    // every handler's missing-required-argument validation, which a strict
+    // `from_slice` (it errors on empty input) would otherwise never reach.
+    //
+    // Any *non-empty* remainder that is not a JSON object — non-UTF-8, non-JSON,
+    // or a non-object JSON value (array/string/number/bool/null) — is
+    // uninteresting and skipped.
+    let args = if json_bytes.is_empty() {
+        Map::new()
+    } else {
+        match serde_json::from_slice::<Value>(json_bytes) {
+            Ok(Value::Object(args)) => args,
+            _ => return,
+        }
     };
 
     drive(name, args);
