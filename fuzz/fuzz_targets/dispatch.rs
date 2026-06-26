@@ -98,6 +98,10 @@ fn drive(name: &str, args: Map<String, Value>) {
     RT.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
+            // rt-only is sufficient: every SQLite DB op goes through spawn_blocking,
+            // so no awaited path needs the tokio time/io driver. If a handler ever
+            // adds tokio::time/net, switch to enable_all() or this will produce
+            // spurious fuzz crashes.
             let Ok(rt) = tokio::runtime::Builder::new_current_thread().build() else {
                 return;
             };
