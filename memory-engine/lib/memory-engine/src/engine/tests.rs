@@ -1151,12 +1151,13 @@ async fn resolve_conflict_delete_cascades_edges() {
     // in-memory mirror above). Asserting this proves `expire_by_fact` actually
     // committed — a bug that cleared only the in-memory graph would pass (b) but
     // fail here, which is exactly the DB/graph divergence #435 guards against.
+    // The fresh DB held exactly one edge, so the post-cascade active set must be
+    // empty — a stronger check than "no edge incident to A" (it also catches a
+    // cascade that wrongly *inserted* an edge).
     let active = engine.storage().list_active_edges().await.unwrap();
     assert!(
-        active
-            .iter()
-            .all(|e| e.source_fact_id != fact_a && e.target_fact_id != fact_a),
-        "DB must have no active edge incident to fact A after Delete cascade, got {active:?}"
+        active.is_empty(),
+        "DB must have no active edges after Delete cascade, got {active:?}"
     );
 }
 
