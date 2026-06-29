@@ -103,8 +103,8 @@ impl MemoryEngine {
     /// Soft-expire a single edge by id, keeping the in-memory graph in sync.
     ///
     /// Sets the edge's `t_expired` in the backend, then — only after the commit
-    /// succeeds — drops it from the in-memory petgraph
-    /// ([`MemoryGraph::remove_edge_by_id`](crate::graph::MemoryGraph::remove_edge_by_id)).
+    /// succeeds — drops it from the in-memory petgraph (via the crate-internal
+    /// `MemoryGraph::remove_edge_by_id`).
     /// This is the edge counterpart of the `add_edge` mirror in
     /// [`link_session_facts`](Self::link_session_facts): without the graph step,
     /// degree/neighbor/component queries would keep reporting the expired edge
