@@ -205,14 +205,14 @@ pub use engine::cycle::{
 /// - [`search::fts::fuzz_fts_query`] — drives an untrusted query string through the
 ///   FTS5 `MATCH` path on a seeded in-memory DB (the store/schema setup it needs is
 ///   `pub(crate)`, so the seam owns it).
-///
-/// `inspect::restore::read_snapshot` (the JSON import path) is fuzzed directly,
-/// without going through this seam. When #276 narrowed the other `inspect`
-/// submodules (`dump`/`explain`/`replay`/`statistics`) to `pub(crate)`,
-/// `inspect::restore` was deliberately kept `pub mod` for exactly this reason: the
-/// `fuzz` crate is a detached workspace excluded from `cargo build --workspace`, so
-/// CI cannot catch a regression if that path stops compiling. Keeping `restore`
-/// public is the seam — narrowing it would silently break the fuzz build.
+/// - [`inspect::restore::read_snapshot`] — the JSON snapshot import path (size-guard +
+///   compression sniff + `serde_json::from_reader::<EngineSnapshot>`). #276 narrowed
+///   the entire `inspect` module tree — including `restore` — to `pub(crate)`, because
+///   `restore_snapshot_into(&Connection)` bypasses the engine lock discipline and must
+///   not be externally reachable. The detached `fuzz` crate (excluded from
+///   `cargo build --workspace`, so CI cannot catch a regression) needs only
+///   `read_snapshot`, so it reaches it through this seam instead of through a widened
+///   module.
 ///
 /// This module compiles to nothing on a normal build, so it adds no public API
 /// to the shipped crate.
@@ -221,6 +221,7 @@ pub use engine::cycle::{
 pub mod fuzz_seam {
     pub use crate::bootstrap::parse::{parse_content_blocks, parse_session_file};
     pub use crate::engine::snapshot::{fuzz_wrap_payload, load_from_file};
+    pub use crate::inspect::restore::read_snapshot;
     pub use crate::search::fts::fuzz_fts_query;
 }
 

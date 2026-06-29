@@ -9,15 +9,17 @@
 // The public seam is the `StorageBackend` port (`storage::schema::{statistics,
 // dump_state}`) and the engine's own inspection methods, which own the locking.
 //
-// `restore` is the lone exception: it stays `pub` because the detached `fuzz` crate
-// (its own workspace, excluded from `cargo build --workspace`, so CI cannot catch a
-// regression) drives `inspect::restore::read_snapshot` directly as its untrusted-FILE
-// ingest fuzz target. Narrowing it to `pub(crate)` would silently break that build.
-// See `fuzz/fuzz_targets/snapshot_restore.rs` and the `fuzz_seam` note in `lib.rs`.
+// `restore` is also crate-internal — `restore_snapshot_into(&Connection)` takes a raw
+// connection and bypasses the engine's lock discipline exactly like the other
+// submodules, so it must not be externally reachable. The detached `fuzz` crate (its
+// own workspace, excluded from `cargo build --workspace`, so CI cannot catch a
+// regression) needs only `read_snapshot` as its untrusted-FILE ingest target; that one
+// function is re-exported through the `#[cfg(fuzzing)] fuzz_seam` in `lib.rs` rather
+// than by widening the whole module. See `fuzz/fuzz_targets/snapshot_restore.rs`.
 pub(crate) mod dump;
 pub(crate) mod explain;
 pub(crate) mod replay;
-pub mod restore;
+pub(crate) mod restore;
 pub(crate) mod statistics;
 pub mod types;
 

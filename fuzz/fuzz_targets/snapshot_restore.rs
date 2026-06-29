@@ -1,13 +1,14 @@
 //! Fuzz target for the JSON snapshot import path (#445).
 //!
-//! `inspect::restore::read_snapshot` is the real untrusted-FILE ingest for the
-//! `Deserialize` core types: it size-guards the file, sniffs compression from
-//! magic bytes (plain / gzip / zstd), then `serde_json::from_reader::<
-//! EngineSnapshot>`. `EngineSnapshot` transitively contains `Vec<Fact>` /
-//! `Vec<Event>` / `Vec<Edge>` / etc, so this exercises the whole graph of core
-//! deserializers through the genuine entry point (the #445 re-triage's
-//! higher-value anchor than a bare `from_str::<Fact>`). `read_snapshot` is
-//! already `pub`, so no seam is needed.
+//! `read_snapshot` is the real untrusted-FILE ingest for the `Deserialize` core
+//! types: it size-guards the file, sniffs compression from magic bytes (plain /
+//! gzip / zstd), then `serde_json::from_reader::<EngineSnapshot>`.
+//! `EngineSnapshot` transitively contains `Vec<Fact>` / `Vec<Event>` /
+//! `Vec<Edge>` / etc, so this exercises the whole graph of core deserializers
+//! through the genuine entry point (the #445 re-triage's higher-value anchor than
+//! a bare `from_str::<Fact>`). The `inspect::restore` module is `pub(crate)` (#276),
+//! so this target reaches `read_snapshot` through the `#[cfg(fuzzing)]`
+//! `memory_engine::fuzz_seam` re-export.
 //!
 //! Built with `compress-gzip` + `compress-zstd`, so a fuzzer-discovered gzip or
 //! zstd magic prefix routes through the decoder branches as well as the plain
@@ -37,6 +38,6 @@ fuzz_target!(|data: &[u8]| {
         if std::fs::write(path, data).is_err() {
             return;
         }
-        let _ = memory_engine::inspect::restore::read_snapshot(path);
+        let _ = memory_engine::fuzz_seam::read_snapshot(path);
     });
 });
