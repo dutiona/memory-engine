@@ -175,6 +175,11 @@ impl Fact {
     /// [`Self::UNSCORED_IMPORTANCE`] sentinel — NOT the eventual stored score.
     /// All other fields are copied verbatim from `nf`.
     ///
+    /// **Clone is intentional:** the trait signature takes `&Fact`, so an owned
+    /// value must be built from the borrowed `NewFact`. The fields cloned
+    /// (`content`, `content_hash`, `embedding`, `metadata`) are string/vec
+    /// payloads with no cheaper alternative at this call site.
+    ///
     /// **Arbiter input caveat:** the returned `Fact` is synthetic. Arbiters must
     /// rely on `content`, `fact_type`, `base_importance`, and `metadata` — never
     /// on `id` (always `0`) or `importance_score` (always the sentinel `0.5`).

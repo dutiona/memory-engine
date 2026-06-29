@@ -40,9 +40,46 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    /// Returns `MemoryError::NotFound` if the old fact doesn't exist.
-    /// Propagates errors from the arbiter or database operations.
+    /// - [`MemoryError::ReadOnly`] — the engine was opened in read-only mode.
+    /// - [`MemoryError::Conflict`] wrapping [`ConflictError::PayloadTooLarge`] —
+    ///   the candidate `new_fact` exceeds the size bound enforced by
+    ///   [`check_new_fact`](crate::limits::check_new_fact). Checked before the
+    ///   arbiter is called.
+    /// - [`MemoryError::NotFound`] — `old_id` is missing or already expired. The
+    ///   lookup itself retrieves expired facts; an already-expired `old_id` is
+    ///   rejected later by the `t_expired IS NULL` guard in the atomic expire step
+    ///   (which changes zero rows), while a missing `old_id` is rejected at lookup.
+    ///   The two are indistinguishable to the caller (both yield `NotFound`).
+    /// - Propagates any error returned by the [`ConflictArbiter`] or the
+    ///   underlying database operations.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use memory_engine::{MemoryEngine, NewFact, FactType, Fact, Result};
+    /// use memory_engine::traits::{ConflictArbiter, CrudDecision};
+    ///
+    /// struct AlwaysUpdate;
+    /// impl ConflictArbiter for AlwaysUpdate {
+    ///     fn arbitrate(&self, _old: &Fact, _new: &Fact) -> Result<CrudDecision> {
+    ///         Ok(CrudDecision::Update)
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<()> {
+    ///     let engine = MemoryEngine::builder(4).build()?;
+    ///
+    ///     // Suppose `old_id` was obtained from a prior `add_fact` or `ingest` call.
+    ///     let old_id: i64 = 1;
+    ///     let candidate = NewFact::builder("updated content", vec![0.1; 4], FactType::Semantic)
+    ///         .build();
+    ///
+    ///     let resolution = engine.resolve_conflict(&AlwaysUpdate, old_id, &candidate).await?;
+    ///     println!("decision: {:?}, new fact id: {:?}", resolution.decision, resolution.new_fact_id);
+    ///     Ok(())
+    /// }
+    /// ```
     // One match dispatches the 4 CRUD decisions; splitting per-arm helpers would
     // scatter the persist→graph-mirror ordering invariant across functions.
     #[allow(clippy::too_many_lines)]
