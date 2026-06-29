@@ -304,4 +304,89 @@ mod tests {
         let err = store.ensure_path(&long_label).unwrap_err();
         assert!(matches!(err, MemoryError::Conflict(_)));
     }
+
+    #[test]
+    fn for_each_on_seeded_store_visits_only_root() {
+        // `migrate` seeds the root scope, so a fresh store is never truly empty —
+        // the smallest possible state is exactly the root (id=1).
+        let conn = setup();
+        let store = ScopeStore::new(&conn);
+        let mut visited = Vec::new();
+        store
+            .for_each(|s| {
+                visited.push(s);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(visited.len(), 1);
+        assert_eq!(visited[0].id, 1);
+        assert_eq!(visited[0].label, "root");
+        assert!(visited[0].parent_id.is_none());
+        assert_eq!(visited[0].depth, 0);
+    }
+
+    #[test]
+    fn for_each_visits_every_scope_exactly_once_in_id_order() {
+        let conn = setup();
+        let store = ScopeStore::new(&conn);
+        // Distinct labels at distinct depths so a swap or dropped row is caught.
+        let leaf = store
+            .ensure_path("user:michael/machine:desktop/project:memory-engine")
+            .unwrap();
+
+        let mut visited = Vec::new();
+        store
+            .for_each(|s| {
+                visited.push((s.id, s.label, s.depth, s.parent_id));
+                Ok(())
+            })
+            .unwrap();
+
+        // for_each must agree with list_all (the same SELECT ... ORDER BY id),
+        // and cover root + the three created nodes.
+        let expected: Vec<_> = store
+            .list_all()
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.id, s.label, s.depth, s.parent_id))
+            .collect();
+        assert_eq!(visited, expected);
+
+        // Pin the exact ordered shape so an out-of-order scan or missing node fails:
+        // root, then the chain in insertion/id order with ascending depths.
+        assert_eq!(
+            visited,
+            vec![
+                (1, "root".to_string(), 0, None),
+                (2, "user:michael".to_string(), 1, Some(1)),
+                (3, "machine:desktop".to_string(), 2, Some(2)),
+                (4, "project:memory-engine".to_string(), 3, Some(3)),
+            ]
+        );
+        // The leaf id returned by ensure_path is the last visited node.
+        assert_eq!(visited.last().unwrap().0, leaf);
+    }
+
+    #[test]
+    fn for_each_propagates_callback_error_and_stops_iteration() {
+        let conn = setup();
+        let store = ScopeStore::new(&conn);
+        store.ensure_path("a/b/c").unwrap(); // root + 3 => 4 scopes total
+
+        // Fail on the second visited scope: proves the error surfaces AND that
+        // the remaining scopes are not visited.
+        let mut seen = 0_usize;
+        let err = store
+            .for_each(|_| {
+                seen += 1;
+                if seen == 2 {
+                    Err(MemoryError::NotFound("boom".to_string()))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::NotFound(msg) if msg == "boom"));
+        assert_eq!(seen, 2, "iteration must stop at the failing callback");
+    }
 }
