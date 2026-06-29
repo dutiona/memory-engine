@@ -31,11 +31,11 @@ use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::inspect_types::DumpFormat;
 use memory_engine::search::SearchConfig;
-use memory_engine::traits::{EmbeddingProvider, ForgetPolicy};
+use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, FactType};
 use memory_engine::{
-    ArchivePolicy, EmbeddingFingerprint, EngineConfig, MatchType, MemoryQuery, SearchMode,
-    SearchQuery,
+    ArchivePolicy, EmbeddingFingerprint, EngineConfig, ForgetPolicy, MatchType, MemoryQuery,
+    SearchMode, SearchQuery,
 };
 
 /// Embedding width — one slot per topic plus headroom, so each topic maps to a
