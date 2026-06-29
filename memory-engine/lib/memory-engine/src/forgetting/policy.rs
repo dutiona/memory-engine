@@ -20,6 +20,15 @@ const CONNECTIVITY_NORMALIZATION_ARG: f64 = 51.0;
 /// Ebbinghaus forgetting curve: retention = 2^(-age/half_life).
 ///
 /// Returns 1.0 at `age=0`, 0.5 at `age=half_life`, 0.25 at `age=2×half_life`.
+///
+/// # Precondition
+///
+/// `half_life` must be **positive and finite**, and `age_days` must be
+/// non-negative. Passing `half_life <= 0.0` or `NaN` produces `NaN` or values
+/// outside the stated `[0, 1]` retention range **without panicking** (e.g.
+/// `ebbinghaus_decay(0.0, 0.0)` is `-0.0 / 0.0 = NaN`; a negative `half_life`
+/// yields a value above `1.0`). When reached through [`prune`], this is
+/// guaranteed by [`ForgetPolicy::validate`]. Direct callers own the precondition.
 #[must_use]
 pub fn ebbinghaus_decay(age_days: f64, half_life: f64) -> f64 {
     f64::exp2(-age_days / half_life)
@@ -81,6 +90,20 @@ impl ImportanceInputs for FactScoringRow {
 /// 3. **Graph degree**: `ln(degree + 1) / ln(51)` — capped at 1.0
 ///    (50 connections = full score)
 /// 4. **Base importance**: `fact.base_importance()` — already in \[0, 1\]
+///
+/// The result therefore lies in `[0, sum_of_weights]`, **not** `[0, 1]` in
+/// general (the four weights need not sum to 1.0 — see ADR-0006). For
+/// [`ForgetPolicy::default`] the weights sum to `1.0`, so the default-policy
+/// score is in `[0, 1]`.
+///
+/// # Precondition
+///
+/// The effective half-life (`policy.half_life_days`, or the per-`FactType`
+/// `half_life_overrides` entry) must be **positive and finite** — the same
+/// precondition [`ebbinghaus_decay`] carries, since the recency term delegates
+/// to it. A non-positive or `NaN` half-life propagates `NaN` into the score
+/// **without panicking**. When reached through [`prune`], this is guaranteed by
+/// [`ForgetPolicy::validate`]; direct callers own the precondition.
 #[must_use]
 pub fn compute_importance(
     fact: &impl ImportanceInputs,
@@ -145,6 +168,26 @@ pub fn compute_importance(
 ///
 /// Returns `MemoryError::Conflict` if the policy fails validation, or
 /// `MemoryError::Storage` on a backend failure.
+///
+/// # Example
+///
+/// `prune` is a crate-internal entry point (the `forgetting` module is
+/// `pub(crate)`), so this sketch is `ignore`d rather than run as a doctest — it
+/// shows the intended call shape, not a compilable public API:
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use chrono::Utc;
+/// use parking_lot::RwLock;
+///
+/// let storage: Arc<dyn StorageBackend> = /* a backend */;
+/// let graph = RwLock::new(MemoryGraph::new());
+/// let policy = ForgetPolicy::default();
+///
+/// // Score every active fact and soft-expire the sub-threshold set.
+/// let (stats, expired) = prune(&storage, &graph, &policy, Utc::now()).await?;
+/// assert_eq!(expired.len(), stats.facts_expired);
+/// ```
 pub async fn prune(
     storage: &Arc<dyn StorageBackend>,
     graph: &RwLock<MemoryGraph>,
@@ -206,6 +249,7 @@ pub async fn prune(
 mod tests {
     use super::*;
     use chrono::Duration;
+    use proptest::prelude::*;
     use std::collections::HashMap;
 
     use crate::pool::ConnectionPool;
@@ -938,6 +982,185 @@ mod tests {
             );
             assert_eq!(g.neighbors(survivor), vec![bystander]);
             assert_eq!(g.degree(bystander), 1);
+        }
+    }
+
+    /// #454: `prune` on a store with zero active facts. Exercises the empty
+    /// `list_active_facts_scoring` path — the score/expire loops never iterate,
+    /// `prune_atomic` commits a no-op, and the graph reconcile is skipped — and
+    /// asserts the clean zero-stats result. A regression here (e.g. an `Err` from
+    /// `list_active_facts_scoring` on an empty table) would otherwise be invisible.
+    #[tokio::test]
+    async fn prune_empty_store_returns_zero_stats() {
+        let now = Utc::now();
+        let embed_dim = 4;
+
+        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
+            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
+            std::sync::Arc::new(UpcasterRegistry::new()),
+        ));
+        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+
+        // Insert nothing — the store is empty.
+        let graph = parking_lot::RwLock::new(MemoryGraph::new());
+        let policy = ForgetPolicy::default();
+        let (stats, expired) = prune(&storage, &graph, &policy, now).await.unwrap();
+
+        assert_eq!(stats.facts_evaluated, 0);
+        assert_eq!(stats.facts_expired, 0);
+        assert!(expired.is_empty(), "expired set must be empty: {expired:?}");
+    }
+
+    /// #497 (sub-finding 4): the negative-age clamp in `compute_importance`. A
+    /// fact whose `last_accessed` is in the **future** yields a negative
+    /// `age_days`, which `age_days.max(0.0)` pins to `0.0` before the recency
+    /// term is computed — so recency lands at exactly `1.0` (the `age=0` value),
+    /// never above it and never `NaN`.
+    #[tokio::test]
+    async fn future_last_accessed_clamps_recency_to_one() {
+        let now = Utc::now();
+        // recency-only policy: isolates the recency term so the score *is* recency.
+        let policy = ForgetPolicy {
+            recency_weight: 1.0,
+            frequency_weight: 0.0,
+            graph_degree_weight: 0.0,
+            base_importance_weight: 0.0,
+            ..ForgetPolicy::default()
+        };
+
+        // Episodic (non-exempt → recency actually decays) but accessed 30 days
+        // in the FUTURE relative to `now` ⇒ negative age ⇒ clamped to 0.0.
+        let future_fact = Fact {
+            id: 1,
+            content: "from the future".into(),
+            content_hash: "hfut".into(),
+            embedding: vec![0.1; 4],
+            fact_type: FactType::Episodic,
+            t_created: now,
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            scope_id: 1,
+            base_importance: 0.0,
+            access_count: 0,
+            last_accessed: now + Duration::days(30),
+            metadata: serde_json::json!({}),
+            is_pinned: false,
+            importance_score: 0.5,
+            surfaced_at: None,
+        };
+
+        let score = compute_importance(&future_fact, 0, now, &policy);
+        assert!(score.is_finite(), "clamp must not yield NaN, got {score}");
+        // recency_weight == 1.0 and all others 0.0 ⇒ score == recency == 1.0.
+        assert!(
+            (score - 1.0).abs() < f64::EPSILON,
+            "future access must clamp recency to exactly 1.0, got {score}"
+        );
+        assert!(score <= 1.0, "recency must never exceed 1.0, got {score}");
+    }
+
+    proptest! {
+        /// #455 (a): `ebbinghaus_decay(age >= 0, half_life > 0)` is always in the
+        /// closed interval `[0, 1]`. The lower bound is closed, not open: for very
+        /// large `age / half_life` ratios `2^(-age/hl)` underflows to exactly `+0.0`
+        /// in f64 (once the ratio exceeds ~1074), which is legitimate IEEE-754
+        /// behavior, not a defect. The declared `age in 0..3650`, `hl in 0.001..3650`
+        /// strategy admits ratios up to 3.65e6, so `+0.0` is reachable.
+        #[test]
+        fn prop_decay_in_unit_interval(
+            age in 0.0f64..3650.0,
+            hl in 0.001f64..3650.0,
+        ) {
+            let r = ebbinghaus_decay(age, hl);
+            prop_assert!((0.0..=1.0).contains(&r), "decay({age}, {hl}) = {r} outside [0, 1]");
+        }
+
+        /// #455 (b): decay is monotone **non-increasing** in age for a fixed half-life.
+        #[test]
+        fn prop_decay_monotone_non_increasing_in_age(
+            age1 in 0.0f64..1000.0,
+            age2 in 0.0f64..1000.0,
+            hl in 0.001f64..3650.0,
+        ) {
+            prop_assume!(age1 < age2);
+            let older = ebbinghaus_decay(age2, hl);
+            let newer = ebbinghaus_decay(age1, hl);
+            // newer (smaller age) retains at least as much as older.
+            prop_assert!(
+                newer + 1e-12 >= older,
+                "decay not non-increasing in age: decay({age1})={newer} < decay({age2})={older}"
+            );
+        }
+
+        /// #455 (c): decay is monotone **non-decreasing** in half-life for a fixed
+        /// positive age (age == 0 is excluded — there decay is flat at 1.0).
+        #[test]
+        fn prop_decay_monotone_non_decreasing_in_half_life(
+            age in 0.001f64..1000.0,
+            hl1 in 0.001f64..1000.0,
+            hl2 in 0.001f64..1000.0,
+        ) {
+            prop_assume!(hl1 < hl2);
+            let shorter = ebbinghaus_decay(age, hl1);
+            let longer = ebbinghaus_decay(age, hl2);
+            // a longer half-life retains at least as much at the same age.
+            prop_assert!(
+                longer + 1e-12 >= shorter,
+                "decay not non-decreasing in half-life: decay(hl={hl1})={shorter} > decay(hl={hl2})={longer}"
+            );
+        }
+
+        /// #455 + #497 (sub-finding 3): `compute_importance` output bounds. With the
+        /// non-negative-weight default policy and arbitrary valid inputs, the score
+        /// is in `[0, SUM_OF_WEIGHTS]`. For `ForgetPolicy::default()` the four
+        /// weights sum to `1.0`, so the bound is `[0, 1]` — asserted as the ACTUAL
+        /// computed weight sum, not a blind `[0, 1]`.
+        #[test]
+        fn prop_compute_importance_within_weight_sum(
+            // Episodic so recency genuinely decays (not pinned by exemption); any
+            // valid scoring inputs within sane ranges.
+            base_importance in 0.0f64..=1.0,
+            access_count in 0i64..1_000_000,
+            graph_degree in 0usize..1_000_000,
+            age_secs in 0i64..(3650 * 86400),
+        ) {
+            let policy = ForgetPolicy::default();
+            let weight_sum = policy.recency_weight
+                + policy.frequency_weight
+                + policy.graph_degree_weight
+                + policy.base_importance_weight;
+
+            let now = Utc::now();
+            let fact = Fact {
+                id: 1,
+                content: "prop".into(),
+                content_hash: "hp".into(),
+                embedding: vec![0.1; 4],
+                fact_type: FactType::Episodic,
+                t_created: now,
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                scope_id: 1,
+                base_importance,
+                access_count,
+                last_accessed: now - Duration::seconds(age_secs),
+                metadata: serde_json::json!({}),
+                is_pinned: false,
+                importance_score: 0.5,
+                surfaced_at: None,
+            };
+
+            let score = compute_importance(&fact, graph_degree, now, &policy);
+            prop_assert!(score.is_finite(), "score must be finite, got {score}");
+            prop_assert!(score >= 0.0, "score must be non-negative, got {score}");
+            prop_assert!(
+                score <= weight_sum + 1e-9,
+                "score {score} exceeds weight sum {weight_sum}"
+            );
         }
     }
 }
