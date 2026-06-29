@@ -99,3 +99,17 @@ path = "fuzz_targets/dispatch.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_timestamp"
+path = "fuzz_targets/parse_timestamp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "read_pak"
+path = "fuzz_targets/read_pak.rs"
+test = false
+doc = false
+bench = false
