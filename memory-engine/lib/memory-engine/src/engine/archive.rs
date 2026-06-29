@@ -527,11 +527,11 @@ mod tests {
         //    hard-deletes them from the DB and prunes the nodes from the graph)
         //  - survivor: survivor -> survivor  (must be left untouched)
         //
-        // Boundary edges (exactly one archived endpoint) are deliberately *not*
-        // exercised here: they are an orthogonal, pre-existing DB-side concern
-        // (archive's `hard_delete_by_facts` only removes edges with *both*
-        // endpoints archived, so a surviving boundary edge trips the facts FK on
-        // hard-delete). That is unrelated to #332's in-memory two-phase update.
+        // Boundary edges (exactly one archived endpoint) are covered by the
+        // dedicated #847 regression below
+        // (`archive_removes_boundary_edge_without_fk_violation`); this test keeps
+        // its focus on #332's in-memory two-phase update with internal/survivor
+        // edges only.
         engine
             .storage()
             .insert_edge(&make_edge(archived_ids[0], archived_ids[1]))
@@ -599,6 +599,134 @@ mod tests {
             node_count, 2,
             "graph should hold exactly the two survivor nodes, found {node_count}"
         );
+    }
+
+    /// #847 regression (end-to-end): `archive()` must succeed when a *boundary*
+    /// edge — one with exactly ONE endpoint in the archive set — crosses the cut.
+    ///
+    /// Before the fix, the DB commit deleted only edges whose *both* endpoints
+    /// were archived, so a boundary edge (`archived → survivor`, or the reverse)
+    /// survived the edge-delete and then referenced an about-to-be-hard-deleted
+    /// archived fact → `FOREIGN KEY constraint failed`, and the whole `archive()`
+    /// returned `Err`. The fix hard-deletes every edge incident to an archived
+    /// fact inside the same transaction.
+    ///
+    /// This test also proves the in-memory graph stays consistent: the survivor
+    /// keeps its node but loses the dangling boundary edge, mirroring the DB.
+    #[tokio::test]
+    async fn archive_removes_boundary_edge_without_fk_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.path().join("boundary.db"))
+            .build()
+            .unwrap();
+
+        // One survivor (active) — it must outlive the archive.
+        let survivor = engine
+            .storage()
+            .insert_fact(&make_active_fact("survivor"))
+            .await
+            .unwrap();
+
+        // Enough expired, non-pinned facts to clear `min_facts`.
+        let expired_at = Utc::now() - Duration::hours(1);
+        let mut archived_ids = Vec::new();
+        for i in 0..5 {
+            archived_ids.push(
+                engine
+                    .storage()
+                    .insert_fact(&make_expired_fact(&format!("doomed {i}"), expired_at))
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        // Boundary edge #1: archived → survivor.
+        engine
+            .storage()
+            .insert_edge(&make_edge(archived_ids[0], survivor))
+            .await
+            .unwrap();
+        // Boundary edge #2: survivor → archived (the other direction).
+        engine
+            .storage()
+            .insert_edge(&make_edge(survivor, archived_ids[1]))
+            .await
+            .unwrap();
+        // An internal archived↔archived edge for good measure.
+        engine
+            .storage()
+            .insert_edge(&make_edge(archived_ids[0], archived_ids[1]))
+            .await
+            .unwrap();
+
+        // Seed the in-memory graph from the DB exactly as `open` does.
+        {
+            let active_edges = engine.storage().list_active_edges().await.unwrap();
+            *engine.graph.write() = MemoryGraph::from_active_edges(&active_edges);
+        }
+        assert!(engine.graph_has_node(survivor));
+        // `graph_degree` counts incident edges in both directions, so it sees
+        // both boundary edges (survivor→archived and archived→survivor).
+        assert_eq!(
+            engine.graph_degree(survivor),
+            2,
+            "survivor starts linked to two archived facts via boundary edges"
+        );
+
+        let policy = ArchivePolicy {
+            expired_before: Utc::now() + Duration::hours(1),
+            min_facts: 1,
+        };
+
+        // The crux: this must NOT FK-violate. Pre-fix it returns an FK error.
+        let stats = engine
+            .archive(&policy)
+            .await
+            .expect("archive with a boundary edge must not trip the facts FK")
+            .expect("archive should run with candidates present");
+        assert_eq!(stats.facts_archived, archived_ids.len());
+
+        // The survivor remains in the live DB.
+        assert!(
+            engine.storage().get_fact(survivor).await.is_ok(),
+            "survivor fact must remain in the live DB"
+        );
+        // No archived fact remains (hard-deleted → `get_fact` errors NotFound).
+        for &id in &archived_ids {
+            assert!(
+                engine.storage().get_fact(id).await.is_err(),
+                "archived fact {id} must be hard-deleted from the live DB"
+            );
+        }
+        // No active edge survives — the survivor's only links were to archived
+        // facts, so the boundary edges are gone with them.
+        assert!(
+            engine
+                .storage()
+                .list_active_edges()
+                .await
+                .unwrap()
+                .is_empty(),
+            "all boundary edges to archived facts must be hard-deleted"
+        );
+
+        // In-memory graph: survivor node kept, but now isolated (no neighbors).
+        assert!(
+            engine.graph_has_node(survivor),
+            "survivor node must remain in the graph cache"
+        );
+        assert_eq!(
+            engine.graph_degree(survivor),
+            0,
+            "survivor must lose its dangling boundary edges in the graph cache too"
+        );
+        for &id in &archived_ids {
+            assert!(
+                !engine.graph_has_node(id),
+                "archived fact {id} must be pruned from the graph cache"
+            );
+        }
     }
 
     /// #292: `verify_archives` must reject a manifest row whose `pak_path`

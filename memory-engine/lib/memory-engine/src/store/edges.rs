@@ -342,6 +342,44 @@ impl<'a> EdgeStore<'a> {
         let deleted = self.conn.execute(&sql, params.as_slice())?;
         Ok(deleted)
     }
+
+    /// Hard-delete every edge incident to any fact in the given set — i.e. with
+    /// EITHER endpoint (source or target) in `fact_ids`.
+    ///
+    /// Unlike [`Self::hard_delete_by_facts`] (both endpoints internal), this also
+    /// removes *boundary* edges that straddle the set: `archived → survivor` and
+    /// `survivor → archived`. Used by the archive commit (#847): when an archived
+    /// fact is hard-deleted from the live DB, any live edge still referencing it
+    /// would trip the `edges.source_fact_id/target_fact_id REFERENCES facts(id)`
+    /// FK. The archived fact moves to cold storage and the boundary edge is not
+    /// part of the `.pak` (only internal edges are), so the link is genuinely
+    /// dangling and must go with the fact. A soft-expire would leave the row — and
+    /// its FK column — in place, so it would *not* satisfy the FK on fact delete;
+    /// only a hard-delete is referentially safe here.
+    ///
+    /// Returns the number of rows deleted. A no-op for an empty `fact_ids` slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn hard_delete_incident_to_facts(&self, fact_ids: &[i64]) -> Result<usize> {
+        if fact_ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: String = fact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "DELETE FROM edges WHERE source_fact_id IN ({placeholders}) OR target_fact_id IN ({placeholders})"
+        );
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(fact_ids.len() * 2);
+        for id in fact_ids {
+            params.push(id as &dyn rusqlite::types::ToSql);
+        }
+        for id in fact_ids {
+            params.push(id as &dyn rusqlite::types::ToSql);
+        }
+        let deleted = self.conn.execute(&sql, params.as_slice())?;
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
@@ -651,5 +689,68 @@ mod tests {
         let remaining = store.list_all().unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].relation_type, "external");
+    }
+
+    // --- hard_delete_incident_to_facts tests (#847) ---
+
+    #[test]
+    fn hard_delete_incident_to_facts_removes_internal_and_boundary_edges() {
+        // facts: 1, 2, 3
+        // edges:
+        //   f1→f2 internal (both in set [1,2])
+        //   f1→f3 boundary (source in set, target survives)
+        //   f3→f2 boundary (target in set, source survives)
+        //   (no edge entirely outside the set to leave behind)
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        store.insert(&make_edge(1, 2, "internal")).unwrap();
+        store.insert(&make_edge(1, 3, "boundary_out")).unwrap();
+        store.insert(&make_edge(3, 2, "boundary_in")).unwrap();
+
+        let deleted = store.hard_delete_incident_to_facts(&[1, 2]).unwrap();
+        assert_eq!(
+            deleted, 3,
+            "every edge with at least one endpoint in the set must be deleted"
+        );
+        assert!(
+            store.list_all().unwrap().is_empty(),
+            "no edge incident to an archived fact may survive"
+        );
+    }
+
+    #[test]
+    fn hard_delete_incident_to_facts_leaves_unrelated_edges() {
+        // An edge entirely outside the set (f3↔f3 is invalid; use a self-link-free
+        // pair via a 4th fact). Insert one extra fact so we have a fully-external
+        // edge to assert is preserved.
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata)
+             VALUES ('fact4', 'h4', X'00000000', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
+            [],
+        ).unwrap();
+        let store = EdgeStore::new(&conn);
+
+        store.insert(&make_edge(1, 2, "incident")).unwrap(); // f1 in set
+        store.insert(&make_edge(3, 4, "external")).unwrap(); // neither in set
+
+        let deleted = store.hard_delete_incident_to_facts(&[1]).unwrap();
+        assert_eq!(deleted, 1, "only the edge touching f1 is deleted");
+
+        let remaining = store.list_all().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].relation_type, "external");
+    }
+
+    #[test]
+    fn hard_delete_incident_to_facts_empty_slice_is_noop() {
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+        store.insert(&make_edge(1, 2, "a")).unwrap();
+
+        let deleted = store.hard_delete_incident_to_facts(&[]).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(store.list_all().unwrap().len(), 1);
     }
 }

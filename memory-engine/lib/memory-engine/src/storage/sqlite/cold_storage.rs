@@ -116,8 +116,13 @@ impl ColdStorage for SqliteBackend {
                 blake3_hash: &blake3_hash,
             })?;
 
-            // Delete edges first (FK safety), then facts.
-            EdgeStore::new(&tx).hard_delete_by_facts(&fact_ids)?;
+            // Delete edges first (FK safety), then facts. Delete EVERY edge
+            // incident to an archived fact — internal (both endpoints archived)
+            // AND boundary (exactly one endpoint archived) — because the archived
+            // fact leaves the live DB (#847). A boundary edge left behind would
+            // reference an about-to-be-hard-deleted fact and trip the
+            // `edges.*_fact_id REFERENCES facts(id)` FK, aborting the whole tx.
+            EdgeStore::new(&tx).hard_delete_incident_to_facts(&fact_ids)?;
             FactStore::new(&tx, dim).hard_delete_ids(&fact_ids)?;
 
             tx.commit().map_err(|e| {
@@ -138,9 +143,10 @@ mod tests {
     use super::super::SqliteBackend;
     use crate::pool::ConnectionPool;
     use crate::storage::cold_storage::ColdStorage;
+    use crate::store::edges::EdgeStore;
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{FactType, NewFact};
+    use crate::types::{FactType, NewEdge, NewFact};
 
     const DIM: usize = 4;
 
@@ -150,6 +156,18 @@ mod tests {
 
     fn backend() -> SqliteBackend {
         backend_from(Arc::new(ConnectionPool::open_memory(DIM).unwrap()))
+    }
+
+    fn new_edge(source: i64, target: i64) -> NewEdge {
+        NewEdge {
+            source_fact_id: source,
+            target_fact_id: target,
+            relation_type: "related".into(),
+            weight: 1.0,
+            t_created: Utc::now(),
+            t_expired: None,
+            scope_id: 1,
+        }
     }
 
     fn new_fact(content: &str) -> NewFact {
@@ -292,7 +310,7 @@ mod tests {
         // Drop the `facts` table to force `hard_delete_ids` to fail mid-tx.
         // The transaction sequence inside `commit_archive_atomic` is:
         //   1. ArchiveManifestStore::insert  ← succeeds
-        //   2. EdgeStore::hard_delete_by_facts ← succeeds (no edges)
+        //   2. EdgeStore::hard_delete_incident_to_facts ← succeeds (no edges)
         //   3. FactStore::hard_delete_ids    ← FAILS (table gone)
         // The whole tx must roll back.
         {
@@ -339,5 +357,108 @@ mod tests {
             "the surviving entry must be the pre-seeded one, not the rolled-back one"
         );
         assert_eq!(manifest_after[0].pak_path, "archives/before.pak");
+    }
+
+    /// #847 regression: a *boundary* edge — one with exactly ONE endpoint in the
+    /// archive set (archived → survivor, or survivor → archived) — must not trip
+    /// the `edges.source_fact_id/target_fact_id REFERENCES facts(id)` FK when the
+    /// archived fact is hard-deleted inside `commit_archive_atomic`.
+    ///
+    /// Before the fix, `commit_archive_atomic` deleted only edges whose *both*
+    /// endpoints were archived (`hard_delete_by_facts`), so a boundary edge
+    /// survived the edge-delete and then referenced an about-to-be-hard-deleted
+    /// archived fact → `FOREIGN KEY constraint failed`, aborting the whole tx.
+    ///
+    /// The archived fact moves to cold storage and the boundary edge is *not*
+    /// part of the `.pak` (only internal edges are), so the live link is dangling:
+    /// the correct, FK-safe behavior is to hard-delete the boundary edge in the
+    /// same transaction. (A mere soft-expire would leave the edge row — and its
+    /// FK column — in place, so it would still violate the FK on the fact delete.)
+    ///
+    /// This test is non-vacuous: with the old both-endpoints-only delete it fails
+    /// with an FK-violation `Err`; with the fix it succeeds and the boundary edge
+    /// is gone.
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn commit_archive_atomic_removes_boundary_edge_without_fk_violation() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+
+        // f1, f2 are archive candidates; survivor stays in the live DB.
+        let (archived_a, archived_b, survivor, edge_ids) = {
+            let conn = pool.write();
+            let fact_store = FactStore::new(&conn, DIM);
+            let archived_a = fact_store.insert(&new_fact("archived a")).unwrap();
+            let archived_b = fact_store.insert(&new_fact("archived b")).unwrap();
+            // The survivor must NOT be pre-expired — it is a live fact left behind.
+            let survivor = fact_store
+                .insert(&NewFact {
+                    t_expired: None,
+                    ..new_fact("survivor")
+                })
+                .unwrap();
+
+            let edge_store = EdgeStore::new(&conn);
+            let internal = edge_store
+                .insert(&new_edge(archived_a, archived_b))
+                .unwrap();
+            // Boundary edge #1: archived → survivor.
+            let out = edge_store.insert(&new_edge(archived_a, survivor)).unwrap();
+            // Boundary edge #2: survivor → archived (other direction).
+            let inn = edge_store.insert(&new_edge(survivor, archived_b)).unwrap();
+            (archived_a, archived_b, survivor, [internal, out, inn])
+        };
+
+        let be = backend_from(Arc::clone(&pool));
+        let fact_ids = vec![archived_a, archived_b];
+        let now = Utc::now();
+
+        // The crux: this must NOT FK-violate. Pre-fix it returns an FK error.
+        be.commit_archive_atomic(
+            "boundary.pak",
+            2,
+            1,
+            archived_a,
+            archived_b,
+            now,
+            now,
+            4096,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &fact_ids,
+        )
+        .await
+        .expect("archive with a boundary edge must succeed, not trip the facts FK");
+
+        // The archived facts are gone; the survivor remains.
+        {
+            let conn = pool.write();
+            let fact_store = FactStore::new(&conn, DIM);
+            assert!(
+                fact_store.get(archived_a).is_err(),
+                "archived fact a must be hard-deleted"
+            );
+            assert!(
+                fact_store.get(archived_b).is_err(),
+                "archived fact b must be hard-deleted"
+            );
+            assert!(
+                fact_store.get(survivor).is_ok(),
+                "survivor fact must remain in the live DB"
+            );
+
+            // ALL edges incident to an archived fact (internal + both boundary
+            // edges) are gone; no dangling edge references a departed fact.
+            let edge_store = EdgeStore::new(&conn);
+            for id in edge_ids {
+                assert!(
+                    edge_store.get(id).is_err(),
+                    "edge {id} incident to an archived fact must be hard-deleted"
+                );
+            }
+            assert!(
+                edge_store.list_all().unwrap().is_empty(),
+                "no edge may survive: the survivor's only links were to archived facts"
+            );
+        }
+        let _ = survivor;
     }
 }
