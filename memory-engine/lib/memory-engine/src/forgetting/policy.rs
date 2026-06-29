@@ -746,4 +746,198 @@ mod tests {
             "explicit override must win over the default exemption"
         );
     }
+
+    /// #312: the prune → graph-reconcile composition. Every prior prune test runs
+    /// against an EMPTY `MemoryGraph`, so neither the SQL edge cascade
+    /// (`prune_atomic` → `EdgeStore::expire_by_fact`) nor the in-memory reconcile
+    /// loop (`graph.write().remove_edges_by_fact`) is ever exercised end-to-end.
+    /// This seeds edges in BOTH the `SQLite` `EdgeStore` (via the port) and the
+    /// `MemoryGraph` (mirroring the DB), prunes a low-importance victim, and
+    /// asserts the cascade fires in both projections while a non-victim edge
+    /// survives untouched.
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one cohesive composition test: seed (facts+edges in DB and graph), \
+                  prune, then assert the cascade across both the SQLite and in-memory \
+                  projections — splitting it would scatter the shared fixture"
+    )]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the read guard is intentionally held across the closing assertion \
+                  block; this is a single-threaded test with no contention"
+    )]
+    async fn prune_cascades_edges_and_reconciles_graph() {
+        use crate::graph::EdgeData;
+        use crate::types::{NewEdge, NewFact};
+
+        let now = Utc::now();
+        let old_time = now - Duration::days(200);
+        let embed_dim = 4;
+
+        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
+            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
+            std::sync::Arc::new(UpcasterRegistry::new()),
+        ));
+        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+
+        // Seed a fact with the shared embed dim + scope. Built fresh per call so
+        // each fact can vary its type/importance/recency.
+        let make_fact = |content: &str, hash: &str, fact_type, base, accessed| NewFact {
+            content: content.into(),
+            content_hash: hash.into(),
+            embedding: vec![0.1; embed_dim],
+            fact_type,
+            t_created: old_time,
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            scope_id: 1,
+            base_importance: base,
+            access_count: 0,
+            last_accessed: accessed,
+            metadata: serde_json::json!({}),
+            is_pinned: false,
+        };
+
+        // Victim: Episodic, ancient, near-zero importance → guaranteed pruned.
+        let victim = storage
+            .insert_fact(&make_fact(
+                "victim",
+                "h-victim",
+                FactType::Episodic,
+                0.01,
+                old_time,
+            ))
+            .await
+            .unwrap();
+        // Survivor: Semantic (decay-exempt) → immune to the prune. Adjacent to the
+        // victim (edge cascades) AND to the bystander (edge must survive).
+        let survivor = storage
+            .insert_fact(&make_fact(
+                "survivor",
+                "h-surv",
+                FactType::Semantic,
+                0.9,
+                now,
+            ))
+            .await
+            .unwrap();
+        // Bystander: Semantic, only adjacent to the survivor — its edge must be
+        // untouched by the victim's cascade.
+        let bystander = storage
+            .insert_fact(&make_fact(
+                "bystander",
+                "h-by",
+                FactType::Semantic,
+                0.9,
+                now,
+            ))
+            .await
+            .unwrap();
+
+        // Mirror two edges into BOTH SQLite and the in-memory graph:
+        //   e_cascade:  victim   → survivor   (must expire when victim is pruned)
+        //   e_keep:     survivor → bystander  (neither endpoint pruned → survives)
+        let new_edge = |src, tgt| NewEdge {
+            source_fact_id: src,
+            target_fact_id: tgt,
+            relation_type: "related".into(),
+            weight: 1.0,
+            scope_id: 1,
+            t_created: old_time,
+            t_expired: None,
+        };
+        let e_cascade = storage
+            .insert_edge(&new_edge(victim, survivor))
+            .await
+            .unwrap();
+        let e_keep = storage
+            .insert_edge(&new_edge(survivor, bystander))
+            .await
+            .unwrap();
+
+        let graph = parking_lot::RwLock::new(MemoryGraph::new());
+        {
+            let mut g = graph.write();
+            g.add_edge(
+                victim,
+                survivor,
+                EdgeData {
+                    edge_id: e_cascade,
+                    relation_type: "related".into(),
+                    weight: 1.0,
+                },
+            );
+            g.add_edge(
+                survivor,
+                bystander,
+                EdgeData {
+                    edge_id: e_keep,
+                    relation_type: "related".into(),
+                    weight: 1.0,
+                },
+            );
+        }
+
+        // Pre-conditions: the graph mirrors the two seeded edges.
+        assert_eq!(graph.read().degree(victim), 1, "victim starts connected");
+        assert_eq!(
+            graph.read().degree(survivor),
+            2,
+            "survivor bridges victim and bystander"
+        );
+
+        let policy = ForgetPolicy {
+            min_importance: 0.3,
+            ..ForgetPolicy::default()
+        };
+        let (stats, expired) = prune(&storage, &graph, &policy, now).await.unwrap();
+
+        // Only the victim is pruned (survivor + bystander are decay-exempt Semantic).
+        assert_eq!(stats.facts_evaluated, 3);
+        assert_eq!(stats.facts_expired, 1, "only the episodic victim expires");
+        assert_eq!(expired, vec![victim]);
+
+        // (a) SQLite cascade: the victim's edge is expired, the other edge stays active.
+        let active_edges = storage.list_active_edges().await.unwrap();
+        let active_ids: std::collections::HashSet<i64> =
+            active_edges.iter().map(|e| e.id).collect();
+        assert!(
+            !active_ids.contains(&e_cascade),
+            "victim's edge must be expired in SQLite (cascade)"
+        );
+        assert!(
+            active_ids.contains(&e_keep),
+            "survivor↔bystander edge must remain active in SQLite"
+        );
+        // It is soft-deleted, not hard-deleted: still present with t_expired set.
+        let cascaded = storage.get_edge(e_cascade).await.unwrap();
+        assert!(
+            cascaded.t_expired.is_some(),
+            "cascaded edge is soft-deleted (t_expired set), not removed"
+        );
+
+        // (b) In-memory reconcile loop ran + (c) the surviving adjacent fact keeps
+        // its non-victim edge in the graph. Scope the read guard tightly so it is
+        // released immediately after the assertions (no contention held to fn end).
+        {
+            let g = graph.read();
+            // (b) The victim is fully disconnected.
+            assert_eq!(g.degree(victim), 0, "in-memory graph reconciled the victim");
+            assert!(
+                g.neighbors(victim).is_empty(),
+                "victim has no outgoing neighbors after reconcile"
+            );
+            // (c) The cascade is scoped to the victim, not a blanket wipe.
+            assert_eq!(
+                g.degree(survivor),
+                1,
+                "survivor keeps exactly its bystander edge (victim edge gone)"
+            );
+            assert_eq!(g.neighbors(survivor), vec![bystander]);
+            assert_eq!(g.degree(bystander), 1);
+        }
+    }
 }
