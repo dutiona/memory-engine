@@ -52,7 +52,7 @@ mod equivalence;
 
 /// Which [`StorageBackend`] implementation backs the engine.
 ///
-/// Resolved once in `MemoryEngine::open_storage`. The in-process
+/// Resolved once in `MemoryEngine::open_from_config`. The in-process
 /// [`SqliteBackend`] is the default and only variant today; epic #628 adds a
 /// `Postgres` arm (#634).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
