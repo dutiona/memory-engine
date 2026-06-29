@@ -162,9 +162,14 @@ impl MemoryEngine {
 
         let mut results = Vec::with_capacity(entries.len());
         for entry in &entries {
-            let pak_path = archive_dir.join(&entry.pak_path);
-            // Path traversal guard
-            if !pak_path.starts_with(&archive_dir) {
+            // Path-traversal guard (#292): reject any manifest path that could
+            // escape `archive_dir` (`..` or an absolute anchor) BEFORE any
+            // filesystem access. The old `pak_path.starts_with(&archive_dir)`
+            // check was purely lexical and did not resolve `..`, so a tampered
+            // or restored DB row like `../outside/x.pak` slipped through. Reuse
+            // the shared containment check that already guards the sibling
+            // `search_archives` (single source of truth for the rule).
+            if !crate::archive::search::is_within_archive_dir(&entry.pak_path) {
                 results.push(ArchiveVerifyResult {
                     manifest_id: entry.id,
                     pak_path: entry.pak_path.clone(),
@@ -173,6 +178,7 @@ impl MemoryEngine {
                 });
                 continue;
             }
+            let pak_path = archive_dir.join(&entry.pak_path);
             let result = if pak_path.exists() {
                 Self::verify_single_archive(entry, &pak_path)
             } else {
@@ -593,5 +599,67 @@ mod tests {
             node_count, 2,
             "graph should hold exactly the two survivor nodes, found {node_count}"
         );
+    }
+
+    /// #292: `verify_archives` must reject a manifest row whose `pak_path`
+    /// escapes the archive directory via `..`. The legitimate write path only
+    /// ever inserts a separator-free `archive-<ts>-<nanos>.pak` filename, so a
+    /// traversal path can only arrive from a tampered/restored DB — exactly the
+    /// untrusted-blob surface this guard defends. The old lexical
+    /// `pak_path.starts_with(&archive_dir)` check let `..` through (it does not
+    /// resolve `..`), so the row was handed to the I/O path instead of being
+    /// flagged. The shared [`is_within_archive_dir`] containment check
+    /// (`archive/search.rs`, widened to `pub(crate)` for exactly this reuse)
+    /// rejects it before any filesystem access.
+    #[tokio::test]
+    async fn verify_archives_rejects_path_traversal_manifest_entry() {
+        use crate::archive::search::is_within_archive_dir;
+
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.path().join("traversal.db"))
+            .build()
+            .unwrap();
+
+        // A traversal path the legitimate write path can never produce. It is
+        // crafted relative to `<db_parent>/archives`, so `archive_dir.join(..)`
+        // would resolve outside the archive directory entirely.
+        let evil_path = "../outside/escape.pak";
+        // Sanity: the shared guard considers this unsafe (the property under test).
+        assert!(
+            !is_within_archive_dir(evil_path),
+            "test fixture must be a path the containment guard rejects"
+        );
+
+        // Inject the malicious manifest row directly — `commit_archive_atomic`
+        // always generates a safe filename, so the only way to exercise the
+        // guard is to plant the row below the port via the test-only `raw_exec`
+        // seam (#727), simulating a tampered/restored DB.
+        engine
+            .storage()
+            .raw_exec(&format!(
+                "INSERT INTO archive_manifest \
+                 (pak_path, created_at, fact_count, edge_count, fact_id_min, \
+                  fact_id_max, t_created_min, t_created_max, size_bytes, blake3_hash) \
+                 VALUES ('{evil_path}', '2026-01-01T00:00:00Z', 0, 0, 0, 0, \
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, 'deadbeef')"
+            ))
+            .await
+            .unwrap();
+
+        let results = engine.verify_archives().await.unwrap();
+        assert_eq!(results.len(), 1, "exactly one manifest entry was planted");
+        let result = &results[0];
+        assert!(
+            !result.ok,
+            "a `..` traversal manifest path must be flagged, not verified"
+        );
+        assert_eq!(
+            result.error.as_deref(),
+            Some("path traversal detected"),
+            "the traversal must be caught by the containment guard, not fall \
+             through to the I/O (file-not-found) path"
+        );
+        assert_eq!(result.pak_path, evil_path);
     }
 }
