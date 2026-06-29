@@ -127,6 +127,10 @@ path = "../../../tests/restore_roundtrip_test.rs"
 name = "roundtrip_test"
 path = "../../../tests/roundtrip_test.rs"
 
+[[test]]
+name = "all_features_store"
+path = "../../../tests/all_features_store.rs"
+
 # --- examples (top-level ../../../examples/) ---
 [[example]]
 name = "basic_roundtrip"
