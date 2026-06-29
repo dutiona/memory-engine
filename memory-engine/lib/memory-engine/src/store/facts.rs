@@ -526,7 +526,11 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::NotFound` if no rows affected (already expired or absent).
+    /// Returns `MemoryError::NotFound` if no rows are affected. This covers two
+    /// indistinguishable cases by design: the fact does not exist at all, or it
+    /// was already expired (`t_expired IS NOT NULL`). The SQL `WHERE` clause
+    /// filters on `t_expired IS NULL`, so both produce zero changed rows and map
+    /// to the same `NotFound` error.
     pub fn expire_and_invalidate(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
         let now_str = now.to_rfc3339();
         let changed = self.conn.execute(

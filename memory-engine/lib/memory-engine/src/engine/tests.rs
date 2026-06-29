@@ -1087,6 +1087,72 @@ async fn resolve_conflict_nonexistent_fact_returns_not_found() {
     );
 }
 
+/// A second `resolve_conflict(Update)` on an already-expired `old_id` returns
+/// `NotFound`. The guard is NOT `get_fact` — that retrieves expired rows fine —
+/// it's `expire_and_invalidate`'s `WHERE id = ? AND t_expired IS NULL`, which
+/// changes zero rows on an already-expired fact (the same path a missing fact
+/// takes, so the two are indistinguishable at that layer).
+#[tokio::test]
+async fn resolve_conflict_double_update_on_expired_returns_not_found() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let old_id = insert_raw_fact(&engine, &make_new_fact("original", vec![0.5; DIM])).await;
+    let arbiter = FixedArbiter {
+        decision: CrudDecision::Update,
+    };
+
+    // First Update — expires the old fact and inserts a successor.
+    engine
+        .resolve_conflict(
+            &arbiter,
+            old_id,
+            &make_new_fact("replacement", vec![0.5; DIM]),
+        )
+        .await
+        .unwrap();
+
+    // Second Update on the SAME (now-expired) old_id — must return NotFound.
+    let result = engine
+        .resolve_conflict(&arbiter, old_id, &make_new_fact("second", vec![0.5; DIM]))
+        .await;
+    assert!(
+        matches!(result, Err(MemoryError::NotFound(_))),
+        "expected NotFound on already-expired fact, got {result:?}"
+    );
+}
+
+/// Same idempotency guard for the `Delete` decision.
+#[tokio::test]
+async fn resolve_conflict_double_delete_on_expired_returns_not_found() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let old_id = insert_raw_fact(&engine, &make_new_fact("to_delete", vec![0.5; DIM])).await;
+    let arbiter = FixedArbiter {
+        decision: CrudDecision::Delete,
+    };
+
+    // First Delete — expires the fact.
+    engine
+        .resolve_conflict(
+            &arbiter,
+            old_id,
+            &make_new_fact("irrelevant", vec![0.5; DIM]),
+        )
+        .await
+        .unwrap();
+
+    // Second Delete on the SAME (now-expired) old_id — must return NotFound.
+    let result = engine
+        .resolve_conflict(
+            &arbiter,
+            old_id,
+            &make_new_fact("irrelevant", vec![0.5; DIM]),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(MemoryError::NotFound(_))),
+        "expected NotFound on already-expired fact, got {result:?}"
+    );
+}
+
 // --- #435: Delete cascade removes DB edges and in-memory graph edge ---
 
 #[tokio::test]
