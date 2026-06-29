@@ -34,7 +34,8 @@ use memory_engine::search::SearchConfig;
 use memory_engine::traits::{EmbeddingProvider, ForgetPolicy};
 use memory_engine::types::{AddFactRequest, FactType};
 use memory_engine::{
-    ArchivePolicy, EmbeddingFingerprint, MatchType, MemoryQuery, SearchMode, SearchQuery,
+    ArchivePolicy, EmbeddingFingerprint, EngineConfig, MatchType, MemoryQuery, SearchMode,
+    SearchQuery,
 };
 
 /// Embedding width — one slot per topic plus headroom, so each topic maps to a
@@ -291,16 +292,35 @@ async fn ann_archive_compress_end_to_end() {
     }
 
     // --- Snapshot roundtrip of the survivors via a zstd-compressed dump
-    // (compress-zstd feature), restored into a fresh in-memory engine whose
-    // HNSW index is rebuilt from the restored rows (ann feature). This is the
-    // compress × ann interaction that no single-feature test covers.
+    // (compress-zstd feature), restored into a fresh engine whose HNSW index is
+    // **rebuilt from the restored rows** (ann feature). This is the compress × ann
+    // interaction that no single-feature test covers.
     let snap_path = dir.path().join("survivors.json.zst");
     engine
         .dump_state(&DumpFormat::JsonZstd(snap_path.clone()))
         .await
         .unwrap();
 
-    let restored = MemoryEngine::restore_json_memory(&snap_path).unwrap();
+    // Restore through `restore_json` carrying `SearchConfig { ann_threshold: 0 }`,
+    // *not* `restore_json_memory` — the latter calls `init_from_pool(.., None, ..)`,
+    // which drops the ANN config so `with_open_config` never materializes HNSW and
+    // every "restored HNSW" query silently falls through to brute force (codex P2:
+    // the assertions would pass even if restore-time HNSW rebuild were broken).
+    //
+    // With `ann_threshold: 0` and no sidecar at the fresh restore path,
+    // `with_open_config` takes `HnswOpenSource::Rebuild` → `build_from_db`, so the
+    // index is rebuilt from the restored facts and `should_use_hnsw` is true
+    // (active_count >= 0). Vector search is therefore HNSW-served, making the
+    // assertions below bite on the rebuild: if the rebuild produced an empty/broken
+    // index, the survivor probe returns nothing (HNSW present-but-empty still wins
+    // the dispatch at threshold 0) and the `assert_eq!` fails — a brute-force
+    // fallback can no longer mask a regressed restore-time rebuild.
+    let restore_db = dir.path().join("restored.db");
+    let restored = MemoryEngine::restore_json(
+        &snap_path,
+        &EngineConfig::new(restore_db, DIM).with_search_config(SearchConfig { ann_threshold: 0 }),
+    )
+    .unwrap();
     let restored_stats = restored.statistics().await.unwrap();
     assert_eq!(
         restored_stats.facts.total,
@@ -308,15 +328,19 @@ async fn ann_archive_compress_end_to_end() {
         "restored snapshot must hold exactly the surviving facts"
     );
 
-    // The restored engine's rebuilt HNSW index resolves a survivor topic to its
-    // own fact, and does not invent the expired ones.
-    let survivor_probe = survivor_topics[0];
-    let restored_hit = nearest_content(&restored, &embedder, survivor_probe).await;
-    assert_eq!(
-        restored_hit.as_deref(),
-        Some(format!("topic {survivor_probe} memory fact").as_str()),
-        "restored HNSW must resolve survivor topic {survivor_probe}"
-    );
+    // Every survivor topic resolves to its own fact via the HNSW-served vector path
+    // (threshold 0). A regressed restore-time rebuild — empty index, or HNSW never
+    // materialized and then *also* a broken brute-force fallback — fails here.
+    for &survivor in &survivor_topics {
+        let restored_hit = nearest_content(&restored, &embedder, survivor).await;
+        assert_eq!(
+            restored_hit.as_deref(),
+            Some(format!("topic {survivor} memory fact").as_str()),
+            "restored HNSW must resolve survivor topic {survivor}"
+        );
+    }
+    // The expired (odd) topics were not snapshotted, so the rebuilt index must not
+    // surface them.
     let restored_miss = nearest_content(&restored, &embedder, expired_probe).await;
     assert_ne!(
         restored_miss.as_deref(),
