@@ -990,9 +990,6 @@ mod tests {
     #[tokio::test]
     async fn dump_sqlite_rejects_null_byte_path() {
         use crate::store::schema::{init_schema, open_connection};
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
-        use std::path::PathBuf;
 
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source.db");
@@ -1001,11 +998,10 @@ mod tests {
 
         // Build a target path *inside* the temp dir with an interior NUL byte in
         // the leaf name, so only the NUL — not a missing parent dir — can be the
-        // cause of any rejection. Assemble the bytes directly (`<dir>/out\0.db`)
-        // so the NUL is preserved verbatim through to `dump_sqlite`.
-        let mut raw: Vec<u8> = dir.path().as_os_str().to_os_string().into_vec();
-        raw.extend_from_slice(b"/out\0.db");
-        let bad_path = PathBuf::from(OsString::from_vec(raw));
+        // cause of any rejection. A NUL is a valid `char`, so the literal leaf
+        // `"out\0.db"` carries the byte verbatim through `join` into
+        // `dump_sqlite`.
+        let bad_path = dir.path().join("out\0.db");
         assert!(
             bad_path.as_os_str().as_encoded_bytes().contains(&0),
             "the constructed bad path must actually contain a NUL byte"
@@ -1027,6 +1023,12 @@ mod tests {
         let good_path = dir.path().join("out.db");
         dump_sqlite(&conn, &good_path)
             .expect("an otherwise-identical path without a NUL byte must dump cleanly");
+
+        // Drop the live source connection before verifying the dump: the
+        // verification reopen below must observe the published file without
+        // racing the still-open writer handle on the same temp dir (avoids any
+        // SQLite lock-contention / sidecar-file flakiness).
+        drop(conn);
         rusqlite::Connection::open_with_flags(
             &good_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
