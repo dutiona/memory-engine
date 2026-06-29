@@ -3706,6 +3706,75 @@ async fn link_session_facts_ignores_expired() {
     assert_eq!(engine.graph_degree(f1), 2); // 1 out + 1 in
 }
 
+// --- Edge expiry / graph-sync regression (#879) ---
+
+#[tokio::test]
+async fn expire_edge_syncs_in_memory_graph() {
+    // #879 regression: expiring a single edge must update BOTH the DB
+    // (t_expired set) AND the in-memory petgraph, so degree/neighbor/stat
+    // queries against the graph stop reporting the now-logically-gone edge
+    // without waiting for a full rebuild. Mirrors `add_edge`'s under-lock
+    // graph sync in `link_session_facts`.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let (_, f1) = add_session_fact(&engine, "fact a", "s1").await;
+    let (_, f2) = add_session_fact(&engine, "fact b", "s1").await;
+
+    // Two co_session edges (f1→f2 and f2→f1); both mirrored into the graph.
+    let created = engine.link_session_facts("s1", None).await.unwrap();
+    assert_eq!(created, 2);
+    assert_eq!(engine.graph_stats().1, 2, "both edges present pre-expiry");
+    assert_eq!(engine.graph_degree(f1), 2);
+    assert_eq!(engine.graph_neighbors(f1), vec![f2]);
+
+    // Pick the f1→f2 edge to expire.
+    let target_edge = {
+        let edges = engine.storage().list_active_edges().await.unwrap();
+        edges
+            .into_iter()
+            .find(|e| e.source_fact_id == f1 && e.target_fact_id == f2)
+            .expect("f1->f2 co_session edge exists")
+    };
+
+    engine.expire_edge(target_edge.id).await.unwrap();
+
+    // DB side: the edge is soft-deleted.
+    let db_edge = engine.storage().get_edge(target_edge.id).await.unwrap();
+    assert!(
+        db_edge.t_expired.is_some(),
+        "edge must be expired in the DB"
+    );
+
+    // Graph side (the part #879 was missing): the in-memory petgraph no
+    // longer reports the expired edge. Only the f2→f1 edge survives.
+    assert_eq!(
+        engine.graph_stats().1,
+        1,
+        "expired edge must be dropped from the in-memory graph, not just the DB"
+    );
+    assert!(
+        engine.graph_neighbors(f1).is_empty(),
+        "f1 has no outgoing neighbor after its only out-edge expired"
+    );
+    assert_eq!(engine.graph_neighbors(f2), vec![f1], "f2->f1 untouched");
+    assert_eq!(engine.graph_degree(f1), 1); // only the incoming f2->f1 remains
+}
+
+#[tokio::test]
+async fn expire_edge_nonexistent_is_not_found() {
+    // Mirrors `EdgeStore::expire`'s rows-affected contract surfaced through
+    // the engine facade: an unknown id is NotFound, and the graph is left
+    // untouched.
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let err = engine
+        .expire_edge(9999)
+        .await
+        .expect_err("expiring a nonexistent edge must return NotFound");
+    assert!(
+        matches!(err, MemoryError::NotFound(_)),
+        "expected MemoryError::NotFound, got {err:?}"
+    );
+}
+
 // --- Scope-aware session linking tests ---
 
 /// Helper: add a fact in a specific scope, linked to a session.
