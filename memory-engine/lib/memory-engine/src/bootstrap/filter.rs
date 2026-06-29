@@ -51,7 +51,7 @@ impl EpisodeCategory {
     /// the adjacent `session_outcome` convention (`"failure"`/`"success"`/…)
     /// and decouples the stored schema from the Rust variant names, so a variant
     /// rename can no longer silently alter stored data (#334). Round-trips via
-    /// [`EpisodeCategory::from_str`].
+    /// `EpisodeCategory::from_str`.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

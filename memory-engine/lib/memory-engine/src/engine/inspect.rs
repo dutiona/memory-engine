@@ -101,7 +101,7 @@ impl MemoryEngine {
     /// This means the graph context may reflect a slightly older snapshot than the
     /// database state under concurrent writes. This trade-off is intentional for
     /// an informational API: the graph snapshot is taken via
-    /// [`inspect::explain::build_graph_context`] before the DB read.
+    /// `inspect::explain::build_graph_context` before the DB read.
     pub async fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
         use crate::inspect::explain;
         use crate::inspect::types::FactProvenance;
@@ -180,14 +180,14 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Io`] on filesystem failure.
-    /// Returns [`MemoryError::Conflict`] if the target path resolves to the live database.
-    /// Returns [`MemoryError::Database`] on SQL failure.
-    /// Returns [`MemoryError::Serialization`] for the JSON formats if snapshot
+    /// Returns [`MemoryError::Io`](crate::MemoryError::Io) on filesystem failure.
+    /// Returns [`MemoryError::Conflict`](crate::MemoryError::Conflict) if the target path resolves to the live database.
+    /// Returns [`MemoryError::Database`](crate::MemoryError::Database) on SQL failure.
+    /// Returns [`MemoryError::Serialization`](crate::MemoryError::Serialization) for the JSON formats if snapshot
     /// serialization fails.
-    /// Returns [`MemoryError::NotImplemented`] if a compression format is used
+    /// Returns [`MemoryError::NotImplemented`](crate::MemoryError::NotImplemented) if a compression format is used
     /// without the corresponding feature enabled.
-    /// Returns [`MemoryError::ReadOnly`] for the `Sqlite` format if the engine
+    /// Returns [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly) for the `Sqlite` format if the engine
     /// was opened read-only (the `VACUUM INTO` backup acquires the write lock).
     pub async fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
         self.ensure_open()?;

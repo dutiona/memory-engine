@@ -435,7 +435,7 @@ impl ConsolidationConfig {
     /// Returns `MemoryError::Conflict` if `dedup_threshold` or `cluster_threshold`
     /// is not a finite value in `[0.0, 1.0]` (each is a cosine-similarity gate), or
     /// if `min_cluster_size < 2` (a cluster requires at least two members to be
-    /// fused into a summary; see [`crate::consolidation`]).
+    /// fused into a summary).
     pub fn validate(&self) -> Result<()> {
         use crate::error::{ConflictError, MemoryError};
 

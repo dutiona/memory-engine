@@ -118,7 +118,7 @@ pub trait SchemaManager: Send + Sync {
 
     /// Compute aggregate engine statistics (fact/edge/summary/scope/event counts
     /// + storage metrics). Replaces `inspect::statistics::compute_statistics`; the
-    /// backend supplies its own db path for [`StorageStats::file_path`].
+    /// backend supplies its own db path for [`StorageStats::file_path`](crate::inspect::types::StorageStats::file_path).
     ///
     /// # Errors
     ///
@@ -126,12 +126,12 @@ pub trait SchemaManager: Send + Sync {
     /// backend failure.
     async fn statistics(&self) -> Result<crate::inspect::EngineStatistics>;
 
-    /// Export full engine state to a file in the requested [`DumpFormat`].
+    /// Export full engine state to a file in the requested [`DumpFormat`](crate::inspect::types::DumpFormat).
     ///
     /// Relocates `inspect::dump::{dump_json,_gzip,_zstd,dump_sqlite}` below the
     /// seam: the JSON variants stream via a read connection; the `Sqlite`
     /// (`VACUUM INTO`) variant routes through the write connection so a read-only
-    /// backend rejects it with [`MemoryError::ReadOnly`]. Feature-gated compression
+    /// backend rejects it with [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly). Feature-gated compression
     /// dispatch lives in the impl, keeping this trait surface `#[cfg]`-free.
     ///
     /// # Errors
@@ -140,7 +140,7 @@ pub trait SchemaManager: Send + Sync {
     /// failure, [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) if a
     /// dump target resolves to the live database or a directory,
     /// [`MemoryError::NotImplemented`](crate::error::MemoryError::NotImplemented) for
-    /// a compression format whose feature is disabled, [`MemoryError::ReadOnly`] for
+    /// a compression format whose feature is disabled, [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly) for
     /// the `Sqlite` format on a read-only backend, or
     /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend failure.
     async fn dump_state(&self, embed_dim: usize, format: crate::inspect::DumpFormat) -> Result<()>;
@@ -207,7 +207,7 @@ pub trait SchemaManager: Send + Sync {
     /// anti-join): `(fact_id, content)` pairs with `fact_id > after_id`,
     /// id-ordered, capped at `limit`. An empty window means the space is fully
     /// backfilled. Covers every fact, expired or not (the homogeneity invariant —
-    /// see [`store::fact_vectors`](crate::store::fact_vectors)).
+    /// see `store::fact_vectors`).
     ///
     /// # Errors
     ///

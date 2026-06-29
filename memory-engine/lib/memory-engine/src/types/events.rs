@@ -45,10 +45,10 @@ impl FromStr for EventType {
     /// shared by every consumer surface (the MCP server's `ingest` / `replay`
     /// tool parameters). Mirroring [`FactType::from_str`](crate::types::FactType::from_str),
     /// it is intentionally lenient on casing so it accepts both wire conventions
-    /// present in the codebase: [`Display`] emits `snake_case` (`"interaction"`),
+    /// present in the codebase: [`std::fmt::Display`] emits `snake_case` (`"interaction"`),
     /// while serde-derive and the MCP JSON-schema enums use `PascalCase`
     /// (`"Interaction"`). Parsing reconciles both to one canonical enum;
-    /// [`EventType::to_string`] remains the canonical output.
+    /// [`ToString::to_string`] remains the canonical output.
     ///
     /// It accepts **all** variants, including [`EventType::OutcomeSignal`] — a
     /// complete parser that round-trips with `Display`. Surfaces that must reject
@@ -122,7 +122,7 @@ impl FromStr for Outcome {
     /// Mirroring [`FactType::from_str`](crate::types::FactType::from_str), it is
     /// lenient on casing so it accepts both the `PascalCase` wire form the MCP
     /// JSON schema advertises (`"Positive"`) and the `snake_case`/lowercase
-    /// [`Display`] form (`"positive"`); [`Outcome::to_string`] round-trips through
+    /// [`std::fmt::Display`] form (`"positive"`); [`ToString::to_string`] round-trips through
     /// it. Parsing reconciles every casing to one canonical enum.
     ///
     /// Note: this is orthogonal to the strict DB serialization — the serde

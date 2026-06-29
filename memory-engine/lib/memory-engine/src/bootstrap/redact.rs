@@ -635,7 +635,7 @@ pub fn redact_text(text: &str) -> (String, Vec<Finding>) {
 ///
 /// Use this on a controlled corpus where the secret-holder can enumerate their
 /// own secrets: it closes the bare-hex / arbitrary-low-entropy gaps the
-/// signature detectors cannot (see [`detect_denylist`]). The `denylist` values
+/// signature detectors cannot (see `detect_denylist`). The `denylist` values
 /// are supplied at runtime from a gitignored source — never committed.
 ///
 /// `redact_text(text)` == `redact_text_with_denylist(text, &[])`.

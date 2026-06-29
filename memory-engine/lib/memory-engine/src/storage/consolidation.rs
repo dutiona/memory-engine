@@ -57,7 +57,7 @@ pub trait ConsolidationStore: Send + Sync {
     // Stage A atomic port method (Fork B, §3 of the #631 plan)
     // -------------------------------------------------------------------------
 
-    /// Atomically apply a validated [`CycleReport`]'s DB-touching deltas in a
+    /// Atomically apply a validated [`CycleReport`](crate::CycleReport)'s DB-touching deltas in a
     /// single `rusqlite` transaction, returning the supersede-edge triples that
     /// the engine must mirror into its in-memory graph after commit.
     ///
@@ -145,7 +145,7 @@ pub trait ConsolidationStore: Send + Sync {
         config: crate::traits::ConsolidationConfig,
     ) -> Result<crate::consolidation::Snapshot>;
 
-    /// Phase 3 — apply a fully-computed [`ConsolidationPlan`](crate::consolidation::ConsolidationPlan)
+    /// Phase 3 — apply a fully-computed `ConsolidationPlan`
     /// in a single transaction, firing the post-commit HNSW `notify_expire` for the
     /// ids it actually expired (Stage B).
     ///

@@ -29,11 +29,11 @@ impl MemoryEngine {
     ///
     /// The in-memory graph is a *derived cache* of the active edge set: the DB
     /// is the source of truth and the cache is rebuilt from it on every `open`
-    /// ([`crate::graph::MemoryGraph::load_from_db`]). After the atomic commit
+    /// (`MemoryGraph::load_from_db`). After the atomic commit
     /// succeeds, the archived facts' nodes are removed in place under a single
     /// graph write guard — an O(N) prune held across no `.await`, so it is
     /// atomic with respect to any other graph mutator.
-    /// [`crate::graph::MemoryGraph::remove_node`] is
+    /// `MemoryGraph::remove_node` is
     /// loop-safe: petgraph's swap-remove relocates the former last node into the
     /// freed slot, and `remove_node` re-indexes `node_map` for that displaced
     /// node, so surviving nodes keep resolving to their correct indices across

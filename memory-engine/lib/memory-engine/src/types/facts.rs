@@ -52,7 +52,7 @@ impl FromStr for FactType {
     /// casing so it accepts both wire conventions present in the codebase:
     /// `Display` emits `snake_case` (`"episodic"`), while serde-derive and the MCP
     /// JSON-schema enums use `PascalCase` (`"Episodic"`). Parsing reconciles both
-    /// to one canonical enum; [`FactType::to_string`] remains the canonical output.
+    /// to one canonical enum; [`ToString::to_string`] remains the canonical output.
     ///
     /// Note: this is orthogonal to the serde `Deserialize` derive, which stays
     /// `PascalCase` to preserve `.pak` cold-storage archive back-compat.
@@ -96,7 +96,7 @@ impl fmt::Display for ConsolidationLevel {
 /// the per-field docs.
 ///
 /// Importance is likewise split across two fields, easily confused:
-/// [`importance`](Self::importance) is the *static, consumer-supplied prior* set at insertion,
+/// [`base_importance`](Self::base_importance) is the *static, consumer-supplied prior* set at insertion,
 /// while [`importance_score`](Self::importance_score) is the *computed, decaying score* the
 /// engine ranks and forgets by (the prior is one of its inputs). See those fields' docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

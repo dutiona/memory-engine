@@ -51,7 +51,6 @@ Source lives in `src/`. Each module owns its domain:
 - `resume/` — 4-tier cognitive boot: pinned → high_importance → due → recent.
 - `bootstrap/` — Parse Claude Code JSONL session logs into historical facts.
 - `inspect/` — Debugging APIs: `explain_fact`, `fact_history`, `replay_events`, `dump_state`, `statistics`.
-- `async_engine.rs` — `AsyncMemoryEngine` via `tokio::spawn_blocking` (feature-gated).
 
 Tests in `tests/` (6 integration tests), benchmarks in `benches/`, examples in `examples/` (3).
 

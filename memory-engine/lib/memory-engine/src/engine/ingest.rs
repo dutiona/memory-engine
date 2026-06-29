@@ -84,7 +84,7 @@ impl MemoryEngine {
     /// Unlike [`add_fact`](Self::add_fact), this performs no embedding (the vector is
     /// given) — the caller supplies the **declared** identity of the model that produced
     /// it (#615, §Design.3). That declared fingerprint is treated exactly like a live
-    /// provider's: [`record_if_absent`](crate::store::embedding_meta::record_if_absent)
+    /// provider's: `record_if_absent`
     /// records it on a fresh store (so a precomputed-only workflow can bootstrap an
     /// identity) and compares it (full-tuple `Eq`) against the stored identity on a
     /// populated one, hard-rejecting a mismatch. This closes the same-dim foreign-vector

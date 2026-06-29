@@ -57,7 +57,7 @@ static BRUTE_FORCE_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 /// shorter slice, so any trailing components of the longer slice are ignored.
 /// This function performs no length check; the **caller is responsible for
 /// passing equal-length vectors**. In-engine callers already enforce dimension
-/// uniformity at the store/query layer (e.g. [`vector_search_filtered`] rejects
+/// uniformity at the store/query layer (e.g. `vector_search_filtered` rejects
 /// a wrongly-sized query, and stored embeddings are validated against
 /// `embed_dim`), so the truncation never fires on the real read path.
 #[must_use]

@@ -41,7 +41,7 @@ const METHOD_VERSION: &str = "llm-proposer-v1";
 /// construct one per `run_dream_cycle` call. The `Arc`s let the async `run` offload
 /// each (possibly blocking HTTP) `propose`/`embed` call to the blocking pool via
 /// `spawn_blocking` — keeping the executor unblocked and a `reqwest::blocking`
-/// provider nested-runtime-safe. See the [module docs](self) for the safety rails.
+/// provider nested-runtime-safe. See the module docs for the safety rails.
 ///
 /// # Injecting the backend
 ///

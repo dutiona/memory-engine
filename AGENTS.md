@@ -49,7 +49,6 @@ src/
   resume/             # 4-tier cognitive boot (pinned → importance → due → recent)
   bootstrap/          # Claude Code JSONL session import
   inspect/            # Debugging APIs (explain, replay, dump, restore, statistics)
-  async_engine.rs     # AsyncMemoryEngine (tokio, feature-gated)
 tests/                # Integration tests
 benches/              # Criterion benchmarks
 examples/             # 3 runnable examples
