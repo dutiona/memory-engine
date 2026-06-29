@@ -434,6 +434,49 @@ mod tests {
     }
 
     #[test]
+    fn insert_with_empty_source_facts_skips_validation_and_stores_empty() {
+        // #482: when `source_fact_ids` is empty, `insert` short-circuits the
+        // FK-existence loop (`if !record.source_fact_ids.is_empty()`) and inserts a
+        // row with `source_fact_ids = '[]'`. This pins the *current, intentional*
+        // permissive behavior — an empty source chain is accepted, not rejected —
+        // so a future change to that contract (e.g. erroring on empty sources) is a
+        // deliberate, test-visible decision rather than a silent drift.
+        //
+        // Non-vacuous: it asserts BOTH that the insert succeeds (a regression that
+        // made empty sources error would fail here) AND that the round-tripped
+        // sources are exactly empty (a regression that, say, validated an empty set
+        // against existing facts and substituted a non-empty default would fail the
+        // equality). The wisdom-fact existence check still runs and must pass.
+        let conn = setup();
+        let store = LineageStore::new(&conn);
+
+        let new_rec = NewLineageRecord {
+            wisdom_fact_id: 1,
+            source_fact_ids: vec![],
+        };
+        let lineage_id = store
+            .insert(&new_rec, &test_provenance())
+            .expect("empty source_fact_ids is accepted by the current contract");
+        assert!(lineage_id > 0);
+
+        // Read back through the typed getter: the stored chain is exactly empty.
+        let ids = store.get_source_fact_ids(1).unwrap();
+        assert!(
+            ids.is_empty(),
+            "empty source_fact_ids must round-trip as empty, got {ids:?}"
+        );
+        // And the raw column is the empty-JSON-array literal, not NULL or absent.
+        let raw: String = conn
+            .query_row(
+                "SELECT source_fact_ids FROM lineage WHERE wisdom_fact_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "[]", "empty sources stored as '[]'");
+    }
+
+    #[test]
     fn for_each_iterates_all_rows() {
         let conn = setup();
         let store = LineageStore::new(&conn);
