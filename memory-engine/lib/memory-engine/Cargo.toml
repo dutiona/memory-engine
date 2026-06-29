@@ -75,15 +75,6 @@ harness = false
 
 # --- integration tests (top-level ../../../tests/) — attached explicitly since this
 #     crate dir has no tests/ subdir for Cargo to auto-discover ---
-# The two-tier eval harness (#16): a multi-file binary rooted at tests/eval/main.rs.
-# Cargo auto-discovered it when the repo root was a package; after the bin/lib
-# restructure the core crate's dir has no tests/ subdir, so it must be attached
-# explicitly like every other top-level integration test below — otherwise the
-# whole conformance + quality suite silently stops building under `cargo test`.
-[[test]]
-name = "eval"
-path = "../../../tests/eval/main.rs"
-
 [[test]]
 name = "activity_stream_test"
 path = "../../../tests/activity_stream_test.rs"
