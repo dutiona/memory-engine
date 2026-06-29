@@ -93,10 +93,16 @@ pub trait FactGraph: Send + Sync {
     async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>>;
     async fn list_active_facts_scoring(&self) -> Result<Vec<FactScoringRow>>;
     async fn list_active_facts_at(&self, valid_at: DateTime<Utc>) -> Result<Vec<Fact>>;
+    /// List dormant facts (active, non-pinned, `importance_score < threshold`,
+    /// temporally valid **as of `as_of`**). `as_of` is the injected wall-clock
+    /// instant — the facade passes [`Utc::now`](chrono::Utc::now) — so backends
+    /// never read the clock themselves and temporal behavior is deterministically
+    /// testable (#327). `scope_ids` `None` = all scopes, `Some` = those scopes.
     async fn list_dormant_facts(
         &self,
         importance_threshold: f64,
         scope_ids: Option<&[i64]>,
+        as_of: DateTime<Utc>,
     ) -> Result<Vec<Fact>>;
     async fn list_facts_by_scope_importance(
         &self,

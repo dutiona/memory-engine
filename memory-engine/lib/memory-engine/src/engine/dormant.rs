@@ -48,7 +48,11 @@ impl MemoryEngine {
         let scope_ids_owned = scope_ids.map(<[i64]>::to_vec);
         let candidates = self
             .storage
-            .list_dormant_facts(DORMANT_THRESHOLD, scope_ids_owned.as_deref())
+            .list_dormant_facts(
+                DORMANT_THRESHOLD,
+                scope_ids_owned.as_deref(),
+                chrono::Utc::now(),
+            )
             .await?;
 
         // Compute cosine similarity and sort descending (resonance = most relevant dormant)
