@@ -1345,11 +1345,20 @@ CREATE TABLE IF NOT EXISTS config (
             "list_config must reflect the upserted value, not the original"
         );
 
-        // init_schema seeds schema_version; list_config must surface it too,
-        // since this is exactly how tooling inspects the schema version.
-        assert!(
-            map.contains_key("schema_version"),
-            "list_config must include the seeded schema_version config row"
+        // init_schema seeds BOTH tooling-inspection keys named by #481:
+        // schema_version AND storage_epoch. list_config is exactly how tooling
+        // reads them, so it must surface each with its seeded value (asserting
+        // the value, not mere key presence, keeps these non-vacuous: a wrong
+        // seed, a +1 drift, or a key/value swap fails here).
+        assert_eq!(
+            map.get("schema_version").map(String::as_str),
+            Some(CURRENT_SCHEMA_VERSION.to_string().as_str()),
+            "list_config must surface the seeded schema_version with its value"
+        );
+        assert_eq!(
+            map.get("storage_epoch").map(String::as_str),
+            Some(STORAGE_EPOCH.to_string().as_str()),
+            "list_config must surface the seeded storage_epoch with its value"
         );
     }
 
