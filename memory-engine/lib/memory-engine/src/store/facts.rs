@@ -3632,4 +3632,95 @@ mod tests {
             .collect();
         assert_eq!(got, vec![live], "expired facts are not recent-listed");
     }
+
+    // -------------------------------------------------------------------------
+    // #329 — list_all and for_each: dump-path coverage
+    // -------------------------------------------------------------------------
+
+    /// `list_all` returns every inserted active fact (state-dump contract).
+    ///
+    /// Non-vacuous: three asymmetric facts are inserted and the returned `id`
+    /// list is asserted verbatim in `id ASC` order, so a short/empty iteration
+    /// or a missed row fails the equality.
+    #[test]
+    fn list_all_returns_all_active_facts() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let a = store.insert(&make_fact("alpha", vec![0.1; DIM])).unwrap();
+        let b = store.insert(&make_fact("beta", vec![0.2; DIM])).unwrap();
+        let c = store.insert(&make_fact("gamma", vec![0.3; DIM])).unwrap();
+
+        let all = store.list_all().unwrap();
+        let ids: Vec<i64> = all.iter().map(|f| f.id).collect();
+        assert_eq!(
+            ids,
+            vec![a, b, c],
+            "list_all must return every inserted fact in id ASC order"
+        );
+        // Content round-trips too — guards against a column-projection slip that
+        // would return rows but with the wrong payload.
+        let contents: Vec<&str> = all.iter().map(|f| f.content.as_str()).collect();
+        assert_eq!(contents, vec!["alpha", "beta", "gamma"]);
+    }
+
+    /// `for_each` visits the same rows as `list_all`, in the same order.
+    ///
+    /// Non-vacuous: the collected stream is asserted equal to `list_all`'s
+    /// output id-for-id over three asymmetric facts — a short iteration (e.g. a
+    /// `while` that stops after one row) or a reordered scan fails the equality.
+    #[test]
+    fn for_each_matches_list_all_ordering() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("one", vec![0.1; DIM])).unwrap();
+        store.insert(&make_fact("two", vec![0.2; DIM])).unwrap();
+        store.insert(&make_fact("three", vec![0.3; DIM])).unwrap();
+
+        let expected: Vec<i64> = store.list_all().unwrap().iter().map(|f| f.id).collect();
+        assert_eq!(expected.len(), 3, "fixture sanity: three facts present");
+
+        let mut collected: Vec<i64> = Vec::new();
+        store
+            .for_each(|f| {
+                collected.push(f.id);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            collected, expected,
+            "for_each must stream the same ids in the same order as list_all"
+        );
+    }
+
+    /// A callback returning `Err` short-circuits iteration and propagates the
+    /// error verbatim — the loop must not swallow it or run to completion.
+    ///
+    /// Non-vacuous: the callback errors on the FIRST visited row, so the visit
+    /// count must be exactly 1 (a swallowed error would let all three through)
+    /// and the surfaced error must be the callback's own.
+    #[test]
+    fn for_each_propagates_callback_error_and_short_circuits() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("one", vec![0.1; DIM])).unwrap();
+        store.insert(&make_fact("two", vec![0.2; DIM])).unwrap();
+        store.insert(&make_fact("three", vec![0.3; DIM])).unwrap();
+
+        let mut visited = 0_usize;
+        let err = store
+            .for_each(|_| {
+                visited += 1;
+                Err(MemoryError::Internal("boom".to_owned()))
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            visited, 1,
+            "iteration must stop at the first erroring row, not run to completion"
+        );
+        assert!(
+            matches!(err, MemoryError::Internal(ref m) if m == "boom"),
+            "the callback's own error must propagate verbatim, got {err:?}"
+        );
+    }
 }
