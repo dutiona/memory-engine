@@ -245,33 +245,70 @@ mod tests {
 
         const TYPE: &str = "ChainEvt";
 
-        /// A single, order- and count-sensitive step: it pushes the revision it
-        /// is *leaving* onto a `"trace"` array. The trace makes the transform
-        /// asymmetric — applying the steps in the wrong order, one too few, or one
-        /// too many produces a *different* array, so an off-by-one in the loop
-        /// bound or a swapped sequence is caught (not just the final revision).
+        /// Upper bound on the number of registered chain steps a proptest drives.
+        /// `from_revision` ranges over `1..=MAX_CHAIN`, so we need one distinct
+        /// step function per value in that range.
+        const MAX_CHAIN: u16 = 10;
+
+        /// Generate a *distinct* step function per `from_revision`, each one
+        /// hard-coding the revision it is registered at and appending **that
+        /// constant** (not a length-derived marker) to the `"trace"` array.
         ///
-        /// The `Result` return is structurally required: this fn is registered as
+        /// This is what makes the chain *order-sensitive against the registry's
+        /// own lookup*: `UpcasterRegistry::upcast` fetches the step keyed by the
+        /// current revision, so if it ever looks up the wrong key (a swapped or
+        /// misordered sequence), the executed trace records the *wrong* revision
+        /// constant — even when the chain *length* is identical. A marker derived
+        /// only from `trace.len()` could not tell those apart.
+        ///
+        /// The `Result` return is structurally required: each fn is registered as
         /// an [`UpcasterFn`] (`fn(Value) -> Result<Value>`), so the signature is
-        /// fixed by the API even though this particular step never fails — hence
-        /// the `unnecessary_wraps` allow.
-        #[allow(clippy::unnecessary_wraps)]
-        fn trace_step(mut v: serde_json::Value) -> Result<serde_json::Value> {
-            let prev = v["trace"].as_array().cloned().unwrap_or_default();
-            let next_marker = serde_json::json!(prev.len());
-            let mut trace = prev;
-            trace.push(next_marker);
-            v["trace"] = serde_json::Value::Array(trace);
-            Ok(v)
+        /// fixed by the API even though these steps never fail — hence the
+        /// `unnecessary_wraps` allow.
+        macro_rules! rev_steps {
+            ($($rev:literal),+ $(,)?) => {
+                /// Step functions indexed so that `STEP_FNS[r]` is the step
+                /// registered at `from_revision == r` (index 0 is an unused
+                /// placeholder — revisions are 1-based).
+                static STEP_FNS: &[UpcasterFn] = &[
+                    // index 0: never registered (revisions start at 1).
+                    |v| Ok(v),
+                    $({
+                        #[allow(clippy::unnecessary_wraps)]
+                        fn step(mut v: serde_json::Value) -> Result<serde_json::Value> {
+                            let prev = v["trace"].as_array().cloned().unwrap_or_default();
+                            let mut trace = prev;
+                            // Append THIS step's own from_revision, not a
+                            // length-derived value: an order-blind impl cannot
+                            // reproduce the right sequence.
+                            trace.push(serde_json::json!($rev));
+                            v["trace"] = serde_json::Value::Array(trace);
+                            Ok(v)
+                        }
+                        step as UpcasterFn
+                    }),+
+                ];
+            };
+        }
+        rev_steps!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+
+        /// Fetch the step function registered at `from_revision`.
+        fn step_fn(from_revision: u16) -> UpcasterFn {
+            STEP_FNS[usize::from(from_revision)]
         }
 
         /// Build a registry whose `TYPE` chain has `n` steps registered at
         /// `from_revision = 1..=n` (so `latest_revision == n + 1`, since an empty
-        /// chain already starts everything at revision 1).
+        /// chain already starts everything at revision 1). Each `from_revision`
+        /// gets its *own* step function (see [`rev_steps!`]).
         fn registry_with_chain(n: u16) -> UpcasterRegistry {
+            assert!(
+                n <= MAX_CHAIN,
+                "chain length {n} exceeds MAX_CHAIN {MAX_CHAIN}"
+            );
             let mut r = UpcasterRegistry::new();
             for from in 1..=n {
-                r.register(TYPE, from, trace_step);
+                r.register(TYPE, from, step_fn(from));
             }
             r
         }
@@ -294,11 +331,17 @@ mod tests {
                 prop_assert_eq!(out, payload);
             }
 
-            /// Law 2 — chained == direct: starting at any revision `start` in
-            /// `1..=latest`, a single `upcast` to latest equals folding the same
-            /// step function `(latest - start)` times by hand. Because `trace_step`
-            /// records each visited revision, this asserts not just the final value
-            /// but the exact sequence of applications.
+            /// Law 2 — chained == direct, *in the right order*: starting at any
+            /// revision `start` in `1..=latest`, a single `upcast` to latest must
+            /// execute the steps for revisions `start, start+1, …, latest-1` —
+            /// **in that exact sequence**. Each step appends its own
+            /// `from_revision` constant to `"trace"`, so the executed trace is the
+            /// literal revision sequence the registry visited. Asserting it equals
+            /// `start..latest` is order-sensitive: an order-blind impl that runs
+            /// the same number of steps but looks up the wrong keys (e.g. swaps two
+            /// adjacent steps, or iterates the span in reverse) produces a
+            /// permuted trace and fails. The length check is then a corollary
+            /// (catches off-by-one on the loop bound).
             #[test]
             fn chained_equals_direct(n in 1u16..=10, start_off in 0u16..=10) {
                 let registry = registry_with_chain(n);
@@ -308,24 +351,26 @@ mod tests {
 
                 let payload = serde_json::json!({"trace": []});
 
-                // Direct: one upcast call over the whole span.
-                let (direct, direct_rev) =
-                    registry.upcast(TYPE, start, payload.clone()).unwrap();
+                // Direct: one upcast call over the whole span. (Payload is not
+                // reused afterwards, so it moves in without a clone.)
+                let (direct, direct_rev) = registry.upcast(TYPE, start, payload).unwrap();
 
-                // Manual: apply the step exactly (latest - start) times.
-                let steps = latest - start;
-                let mut manual = payload;
-                for _ in 0..steps {
-                    manual = trace_step(manual).unwrap();
-                }
+                // Expected: the steps keyed at revisions start..latest, applied in
+                // ascending order, each recording its own from_revision.
+                let expected_trace: Vec<serde_json::Value> =
+                    (start..latest).map(|rev| serde_json::json!(rev)).collect();
 
                 prop_assert_eq!(direct_rev, latest);
-                prop_assert_eq!(&direct, &manual);
-                // The trace length equals the number of steps actually applied —
-                // an independent check on the loop count (catches off-by-one).
+                // Order-sensitive: the exact revision sequence the registry ran.
+                prop_assert_eq!(
+                    direct["trace"].as_array(),
+                    Some(&expected_trace)
+                );
+                // Corollary — the trace length equals the number of steps applied
+                // (catches an off-by-one on the loop bound independently).
                 prop_assert_eq!(
                     direct["trace"].as_array().map(Vec::len),
-                    Some(usize::from(steps))
+                    Some(usize::from(latest - start))
                 );
             }
 
