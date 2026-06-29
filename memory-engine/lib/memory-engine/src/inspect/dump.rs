@@ -893,8 +893,8 @@ mod tests {
     /// regression here could silently corrupt the live DB on a re-dump.
     ///
     /// The guard is gated on `is_file_backed` (an in-memory `open_memory()` conn
-    /// never reaches it — see #463's short-circuit note), so this test opens a
-    /// real on-disk connection. Non-vacuous: deleting the guard would let
+    /// has db path `:memory:`, so it never reaches the guard), so this test opens
+    /// a real on-disk connection. Non-vacuous: deleting the guard would let
     /// `VACUUM INTO` proceed against the source, so this returns `Ok` (or a
     /// different error) and fails the exact-variant `matches!` below.
     #[tokio::test]
@@ -970,14 +970,18 @@ mod tests {
     /// NUL byte must be rejected, never reaching `VACUUM INTO` (where a NUL would
     /// otherwise risk truncating the SQL string fed to `SQLite`). On current main
     /// the rejection surfaces as `MemoryError::Io` (`ErrorKind::InvalidInput`):
-    /// the `std::fs::symlink_metadata(path)` probe — which runs for *every*
-    /// connection, file-backed or not (it is not behind the `is_file_backed`
-    /// short-circuit) — fails first because the OS rejects a NUL in a path, and
-    /// that I/O error is mapped to `MemoryError::Io`. (This is the live behavior
-    /// after the #836 `VACUUM INTO`-into-a-server-minted-temp refactor: the
-    /// surviving in-function NUL check at the `VACUUM INTO` site now guards the
-    /// *server-minted* temp path, which can never carry caller-supplied NULs, so
-    /// the caller-path NUL is caught earlier and typed as `Io`, not `Internal`.)
+    /// the rejection is defense-in-depth across the path-touching syscalls that
+    /// run before `VACUUM INTO` — `canonicalize` (file-backed conns),
+    /// `symlink_metadata`, and the final `persist` rename — each of which the OS
+    /// refuses on a NUL-bearing path, mapping to `MemoryError::Io`. A NUL-byte
+    /// caller path is therefore rejected as `Io` / `InvalidInput` before the NUL
+    /// can reach `VACUUM INTO`; the exact probe that fires first is an
+    /// implementation detail, not part of the contract. (This is the live
+    /// behavior after the #836 `VACUUM INTO`-into-a-server-minted-temp refactor:
+    /// the surviving in-function NUL check at the `VACUUM INTO` site now guards
+    /// only the *server-minted* temp path, which can never carry caller-supplied
+    /// NULs, so the caller-path NUL is caught earlier and typed as `Io`, not
+    /// `Internal`.)
     ///
     /// Non-vacuous: a path *without* a NUL byte at the same nonexistent leaf is
     /// accepted (the dump succeeds), so the assertion fails if the NUL is not
@@ -1011,8 +1015,9 @@ mod tests {
         assert!(
             matches!(result, Err(MemoryError::Io(ref e))
                 if e.kind() == std::io::ErrorKind::InvalidInput),
-            "a NUL-byte dump path must be rejected (current main: as \
-             MemoryError::Io / InvalidInput, from the symlink_metadata probe), \
+            "a NUL-byte dump path must be rejected as \
+             MemoryError::Io / InvalidInput before the NUL can reach VACUUM INTO \
+             (defense-in-depth across canonicalize / symlink_metadata / persist), \
              got {result:?}"
         );
 
