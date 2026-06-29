@@ -64,8 +64,7 @@ impl MemoryEngine {
         // free-function transaction).
         let old_fact = self.storage.get_fact(old_id).await?;
 
-        // Build a temporary Fact from NewFact for the arbiter (it needs both as
-        // Fact). Ported verbatim from `crate::conflict::temporal::resolve_conflict`.
+        // Build a temporary Fact from NewFact for the arbiter (it needs both as Fact).
         let new_as_fact = crate::types::Fact::from_new_for_arbiter(new_fact);
 
         // CONSUMER TRAIT — the main loop drives this; left exactly as-is (rule 5).
