@@ -233,4 +233,118 @@ mod tests {
         assert!(r1["interaction_v2"].as_bool().unwrap());
         assert!(r1.get("toolcall_v2").is_none());
     }
+
+    /// Composition invariants for arbitrary-length upcaster chains (#486).
+    ///
+    /// The example tests above only cover chains of length 0/1/2. These proptests
+    /// drive chains of `0..=10` registered steps and pin the three algebraic laws
+    /// the chain must obey for *any* length and *any* starting revision.
+    mod proptest_chain {
+        use super::*;
+        use proptest::prelude::*;
+
+        const TYPE: &str = "ChainEvt";
+
+        /// A single, order- and count-sensitive step: it pushes the revision it
+        /// is *leaving* onto a `"trace"` array. The trace makes the transform
+        /// asymmetric — applying the steps in the wrong order, one too few, or one
+        /// too many produces a *different* array, so an off-by-one in the loop
+        /// bound or a swapped sequence is caught (not just the final revision).
+        ///
+        /// The `Result` return is structurally required: this fn is registered as
+        /// an [`UpcasterFn`] (`fn(Value) -> Result<Value>`), so the signature is
+        /// fixed by the API even though this particular step never fails — hence
+        /// the `unnecessary_wraps` allow.
+        #[allow(clippy::unnecessary_wraps)]
+        fn trace_step(mut v: serde_json::Value) -> Result<serde_json::Value> {
+            let prev = v["trace"].as_array().cloned().unwrap_or_default();
+            let next_marker = serde_json::json!(prev.len());
+            let mut trace = prev;
+            trace.push(next_marker);
+            v["trace"] = serde_json::Value::Array(trace);
+            Ok(v)
+        }
+
+        /// Build a registry whose `TYPE` chain has `n` steps registered at
+        /// `from_revision = 1..=n` (so `latest_revision == n + 1`, since an empty
+        /// chain already starts everything at revision 1).
+        fn registry_with_chain(n: u16) -> UpcasterRegistry {
+            let mut r = UpcasterRegistry::new();
+            for from in 1..=n {
+                r.register(TYPE, from, trace_step);
+            }
+            r
+        }
+
+        proptest! {
+            /// Law 1 — idempotent at the latest revision: upcasting a payload that
+            /// is *already* at `latest_revision` is a no-op and returns the payload
+            /// byte-for-byte plus the unchanged revision. Distinct expected values
+            /// (unchanged payload AND unchanged rev) catch a stray transform or a
+            /// rev mutation.
+            #[test]
+            fn idempotent_at_latest(n in 0u16..=10) {
+                let registry = registry_with_chain(n);
+                let latest = registry.latest_revision(TYPE);
+                prop_assert_eq!(latest, n + 1);
+
+                let payload = serde_json::json!({"trace": [], "marker": "untouched"});
+                let (out, rev) = registry.upcast(TYPE, latest, payload.clone()).unwrap();
+                prop_assert_eq!(rev, latest);
+                prop_assert_eq!(out, payload);
+            }
+
+            /// Law 2 — chained == direct: starting at any revision `start` in
+            /// `1..=latest`, a single `upcast` to latest equals folding the same
+            /// step function `(latest - start)` times by hand. Because `trace_step`
+            /// records each visited revision, this asserts not just the final value
+            /// but the exact sequence of applications.
+            #[test]
+            fn chained_equals_direct(n in 1u16..=10, start_off in 0u16..=10) {
+                let registry = registry_with_chain(n);
+                let latest = registry.latest_revision(TYPE); // == n + 1
+                // Pick a start within [1, latest]; clamp the offset into range.
+                let start = 1 + (start_off % latest);
+
+                let payload = serde_json::json!({"trace": []});
+
+                // Direct: one upcast call over the whole span.
+                let (direct, direct_rev) =
+                    registry.upcast(TYPE, start, payload.clone()).unwrap();
+
+                // Manual: apply the step exactly (latest - start) times.
+                let steps = latest - start;
+                let mut manual = payload;
+                for _ in 0..steps {
+                    manual = trace_step(manual).unwrap();
+                }
+
+                prop_assert_eq!(direct_rev, latest);
+                prop_assert_eq!(&direct, &manual);
+                // The trace length equals the number of steps actually applied —
+                // an independent check on the loop count (catches off-by-one).
+                prop_assert_eq!(
+                    direct["trace"].as_array().map(Vec::len),
+                    Some(usize::from(steps))
+                );
+            }
+
+            /// Law 3 — revisions strictly past `latest` are a no-op: a payload
+            /// claiming a revision `> latest` is returned unchanged with its own
+            /// revision preserved (NOT clamped to latest). The `> latest` guard and
+            /// the `>= latest` early-return share the same branch, so a flip from
+            /// `>=` to `>` would corrupt the at-latest case Law 1 already pins.
+            #[test]
+            fn future_revision_is_noop(n in 0u16..=10, beyond in 1u16..=100) {
+                let registry = registry_with_chain(n);
+                let latest = registry.latest_revision(TYPE);
+                let future = latest.saturating_add(beyond);
+
+                let payload = serde_json::json!({"trace": [], "v": 7});
+                let (out, rev) = registry.upcast(TYPE, future, payload.clone()).unwrap();
+                prop_assert_eq!(rev, future);
+                prop_assert_eq!(out, payload);
+            }
+        }
+    }
 }

@@ -213,16 +213,29 @@ pub use engine::cycle::{
 ///   `cargo build --workspace`, so CI cannot catch a regression) needs only
 ///   `read_snapshot`, so it reaches it through this seam instead of through a widened
 ///   module.
+/// - [`store::parse_timestamp`] / [`store::parse_optional_timestamp`] — the two
+///   TEXT-column timestamp parsers (`DateTime::parse_from_rfc3339` wrapped into a
+///   `rusqlite` error). They are `pub fn` inside the `pub(crate) mod store`, so the
+///   external fuzz crate cannot reach them without this seam (#488). The contract is
+///   total: every input yields `Ok`/`Err`, never a panic.
+/// - [`archive::pak::read_pak`] — the two-layer (`zstd` frame + `serde_json`) `.pak`
+///   reader, with the `MAX_PAK_DECOMPRESSED_SIZE` decompression-bomb cap. It is `pub
+///   fn` inside the `#[cfg(feature = "archive")] pub(crate) mod archive`, so it is
+///   unreachable from the fuzz crate without this seam (#421); the entry is therefore
+///   `archive`-gated to match the module. Every input yields `Ok`/`Err`, never a panic.
 ///
 /// This module compiles to nothing on a normal build, so it adds no public API
 /// to the shipped crate.
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub mod fuzz_seam {
+    #[cfg(feature = "archive")]
+    pub use crate::archive::pak::read_pak;
     pub use crate::bootstrap::parse::{parse_content_blocks, parse_session_file};
     pub use crate::engine::snapshot::{fuzz_wrap_payload, load_from_file};
     pub use crate::inspect::restore::read_snapshot;
     pub use crate::search::fts::fuzz_fts_query;
+    pub use crate::store::{parse_optional_timestamp, parse_timestamp};
 }
 
 #[cfg(test)]
