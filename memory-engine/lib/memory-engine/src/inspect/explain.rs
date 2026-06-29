@@ -160,7 +160,12 @@ mod tests {
 
     /// #314: a `t_invalid` that is strictly in the *future* must NOT invalidate —
     /// `is_temporally_due` keeps the fact `Due` (it also has a past `t_valid`).
-    /// This pins the `t_invalid <= now` boundary so a `<` / `<=` flip is caught.
+    ///
+    /// Note: a strictly-future `t_invalid` behaves identically under `<` and `<=`,
+    /// so this case alone does NOT discriminate the `t_invalid <= now` boundary
+    /// (the flip is silently accepted). The exact-boundary case
+    /// [`determine_state_t_invalid_at_now_is_invalidated`] pins the `<=` vs `<`
+    /// distinction; this one only covers the "clearly future ⇒ still Due" branch.
     #[test]
     fn determine_state_future_t_invalid_is_not_invalidated() {
         let now = Utc::now();
@@ -173,6 +178,27 @@ mod tests {
             matches!(state, FactState::Due { .. }),
             "future t_invalid must stay Due, got {state:?}"
         );
+    }
+
+    /// #314: the exact `t_invalid == now` boundary classifies as `Invalidated`,
+    /// pinning the `t_invalid <= now` comparison against a `<=` → `<` flip.
+    ///
+    /// This is the discriminating case the strictly-future test above cannot reach:
+    /// under the live `<=` the fact is `Invalidated { t_invalid: now }`; under a
+    /// mutated `<` the `t_invalid` branch is skipped and — with `t_valid` left
+    /// `None`, so `is_temporally_due` is false — the fact falls through to `Active`.
+    /// Asserting the exact `Invalidated { t_invalid }` (not just the variant) also
+    /// guards the threaded instant.
+    #[test]
+    fn determine_state_t_invalid_at_now_is_invalidated() {
+        let now = Utc::now();
+        let mut fact = baseline_fact(now);
+        // `t_valid` stays None: a `<=` → `<` flip would route to Active (not Due),
+        // making the boundary failure unambiguous.
+        fact.t_invalid = Some(now);
+
+        let state = determine_state(&fact, now);
+        assert_eq!(state, FactState::Invalidated { t_invalid: now });
     }
 
     /// #314: `t_expired` set without a `quarantine` metadata marker → `Unknown`.
