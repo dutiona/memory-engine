@@ -218,7 +218,11 @@ async fn test_forget_invalid_override_key() {
         &memory_engine::ActivityFilterConfig::default(),
     )
     .await;
-    assert!(result.is_err());
+    // An unknown FactType key surfaces as `INVALID_PARAMS` via the
+    // `parse_fact_type` -> `ValidationError::UnknownFactType` -> `ErrorData`
+    // conversion (matching the sibling `test_forget_validation_error`).
+    let err = result.unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 }
 
 #[tokio::test]
@@ -238,7 +242,9 @@ async fn test_forget_non_object_overrides() {
         &memory_engine::ActivityFilterConfig::default(),
     )
     .await;
-    assert!(array_result.is_err());
+    let array_err = array_result.unwrap_err();
+    assert_eq!(array_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(array_err.message.contains("must be a JSON object"));
 
     // A JSON string is likewise rejected.
     let string_result = tools::dispatch(
@@ -251,7 +257,9 @@ async fn test_forget_non_object_overrides() {
         &memory_engine::ActivityFilterConfig::default(),
     )
     .await;
-    assert!(string_result.is_err());
+    let string_err = string_result.unwrap_err();
+    assert_eq!(string_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(string_err.message.contains("must be a JSON object"));
 }
 
 // ---------------------------------------------------------------------------
