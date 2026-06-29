@@ -98,6 +98,49 @@ impl MemoryEngine {
         Ok(new_edges.len())
     }
 
+    // --- Public API: Edge expiry ---
+
+    /// Soft-expire a single edge by id, keeping the in-memory graph in sync.
+    ///
+    /// Sets the edge's `t_expired` in the backend, then — only after the commit
+    /// succeeds — drops it from the in-memory petgraph
+    /// ([`MemoryGraph::remove_edge_by_id`](crate::graph::MemoryGraph::remove_edge_by_id)).
+    /// This is the edge counterpart of the `add_edge` mirror in
+    /// [`link_session_facts`](Self::link_session_facts): without the graph step,
+    /// degree/neighbor/component queries would keep reporting the expired edge
+    /// until the next full rebuild (#879).
+    ///
+    /// **Graph/DB consistency:** the graph is mirrored only after the DB write
+    /// returns `Ok`. A panic in the small window between commit and mirror leaves
+    /// the graph transiently holding the stale edge for the rest of the session;
+    /// the next `open()` recovers it via `MemoryGraph::load_from_db`. (Same
+    /// post-commit-mirror contract as [`resolve_conflict`](Self::resolve_conflict).)
+    ///
+    /// # Errors
+    ///
+    /// - [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) — the
+    ///   engine was opened read-only (the backend rejects the write; the graph is
+    ///   left untouched).
+    /// - [`MemoryError::NotFound`](crate::error::MemoryError::NotFound) — no
+    ///   *active* edge with `edge_id` exists (unknown id, or already expired); the
+    ///   write affected 0 rows, so the graph is not modified.
+    /// - [`MemoryError::Database`](crate::error::MemoryError::Database) on SQL
+    ///   failure.
+    pub async fn expire_edge(&self, edge_id: i64) -> Result<()> {
+        let now = Utc::now();
+        // DB write below the seam first. On NotFound/ReadOnly/Database the graph
+        // is deliberately left untouched (no edge transitioned to expired).
+        self.storage.expire_edge(edge_id, now).await?;
+
+        // Mirror the in-memory graph AFTER the commit (no guard held across
+        // `.await`). `remove_edge_by_id` is a no-op if the edge is absent from the
+        // graph (e.g. graph built without this edge), so it is safe even when the
+        // DB and graph briefly disagree.
+        self.graph.write().remove_edge_by_id(edge_id);
+
+        Ok(())
+    }
+
     // --- Public API: Graph queries (no lock exposure) ---
 
     /// Get the degree (in + out edges) for a fact in the graph.

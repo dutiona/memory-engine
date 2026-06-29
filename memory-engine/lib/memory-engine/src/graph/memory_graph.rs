@@ -101,24 +101,20 @@ impl MemoryGraph {
     /// first match.
     ///
     /// In-memory twin of the single-edge store primitive
-    /// [`FactGraph::expire_edge`](crate::storage::FactGraph::expire_edge): when one
-    /// edge is soft-expired in the store *without* expiring either endpoint fact,
-    /// this drops the matching edge from the derived graph cache so reads (degree,
-    /// neighbors, components, `explain_fact` context) stay consistent. Its
-    /// fact-level sibling [`remove_edges_by_fact`](Self::remove_edges_by_fact) is
-    /// the path wired today; this edge-level one has **no production caller yet**,
-    /// because nothing in the engine expires a *single* edge in isolation — fact
-    /// supersession expires edges in bulk, by fact. The drift its absence could
-    /// imply is therefore latent, not active (#879).
+    /// [`EdgeStore::expire`](crate::store::edges::EdgeStore::expire), reached via
+    /// [`MemoryEngine::expire_edge`]: when one edge is soft-expired in the store
+    /// *without* expiring either endpoint fact, this drops the matching edge from
+    /// the derived graph cache so reads (degree, neighbors, components,
+    /// `explain_fact` context) stay consistent — the edge counterpart of
+    /// [`Self::remove_node`]. Its fact-level sibling
+    /// [`remove_edges_by_fact`](Self::remove_edges_by_fact) handles the bulk
+    /// fact-supersession path; this single-edge one is now wired through
+    /// `MemoryEngine::expire_edge` (#879).
     ///
-    /// The designed consumer is the geometric associative-memory substrate (epic
-    /// #761, E0 #763): its kNN similarity-edge graph invalidates *individual*
-    /// similarity edges when the metric (whitening `W` or sim-graph `k`) is
-    /// retuned, keeping both endpoint facts. When that path lands, call this beside
-    /// `expire_edge` in the invalidation step and drop the `#[cfg(test)]` gate. The
-    /// gate keeps the dead-code lint honest meanwhile, without an
-    /// `#[allow(dead_code)]` mask.
-    #[cfg(test)]
+    /// A second designed consumer is the geometric associative-memory substrate
+    /// (epic #761, E0 #763): its kNN similarity-edge graph invalidates *individual*
+    /// similarity edges when the metric (whitening `W` or sim-graph `k`) is retuned,
+    /// keeping both endpoint facts — call this beside `expire_edge` there too.
     pub fn remove_edge_by_id(&mut self, edge_id: i64) {
         if let Some(ei) = self
             .graph
