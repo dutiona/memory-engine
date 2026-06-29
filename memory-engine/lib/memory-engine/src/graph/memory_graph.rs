@@ -100,11 +100,24 @@ impl MemoryGraph {
     /// scans O(E) and removes at most one edge. Short-circuits after the
     /// first match.
     ///
-    /// Intended for the edge-expiry graph-sync path (keep the in-memory graph in
-    /// step after `EdgeStore::expire`), but that wiring is not yet landed, so the
-    /// only current caller is the unit test below — hence `#[cfg(test)]` to keep
-    /// the lint honest without an `#[allow(dead_code)]` mask. Drop the gate when a
-    /// production caller is added (tracked as a follow-up to #276).
+    /// In-memory twin of the single-edge store primitive
+    /// [`FactGraph::expire_edge`](crate::storage::FactGraph::expire_edge): when one
+    /// edge is soft-expired in the store *without* expiring either endpoint fact,
+    /// this drops the matching edge from the derived graph cache so reads (degree,
+    /// neighbors, components, `explain_fact` context) stay consistent. Its
+    /// fact-level sibling [`remove_edges_by_fact`](Self::remove_edges_by_fact) is
+    /// the path wired today; this edge-level one has **no production caller yet**,
+    /// because nothing in the engine expires a *single* edge in isolation — fact
+    /// supersession expires edges in bulk, by fact. The drift its absence could
+    /// imply is therefore latent, not active (#879).
+    ///
+    /// The designed consumer is the geometric associative-memory substrate (epic
+    /// #761, E0 #763): its kNN similarity-edge graph invalidates *individual*
+    /// similarity edges when the metric (whitening `W` or sim-graph `k`) is
+    /// retuned, keeping both endpoint facts. When that path lands, call this beside
+    /// `expire_edge` in the invalidation step and drop the `#[cfg(test)]` gate. The
+    /// gate keeps the dead-code lint honest meanwhile, without an
+    /// `#[allow(dead_code)]` mask.
     #[cfg(test)]
     pub fn remove_edge_by_id(&mut self, edge_id: i64) {
         if let Some(ei) = self
@@ -119,7 +132,12 @@ impl MemoryGraph {
     /// Remove a node and all its edges from the graph.
     ///
     /// No-op if the fact id is not in the graph.
-    /// Used by archival after hard-deleting facts from `SQLite`.
+    ///
+    /// Used by archival (`#[cfg(feature = "archive")]`) after the facts are
+    /// hard-deleted from `SQLite` into a cold-storage `.pak`. That archival prune
+    /// is its only production caller, so the method is gated to
+    /// `any(feature = "archive", test)`: without the `archive` feature it would be
+    /// dead code, and the repo forbids `#[allow(dead_code)]` masks (#879).
     ///
     /// petgraph's [`DiGraph::remove_node`] uses swap-remove: the former last
     /// node is relocated into the freed slot, which invalidates that node's
@@ -127,6 +145,7 @@ impl MemoryGraph {
     /// removal it rewrites `node_map` for the displaced node so every surviving
     /// node still resolves to its correct index. Callers may therefore remove
     /// nodes in a loop (e.g. archival) without corrupting the map.
+    #[cfg(any(feature = "archive", test))]
     pub fn remove_node(&mut self, fact_id: i64) {
         let Some(idx) = self.node_map.remove(&fact_id) else {
             return;
