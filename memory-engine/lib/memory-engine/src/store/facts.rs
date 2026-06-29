@@ -464,21 +464,18 @@ impl<'a> FactStore<'a> {
     ) -> Result<Vec<Fact>> {
         let now_str = as_of.to_rfc3339();
 
-        let (scope_clause, scope_params) = match scope_ids {
-            Some(ids) if !ids.is_empty() => {
-                let placeholders: Vec<String> = ids
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| format!("?{}", i + 3))
-                    .collect();
-                let clause = format!(" AND scope_id IN ({})", placeholders.join(","));
-                let params: Vec<Box<dyn rusqlite::types::ToSql>> = ids
-                    .iter()
-                    .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
-                    .collect();
-                (clause, params)
-            }
-            _ => (String::new(), Vec::new()),
+        // Scope filtering via `json_each(?3)`: a single serialized-array param
+        // (`?3`) regardless of list length — the unified IN-list strategy shared
+        // by every scope-filtered query in this store (#405). `None` and the
+        // empty slice both mean "all scopes" (no clause).
+        let scope_json = match scope_ids {
+            Some(ids) if !ids.is_empty() => Some(serde_json::to_string(ids)?),
+            _ => None,
+        };
+        let scope_clause = if scope_json.is_some() {
+            " AND scope_id IN (SELECT value FROM json_each(?3))"
+        } else {
+            ""
         };
 
         let sql = format!(
@@ -493,14 +490,17 @@ impl<'a> FactStore<'a> {
         let mut stmt = self.conn.prepare(&sql)?;
         let dim = self.embed_dim;
 
-        // Build params: [threshold, now, ...scope_ids]
+        // Build params: [threshold, now, scope_json?]. `?3` is bound only when a
+        // scope filter is present (its clause is otherwise absent from the SQL).
         let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> =
             vec![Box::new(importance_threshold), Box::new(now_str)];
-        all_params.extend(scope_params);
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            all_params.iter().map(std::convert::AsRef::as_ref).collect();
+        if let Some(json) = scope_json {
+            all_params.push(Box::new(json));
+        }
 
-        let rows = stmt.query_map(param_refs.as_slice(), |row| row_to_fact(row, dim))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(all_params), |row| {
+            row_to_fact(row, dim)
+        })?;
         let mut facts = Vec::new();
         for row in rows {
             facts.push(row?);
@@ -698,26 +698,22 @@ impl<'a> FactStore<'a> {
 
         // Build the dynamic clauses and the matching positional params together so
         // the `?N` indices stay in lock-step. `?1` is always `now`; subsequent
-        // indices are assigned in append order.
+        // indices are assigned in append order. Scope and exclude both filter via
+        // `json_each(?N)` over a single serialized-array param — the unified
+        // IN-list strategy shared by every scope-filtered query (#405): no
+        // per-element placeholder string, so the only `?N` bookkeeping left is one
+        // index per optional clause.
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now_str)];
         let mut next_idx = 2;
 
         let scope_clause = if scope_ids.is_empty() {
             String::new()
         } else {
-            let placeholders: String = scope_ids
-                .iter()
-                .map(|_| {
-                    let p = format!("?{next_idx}");
-                    next_idx += 1;
-                    p
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            for id in scope_ids {
-                params.push(Box::new(*id));
-            }
-            format!(" AND scope_id IN ({placeholders})")
+            let scope_json = serde_json::to_string(scope_ids)?;
+            let clause = format!(" AND scope_id IN (SELECT value FROM json_each(?{next_idx}))");
+            next_idx += 1;
+            params.push(Box::new(scope_json));
+            clause
         };
 
         let exclude_clause = if exclude.is_empty() {
@@ -758,22 +754,17 @@ impl<'a> FactStore<'a> {
         let base = "SELECT MIN(t_valid) FROM facts
              WHERE t_expired IS NULL AND t_valid IS NOT NULL AND t_valid > ?1
              AND (t_invalid IS NULL OR t_invalid > ?1)";
+        // Scope filtering via `json_each(?2)`: a single serialized-array param,
+        // length-independent — the unified IN-list strategy shared by every
+        // scope-filtered query in this store (#405).
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now_str)];
         let sql = if scope_ids.is_empty() {
             base.to_string()
         } else {
-            let placeholders: String = scope_ids
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 2))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{base} AND scope_id IN ({placeholders})")
+            params.push(Box::new(serde_json::to_string(scope_ids)?));
+            format!("{base} AND scope_id IN (SELECT value FROM json_each(?2))")
         };
         let mut stmt = self.conn.prepare(&sql)?;
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(now_str)];
-        for id in scope_ids {
-            params.push(Box::new(*id));
-        }
         let result: Option<String> =
             stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?;
         match result {
@@ -2763,6 +2754,187 @@ mod tests {
         assert!(
             matches!(err, MemoryError::Database(_)),
             "expected Database error, got: {err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // #405 — unified scope_id IN-list strategy (json_each) across the three
+    // scheduling/forgetting queries that used to build positional placeholder
+    // strings (list_dormant, list_due, next_due_time). These tests pin the
+    // refactor against regressions for 0, 1, and N scope ids — N > 1 being the
+    // case the per-element placeholder builder was hand-rolling.
+    // -------------------------------------------------------------------------
+
+    /// Seed scopes 1..=4 and one fact per scope, then return the fact ids keyed
+    /// by their scope. Scope 1 already exists (created by `init_schema`); 2..=4
+    /// are inserted to satisfy the FK on `facts.scope_id`. All facts share a past
+    /// `t_valid` so they are due, and a low importance so they are dormant.
+    fn seed_one_fact_per_scope(
+        store: &FactStore<'_>,
+        conn: &Connection,
+        now: DateTime<Utc>,
+    ) -> std::collections::HashMap<i64, i64> {
+        for scope in 2..=4 {
+            conn.execute(
+                "INSERT INTO scopes (id, parent_id, label, depth) VALUES (?1, 1, ?2, 1)",
+                params![scope, format!("scope{scope}")],
+            )
+            .unwrap();
+        }
+        let mut by_scope = std::collections::HashMap::new();
+        for scope in 1..=4 {
+            let mut f = make_fact(&format!("fact in scope {scope}"), vec![0.1; DIM]);
+            f.scope_id = scope;
+            f.base_importance = 0.1; // dormant: importance_score = 0.1 < threshold
+            f.t_valid = Some(now - TimeDelta::hours(1)); // due
+            by_scope.insert(scope, store.insert(&f).unwrap());
+        }
+        by_scope
+    }
+
+    /// `list_due` honors the scope filter for 0, 1, and N scope ids — the unified
+    /// `json_each` IN-list returns exactly the facts in the requested scopes.
+    #[test]
+    fn list_due_scope_filter_handles_zero_one_and_n_scopes() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+        let by_scope = seed_one_fact_per_scope(&fs, &conn, now);
+
+        let due_ids = |scopes: &[i64]| -> std::collections::HashSet<i64> {
+            fs.list_due(now, scopes, &[], None)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.id)
+                .collect()
+        };
+
+        // 0 scopes → all scopes (no filter): every seeded fact is due.
+        assert_eq!(
+            due_ids(&[]),
+            by_scope
+                .values()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            "empty scope slice means all scopes"
+        );
+        // 1 scope → exactly that scope's fact.
+        assert_eq!(
+            due_ids(&[2]),
+            std::collections::HashSet::from([by_scope[&2]]),
+            "single scope returns only its fact"
+        );
+        // N scopes → exactly those scopes' facts (and nothing from the omitted ones).
+        assert_eq!(
+            due_ids(&[1, 3, 4]),
+            [by_scope[&1], by_scope[&3], by_scope[&4]]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            "multi-scope filter returns exactly the requested scopes"
+        );
+        // Mutation guard: an omitted scope's fact must NOT leak in.
+        assert!(
+            !due_ids(&[1, 3, 4]).contains(&by_scope[&2]),
+            "scope 2 was not requested and must be excluded"
+        );
+    }
+
+    /// `next_due_time` honors the scope filter for 0, 1, and N scope ids: the
+    /// earliest FUTURE `t_valid` is computed only over the requested scopes.
+    #[test]
+    fn next_due_time_scope_filter_handles_zero_one_and_n_scopes() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+        for scope in 2..=4 {
+            conn.execute(
+                "INSERT INTO scopes (id, parent_id, label, depth) VALUES (?1, 1, ?2, 1)",
+                params![scope, format!("scope{scope}")],
+            )
+            .unwrap();
+        }
+        // One future fact per scope; the lead time is distinct per scope so the
+        // MIN(t_valid) of any scope subset is unambiguous.
+        for (scope, hours) in [(1_i64, 4_i64), (2, 1), (3, 2), (4, 3)] {
+            let mut f = make_fact(&format!("future scope {scope}"), vec![0.1; DIM]);
+            f.scope_id = scope;
+            f.t_valid = Some(now + TimeDelta::hours(hours));
+            fs.insert(&f).unwrap();
+        }
+
+        // 0 scopes → global MIN is scope 2's +1h.
+        let all = fs.next_due_time(now, &[]).unwrap().unwrap();
+        assert!(
+            all < now + TimeDelta::hours(1) + TimeDelta::minutes(1)
+                && all > now + TimeDelta::minutes(59),
+            "global next-due must be ~+1h (scope 2), got {all}"
+        );
+        // 1 scope → that scope's own next-due (scope 3 = +2h, not the global +1h).
+        let one = fs.next_due_time(now, &[3]).unwrap().unwrap();
+        assert!(
+            one > now + TimeDelta::hours(1) + TimeDelta::minutes(1),
+            "single-scope next-due must skip the omitted earlier scope, got {one}"
+        );
+        // N scopes → MIN over the subset {3,4} = scope 3's +2h, excluding scope 2's +1h.
+        let many = fs.next_due_time(now, &[3, 4]).unwrap().unwrap();
+        assert_eq!(many, one, "MIN over {{3,4}} equals scope 3's +2h");
+        assert!(
+            many > now + TimeDelta::hours(1) + TimeDelta::minutes(1),
+            "multi-scope subset must exclude scope 2's earlier +1h, got {many}"
+        );
+        // A scope with no future facts → None.
+        for scope in 5..=5 {
+            conn.execute(
+                "INSERT INTO scopes (id, parent_id, label, depth) VALUES (?1, 1, ?2, 1)",
+                params![scope, format!("scope{scope}")],
+            )
+            .unwrap();
+        }
+        assert!(
+            fs.next_due_time(now, &[5]).unwrap().is_none(),
+            "a scope with no future-valid facts has no next-due time"
+        );
+    }
+
+    /// `list_dormant` honors an N-scope (N > 1) filter via the unified `json_each`
+    /// IN-list — complementing the existing single-scope/None coverage in
+    /// `list_dormant_filters_importance_pinned_and_scope`.
+    #[test]
+    fn list_dormant_scope_filter_handles_n_scopes() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+        let now = Utc::now();
+        let by_scope = seed_one_fact_per_scope(&fs, &conn, now);
+
+        let dormant_ids = |scopes: Option<&[i64]>| -> std::collections::HashSet<i64> {
+            fs.list_dormant(0.5, scopes, now)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.id)
+                .collect()
+        };
+
+        // None → all scopes.
+        assert_eq!(
+            dormant_ids(None),
+            by_scope
+                .values()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            "None spans every scope"
+        );
+        // N scopes → exactly the requested scopes' facts.
+        assert_eq!(
+            dormant_ids(Some(&[2, 4])),
+            [by_scope[&2], by_scope[&4]]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            "multi-scope dormant filter returns exactly the requested scopes"
+        );
+        // Mutation guard: an omitted scope must not leak in.
+        assert!(
+            !dormant_ids(Some(&[2, 4])).contains(&by_scope[&1]),
+            "scope 1 was not requested and must be excluded"
         );
     }
 
