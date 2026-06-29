@@ -47,11 +47,13 @@ impl MemoryEngine {
     ///   — the candidate `new_fact` exceeds the size bound enforced by
     ///   `check_new_fact`. Checked before the arbiter is called.
     /// - [`MemoryError::NotFound`](crate::error::MemoryError::NotFound) — `old_id`
-    ///   is missing or already expired. The lookup itself retrieves expired facts;
-    ///   an already-expired `old_id` is rejected later by the `t_expired IS NULL`
-    ///   guard in the atomic expire step (which changes zero rows), while a missing
-    ///   `old_id` is rejected at lookup. The two are indistinguishable to the
-    ///   caller (both yield `NotFound`).
+    ///   is missing or already expired. The lookup itself retrieves expired facts,
+    ///   so an already-expired `old_id` is rejected later, *inside the atomic
+    ///   transaction*: `Update`/`Delete` change zero rows under their
+    ///   `t_expired IS NULL` expiry, and `Add` re-validates `old_id` is still
+    ///   active before creating its edge (the #335 read→write TOCTOU guard). A
+    ///   missing `old_id` is rejected at lookup. All cases are indistinguishable to
+    ///   the caller (each yields `NotFound`).
     /// - Propagates any error returned by the [`ConflictArbiter`] or the
     ///   underlying database operations.
     ///

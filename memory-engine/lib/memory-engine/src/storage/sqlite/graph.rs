@@ -896,6 +896,17 @@ impl FactGraph for SqliteBackend {
                     CrudDecision::Noop => Ok((None, None)),
                     CrudDecision::Add => {
                         let tx = conn.unchecked_transaction()?;
+                        // #335 (TOCTOU): the arbiter decided on `old_id` as read
+                        // BEFORE this transaction opened. Re-validate it is still
+                        // active here; if it was expired concurrently in that window,
+                        // reject rather than create a `supplements` edge pointing at
+                        // an already-expired fact. (The Update/Delete arms self-guard
+                        // via `expire_and_invalidate`'s `WHERE t_expired IS NULL`.)
+                        if !FactStore::new(&tx, dim).is_active(old_id)? {
+                            return Err(crate::error::MemoryError::NotFound(format!(
+                                "fact {old_id} is no longer active (expired since arbitration)"
+                            )));
+                        }
                         let new_id = FactStore::new(&tx, dim).insert(&new_fact)?;
                         // "supplements" edge: new → old
                         let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
@@ -1974,6 +1985,59 @@ mod tests {
             be.list_active_facts(None).await.unwrap().len(),
             1,
             "rollback must leave exactly the original active fact"
+        );
+    }
+
+    /// #335 (TOCTOU): an `Add` whose `old_id` was expired *after* the arbiter
+    /// decided (but before this transaction) must be rejected with `NotFound`
+    /// rather than create a `supplements` edge against an already-expired fact.
+    /// The in-transaction re-validation is what closes the race.
+    #[tokio::test]
+    async fn resolve_conflict_atomic_add_on_expired_old_rejects() {
+        let pool = seeded(&[fact("old", [0.1; DIM])]);
+        let be = backend(Arc::clone(&pool));
+        let old_id = be.list_active_facts(None).await.unwrap()[0].id;
+
+        // Expire old_id first — stands in for a concurrent Delete landing in the
+        // read→write window.
+        be.resolve_conflict_atomic(
+            crate::traits::CrudDecision::Delete,
+            old_id,
+            &fact("ignored", [0.0; DIM]),
+            "",
+            1.0,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        // Add against the now-expired old_id must be rejected.
+        let err = be
+            .resolve_conflict_atomic(
+                crate::traits::CrudDecision::Add,
+                old_id,
+                &fact("supplement", [0.5; DIM]),
+                "supplements",
+                1.0,
+                Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::NotFound(_)),
+            "Add against an expired old_id must be NotFound (TOCTOU #335), got {err:?}"
+        );
+
+        // Byte-identical on error: the rejected Add wrote nothing — no supplement
+        // fact (old is expired ⇒ zero active facts) and no edge.
+        assert_eq!(
+            be.list_active_facts(None).await.unwrap().len(),
+            0,
+            "the rejected Add must not have inserted a supplement fact"
+        );
+        assert!(
+            be.list_active_edges().await.unwrap().is_empty(),
+            "the rejected Add must not have created a supplements edge"
         );
     }
 
