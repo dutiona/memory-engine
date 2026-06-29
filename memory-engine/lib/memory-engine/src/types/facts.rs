@@ -168,6 +168,39 @@ impl Fact {
     /// unscored candidate.
     pub const UNSCORED_IMPORTANCE: f64 = 0.5;
 
+    /// Build a transient, pre-insert [`Fact`] from a [`NewFact`] to hand to
+    /// [`ConflictArbiter::arbitrate`](crate::traits::ConflictArbiter::arbitrate).
+    ///
+    /// `id` is `0` (not yet assigned by the DB) and `importance_score` is the
+    /// [`Self::UNSCORED_IMPORTANCE`] sentinel — NOT the eventual stored score.
+    /// All other fields are copied verbatim from `nf`.
+    ///
+    /// **Arbiter input caveat:** the returned `Fact` is synthetic. Arbiters must
+    /// rely on `content`, `fact_type`, `base_importance`, and `metadata` — never
+    /// on `id` (always `0`) or `importance_score` (always the sentinel `0.5`).
+    pub(crate) fn from_new_for_arbiter(nf: &NewFact) -> Self {
+        Self {
+            id: 0, // placeholder, not yet inserted
+            content: nf.content.clone(),
+            content_hash: nf.content_hash.clone(),
+            embedding: nf.embedding.clone(),
+            fact_type: nf.fact_type,
+            t_created: nf.t_created,
+            t_expired: nf.t_expired,
+            t_valid: nf.t_valid,
+            t_invalid: nf.t_invalid,
+            source_event_id: nf.source_event_id,
+            scope_id: nf.scope_id,
+            base_importance: nf.base_importance,
+            access_count: nf.access_count,
+            last_accessed: nf.last_accessed,
+            metadata: nf.metadata.clone(),
+            is_pinned: nf.is_pinned,
+            importance_score: Self::UNSCORED_IMPORTANCE,
+            surfaced_at: None,
+        }
+    }
+
     /// Whether this fact is **temporally due** at `now`: it has a concrete
     /// valid-time start that has arrived (`t_valid` is `Some` and `<= now`) and is
     /// not yet bi-temporally invalidated (`t_invalid` is `None` or strictly after

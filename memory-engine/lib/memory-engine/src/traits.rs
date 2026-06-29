@@ -190,16 +190,17 @@ pub trait DeltaProposer: Send + Sync {
 pub trait ConflictArbiter: Send + Sync {
     /// Decide how to resolve a conflict between an existing and a new fact.
     ///
-    /// # Warning: `importance_score` on `new_fact` is a placeholder
-    ///
-    /// When called from [`MemoryEngine::resolve_conflict`](crate::MemoryEngine::resolve_conflict),
-    /// `new_fact` is a temporary [`Fact`] constructed from a [`NewFact`](crate::types::NewFact)
-    /// before it has been persisted or scored. Its `importance_score` field is hardcoded
-    /// to [`Fact::UNSCORED_IMPORTANCE`](crate::types::Fact::UNSCORED_IMPORTANCE) and does
-    /// **not** reflect the fact's actual computed importance. Implementations that branch on
-    /// `new_fact.importance_score` will always see that sentinel.
-    /// Use `new_fact.base_importance` (the caller-supplied raw importance) instead if you need
-    /// a signal for the incoming fact's weight.
+    /// **Arbiter input caveat:** when called from
+    /// [`MemoryEngine::resolve_conflict`](crate::MemoryEngine::resolve_conflict),
+    /// `new_fact` is a pre-insert synthetic [`Fact`] built via
+    /// [`Fact::from_new_for_arbiter`](crate::types::Fact) from a
+    /// [`NewFact`](crate::types::NewFact) before it has been persisted or scored.
+    /// Its `id` is always `0` (not yet assigned by the DB) and `importance_score`
+    /// is always the
+    /// [`Fact::UNSCORED_IMPORTANCE`](crate::types::Fact::UNSCORED_IMPORTANCE)
+    /// sentinel (`0.5`), NOT the eventual stored score. Implementations must rely
+    /// on `content`, `fact_type`, `base_importance`, and `metadata` — never on
+    /// `id` or `importance_score`.
     ///
     /// # Errors
     ///
