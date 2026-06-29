@@ -5,11 +5,12 @@
 #![allow(clippy::cast_precision_loss)]
 
 use memory_engine::EmbeddingFingerprint;
+use memory_engine::ForgetPolicy;
 use memory_engine::MemoryEngine;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::{
-    ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, ForgetPolicy,
-    SummarizableContent, SummaryGenerator,
+    ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, SummarizableContent,
+    SummaryGenerator,
 };
 use memory_engine::types::{AddFactRequest, Fact, FactType, NewFact};
 

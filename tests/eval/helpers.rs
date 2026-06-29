@@ -5,11 +5,12 @@
 
 use chrono::{DateTime, Duration, Utc};
 use memory_engine::EmbeddingFingerprint;
+use memory_engine::ForgetPolicy;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::traits::{
-    ConflictArbiter, CrudDecision, EmbeddingProvider, ForgetPolicy, PersistenceClassifier,
-    SummarizableContent, SummaryGenerator,
+    ConflictArbiter, CrudDecision, EmbeddingProvider, PersistenceClassifier, SummarizableContent,
+    SummaryGenerator,
 };
 use memory_engine::types::{AddFactOptions, AddFactRequest, ClassifierInput, Fact, FactType};
 

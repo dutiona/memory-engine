@@ -21,7 +21,7 @@ pub enum ConflictError {
 
     /// A configuration or policy parameter is out of its accepted range — e.g. a
     /// non-positive half-life, a weight below zero, or a ratio/percentile outside
-    /// `[0.0, 1.0]`. Raised by [`ForgetPolicy::validate`](crate::traits::ForgetPolicy::validate)
+    /// `[0.0, 1.0]`. Raised by [`ForgetPolicy::validate`](crate::forgetting::ForgetPolicy::validate)
     /// and [`DreamCycleConfig::validate`](crate::types::DreamCycleConfig::validate).
     /// The string describes the offending parameter and its value.
     #[error("{0}")]

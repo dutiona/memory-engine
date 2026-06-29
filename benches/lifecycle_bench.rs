@@ -28,9 +28,10 @@
 use chrono::{Duration, Utc};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::EmbeddingFingerprint;
+use memory_engine::ForgetPolicy;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::{
-    ConsolidationConfig, EmbeddingProvider, ForgetPolicy, SummarizableContent, SummaryGenerator,
+    ConsolidationConfig, EmbeddingProvider, SummarizableContent, SummaryGenerator,
 };
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 

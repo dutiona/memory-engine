@@ -3,11 +3,11 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
+use super::types::{ForgetPolicy, PruneStats};
 use crate::error::Result;
 use crate::graph::MemoryGraph;
 use crate::storage::StorageBackend;
 use crate::store::facts::FactScoringRow;
-use crate::traits::{ForgetPolicy, PruneStats};
 use crate::types::{Fact, FactType};
 
 /// Argument to `ln()` for access-frequency normalization: 100 + 1.

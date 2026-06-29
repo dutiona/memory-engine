@@ -80,7 +80,7 @@ Different fact types can have different decay rates. Episodic memories (conversa
 ```rust
 use std::collections::HashMap;
 use memory_engine::types::FactType;
-use memory_engine::traits::ForgetPolicy;
+use memory_engine::ForgetPolicy;
 
 let mut overrides = HashMap::new();
 overrides.insert(FactType::Episodic, 30.0);     // 30-day half-life

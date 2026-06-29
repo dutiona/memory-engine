@@ -421,7 +421,7 @@ pub trait FactGraph: Send + Sync {
         scored: &[(i64, f64)],
         to_expire: &[i64],
         now: DateTime<Utc>,
-    ) -> Result<(crate::traits::PruneStats, Vec<i64>)>;
+    ) -> Result<(crate::forgetting::PruneStats, Vec<i64>)>;
 
     // -------------------------------------------------------------------------
     // Stage E bootstrap seams — the conn-threaded import pipelines run below the

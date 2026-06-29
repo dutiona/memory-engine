@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use memory_engine::EmbeddingFingerprint;
+use memory_engine::ForgetPolicy;
 use memory_engine::ResumeConfig;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
-use memory_engine::traits::{EmbeddingProvider, ForgetPolicy, PersistenceClassifier};
+use memory_engine::traits::{EmbeddingProvider, PersistenceClassifier};
 use memory_engine::types::{AddFactOptions, AddFactRequest, ClassifierInput, FactType};
 
 const DIM: usize = 8;
