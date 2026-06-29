@@ -23,6 +23,21 @@ impl MemoryEngine {
     /// Delegates the decision to the consumer-provided [`ConflictArbiter`].
     /// Graph is updated only after the persistence operations succeed.
     ///
+    /// **Arbiter input caveat:** the `new_fact` passed to
+    /// [`ConflictArbiter::arbitrate`] is a pre-insert synthetic `Fact` built via
+    /// [`Fact::from_new_for_arbiter`](crate::types::Fact). Its `id` is always `0`
+    /// (not yet assigned by the DB) and `importance_score` is the
+    /// [`Fact::UNSCORED_IMPORTANCE`](crate::types::Fact::UNSCORED_IMPORTANCE)
+    /// sentinel (`0.5`), NOT the eventual stored score. Arbiters must rely on
+    /// `content`, `fact_type`, `base_importance`, and `metadata` — never on `id`
+    /// or `importance_score`.
+    ///
+    /// **Graph/DB consistency:** the in-memory graph is updated only after the DB
+    /// commit succeeds. A panic in the small window between the commit and the
+    /// graph mirror leaves the graph and DB transiently diverged for the rest of
+    /// the session; the next `open()` recovers the graph via
+    /// `MemoryGraph::load_from_db`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
@@ -51,26 +66,7 @@ impl MemoryEngine {
 
         // Build a temporary Fact from NewFact for the arbiter (it needs both as
         // Fact). Ported verbatim from `crate::conflict::temporal::resolve_conflict`.
-        let new_as_fact = crate::types::Fact {
-            id: 0, // placeholder, not yet inserted
-            content: new_fact.content.clone(),
-            content_hash: new_fact.content_hash.clone(),
-            embedding: new_fact.embedding.clone(),
-            fact_type: new_fact.fact_type,
-            t_created: new_fact.t_created,
-            t_expired: new_fact.t_expired,
-            t_valid: new_fact.t_valid,
-            t_invalid: new_fact.t_invalid,
-            source_event_id: new_fact.source_event_id,
-            scope_id: new_fact.scope_id,
-            base_importance: new_fact.base_importance,
-            access_count: new_fact.access_count,
-            last_accessed: new_fact.last_accessed,
-            metadata: new_fact.metadata.clone(),
-            is_pinned: new_fact.is_pinned,
-            importance_score: crate::types::Fact::UNSCORED_IMPORTANCE,
-            surfaced_at: None,
-        };
+        let new_as_fact = crate::types::Fact::from_new_for_arbiter(new_fact);
 
         // CONSUMER TRAIT — the main loop drives this; left exactly as-is (rule 5).
         let decision = arbiter.arbitrate(&old_fact, &new_as_fact)?;
