@@ -1051,3 +1051,210 @@ mod proptest_temporal {
         }
     }
 }
+
+/// Property-based coverage for the conflict-resolution DB↔graph consistency
+/// invariant (#437).
+///
+/// After `MemoryEngine::resolve_conflict` succeeds, the active edges held by
+/// the in-memory [`MemoryGraph`] must exactly mirror the active edges committed
+/// to the DB — for any [`CrudDecision`] and for any number of pre-existing
+/// edges incident to the old fact. Placed at the end of the file so no
+/// non-test items follow a `#[cfg(test)]` module
+/// (`clippy::items_after_test_module`).
+#[cfg(test)]
+mod proptest_conflict {
+    use std::collections::HashSet;
+
+    use proptest::prelude::*;
+
+    use super::MemoryEngine;
+    use crate::graph::MemoryGraph;
+    use crate::traits::{ConflictArbiter, CrudDecision};
+    use crate::types::{Fact, FactType, NewEdge, NewFact};
+
+    const DIM: usize = 4;
+
+    /// Minimal fixed-decision arbiter — mirrors the one in `mod tests` but
+    /// declared locally so `proptest_conflict` stays self-contained and never
+    /// accidentally breaks when `mod tests` changes.
+    struct FixedArbiter {
+        decision: CrudDecision,
+    }
+    impl ConflictArbiter for FixedArbiter {
+        fn arbitrate(&self, _: &Fact, _: &Fact) -> crate::error::Result<CrudDecision> {
+            Ok(self.decision)
+        }
+    }
+
+    /// Build a `NewFact` with a distinct content string and a fixed embedding.
+    fn make_fact(content: &str) -> NewFact {
+        NewFact::builder(content, vec![0.5_f32; DIM], FactType::Semantic)
+            .content_hash(blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string())
+            .build()
+    }
+
+    /// Canonical edge key for set-equality comparisons: `(source, target, relation)`.
+    type EdgeKey = (i64, i64, String);
+
+    /// Enumerate all edges currently held by the in-memory graph as a set of
+    /// `(source, target, relation_type)` triples.
+    ///
+    /// Uses `MemoryGraph::to_snapshot()` (the same projection the engine save/
+    /// restore path relies on) rather than a per-node neighbor walk, which would
+    /// count only outgoing edges and lose the target-side membership.  This is
+    /// **not** a tautology: the snapshot is built from the petgraph `DiGraph`
+    /// that the conflict-resolution path writes to via `graph.write()`, while the
+    /// DB set comes from a fresh SQL `SELECT` — divergence between the two is
+    /// exactly the class of bug #437 is tracking.
+    fn graph_edge_set(engine: &MemoryEngine) -> HashSet<EdgeKey> {
+        engine
+            .graph
+            .read()
+            .to_snapshot()
+            .edges
+            .into_iter()
+            .map(|e| (e.source, e.target, e.relation_type))
+            .collect()
+    }
+
+    proptest! {
+        // 64 cases: each builds a fresh in-memory engine, so the cost is dominated
+        // by engine construction (~SQLite init). The `prop_oneof!` over 4 decisions
+        // gives only *statistical* per-arm coverage, so 64 (vs 32) drives the
+        // probability of starving any one arm to ~(3/4)^64 ≈ 1e-8 while keeping the
+        // suite well under 5 s.
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// DB↔graph edge-set consistency after `resolve_conflict`.
+        ///
+        /// **Property:** for any `CrudDecision` and any number of pre-existing
+        /// edges (0–3) incident to the old fact, the set of `(source, target,
+        /// relation_type)` triples in the in-memory graph equals the set of
+        /// the same triples from `StorageBackend::list_active_edges()` after
+        /// `resolve_conflict` returns `Ok`.
+        ///
+        /// This is a genuine cross-check: the graph is mutated by independent
+        /// `graph.write()` code (in `conflict.rs`) while the DB is written by
+        /// `resolve_conflict_atomic` inside the storage backend — a regression in
+        /// either path produces a divergent set that this test catches.
+        #[test]
+        fn graph_db_edge_consistency_after_resolve_conflict(
+            decision in prop_oneof![
+                Just(CrudDecision::Add),
+                Just(CrudDecision::Update),
+                Just(CrudDecision::Delete),
+                Just(CrudDecision::Noop),
+            ],
+            n_extra_edges in 0usize..=3,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio rt builds");
+
+            rt.block_on(async {
+                let engine = MemoryEngine::builder(DIM)
+                    .build()
+                    .expect("engine builds");
+
+                // Insert the "old" fact that resolve_conflict targets.
+                let old_fact = make_fact("old fact content");
+                let old_id = engine
+                    .storage()
+                    .insert_fact(&old_fact)
+                    .await
+                    .expect("old fact inserts");
+
+                // Insert `n_extra_edges` side facts and connect them to `old_id`
+                // with pre-existing active edges, then sync the in-memory graph.
+                // This exercises Update/Delete cascade, which must expire these
+                // edges in both the DB and the graph simultaneously.
+                let now = chrono::Utc::now();
+                for i in 0..n_extra_edges {
+                    let side_content = format!("side fact {i}");
+                    let side_fact = make_fact(&side_content);
+                    let side_id = engine
+                        .storage()
+                        .insert_fact(&side_fact)
+                        .await
+                        .expect("side fact inserts");
+                    engine
+                        .storage()
+                        .insert_edge(&NewEdge {
+                            source_fact_id: old_id,
+                            target_fact_id: side_id,
+                            relation_type: "related".to_string(),
+                            weight: 1.0,
+                            t_created: now,
+                            t_expired: None,
+                            scope_id: 1,
+                        })
+                        .await
+                        .expect("pre-existing edge inserts");
+                }
+                // Sync the in-memory graph to match the DB state after edge
+                // insertions.  (The engine starts with an empty graph; raw
+                // `insert_edge` calls bypass the engine's graph mirror.)
+                if n_extra_edges > 0 {
+                    let active = engine
+                        .storage()
+                        .list_active_edges()
+                        .await
+                        .expect("list_active_edges pre-resolve");
+                    *engine.graph.write() = MemoryGraph::from_active_edges(&active);
+                }
+
+                // Candidate fact presented to the arbiter as the "new" version.
+                let candidate = make_fact("candidate fact content");
+
+                // Resolve the conflict; ignore the return value — the property
+                // holds on the state the engine reaches, not on the return type.
+                let _resolution = engine
+                    .resolve_conflict(
+                        &FixedArbiter { decision },
+                        old_id,
+                        &candidate,
+                    )
+                    .await
+                    .expect("resolve_conflict succeeds");
+
+                // --- Cross-check: graph set == DB set ---
+                //
+                // Collect the in-memory graph's edges via `to_snapshot()` (a
+                // petgraph `edge_references()` projection — entirely independent
+                // of the DB path below).
+                let graph_set: HashSet<EdgeKey> = graph_edge_set(&engine);
+
+                // Collect the DB's active edges via a fresh SQL SELECT.
+                let db_edges = engine
+                    .storage()
+                    .list_active_edges()
+                    .await
+                    .expect("list_active_edges post-resolve");
+                let db_set: HashSet<EdgeKey> = db_edges
+                    .into_iter()
+                    .map(|e| (e.source_fact_id, e.target_fact_id, e.relation_type))
+                    .collect();
+
+                // The sets must be identical.  Divergence means either:
+                //   • the graph mirror missed an edge the DB committed, or
+                //   • the graph mirror kept an edge the DB expired.
+                // `prop_assert!` with a pre-formatted string avoids format-capture
+                // restrictions inside the `concat!`-expanded `prop_assert_eq!` macro.
+                prop_assert!(
+                    graph_set == db_set,
+                    "{}",
+                    format!(
+                        "in-memory graph edge set diverges from DB active edges after \
+                         resolve_conflict(decision={decision:?}, n_extra_edges={n_extra_edges})\n\
+                         graph_only={:?}\ndb_only={:?}",
+                        graph_set.difference(&db_set).collect::<Vec<_>>(),
+                        db_set.difference(&graph_set).collect::<Vec<_>>(),
+                    )
+                );
+
+                Ok(()) as proptest::test_runner::TestCaseResult
+            })?;
+        }
+    }
+}
