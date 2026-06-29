@@ -197,6 +197,71 @@ async fn test_forget_with_overrides() {
     assert!(v["facts_evaluated"].is_number());
 }
 
+// #497 sub-finding #6: the handler validates `half_life_overrides` keys via
+// `parse_fact_type` and rejects non-object values, but only the happy path was
+// covered. These two tests close that negative-path gap.
+
+#[tokio::test]
+async fn test_forget_invalid_override_key() {
+    let (engine, _dir) = test_engine();
+    add_test_fact(&engine, "some fact").await;
+
+    // An override key that is not a valid FactType must fail fact-type parsing
+    // rather than being silently ignored or panicking.
+    let result = tools::dispatch(
+        "memory_forget",
+        args(&[("half_life_overrides", json!({"NotARealType": 30.0}))]),
+        &engine,
+        None,
+        None,
+        3,
+        &memory_engine::ActivityFilterConfig::default(),
+    )
+    .await;
+    // An unknown FactType key surfaces as `INVALID_PARAMS` via the
+    // `parse_fact_type` -> `ValidationError::UnknownFactType` -> `ErrorData`
+    // conversion (matching the sibling `test_forget_validation_error`).
+    let err = result.unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn test_forget_non_object_overrides() {
+    let (engine, _dir) = test_engine();
+    add_test_fact(&engine, "some fact").await;
+
+    // A JSON array for `half_life_overrides` must hit the must-be-a-JSON-object
+    // validation error.
+    let array_result = tools::dispatch(
+        "memory_forget",
+        args(&[("half_life_overrides", json!([30.0]))]),
+        &engine,
+        None,
+        None,
+        3,
+        &memory_engine::ActivityFilterConfig::default(),
+    )
+    .await;
+    let array_err = array_result.unwrap_err();
+    assert_eq!(array_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(array_err.message.contains("must be a JSON object"));
+
+    // A JSON string is likewise rejected.
+    let string_result = tools::dispatch(
+        "memory_forget",
+        args(&[("half_life_overrides", json!("Episodic"))]),
+        &engine,
+        None,
+        None,
+        3,
+        &memory_engine::ActivityFilterConfig::default(),
+    )
+    .await;
+    let string_err = string_result.unwrap_err();
+    assert_eq!(string_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(string_err.message.contains("must be a JSON object"));
+}
+
 // ---------------------------------------------------------------------------
 // Consolidate
 // ---------------------------------------------------------------------------
