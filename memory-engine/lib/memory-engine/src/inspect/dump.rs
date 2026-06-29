@@ -886,6 +886,149 @@ mod tests {
         );
     }
 
+    /// #315 data-safety guard: `dump_sqlite` must refuse to overwrite the live
+    /// database file. With a file-backed connection, the source DB path and the
+    /// dump target canonicalize to the same file, so the guard
+    /// (`DumpTargetIsLiveDatabase`) must fire *before* `VACUUM INTO` runs — a
+    /// regression here could silently corrupt the live DB on a re-dump.
+    ///
+    /// The guard is gated on `is_file_backed` (an in-memory `open_memory()` conn
+    /// never reaches it — see #463's short-circuit note), so this test opens a
+    /// real on-disk connection. Non-vacuous: deleting the guard would let
+    /// `VACUUM INTO` proceed against the source, so this returns `Ok` (or a
+    /// different error) and fails the exact-variant `matches!` below.
+    #[tokio::test]
+    async fn dump_sqlite_refuses_to_overwrite_live_db() {
+        use crate::store::schema::{init_schema, open_connection};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let source_str = source.to_str().unwrap();
+
+        let conn = open_connection(source_str).unwrap();
+        init_schema(&conn).unwrap();
+
+        // Dump target == the live source file (both canonicalize to the same path).
+        let result = dump_sqlite(&conn, &source);
+
+        assert!(
+            matches!(
+                result,
+                Err(MemoryError::Conflict(
+                    ConflictError::DumpTargetIsLiveDatabase
+                ))
+            ),
+            "dumping onto the live database file must be refused with \
+             DumpTargetIsLiveDatabase, got {result:?}"
+        );
+
+        // The source DB must be intact and unmodified by the refused dump:
+        // it is still a valid SQLite database that opens read-only.
+        rusqlite::Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("the live database must remain a valid SQLite file after the refusal");
+    }
+
+    /// #315 corollary: a symlink that *resolves* to the live database must also
+    /// be refused — `canonicalize` follows the link, so the guard compares the
+    /// resolved target against the resolved source and still catches it. This
+    /// proves the guard is not bypassable by indirection (a direct same-path
+    /// test alone would pass even if the guard compared raw, un-canonicalized
+    /// paths). Non-vacuous: a guard that skipped canonicalization on the target
+    /// would treat the symlink as a distinct path and let the dump clobber the
+    /// live DB through the link.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dump_sqlite_refuses_symlink_resolving_to_live_db() {
+        use crate::store::schema::{init_schema, open_connection};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let source_str = source.to_str().unwrap();
+
+        let conn = open_connection(source_str).unwrap();
+        init_schema(&conn).unwrap();
+
+        // A symlink whose referent is the live database file.
+        let link = dir.path().join("alias.db");
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+
+        let result = dump_sqlite(&conn, &link);
+
+        assert!(
+            matches!(
+                result,
+                Err(MemoryError::Conflict(
+                    ConflictError::DumpTargetIsLiveDatabase
+                ))
+            ),
+            "a symlink resolving to the live database must be refused with \
+             DumpTargetIsLiveDatabase, got {result:?}"
+        );
+    }
+
+    /// #463 null-byte path guard: a dump target whose path contains an interior
+    /// NUL byte must be rejected, never reaching `VACUUM INTO` (where a NUL would
+    /// otherwise risk truncating the SQL string fed to `SQLite`). On current main
+    /// the rejection surfaces as `MemoryError::Io` (`ErrorKind::InvalidInput`):
+    /// the `std::fs::symlink_metadata(path)` probe — which runs for *every*
+    /// connection, file-backed or not (it is not behind the `is_file_backed`
+    /// short-circuit) — fails first because the OS rejects a NUL in a path, and
+    /// that I/O error is mapped to `MemoryError::Io`. (This is the live behavior
+    /// after the #836 `VACUUM INTO`-into-a-server-minted-temp refactor: the
+    /// surviving in-function NUL check at the `VACUUM INTO` site now guards the
+    /// *server-minted* temp path, which can never carry caller-supplied NULs, so
+    /// the caller-path NUL is caught earlier and typed as `Io`, not `Internal`.)
+    ///
+    /// Non-vacuous: a path *without* a NUL byte at the same nonexistent leaf is
+    /// accepted (the dump succeeds), so the assertion fails if the NUL is not
+    /// what triggers the rejection.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dump_sqlite_rejects_null_byte_path() {
+        use crate::store::schema::{init_schema, open_connection};
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let conn = open_connection(source.to_str().unwrap()).unwrap();
+        init_schema(&conn).unwrap();
+
+        // Build a target path *inside* the temp dir with an interior NUL byte in
+        // the leaf name, so only the NUL — not a missing parent dir — can be the
+        // cause of any rejection. Assemble the bytes directly (`<dir>/out\0.db`)
+        // so the NUL is preserved verbatim through to `dump_sqlite`.
+        let mut raw: Vec<u8> = dir.path().as_os_str().to_os_string().into_vec();
+        raw.extend_from_slice(b"/out\0.db");
+        let bad_path = PathBuf::from(OsString::from_vec(raw));
+        assert!(
+            bad_path.as_os_str().as_encoded_bytes().contains(&0),
+            "the constructed bad path must actually contain a NUL byte"
+        );
+
+        let result = dump_sqlite(&conn, &bad_path);
+        assert!(
+            matches!(result, Err(MemoryError::Io(ref e))
+                if e.kind() == std::io::ErrorKind::InvalidInput),
+            "a NUL-byte dump path must be rejected (current main: as \
+             MemoryError::Io / InvalidInput, from the symlink_metadata probe), \
+             got {result:?}"
+        );
+
+        // Control: the SAME leaf without the NUL byte is accepted and produces a
+        // valid SQLite dump. This makes the rejection above attributable to the
+        // NUL specifically, not to anything else about the path or connection.
+        let good_path = dir.path().join("out.db");
+        dump_sqlite(&conn, &good_path)
+            .expect("an otherwise-identical path without a NUL byte must dump cleanly");
+        rusqlite::Connection::open_with_flags(
+            &good_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("the NUL-free dump must be a valid SQLite database");
+    }
+
     /// `tmp_path` must build a `.tmp` sibling next to a normal target path.
     #[test]
     fn tmp_path_builds_sibling_for_normal_path() {
