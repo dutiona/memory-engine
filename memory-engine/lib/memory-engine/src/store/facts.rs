@@ -871,24 +871,52 @@ impl<'a> FactStore<'a> {
     /// `update_importance_score` calls (one prepared-statement exec + one
     /// B-tree write each) into one `json_each`-driven UPDATE, regardless of
     /// corpus size. Behaviorally identical to the loop: only the ids present in
-    /// `scores` are touched — rows outside the payload are left untouched (the
-    /// `WHERE id IN (...)` guard; without it the correlated subquery would NULL
-    /// every unmatched row).
+    /// `scores` are touched — rows outside the payload are left untouched. The
+    /// `WHERE id IN (...)` guard restricts the UPDATE to the scored ids; without
+    /// it the correlated subquery yields NULL for every unmatched row, which the
+    /// `importance_score REAL NOT NULL` column rejects (the whole statement errors
+    /// and rolls back).
     ///
     /// `scores` is serialized as a JSON object mapping the id (as a string key,
     /// which is what `json_each.key` yields) to its score; the `IN`-subquery
     /// casts the TEXT key back to INTEGER so i64 ids round-trip correctly.
+    ///
+    /// Every score is validated finite *before* any SQL runs: `serde_json` maps a
+    /// non-finite `f64` (`NaN` / `±Infinity`) to JSON `null`, which `json_each`
+    /// would then yield as NULL and the UPDATE would try to write into the
+    /// `NOT NULL` column — aborting the entire enclosing transaction. The guard is
+    /// validate-all-then-execute: a single non-finite entry rejects the whole
+    /// batch with [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
+    /// and leaves **all** rows untouched. (Defense in depth: today's callers feed
+    /// provably-finite `compute_importance` output, so this is unreachable — but it
+    /// converts a latent opaque DB-constraint abort into a clean, typed error.)
     ///
     /// An empty slice is a no-op and returns `Ok(())` (no degenerate statement
     /// runs).
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure (or `MemoryError` from
-    /// JSON serialization, which cannot fail for the `id -> f64` map built here).
+    /// Returns [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) wrapping
+    /// [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
+    /// if any score is non-finite (the statement does not run). Returns
+    /// `MemoryError::Database` on SQL failure (or `MemoryError` from JSON
+    /// serialization, which cannot fail for the finite `id -> f64` map built here).
     pub fn update_importance_scores_bulk(&self, scores: &[(i64, f64)]) -> Result<()> {
         if scores.is_empty() {
             return Ok(());
+        }
+        // Validate-all-then-execute: a non-finite score would serialize to JSON
+        // `null` and write NULL into the `NOT NULL` importance_score column,
+        // aborting the enclosing transaction. Reject the whole batch up front so a
+        // bad entry leaves every row untouched.
+        for &(id, score) in scores {
+            if !score.is_finite() {
+                return Err(MemoryError::Conflict(
+                    crate::error::ConflictError::PolicyParameter(format!(
+                        "importance score must be finite, got {score} for fact {id}"
+                    )),
+                ));
+            }
         }
         let mut map = serde_json::Map::with_capacity(scores.len());
         for &(id, score) in scores {
@@ -2415,8 +2443,10 @@ mod tests {
     /// #392: the bulk `importance_score` materialization (one `json_each`
     /// UPDATE) must be byte-for-byte equivalent to the old per-row loop:
     /// (a) it sets exactly the scored subset,
-    /// (b) it leaves an UNSCORED row untouched (the `WHERE id IN (...)` guard —
-    ///     a naive correlated subquery would NULL-out every unmatched row),
+    /// (b) it leaves an UNSCORED row untouched (the `WHERE id IN (...)` guard
+    ///     restricts the UPDATE to scored ids; without it the correlated subquery
+    ///     yields NULL for unmatched rows, which the `NOT NULL` column rejects —
+    ///     the whole statement would error and roll back),
     /// (c) i64 ids round-trip the `json_each` TEXT key cast (a large id catches
     ///     a TEXT/INTEGER mismatch in the `CAST(... AS TEXT)` / `CAST(key AS
     ///     INTEGER)` pairing), and
@@ -2462,6 +2492,48 @@ mod tests {
         assert!((fs.get(b).unwrap().importance_score - 0.5).abs() < f64::EPSILON);
         assert!((fs.get(c).unwrap().importance_score - 0.33).abs() < f64::EPSILON);
         assert!((fs.get(big_id).unwrap().importance_score - 0.99).abs() < f64::EPSILON);
+    }
+
+    /// #392 hardening: a non-finite score (`NaN` / `±Infinity`) is rejected up
+    /// front with `ConflictError::PolicyParameter` and leaves **all** rows
+    /// untouched. `serde_json` would otherwise map the non-finite `f64` to JSON
+    /// `null`, writing NULL into the `importance_score REAL NOT NULL` column and
+    /// aborting the enclosing transaction — so this proves validate-all-then-
+    /// execute: the bad batch errors cleanly and no row mutates.
+    #[test]
+    fn update_importance_scores_bulk_rejects_non_finite_leaves_rows_untouched() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let conn = setup();
+            let fs = FactStore::new(&conn, DIM);
+
+            // Two facts, each seeded at base_importance 0.5 by `insert`.
+            let a = fs.insert(&make_fact("fact a", vec![0.1; DIM])).unwrap();
+            let b = fs.insert(&make_fact("fact b", vec![0.2; DIM])).unwrap();
+
+            // A batch mixing a valid score for `a` with a non-finite score for `b`.
+            // The whole batch must be rejected before any UPDATE runs.
+            let err = fs
+                .update_importance_scores_bulk(&[(a, 0.11), (b, bad)])
+                .expect_err("non-finite score must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    MemoryError::Conflict(crate::error::ConflictError::PolicyParameter(_))
+                ),
+                "expected ConflictError::PolicyParameter, got {err:?}"
+            );
+
+            // Validate-all-then-execute: BOTH rows keep their seeded 0.5 — even
+            // `a`, whose score was valid, must be left untouched.
+            assert!(
+                (fs.get(a).unwrap().importance_score - 0.5).abs() < f64::EPSILON,
+                "valid-scored row must be untouched when the batch is rejected"
+            );
+            assert!(
+                (fs.get(b).unwrap().importance_score - 0.5).abs() < f64::EPSILON,
+                "non-finite-scored row must be untouched"
+            );
+        }
     }
 
     #[test]
