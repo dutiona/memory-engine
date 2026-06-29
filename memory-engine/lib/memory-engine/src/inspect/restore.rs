@@ -1725,4 +1725,659 @@ mod tests {
             "absent fact_vectors defaults to empty"
         );
     }
+
+    // --- MANAGED_CONFIG_KEYS exclusion during restore (#316) ---
+
+    /// Restore must NOT import the keys in [`MANAGED_CONFIG_KEYS`] from a snapshot's
+    /// `config` map — those rows are owned by `init_schema`/`migrate`. A hand-crafted
+    /// snapshot carrying `schema_version: "9999"` (and the other managed keys) must
+    /// leave the DB's own managed values intact, while a non-managed `custom_key` IS
+    /// imported.
+    ///
+    /// Non-vacuous & mutation-proof: the expected values are *asymmetric* — the
+    /// managed `schema_version` must stay `CURRENT_SCHEMA_VERSION` ("14") and reject
+    /// the snapshot's "9999"; `storage_epoch` must stay "1" and reject "9999"; the
+    /// custom key must equal exactly "imported-value". If a regression dropped the
+    /// `!MANAGED_CONFIG_KEYS.contains(...)` filter, `schema_version` would become
+    /// "9999" and `storage_epoch` "9999" — both caught here. `embedding_meta` is the
+    /// legacy managed key: it must NOT land in `config` (it is consumed by the
+    /// embedding-space restore fallback instead), so its config row stays absent.
+    #[test]
+    fn restore_does_not_import_managed_config_keys() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        // Sanity: the DB's own managed values before restore.
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
+        );
+        assert_eq!(
+            get_config(&conn, "storage_epoch").unwrap().as_deref(),
+            Some(STORAGE_EPOCH.to_string().as_str())
+        );
+
+        // A legacy embedding_meta value: valid fingerprint JSON so the embedding-space
+        // restore fallback consumes it (embedding_spaces is empty) rather than erroring.
+        let fp = crate::types::EmbeddingFingerprint::new("legacy", "test", 4);
+        let mut config = BTreeMap::new();
+        config.insert("schema_version".to_string(), "9999".to_string());
+        config.insert("storage_epoch".to_string(), "9999".to_string());
+        config.insert(
+            "embedding_meta".to_string(),
+            serde_json::to_string(&fp).unwrap(),
+        );
+        config.insert("custom_key".to_string(), "imported-value".to_string());
+
+        let snapshot = EngineSnapshot {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            storage_epoch: STORAGE_EPOCH,
+            embed_dim: 4,
+            facts: vec![],
+            edges: vec![],
+            summaries: vec![],
+            scopes: vec![],
+            events: vec![],
+            lineage: vec![],
+            embedding_spaces: vec![], // empty → legacy embedding_meta fallback runs
+            fact_vectors: vec![],
+            config,
+        };
+
+        restore_snapshot_into(&conn, &snapshot).unwrap();
+
+        // Managed keys: the DB's own values survive; the snapshot's "9999" is rejected.
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some(CURRENT_SCHEMA_VERSION.to_string().as_str()),
+            "managed schema_version must NOT be overwritten by the snapshot"
+        );
+        assert_eq!(
+            get_config(&conn, "storage_epoch").unwrap().as_deref(),
+            Some(STORAGE_EPOCH.to_string().as_str()),
+            "managed storage_epoch must NOT be overwritten by the snapshot"
+        );
+        // The legacy managed key is never copied into `config` (it routes to the
+        // embedding-space registry instead).
+        assert!(
+            get_config(&conn, "embedding_meta").unwrap().is_none(),
+            "embedding_meta is managed → must not be imported as a config row"
+        );
+        // ...but its value WAS consumed: the identity landed in the registry.
+        assert_eq!(
+            crate::store::embedding_meta::load(&conn).unwrap(),
+            Some(fp),
+            "legacy embedding_meta value reconstructed into the registry"
+        );
+
+        // The non-managed custom key IS imported, verbatim.
+        assert_eq!(
+            get_config(&conn, "custom_key").unwrap().as_deref(),
+            Some("imported-value"),
+            "non-managed config keys must be imported"
+        );
+    }
+
+    // --- MAX_SNAPSHOT_SIZE file-cap guard for read_snapshot (#464) ---
+
+    /// The 4 GiB cap of the *public* [`read_snapshot`] entry point fires on an
+    /// oversized on-disk file — proved without materializing 4 GiB by `set_len`-ing
+    /// a sparse file to `MAX_SNAPSHOT_SIZE + 1` (the proven technique from
+    /// `engine/snapshot.rs`'s binary-loader cap). #877 added the cap+1 decompression
+    /// logic and tests the *parameterized* `read_snapshot_capped`; the remaining gap
+    /// is that the public `read_snapshot` actually wires [`MAX_SNAPSHOT_SIZE`] as its
+    /// cap. This pins that wiring: a `MAX_SNAPSHOT_SIZE + 1` file is rejected with the
+    /// distinct [`MemoryError::SnapshotTooLarge`] carrying exactly that cap.
+    ///
+    /// Mutation-proof: it asserts the error's `cap` equals `MAX_SNAPSHOT_SIZE` — a
+    /// regression that passed a *different* cap (e.g. `u64::MAX`, disabling the guard)
+    /// would either not fire at all or carry the wrong cap, failing the match. The
+    /// sparse file occupies ~0 real disk bytes, so the test stays cheap.
+    #[test]
+    fn read_snapshot_rejects_file_over_max_snapshot_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.json");
+        let f = File::create(&path).unwrap();
+        // Sparse: logical length = cap + 1, physical bytes ~= 0.
+        f.set_len(MAX_SNAPSHOT_SIZE + 1).unwrap();
+        drop(f);
+
+        let err = read_snapshot(&path).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::SnapshotTooLarge { cap } if cap == MAX_SNAPSHOT_SIZE),
+            "expected SnapshotTooLarge {{ cap: {MAX_SNAPSHOT_SIZE} }} from the public \
+             read_snapshot, got {err:?}"
+        );
+    }
+
+    // --- Lineage restore orchestration (#465) ---
+
+    /// The restore *orchestration* (step 7 of [`restore_snapshot_into`]) must carry a
+    /// non-empty `lineage` section through `LineageStore::insert_raw`, AND reset the
+    /// lineage autoincrement so a post-restore insert gets an id strictly greater than
+    /// any imported `lineage_id`. Every in-module restore fixture uses `lineage: vec![]`,
+    /// so this step-7 wiring + the autoincrement reset were untested end-to-end.
+    ///
+    /// Non-vacuous & mutation-proof on *distinct* values:
+    /// - The imported row preserves its explicit `lineage_id = 42` and
+    ///   `wisdom_fact_id = 1` (asymmetric, so a column swap is caught).
+    /// - `COUNT(lineage) == 1` (a dropped step-7 loop would give 0).
+    /// - A fresh `insert_raw` afterwards lands at `lineage_id > 42` (a missing
+    ///   autoincrement reset would collide/reuse a low id).
+    #[test]
+    fn restore_roundtrip_with_lineage() {
+        use crate::types::{LineageSnapshotEntry, PromotionProvenance};
+        use chrono::Utc;
+
+        // One wisdom fact + two source facts so the lineage references resolve.
+        let wisdom = fact_with_embedding(1, vec![0.1, 0.2, 0.3, 0.4]);
+        let src_a = fact_with_embedding(10, vec![0.1, 0.2, 0.3, 0.4]);
+        let src_b = fact_with_embedding(20, vec![0.1, 0.2, 0.3, 0.4]);
+
+        let imported_lineage_id = 42_i64;
+        let entry = LineageSnapshotEntry {
+            lineage_id: imported_lineage_id,
+            wisdom_fact_id: 1,
+            source_fact_ids: vec![10, 20],
+            provenance: PromotionProvenance {
+                source_count: 2,
+                session_count: 1,
+                date_range_start: Utc::now(),
+                date_range_end: Utc::now(),
+                confidence: 0.77,
+                method_version: "test-v1".into(),
+                representative_ids: vec![10, 20],
+            },
+        };
+
+        let snapshot = EngineSnapshot {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            storage_epoch: STORAGE_EPOCH,
+            embed_dim: 4,
+            facts: vec![wisdom, src_a, src_b],
+            edges: vec![],
+            summaries: vec![],
+            scopes: vec![],
+            events: vec![],
+            lineage: vec![entry],
+            embedding_spaces: vec![],
+            fact_vectors: vec![],
+            config: BTreeMap::new(),
+        };
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        restore_snapshot_into(&conn, &snapshot).unwrap();
+
+        // Exactly one lineage row, with the imported PK + wisdom fact preserved.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM lineage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "step-7 must import the one lineage row");
+        let (lid, wfid): (i64, i64) = conn
+            .query_row("SELECT lineage_id, wisdom_fact_id FROM lineage", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(lid, imported_lineage_id, "explicit lineage_id preserved");
+        assert_eq!(
+            wfid, 1,
+            "wisdom_fact_id preserved (not swapped with lineage_id)"
+        );
+
+        // The source chain round-tripped through insert_raw.
+        let store = LineageStore::new(&conn);
+        assert_eq!(store.get_source_fact_ids(1).unwrap(), vec![10, 20]);
+
+        // ID-continuity after restore: a fresh post-restore insert (via the
+        // validating `insert`, which omits `lineage_id` and lets the table assign the
+        // next AUTOINCREMENT value) must land STRICTLY ABOVE the imported id, never
+        // colliding with or reusing it. This guards the consumer-visible guarantee
+        // that imported provenance ids stay stable while new rows extend past them.
+        //
+        // Note: with an explicit `lineage_id = 42` row present, SQLite already raises
+        // its internal AUTOINCREMENT floor to 42 on that insert, so this assertion
+        // does not in isolation prove the manual `reset_autoincrement("lineage", …)`
+        // call fires — it proves the end-to-end continuity property, which is what a
+        // caller relies on. The step-7 import wiring is what the COUNT/id assertions
+        // above pin; the `reset_autoincrement` floor-raise itself — the case where the
+        // sequence must be lifted ABOVE the highest physically-inserted rowid — is
+        // pinned non-vacuously by [`reset_autoincrement_raises_sequence_floor`].
+        let new_id = store
+            .insert(
+                &crate::types::NewLineageRecord {
+                    wisdom_fact_id: 10, // a different, existing fact (unique wisdom_fact_id)
+                    source_fact_ids: vec![20],
+                },
+                &PromotionProvenance {
+                    source_count: 1,
+                    session_count: 1,
+                    date_range_start: Utc::now(),
+                    date_range_end: Utc::now(),
+                    confidence: 0.5,
+                    method_version: "post".into(),
+                    representative_ids: vec![20],
+                },
+            )
+            .unwrap();
+        assert!(
+            new_id > imported_lineage_id,
+            "post-restore lineage id {new_id} must exceed imported {imported_lineage_id}"
+        );
+    }
+
+    /// Direct, non-vacuous proof that [`reset_autoincrement`] *raises* a table's
+    /// `sqlite_sequence` floor above the highest physically-inserted rowid — the case
+    /// the end-to-end [`restore_roundtrip_with_lineage`] test cannot witness.
+    ///
+    /// The vacuity it closes: a snapshot restore inserts each row with its *explicit*
+    /// `lineage_id`, and `SQLite` already lifts the AUTOINCREMENT floor to the largest
+    /// inserted id on that very insert. So `reset_autoincrement(_, "lineage", max)`,
+    /// where `max` equals the highest inserted id, is a no-op for the floor — asserting
+    /// "next id > max" there proves nothing about the reset call. The genuine job of
+    /// `reset_autoincrement` is to set the floor to a value the inserted rows did NOT
+    /// reach, so subsequent caller inserts never collide with ids the snapshot reserved
+    /// above its physical rows. This test exercises exactly that gap.
+    ///
+    /// Setup: a lineage table with one inserted row at `lineage_id = 5` (natural floor
+    /// 5), then `reset_autoincrement(_, "lineage", 1000)`. A fresh AUTOINCREMENT insert
+    /// must land at `1001` — proving the floor was lifted from 5 to 1000, not merely
+    /// left at the natural 5.
+    ///
+    /// Mutation-proof: with the `reset_autoincrement` call removed (or its `max_id`
+    /// lowered to ≤ 5, or the `INSERT INTO sqlite_sequence` dropped) the next id would
+    /// be `6`, not `1001`, and the assertion fails. The `+1` floor semantics are pinned
+    /// to a single value, so neither an off-by-one nor a swallowed reset survives.
+    #[test]
+    fn reset_autoincrement_raises_sequence_floor() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        // Two active wisdom facts so the lineage FKs resolve (lineage has a UNIQUE
+        // index on wisdom_fact_id, so the seed row and the post-reset insert must
+        // anchor to *different* facts). Fact 1 anchors the seed row; fact 2 the insert.
+        conn.execute(
+            "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, last_accessed) \
+             VALUES (1, 'w1', 'h1', X'00', 'semantic', datetime('now'), datetime('now')), \
+                    (2, 'w2', 'h2', X'00', 'semantic', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let store = LineageStore::new(&conn);
+        store
+            .insert_raw(&crate::types::LineageSnapshotEntry {
+                lineage_id: 5,
+                wisdom_fact_id: 1,
+                source_fact_ids: vec![],
+                provenance: crate::types::PromotionProvenance {
+                    source_count: 0,
+                    session_count: 0,
+                    date_range_start: chrono::Utc::now(),
+                    date_range_end: chrono::Utc::now(),
+                    confidence: 0.0,
+                    method_version: "seed".into(),
+                    representative_ids: vec![],
+                },
+            })
+            .unwrap();
+
+        // Precondition: the natural floor is 5 (set by the explicit insert above),
+        // which is what a missing/no-op reset would leave behind.
+        let floor_before: i64 = conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'lineage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            floor_before, 5,
+            "explicit insert sets the natural floor to 5"
+        );
+
+        // The unit under test: lift the floor to 1000 — far above the highest
+        // physically-inserted rowid (5).
+        reset_autoincrement(&conn, "lineage", 1000).unwrap();
+
+        // A fresh AUTOINCREMENT insert (validating path omits lineage_id) must land at
+        // 1001 — only possible if the floor was lifted from 5 to 1000. Anchors on the
+        // *second* wisdom fact (the first already owns the seed row; wisdom_fact_id is
+        // UNIQUE).
+        let new_id = store
+            .insert(
+                &crate::types::NewLineageRecord {
+                    wisdom_fact_id: 2,
+                    source_fact_ids: vec![],
+                },
+                &crate::types::PromotionProvenance {
+                    source_count: 0,
+                    session_count: 0,
+                    date_range_start: chrono::Utc::now(),
+                    date_range_end: chrono::Utc::now(),
+                    confidence: 0.0,
+                    method_version: "after".into(),
+                    representative_ids: vec![],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            new_id, 1001,
+            "reset_autoincrement must lift the floor to 1000 so the next id is 1001 \
+             (natural floor was only 5) — a no-op/missing reset would yield 6"
+        );
+    }
+
+    // --- NotImplemented compression arms when feature disabled (#466) ---
+    //
+    // These tests exercise the `#[cfg(not(feature = "compress-*"))]` arms of
+    // `read_gzip` / `read_zstd`, which return `MemoryError::NotImplemented`. They are
+    // gated on the feature being DISABLED, so they compile and run ONLY under a build
+    // without that compress feature (e.g. the default-feature `cargo test`).
+    //
+    // ⚠️ CI CAVEAT: this repo's CI runs tests solely via `cargo test --workspace
+    // --all-features` (see .github/workflows/ci.yml). Under `--all-features` both
+    // compress features are ON, so these `cfg(not(...))` tests are compiled OUT and
+    // NEVER execute in CI — they guard the NotImplemented arms only under a build
+    // WITHOUT the compress features (a local default-feature `cargo test`, NOT the
+    // `--all-features` CI job). This is the known "default-features test masked by
+    // --all-features" gap (#466 explicitly flags it). A follow-up `area:build` issue
+    // tracks adding a no-compress (default-features) CI test job so these arms run in
+    // CI too; closing it here is out of scope for this test-coverage PR. The tests are
+    // kept (not deleted): they are valid and DO run under a default `cargo test`.
+
+    /// gzip magic on a snapshot file, with `compress-gzip` disabled, must surface a
+    /// clear [`MemoryError::NotImplemented`] (not a serde/Io error). Mutation-proof:
+    /// asserts the variant AND that the message names "gzip" — a regression that
+    /// returned a generic error or mislabelled the format fails the match/contains.
+    ///
+    /// Runs ONLY under a build *without* `compress-gzip` (the `cfg(not(...))` gate) —
+    /// i.e. a default-feature `cargo test`, NOT the `--all-features` CI job, which
+    /// enables the feature and compiles this test OUT. A follow-up `area:build` issue
+    /// tracks adding a no-compress (default-features) CI test job so this arm is
+    /// covered in CI too. See the section comment above for the full caveat.
+    #[cfg(not(feature = "compress-gzip"))]
+    #[test]
+    fn read_snapshot_gzip_without_feature_is_not_implemented() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("foo.json.gz");
+        // gzip magic [0x1f, 0x8b, ...] — detect_compression routes to read_gzip.
+        std::fs::write(&path, [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00]).unwrap();
+        let err = read_snapshot(&path).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::NotImplemented(ref m) if m.contains("gzip")),
+            "expected NotImplemented naming gzip, got {err:?}"
+        );
+    }
+
+    /// zstd magic on a snapshot file, with `compress-zstd` disabled, must surface a
+    /// clear [`MemoryError::NotImplemented`] naming "zstd".
+    ///
+    /// Runs ONLY under a build *without* `compress-zstd` (the `cfg(not(...))` gate) —
+    /// i.e. a default-feature `cargo test`, NOT the `--all-features` CI job, which
+    /// enables the feature and compiles this test OUT. A follow-up `area:build` issue
+    /// tracks adding a no-compress (default-features) CI test job so this arm is
+    /// covered in CI too. See the section comment above for the full caveat.
+    #[cfg(not(feature = "compress-zstd"))]
+    #[test]
+    fn read_snapshot_zstd_without_feature_is_not_implemented() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("foo.json.zst");
+        // zstd magic [0x28, 0xb5, 0x2f, 0xfd] — routes to read_zstd.
+        std::fs::write(&path, [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00]).unwrap();
+        let err = read_snapshot(&path).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::NotImplemented(ref m) if m.contains("zstd")),
+            "expected NotImplemented naming zstd, got {err:?}"
+        );
+    }
+
+    // --- EngineSnapshot serde roundtrip proptest (#467) ---
+
+    mod proptest_snapshot {
+        use super::*;
+        use crate::types::{
+            ConsolidationLevel, Edge, Event, EventType, Fact, FactType, LineageSnapshotEntry,
+            PromotionProvenance, ScopeNode, Summary,
+        };
+        use chrono::{DateTime, TimeZone, Utc};
+        use proptest::prelude::*;
+
+        const PDIM: usize = 4;
+
+        /// A bounded, valid UTC timestamp (avoids chrono's extreme-year edge cases
+        /// that don't survive RFC3339; the snapshot wire format is RFC3339-based).
+        fn arb_ts() -> impl Strategy<Value = DateTime<Utc>> {
+            // 2000-01-01 .. ~2100 in seconds.
+            (946_684_800_i64..4_102_444_800_i64)
+                .prop_map(|s| Utc.timestamp_opt(s, 0).single().expect("valid timestamp"))
+        }
+
+        fn arb_opt_ts() -> impl Strategy<Value = Option<DateTime<Utc>>> {
+            proptest::option::of(arb_ts())
+        }
+
+        /// A finite embedding of exactly `PDIM` floats (NaN/inf don't survive JSON).
+        fn arb_embedding() -> impl Strategy<Value = Vec<f32>> {
+            proptest::collection::vec(-1.0e3_f32..1.0e3_f32, PDIM..=PDIM)
+        }
+
+        fn arb_fact_type() -> impl Strategy<Value = FactType> {
+            prop_oneof![
+                Just(FactType::Episodic),
+                Just(FactType::Semantic),
+                Just(FactType::Procedural),
+            ]
+        }
+
+        fn arb_level() -> impl Strategy<Value = ConsolidationLevel> {
+            prop_oneof![
+                Just(ConsolidationLevel::Local),
+                Just(ConsolidationLevel::Cluster),
+                Just(ConsolidationLevel::Global),
+            ]
+        }
+
+        fn arb_fact() -> impl Strategy<Value = Fact> {
+            (
+                1..10_000i64,
+                ".*",
+                arb_embedding(),
+                arb_fact_type(),
+                arb_ts(),
+                arb_opt_ts(),
+                arb_opt_ts(),
+                arb_opt_ts(),
+                proptest::option::of(1..10_000i64),
+                any::<bool>(),
+            )
+                .prop_map(
+                    |(
+                        id,
+                        content,
+                        embedding,
+                        ft,
+                        t_created,
+                        t_expired,
+                        t_valid,
+                        t_invalid,
+                        sev,
+                        pinned,
+                    )| {
+                        Fact {
+                            id,
+                            content,
+                            content_hash: format!("h{id}"),
+                            embedding,
+                            fact_type: ft,
+                            t_created,
+                            t_expired,
+                            t_valid,
+                            t_invalid,
+                            source_event_id: sev,
+                            base_importance: 0.5,
+                            access_count: i64::from(pinned),
+                            last_accessed: t_created,
+                            metadata: serde_json::json!({"k": id}),
+                            scope_id: 1,
+                            is_pinned: pinned,
+                            importance_score: 0.25,
+                            surfaced_at: None,
+                        }
+                    },
+                )
+        }
+
+        fn arb_edge() -> impl Strategy<Value = Edge> {
+            (
+                1..10_000i64,
+                1..10_000i64,
+                1..10_000i64,
+                arb_ts(),
+                arb_opt_ts(),
+            )
+                .prop_map(|(id, src, tgt, t_created, t_expired)| Edge {
+                    id,
+                    source_fact_id: src,
+                    target_fact_id: tgt,
+                    relation_type: "rel".into(),
+                    weight: 0.5,
+                    t_created,
+                    t_expired,
+                    scope_id: 1,
+                })
+        }
+
+        fn arb_summary() -> impl Strategy<Value = Summary> {
+            (
+                1..10_000i64,
+                ".*",
+                arb_embedding(),
+                arb_level(),
+                proptest::collection::vec(1..10_000i64, 0..4),
+                arb_ts(),
+            )
+                .prop_map(|(id, content, embedding, level, src, created_at)| Summary {
+                    id,
+                    content,
+                    embedding,
+                    level,
+                    source_fact_ids: src,
+                    created_at,
+                    scope_id: 1,
+                })
+        }
+
+        fn arb_event() -> impl Strategy<Value = Event> {
+            (1..10_000i64, arb_ts(), proptest::option::of(".*")).prop_map(
+                |(id, timestamp, session_id)| Event {
+                    id,
+                    timestamp,
+                    event_type: EventType::Interaction,
+                    payload: serde_json::json!({"e": id}),
+                    source: "test".into(),
+                    session_id,
+                    scope_id: 1,
+                    origin_node_id: "local".into(),
+                    sequence_id: id,
+                    created_at: Some(timestamp),
+                    event_revision: 1,
+                },
+            )
+        }
+
+        fn arb_lineage() -> impl Strategy<Value = LineageSnapshotEntry> {
+            (
+                1..10_000i64,
+                1..10_000i64,
+                proptest::collection::vec(1..10_000i64, 0..4),
+                arb_ts(),
+                arb_ts(),
+            )
+                .prop_map(|(lineage_id, wisdom_fact_id, src, start, end)| {
+                    LineageSnapshotEntry {
+                        lineage_id,
+                        wisdom_fact_id,
+                        source_fact_ids: src,
+                        provenance: PromotionProvenance {
+                            source_count: 1,
+                            session_count: 1,
+                            date_range_start: start,
+                            date_range_end: end,
+                            confidence: 0.5,
+                            method_version: "v".into(),
+                            representative_ids: vec![],
+                        },
+                    }
+                })
+        }
+
+        fn arb_snapshot() -> impl Strategy<Value = EngineSnapshot> {
+            (
+                proptest::collection::vec(arb_fact(), 0..4),
+                proptest::collection::vec(arb_edge(), 0..4),
+                proptest::collection::vec(arb_summary(), 0..4),
+                proptest::collection::vec(arb_event(), 0..4),
+                proptest::collection::vec(arb_lineage(), 0..3),
+            )
+                .prop_map(|(facts, edges, summaries, events, lineage)| {
+                    let scopes = vec![ScopeNode {
+                        id: 1,
+                        parent_id: None,
+                        label: "root".into(),
+                        depth: 0,
+                    }];
+                    let mut config = BTreeMap::new();
+                    config.insert("custom".to_string(), "value".to_string());
+                    EngineSnapshot {
+                        schema_version: CURRENT_SCHEMA_VERSION,
+                        storage_epoch: STORAGE_EPOCH,
+                        embed_dim: PDIM,
+                        facts,
+                        edges,
+                        summaries,
+                        scopes,
+                        events,
+                        lineage,
+                        embedding_spaces: vec![],
+                        fact_vectors: vec![],
+                        config,
+                    }
+                })
+        }
+
+        proptest! {
+            /// `serialize → deserialize → serialize` is byte-stable for arbitrary
+            /// `EngineSnapshot`s, and the scalar/length invariants survive. This is the
+            /// dump↔restore wire contract: any serde drift (a renamed field, a
+            /// non-round-tripping timestamp, a dropped collection element) breaks the
+            /// JSON stability check or a length assertion.
+            ///
+            /// `EngineSnapshot` is not `PartialEq` (it nests `serde_json::Value` and
+            /// float scores), so JSON-value stability stands in for structural equality
+            /// — the same approach as the example-based `engine_snapshot_roundtrip`.
+            #[test]
+            fn engine_snapshot_serde_roundtrip(snapshot in arb_snapshot()) {
+                let json1 = serde_json::to_value(&snapshot).expect("serialize #1");
+                let recovered: EngineSnapshot =
+                    serde_json::from_value(json1.clone()).expect("deserialize");
+                let json2 = serde_json::to_value(&recovered).expect("serialize #2");
+                prop_assert_eq!(&json1, &json2, "snapshot JSON not stable across roundtrip");
+
+                // Scalar + collection-length invariants (catch a dropped/duplicated
+                // element that a coincidental value-equality might miss).
+                prop_assert_eq!(snapshot.schema_version, recovered.schema_version);
+                prop_assert_eq!(snapshot.storage_epoch, recovered.storage_epoch);
+                prop_assert_eq!(snapshot.embed_dim, recovered.embed_dim);
+                prop_assert_eq!(snapshot.facts.len(), recovered.facts.len());
+                prop_assert_eq!(snapshot.edges.len(), recovered.edges.len());
+                prop_assert_eq!(snapshot.summaries.len(), recovered.summaries.len());
+                prop_assert_eq!(snapshot.events.len(), recovered.events.len());
+                prop_assert_eq!(snapshot.lineage.len(), recovered.lineage.len());
+                prop_assert_eq!(snapshot.config, recovered.config);
+            }
+        }
+    }
 }
