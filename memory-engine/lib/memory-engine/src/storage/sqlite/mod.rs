@@ -180,8 +180,8 @@ impl SqliteBackend {
     /// `ann_threshold < usize::MAX`, materializes the HNSW index from the
     /// requested [`HnswOpenSource`]:
     ///
-    /// - [`HnswOpenSource::Snapshot`]`(Some(snap))` → restore from the sidecar blob.
-    /// - [`HnswOpenSource::Snapshot`]`(None)` or [`HnswOpenSource::Rebuild`] → build
+    /// - [`HnswOpenSource::Snapshot`] with `Some(snap)` → restore from the sidecar blob.
+    /// - [`HnswOpenSource::Snapshot`] with `None`, or [`HnswOpenSource::Rebuild`] → build
     ///   from a full DB scan.
     ///
     /// Mirrors `engine/mod.rs::try_load_snapshot`'s match arms exactly so the
