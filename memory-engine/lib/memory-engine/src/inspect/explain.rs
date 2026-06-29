@@ -101,12 +101,322 @@ pub fn fact_history_from_fact(fact_id: i64, fact: &Fact) -> FactHistory {
 mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
+    use crate::graph::{EdgeData, MemoryGraph};
     use crate::traits::EmbeddingProvider;
     use crate::types::{AddFactOptions, AddFactRequest, EventType, FactType, NewEvent};
     use chrono::Duration;
     use std::sync::Arc;
 
     const DIM: usize = 4;
+
+    /// A neutral, *active* baseline fact: no expiry, no valid-time, not pinned.
+    ///
+    /// Tests for [`determine_state`] / [`fact_history_from_fact`] mutate exactly the
+    /// one or two timestamp/flag fields under test on top of this baseline, so each
+    /// assertion isolates a single classifier branch. `determine_state` and
+    /// `fact_history_from_fact` are pure over a `Fact`, so a hand-built struct is
+    /// the most direct, least-coupled way to drive every branch — including the
+    /// past-`t_invalid` and `t_expired` states the engine's `add_fact` entry points
+    /// cannot set.
+    fn baseline_fact(now: DateTime<Utc>) -> Fact {
+        Fact {
+            id: 1,
+            content: "baseline".into(),
+            content_hash: "0".repeat(32),
+            embedding: vec![0.0; DIM],
+            fact_type: FactType::Semantic,
+            t_created: now,
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            base_importance: 0.5,
+            access_count: 0,
+            last_accessed: now,
+            metadata: serde_json::json!({}),
+            scope_id: 1,
+            is_pinned: false,
+            importance_score: 0.5,
+            surfaced_at: None,
+        }
+    }
+
+    // --- #314 / #458: determine_state branch + priority coverage -----------
+
+    /// #314: a fact with a *past* `t_invalid` (and no `t_expired`, not pinned)
+    /// classifies as `Invalidated`, and the exact `t_invalid` instant is threaded
+    /// through unchanged. The asserted instant is deliberately offset from both
+    /// `now` and `t_created` so a wrong field (e.g. echoing `now`) would fail.
+    #[test]
+    fn determine_state_invalidated_branch() {
+        let now = Utc::now();
+        let t_invalid = now - Duration::hours(3);
+        let mut fact = baseline_fact(now);
+        fact.t_invalid = Some(t_invalid);
+
+        let state = determine_state(&fact, now);
+        assert_eq!(state, FactState::Invalidated { t_invalid });
+    }
+
+    /// #314: a `t_invalid` that is strictly in the *future* must NOT invalidate —
+    /// `is_temporally_due` keeps the fact `Due` (it also has a past `t_valid`).
+    /// This pins the `t_invalid <= now` boundary so a `<` / `<=` flip is caught.
+    #[test]
+    fn determine_state_future_t_invalid_is_not_invalidated() {
+        let now = Utc::now();
+        let mut fact = baseline_fact(now);
+        fact.t_valid = Some(now - Duration::hours(1));
+        fact.t_invalid = Some(now + Duration::hours(1));
+
+        let state = determine_state(&fact, now);
+        assert!(
+            matches!(state, FactState::Due { .. }),
+            "future t_invalid must stay Due, got {state:?}"
+        );
+    }
+
+    /// #314: `t_expired` set without a `quarantine` metadata marker → `Unknown`.
+    #[test]
+    fn determine_state_expired_unknown_reason() {
+        let now = Utc::now();
+        let mut fact = baseline_fact(now);
+        fact.t_expired = Some(now - Duration::hours(1));
+
+        let state = determine_state(&fact, now);
+        assert_eq!(
+            state,
+            FactState::Expired {
+                reason: ExpiredReason::Unknown
+            }
+        );
+    }
+
+    /// #314: `t_expired` set WITH a `quarantine` metadata marker → `Quarantined`.
+    /// Paired with the `Unknown` case above so a constant-return bug (always one
+    /// reason) is caught by the asymmetry.
+    #[test]
+    fn determine_state_expired_quarantined_reason() {
+        let now = Utc::now();
+        let mut fact = baseline_fact(now);
+        fact.t_expired = Some(now - Duration::hours(1));
+        fact.metadata = serde_json::json!({ "quarantine": "dream-cycle" });
+
+        let state = determine_state(&fact, now);
+        assert_eq!(
+            state,
+            FactState::Expired {
+                reason: ExpiredReason::Quarantined
+            }
+        );
+    }
+
+    /// #458: priority `Pinned > Due` — a pinned fact whose `t_valid` is in the past
+    /// (so it would otherwise be `Due`) classifies as `Pinned`. Catches a chain
+    /// re-order that put the `is_temporally_due` check before `is_pinned`.
+    #[test]
+    fn determine_state_pinned_beats_due() {
+        let now = Utc::now();
+        let mut fact = baseline_fact(now);
+        fact.is_pinned = true;
+        fact.t_valid = Some(now - Duration::hours(1));
+
+        let state = determine_state(&fact, now);
+        assert_eq!(state, FactState::Pinned);
+    }
+
+    /// #458: priority `Expired > Pinned` — an expired *and* pinned fact classifies
+    /// as `Expired`, not `Pinned`. Catches a chain re-order that ran `is_pinned`
+    /// before the `t_expired` check.
+    #[test]
+    fn determine_state_expired_beats_pinned() {
+        let now = Utc::now();
+        let mut fact = baseline_fact(now);
+        fact.t_expired = Some(now - Duration::hours(1));
+        fact.is_pinned = true;
+
+        let state = determine_state(&fact, now);
+        assert_eq!(
+            state,
+            FactState::Expired {
+                reason: ExpiredReason::Unknown
+            }
+        );
+    }
+
+    /// #458: priority `Expired > Invalidated` — a fact that is both expired and
+    /// past-`t_invalid` classifies as `Expired`. Catches a chain re-order that put
+    /// the `t_invalid` check first.
+    #[test]
+    fn determine_state_expired_beats_invalidated() {
+        let now = Utc::now();
+        let mut fact = baseline_fact(now);
+        fact.t_expired = Some(now - Duration::hours(1));
+        fact.t_invalid = Some(now - Duration::hours(2));
+
+        let state = determine_state(&fact, now);
+        assert_eq!(
+            state,
+            FactState::Expired {
+                reason: ExpiredReason::Unknown
+            }
+        );
+    }
+
+    /// #458: priority `Invalidated > Pinned` — a pinned fact whose `t_invalid` is in
+    /// the past classifies as `Invalidated`, not `Pinned`. Catches a chain re-order
+    /// that put `is_pinned` before the `t_invalid` check.
+    #[test]
+    fn determine_state_invalidated_beats_pinned() {
+        let now = Utc::now();
+        let t_invalid = now - Duration::hours(2);
+        let mut fact = baseline_fact(now);
+        fact.t_invalid = Some(t_invalid);
+        fact.is_pinned = true;
+
+        let state = determine_state(&fact, now);
+        assert_eq!(state, FactState::Invalidated { t_invalid });
+    }
+
+    // --- #459: build_graph_context with a connected fact (degree > 0) ------
+
+    /// #459: a fact with >= 1 edge yields a non-trivial graph context — the
+    /// existing tests only ever exercise degree-0 isolated facts. Builds a known
+    /// star (center `10` linked to `20`, `30`, `40`) so degree, the *sorted*
+    /// neighbour set, and the `component_size == neighbors + 1` formula are all
+    /// asserted against distinct, hand-computed values.
+    #[test]
+    fn build_graph_context_with_neighbors() {
+        let mut graph = MemoryGraph::new();
+        let edge = |edge_id| EdgeData {
+            edge_id,
+            relation_type: "supports".into(),
+            weight: 1.0,
+        };
+        // Insert targets out of order so a missing sort would surface.
+        graph.add_edge(10, 40, edge(1)); // outgoing
+        graph.add_edge(10, 20, edge(2)); // outgoing
+        graph.add_edge(30, 10, edge(3)); // incoming — degree counts both directions
+
+        let ctx = build_graph_context(&graph, 10);
+
+        assert_eq!(ctx.degree, 3, "2 outgoing + 1 incoming");
+        assert_eq!(
+            ctx.neighbor_ids,
+            vec![20, 30, 40],
+            "all in/out neighbours, ascending"
+        );
+        assert_eq!(
+            ctx.component_size,
+            ctx.neighbor_ids.len() + 1,
+            "neighbours + the fact itself"
+        );
+        assert_eq!(ctx.component_size, 4);
+    }
+
+    /// #459: a node present in the graph but with no edges has degree 0, no
+    /// neighbours, and a component of just itself — the asymmetric counterpart to
+    /// the connected case above (guards `component_size` against a stray +1).
+    #[test]
+    fn build_graph_context_isolated_present_node() {
+        let mut graph = MemoryGraph::new();
+        // Give the graph some unrelated structure, then probe a disconnected node.
+        graph.add_edge(
+            1,
+            2,
+            EdgeData {
+                edge_id: 1,
+                relation_type: "r".into(),
+                weight: 1.0,
+            },
+        );
+        graph.ensure_node(99);
+
+        let ctx = build_graph_context(&graph, 99);
+        assert_eq!(ctx.degree, 0);
+        assert!(ctx.neighbor_ids.is_empty());
+        assert_eq!(ctx.component_size, 1);
+    }
+
+    // --- #460: fact_history Expired timeline entry -------------------------
+
+    /// #460: a fact with `t_expired` set yields a timeline that **includes** the
+    /// `Expired` event — the existing `fact_history_*` tests never set `t_expired`,
+    /// so this branch was uncovered. Realistic, chronological timestamps here.
+    #[test]
+    fn fact_history_includes_expired_entry() {
+        let now = Utc::now();
+        let t_created = now - Duration::hours(10);
+        let t_valid = now - Duration::hours(8);
+        let t_invalid = now - Duration::hours(4);
+        let t_expired = now - Duration::hours(1);
+
+        let mut fact = baseline_fact(now);
+        fact.t_created = t_created;
+        fact.t_valid = Some(t_valid);
+        fact.t_invalid = Some(t_invalid);
+        fact.t_expired = Some(t_expired);
+
+        let history = fact_history_from_fact(42, &fact);
+        assert_eq!(history.fact_id, 42);
+        assert_eq!(history.timeline.len(), 4);
+
+        // The Expired entry is present and carries `t_expired` verbatim — a missing
+        // `if let Some(t_expired)` push, or echoing the wrong timestamp, fails here.
+        let expired_entry = history
+            .timeline
+            .iter()
+            .find(|e| matches!(e.kind, HistoryEventKind::Expired))
+            .expect("Expired entry present");
+        assert_eq!(expired_entry.timestamp, t_expired);
+    }
+
+    /// #460: the timeline is sorted **ascending** by timestamp regardless of the
+    /// fixed push order (`Created → BecameValid → BecameInvalid → Expired`). To make
+    /// the `sort_by_key` load-bearing — and not silently satisfied because the push
+    /// order already happens to be chronological — `t_created` is deliberately the
+    /// *latest* instant, so a dropped sort would leave `Created` at index 0 and the
+    /// kind-vector assertion would fail.
+    #[test]
+    fn fact_history_sort_is_load_bearing() {
+        let base = Utc::now() - Duration::hours(20);
+        // Chronological order: valid < invalid < expired < created (created last).
+        let t_valid = base + Duration::hours(1);
+        let t_invalid = base + Duration::hours(2);
+        let t_expired = base + Duration::hours(3);
+        let t_created = base + Duration::hours(9);
+
+        let mut fact = baseline_fact(Utc::now());
+        fact.t_created = t_created;
+        fact.t_valid = Some(t_valid);
+        fact.t_invalid = Some(t_invalid);
+        fact.t_expired = Some(t_expired);
+
+        let history = fact_history_from_fact(7, &fact);
+        assert_eq!(history.timeline.len(), 4);
+
+        // Sorted by timestamp, `Created` (latest) must land LAST — the inverse of
+        // the push order, so a dropped sort flips this assertion.
+        let kinds: Vec<&HistoryEventKind> = history.timeline.iter().map(|e| &e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &HistoryEventKind::BecameValid,
+                &HistoryEventKind::BecameInvalid,
+                &HistoryEventKind::Expired,
+                &HistoryEventKind::Created,
+            ],
+            "timeline must be sorted ascending by timestamp, not push order"
+        );
+
+        // Timestamps are non-decreasing.
+        assert!(
+            history
+                .timeline
+                .windows(2)
+                .all(|w| w[0].timestamp <= w[1].timestamp),
+            "timeline must be sorted ascending"
+        );
+    }
 
     struct FakeEmbed;
     impl EmbeddingProvider for FakeEmbed {
