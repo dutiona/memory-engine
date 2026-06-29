@@ -1062,14 +1062,19 @@ mod tests {
     }
 
     proptest! {
-        /// #455 (a): `ebbinghaus_decay(age >= 0, half_life > 0)` is always in `(0, 1]`.
+        /// #455 (a): `ebbinghaus_decay(age >= 0, half_life > 0)` is always in the
+        /// closed interval `[0, 1]`. The lower bound is closed, not open: for very
+        /// large `age / half_life` ratios `2^(-age/hl)` underflows to exactly `+0.0`
+        /// in f64 (once the ratio exceeds ~1074), which is legitimate IEEE-754
+        /// behavior, not a defect. The declared `age in 0..3650`, `hl in 0.001..3650`
+        /// strategy admits ratios up to 3.65e6, so `+0.0` is reachable.
         #[test]
         fn prop_decay_in_unit_interval(
             age in 0.0f64..3650.0,
             hl in 0.001f64..3650.0,
         ) {
             let r = ebbinghaus_decay(age, hl);
-            prop_assert!(r > 0.0 && r <= 1.0, "decay({age}, {hl}) = {r} outside (0, 1]");
+            prop_assert!((0.0..=1.0).contains(&r), "decay({age}, {hl}) = {r} outside [0, 1]");
         }
 
         /// #455 (b): decay is monotone **non-increasing** in age for a fixed half-life.
