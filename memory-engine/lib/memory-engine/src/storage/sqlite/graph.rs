@@ -990,10 +990,9 @@ impl FactGraph for SqliteBackend {
                 let fact_store = FactStore::new(&tx, dim);
                 let edge_store = EdgeStore::new(&tx);
 
-                // Materialize importance scores for every active fact.
-                for &(id, score) in &scored {
-                    fact_store.update_importance_score(id, score)?;
-                }
+                // Materialize importance scores for every active fact in one
+                // bulk UPDATE (#392) instead of an N+1 per-row loop.
+                fact_store.update_importance_scores_bulk(&scored)?;
                 // Expire the sub-threshold set + cascade edge expiry.
                 for &fact_id in &to_expire {
                     fact_store.expire(fact_id, now)?;
