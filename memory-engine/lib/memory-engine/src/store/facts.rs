@@ -442,7 +442,13 @@ impl<'a> FactStore<'a> {
     /// List dormant facts: active, non-pinned, low importance, temporally valid.
     ///
     /// Used by `sample_dormant()` for resonance queries. Returns facts with
-    /// `importance_score < threshold` that pass temporal validity checks.
+    /// `importance_score < threshold` that pass temporal validity checks
+    /// **as of `as_of`** (`t_valid <= as_of < t_invalid`).
+    ///
+    /// `as_of` is the injected wall-clock instant (the facade passes
+    /// [`Utc::now`]), mirroring [`list_due`](Self::list_due) and
+    /// [`list_active_at`](Self::list_active_at) — the store never reads the clock
+    /// itself, so temporal behavior is deterministically testable (#327).
     ///
     /// When `scope_ids` is `Some`, only facts in those scopes are returned.
     /// When `None`, all scopes are searched.
@@ -454,8 +460,9 @@ impl<'a> FactStore<'a> {
         &self,
         importance_threshold: f64,
         scope_ids: Option<&[i64]>,
+        as_of: DateTime<Utc>,
     ) -> Result<Vec<Fact>> {
-        let now_str = Utc::now().to_rfc3339();
+        let now_str = as_of.to_rfc3339();
 
         let (scope_clause, scope_params) = match scope_ids {
             Some(ids) if !ids.is_empty() => {
@@ -861,11 +868,22 @@ impl<'a> FactStore<'a> {
     }
 
     /// Update the materialized importance score for a fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if no row with `id` exists (rows-affected
+    /// contract, mirroring [`update_base_importance`](Self::update_base_importance)
+    /// and [`increment_access`](Self::increment_access)) — a silent no-op on a
+    /// nonexistent id would let a caller mistake a missing fact for a successful
+    /// write (#328).
     pub fn update_importance_score(&self, id: i64, score: f64) -> Result<()> {
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE facts SET importance_score = ?1 WHERE id = ?2",
             rusqlite::params![score, id],
         )?;
+        if changed == 0 {
+            return Err(MemoryError::NotFound(format!("fact {id}")));
+        }
         Ok(())
     }
 
@@ -3165,5 +3183,716 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fts_count_after, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // #326 — stamp_surfaced: batch, idempotent, returns persisted pairs
+    // -------------------------------------------------------------------------
+
+    /// Stamping a batch of never-surfaced facts sets `surfaced_at = now` on each
+    /// and returns the persisted `(id, now)` pair for every requested id.
+    #[test]
+    fn stamp_surfaced_stamps_unsurfaced_and_returns_pairs() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let a = store.insert(&make_fact("a", vec![0.1; DIM])).unwrap();
+        let b = store.insert(&make_fact("b", vec![0.2; DIM])).unwrap();
+        // A third, unrequested fact must NOT be stamped or returned.
+        let c = store.insert(&make_fact("c", vec![0.3; DIM])).unwrap();
+
+        let now: DateTime<Utc> = "2024-03-01T12:00:00Z".parse().unwrap();
+        let mut pairs = store.stamp_surfaced(&[a, b], now).unwrap();
+        pairs.sort_by_key(|(id, _)| *id);
+
+        assert_eq!(
+            pairs,
+            vec![(a, now), (b, now)],
+            "every requested id must come back with the persisted surfaced_at"
+        );
+        // The persisted column matches what was returned (round-trip, not just the
+        // in-memory return value).
+        for id in [a, b] {
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT surfaced_at FROM facts WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                stored.map(|s| parse_timestamp(&s).unwrap()),
+                Some(now),
+                "fact {id} surfaced_at must be persisted as `now`"
+            );
+        }
+        // The unrequested fact is untouched.
+        let c_surfaced: Option<String> = conn
+            .query_row(
+                "SELECT surfaced_at FROM facts WHERE id = ?1",
+                params![c],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            c_surfaced.is_none(),
+            "an id not in the batch must not be stamped"
+        );
+    }
+
+    /// Re-stamping is idempotent: a second call with a *different* clock must NOT
+    /// overwrite the original `surfaced_at` (only `surfaced_at IS NULL` rows are
+    /// touched), yet it still returns the original persisted pair.
+    #[test]
+    fn stamp_surfaced_is_idempotent_preserving_original_timestamp() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = store.insert(&make_fact("once", vec![0.1; DIM])).unwrap();
+
+        let first: DateTime<Utc> = "2024-01-01T00:00:00Z".parse().unwrap();
+        let second: DateTime<Utc> = "2024-12-31T23:59:59Z".parse().unwrap();
+        assert!(first < second, "fixture sanity: the two clocks differ");
+
+        let p1 = store.stamp_surfaced(&[id], first).unwrap();
+        assert_eq!(p1, vec![(id, first)]);
+
+        // Re-stamp with a later clock — the original must survive.
+        let p2 = store.stamp_surfaced(&[id], second).unwrap();
+        assert_eq!(
+            p2,
+            vec![(id, first)],
+            "re-stamp must return the ORIGINAL surfaced_at, not the new clock"
+        );
+        let stored: String = conn
+            .query_row(
+                "SELECT surfaced_at FROM facts WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            parse_timestamp(&stored).unwrap(),
+            first,
+            "the persisted surfaced_at must not be overwritten on re-stamp"
+        );
+    }
+
+    /// A partial batch where one id is already stamped and one is fresh: the fresh
+    /// one is stamped with `now`, the already-stamped one keeps its original — both
+    /// come back with their *persisted* (asymmetric) timestamps.
+    #[test]
+    fn stamp_surfaced_mixed_batch_returns_each_persisted_value() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let old = store.insert(&make_fact("old", vec![0.1; DIM])).unwrap();
+        let fresh = store.insert(&make_fact("fresh", vec![0.2; DIM])).unwrap();
+
+        let t_old: DateTime<Utc> = "2024-02-02T02:02:02Z".parse().unwrap();
+        let t_new: DateTime<Utc> = "2024-08-08T08:08:08Z".parse().unwrap();
+        store.stamp_surfaced(&[old], t_old).unwrap();
+
+        let mut pairs = store.stamp_surfaced(&[old, fresh], t_new).unwrap();
+        pairs.sort_by_key(|(id, _)| *id);
+        // Distinct expected timestamps per id catch a swap or a "stamp everything
+        // with now" regression.
+        assert_eq!(pairs, vec![(old, t_old), (fresh, t_new)]);
+    }
+
+    /// Empty slice → `Ok(vec![])` with no DB writes (early-return contract).
+    #[test]
+    fn stamp_surfaced_empty_slice_is_ok_empty() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = store
+            .insert(&make_fact("untouched", vec![0.1; DIM]))
+            .unwrap();
+        let pairs = store.stamp_surfaced(&[], Utc::now()).unwrap();
+        assert!(pairs.is_empty(), "empty batch yields no pairs");
+        // No collateral stamping happened.
+        let surfaced: Option<String> = conn
+            .query_row(
+                "SELECT surfaced_at FROM facts WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(surfaced.is_none(), "empty batch must not stamp any fact");
+    }
+
+    // -------------------------------------------------------------------------
+    // #327 — list_dormant: injectable `as_of` clock, deterministic temporal filter
+    // -------------------------------------------------------------------------
+
+    /// `list_dormant` respects the injected `as_of` for the temporal-validity
+    /// window: a fact valid only in `[t_valid, t_invalid)` is dormant when `as_of`
+    /// falls inside the window and excluded when it falls outside — with the SAME
+    /// fact and threshold, so the only variable under test is the clock.
+    #[test]
+    fn list_dormant_honors_injected_as_of_window() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        let valid_from: DateTime<Utc> = "2024-06-01T00:00:00Z".parse().unwrap();
+        let valid_until: DateTime<Utc> = "2024-07-01T00:00:00Z".parse().unwrap();
+        let mut f = make_fact("windowed dormant", vec![0.1; DIM]);
+        f.base_importance = 0.1; // seeds importance_score = 0.1 < threshold
+        f.t_valid = Some(valid_from);
+        f.t_invalid = Some(valid_until);
+        let id = store.insert(&f).unwrap();
+
+        let inside: DateTime<Utc> = "2024-06-15T00:00:00Z".parse().unwrap();
+        let before: DateTime<Utc> = "2024-05-15T00:00:00Z".parse().unwrap();
+        let after: DateTime<Utc> = "2024-07-15T00:00:00Z".parse().unwrap();
+
+        // Inside the validity window → dormant.
+        let hit = store.list_dormant(0.5, None, inside).unwrap();
+        assert_eq!(
+            hit.iter().map(|x| x.id).collect::<Vec<_>>(),
+            vec![id],
+            "as_of inside [t_valid, t_invalid) must include the fact"
+        );
+        // Before t_valid → excluded (proves t_valid <= as_of is enforced).
+        assert!(
+            store.list_dormant(0.5, None, before).unwrap().is_empty(),
+            "as_of before t_valid must exclude the fact"
+        );
+        // At/after t_invalid → excluded (proves as_of < t_invalid is enforced).
+        assert!(
+            store.list_dormant(0.5, None, after).unwrap().is_empty(),
+            "as_of at/after t_invalid must exclude the fact"
+        );
+    }
+
+    /// `list_dormant` filters on importance, pinned, and scope — independent of the
+    /// clock. Uses a far-future `as_of` so every fact is temporally valid, isolating
+    /// the non-temporal predicates.
+    #[test]
+    fn list_dormant_filters_importance_pinned_and_scope() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'other', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Low-importance, unpinned, scope 1 → dormant.
+        let mut low = make_fact("low", vec![0.1; DIM]);
+        low.base_importance = 0.2;
+        low.scope_id = 1;
+        let low_id = store.insert(&low).unwrap();
+        // High-importance → above threshold, excluded.
+        let mut high = make_fact("high", vec![0.1; DIM]);
+        high.base_importance = 0.9;
+        high.scope_id = 1;
+        store.insert(&high).unwrap();
+        // Low-importance but pinned → excluded.
+        let mut pinned = make_fact("pinned", vec![0.1; DIM]);
+        pinned.base_importance = 0.2;
+        pinned.is_pinned = true;
+        pinned.scope_id = 1;
+        store.insert(&pinned).unwrap();
+        // Low-importance in scope 2 → excluded by the scope filter.
+        let mut other = make_fact("scope2", vec![0.1; DIM]);
+        other.base_importance = 0.2;
+        other.scope_id = 2;
+        let other_id = store.insert(&other).unwrap();
+
+        let as_of: DateTime<Utc> = "2100-01-01T00:00:00Z".parse().unwrap();
+
+        // Scope 1 only → just the low/unpinned fact.
+        let scoped = store.list_dormant(0.5, Some(&[1]), as_of).unwrap();
+        assert_eq!(
+            scoped.iter().map(|f| f.id).collect::<Vec<_>>(),
+            vec![low_id],
+            "only low-importance, unpinned, in-scope facts are dormant"
+        );
+        // None (all scopes) → both low facts across scopes, neither high nor pinned.
+        let mut all = store
+            .list_dormant(0.5, None, as_of)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect::<Vec<_>>();
+        all.sort_unstable();
+        let mut expected = vec![low_id, other_id];
+        expected.sort_unstable();
+        assert_eq!(all, expected, "None scope spans every scope");
+    }
+
+    // -------------------------------------------------------------------------
+    // #328 — update_importance_score: happy path + NotFound guard
+    // -------------------------------------------------------------------------
+
+    /// The happy path persists the new score (and updates `importance_score`, not
+    /// the base `importance` column).
+    #[test]
+    fn update_importance_score_persists_score() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut f = make_fact("scored", vec![0.1; DIM]);
+        f.base_importance = 0.3; // seeds both `importance` and `importance_score` to 0.3
+        let id = store.insert(&f).unwrap();
+
+        store.update_importance_score(id, 0.87).unwrap();
+
+        let (new_score, base_imp): (f64, f64) = conn
+            .query_row(
+                "SELECT importance_score, importance FROM facts WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            (new_score - 0.87).abs() < f64::EPSILON,
+            "importance_score must be updated to 0.87, got {new_score}"
+        );
+        assert!(
+            (base_imp - 0.3).abs() < f64::EPSILON,
+            "the base `importance` column must be untouched (only importance_score \
+             changes), got {base_imp}"
+        );
+    }
+
+    /// Updating a nonexistent id returns `NotFound` (rows-affected guard, #328) —
+    /// previously a silent `Ok(())` no-op. Mirrors `update_base_importance`.
+    #[test]
+    fn update_importance_score_missing_id_is_not_found() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        // Insert one fact so the table is non-empty (proves the guard keys off the
+        // matched row, not "table empty").
+        store.insert(&make_fact("present", vec![0.1; DIM])).unwrap();
+
+        let err = store.update_importance_score(9999, 0.5).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::NotFound(_)),
+            "updating a missing id must return NotFound, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("9999"),
+            "the error must name the offending id, got {err}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // #329 — query-method coverage: scope/importance/score/recent lists
+    // -------------------------------------------------------------------------
+
+    /// `list_by_scope_importance` returns active in-scope facts ordered by the base
+    /// `importance` column DESC, capped at `limit`, and excludes other scopes /
+    /// expired rows.
+    #[test]
+    fn list_by_scope_importance_orders_filters_and_caps() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'other', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Scope 1: three active facts with distinct importance (so ordering is
+        // unambiguous and a sort flip is observable).
+        let mut a = make_fact("a", vec![0.1; DIM]);
+        a.base_importance = 0.3;
+        let a_id = store.insert(&a).unwrap();
+        let mut b = make_fact("b", vec![0.1; DIM]);
+        b.base_importance = 0.9;
+        let b_id = store.insert(&b).unwrap();
+        let mut c = make_fact("c", vec![0.1; DIM]);
+        c.base_importance = 0.6;
+        let c_id = store.insert(&c).unwrap();
+        // Scope 1 but expired → excluded.
+        let mut gone = make_fact("gone", vec![0.1; DIM]);
+        gone.base_importance = 0.99;
+        let gone_id = store.insert(&gone).unwrap();
+        store.expire(gone_id, Utc::now()).unwrap();
+        // Scope 2 high importance → excluded by scope filter.
+        let mut other = make_fact("other", vec![0.1; DIM]);
+        other.base_importance = 0.99;
+        other.scope_id = 2;
+        store.insert(&other).unwrap();
+
+        // Full ordering: b (0.9) > c (0.6) > a (0.3).
+        let ordered: Vec<i64> = store
+            .list_by_scope_importance(1, 10)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![b_id, c_id, a_id],
+            "active scope-1 facts, importance DESC"
+        );
+        // Limit pushes down: top-2 only.
+        let top2: Vec<i64> = store
+            .list_by_scope_importance(1, 2)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            top2,
+            vec![b_id, c_id],
+            "LIMIT 2 keeps the two most important"
+        );
+        // Scope 2 isolation: querying it returns ONLY its single fact (proves the
+        // scope filter both includes scope 2 and excludes all of scope 1).
+        let scope2: Vec<String> = store
+            .list_by_scope_importance(2, 10)
+            .unwrap()
+            .iter()
+            .map(|f| f.content.clone())
+            .collect();
+        assert_eq!(
+            scope2,
+            vec!["other".to_owned()],
+            "scope 2 holds only its own fact"
+        );
+    }
+
+    /// `list_by_scopes_importance` honors the `json_each` scope-IN set, the
+    /// `min_importance` floor, the `exclude_ids` set, importance-DESC ordering, and
+    /// the LIMIT — each predicate is exercised with a distinct fact.
+    #[test]
+    fn list_by_scopes_importance_filters_threshold_exclude_scope_and_orders() {
+        use std::collections::HashSet;
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 's2', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (3, 1, 's3', 1)",
+            [],
+        )
+        .unwrap();
+
+        let mk = |store: &FactStore, content: &str, imp: f64, scope: i64| {
+            let mut f = make_fact(content, vec![0.1; DIM]);
+            f.base_importance = imp;
+            f.scope_id = scope;
+            store.insert(&f).unwrap()
+        };
+
+        let top = mk(&store, "top s2", 0.9, 2); // in-scope, high, but EXCLUDED below
+        let mid = mk(&store, "mid s2", 0.7, 2); // in-scope, above floor → expected first
+        let low = mk(&store, "low s2", 0.2, 2); // in-scope but below the 0.5 floor
+        let s3 = mk(&store, "s3 high", 0.95, 3); // above floor, but scope 3 not queried
+        let _s1 = mk(&store, "s1 high", 0.95, 1); // scope 1 not queried
+
+        let exclude: HashSet<i64> = std::iter::once(top).collect();
+        let got: Vec<i64> = store
+            .list_by_scopes_importance(&[2], 0.5, 10, &exclude)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            got,
+            vec![mid],
+            "scope 2, importance>=0.5, minus the excluded top, ordered DESC → just mid \
+             (low is below floor; top is excluded; s3/s1 are out of scope)"
+        );
+
+        // Two scopes, no exclusion, no floor: ordering spans both scopes by importance.
+        let across: Vec<i64> = store
+            .list_by_scopes_importance(&[2, 3], 0.0, 10, &HashSet::new())
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            across,
+            vec![s3, top, mid, low],
+            "0.95 > 0.9 > 0.7 > 0.2 across scopes 2 and 3"
+        );
+        // LIMIT pushes down across the merged, ordered set.
+        let top1: Vec<i64> = store
+            .list_by_scopes_importance(&[2, 3], 0.0, 1, &HashSet::new())
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(top1, vec![s3], "LIMIT 1 keeps the single most important");
+    }
+
+    /// `list_by_importance_score` filters on the materialized `importance_score`
+    /// column (NOT base `importance`), honoring `min_score`, `exclude`, scope, and
+    /// score-DESC ordering. The score is set distinctly from `importance` so a
+    /// column swap (`importance` vs `importance_score`) is caught.
+    #[test]
+    fn list_by_importance_score_uses_score_column_not_base_importance() {
+        use std::collections::HashSet;
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        // Insert with a LOW base importance, then raise importance_score above the
+        // floor. A method reading `importance` would miss this fact; one reading
+        // `importance_score` finds it.
+        let mut climber = make_fact("climber", vec![0.1; DIM]);
+        climber.base_importance = 0.1; // base importance stays low
+        let climber_id = store.insert(&climber).unwrap();
+        store.update_importance_score(climber_id, 0.8).unwrap(); // score rises
+
+        // Insert with a HIGH base importance but drop its score below the floor.
+        let mut sinker = make_fact("sinker", vec![0.1; DIM]);
+        sinker.base_importance = 0.9; // base importance high
+        let sinker_id = store.insert(&sinker).unwrap();
+        store.update_importance_score(sinker_id, 0.1).unwrap(); // score drops below 0.5
+
+        // A second qualifying fact, to assert ordering AND exclusion.
+        let mut mid = make_fact("mid", vec![0.1; DIM]);
+        mid.base_importance = 0.5;
+        let mid_id = store.insert(&mid).unwrap();
+        store.update_importance_score(mid_id, 0.6).unwrap();
+
+        // min_score 0.5: climber(0.8) and mid(0.6) qualify; sinker(0.1) does not.
+        // Score-DESC → climber, then mid. If the method read `importance` instead,
+        // sinker (0.9) would wrongly appear and climber (0.1) would vanish.
+        let got: Vec<i64> = store
+            .list_by_importance_score(&[], 0.5, 10, &HashSet::new())
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            got,
+            vec![climber_id, mid_id],
+            "filters/orders on importance_score, not the base importance column"
+        );
+
+        // Excluding the top leaves only mid.
+        let exclude: HashSet<i64> = std::iter::once(climber_id).collect();
+        let excluded: Vec<i64> = store
+            .list_by_importance_score(&[], 0.5, 10, &exclude)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(excluded, vec![mid_id], "exclude set removes the climber");
+
+        // LIMIT pushes down.
+        let top1: Vec<i64> = store
+            .list_by_importance_score(&[], 0.5, 1, &HashSet::new())
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(top1, vec![climber_id], "LIMIT 1 keeps the top-scored fact");
+    }
+
+    /// `list_by_importance_score` with a non-empty `scope_ids` restricts to those
+    /// scopes (the scoped SQL branch, distinct from the all-scopes branch above).
+    #[test]
+    fn list_by_importance_score_respects_scope_filter() {
+        use std::collections::HashSet;
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'other', 1)",
+            [],
+        )
+        .unwrap();
+
+        let mut in_scope = make_fact("in", vec![0.1; DIM]);
+        in_scope.base_importance = 0.7;
+        let in_id = store.insert(&in_scope).unwrap();
+        let mut out_scope = make_fact("out", vec![0.1; DIM]);
+        out_scope.base_importance = 0.9;
+        out_scope.scope_id = 2;
+        store.insert(&out_scope).unwrap();
+
+        let got: Vec<i64> = store
+            .list_by_importance_score(&[1], 0.0, 10, &HashSet::new())
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            got,
+            vec![in_id],
+            "scope 1 only — the higher-scored scope-2 fact is excluded"
+        );
+    }
+
+    /// `list_by_scopes_recent` returns active in-scope facts ordered by `t_created`
+    /// DESC (newest first), honoring the exclude set, scope-IN, and LIMIT.
+    #[test]
+    fn list_by_scopes_recent_orders_by_t_created_and_filters() {
+        use std::collections::HashSet;
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'other', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Distinct creation times so DESC ordering is unambiguous.
+        let mut oldest = make_fact("oldest", vec![0.1; DIM]);
+        oldest.t_created = "2024-01-01T00:00:00Z".parse().unwrap();
+        let oldest_id = store.insert(&oldest).unwrap();
+        let mut middle = make_fact("middle", vec![0.1; DIM]);
+        middle.t_created = "2024-06-01T00:00:00Z".parse().unwrap();
+        let middle_id = store.insert(&middle).unwrap();
+        let mut newest = make_fact("newest", vec![0.1; DIM]);
+        newest.t_created = "2024-12-01T00:00:00Z".parse().unwrap();
+        let newest_id = store.insert(&newest).unwrap();
+        // Scope 2 → excluded by the scope filter even though it is the very newest.
+        let mut other = make_fact("other", vec![0.1; DIM]);
+        other.t_created = "2025-01-01T00:00:00Z".parse().unwrap();
+        other.scope_id = 2;
+        store.insert(&other).unwrap();
+
+        // Newest-first across scope 1.
+        let ordered: Vec<i64> = store
+            .list_by_scopes_recent(&[1], 10, &HashSet::new())
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![newest_id, middle_id, oldest_id],
+            "active scope-1 facts, t_created DESC (the scope-2 newer fact is excluded)"
+        );
+
+        // Exclude the newest → middle becomes the head.
+        let exclude: HashSet<i64> = std::iter::once(newest_id).collect();
+        let after_exclude: Vec<i64> = store
+            .list_by_scopes_recent(&[1], 10, &exclude)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            after_exclude,
+            vec![middle_id, oldest_id],
+            "the excluded id is dropped, order preserved"
+        );
+
+        // LIMIT pushes down to the single newest.
+        let top1: Vec<i64> = store
+            .list_by_scopes_recent(&[1], 1, &HashSet::new())
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(top1, vec![newest_id], "LIMIT 1 keeps the newest");
+    }
+
+    /// `list_by_scopes_recent` excludes expired facts (active-only contract).
+    #[test]
+    fn list_by_scopes_recent_excludes_expired() {
+        use std::collections::HashSet;
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+
+        let live = store.insert(&make_fact("live", vec![0.1; DIM])).unwrap();
+        let gone = store.insert(&make_fact("gone", vec![0.2; DIM])).unwrap();
+        store.expire(gone, Utc::now()).unwrap();
+
+        let got: Vec<i64> = store
+            .list_by_scopes_recent(&[1], 10, &HashSet::new())
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(got, vec![live], "expired facts are not recent-listed");
+    }
+
+    // -------------------------------------------------------------------------
+    // #329 — list_all and for_each: dump-path coverage
+    // -------------------------------------------------------------------------
+
+    /// `list_all` returns every inserted active fact (state-dump contract).
+    ///
+    /// Non-vacuous: three asymmetric facts are inserted and the returned `id`
+    /// list is asserted verbatim in `id ASC` order, so a short/empty iteration
+    /// or a missed row fails the equality.
+    #[test]
+    fn list_all_returns_all_active_facts() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let a = store.insert(&make_fact("alpha", vec![0.1; DIM])).unwrap();
+        let b = store.insert(&make_fact("beta", vec![0.2; DIM])).unwrap();
+        let c = store.insert(&make_fact("gamma", vec![0.3; DIM])).unwrap();
+
+        let all = store.list_all().unwrap();
+        let ids: Vec<i64> = all.iter().map(|f| f.id).collect();
+        assert_eq!(
+            ids,
+            vec![a, b, c],
+            "list_all must return every inserted fact in id ASC order"
+        );
+        // Content round-trips too — guards against a column-projection slip that
+        // would return rows but with the wrong payload.
+        let contents: Vec<&str> = all.iter().map(|f| f.content.as_str()).collect();
+        assert_eq!(contents, vec!["alpha", "beta", "gamma"]);
+    }
+
+    /// `for_each` visits the same rows as `list_all`, in the same order.
+    ///
+    /// Non-vacuous: the collected stream is asserted equal to `list_all`'s
+    /// output id-for-id over three asymmetric facts — a short iteration (e.g. a
+    /// `while` that stops after one row) or a reordered scan fails the equality.
+    #[test]
+    fn for_each_matches_list_all_ordering() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("one", vec![0.1; DIM])).unwrap();
+        store.insert(&make_fact("two", vec![0.2; DIM])).unwrap();
+        store.insert(&make_fact("three", vec![0.3; DIM])).unwrap();
+
+        let expected: Vec<i64> = store.list_all().unwrap().iter().map(|f| f.id).collect();
+        assert_eq!(expected.len(), 3, "fixture sanity: three facts present");
+
+        let mut collected: Vec<i64> = Vec::new();
+        store
+            .for_each(|f| {
+                collected.push(f.id);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            collected, expected,
+            "for_each must stream the same ids in the same order as list_all"
+        );
+    }
+
+    /// A callback returning `Err` short-circuits iteration and propagates the
+    /// error verbatim — the loop must not swallow it or run to completion.
+    ///
+    /// Non-vacuous: the callback errors on the FIRST visited row, so the visit
+    /// count must be exactly 1 (a swallowed error would let all three through)
+    /// and the surfaced error must be the callback's own.
+    #[test]
+    fn for_each_propagates_callback_error_and_short_circuits() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        store.insert(&make_fact("one", vec![0.1; DIM])).unwrap();
+        store.insert(&make_fact("two", vec![0.2; DIM])).unwrap();
+        store.insert(&make_fact("three", vec![0.3; DIM])).unwrap();
+
+        let mut visited = 0_usize;
+        let err = store
+            .for_each(|_| {
+                visited += 1;
+                Err(MemoryError::Internal("boom".to_owned()))
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            visited, 1,
+            "iteration must stop at the first erroring row, not run to completion"
+        );
+        assert!(
+            matches!(err, MemoryError::Internal(ref m) if m == "boom"),
+            "the callback's own error must propagate verbatim, got {err:?}"
+        );
     }
 }

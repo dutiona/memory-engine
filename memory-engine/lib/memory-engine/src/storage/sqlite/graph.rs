@@ -355,11 +355,12 @@ impl FactGraph for SqliteBackend {
         &self,
         importance_threshold: f64,
         scope_ids: Option<&[i64]>,
+        as_of: DateTime<Utc>,
     ) -> Result<Vec<Fact>> {
         let scope_ids = scope_ids.map(<[i64]>::to_vec);
         let dim = self.embed_dim;
         self.block_read(move |c| {
-            FactStore::new(c, dim).list_dormant(importance_threshold, scope_ids.as_deref())
+            FactStore::new(c, dim).list_dormant(importance_threshold, scope_ids.as_deref(), as_of)
         })
         .await
     }
