@@ -865,6 +865,47 @@ impl<'a> FactStore<'a> {
         Ok(())
     }
 
+    /// Bulk-update materialized importance scores in a single statement.
+    ///
+    /// Collapses what the prune path used to do as an N+1 loop of per-row
+    /// `update_importance_score` calls (one prepared-statement exec + one
+    /// B-tree write each) into one `json_each`-driven UPDATE, regardless of
+    /// corpus size. Behaviorally identical to the loop: only the ids present in
+    /// `scores` are touched — rows outside the payload are left untouched (the
+    /// `WHERE id IN (...)` guard; without it the correlated subquery would NULL
+    /// every unmatched row).
+    ///
+    /// `scores` is serialized as a JSON object mapping the id (as a string key,
+    /// which is what `json_each.key` yields) to its score; the `IN`-subquery
+    /// casts the TEXT key back to INTEGER so i64 ids round-trip correctly.
+    ///
+    /// An empty slice is a no-op and returns `Ok(())` (no degenerate statement
+    /// runs).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure (or `MemoryError` from
+    /// JSON serialization, which cannot fail for the `id -> f64` map built here).
+    pub fn update_importance_scores_bulk(&self, scores: &[(i64, f64)]) -> Result<()> {
+        if scores.is_empty() {
+            return Ok(());
+        }
+        let mut map = serde_json::Map::with_capacity(scores.len());
+        for &(id, score) in scores {
+            map.insert(id.to_string(), serde_json::json!(score));
+        }
+        let payload = serde_json::to_string(&serde_json::Value::Object(map))?;
+        self.conn.execute(
+            "UPDATE facts \
+             SET importance_score = ( \
+                 SELECT value FROM json_each(?1) WHERE key = CAST(facts.id AS TEXT) \
+             ) \
+             WHERE id IN (SELECT CAST(key AS INTEGER) FROM json_each(?1))",
+            params![payload],
+        )?;
+        Ok(())
+    }
+
     /// Shallow-merge a JSON object `patch` into a fact's `metadata` column.
     ///
     /// Existing keys are overwritten by colliding patch keys; other keys are
@@ -2369,6 +2410,58 @@ mod tests {
                 "SQL LIMIT {cap} must equal Rust .take({cap}) (same order)"
             );
         }
+    }
+
+    /// #392: the bulk `importance_score` materialization (one `json_each`
+    /// UPDATE) must be byte-for-byte equivalent to the old per-row loop:
+    /// (a) it sets exactly the scored subset,
+    /// (b) it leaves an UNSCORED row untouched (the `WHERE id IN (...)` guard —
+    ///     a naive correlated subquery would NULL-out every unmatched row),
+    /// (c) i64 ids round-trip the `json_each` TEXT key cast (a large id catches
+    ///     a TEXT/INTEGER mismatch in the `CAST(... AS TEXT)` / `CAST(key AS
+    ///     INTEGER)` pairing), and
+    /// (d) an empty slice is a no-op.
+    #[test]
+    fn update_importance_scores_bulk_sets_subset_and_round_trips_ids() {
+        let conn = setup();
+        let fs = FactStore::new(&conn, DIM);
+
+        // Three autoincrement facts (ids 1, 2, 3), each seeded at base_importance
+        // 0.5 by `insert`.
+        let a = fs.insert(&make_fact("fact a", vec![0.1; DIM])).unwrap();
+        let b = fs.insert(&make_fact("fact b", vec![0.2; DIM])).unwrap();
+        let c = fs.insert(&make_fact("fact c", vec![0.3; DIM])).unwrap();
+
+        // A fourth fact carrying a large i64 id, to exercise the json_each key
+        // cast on a value that would mismatch under a sloppy TEXT/INTEGER pairing.
+        let big_id: i64 = 9_007_199_254_740_993; // 2^53 + 1
+        let d = fs.insert(&make_fact("fact d", vec![0.4; DIM])).unwrap();
+        conn.execute("UPDATE facts SET id = ?1 WHERE id = ?2", params![big_id, d])
+            .unwrap();
+
+        // Score a SUBSET: a, c, and the large-id fact — but NOT b.
+        fs.update_importance_scores_bulk(&[(a, 0.11), (c, 0.33), (big_id, 0.99)])
+            .unwrap();
+
+        // (a) exactly the scored rows take their new values.
+        assert!((fs.get(a).unwrap().importance_score - 0.11).abs() < f64::EPSILON);
+        assert!((fs.get(c).unwrap().importance_score - 0.33).abs() < f64::EPSILON);
+        // (c) the large id round-trips the cast and is updated.
+        assert!((fs.get(big_id).unwrap().importance_score - 0.99).abs() < f64::EPSILON);
+
+        // (b) the unscored row b keeps its seeded base_importance (0.5) — the
+        // bulk UPDATE must not zero/NULL rows outside the payload.
+        assert!(
+            (fs.get(b).unwrap().importance_score - 0.5).abs() < f64::EPSILON,
+            "unscored fact must be left untouched"
+        );
+
+        // (d) an empty slice changes nothing and returns Ok.
+        fs.update_importance_scores_bulk(&[]).unwrap();
+        assert!((fs.get(a).unwrap().importance_score - 0.11).abs() < f64::EPSILON);
+        assert!((fs.get(b).unwrap().importance_score - 0.5).abs() < f64::EPSILON);
+        assert!((fs.get(c).unwrap().importance_score - 0.33).abs() < f64::EPSILON);
+        assert!((fs.get(big_id).unwrap().importance_score - 0.99).abs() < f64::EPSILON);
     }
 
     #[test]
