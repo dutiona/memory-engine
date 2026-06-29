@@ -339,6 +339,70 @@ mod tests {
         assert_eq!(ctx.component_size, 4);
     }
 
+    /// #459 / #901: documents the CURRENT behaviour that `build_graph_context`
+    /// returns the **entire weakly-connected component**, NOT the immediate
+    /// (distance-1) neighbours — and that this is *inconsistent* with `degree`,
+    /// which counts only distance-1 in+out edges.
+    ///
+    /// The star fixture in [`build_graph_context_with_neighbors`] cannot expose
+    /// this: in a star every component member is also a distance-1 neighbour of
+    /// the centre, so component-membership and immediate-neighbourhood coincide.
+    /// Here a deliberately **transitive** chain `A(10) -> B(20) -> C(30)` queried
+    /// from `A` separates them: `C` is distance-2 from `A` (NOT an immediate
+    /// neighbour), yet it appears in `neighbor_ids` because the helper walks the
+    /// whole component. `degree(A) == 1` (only the `A->B` edge) confirms the
+    /// distance-1 vs whole-component divergence.
+    ///
+    /// This asserts reality (the whole-component behaviour) rather than hiding it.
+    /// The degree-vs-component inconsistency — and whether `neighbor_ids` should
+    /// instead be the distance-1 neighbour set to match `degree` — is a
+    /// production design decision tracked in collateral issue #901; this test must
+    /// be updated to assert the distance-1 set if/when that fix lands.
+    #[test]
+    fn build_graph_context_returns_whole_component_not_immediate_neighbours() {
+        let mut graph = MemoryGraph::new();
+        let edge = |edge_id| EdgeData {
+            edge_id,
+            relation_type: "supports".into(),
+            weight: 1.0,
+        };
+        // Transitive chain: A(10) -> B(20) -> C(30). C is distance-2 from A.
+        graph.add_edge(10, 20, edge(1));
+        graph.add_edge(20, 30, edge(2));
+
+        let ctx = build_graph_context(&graph, 10);
+
+        // `degree` is distance-1 in+out: A has only the single outgoing `A->B`.
+        assert_eq!(ctx.degree, 1, "A has exactly one distance-1 edge (A->B)");
+
+        // `neighbor_ids` is the WHOLE component minus A — so it INCLUDES the
+        // transitive distance-2 node C(30), proving it is not the distance-1 set.
+        assert_eq!(
+            ctx.neighbor_ids,
+            vec![20, 30],
+            "whole connected component (incl. transitive C=30), NOT immediate neighbours"
+        );
+        // Non-vacuous guard: the transitive node is the load-bearing assertion —
+        // a distance-1-only implementation (matching `degree`) would omit 30.
+        assert!(
+            ctx.neighbor_ids.contains(&30),
+            "transitive distance-2 node C(30) must be present under current whole-component behaviour"
+        );
+
+        // The divergence made explicit: neighbour-set size (2) exceeds degree (1).
+        assert!(
+            ctx.neighbor_ids.len() > ctx.degree,
+            "component-derived neighbour set is broader than the distance-1 degree (tracked in #901)"
+        );
+
+        assert_eq!(
+            ctx.component_size,
+            ctx.neighbor_ids.len() + 1,
+            "neighbours + the fact itself"
+        );
+        assert_eq!(ctx.component_size, 3);
+    }
+
     /// #459: a node present in the graph but with no edges has degree 0, no
     /// neighbours, and a component of just itself — the asymmetric counterpart to
     /// the connected case above (guards `component_size` against a stray +1).
