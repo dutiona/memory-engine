@@ -1,94 +1,12 @@
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
 
-use crate::error::Result;
-use crate::graph::MemoryGraph;
-use crate::scope::tree::ScopeTree;
-use crate::store::events::EventStore;
-use crate::store::facts::FactStore;
-use crate::store::upcaster::UpcasterRegistry;
 use crate::types::Fact;
 
 use super::types::{
-    ExpiredReason, FactExplanation, FactHistory, FactHistoryEntry, FactProvenance, FactState,
-    GraphContext, HistoryEventKind,
+    ExpiredReason, FactHistory, FactHistoryEntry, FactState, GraphContext, HistoryEventKind,
 };
 
-/// Explain why a fact is in its current state.
-///
-/// Computes graph context, temporal state, provenance, and scope path for the
-/// given fact. When the fact has a `source_event_id`, the originating event is
-/// fetched via [`EventStore::get_upcasted`] and included in the provenance.
-///
-/// # Errors
-///
-/// Returns [`MemoryError::NotFound`] if the fact (or its source event) does not exist.
-/// Returns [`MemoryError::Migration`] if the source event cannot be upcasted.
-/// Returns [`MemoryError::Database`] on SQL failure.
-pub fn explain_fact(
-    conn: &Connection,
-    graph: &MemoryGraph,
-    scope_tree: &ScopeTree,
-    embed_dim: usize,
-    fact_id: i64,
-    registry: &UpcasterRegistry,
-) -> Result<FactExplanation> {
-    let graph_context = build_graph_context(graph, fact_id);
-    explain_fact_with_graph_context(
-        conn,
-        scope_tree,
-        embed_dim,
-        fact_id,
-        registry,
-        graph_context,
-    )
-}
-
-/// Like [`explain_fact`], but accepts a pre-computed [`GraphContext`].
-///
-/// Used by [`MemoryEngine::explain_fact`] to release the graph `RwLock` before
-/// acquiring the database connection, reducing lock contention.
-///
-/// # Consistency note
-///
-/// The graph context may reflect a slightly older graph state than the database
-/// snapshot if a concurrent writer commits between the graph traversal and the
-/// DB read. This is acceptable for an informational/debugging API — the
-/// explanation is best-effort, not transactionally consistent.
-///
-/// # Errors
-///
-/// Returns [`MemoryError::NotFound`] if the fact (or its source event) does not exist.
-/// Returns [`MemoryError::Migration`] if the source event cannot be upcasted.
-/// Returns [`MemoryError::Database`] on SQL failure.
-pub(crate) fn explain_fact_with_graph_context(
-    conn: &Connection,
-    scope_tree: &ScopeTree,
-    embed_dim: usize,
-    fact_id: i64,
-    registry: &UpcasterRegistry,
-    graph_context: GraphContext,
-) -> Result<FactExplanation> {
-    let store = FactStore::new(conn, embed_dim);
-    let fact = store.get(fact_id)?;
-    let now = Utc::now();
-
-    let state = determine_state(&fact, now);
-    let provenance = build_provenance(conn, registry, &fact)?;
-    let scope_path = scope_tree
-        .path_for_id(fact.scope_id)
-        .unwrap_or_else(|| format!("scope:{}", fact.scope_id));
-
-    Ok(FactExplanation {
-        fact_id,
-        state,
-        provenance,
-        graph_context,
-        scope_path,
-    })
-}
-
-pub(crate) fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
+pub fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     // Priority: Expired > Invalidated > Pinned > Due > Active
     if fact.t_expired.is_some() {
         // A DreamCycle quarantine leaves a `quarantine` metadata marker, letting us
@@ -123,30 +41,7 @@ pub(crate) fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     FactState::Active
 }
 
-fn build_provenance(
-    conn: &Connection,
-    registry: &UpcasterRegistry,
-    fact: &Fact,
-) -> Result<FactProvenance> {
-    let source_event = match fact.source_event_id {
-        Some(event_id) => {
-            let event_store = EventStore::new(conn, registry);
-            Some(event_store.get_upcasted(event_id)?)
-        }
-        None => None,
-    };
-
-    Ok(FactProvenance {
-        source_event_id: fact.source_event_id,
-        source_event,
-        base_importance: fact.base_importance,
-        importance_score: fact.importance_score,
-        is_pinned: fact.is_pinned,
-        access_count: fact.access_count,
-    })
-}
-
-pub(crate) fn build_graph_context(graph: &crate::graph::MemoryGraph, fact_id: i64) -> GraphContext {
+pub fn build_graph_context(graph: &crate::graph::MemoryGraph, fact_id: i64) -> GraphContext {
     let degree = graph.degree(fact_id);
     // Use connected_component to get ALL neighbors (in + out), consistent with degree.
     // `neighbors()` only returns outgoing, which would be inconsistent with degree.
@@ -166,26 +61,14 @@ pub(crate) fn build_graph_context(graph: &crate::graph::MemoryGraph, fact_id: i6
     }
 }
 
-/// Reconstruct the temporal history of a fact from its bi-temporal timestamps.
+/// Derive the bi-temporal lifecycle timeline from a single fact's timestamps.
 ///
 /// Returns a sorted timeline of lifecycle events (`Created`, `BecameValid`, etc.)
-/// computed from the fact's `t_created`, `t_valid`, `t_invalid`, and `t_expired` fields.
-///
-/// # Errors
-///
-/// Returns [`MemoryError::NotFound`] if the fact does not exist, or
-/// [`MemoryError::Database`] on SQL failure.
-pub fn fact_history(conn: &Connection, embed_dim: usize, fact_id: i64) -> Result<FactHistory> {
-    let store = FactStore::new(conn, embed_dim);
-    let fact = store.get(fact_id)?;
-    Ok(fact_history_from_fact(fact_id, &fact))
-}
-
-/// Pure core of [`fact_history`]: derive the bi-temporal lifecycle timeline from a
-/// single fact's timestamps. The async engine fetches the fact via the port
-/// (`get_fact`) and calls this directly — no `&Connection` needed (#631).
+/// computed from the fact's `t_created`, `t_valid`, `t_invalid`, and `t_expired`
+/// fields. The async engine fetches the fact via the port (`get_fact`) and calls
+/// this directly — no `&Connection` needed (#631).
 #[must_use]
-pub(crate) fn fact_history_from_fact(fact_id: i64, fact: &Fact) -> FactHistory {
+pub fn fact_history_from_fact(fact_id: i64, fact: &Fact) -> FactHistory {
     let mut timeline = Vec::new();
     timeline.push(FactHistoryEntry {
         timestamp: fact.t_created,

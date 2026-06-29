@@ -100,7 +100,8 @@ impl MemoryEngine {
     ///
     /// This means the graph context may reflect a slightly older snapshot than the
     /// database state under concurrent writes. This trade-off is intentional for
-    /// an informational API — see [`inspect::explain::explain_fact_with_graph_context`].
+    /// an informational API: the graph snapshot is taken via
+    /// [`inspect::explain::build_graph_context`] before the DB read.
     pub async fn explain_fact(&self, id: i64) -> Result<crate::inspect::FactExplanation> {
         use crate::inspect::explain;
         use crate::inspect::types::FactProvenance;

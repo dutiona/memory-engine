@@ -200,12 +200,20 @@ impl ScopeTree {
     }
 
     /// Number of nodes in the scope tree.
+    ///
+    /// Test-only accessor (the sole callers are unit tests); `#[cfg(test)]` keeps
+    /// the dead-code lint honest without an `#[allow]` mask. Promote to plain `pub`
+    /// when a production caller is added.
+    #[cfg(test)]
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
     /// Maximum depth in the scope tree. Returns 0 for an empty tree.
+    ///
+    /// Test-only accessor (see [`ScopeTree::node_count`]); `#[cfg(test)]`-gated.
+    #[cfg(test)]
     #[must_use]
     pub fn max_depth(&self) -> i64 {
         self.nodes.values().map(|n| n.depth).max().unwrap_or(0)
