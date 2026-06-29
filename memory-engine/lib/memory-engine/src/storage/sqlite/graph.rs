@@ -852,8 +852,7 @@ impl FactGraph for SqliteBackend {
         .await
     }
 
-    // ATOMIC WRITE — arbitrated conflict resolution in ONE transaction (verbatim
-    // single-tx body of the former conflict::temporal::resolve_conflict). Restores the
+    // ATOMIC WRITE — arbitrated conflict resolution in ONE transaction. Restores the
     // all-or-nothing semantics the #631 cutover lost when it decomposed this into
     // separate per-call port transactions (a mid-sequence failure could leave an old
     // fact expired+invalidated with no inserted successor = silent data loss).
@@ -882,6 +881,16 @@ impl FactGraph for SqliteBackend {
                 // unchecked_transaction: we own the write connection exclusively here,
                 // so there is no risk of nesting. All writes for the decision commit
                 // atomically (or roll back together on any error).
+                // Shared cascade used by Update and Delete: expire+invalidate the
+                // old fact (bi-temporal: both columns) then cascade-expire its edges.
+                // Extracted as a closure so dim/old_id/now are captured from the
+                // surrounding scope rather than threaded as arguments.
+                let cascade_expire = |tx: &rusqlite::Transaction| -> Result<()> {
+                    FactStore::new(tx, dim).expire_and_invalidate(old_id, now)?;
+                    EdgeStore::new(tx).expire_by_fact(old_id, now)?;
+                    Ok(())
+                };
+
                 match decision {
                     CrudDecision::Noop => Ok((None, None)),
                     CrudDecision::Add => {
@@ -902,15 +911,11 @@ impl FactGraph for SqliteBackend {
                     }
                     CrudDecision::Update => {
                         let tx = conn.unchecked_transaction()?;
-                        // Expire + invalidate old fact (bi-temporal: both columns).
-                        FactStore::new(&tx, dim).expire_and_invalidate(old_id, now)?;
-                        // Cascade: expire all edges involving the old fact.
-                        let edge_store = EdgeStore::new(&tx);
-                        edge_store.expire_by_fact(old_id, now)?;
+                        cascade_expire(&tx)?;
                         // Insert the replacement fact.
                         let new_id = FactStore::new(&tx, dim).insert(&new_fact)?;
                         // "contradicts" edge: new → old
-                        let edge_id = edge_store.insert(&NewEdge {
+                        let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
                             source_fact_id: new_id,
                             target_fact_id: old_id,
                             relation_type: relation.clone(),
@@ -924,8 +929,7 @@ impl FactGraph for SqliteBackend {
                     }
                     CrudDecision::Delete => {
                         let tx = conn.unchecked_transaction()?;
-                        FactStore::new(&tx, dim).expire_and_invalidate(old_id, now)?;
-                        EdgeStore::new(&tx).expire_by_fact(old_id, now)?;
+                        cascade_expire(&tx)?;
                         tx.commit()?;
                         Ok((None, None))
                     }
