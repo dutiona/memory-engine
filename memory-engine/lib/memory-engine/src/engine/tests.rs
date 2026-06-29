@@ -1094,8 +1094,6 @@ async fn resolve_conflict_nonexistent_fact_returns_not_found() {
 /// takes, so the two are indistinguishable at that layer).
 #[tokio::test]
 async fn resolve_conflict_double_update_on_expired_returns_not_found() {
-    use crate::error::MemoryError;
-
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let old_id = insert_raw_fact(&engine, &make_new_fact("original", vec![0.5; DIM])).await;
     let arbiter = FixedArbiter {
@@ -1125,8 +1123,6 @@ async fn resolve_conflict_double_update_on_expired_returns_not_found() {
 /// Same idempotency guard for the `Delete` decision.
 #[tokio::test]
 async fn resolve_conflict_double_delete_on_expired_returns_not_found() {
-    use crate::error::MemoryError;
-
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let old_id = insert_raw_fact(&engine, &make_new_fact("to_delete", vec![0.5; DIM])).await;
     let arbiter = FixedArbiter {

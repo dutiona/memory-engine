@@ -40,16 +40,18 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// - [`MemoryError::ReadOnly`] — the engine was opened in read-only mode.
-    /// - [`MemoryError::Conflict`] wrapping [`ConflictError::PayloadTooLarge`] —
-    ///   the candidate `new_fact` exceeds the size bound enforced by
-    ///   [`check_new_fact`](crate::limits::check_new_fact). Checked before the
-    ///   arbiter is called.
-    /// - [`MemoryError::NotFound`] — `old_id` is missing or already expired. The
-    ///   lookup itself retrieves expired facts; an already-expired `old_id` is
-    ///   rejected later by the `t_expired IS NULL` guard in the atomic expire step
-    ///   (which changes zero rows), while a missing `old_id` is rejected at lookup.
-    ///   The two are indistinguishable to the caller (both yield `NotFound`).
+    /// - [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) — the
+    ///   engine was opened in read-only mode.
+    /// - [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) wrapping
+    ///   [`ConflictError::PayloadTooLarge`](crate::error::ConflictError::PayloadTooLarge)
+    ///   — the candidate `new_fact` exceeds the size bound enforced by
+    ///   `check_new_fact`. Checked before the arbiter is called.
+    /// - [`MemoryError::NotFound`](crate::error::MemoryError::NotFound) — `old_id`
+    ///   is missing or already expired. The lookup itself retrieves expired facts;
+    ///   an already-expired `old_id` is rejected later by the `t_expired IS NULL`
+    ///   guard in the atomic expire step (which changes zero rows), while a missing
+    ///   `old_id` is rejected at lookup. The two are indistinguishable to the
+    ///   caller (both yield `NotFound`).
     /// - Propagates any error returned by the [`ConflictArbiter`] or the
     ///   underlying database operations.
     ///
