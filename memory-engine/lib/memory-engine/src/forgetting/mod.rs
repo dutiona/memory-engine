@@ -3,5 +3,7 @@
 //! Facts with computed importance below `ForgetPolicy::min_importance` get soft-deleted.
 
 mod policy;
+mod types;
 
 pub use policy::prune;
+pub use types::{ForgetPolicy, PruneStats};

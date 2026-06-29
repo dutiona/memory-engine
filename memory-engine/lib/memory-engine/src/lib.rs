@@ -144,6 +144,7 @@ pub use error::{
     ArchiveError, ConflictError, CycleError, MemoryError, MigrationError, RerankerError, Result,
     StorageError,
 };
+pub use forgetting::{ForgetPolicy, PruneStats};
 pub use inspect::types as inspect_types;
 pub use resume::{ResumeConfig, ResumeContext};
 pub use search::{
@@ -154,8 +155,8 @@ pub use store::UpcasterRegistry;
 pub use store::schema::CURRENT_SCHEMA_VERSION;
 pub use traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
-    DeltaProposer, DreamCycle, EmbeddingProvider, ForgetPolicy, InsightStream,
-    PersistenceClassifier, PruneStats, Reranker, SummarizableContent, SummaryGenerator,
+    DeltaProposer, DreamCycle, EmbeddingProvider, InsightStream, PersistenceClassifier, Reranker,
+    SummarizableContent, SummaryGenerator,
 };
 // Explicit re-export of the full `types` public surface, enumerated for the
 // same reason as `error` above: a transparent, audit-able crate-root API where

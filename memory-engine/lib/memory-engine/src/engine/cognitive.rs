@@ -7,11 +7,9 @@ use crate::engine::cycle::{
     CycleContext, CycleMetadata, CycleOutcome, CycleReport, SkipReason, TimeWindow,
 };
 use crate::error::{MemoryError, MigrationError, Result};
+use crate::forgetting::{ForgetPolicy, PruneStats};
 use crate::search::hybrid::{SearchQuery, SearchResult};
-use crate::traits::{
-    ConsolidationConfig, ConsolidationStats, EmbeddingProvider, ForgetPolicy, PruneStats,
-    SummaryGenerator,
-};
+use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
 use crate::types::{Fact, NewFact, PromoteRequest, PromotionResult};
 
 // Re-import trait types used in public API signatures

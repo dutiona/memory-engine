@@ -4,10 +4,11 @@
 use chrono::{Duration, Utc};
 use memory_engine::ArchivePolicy;
 use memory_engine::EmbeddingFingerprint;
+use memory_engine::ForgetPolicy;
 use memory_engine::MemoryQuery;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
-use memory_engine::traits::{EmbeddingProvider, ForgetPolicy};
+use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, FactType};
 
 const DIM: usize = 8;

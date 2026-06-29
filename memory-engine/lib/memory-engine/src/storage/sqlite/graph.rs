@@ -976,7 +976,7 @@ impl FactGraph for SqliteBackend {
         scored: &[(i64, f64)],
         to_expire: &[i64],
         now: DateTime<Utc>,
-    ) -> Result<(crate::traits::PruneStats, Vec<i64>)> {
+    ) -> Result<(crate::forgetting::PruneStats, Vec<i64>)> {
         let dim = self.embed_dim;
         let scored = scored.to_vec();
         let to_expire = to_expire.to_vec();
@@ -997,7 +997,7 @@ impl FactGraph for SqliteBackend {
                 }
                 tx.commit()?;
 
-                let stats = crate::traits::PruneStats {
+                let stats = crate::forgetting::PruneStats {
                     facts_expired: to_expire.len(),
                     facts_evaluated: scored.len(),
                 };

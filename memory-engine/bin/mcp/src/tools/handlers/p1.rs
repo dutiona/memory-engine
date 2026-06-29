@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use memory_engine::ForgetPolicy;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::inspect_types::DumpFormat;
-use memory_engine::traits::{EmbeddingProvider, ForgetPolicy, SummaryGenerator};
+use memory_engine::traits::{EmbeddingProvider, SummaryGenerator};
 use rmcp::model::{CallToolResult, ErrorData};
 use serde_json::{Value, json};
 

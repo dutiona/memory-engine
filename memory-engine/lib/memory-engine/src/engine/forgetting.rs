@@ -3,7 +3,7 @@
 use chrono::Utc;
 
 use crate::error::Result;
-use crate::traits::{ForgetPolicy, PruneStats};
+use crate::forgetting::{ForgetPolicy, PruneStats};
 
 use super::MemoryEngine;
 
