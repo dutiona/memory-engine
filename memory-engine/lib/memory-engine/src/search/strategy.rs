@@ -7,7 +7,7 @@ use crate::types::FactType;
 /// Strategy for vector similarity search.
 ///
 /// Implementations provide a single `search` method with the same contract as
-/// [`crate::search::vector::vector_search`].  The engine holds a boxed strategy
+/// `crate::search::vector::vector_search`.  The engine holds a boxed strategy
 /// and dispatches through it, allowing runtime selection between algorithms
 /// (analogous to introsort dispatching between quicksort / heapsort / insertion
 /// sort based on partition size).

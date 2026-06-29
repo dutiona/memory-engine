@@ -20,7 +20,7 @@ pub enum SearchMode {
     /// `embedding`; ignores any `text`. Best for paraphrase and concept recall.
     Vector,
     /// Both lexical and semantic, fused with Reciprocal Rank Fusion (see
-    /// [`rrf_merge`]). Uses whichever of `text`/`embedding` are present. The
+    /// `rrf_merge`). Uses whichever of `text`/`embedding` are present. The
     /// default, balancing keyword precision with semantic recall.
     Hybrid,
 }

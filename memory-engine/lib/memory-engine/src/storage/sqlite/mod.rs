@@ -1,10 +1,10 @@
 //! The default, in-process `SQLite` implementation of the storage port (#630).
 //!
 //! `SqliteBackend` is the sole owner of every `SQLite`-private concern — the
-//! read-pool/write-mutex [`ConnectionPool`] and the event [`UpcasterRegistry`] —
+//! read-pool/write-mutex `ConnectionPool` and the event [`UpcasterRegistry`] —
 //! and the bounded-trait impls in this module's siblings are a thin, uniform
-//! delegation layer over two primitives: [`SqliteBackend::block_read`] and
-//! [`SqliteBackend::block_write`], which encapsulate *"acquire a connection and run
+//! delegation layer over two primitives: `SqliteBackend::block_read` and
+//! `SqliteBackend::block_write`, which encapsulate *"acquire a connection and run
 //! a sync `rusqlite` closure on a blocking thread"*.
 //!
 //! ## Why delegation, not absorption
@@ -17,11 +17,11 @@
 //!
 //! ## Seam invariants
 //!
-//! - **Conn selection (D-design):** read methods → [`ConnectionPool::read`]; write
-//!   methods → [`ConnectionPool::try_write`] (so a read-only pool rejects writes
+//! - **Conn selection (D-design):** read methods → `ConnectionPool::read`; write
+//!   methods → `ConnectionPool::try_write` (so a read-only pool rejects writes
 //!   with [`MemoryError::ReadOnly`] — Key Design Decision #6, preserved for free).
 //! - **No driver type crosses the seam (D4):** a `rusqlite` failure surfaces as
-//!   [`MemoryError::Database`] from the concrete store; [`map_seam_err`] maps it to
+//!   [`MemoryError::Database`] from the concrete store; `map_seam_err` maps it to
 //!   [`MemoryError::Storage`] wrapping [`StorageError::Backend`] at the boundary.
 //!   Semantic variants (`NotFound`, `Migration`, `EmbeddingDimension`, `Conflict`,
 //!   `ReadOnly`, `Internal`, …) already have a precise home and pass through.
@@ -67,7 +67,7 @@ mod session;
 ///
 /// When the `ann` feature is enabled and a [`SearchConfig`] with
 /// `ann_threshold < usize::MAX` is provided via [`SqliteBackend::with_search_config`],
-/// an [`HnswStrategy`] is built from the database and stored here. `vector_search`
+/// an `HnswStrategy` is built from the database and stored here. `vector_search`
 /// dispatches to HNSW when `active_count() >= ann_threshold`, mirroring the engine's
 /// `should_use_hnsw()` predicate exactly. Without a `search_config` (the default),
 /// `vector_search` is always brute-force, preserving the `#630` behavior.
@@ -118,7 +118,7 @@ pub enum HnswOpenSource {
 
 impl SqliteBackend {
     /// Wrap an already-opened pool + upcaster registry. The canonical constructor
-    /// `#631` will use where it builds the [`ConnectionPool`] today. `embed_dim` is
+    /// `#631` will use where it builds the `ConnectionPool` today. `embed_dim` is
     /// read from the pool, so a backend's dimension cannot diverge from its pool's.
     ///
     /// The backend produced by this constructor has no `SearchConfig`, so HNSW never
@@ -180,8 +180,8 @@ impl SqliteBackend {
     /// `ann_threshold < usize::MAX`, materializes the HNSW index from the
     /// requested [`HnswOpenSource`]:
     ///
-    /// - [`HnswOpenSource::Snapshot(Some(snap))`] → restore from the sidecar blob.
-    /// - [`HnswOpenSource::Snapshot(None)`] or [`HnswOpenSource::Rebuild`] → build
+    /// - [`HnswOpenSource::Snapshot`]`(Some(snap))` → restore from the sidecar blob.
+    /// - [`HnswOpenSource::Snapshot`]`(None)` or [`HnswOpenSource::Rebuild`] → build
     ///   from a full DB scan.
     ///
     /// Mirrors `engine/mod.rs::try_load_snapshot`'s match arms exactly so the

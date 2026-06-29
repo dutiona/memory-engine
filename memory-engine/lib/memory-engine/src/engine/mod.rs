@@ -52,7 +52,7 @@ mod equivalence;
 
 /// Which [`StorageBackend`] implementation backs the engine.
 ///
-/// Resolved once in [`MemoryEngine::open_storage`]. The in-process
+/// Resolved once in `MemoryEngine::open_storage`. The in-process
 /// [`SqliteBackend`] is the default and only variant today; epic #628 adds a
 /// `Postgres` arm (#634).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -511,7 +511,7 @@ impl MemoryEngine {
     ///
     /// After #631 the engine no longer holds the pool/HNSW, so snapshot assembly
     /// (DB fingerprint + HNSW) lives below the port; this hands the engine's two
-    /// projections down via [`StorageBackend::write_engine_snapshot`] and marks the
+    /// projections down via [`SchemaManager::write_engine_snapshot`](crate::storage::SchemaManager::write_engine_snapshot) and marks the
     /// engine flushed so `Drop` won't warn.
     ///
     /// Unlike [`close`](Self::close) this needs no `&mut`, so a **shared owner**
@@ -526,7 +526,7 @@ impl MemoryEngine {
     /// reconstruction (#742): the in-memory HNSW it would serialize was built at the
     /// old dimension, while the DB (and thus the sidecar's fingerprint/`embed_dim`
     /// header) is now `D′`. The reopen at `D′` rebuilds the index from the DB anyway
-    /// (the `embed_dim` header gate at [`snapshot::load_from_file`] already rejects a
+    /// (the `embed_dim` header gate at `snapshot::load_from_file` already rejects a
     /// stale-dim sidecar), and under `ann` the assembly would otherwise *fail*
     /// re-reading the now-`D′` `facts.embedding` at the old dim. Short-circuiting
     /// avoids that spurious error and the wasted work. The consumer can still flush +

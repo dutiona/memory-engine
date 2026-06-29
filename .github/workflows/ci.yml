@@ -30,6 +30,25 @@ jobs:
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  docs:
+    name: Docs (intra-doc links)
+    runs-on: ubuntu-latest
+    # Deny broken AND public->private intra-doc links. `cargo test --doc` does not
+    # catch broken *links* (only failing doc examples), so this is a distinct gate.
+    # Scoped to the `memory-engine` core crate for now; the cli/mcp/embed crates
+    # still carry residual broken links (tracked separately) before the gate can
+    # widen to `--workspace`.
+    env:
+      RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc (default features)
+        run: cargo doc --no-deps -p memory-engine
+      - name: cargo doc (all features)
+        run: cargo doc --no-deps -p memory-engine --all-features
+
   build:
     name: Build
     runs-on: ubuntu-latest

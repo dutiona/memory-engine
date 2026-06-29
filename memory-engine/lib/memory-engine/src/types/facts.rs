@@ -96,7 +96,7 @@ impl fmt::Display for ConsolidationLevel {
 /// the per-field docs.
 ///
 /// Importance is likewise split across two fields, easily confused:
-/// [`importance`](Self::importance) is the *static, consumer-supplied prior* set at insertion,
+/// [`base_importance`](Self::base_importance) is the *static, consumer-supplied prior* set at insertion,
 /// while [`importance_score`](Self::importance_score) is the *computed, decaying score* the
 /// engine ranks and forgets by (the prior is one of its inputs). See those fields' docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

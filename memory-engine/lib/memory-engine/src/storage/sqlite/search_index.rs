@@ -122,7 +122,7 @@ impl SearchIndex for SqliteBackend {
     }
 
     /// Rebuild the in-memory HNSW index after a same-dim reconstruction promote
-    /// (#624). With `ann`, delegates to [`hnsw_rebuild_from_db`](SqliteBackend::hnsw_rebuild_from_db)
+    /// (#624). With `ann`, delegates to `hnsw_rebuild_from_db`
     /// (itself a no-op when no HNSW index is active). Without `ann`, the brute-force
     /// vector path reads `facts.embedding` directly, so there is nothing to rebuild.
     async fn rebuild_vector_index(&self) -> Result<()> {

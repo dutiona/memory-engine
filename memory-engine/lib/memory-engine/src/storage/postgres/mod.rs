@@ -4,14 +4,14 @@
 //! and its async-native opposite. `SQLite` delegates every method through
 //! `block_read`/`block_write` (`spawn_blocking` + a `!Send` `rusqlite` guard + a
 //! read-pool/write-mutex pool); Postgres is MVCC and `tokio-postgres` is natively
-//! async, so the seam here is a single [`PgBackend::with_client`] — *acquire a pooled
+//! async, so the seam here is a single `PgBackend::with_client` — *acquire a pooled
 //! client, run an async closure, map driver errors at the boundary* — with **no**
 //! `spawn_blocking` and **no** write serialization.
 //!
 //! ## Scope of #633 (honest boundary)
 //!
 //! This is the **skeleton**: the pool, a fresh migration chain producing the live v14
-//! logical schema (see [`migrations`]), and the [`SchemaManager`](crate::storage::SchemaManager)
+//! logical schema (see the `migrations` module), and the [`SchemaManager`](crate::storage::SchemaManager)
 //! lifecycle/identity/config surface. It is **NOT** a full
 //! [`StorageBackend`](crate::storage::StorageBackend): the umbrella's blanket impl
 //! requires all six bounded traits, and `PgBackend` implements only `SchemaManager`
@@ -23,12 +23,12 @@
 //! ## Seam invariants (mirroring `SQLite`'s, minus the blocking concerns)
 //!
 //! - **No driver type crosses the seam:** a `tokio_postgres::Error` is mapped to
-//!   [`MemoryError::Storage`] wrapping [`StorageError::Backend`] by [`pg_err`] at the
+//!   [`MemoryError::Storage`] wrapping [`StorageError::Backend`] by `pg_err` at the
 //!   boundary; semantic variants (`Migration`, `EmbeddingDimension`, `ReadOnly`,
 //!   `Internal`, …) have a precise home and are constructed directly.
 //! - **Read-only:** write methods check `read_only` first and return
 //!   [`MemoryError::ReadOnly`] (the typed, primary guard); the pool's
-//!   `default_transaction_read_only` is the DB-level backstop (see [`pool`]).
+//!   `default_transaction_read_only` is the DB-level backstop (see the `pool` module).
 //! - **Transactions:** the multi-statement migration chain runs in one transaction —
 //!   Postgres DDL is transactional (a genuine win over `SQLite`'s per-statement DDL).
 

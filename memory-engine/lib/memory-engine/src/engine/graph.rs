@@ -21,8 +21,8 @@ impl MemoryEngine {
     /// Create `co_session` edges between all active facts sharing a session.
     ///
     /// Edges are bidirectional (A→B and B→A), with weight
-    /// [`CO_SESSION_WEIGHT`](Self::CO_SESSION_WEIGHT) and
-    /// `scope_id =` [`CO_SESSION_SCOPE_ID`](Self::CO_SESSION_SCOPE_ID)
+    /// `CO_SESSION_WEIGHT` and
+    /// `scope_id = CO_SESSION_SCOPE_ID`
     /// (root — cross-scope by nature). Idempotent: calling twice for the same
     /// session does not create duplicate edges.
     ///

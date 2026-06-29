@@ -91,7 +91,7 @@ impl MemoryEngine {
         )
     }
 
-    /// Restore from a [`dump_sqlite()`](crate::inspect::dump::dump_sqlite) backup
+    /// Restore from a `dump_sqlite()` backup
     /// into a new file-backed engine.
     ///
     /// **Only accepts clean backups** produced by `dump_state(DumpFormat::Sqlite(..))`.

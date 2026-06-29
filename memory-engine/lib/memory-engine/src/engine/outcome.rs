@@ -16,13 +16,13 @@ impl MemoryEngine {
     /// Appends an [`EventType::OutcomeSignal`] event to the event log with
     /// payload `{"fact_id": <id>, "outcome": "<variant>"}`. The fact must
     /// exist (active or expired); recording on a nonexistent fact returns
-    /// [`MemoryError::NotFound`].
+    /// [`MemoryError::NotFound`](crate::MemoryError::NotFound).
     ///
     /// # Errors
     ///
-    /// - [`MemoryError::NotFound`] if `fact_id` does not exist.
-    /// - [`MemoryError::ReadOnly`] if the engine is read-only.
-    /// - [`MemoryError::Database`] on insert failure.
+    /// - [`MemoryError::NotFound`](crate::MemoryError::NotFound) if `fact_id` does not exist.
+    /// - [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly) if the engine is read-only.
+    /// - [`MemoryError::Database`](crate::MemoryError::Database) on insert failure.
     pub async fn record_outcome(&self, fact_id: i64, outcome: Outcome) -> Result<i64> {
         // Validate fact exists via the port — propagate DB errors as-is,
         // only remap NotFound for a clearer message.
@@ -56,8 +56,8 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// - [`MemoryError::NotFound`] if `fact_id` does not exist.
-    /// - [`MemoryError::Database`] on query failure.
+    /// - [`MemoryError::NotFound`](crate::MemoryError::NotFound) if `fact_id` does not exist.
+    /// - [`MemoryError::Database`](crate::MemoryError::Database) on query failure.
     pub async fn get_outcome_counts(&self, fact_id: i64) -> Result<OutcomeCounts> {
         // Validate fact exists (consistent with record_outcome) — propagate NotFound.
         self.storage.get_fact(fact_id).await.map(|_| ())?;
@@ -79,7 +79,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// - [`MemoryError::Database`] on query failure.
+    /// - [`MemoryError::Database`](crate::MemoryError::Database) on query failure.
     pub async fn get_outcome_counts_batch(
         &self,
         fact_ids: &[i64],

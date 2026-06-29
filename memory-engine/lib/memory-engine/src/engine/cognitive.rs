@@ -206,7 +206,7 @@ impl MemoryEngine {
     /// fact-writes and the cycle can fire on the same trigger.
     ///
     /// On entry, under a single write-lock acquisition, this compares
-    /// [`FactStore::max_caller_written_fact_id`] against the persisted cursor
+    /// `FactStore::max_caller_written_fact_id` against the persisted cursor
     /// `last_caller_write_fact_id`:
     ///
     /// - **New caller writes** (`max > cursor`): advance the cursor to `max` and return

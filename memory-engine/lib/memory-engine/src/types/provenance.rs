@@ -13,7 +13,7 @@ use crate::types::facts::FactId;
 /// The owning `lineage_id` (DB row PK) is **not** part of this envelope — it is a
 /// property of the row, not of the provenance. Read paths return it alongside the
 /// envelope in the companion [`LineageRecord`] / [`LineageSnapshotEntry`], and the
-/// write path returns it in [`PromotionResult`]. Previously this struct carried a
+/// write path returns it in [`PromotionResult`](crate::PromotionResult). Previously this struct carried a
 /// phantom `lineage_id: i64` with `#[serde(skip_serializing, default)]` that was
 /// always `0` on deserialization and reconstructed from the PK on read — a lying
 /// field with an invisible "0 means not-yet-persisted" invariant. It is removed.
@@ -45,7 +45,7 @@ pub struct NewLineageRecord {
 }
 
 /// One proposed merge: a set of source facts an
-/// [`LlmDreamCycle`](crate::engine::cycle) should collapse into a single
+/// [`LlmDreamCycle`](crate::LlmDreamCycle) should collapse into a single
 /// synthesized `summary`.
 ///
 /// The output of a [`DeltaProposer`](crate::traits::DeltaProposer), it is a raw

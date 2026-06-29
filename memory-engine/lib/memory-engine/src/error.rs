@@ -12,9 +12,9 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConflictError {
-    /// A [`MemoryQuery`](crate::types::MemoryQuery) combined options that are
+    /// A [`MemoryQuery`](crate::MemoryQuery) combined options that are
     /// mutually exclusive or incomplete (e.g. a half-open period, `valid_at`
-    /// together with a period, or a [`SearchMode`](crate::types::SearchMode)
+    /// together with a period, or a [`SearchMode`](crate::SearchMode)
     /// missing its required input). The string names the specific rule violated.
     #[error("{0}")]
     QueryValidation(String),
@@ -53,7 +53,7 @@ pub enum ConflictError {
     /// `VACUUM INTO` writes a file, and the engine refuses to unlink a directory
     /// to make room — surfacing the mistake as a clear conflict instead of an
     /// opaque "is a directory" I/O failure (see the trusted-path contract on
-    /// [`dump_sqlite`](crate::inspect::dump::dump_sqlite)).
+    /// `dump_sqlite`).
     #[error("dump target is an existing directory")]
     DumpTargetIsDirectory,
 
