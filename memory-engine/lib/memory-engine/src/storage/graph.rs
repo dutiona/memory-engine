@@ -332,8 +332,8 @@ pub trait FactGraph: Send + Sync {
     ) -> Result<Vec<(i64, i64, i64)>>;
 
     /// Atomically execute an arbitrated conflict-resolution write plan in ONE
-    /// transaction — the verbatim single-tx body of the former
-    /// `crate::conflict::temporal::resolve_conflict`, moved below the seam.
+    /// transaction — the former conflict-resolution path, now encapsulated below
+    /// the storage seam.
     ///
     /// The consumer [`ConflictArbiter`](crate::traits::ConflictArbiter) decision is
     /// made engine-side **before** this call; this method performs only the DB
