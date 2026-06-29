@@ -360,4 +360,123 @@ mod tests {
         let err = store.get(999).unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
     }
+
+    #[test]
+    fn list_all_empty_store_returns_empty() {
+        let conn = setup();
+        let store = SummaryStore::new(&conn, 4);
+        assert!(store.list_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_all_returns_every_summary_in_id_order() {
+        let conn = setup();
+        let store = SummaryStore::new(&conn, 4);
+        // Insert across levels with asymmetric source ids so each content string
+        // is distinct — a tuple-swap or dropped row would change the sequence.
+        let id1 = store
+            .insert(&make_summary(ConsolidationLevel::Local, vec![1]))
+            .unwrap();
+        let id2 = store
+            .insert(&make_summary(ConsolidationLevel::Cluster, vec![2, 3]))
+            .unwrap();
+        let id3 = store
+            .insert(&make_summary(ConsolidationLevel::Global, vec![4, 5, 6]))
+            .unwrap();
+
+        let all = store.list_all().unwrap();
+        // All three rows, regardless of level (list_all is not level-filtered).
+        assert_eq!(all.len(), 3);
+        // ORDER BY id ASC — assert the exact ordered id sequence so a reorder
+        // (e.g. DESC) would fail.
+        assert_eq!(
+            all.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![id1, id2, id3]
+        );
+        // Content/level travel with the right row — asymmetric so a swap is caught.
+        assert_eq!(all[0].level, ConsolidationLevel::Local);
+        assert_eq!(all[0].source_fact_ids, vec![1]);
+        assert_eq!(all[1].level, ConsolidationLevel::Cluster);
+        assert_eq!(all[1].source_fact_ids, vec![2, 3]);
+        assert_eq!(all[2].level, ConsolidationLevel::Global);
+        assert_eq!(all[2].source_fact_ids, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn for_each_visits_every_summary_exactly_once_in_order() {
+        let conn = setup();
+        let store = SummaryStore::new(&conn, 4);
+        let id1 = store
+            .insert(&make_summary(ConsolidationLevel::Local, vec![1]))
+            .unwrap();
+        let id2 = store
+            .insert(&make_summary(ConsolidationLevel::Cluster, vec![2, 3]))
+            .unwrap();
+        let id3 = store
+            .insert(&make_summary(ConsolidationLevel::Global, vec![4, 5, 6]))
+            .unwrap();
+
+        let mut visited = Vec::new();
+        store
+            .for_each(|s| {
+                visited.push((s.id, s.level, s.source_fact_ids));
+                Ok(())
+            })
+            .unwrap();
+
+        // Exactly-once and ORDER BY id ASC: the full ordered tuple sequence.
+        assert_eq!(
+            visited,
+            vec![
+                (id1, ConsolidationLevel::Local, vec![1]),
+                (id2, ConsolidationLevel::Cluster, vec![2, 3]),
+                (id3, ConsolidationLevel::Global, vec![4, 5, 6]),
+            ]
+        );
+    }
+
+    #[test]
+    fn for_each_on_empty_store_never_calls_callback() {
+        let conn = setup();
+        let store = SummaryStore::new(&conn, 4);
+        let mut calls = 0_usize;
+        store
+            .for_each(|_| {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn for_each_propagates_callback_error_and_stops_iteration() {
+        let conn = setup();
+        let store = SummaryStore::new(&conn, 4);
+        store
+            .insert(&make_summary(ConsolidationLevel::Local, vec![1]))
+            .unwrap();
+        store
+            .insert(&make_summary(ConsolidationLevel::Cluster, vec![2]))
+            .unwrap();
+        store
+            .insert(&make_summary(ConsolidationLevel::Global, vec![3]))
+            .unwrap();
+
+        // Fail on the second visited row: proves the error surfaces AND that
+        // iteration halts (the third row is never seen).
+        let mut seen = 0_usize;
+        let err = store
+            .for_each(|_| {
+                seen += 1;
+                if seen == 2 {
+                    Err(MemoryError::NotFound("boom".to_string()))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::NotFound(msg) if msg == "boom"));
+        assert_eq!(seen, 2, "iteration must stop at the failing callback");
+    }
 }
