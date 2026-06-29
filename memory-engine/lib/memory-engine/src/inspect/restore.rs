@@ -1942,7 +1942,9 @@ mod tests {
         // does not in isolation prove the manual `reset_autoincrement("lineage", …)`
         // call fires — it proves the end-to-end continuity property, which is what a
         // caller relies on. The step-7 import wiring is what the COUNT/id assertions
-        // above pin.
+        // above pin; the `reset_autoincrement` floor-raise itself — the case where the
+        // sequence must be lifted ABOVE the highest physically-inserted rowid — is
+        // pinned non-vacuously by [`reset_autoincrement_raises_sequence_floor`].
         let new_id = store
             .insert(
                 &crate::types::NewLineageRecord {
@@ -1966,6 +1968,108 @@ mod tests {
         );
     }
 
+    /// Direct, non-vacuous proof that [`reset_autoincrement`] *raises* a table's
+    /// `sqlite_sequence` floor above the highest physically-inserted rowid — the case
+    /// the end-to-end [`restore_roundtrip_with_lineage`] test cannot witness.
+    ///
+    /// The vacuity it closes: a snapshot restore inserts each row with its *explicit*
+    /// `lineage_id`, and `SQLite` already lifts the AUTOINCREMENT floor to the largest
+    /// inserted id on that very insert. So `reset_autoincrement(_, "lineage", max)`,
+    /// where `max` equals the highest inserted id, is a no-op for the floor — asserting
+    /// "next id > max" there proves nothing about the reset call. The genuine job of
+    /// `reset_autoincrement` is to set the floor to a value the inserted rows did NOT
+    /// reach, so subsequent caller inserts never collide with ids the snapshot reserved
+    /// above its physical rows. This test exercises exactly that gap.
+    ///
+    /// Setup: a lineage table with one inserted row at `lineage_id = 5` (natural floor
+    /// 5), then `reset_autoincrement(_, "lineage", 1000)`. A fresh AUTOINCREMENT insert
+    /// must land at `1001` — proving the floor was lifted from 5 to 1000, not merely
+    /// left at the natural 5.
+    ///
+    /// Mutation-proof: with the `reset_autoincrement` call removed (or its `max_id`
+    /// lowered to ≤ 5, or the `INSERT INTO sqlite_sequence` dropped) the next id would
+    /// be `6`, not `1001`, and the assertion fails. The `+1` floor semantics are pinned
+    /// to a single value, so neither an off-by-one nor a swallowed reset survives.
+    #[test]
+    fn reset_autoincrement_raises_sequence_floor() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        // Two active wisdom facts so the lineage FKs resolve (lineage has a UNIQUE
+        // index on wisdom_fact_id, so the seed row and the post-reset insert must
+        // anchor to *different* facts). Fact 1 anchors the seed row; fact 2 the insert.
+        conn.execute(
+            "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, last_accessed) \
+             VALUES (1, 'w1', 'h1', X'00', 'semantic', datetime('now'), datetime('now')), \
+                    (2, 'w2', 'h2', X'00', 'semantic', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let store = LineageStore::new(&conn);
+        store
+            .insert_raw(&crate::types::LineageSnapshotEntry {
+                lineage_id: 5,
+                wisdom_fact_id: 1,
+                source_fact_ids: vec![],
+                provenance: crate::types::PromotionProvenance {
+                    source_count: 0,
+                    session_count: 0,
+                    date_range_start: chrono::Utc::now(),
+                    date_range_end: chrono::Utc::now(),
+                    confidence: 0.0,
+                    method_version: "seed".into(),
+                    representative_ids: vec![],
+                },
+            })
+            .unwrap();
+
+        // Precondition: the natural floor is 5 (set by the explicit insert above),
+        // which is what a missing/no-op reset would leave behind.
+        let floor_before: i64 = conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'lineage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            floor_before, 5,
+            "explicit insert sets the natural floor to 5"
+        );
+
+        // The unit under test: lift the floor to 1000 — far above the highest
+        // physically-inserted rowid (5).
+        reset_autoincrement(&conn, "lineage", 1000).unwrap();
+
+        // A fresh AUTOINCREMENT insert (validating path omits lineage_id) must land at
+        // 1001 — only possible if the floor was lifted from 5 to 1000. Anchors on the
+        // *second* wisdom fact (the first already owns the seed row; wisdom_fact_id is
+        // UNIQUE).
+        let new_id = store
+            .insert(
+                &crate::types::NewLineageRecord {
+                    wisdom_fact_id: 2,
+                    source_fact_ids: vec![],
+                },
+                &crate::types::PromotionProvenance {
+                    source_count: 0,
+                    session_count: 0,
+                    date_range_start: chrono::Utc::now(),
+                    date_range_end: chrono::Utc::now(),
+                    confidence: 0.0,
+                    method_version: "after".into(),
+                    representative_ids: vec![],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            new_id, 1001,
+            "reset_autoincrement must lift the floor to 1000 so the next id is 1001 \
+             (natural floor was only 5) — a no-op/missing reset would yield 6"
+        );
+    }
+
     // --- NotImplemented compression arms when feature disabled (#466) ---
     //
     // These tests exercise the `#[cfg(not(feature = "compress-*"))]` arms of
@@ -1976,15 +2080,24 @@ mod tests {
     // ⚠️ CI CAVEAT: this repo's CI runs tests solely via `cargo test --workspace
     // --all-features` (see .github/workflows/ci.yml). Under `--all-features` both
     // compress features are ON, so these `cfg(not(...))` tests are compiled OUT and
-    // NEVER execute in CI. They guard the NotImplemented arms only under a local
-    // default-feature (`cargo test`) run. This is the known "default-features test
-    // masked by --all-features" gap (#466 explicitly flags it); closing it for real
-    // would require a no-compress test job in CI, out of scope for this test-coverage PR.
+    // NEVER execute in CI — they guard the NotImplemented arms only under a build
+    // WITHOUT the compress features (a local default-feature `cargo test`, NOT the
+    // `--all-features` CI job). This is the known "default-features test masked by
+    // --all-features" gap (#466 explicitly flags it). A follow-up `area:build` issue
+    // tracks adding a no-compress (default-features) CI test job so these arms run in
+    // CI too; closing it here is out of scope for this test-coverage PR. The tests are
+    // kept (not deleted): they are valid and DO run under a default `cargo test`.
 
     /// gzip magic on a snapshot file, with `compress-gzip` disabled, must surface a
     /// clear [`MemoryError::NotImplemented`] (not a serde/Io error). Mutation-proof:
     /// asserts the variant AND that the message names "gzip" — a regression that
     /// returned a generic error or mislabelled the format fails the match/contains.
+    ///
+    /// Runs ONLY under a build *without* `compress-gzip` (the `cfg(not(...))` gate) —
+    /// i.e. a default-feature `cargo test`, NOT the `--all-features` CI job, which
+    /// enables the feature and compiles this test OUT. A follow-up `area:build` issue
+    /// tracks adding a no-compress (default-features) CI test job so this arm is
+    /// covered in CI too. See the section comment above for the full caveat.
     #[cfg(not(feature = "compress-gzip"))]
     #[test]
     fn read_snapshot_gzip_without_feature_is_not_implemented() {
@@ -2001,6 +2114,12 @@ mod tests {
 
     /// zstd magic on a snapshot file, with `compress-zstd` disabled, must surface a
     /// clear [`MemoryError::NotImplemented`] naming "zstd".
+    ///
+    /// Runs ONLY under a build *without* `compress-zstd` (the `cfg(not(...))` gate) —
+    /// i.e. a default-feature `cargo test`, NOT the `--all-features` CI job, which
+    /// enables the feature and compiles this test OUT. A follow-up `area:build` issue
+    /// tracks adding a no-compress (default-features) CI test job so this arm is
+    /// covered in CI too. See the section comment above for the full caveat.
     #[cfg(not(feature = "compress-zstd"))]
     #[test]
     fn read_snapshot_zstd_without_feature_is_not_implemented() {
