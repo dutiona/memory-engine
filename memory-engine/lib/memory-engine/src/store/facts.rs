@@ -55,9 +55,33 @@ pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
 /// here. Stored values are written as `snake_case` via [`fact_type_to_str`]; the
 /// canonical parser accepts that (and is case-insensitive), so the DB round-trip
 /// is unaffected.
+///
+/// A value that does not parse is therefore **data-integrity corruption**, not a
+/// missing row: the store always writes a canonical token, so an unparseable one
+/// means the `fact_type` column was tampered with or otherwise corrupted. It maps
+/// to [`MemoryError::Internal`] (a terminal "this shouldn't happen" / corrupt
+/// state, #560), **not** [`MemoryError::NotFound`] — `NotFound` means "the
+/// requested row is absent", a semantically distinct, recoverable condition
+/// (#366). The message embeds the offending token verbatim for diagnostics.
+///
+/// What a *read-path* caller sees, end-to-end: the read sites ([`row_to_fact`],
+/// [`row_to_scoring_row`]) box this `Internal` into
+/// `rusqlite::Error::FromSqlConversionFailure`, which re-maps to
+/// [`MemoryError::Database`] via its `#[from]`. So the surfaced top-level variant
+/// is `Database` (a *data* error — the correct class for corrupt stored data, and
+/// crucially **not** `NotFound`, which is exactly the conflation #366 reported),
+/// with this `Internal` preserved as the boxed source for diagnostics. The
+/// `Internal` value here is therefore the directly-observable error only for a
+/// *direct* caller of this helper; the read path re-classifies it to `Database`.
+/// On the `SQLite` backend a `CHECK(fact_type IN (…))` constraint additionally makes
+/// this arm unreachable through ordinary SQL — it fires only on genuine on-disk
+/// tampering or a backend without that constraint. Both surfaced behaviors are
+/// covered by tests (`corrupt_fact_type_read_path_surfaces_database_not_notfound`
+/// for the end-to-end path, `str_to_fact_type_rejects_unknown_as_internal` for the
+/// direct call).
 fn str_to_fact_type(s: &str) -> Result<FactType> {
     s.parse::<FactType>()
-        .map_err(|e| MemoryError::NotFound(e.to_string()))
+        .map_err(|e| MemoryError::Internal(format!("corrupt stored fact_type: {e}")))
 }
 
 /// Compute blake3 hex hash of content, truncated to first 32 characters (128 bits).
@@ -1439,6 +1463,89 @@ mod tests {
             scope_id: 1,
             is_pinned: false,
         }
+    }
+
+    /// #366 end-to-end (read path): corrupt the stored `fact_type` of a real row,
+    /// then read it back through the normal `FactStore::get` path and assert the
+    /// **actual user-visible** `MemoryError`.
+    ///
+    /// This is the test that proves the #366 fix where a user can observe it — the
+    /// isolated [`str_to_fact_type_rejects_unknown_as_internal`] test below only
+    /// exercises the private helper, but every production caller (`row_to_fact`,
+    /// `row_to_scoring_row`) boxes the helper's error into
+    /// `rusqlite::Error::FromSqlConversionFailure`, which re-maps to
+    /// [`MemoryError::Database`] via its `#[from]`. So the helper's `Internal`
+    /// never reaches a read-path caller as the top-level variant.
+    ///
+    /// What #366 actually demanded — *do not surface [`MemoryError::NotFound`] for
+    /// a corrupt enum* (which lets a caller matching `NotFound` mistake a corrupt
+    /// store for "no such fact") — is met **end-to-end**: the surfaced variant is
+    /// `Database`, a data error, which is the semantically correct class for
+    /// corrupt stored data, and is distinct from `NotFound`. The diagnostic
+    /// `Internal("corrupt stored fact_type: …")` is preserved as the boxed source.
+    ///
+    /// Note the `SQLite` schema carries `CHECK(fact_type IN (…))`, so this corruption
+    /// is unreachable through ordinary SQL — the test must
+    /// `PRAGMA ignore_check_constraints` to simulate genuine on-disk tampering or a
+    /// backend without the constraint (the exact scenario the helper guards).
+    #[test]
+    fn corrupt_fact_type_read_path_surfaces_database_not_notfound() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = store.insert(&make_fact("p", vec![0.0; DIM])).unwrap();
+        // The `CHECK(fact_type IN (...))` constraint rejects a bad value on a plain
+        // UPDATE; bypass it to simulate genuine on-disk corruption / a non-CHECK
+        // backend — the only way `str_to_fact_type`'s corrupt arm is reachable.
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        conn.execute(
+            "UPDATE facts SET fact_type = 'bogus' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA ignore_check_constraints = OFF")
+            .unwrap();
+
+        let err = store.get(id).unwrap_err();
+        // The user-visible top-level variant is Database (the helper's Internal is
+        // boxed by FromSqlConversionFailure and re-mapped via `#[from]`).
+        assert!(
+            matches!(err, MemoryError::Database(_)),
+            "read-path corrupt fact_type must surface Database, got {err:?}"
+        );
+        // #366's actual harm — surfacing NotFound for a corrupt enum — is gone.
+        assert!(
+            !matches!(err, MemoryError::NotFound(_)),
+            "a corrupt stored fact_type must never read back as NotFound (#366), got {err:?}"
+        );
+        // The diagnostic helper message survives as the boxed source.
+        assert!(
+            err.to_string().contains("corrupt stored fact_type"),
+            "the diagnostic message must be preserved through the box, got {err}"
+        );
+    }
+
+    #[test]
+    fn str_to_fact_type_rejects_unknown_as_internal() {
+        // A `fact_type` string read back from the DB that names no known variant
+        // is a data-integrity failure (the store wrote it via `fact_type_to_str`,
+        // so a value that does not parse means the row is corrupt) — NOT a
+        // missing-row condition. It must map to `MemoryError::Internal`, never
+        // `MemoryError::NotFound` (#366).
+        let err = str_to_fact_type("bogus").unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+        // The message stays greppable: it carries the offending token verbatim.
+        assert!(
+            err.to_string().contains("bogus"),
+            "message must include the offending string, got {err}"
+        );
+        assert!(
+            !matches!(err, MemoryError::NotFound(_)),
+            "an unparseable stored enum is not a NotFound condition"
+        );
     }
 
     /// #257 regression: the snapshot referential-validation set MUST include

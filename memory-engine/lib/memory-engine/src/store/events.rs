@@ -26,6 +26,28 @@ pub const fn event_type_to_str(et: &EventType) -> &'static str {
     }
 }
 
+/// Parse an `event_type` string read back from the store into the core
+/// [`EventType`].
+///
+/// Values are written via [`event_type_to_str`], so a token that names no known
+/// variant is **data-integrity corruption** (the `event_type` column was tampered
+/// with or otherwise corrupted), not a missing row. It maps to
+/// [`MemoryError::Internal`] (a terminal "this shouldn't happen" / corrupt state,
+/// #560), **not** [`MemoryError::NotFound`] — `NotFound` means "the requested row
+/// is absent", a semantically distinct, recoverable condition (#366). The message
+/// embeds the offending token verbatim for diagnostics.
+///
+/// What a *read-path* caller sees, end-to-end: the read site ([`row_to_event`])
+/// boxes this `Internal` into `rusqlite::Error::FromSqlConversionFailure`, which
+/// re-maps to [`MemoryError::Database`] via its `#[from]`. So the surfaced
+/// top-level variant is `Database` (a *data* error — the correct class for corrupt
+/// stored data, and crucially **not** `NotFound`, the conflation #366 reported),
+/// with this `Internal` preserved as the boxed source. The `Internal` value here
+/// is therefore the directly-observable error only for a *direct* caller; the read
+/// path re-classifies it to `Database`. Both surfaced behaviors are covered by
+/// tests (`corrupt_event_type_read_path_surfaces_database_not_notfound` for the
+/// end-to-end path, `str_to_event_type_rejects_unknown_as_internal` for the direct
+/// call).
 fn str_to_event_type(s: &str) -> Result<EventType> {
     match s {
         "Interaction" => Ok(EventType::Interaction),
@@ -33,8 +55,8 @@ fn str_to_event_type(s: &str) -> Result<EventType> {
         "MemoryOp" => Ok(EventType::MemoryOp),
         "SystemEvent" => Ok(EventType::SystemEvent),
         "OutcomeSignal" => Ok(EventType::OutcomeSignal),
-        other => Err(MemoryError::NotFound(format!(
-            "unknown event type: {other}"
+        other => Err(MemoryError::Internal(format!(
+            "corrupt stored event_type: {other}"
         ))),
     }
 }
@@ -380,6 +402,76 @@ mod tests {
         let store = EventStore::new(&conn, &registry);
         let err = store.get(999).unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
+    }
+
+    /// #366 end-to-end (read path): corrupt the stored `event_type` of a real row,
+    /// then read it back through the normal `EventStore::get` path and assert the
+    /// **actual user-visible** `MemoryError`.
+    ///
+    /// The isolated [`str_to_event_type_rejects_unknown_as_internal`] test below
+    /// only exercises the private helper; the production caller (`row_to_event`)
+    /// boxes its error into `rusqlite::Error::FromSqlConversionFailure`, which
+    /// re-maps to [`MemoryError::Database`] via its `#[from]`. So the helper's
+    /// `Internal` never reaches a read-path caller as the top-level variant.
+    ///
+    /// What #366 actually demanded — *do not surface [`MemoryError::NotFound`] for
+    /// a corrupt enum* — is met end-to-end: the surfaced variant is `Database` (a
+    /// data error, the correct class for corrupt stored data), distinct from
+    /// `NotFound`, with `Internal("corrupt stored event_type: …")` preserved as the
+    /// boxed source. Unlike `facts`, the `events.event_type` column has **no** CHECK
+    /// constraint, so this corruption is reachable through a plain UPDATE.
+    #[test]
+    fn corrupt_event_type_read_path_surfaces_database_not_notfound() {
+        let conn = setup();
+        let registry = UpcasterRegistry::new();
+        let store = EventStore::new(&conn, &registry);
+        let id = store.insert(&make_event("p", None)).unwrap();
+        conn.execute(
+            "UPDATE events SET event_type = 'bogus' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+
+        let err = store.get(id).unwrap_err();
+        // The user-visible top-level variant is Database (the helper's Internal is
+        // boxed by FromSqlConversionFailure and re-mapped via `#[from]`).
+        assert!(
+            matches!(err, MemoryError::Database(_)),
+            "read-path corrupt event_type must surface Database, got {err:?}"
+        );
+        // #366's actual harm — surfacing NotFound for a corrupt enum — is gone.
+        assert!(
+            !matches!(err, MemoryError::NotFound(_)),
+            "a corrupt stored event_type must never read back as NotFound (#366), got {err:?}"
+        );
+        // The diagnostic helper message survives as the boxed source.
+        assert!(
+            err.to_string().contains("corrupt stored event_type"),
+            "the diagnostic message must be preserved through the box, got {err}"
+        );
+    }
+
+    #[test]
+    fn str_to_event_type_rejects_unknown_as_internal() {
+        // An `event_type` string read back from the DB that names no known
+        // variant is a data-integrity failure (the store wrote it via
+        // `event_type_to_str`, so a value that does not parse means the row is
+        // corrupt) — NOT a missing-row condition. It must map to
+        // `MemoryError::Internal`, never `MemoryError::NotFound` (#366).
+        let err = str_to_event_type("Bogus").unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+        // The message stays greppable: it carries the offending token verbatim.
+        assert!(
+            err.to_string().contains("Bogus"),
+            "message must include the offending string, got {err}"
+        );
+        assert!(
+            !matches!(err, MemoryError::NotFound(_)),
+            "an unparseable stored enum is not a NotFound condition"
+        );
     }
 
     #[test]
