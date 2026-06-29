@@ -369,6 +369,15 @@ pub trait FactGraph: Send + Sync {
     /// the write, which would duplicate the fact). Every *other* `Err` variant preserves
     /// the byte-identical guarantee (nothing was written).
     ///
+    /// **Re-validation (TOCTOU, #335):** the arbiter `decision` was made
+    /// engine-side from an `old_id` read *before* this call opened its
+    /// transaction. Implementations MUST re-validate that `old_id` is still active
+    /// *inside* the transaction and return `MemoryError::NotFound` if it was
+    /// expired concurrently in that window — an `Add` must not create a
+    /// `supplements` edge pointing at an already-expired fact. (The `Update` and
+    /// `Delete` arms re-validate implicitly via their `WHERE t_expired IS NULL`
+    /// expiry, which changes zero rows on an already-expired fact.)
+    ///
     /// # Returns
     ///
     /// `(new_fact_id, edge_id)` — both `Some` for `Add`/`Update`, both `None` for

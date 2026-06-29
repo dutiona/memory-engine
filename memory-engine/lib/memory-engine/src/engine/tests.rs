@@ -1153,6 +1153,45 @@ async fn resolve_conflict_double_delete_on_expired_returns_not_found() {
     );
 }
 
+/// #335 (TOCTOU): the arbiter decides on the `old_fact` read *before* the atomic
+/// write opens its transaction. If `old_id` is expired concurrently in that
+/// window, an `Add` decision would otherwise create a `supplements` edge against
+/// a now-expired fact. The in-transaction re-validation must reject it instead.
+/// (`get_fact` returns expired rows, so the candidate still reaches the arbiter;
+/// the guard fires inside `resolve_conflict_atomic`.)
+#[tokio::test]
+async fn resolve_conflict_add_on_expired_old_fact_returns_not_found() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let old_id = insert_raw_fact(&engine, &make_new_fact("original", vec![0.5; DIM])).await;
+
+    // Expire old_id — stands in for a concurrent Delete landing before our Add's write.
+    engine
+        .resolve_conflict(
+            &FixedArbiter {
+                decision: CrudDecision::Delete,
+            },
+            old_id,
+            &make_new_fact("concurrent expiry", vec![0.5; DIM]),
+        )
+        .await
+        .unwrap();
+
+    // Add against the now-expired old_id must be rejected by the in-tx re-validation.
+    let result = engine
+        .resolve_conflict(
+            &FixedArbiter {
+                decision: CrudDecision::Add,
+            },
+            old_id,
+            &make_new_fact("supplement", vec![0.5; DIM]),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(MemoryError::NotFound(_))),
+        "Add against an expired old_id must be rejected (TOCTOU #335), got {result:?}"
+    );
+}
+
 // --- #435: Delete cascade removes DB edges and in-memory graph edge ---
 
 #[tokio::test]
