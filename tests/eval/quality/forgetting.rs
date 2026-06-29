@@ -5,10 +5,12 @@
 
 use std::collections::HashMap;
 
+use chrono::Utc;
 use memory_engine::ForgetPolicy;
-use memory_engine::types::{AddFactOptions, FactType};
+use memory_engine::traits::EmbeddingProvider;
+use memory_engine::types::{AddFactOptions, AddFactRequest, EventType, FactType, NewEvent};
 
-use crate::helpers::{add_fact_with_opts, days_ago, eval_engine};
+use crate::helpers::{TestEmbedder, add_fact_with_opts, days_ago, eval_engine};
 
 #[tokio::test]
 async fn ebbinghaus_decay_ordering_old_before_young() {
@@ -261,5 +263,143 @@ async fn pin_immunity_survives_aggressive_forget() {
     assert!(
         unpinned.t_expired.is_some(),
         "unpinned fact with low importance should be expired under aggressive policy"
+    );
+}
+
+/// #312: end-to-end exercise of the `graph_degree_weight` survival signal.
+///
+/// Two Episodic facts with EQUAL `base_importance`, EQUAL age, and EQUAL access
+/// count differ only in graph connectivity: one is the hub of a co-session clique
+/// (high degree), the other is isolated (degree 0). Under a threshold tuned between
+/// their scores, the graph-degree term is the sole differentiator — the connected
+/// fact must survive while the isolated one is pruned.
+///
+/// Every prior forgetting test runs with an empty graph (every fact's degree is 0,
+/// so the 3rd of 4 scoring signals never moves the needle); this is the gap #312
+/// flagged. The clique is built through the real engine API (`ingest` +
+/// `link_session_facts`), so the in-memory graph the prune walk reads is populated
+/// the same way production populates it.
+#[tokio::test]
+async fn well_connected_fact_survives_prune() {
+    let engine = eval_engine();
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbedder);
+
+    // One session whose facts will be wired into a co-session clique.
+    let session = "sess-hub";
+    let event = NewEvent {
+        timestamp: Utc::now(),
+        event_type: EventType::Interaction,
+        payload: serde_json::json!({"k": "v"}),
+        source: "test".to_string(),
+        session_id: Some(session.to_string()),
+        scope_id: 1,
+        origin_node_id: "node-1".to_string(),
+        sequence_id: 1,
+        created_at: None,
+    };
+    let event_id = engine.ingest(&event).await.expect("ingest event");
+
+    // Shared decay profile: ancient + never accessed, so recency/frequency are
+    // identical for the hub and the isolated fact and cannot mask the degree term.
+    let aged = || AddFactOptions {
+        base_importance: Some(0.3),
+        t_created: Some(days_ago(100)),
+        last_accessed: Some(days_ago(100)),
+        ..Default::default()
+    };
+
+    // Hub: Episodic (so it CAN decay), linked to the session event so
+    // `link_session_facts` connects it.
+    let hub_id = engine
+        .add_fact(
+            &AddFactRequest {
+                content: "Hub fact connected to many others in its session".to_string(),
+                fact_type: FactType::Episodic,
+                source_event_id: Some(event_id),
+                scope: None,
+                opts: Some(aged()),
+            },
+            embedder.clone(),
+            None,
+        )
+        .await
+        .expect("add hub");
+
+    // Two Semantic neighbours (decay-exempt → they survive, keeping the hub's
+    // degree stable through the prune) sharing the same session as the hub.
+    for i in 0..2 {
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: format!("Neighbour {i} sharing the hub's session"),
+                    fact_type: FactType::Semantic,
+                    source_event_id: Some(event_id),
+                    scope: None,
+                    opts: Some(AddFactOptions {
+                        base_importance: Some(0.9),
+                        ..Default::default()
+                    }),
+                },
+                embedder.clone(),
+                None,
+            )
+            .await
+            .expect("add neighbour");
+    }
+
+    // Isolated fact: same type/importance/age as the hub, but NOT linked to any
+    // session — it never gains a co-session edge, so its degree stays 0.
+    let isolated_id = add_fact_with_opts(
+        &engine,
+        "Isolated fact with no graph connections at all",
+        FactType::Episodic,
+        None,
+        aged(),
+    )
+    .await;
+
+    // Build the co-session clique. Hub + 2 neighbours → the hub gains 4 directed
+    // edges (in+out to each neighbour); the isolated fact gains none.
+    let created = engine
+        .link_session_facts(session, None)
+        .await
+        .expect("link session facts");
+    assert!(created > 0, "co-session edges must have been created");
+
+    // Sanity: the degree signal is actually non-trivial for the hub and zero for
+    // the isolated fact — otherwise the test would pass for the wrong reason.
+    assert!(
+        engine.graph_degree(hub_id) >= 2,
+        "hub must be well-connected, got degree {}",
+        engine.graph_degree(hub_id)
+    );
+    assert_eq!(
+        engine.graph_degree(isolated_id),
+        0,
+        "isolated fact must have no edges"
+    );
+
+    // Computed scores (default weights recency=0.3, freq=0.2, graph=0.3, base=0.2):
+    //   isolated (deg 0): 0.3·2^(-100/69) + 0 + 0          + 0.2·0.3 ≈ 0.170
+    //   hub      (deg 4): 0.3·2^(-100/69) + 0 + 0.3·0.409  + 0.2·0.3 ≈ 0.293
+    // A threshold strictly between them isolates the graph-degree term as the
+    // decisive survival signal.
+    let policy = ForgetPolicy {
+        min_importance: 0.23,
+        ..ForgetPolicy::default()
+    };
+    let _stats = engine.forget(&policy).await.expect("forget failed");
+
+    let hub = engine.get_fact(hub_id).await.expect("get hub");
+    let isolated = engine.get_fact(isolated_id).await.expect("get isolated");
+
+    assert!(
+        isolated.t_expired.is_some(),
+        "the isolated fact (degree 0) must be pruned under the threshold"
+    );
+    assert!(
+        hub.t_expired.is_none(),
+        "the well-connected fact must survive — its graph-degree signal lifts it \
+         above the threshold despite equal base importance, age, and access"
     );
 }
