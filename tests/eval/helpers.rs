@@ -4,6 +4,8 @@
 //! (e.g., `ann_recall_test.rs` uses intentionally different embedder variants).
 
 use chrono::{DateTime, Duration, Utc};
+use memory_engine::EmbeddingFingerprint;
+use memory_engine::ForgetPolicy;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::traits::{
@@ -11,8 +13,6 @@ use memory_engine::traits::{
     SummaryGenerator,
 };
 use memory_engine::types::{AddFactOptions, AddFactRequest, ClassifierInput, Fact, FactType};
-use memory_engine::EmbeddingFingerprint;
-use memory_engine::ForgetPolicy;
 
 use crate::corpus::CorpusDefinition;
 

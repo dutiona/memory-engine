@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 
-use memory_engine::types::{AddFactOptions, FactType};
 use memory_engine::ForgetPolicy;
+use memory_engine::types::{AddFactOptions, FactType};
 
 use crate::helpers::{add_fact_with_opts, days_ago, eval_engine};
 

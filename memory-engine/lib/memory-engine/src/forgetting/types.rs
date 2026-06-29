@@ -33,6 +33,10 @@ pub struct PruneStats {
 /// the normalization constants (`ln(101)` for frequency, `ln(51)` for graph
 /// degree); keep this doc in sync with it.
 ///
+/// The displayed recency term `2^(-age/half_life)` is the general (non-exempt)
+/// case: for decay-exempt fact types (see [`decay_exempt_types`](Self::decay_exempt_types) /
+/// [`is_decay_exempt`](Self::is_decay_exempt)) the recency signal is pinned to `1.0`.
+///
 /// Facts with computed importance below `min_importance` get soft-deleted (`t_expired` set).
 #[derive(Debug, Clone)]
 pub struct ForgetPolicy {
