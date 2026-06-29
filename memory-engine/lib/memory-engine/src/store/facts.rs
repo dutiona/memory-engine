@@ -871,15 +871,19 @@ impl<'a> FactStore<'a> {
     /// `update_importance_score` calls (one prepared-statement exec + one
     /// B-tree write each) into one `json_each`-driven UPDATE, regardless of
     /// corpus size. Behaviorally identical to the loop: only the ids present in
-    /// `scores` are touched — rows outside the payload are left untouched. The
-    /// `WHERE id IN (...)` guard restricts the UPDATE to the scored ids; without
-    /// it the correlated subquery yields NULL for every unmatched row, which the
-    /// `importance_score REAL NOT NULL` column rejects (the whole statement errors
-    /// and rolls back).
+    /// `scores` are touched — rows outside the payload are left untouched. This
+    /// is an `UPDATE ... FROM json_each(?1)` join (`SQLite` 3.33+): the payload is
+    /// parsed exactly once and index-joined to `facts` on
+    /// `facts.id = CAST(s.key AS INTEGER)`, so the cost is O(N) in the batch
+    /// size — no per-row re-scan of the JSON. The join condition *is* the
+    /// restriction: a fact with no matching `json_each` row is simply not joined,
+    /// hence not updated (no NULL is ever produced for the `NOT NULL`
+    /// `importance_score` column).
     ///
     /// `scores` is serialized as a JSON object mapping the id (as a string key,
-    /// which is what `json_each.key` yields) to its score; the `IN`-subquery
-    /// casts the TEXT key back to INTEGER so i64 ids round-trip correctly.
+    /// which is what `json_each.key` yields) to its score; the join casts the
+    /// TEXT key back to INTEGER (`CAST(s.key AS INTEGER)`) so i64 ids round-trip
+    /// correctly.
     ///
     /// Every score is validated finite *before* any SQL runs: `serde_json` maps a
     /// non-finite `f64` (`NaN` / `±Infinity`) to JSON `null`, which `json_each`
@@ -925,10 +929,9 @@ impl<'a> FactStore<'a> {
         let payload = serde_json::to_string(&serde_json::Value::Object(map))?;
         self.conn.execute(
             "UPDATE facts \
-             SET importance_score = ( \
-                 SELECT value FROM json_each(?1) WHERE key = CAST(facts.id AS TEXT) \
-             ) \
-             WHERE id IN (SELECT CAST(key AS INTEGER) FROM json_each(?1))",
+             SET importance_score = s.value \
+             FROM json_each(?1) AS s \
+             WHERE facts.id = CAST(s.key AS INTEGER)",
             params![payload],
         )?;
         Ok(())
@@ -2440,16 +2443,16 @@ mod tests {
         }
     }
 
-    /// #392: the bulk `importance_score` materialization (one `json_each`
-    /// UPDATE) must be byte-for-byte equivalent to the old per-row loop:
+    /// #392: the bulk `importance_score` materialization (one
+    /// `UPDATE ... FROM json_each` join) must be behavior-equivalent to the old
+    /// per-row loop:
     /// (a) it sets exactly the scored subset,
-    /// (b) it leaves an UNSCORED row untouched (the `WHERE id IN (...)` guard
-    ///     restricts the UPDATE to scored ids; without it the correlated subquery
-    ///     yields NULL for unmatched rows, which the `NOT NULL` column rejects —
-    ///     the whole statement would error and roll back),
+    /// (b) it leaves an UNSCORED row untouched (the FROM-join condition
+    ///     `facts.id = CAST(s.key AS INTEGER)` is the restriction: a fact with no
+    ///     matching `json_each` row is not joined, hence not updated — no NULL is
+    ///     ever produced for the `NOT NULL` column),
     /// (c) i64 ids round-trip the `json_each` TEXT key cast (a large id catches
-    ///     a TEXT/INTEGER mismatch in the `CAST(... AS TEXT)` / `CAST(key AS
-    ///     INTEGER)` pairing), and
+    ///     a TEXT/INTEGER mismatch in the `CAST(s.key AS INTEGER)` join key), and
     /// (d) an empty slice is a no-op.
     #[test]
     fn update_importance_scores_bulk_sets_subset_and_round_trips_ids() {
