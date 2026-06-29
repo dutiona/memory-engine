@@ -319,7 +319,18 @@ impl<'a> EdgeStore<'a> {
     /// moved to a `.pak` file. Edges where only one endpoint is archived are
     /// left intact (they may reference facts still in the live DB).
     ///
+    /// The id set is bound as a single serialized JSON array param and parsed
+    /// via `json_each(?1)`, so the bound-variable count is O(1) regardless of
+    /// `fact_ids.len()` — `SQLite`'s max-parameter limit is never hit even for
+    /// large archive sets (mirrors [`Self::list_internal_by_facts`] and the
+    /// `json_each` idiom used throughout [`crate::store::facts`]).
+    ///
     /// Returns the number of rows deleted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `fact_ids` cannot be serialized to JSON — infallible in
+    /// practice for `&[i64]`.
     ///
     /// # Errors
     ///
@@ -328,18 +339,57 @@ impl<'a> EdgeStore<'a> {
         if fact_ids.is_empty() {
             return Ok(0);
         }
-        let placeholders: String = fact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "DELETE FROM edges WHERE source_fact_id IN ({placeholders}) AND target_fact_id IN ({placeholders})"
-        );
-        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(fact_ids.len() * 2);
-        for id in fact_ids {
-            params.push(id as &dyn rusqlite::types::ToSql);
+        let ids_json = serde_json::to_string(fact_ids).expect("serialize fact_ids");
+        let deleted = self.conn.execute(
+            "DELETE FROM edges
+             WHERE source_fact_id IN (SELECT value FROM json_each(?1))
+               AND target_fact_id IN (SELECT value FROM json_each(?1))",
+            params![ids_json],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Hard-delete every edge incident to any fact in the given set — i.e. with
+    /// EITHER endpoint (source or target) in `fact_ids`.
+    ///
+    /// Unlike [`Self::hard_delete_by_facts`] (both endpoints internal), this also
+    /// removes *boundary* edges that straddle the set: `archived → survivor` and
+    /// `survivor → archived`. Used by the archive commit (#847): when an archived
+    /// fact is hard-deleted from the live DB, any live edge still referencing it
+    /// would trip the `edges.source_fact_id/target_fact_id REFERENCES facts(id)`
+    /// FK. The archived fact moves to cold storage and the boundary edge is not
+    /// part of the `.pak` (only internal edges are), so the link is genuinely
+    /// dangling and must go with the fact. A soft-expire would leave the row — and
+    /// its FK column — in place, so it would *not* satisfy the FK on fact delete;
+    /// only a hard-delete is referentially safe here.
+    ///
+    /// Returns the number of rows deleted. A no-op for an empty `fact_ids` slice.
+    ///
+    /// The id set is bound as a single serialized JSON array param and parsed
+    /// via `json_each(?1)`, so the bound-variable count is O(1) regardless of
+    /// `fact_ids.len()` — `SQLite`'s max-parameter limit is never hit even for
+    /// large archive sets (mirrors [`Self::list_internal_by_facts`] and the
+    /// `json_each` idiom used throughout [`crate::store::facts`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `fact_ids` cannot be serialized to JSON — infallible in
+    /// practice for `&[i64]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
+    pub fn hard_delete_incident_to_facts(&self, fact_ids: &[i64]) -> Result<usize> {
+        if fact_ids.is_empty() {
+            return Ok(0);
         }
-        for id in fact_ids {
-            params.push(id as &dyn rusqlite::types::ToSql);
-        }
-        let deleted = self.conn.execute(&sql, params.as_slice())?;
+        let ids_json = serde_json::to_string(fact_ids).expect("serialize fact_ids");
+        let deleted = self.conn.execute(
+            "DELETE FROM edges
+             WHERE source_fact_id IN (SELECT value FROM json_each(?1))
+                OR target_fact_id IN (SELECT value FROM json_each(?1))",
+            params![ids_json],
+        )?;
         Ok(deleted)
     }
 }
@@ -650,6 +700,149 @@ mod tests {
 
         let remaining = store.list_all().unwrap();
         assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].relation_type, "external");
+    }
+
+    // --- hard_delete_incident_to_facts tests (#847) ---
+
+    #[test]
+    fn hard_delete_incident_to_facts_removes_internal_and_boundary_edges() {
+        // facts: 1, 2, 3
+        // edges:
+        //   f1→f2 internal (both in set [1,2])
+        //   f1→f3 boundary (source in set, target survives)
+        //   f3→f2 boundary (target in set, source survives)
+        //   (no edge entirely outside the set to leave behind)
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        store.insert(&make_edge(1, 2, "internal")).unwrap();
+        store.insert(&make_edge(1, 3, "boundary_out")).unwrap();
+        store.insert(&make_edge(3, 2, "boundary_in")).unwrap();
+
+        let deleted = store.hard_delete_incident_to_facts(&[1, 2]).unwrap();
+        assert_eq!(
+            deleted, 3,
+            "every edge with at least one endpoint in the set must be deleted"
+        );
+        assert!(
+            store.list_all().unwrap().is_empty(),
+            "no edge incident to an archived fact may survive"
+        );
+    }
+
+    #[test]
+    fn hard_delete_incident_to_facts_leaves_unrelated_edges() {
+        // An edge entirely outside the set (f3↔f3 is invalid; use a self-link-free
+        // pair via a 4th fact). Insert one extra fact so we have a fully-external
+        // edge to assert is preserved.
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata)
+             VALUES ('fact4', 'h4', X'00000000', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
+            [],
+        ).unwrap();
+        let store = EdgeStore::new(&conn);
+
+        store.insert(&make_edge(1, 2, "incident")).unwrap(); // f1 in set
+        store.insert(&make_edge(3, 4, "external")).unwrap(); // neither in set
+
+        let deleted = store.hard_delete_incident_to_facts(&[1]).unwrap();
+        assert_eq!(deleted, 1, "only the edge touching f1 is deleted");
+
+        let remaining = store.list_all().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].relation_type, "external");
+    }
+
+    #[test]
+    fn hard_delete_incident_to_facts_empty_slice_is_noop() {
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+        store.insert(&make_edge(1, 2, "a")).unwrap();
+
+        let deleted = store.hard_delete_incident_to_facts(&[]).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(store.list_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hard_delete_incident_to_facts_handles_large_id_set_without_param_limit() {
+        // Regression for the gemini param-limit finding (#847 thread on edges.rs).
+        //
+        // The prior positional binding emitted one `?` per id, per IN clause —
+        // 2N bound variables for the OR-two-clause shape. SQLite caps bound
+        // variables at the compiled `SQLITE_MAX_VARIABLE_NUMBER` (32766 in the
+        // bundled build, empirically verified); an id set at or above that cap
+        // would have failed at prepare time with "too many SQL variables".
+        //
+        // We use an id set LARGER than the cap (`LARGE_N` > 32766) so the old
+        // binding would have overflowed even on a SINGLE IN clause — and doubly
+        // so at 2N — whereas the `json_each(?1)` rewrite binds exactly ONE param
+        // regardless of N, so the call must succeed.
+        //
+        // Non-vacuous: we insert real facts + edges so the delete actually
+        // removes rows (the asserted `deleted` count is positive), and pad the
+        // id slice past the cap to force the param-limit condition the old
+        // binding hit.
+        const LARGE_N: i64 = 35_000; // > 32766 → trips even a single old IN clause
+        let conn = setup();
+        let store = EdgeStore::new(&conn);
+
+        // Insert enough real facts (beyond the 3 seeded by `setup`) to attach
+        // edges to, then build incident edges whose source is in the archive set.
+        let real_facts: i64 = 50;
+        for i in 0..real_facts {
+            conn.execute(
+                "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata)
+                 VALUES (?1, ?2, X'00000000', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
+                params![format!("bulk{i}"), format!("bh{i}")],
+            )
+            .unwrap();
+        }
+        // Live id range starts after the 3 seed facts (ids 1..=3).
+        let first_bulk: i64 = 4;
+        let last_bulk: i64 = 3 + real_facts;
+
+        // Chain edges from `first_bulk` to each later bulk fact — every one is
+        // incident to `first_bulk`, which we include in the (large) id set.
+        let mut expected_deleted = 0usize;
+        for id in first_bulk..last_bulk {
+            store
+                .insert(&make_edge(first_bulk, id + 1, "incident"))
+                .unwrap();
+            expected_deleted += 1;
+        }
+        assert!(
+            expected_deleted > 0,
+            "test must delete real rows to be non-vacuous"
+        );
+        // An edge entirely outside the set must survive (proves we delete by the
+        // set, not everything).
+        store.insert(&make_edge(2, 3, "external")).unwrap();
+
+        // Build a LARGE id set: the one id that actually matches (`first_bulk`)
+        // plus padding ids that match nothing, to exceed the parameter cap.
+        let mut ids: Vec<i64> = vec![first_bulk];
+        // High, non-existent ids — far past any real row — purely to inflate N.
+        ids.extend(1_000_000..1_000_000 + (LARGE_N - 1));
+        assert!(
+            ids.len() > 32_766,
+            "id set must exceed SQLite's bound-variable cap to be a real regression"
+        );
+
+        // Under the old positional binding this would error with
+        // "too many SQL variables"; with json_each it succeeds.
+        let deleted = store
+            .hard_delete_incident_to_facts(&ids)
+            .expect("large id set must not trip the bound-variable limit");
+        assert_eq!(
+            deleted, expected_deleted,
+            "every edge incident to first_bulk must be deleted"
+        );
+
+        let remaining = store.list_all().unwrap();
+        assert_eq!(remaining.len(), 1, "only the fully-external edge survives");
         assert_eq!(remaining[0].relation_type, "external");
     }
 }
