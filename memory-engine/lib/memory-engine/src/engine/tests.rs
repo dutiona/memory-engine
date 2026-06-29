@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph::MemoryGraph;
 use crate::resume::context::ResumeConfig;
 use crate::search::hybrid::{SearchMode, SearchQuery};
 use crate::search::query::MemoryQuery;
@@ -8,7 +9,7 @@ use crate::traits::{
 };
 use crate::types::{
     AddFactOptions, AddFactRequest, ClassifierInput, EmbeddingFingerprint, EventType, Fact,
-    FactType, NewEvent, NewFact,
+    FactType, NewEdge, NewEvent, NewFact,
 };
 
 const DIM: usize = 4;
@@ -102,6 +103,30 @@ struct FixedArbiter {
 impl ConflictArbiter for FixedArbiter {
     fn arbitrate(&self, _: &Fact, _: &Fact) -> Result<CrudDecision> {
         Ok(self.decision)
+    }
+}
+
+/// Captures the `new_fact` argument passed to `arbitrate` so tests can inspect
+/// which synthetic `Fact` the engine hands to the arbiter.  Uses a `Mutex` so
+/// that `CapturingArbiter` is `Send + Sync` (required by the trait bound) while
+/// still being mutated via `&self`.
+struct CapturingArbiter {
+    captured: std::sync::Mutex<Option<Fact>>,
+}
+impl CapturingArbiter {
+    fn new() -> Self {
+        Self {
+            captured: std::sync::Mutex::new(None),
+        }
+    }
+    fn take(&self) -> Option<Fact> {
+        self.captured.lock().unwrap().take()
+    }
+}
+impl ConflictArbiter for CapturingArbiter {
+    fn arbitrate(&self, _old: &Fact, new_fact: &Fact) -> Result<CrudDecision> {
+        *self.captured.lock().unwrap() = Some(new_fact.clone());
+        Ok(CrudDecision::Noop)
     }
 }
 
@@ -1038,6 +1063,239 @@ async fn resolve_conflict_noop_no_changes() {
     // Old fact unchanged
     let old = engine.get_fact(old_id).await.unwrap();
     assert!(old.t_expired.is_none());
+}
+
+// --- #434: NotFound for nonexistent old_id ---
+
+#[tokio::test]
+async fn resolve_conflict_nonexistent_fact_returns_not_found() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let arbiter = FixedArbiter {
+        decision: CrudDecision::Update,
+    };
+    let result = engine
+        .resolve_conflict(
+            &arbiter,
+            999_999,
+            &make_new_fact("irrelevant", vec![0.5; DIM]),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(MemoryError::NotFound(_))),
+        "expected NotFound, got {result:?}"
+    );
+}
+
+// --- #435: Delete cascade removes DB edges and in-memory graph edge ---
+
+#[tokio::test]
+async fn resolve_conflict_delete_cascades_edges() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+
+    let fact_a = insert_raw_fact(&engine, &make_new_fact("fact a", vec![0.5; DIM])).await;
+    let fact_b = insert_raw_fact(&engine, &make_new_fact("fact b", vec![0.5; DIM])).await;
+
+    // Insert an active edge between A and B, then sync the in-memory graph.
+    engine
+        .storage()
+        .insert_edge(&NewEdge {
+            source_fact_id: fact_a,
+            target_fact_id: fact_b,
+            relation_type: "related".into(),
+            weight: 1.0,
+            t_created: chrono::Utc::now(),
+            t_expired: None,
+            scope_id: 1,
+        })
+        .await
+        .unwrap();
+    {
+        let active_edges = engine.storage().list_active_edges().await.unwrap();
+        *engine.graph.write() = MemoryGraph::from_active_edges(&active_edges);
+    }
+    assert_eq!(
+        engine.graph_stats().1,
+        1,
+        "pre-condition: one edge before delete"
+    );
+
+    // Delete fact A via conflict resolution.
+    let arbiter = FixedArbiter {
+        decision: CrudDecision::Delete,
+    };
+    let result = engine
+        .resolve_conflict(&arbiter, fact_a, &make_new_fact("gone", vec![0.5; DIM]))
+        .await
+        .unwrap();
+    assert_eq!(result.decision, CrudDecision::Delete);
+
+    // (a) Fact A is expired.
+    let fact = engine.get_fact(fact_a).await.unwrap();
+    assert!(
+        fact.t_expired.is_some(),
+        "fact A must be expired after Delete"
+    );
+
+    // (b) The in-memory graph edge involving A is removed.
+    assert_eq!(
+        engine.graph_stats().1,
+        0,
+        "in-memory graph edge count must drop to 0 after Delete cascade"
+    );
+    assert!(
+        engine.graph_neighbors(fact_a).is_empty(),
+        "fact A must have no in-memory graph neighbors after Delete"
+    );
+
+    // (c) DB side: the cascade expired the A→B edge (independently of the
+    // in-memory mirror above). Asserting this proves `expire_by_fact` actually
+    // committed — a bug that cleared only the in-memory graph would pass (b) but
+    // fail here, which is exactly the DB/graph divergence #435 guards against.
+    let active = engine.storage().list_active_edges().await.unwrap();
+    assert!(
+        active
+            .iter()
+            .all(|e| e.source_fact_id != fact_a && e.target_fact_id != fact_a),
+        "DB must have no active edge incident to fact A after Delete cascade, got {active:?}"
+    );
+}
+
+// --- #436: Update cascade removes stale edges and adds the new contradicts edge ---
+
+#[tokio::test]
+async fn resolve_conflict_update_cascade_rebuilds_graph() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+
+    let fact_a = insert_raw_fact(&engine, &make_new_fact("original a", vec![0.5; DIM])).await;
+    let fact_b = insert_raw_fact(&engine, &make_new_fact("fact b", vec![0.5; DIM])).await;
+
+    // Pre-existing edge: A → B (some prior relationship).
+    engine
+        .storage()
+        .insert_edge(&NewEdge {
+            source_fact_id: fact_a,
+            target_fact_id: fact_b,
+            relation_type: "related".into(),
+            weight: 1.0,
+            t_created: chrono::Utc::now(),
+            t_expired: None,
+            scope_id: 1,
+        })
+        .await
+        .unwrap();
+    {
+        let active_edges = engine.storage().list_active_edges().await.unwrap();
+        *engine.graph.write() = MemoryGraph::from_active_edges(&active_edges);
+    }
+    assert_eq!(
+        engine.graph_stats().1,
+        1,
+        "pre-condition: one edge before Update"
+    );
+
+    // Update fact A via conflict resolution.
+    let arbiter = FixedArbiter {
+        decision: CrudDecision::Update,
+    };
+    let result = engine
+        .resolve_conflict(
+            &arbiter,
+            fact_a,
+            &make_new_fact("replacement a", vec![0.5; DIM]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.decision, CrudDecision::Update);
+    let new_id = result.new_fact_id.unwrap();
+
+    // The stale A↔B edge is gone; the new "contradicts" edge new_id→A is present.
+    assert_eq!(
+        engine.graph_stats().1,
+        1,
+        "total active edge count must remain exactly 1 (contradicts edge replaces stale edge)"
+    );
+    assert_eq!(
+        engine.graph_neighbors(new_id),
+        vec![fact_a],
+        "new fact must have a contradicts edge pointing to the old fact A"
+    );
+    assert!(
+        engine.graph_neighbors(fact_a).is_empty(),
+        "old fact A must have no outgoing edges after Update cascade"
+    );
+
+    // DB side: the cascade must have expired the stale A→B edge and committed the
+    // new contradicts edge new_id→A. Verifying the DB (not just the in-memory
+    // mirror) is the point of #436 — the two can diverge, so a divergence-free
+    // result requires asserting both. Exactly one active edge must remain.
+    let active = engine.storage().list_active_edges().await.unwrap();
+    assert_eq!(
+        active.len(),
+        1,
+        "exactly one active DB edge (the contradicts edge) must remain after Update cascade, got {active:?}"
+    );
+    assert_eq!(
+        active[0].source_fact_id, new_id,
+        "active edge source must be the new fact"
+    );
+    assert_eq!(
+        active[0].target_fact_id, fact_a,
+        "active edge target must be the old fact A"
+    );
+    assert_eq!(
+        active[0].relation_type, "contradicts",
+        "the surviving edge must be the contradicts edge"
+    );
+}
+
+// --- #438: Capturing arbiter verifies the synthetic Fact the engine passes in ---
+
+#[tokio::test]
+#[allow(
+    clippy::float_cmp,
+    reason = "both comparisons are against exact sentinel/literal constants; \
+              UNSCORED_IMPORTANCE is 0.5 and distinctive_base_importance is 0.9"
+)]
+async fn resolve_conflict_arbiter_sees_synthetic_importance() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let old_id = insert_raw_fact(&engine, &make_new_fact("existing", vec![0.5; DIM])).await;
+
+    // Build a NewFact with a distinctive base_importance to confirm the arbiter
+    // sees it, and confirm that importance_score is the UNSCORED_IMPORTANCE sentinel.
+    let distinctive_base_importance = 0.9_f64;
+    let new_fact = NewFact::builder("candidate", vec![0.5; DIM], FactType::Semantic)
+        .base_importance(distinctive_base_importance)
+        .build();
+
+    let arbiter = CapturingArbiter::new();
+    let result = engine
+        .resolve_conflict(&arbiter, old_id, &new_fact)
+        .await
+        .unwrap();
+    assert_eq!(result.decision, CrudDecision::Noop);
+
+    let captured = arbiter
+        .take()
+        .expect("arbiter must have captured the new_fact");
+
+    // The synthetic Fact is pre-insert: id is the placeholder 0.
+    assert_eq!(
+        captured.id, 0,
+        "pre-insert synthetic Fact must have id == 0"
+    );
+
+    // importance_score is the UNSCORED_IMPORTANCE sentinel — NOT a real computed score.
+    assert_eq!(
+        captured.importance_score,
+        Fact::UNSCORED_IMPORTANCE,
+        "arbiter must see UNSCORED_IMPORTANCE sentinel, not a derived score"
+    );
+
+    // base_importance is the caller-supplied raw prior — the real value.
+    assert_eq!(
+        captured.base_importance, distinctive_base_importance,
+        "arbiter must see the caller-supplied base_importance, not a default"
+    );
 }
 
 #[tokio::test]
