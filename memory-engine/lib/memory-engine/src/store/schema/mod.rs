@@ -1313,6 +1313,47 @@ CREATE TABLE IF NOT EXISTS config (
     }
 
     #[test]
+    fn list_config_returns_all_set_pairs() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        // Two keys with deliberately asymmetric values so a key/value tuple
+        // swap (k1 paired with v2, etc.) would be caught by the assertions.
+        set_config(&conn, "alpha_key", "value_for_alpha").unwrap();
+        set_config(&conn, "beta_key", "value_for_beta").unwrap();
+
+        let map = list_config(&conn).unwrap();
+
+        // Both inserted pairs must be present and correctly paired.
+        assert_eq!(
+            map.get("alpha_key").map(String::as_str),
+            Some("value_for_alpha"),
+            "alpha_key must round-trip through list_config with its own value"
+        );
+        assert_eq!(
+            map.get("beta_key").map(String::as_str),
+            Some("value_for_beta"),
+            "beta_key must round-trip through list_config with its own value"
+        );
+
+        // list_config reflects writes through set_config (upsert), not stale rows.
+        set_config(&conn, "alpha_key", "updated_alpha").unwrap();
+        let map = list_config(&conn).unwrap();
+        assert_eq!(
+            map.get("alpha_key").map(String::as_str),
+            Some("updated_alpha"),
+            "list_config must reflect the upserted value, not the original"
+        );
+
+        // init_schema seeds schema_version; list_config must surface it too,
+        // since this is exactly how tooling inspects the schema version.
+        assert!(
+            map.contains_key("schema_version"),
+            "list_config must include the seeded schema_version config row"
+        );
+    }
+
+    #[test]
     fn all_nine_indexes_created() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
