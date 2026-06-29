@@ -52,7 +52,7 @@ impl FromStr for FactType {
     /// casing so it accepts both wire conventions present in the codebase:
     /// `Display` emits `snake_case` (`"episodic"`), while serde-derive and the MCP
     /// JSON-schema enums use `PascalCase` (`"Episodic"`). Parsing reconciles both
-    /// to one canonical enum; [`FactType::to_string`] remains the canonical output.
+    /// to one canonical enum; [`ToString::to_string`] remains the canonical output.
     ///
     /// Note: this is orthogonal to the serde `Deserialize` derive, which stays
     /// `PascalCase` to preserve `.pak` cold-storage archive back-compat.
