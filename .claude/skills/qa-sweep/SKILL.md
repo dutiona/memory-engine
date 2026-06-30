@@ -24,10 +24,12 @@ a local pass that diverges (weaker features, narrower scope, piped output) is a 
 ```bash
 cargo fmt --all --check                                                # Format
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
-cargo build --workspace --all-features                                 # Build (CI also builds default features)
+cargo build --workspace                                                # Build (default features)
+cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
-  cargo doc --no-deps -p memory-engine --all-features                  # Docs (core crate only; #915 widens to --workspace)
+export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only; #915 widens to --workspace)
+cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain
 ```
 
@@ -45,10 +47,12 @@ name its class, apply the countermeasure.
 
 The gate reported pass while tests were dark or never ran.
 
-- **Piping a cargo gate through `head`/`tail`/`grep`** truncates output (hides RED) _and_ discards
+- **Piping a cargo gate through `head`/`tail`** truncates output (hides RED) _and_ discards
   cargo's exit code (PIPESTATUS reflects the pager, not cargo). `head -N` masked 8 RED insta
   snapshots (#254); a `tail` + `$PIPESTATUS` capture came back empty (#259). → **Run unpiped, or
-  redirect to a file and read the file.** The `cargo-gate-guard.sh` hook blocks this mechanically.
+  redirect to a file and read the file.** The `cargo-gate-guard.sh` hook blocks the `head`/`tail`
+  forms mechanically. `grep` is allowed (it doesn't truncate) but _also_ masks the exit code —
+  check `${PIPESTATUS[0]}` or redirect if you filter a gate through it.
 - **`clippy --all-features` compiles tests but does not run them** — a clippy-green diff can have RED
   tests (#255).
 - **`cargo build` green ≠ tests green** for file moves / `include_str!` / `[[test]]` registration —

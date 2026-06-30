@@ -23,10 +23,12 @@ These are the **exact** commands CI runs (`.github/workflows/ci.yml`). A local p
 ```bash
 cargo fmt --all --check                                                # Format
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
-cargo build --workspace --all-features                                 # Build
+cargo build --workspace                                                # Build (default features)
+cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test — --all-features is mandatory, or ann/archive/eval tests never run
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
-  cargo doc --no-deps -p memory-engine --all-features                  # Docs — broken/private intra-doc links (core crate only)
+export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only)
+cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
@@ -36,7 +38,7 @@ Run all of them after every change. Do not skip any, and do not substitute a wea
 
 **Verification traps** (each cost a real rework cycle):
 
-1. **Never pipe a cargo gate through `head`/`tail`/`grep`** — truncation hides RED results and the pipe drops cargo's exit code → false green. Run unpiped or redirect to a file.
+1. **Never pipe a cargo gate through `head`/`tail`** — truncation hides RED results and the pipe drops cargo's exit code → false green. Run unpiped or redirect to a file. (`grep` doesn't truncate but also masks the exit code — check `${PIPESTATUS[0]}` if you must filter.)
 2. **`clippy --all-features` compiles tests but does not run them** — only `cargo test --all-features` runs them.
 3. **`cargo build` green ≠ tests green** for file moves / `include_str!` / `[[test]]` registration — only `cargo test` catches a dark test target.
 4. **Triage findings against current `main`, not the issue snapshot** — file:lines drift across reorgs; a "magic constant" or "dead" item may be an intentional sentinel or epic-foundation (`git log -S` + check the roadmap before changing it).

@@ -25,16 +25,18 @@ cargo doc --no-deps --open            # API reference
 ```bash
 cargo fmt --all --check                                                # Format
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
-cargo build --workspace --all-features                                 # Build
+cargo build --workspace                                                # Build (default features)
+cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test — --all-features is mandatory, or ann/archive/eval tests never run
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
-  cargo doc --no-deps -p memory-engine --all-features                  # Docs — broken/private intra-doc links (core crate only)
+export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only)
+cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
 The workspace contains **4 crates**: `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. Changes to `error.rs`, `types/`, `traits.rs`, or any public API in the core crate can silently break the CLI, MCP, and embed crates if only the root crate is checked. Always use `--workspace`.
 
-**Verification traps** — never pipe a cargo gate through `head`/`tail`/`grep` (truncation + dropped exit code → false green); `clippy --all-features` compiles tests but does not run them; `cargo build` green ≠ tests green for file moves / dark `[[test]]` targets; triage findings against current `main`, not the issue snapshot (a "magic constant" may be an intentional sentinel — `git log -S` first).
+**Verification traps** — never pipe a cargo gate through `head`/`tail` (truncation + dropped exit code → false green; `grep` doesn't truncate but also masks the exit code); `clippy --all-features` compiles tests but does not run them; `cargo build` green ≠ tests green for file moves / dark `[[test]]` targets; triage findings against current `main`, not the issue snapshot (a "magic constant" may be an intentional sentinel — `git log -S` first).
 
 Feature flags: `backend-sqlite` (default, in-process SQLite), `backend-postgres` (`PgBackend` skeleton, gated tests), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`, `test-util` (cross-crate test-only hooks). At least one backend feature must be enabled. There is **no** `async` feature — `tokio` is non-optional (#702).
 

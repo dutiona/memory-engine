@@ -37,10 +37,12 @@ Feature flags: `backend-sqlite` (default; the in-process SQLite backend — a #6
 ```bash
 cargo fmt --all --check                                                # Format
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
-cargo build --workspace --all-features                                 # Build (also runs default-feature build in CI)
+cargo build --workspace                                                # Build (default features)
+cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test — NB: --all-features, or ann/archive/eval tests never run
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
-  cargo doc --no-deps -p memory-engine --all-features                  # Docs — broken/private intra-doc links (core crate only; #915 widens to --workspace)
+export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only; #915 widens to --workspace)
+cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
@@ -48,7 +50,7 @@ The workspace contains **4 crates** (`memory-engine` core, `memory-engine-cli`, 
 
 **Verification traps** — each one cost a real super-qa rework cycle; the `qa-sweep` skill holds the full taxonomy:
 
-1. **Never pipe a cargo gate through `head`/`tail`/`grep`.** Truncation hides RED results _and_ the pipe discards cargo's exit code (PIPESTATUS) → false green. Run unpiped, or redirect to a file and read it. (Enforced by the `cargo-gate-guard.sh` hook below.)
+1. **Never pipe a cargo gate through `head`/`tail`.** Truncation hides RED results _and_ the pipe discards cargo's exit code (PIPESTATUS) → false green. Run unpiped, or redirect to a file and read it. (The `cargo-gate-guard.sh` hook below mechanically blocks the `head`/`tail` forms.) `grep` is softer — it doesn't truncate, but it _also_ masks the exit code, so if you must filter, check `${PIPESTATUS[0]}` or redirect first.
 2. **`clippy --all-features` _compiles_ tests; it does not _run_ them** — only `cargo test --all-features` does. A clippy-green diff can still have RED tests.
 3. **`cargo build` green ≠ tests green** for file moves / `include_str!` / `[[test]]` registration — only `cargo test` catches a dropped or dark test target (56 eval tests were dark for weeks this way).
 4. **Proptests pass "lucky" at low case counts** — raise `PROPTEST_CASES` before trusting a property holds.
