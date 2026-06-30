@@ -278,6 +278,33 @@ mod tests {
         assert_eq!(fetched.status, ActivityStatus::Recorded);
     }
 
+    /// #485 regression guard: [`crate::test_utils::setup_memory_db`] MUST enable
+    /// `PRAGMA foreign_keys`. With enforcement OFF (the original bug — raw
+    /// `Connection::open_in_memory`), an activity whose `scope_id` references a
+    /// non-existent scope inserts silently; with it ON, the FK constraint
+    /// (`activities.scope_id REFERENCES scopes(id)`) rejects it. This is the
+    /// mutation-proof check — it fails loudly if the harness ever loses the pragma.
+    #[test]
+    fn insert_with_dangling_scope_fk_is_rejected() {
+        let conn = setup();
+        let store = ActivityStore::new(&conn);
+        let activity = NewActivity {
+            session_id: "sess-fk".into(),
+            tool_name: "Read".into(),
+            args_hash: "ffffffffffffffffffffffffffffffff".into(),
+            args: serde_json::json!({}),
+            result_summary: None,
+            outcome_class: OutcomeClass::Success,
+            timestamp: Utc::now(),
+            scope_id: 999_999, // no such scope → FK violation when enforcement is ON
+        };
+        assert!(
+            store.insert_or_dedup(&activity, 300).is_err(),
+            "activity insert with a dangling scope_id FK must be rejected when \
+             foreign_keys=ON (#485); Ok means the test harness lost the pragma"
+        );
+    }
+
     /// Persist every [`OutcomeClass`] variant through the real `SQLite` `TEXT`
     /// column and read it back, proving the `to_string()` -> column ->
     /// `from_str()` round-trip in [`row_to_activity`] (the entire #347
