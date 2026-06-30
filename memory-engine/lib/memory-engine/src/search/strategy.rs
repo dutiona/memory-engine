@@ -160,7 +160,6 @@ mod tests {
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
     use crate::types::NewFact;
-    use chrono::Utc;
 
     const DIM: usize = 4;
 
@@ -171,23 +170,7 @@ mod tests {
     }
 
     fn make_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-        NewFact {
-            content: content.into(),
-            content_hash: String::new(),
-            embedding,
-            fact_type: FactType::Episodic,
-            t_created: Utc::now(),
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            scope_id: 1,
-            base_importance: 0.5,
-            access_count: 0,
-            last_accessed: Utc::now(),
-            metadata: serde_json::json!({}),
-            is_pinned: false,
-        }
+        crate::test_utils::new_fact(content, embedding)
     }
 
     #[test]

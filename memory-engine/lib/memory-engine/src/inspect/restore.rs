@@ -629,17 +629,6 @@ mod tests {
 
     const DIM: usize = 4;
 
-    struct FakeEmbed;
-    impl EmbeddingProvider for FakeEmbed {
-        fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
-            Ok(vec![0.1, 0.2, 0.3, 0.4])
-        }
-
-        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-            crate::types::EmbeddingFingerprint::new("mock", "test", 4)
-        }
-    }
-
     // --- Compression detection tests ---
 
     #[test]
@@ -794,7 +783,8 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -808,7 +798,8 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -906,7 +897,8 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -949,7 +941,8 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -963,7 +956,8 @@ mod tests {
                     scope: None,
                     opts: None,
                 },
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -1647,7 +1641,8 @@ mod tests {
                         scope: None,
                         opts: None,
                     },
-                    std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                    std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                        as std::sync::Arc<dyn EmbeddingProvider>,
                     None,
                 )
                 .await

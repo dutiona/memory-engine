@@ -206,17 +206,6 @@ mod tests {
 
     const DIM: usize = 4;
 
-    /// Returns a fixed-dimension embedding; `dim` lets a test force a mismatch.
-    struct FixedEmbed(usize);
-    impl EmbeddingProvider for FixedEmbed {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-            Ok(vec![0.1; self.0])
-        }
-        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-            crate::types::EmbeddingFingerprint::new("mock", "test", self.0)
-        }
-    }
-
     /// A proposer that returns a canned set of merge groups, ignoring its inputs.
     struct FakeProposer {
         merges: Vec<MergeGroup>,
@@ -248,7 +237,8 @@ mod tests {
         engine
             .add_fact(
                 &req,
-                std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -291,7 +281,8 @@ mod tests {
         };
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>,
         );
 
         let report = engine.run_dream_cycle(&llm).await.unwrap();
@@ -320,7 +311,8 @@ mod tests {
         };
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>,
         );
 
         let report = engine.run_dream_cycle(&llm).await.unwrap();
@@ -369,7 +361,8 @@ mod tests {
         };
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>,
         );
 
         let report = engine.run_dream_cycle(&llm).await.unwrap();
@@ -389,7 +382,8 @@ mod tests {
         };
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>,
         );
 
         let report = engine.run_dream_cycle(&llm).await.unwrap();
@@ -409,7 +403,8 @@ mod tests {
         let proposer = FakeProposer { merges: vec![] };
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>,
         );
 
         let report = engine.run_dream_cycle(&llm).await.unwrap();
@@ -429,10 +424,10 @@ mod tests {
         let proposer = FakeProposer {
             merges: vec![merge(vec![s1, s2], "merged")],
         };
-        let bad_embedder = FixedEmbed(DIM + 4); // wrong dimension
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(bad_embedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM + 4, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>, // wrong dimension
         );
 
         let report = engine.run_dream_cycle(&llm).await.unwrap(); // run itself can't know engine dim
@@ -451,7 +446,8 @@ mod tests {
         };
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>,
         );
 
         let first = engine.run_dream_cycle(&llm).await.unwrap();
@@ -480,7 +476,8 @@ mod tests {
         };
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>,
         );
 
         let report = engine.run_dream_cycle(&llm).await.unwrap();
@@ -514,7 +511,8 @@ mod tests {
         };
         let llm = LlmDreamCycle::new(
             std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(FixedEmbed(DIM)) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
+                as std::sync::Arc<dyn EmbeddingProvider>,
         );
 
         let report = engine.run_dream_cycle(&llm).await.unwrap();

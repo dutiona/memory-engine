@@ -357,17 +357,7 @@ mod tests {
     }
 
     fn make_event(source: &str, session_id: Option<&str>) -> NewEvent {
-        NewEvent {
-            timestamp: Utc::now(),
-            event_type: EventType::Interaction,
-            payload: serde_json::json!({"key": "value"}),
-            source: source.into(),
-            session_id: session_id.map(Into::into),
-            scope_id: 1,
-            origin_node_id: "local".into(),
-            sequence_id: 0,
-            created_at: None,
-        }
+        crate::test_utils::new_event(source, session_id)
     }
 
     #[test]

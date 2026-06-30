@@ -26,6 +26,9 @@ mod tests {
 
     const DIM: usize = 4;
 
+    // kept: distinct from test_utils::new_event — hardcodes session_id=Some("s1")
+    // (tests at lines 127/159/191/269/342 filter by "s1") and uses a
+    // source-embedding payload {"src": source} rather than the generic {"key":"value"}.
     fn make_event(source: &str) -> NewEvent {
         NewEvent {
             timestamp: Utc::now(),

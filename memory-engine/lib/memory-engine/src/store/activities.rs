@@ -248,13 +248,10 @@ fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::schema::init_schema;
     use chrono::Utc;
 
     fn setup() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        init_schema(&conn).unwrap();
-        conn
+        crate::test_utils::setup_memory_db()
     }
 
     #[test]
@@ -279,6 +276,39 @@ mod tests {
         assert_eq!(fetched.tool_name, "Read");
         assert_eq!(fetched.occurrence_count, 1);
         assert_eq!(fetched.status, ActivityStatus::Recorded);
+    }
+
+    /// #485 regression guard: [`crate::test_utils::setup_memory_db`] MUST enable
+    /// `PRAGMA foreign_keys`. With enforcement OFF (the original bug — raw
+    /// `Connection::open_in_memory`), an activity whose `scope_id` references a
+    /// non-existent scope inserts silently; with it ON, the FK constraint
+    /// (`activities.scope_id REFERENCES scopes(id)`) rejects it. This is the
+    /// mutation-proof check — it fails loudly if the harness ever loses the pragma.
+    #[test]
+    fn insert_with_dangling_scope_fk_is_rejected() {
+        let conn = setup();
+        let store = ActivityStore::new(&conn);
+        let activity = NewActivity {
+            session_id: "sess-fk".into(),
+            tool_name: "Read".into(),
+            args_hash: "ffffffffffffffffffffffffffffffff".into(),
+            args: serde_json::json!({}),
+            result_summary: None,
+            outcome_class: OutcomeClass::Success,
+            timestamp: Utc::now(),
+            scope_id: 999_999, // no such scope → FK violation when enforcement is ON
+        };
+        let err = store
+            .insert_or_dedup(&activity, 300)
+            .expect_err("dangling scope_id FK must be rejected when foreign_keys=ON (#485)");
+        // Assert the rejection is the FK constraint *specifically* — not an
+        // incidental NOT NULL / UNIQUE / CHECK / JSON error. A bare `is_err()`
+        // would pass for the wrong reason if a future schema change made the
+        // insert fail some other way, silently masking a lost FK pragma.
+        assert!(
+            err.to_string().to_lowercase().contains("foreign key"),
+            "expected a FOREIGN KEY violation (proof the pragma is ON); got: {err}"
+        );
     }
 
     /// Persist every [`OutcomeClass`] variant through the real `SQLite` `TEXT`

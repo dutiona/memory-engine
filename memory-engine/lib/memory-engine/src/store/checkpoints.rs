@@ -125,13 +125,10 @@ fn row_to_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionCheckpo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::schema::init_schema;
     use chrono::Utc;
 
     fn setup() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        init_schema(&conn).unwrap();
-        conn
+        crate::test_utils::setup_memory_db()
     }
 
     #[test]

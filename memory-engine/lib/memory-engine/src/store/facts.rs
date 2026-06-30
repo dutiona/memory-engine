@@ -1531,23 +1531,7 @@ mod tests {
     }
 
     fn make_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-        NewFact {
-            content: content.into(),
-            content_hash: String::new(), // store computes this
-            embedding,
-            fact_type: FactType::Episodic,
-            t_created: Utc::now(),
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            base_importance: 0.5,
-            access_count: 0,
-            last_accessed: Utc::now(),
-            metadata: serde_json::json!({}),
-            scope_id: 1,
-            is_pinned: false,
-        }
+        crate::test_utils::new_fact(content, embedding)
     }
 
     /// #366 end-to-end (read path): corrupt the stored `fact_type` of a real row,

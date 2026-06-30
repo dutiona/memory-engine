@@ -98,21 +98,10 @@ mod tests {
         }
     }
 
-    /// Minimal embedder for testing — returns a fixed-dimension vector.
-    struct FixedEmbedder;
-    impl crate::traits::EmbeddingProvider for FixedEmbedder {
-        fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
-            Ok(vec![0.1, 0.2, 0.3, 0.4])
-        }
-
-        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-            crate::types::EmbeddingFingerprint::new("mock", "test", 4)
-        }
-    }
-
     async fn engine_with_facts() -> MemoryEngine {
         let engine = MemoryEngine::builder(4).build().unwrap();
-        let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(FixedEmbedder);
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4());
 
         // Insert wisdom fact (id=1)
         engine
