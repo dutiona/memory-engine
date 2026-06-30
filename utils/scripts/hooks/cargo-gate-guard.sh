@@ -55,23 +55,49 @@ fi
 # command into pipeline SEGMENTS on the logical separators `;`, `&&`, `||`, then
 # block only a segment that is BOTH a cargo gate invocation AND pipes into
 # head/tail. This scopes the pipe to its own pipeline and anchors `cargo` to the
-# segment start (after optional `VAR=val` env prefixes), so a quoted literal or a
-# sibling command no longer trips it. grep is intentionally NOT blocked (it does
-# not truncate). Residual, accepted misses: a subshell-wrapped `( cargo test |
-# head )` and an indirected pager like `| stdbuf -oL head`.
+# segment start (after optional `VAR=val` assignments or a bare wrapper like
+# `env`/`command`/`nice`/`time`/`nohup`), so a quoted literal or a sibling command
+# no longer trips it. grep is intentionally NOT blocked (it does not truncate).
+# Residual, accepted misses (it is a heuristic, not a bash parser): a subshell
+# `( cargo test | head )`, an arg-taking wrapper (`timeout 60 cargo … | head`,
+# `stdbuf -oL head`), and full indirection (`sh -c '…' | head`, shell aliases).
+
+# Replace quoted spans with spaces so a separator or pipe INSIDE a quoted argument
+# (e.g. `cargo test --features "a;b" | head`) cannot confuse the split below. Pure
+# bash, no deps; errs toward masking (a false negative is at worst the no-guard
+# baseline). Escaped quotes inside quotes are not tracked — acceptable for a guard.
+mask_quotes() {
+	local s="$1" out="" q="" c i
+	for ((i = 0; i < ${#s}; i++)); do
+		c="${s:i:1}"
+		if [ -z "$q" ]; then
+			case "$c" in '"' | "'") q="$c" out+=" " ;; *) out+="$c" ;; esac
+		elif [ "$c" = "$q" ]; then
+			q="" out+=" "
+		else
+			out+=" "
+		fi
+	done
+	printf '%s' "$out"
+}
 
 # Normalize newlines/tabs to spaces (a newline-separated pipe would dodge a
-# line-oriented grep), then turn logical separators into segment boundaries.
+# line-oriented grep), mask quoted spans, then split on the logical separators.
 norm="${cmd//$'\n'/ }"
 norm="${norm//$'\t'/ }"
+norm="$(mask_quotes "$norm")"
 norm="${norm//';'/$'\n'}"
 norm="${norm//'&&'/$'\n'}"
 norm="${norm//'||'/$'\n'}"
 
-# `([^[:alnum:]_]|$)` is the POSIX-ERE word boundary (`\b` is a GNU/BSD extension,
-# not portable POSIX ERE) — it keeps `build`/`tail` from matching `buildx`/`tailor`.
-GATE_RE='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*cargo[[:space:]]+(\+[^[:space:]]+[[:space:]]+)?(test|clippy|build|doc|nextest)([^[:alnum:]_]|$)'
+# A cargo gate at the segment start: optional `VAR=val` assignments and/or a bare
+# wrapper (env/command/nice/time/nohup), then `cargo [+toolchain] <gate>`. The gate
+# is closed by whitespace, a pipe, or end — `([[:space:]|]|$)`, NOT a general
+# non-alnum boundary, so a hyphenated subcommand like `build-docs`/`doc-open` is
+# NOT mistaken for the `build`/`doc` gate (`\b` is also a non-POSIX GNU extension).
+GATE_RE='^[[:space:]]*((env|command|nice|time|nohup|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*)[[:space:]]+)*cargo[[:space:]]+(\+[^[:space:]]+[[:space:]]+)?(test|clippy|build|doc|nextest)([[:space:]|]|$)'
 # A pipe (`|` or `|&`) into head/tail, allowing a leading path (`/usr/bin/head`).
+# Over-matching here is safe (it only ever blocks more), so the looser boundary stays.
 PIPE_RE='\|&?[[:space:]]*([^[:space:]|]*/)?(head|tail)([^[:alnum:]_]|$)'
 
 while IFS= read -r seg; do
