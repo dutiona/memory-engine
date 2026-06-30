@@ -27,12 +27,11 @@ use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
-use crate::traits::DreamCycle;
+use crate::traits::{CycleCtx, DreamCycle};
 use crate::types::{DreamCycleConfig, Fact, FactId, FactType, PromotionProvenance};
 
-use super::context::CycleContext;
 use super::dbscan::dbscan;
-use super::report::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
+use super::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
 
 /// DBSCAN neighbourhood radius in cosine *distance* (cos similarity ≥ 0.85).
 /// The per-`FactType` `DreamCycleConfig` ratios are retention ratios, NOT distances,
@@ -170,9 +169,9 @@ fn cluster_provenance(cluster: &[FactId], by_id: &HashMap<FactId, &Fact>) -> Pro
 
 #[async_trait::async_trait]
 impl DreamCycle for DefaultDreamCycle {
-    async fn run(&self, ctx: &CycleContext<'_>) -> Result<CycleReport> {
+    async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {
         let window = ctx.time_window();
-        let facts = ctx.dream().list_undreamt_in_period(window).await?;
+        let facts = ctx.list_undreamt_in_period(window).await?;
         let processed_ids: Vec<FactId> = facts.iter().map(|f| f.id).collect();
         let by_id: HashMap<FactId, &Fact> = facts.iter().map(|f| (f.id, f)).collect();
 
@@ -224,7 +223,7 @@ impl DreamCycle for DefaultDreamCycle {
             .map(|f| f.id)
             .filter(|id| !promoted.contains(id))
             .collect();
-        let outcome_counts = ctx.dream().outcome_counts_batch(&outcome_ids).await?;
+        let outcome_counts = ctx.outcome_counts_batch(&outcome_ids).await?;
         for fact in &facts {
             if promoted.contains(&fact.id) {
                 continue;

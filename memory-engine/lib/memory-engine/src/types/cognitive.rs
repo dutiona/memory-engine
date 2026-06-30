@@ -27,7 +27,7 @@ pub struct Insight {
     pub scope: Option<String>,
 }
 
-// `CycleReport` (delta-based, R7) now lives in `crate::engine::cycle::report` and is
+// `CycleReport` (delta-based, R7) now lives in `crate::types::cycle_report` and is
 // re-exported from the crate root. The old counts-based struct was removed in #49.
 
 /// Per-`FactType` compression configuration for `DreamCycle`.

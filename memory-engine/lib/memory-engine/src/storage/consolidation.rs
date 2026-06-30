@@ -112,11 +112,11 @@ pub trait ConsolidationStore: Send + Sync {
     /// - `to_index` — `(fact_id, embedding)` pairs for HNSW `notify_insert`
     async fn apply_cycle_deltas_atomic(
         &self,
-        report: &crate::engine::cycle::CycleReport,
+        report: &crate::types::cycle_report::CycleReport,
         embed_dim: usize,
         upcaster_registry: &crate::store::upcaster::UpcasterRegistry,
     ) -> Result<(
-        crate::engine::cycle::ApplyResult,
+        crate::types::cycle_report::ApplyResult,
         Vec<(i64, i64, i64)>,
         Vec<i64>,
         Vec<(i64, Vec<f32>)>,

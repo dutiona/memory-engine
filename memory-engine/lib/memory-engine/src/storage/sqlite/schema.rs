@@ -125,8 +125,8 @@ impl SchemaManager for SqliteBackend {
     // matching the engine's prior behavior exactly.
     async fn write_engine_snapshot(
         &self,
-        graph: crate::engine::snapshot::GraphSnapshot,
-        scope_tree: crate::engine::snapshot::ScopeTreeSnapshot,
+        graph: crate::types::snapshot::GraphSnapshot,
+        scope_tree: crate::types::snapshot::ScopeTreeSnapshot,
     ) -> Result<bool> {
         use crate::engine::snapshot;
 
@@ -150,15 +150,15 @@ impl SchemaManager for SqliteBackend {
                 .map(|h| h.to_snapshot(conn, embed_dim))
                 .transpose()?;
             #[cfg(not(feature = "ann"))]
-            let hnsw_snap: Option<snapshot::HnswSnapshot> = None;
+            let hnsw_snap: Option<crate::types::snapshot::HnswSnapshot> = None;
 
-            let header = snapshot::SnapshotHeader {
+            let header = crate::types::snapshot::SnapshotHeader {
                 format_version: snapshot::FORMAT_VERSION,
                 fingerprint,
                 embed_dim,
                 engine_version: env!("CARGO_PKG_VERSION").to_string(),
             };
-            let payload = snapshot::SnapshotPayload {
+            let payload = crate::types::snapshot::SnapshotPayload {
                 graph,
                 scope_tree,
                 hnsw: hnsw_snap,

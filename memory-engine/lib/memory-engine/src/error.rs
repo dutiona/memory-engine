@@ -342,7 +342,7 @@ pub enum CycleError {
 
     /// A `Synthesize` delta carried an empty `sources` list. A merge with no sources
     /// is degenerate — it would expire nothing and orphan a summary with empty
-    /// lineage; use [`CycleDelta::AddFact`](crate::engine::cycle::CycleDelta::AddFact)
+    /// lineage; use [`CycleDelta::AddFact`](crate::types::cycle_report::CycleDelta::AddFact)
     /// to insert a standalone fact instead.
     #[error("synthesize delta has no sources (use AddFact for a standalone fact)")]
     SynthesizeNoSources,

@@ -168,24 +168,24 @@ impl ConsolidationStore for SqliteBackend {
     #[allow(clippy::too_many_lines)]
     async fn apply_cycle_deltas_atomic(
         &self,
-        report: &crate::engine::cycle::CycleReport,
+        report: &crate::types::cycle_report::CycleReport,
         embed_dim: usize,
         upcaster_registry: &crate::store::upcaster::UpcasterRegistry,
     ) -> Result<(
-        crate::engine::cycle::ApplyResult,
+        crate::types::cycle_report::ApplyResult,
         Vec<(i64, i64, i64)>,
         Vec<i64>,
         Vec<(i64, Vec<f32>)>,
     )> {
         use chrono::Utc;
 
-        use crate::engine::cycle::{ApplyResult, CycleDelta, IMPORTANCE_STEP};
         use crate::error::{CycleError, MemoryError};
         use crate::store::edges::EdgeStore;
         use crate::store::events::EventStore;
         use crate::store::facts::FactStore;
         use crate::store::lineage::LineageStore;
         use crate::store::schema::{get_config, set_config};
+        use crate::types::cycle_report::{ApplyResult, CycleDelta, IMPORTANCE_STEP};
         use crate::types::{
             EventType, NewEdge, NewEvent, NewLineageRecord, PromotionProvenance, RelationType,
         };
@@ -254,7 +254,7 @@ impl ConsolidationStore for SqliteBackend {
                                 fact_id,
                                 adjustment,
                             } => {
-                                use crate::engine::cycle::MAX_ADJUSTMENT;
+                                use crate::types::cycle_report::MAX_ADJUSTMENT;
                                 if adjustment.abs() > MAX_ADJUSTMENT {
                                     return Err(MemoryError::Cycle(
                                         CycleError::AdjustmentOutOfRange {
@@ -568,7 +568,7 @@ impl ConsolidationStore for SqliteBackend {
 
                 // append_cycle_history verbatim from apply.rs:467-479
                 {
-                    let mut history: Vec<crate::engine::cycle::CycleMetadata> =
+                    let mut history: Vec<crate::types::cycle_report::CycleMetadata> =
                         match get_config(&tx, DREAM_CYCLE_HISTORY)? {
                             Some(s) => serde_json::from_str(&s)?,
                             None => Vec::new(),
@@ -1025,12 +1025,12 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::significant_drop_tightening)]
     async fn apply_cycle_deltas_atomic_rollback_on_mid_tx_error() {
-        use crate::engine::cycle::{
-            CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
-        };
         use crate::storage::graph::FactGraph as _;
         use crate::store::embedding_meta;
         use crate::types::EmbeddingFingerprint;
+        use crate::types::cycle_report::{
+            CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
+        };
 
         let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
         let fp = EmbeddingFingerprint::new("test-model", "tei", DIM);

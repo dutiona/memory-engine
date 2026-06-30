@@ -25,11 +25,10 @@ use chrono::Utc;
 
 use crate::engine::spawn_join_err;
 use crate::error::Result;
-use crate::traits::{DeltaProposer, DreamCycle, EmbeddingProvider};
+use crate::traits::{CycleCtx, DeltaProposer, DreamCycle, EmbeddingProvider};
 use crate::types::{Fact, FactId, FactType, NewFact};
 
-use super::context::CycleContext;
-use super::report::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
+use super::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
 
 /// `method_version` stamped into every report this backend produces.
 const METHOD_VERSION: &str = "llm-proposer-v1";
@@ -90,9 +89,9 @@ impl LlmDreamCycle {
 
 #[async_trait::async_trait]
 impl DreamCycle for LlmDreamCycle {
-    async fn run(&self, ctx: &CycleContext<'_>) -> Result<CycleReport> {
+    async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {
         let window = ctx.time_window();
-        let facts = ctx.dream().list_undreamt_in_period(window).await?;
+        let facts = ctx.list_undreamt_in_period(window).await?;
         // `processed_ids` is the WHOLE window, independent of what the proposer
         // returns — a forgetful proposer cannot leave a fact un-dream-marked and
         // livelock the #209 guard.

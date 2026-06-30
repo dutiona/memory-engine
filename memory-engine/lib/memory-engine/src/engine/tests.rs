@@ -2,12 +2,12 @@ use super::*;
 use crate::forgetting::ForgetPolicy;
 use crate::graph::MemoryGraph;
 use crate::resume::context::ResumeConfig;
-use crate::search::hybrid::{SearchMode, SearchQuery};
 use crate::search::query::MemoryQuery;
 use crate::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, PersistenceClassifier,
     SummarizableContent, SummaryGenerator,
 };
+use crate::types::search::{SearchMode, SearchQuery};
 use crate::types::{
     AddFactOptions, AddFactRequest, ClassifierInput, EmbeddingFingerprint, EventType, Fact,
     FactType, NewEdge, NewEvent, NewFact,

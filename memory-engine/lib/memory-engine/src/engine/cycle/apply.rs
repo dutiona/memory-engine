@@ -16,7 +16,7 @@ use crate::error::Result;
 use crate::graph::EdgeData;
 use crate::types::RelationType;
 
-use super::report::{ApplyResult, CycleReport};
+use super::{ApplyResult, CycleReport};
 
 impl MemoryEngine {
     /// Validate and apply a [`CycleReport`] atomically.
@@ -71,7 +71,7 @@ impl MemoryEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::report::{CycleMetadata, IdentityOutput, TimeWindow};
+    use super::super::{CycleMetadata, IdentityOutput, TimeWindow};
     use super::*;
     use crate::engine::cycle::CycleDelta;
     use crate::error::CycleError;

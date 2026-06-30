@@ -19,9 +19,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Serialize;
 
 use crate::error::{MemoryError, Result};
+use crate::types::snapshot::{DbFingerprint, SnapshotHeader, SnapshotPayload};
+#[cfg(test)]
+use crate::types::snapshot::{
+    GraphEdgeSnapshot, GraphSnapshot, HnswEntry, HnswSnapshot, ScopeTreeSnapshot,
+};
+#[cfg(test)]
 use crate::types::{RelationType, ScopeNode};
 
 /// Current snapshot format version. Bump on breaking changes to the snapshot
@@ -122,79 +129,11 @@ fn size_gate(path: &Path, cap: u64) -> SizeGate {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot types (decoupled from internal representations)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SnapshotHeader {
-    pub format_version: u32,
-    pub fingerprint: DbFingerprint,
-    pub embed_dim: usize,
-    pub engine_version: String,
-}
-
-/// Composite fingerprint from the three source-of-truth tables.
-///
-/// Catches inserts (`max_*_id` changes) and soft-deletes (`active_*_count`
-/// changes). **Not** based on the `events` table — many mutators
-/// (`add_fact`, `forget`, `consolidate`, `link_session_facts`) modify
-/// `facts`/`edges`/`scopes` without appending an event.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DbFingerprint {
-    pub max_fact_id: i64,
-    pub active_fact_count: i64,
-    pub max_edge_id: i64,
-    pub active_edge_count: i64,
-    pub max_scope_id: i64,
-    pub scope_count: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SnapshotPayload {
-    pub graph: GraphSnapshot,
-    pub scope_tree: ScopeTreeSnapshot,
-    /// Present when built with `ann` feature AND HNSW was active.
-    /// `#[serde(default)]` allows non-ann snapshots to be loaded by ann builds
-    /// and vice versa (named `MessagePack` handles missing fields).
-    #[serde(default)]
-    pub hnsw: Option<HnswSnapshot>,
-}
-
-/// Edge list — decoupled from petgraph `DiGraph` internals.
-/// No isolated nodes: matches `MemoryGraph::load_from_db` semantics (edges only).
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GraphSnapshot {
-    pub edges: Vec<GraphEdgeSnapshot>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GraphEdgeSnapshot {
-    pub edge_id: i64,
-    pub source: i64,
-    pub target: i64,
-    pub relation_type: RelationType,
-    pub weight: f64,
-}
-
-/// Flat list of scope nodes — `ScopeNode` is already serde.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ScopeTreeSnapshot {
-    pub nodes: Vec<ScopeNode>,
-}
-
-/// Compact HNSW rebuild data: active fact embeddings only, no tombstones.
-/// On load, rebuilds a fresh compact HNSW index (same as `build_from_db`).
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HnswSnapshot {
-    pub entries: Vec<HnswEntry>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HnswEntry {
-    pub fact_id: i64,
-    pub embedding: Vec<f32>,
-}
+// Snapshot DTOs (`SnapshotHeader`, `DbFingerprint`, `SnapshotPayload`,
+// `GraphSnapshot`, `GraphEdgeSnapshot`, `ScopeTreeSnapshot`, `HnswSnapshot`,
+// `HnswEntry`) moved to `crate::types::snapshot` (Wave 2 #816): pure serde DTOs
+// belong in the data layer. This file keeps only the rusqlite + fs IO that
+// produces and consumes them (→ `me-backend-sqlite` in S2).
 
 // ---------------------------------------------------------------------------
 // Path derivation

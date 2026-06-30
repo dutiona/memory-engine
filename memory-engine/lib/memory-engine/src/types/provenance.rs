@@ -54,7 +54,7 @@ pub struct NewLineageRecord {
 /// malformed group at parse time would deny the cycle the chance to clamp it. The
 /// `LlmDreamCycle` (A2) is responsible for clamping `source_ids` to the fed window
 /// and dropping degenerate groups before turning each into a
-/// [`CycleDelta::Synthesize`](crate::engine::cycle::CycleDelta::Synthesize) (which
+/// [`CycleDelta::Synthesize`](crate::types::cycle_report::CycleDelta::Synthesize) (which
 /// itself enforces a non-empty, all-active source set at apply time).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeGroup {

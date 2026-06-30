@@ -1,8 +1,11 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::search::hybrid::SearchResult;
-use crate::types::{ClassifierInput, ConsolidationProposal, EmbeddingFingerprint, Fact};
+use crate::types::cycle_report::{CycleMetadata, CycleReport, TimeWindow};
+use crate::types::search::SearchResult;
+use crate::types::{
+    ClassifierInput, ConsolidationProposal, EmbeddingFingerprint, Fact, OutcomeCounts,
+};
 
 // --- Phase 1: Embedding provider (fully used) ---
 
@@ -312,16 +315,61 @@ pub trait InsightStream: Send + Sync {
     fn record(&self, insight: crate::types::Insight) -> Result<()>;
 }
 
+/// The read-capability handle a [`DreamCycle`] receives during [`run`](DreamCycle::run).
+///
+/// `DreamCycle::run` is **planning**, not writing: it reads the time window and prior
+/// state and returns a delta-based [`CycleReport`] for the caller to apply. `CycleCtx`
+/// is exactly the read surface those impls use. It is implemented by the engine's
+/// concrete [`CycleContext`](crate::engine::cycle::CycleContext); abstracting it behind
+/// this trait is what lets the `DreamCycle` contract name no engine/consolidation type
+/// (Wave 2 #816 — the trait layer stays a leaf over the data layer). The write
+/// capabilities (consolidate / forget / promote) run later, in the engine's apply path,
+/// not through this handle.
+///
+/// `Send + Sync` (like every sibling consumer trait, #631/#386): a `&dyn CycleCtx` is
+/// borrowed across `.await` inside the `Send` cycle future.
+#[async_trait]
+pub trait CycleCtx: Send + Sync {
+    /// The window of facts this cycle was asked to process.
+    fn time_window(&self) -> TimeWindow;
+
+    /// Previously promoted wisdom (active, pinned) — read to avoid re-detecting
+    /// already-promoted patterns (generative-output isolation).
+    fn prior_wisdom(&self) -> &[Fact];
+
+    /// Metadata of recent prior cycles (newest last), for cycle-id sequencing and
+    /// drift detection against existing wisdom.
+    fn prior_reports(&self) -> &[CycleMetadata];
+
+    /// The cycle's input set: facts in `window` not already processed by a prior cycle
+    /// (the `dream_cycle` marker excludes them).
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the read fails.
+    async fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>>;
+
+    /// Aggregated outcome counts for many facts in a single query (batch rescoring).
+    /// Facts with no recorded outcomes (or unknown ids) are absent from the map;
+    /// callers treat a missing key as
+    /// [`OutcomeCounts::default`](crate::types::OutcomeCounts).
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the query fails.
+    async fn outcome_counts_batch(
+        &self,
+        fact_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, OutcomeCounts>>;
+}
+
 /// Periodic batch processing: consolidation, pattern detection, promotion.
 ///
-/// Consumer-implemented. Called on a schedule (e.g., end of session, daily).
-/// The implementation drives the full pipeline through a
-/// [`CycleContext`](crate::engine::cycle::CycleContext) — the retrieve-before-reflect
-/// wrapper around the capability-restricted
-/// [`DreamContext`](crate::engine::cognitive::DreamContext): it exposes the
-/// query/consolidate/promote capability bag via
-/// [`dream()`](crate::engine::cycle::CycleContext::dream) **plus** the retrieved
-/// prior wisdom, prior cycle metadata, and the time window to process.
+/// Consumer-implemented. Called on a schedule (e.g., end of session, daily). `run`
+/// receives a [`CycleCtx`] — the retrieve-before-reflect read surface (time window +
+/// prior wisdom + prior cycle metadata, plus `list_undreamt_in_period` /
+/// `outcome_counts_batch`). The engine's concrete
+/// [`CycleContext`](crate::engine::cycle::CycleContext) implements it.
 ///
 /// `run` **proposes** mutations as a delta-based [`CycleReport`](crate::CycleReport);
 /// it does not write to the store. The caller applies the report via
@@ -330,9 +378,8 @@ pub trait InsightStream: Send + Sync {
 ///
 /// Passed as `&dyn DreamCycle` per-call (not stored in the engine).
 ///
-/// `run` is async (`#[async_trait]`): the cycle drives the engine through the
-/// now-async [`DreamContext`](crate::engine::cognitive::DreamContext) capability bag
-/// (query / consolidate / forget / promote all await the storage port).
+/// `run` is async (`#[async_trait]`): the [`CycleCtx`] read methods await the storage
+/// port.
 ///
 /// The `Send + Sync` supertrait bound (#631) keeps the engine's
 /// `run_dream_cycle_guarded(&self, cycle: &dyn DreamCycle)` future `Send`: borrowing a
@@ -346,10 +393,8 @@ pub trait InsightStream: Send + Sync {
 pub trait DreamCycle: Send + Sync {
     /// Run one cycle of the cognitive pipeline, returning a delta-based report.
     ///
-    /// The [`CycleContext`](crate::engine::cycle::CycleContext) provides read access
-    /// and consolidation delegation via
-    /// [`dream()`](crate::engine::cycle::CycleContext::dream), plus retrieve-before-reflect
-    /// prior state.
+    /// `ctx` is the [`CycleCtx`] read surface (the engine passes its concrete
+    /// [`CycleContext`](crate::engine::cycle::CycleContext)).
     ///
     /// # Contract
     ///
@@ -366,10 +411,7 @@ pub trait DreamCycle: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the cycle fails.
-    async fn run(
-        &self,
-        ctx: &crate::engine::cycle::CycleContext<'_>,
-    ) -> Result<crate::engine::cycle::CycleReport>;
+    async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport>;
 }
 
 /// Configuration for the consolidation process.

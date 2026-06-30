@@ -704,8 +704,8 @@ mod tests {
     #[cfg(feature = "ann")]
     mod ann_rebuild {
         use super::*;
-        use crate::search::hybrid::{SearchMode, SearchQuery};
         use crate::search::strategy::SearchConfig;
+        use crate::types::search::{SearchMode, SearchQuery};
 
         #[tokio::test]
         async fn same_dim_reconstruct_rebuilds_index_without_fencing() {

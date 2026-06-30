@@ -159,8 +159,8 @@ pub use store::UpcasterRegistry;
 pub use store::schema::CURRENT_SCHEMA_VERSION;
 pub use traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
-    DeltaProposer, DreamCycle, EmbeddingProvider, InsightStream, PersistenceClassifier, Reranker,
-    SummarizableContent, SummaryGenerator,
+    CycleCtx, DeltaProposer, DreamCycle, EmbeddingProvider, InsightStream, PersistenceClassifier,
+    Reranker, SummarizableContent, SummaryGenerator,
 };
 // Explicit re-export of the full `types` public surface, enumerated for the
 // same reason as `error` above: a transparent, audit-able crate-root API where

@@ -113,7 +113,7 @@ pub enum HnswOpenSource {
     /// A validated sidecar snapshot — restore the index from this payload. The
     /// inner `Option` is the sidecar's HNSW blob (`None` when the sidecar
     /// predates HNSW, in which case the index falls back to a DB rebuild).
-    Snapshot(Option<crate::engine::snapshot::HnswSnapshot>),
+    Snapshot(Option<crate::types::snapshot::HnswSnapshot>),
 }
 
 impl SqliteBackend {
@@ -287,7 +287,7 @@ impl SqliteBackend {
     /// Returns `MemoryError::Database` on pool or query failure, or
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     #[cfg(feature = "ann")]
-    pub fn hnsw_snapshot(&self) -> Result<Option<crate::engine::snapshot::HnswSnapshot>> {
+    pub fn hnsw_snapshot(&self) -> Result<Option<crate::types::snapshot::HnswSnapshot>> {
         let Some(ref hnsw) = self.hnsw else {
             return Ok(None);
         };
@@ -310,7 +310,7 @@ impl SqliteBackend {
     #[cfg(feature = "ann")]
     pub fn load_hnsw_snapshot(
         &mut self,
-        snap: &crate::engine::snapshot::HnswSnapshot,
+        snap: &crate::types::snapshot::HnswSnapshot,
     ) -> Result<()> {
         // Only meaningful if the config requires ANN.
         let ann_threshold = self

@@ -258,14 +258,14 @@ impl ScopeTree {
     }
 
     /// Snapshot all nodes for serialization.
-    pub(crate) fn to_snapshot(&self) -> crate::engine::snapshot::ScopeTreeSnapshot {
-        crate::engine::snapshot::ScopeTreeSnapshot {
+    pub(crate) fn to_snapshot(&self) -> crate::types::snapshot::ScopeTreeSnapshot {
+        crate::types::snapshot::ScopeTreeSnapshot {
             nodes: self.nodes.values().cloned().collect(),
         }
     }
 
     /// Rebuild tree from a snapshot (same logic as `load` but from snapshot data).
-    pub(crate) fn from_snapshot(snap: &crate::engine::snapshot::ScopeTreeSnapshot) -> Self {
+    pub(crate) fn from_snapshot(snap: &crate::types::snapshot::ScopeTreeSnapshot) -> Self {
         let (nodes, children) = Self::build_index(snap.nodes.iter().cloned());
         Self { nodes, children }
     }

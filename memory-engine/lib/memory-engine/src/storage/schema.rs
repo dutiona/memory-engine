@@ -105,8 +105,8 @@ pub trait SchemaManager: Send + Sync {
     /// backend's blocking boundary (no deep-clone of a large graph).
     async fn write_engine_snapshot(
         &self,
-        graph: crate::engine::snapshot::GraphSnapshot,
-        scope_tree: crate::engine::snapshot::ScopeTreeSnapshot,
+        graph: crate::types::snapshot::GraphSnapshot,
+        scope_tree: crate::types::snapshot::ScopeTreeSnapshot,
     ) -> Result<bool>;
 
     // -------------------------------------------------------------------------

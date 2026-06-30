@@ -14,7 +14,7 @@ pub(crate) mod vector;
 // These are the only `pub` items the `search` module exposes. Everything else
 // below is an impl-internal helper kept `pub(crate)` so it stays reachable from
 // other engine modules without leaking onto the public API (#365).
-pub use hybrid::{
+pub use crate::types::search::{
     MatchType, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
 };
 pub use query::MemoryQuery;

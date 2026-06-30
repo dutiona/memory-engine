@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::search::hybrid::SearchMode;
+use crate::types::search::SearchMode;
 use crate::types::{FactType, ScopeQuery};
 
 /// Default limit for queries when not explicitly set.
