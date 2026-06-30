@@ -18,6 +18,10 @@ impl<'a> CheckpointStore<'a> {
     }
 
     /// Upsert a session checkpoint (last-write-wins per `session_id`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn upsert(&self, checkpoint: &SessionCheckpoint) -> Result<()> {
         self.conn
             .execute(
@@ -47,6 +51,12 @@ impl<'a> CheckpointStore<'a> {
     ///
     /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
     /// impl can call it in non-test builds (#630).
+    ///
+    /// Returns `Ok(None)` if no checkpoint exists for this session.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn get(&self, session_id: &str) -> Result<Option<SessionCheckpoint>> {
         self.conn
             .query_row(
@@ -61,6 +71,12 @@ impl<'a> CheckpointStore<'a> {
     }
 
     /// Get the most recent checkpoint for a scope path.
+    ///
+    /// Returns `Ok(None)` if no checkpoint exists for this scope path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn get_by_scope(&self, scope_path: &str) -> Result<Option<SessionCheckpoint>> {
         self.conn
             .query_row(
@@ -80,6 +96,10 @@ impl<'a> CheckpointStore<'a> {
     ///
     /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
     /// impl can call it in non-test builds (#630).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_recent(&self, limit: usize) -> Result<Vec<SessionCheckpoint>> {
         let mut stmt = self
             .conn

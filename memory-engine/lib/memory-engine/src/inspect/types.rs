@@ -71,6 +71,11 @@ pub struct FactProvenance {
     /// The fact's base importance prior (mirrors [`crate::types::Fact::base_importance`]).
     /// Serde key is `base_importance` (#274 export/MCP break).
     pub base_importance: f64,
+    /// The effective decayed importance as of the last forgetting pass
+    /// (mirrors [`crate::types::Fact::importance_score`]). This is the live,
+    /// computed value — it starts equal to `base_importance` and drifts downward
+    /// over time as the Ebbinghaus decay is applied, or upward when the fact is
+    /// accessed and reinforced.
     pub importance_score: f64,
     pub is_pinned: bool,
     pub access_count: i64,

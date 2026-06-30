@@ -608,6 +608,11 @@ impl<'a> FactStore<'a> {
     /// List active facts in a set of scopes with importance >= threshold,
     /// excluding specific fact IDs, ordered by importance DESC.
     ///
+    /// # Panics
+    ///
+    /// Panics if `scope_ids` or `exclude_ids` cannot be serialized to JSON —
+    /// infallible in practice for `&[i64]` / `&HashSet<i64>`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
@@ -648,6 +653,15 @@ impl<'a> FactStore<'a> {
     /// pushed down to SQL (`LIMIT ?`) so the DB never transmits or deserializes the
     /// embedding BLOBs of facts beyond the cap (#395) — matching the pattern of
     /// `list_by_importance_score`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scope_ids` cannot be serialized to JSON — infallible in practice
+    /// for `&[i64]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
     pub fn list_pinned(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Fact>> {
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let base =
@@ -682,6 +696,15 @@ impl<'a> FactStore<'a> {
     /// returns ALL due facts). Pushing both down (#396) keeps the resume Tier-3
     /// path from materializing — and decoding the embedding BLOB of — every due
     /// fact only to filter+cap it in Rust, matching `list_by_importance_score`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `exclude` cannot be serialized to JSON — infallible in practice
+    /// for `&[i64]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
     pub fn list_due(
         &self,
         now: DateTime<Utc>,
@@ -1080,6 +1103,15 @@ impl<'a> FactStore<'a> {
 
     /// List active facts ordered by materialized `importance_score`, excluding IDs in `exclude`.
     /// Pass empty `scope_ids` to query across all scopes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `exclude` or `scope_ids` cannot be serialized to JSON —
+    /// infallible in practice for `&HashSet<i64>` / `&[i64]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
     pub fn list_by_importance_score(
         &self,
         scope_ids: &[i64],
@@ -1178,6 +1210,11 @@ impl<'a> FactStore<'a> {
     /// List active facts in a set of scopes, excluding specific fact IDs,
     /// ordered by `t_created` DESC (most recent first).
     ///
+    /// # Panics
+    ///
+    /// Panics if `scope_ids` or `exclude_ids` cannot be serialized to JSON —
+    /// infallible in practice for `&[i64]` / `&HashSet<i64>`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
@@ -1230,6 +1267,11 @@ impl<'a> FactStore<'a> {
     /// into the SQL JSON path, **never bound**, so it must never carry client input.
     /// A runtime guard rejects a non-identifier key in **all** build profiles
     /// (not just `debug`), since the key is interpolated into SQL.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scope_ids` cannot be serialized to JSON — infallible in practice
+    /// for `&[i64]`.
     ///
     /// # Errors
     ///
