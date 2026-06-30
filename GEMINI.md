@@ -34,6 +34,8 @@ cargo doc --no-deps -p memory-engine --all-features                    # Docs, a
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
+CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
+
 The workspace contains **4 crates**: `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. Changes to `error.rs`, `types/`, `traits.rs`, or any public API in the core crate can silently break the CLI, MCP, and embed crates if only the root crate is checked. Always use `--workspace`.
 
 **Verification traps** — never pipe a cargo gate through `head`/`tail` (truncation + dropped exit code → false green; `grep` doesn't truncate but also masks the exit code); `clippy --all-features` compiles tests but does not run them; `cargo build` green ≠ tests green for file moves / dark `[[test]]` targets; triage findings against current `main`, not the issue snapshot (a "magic constant" may be an intentional sentinel — `git log -S` first).

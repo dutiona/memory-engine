@@ -32,7 +32,7 @@ cargo doc --no-deps -p memory-engine --all-features                    # Docs, a
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
-Run all of them after every change. Do not skip any, and do not substitute a weaker variant.
+Run all of them after every change. Do not skip any, and do not substitute a weaker variant. CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
 
 **Critical:** The workspace contains **4 crates** — `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. Changes to `error.rs`, `types/`, `traits.rs`, or any public API in the core crate can break the CLI, MCP, and embed crates silently if only the root crate is checked. Always use `--workspace`.
 

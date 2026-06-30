@@ -46,6 +46,8 @@ cargo doc --no-deps -p memory-engine --all-features                    # Docs, a
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
+CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
+
 The workspace contains **4 crates** (`memory-engine` core, `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`); the CLI/MCP/embed crates consume the core's public API, so `--workspace` is mandatory — a change to error variants, type definitions, or trait signatures can break them silently if only the root crate is checked.
 
 **Verification traps** — each one cost a real super-qa rework cycle; the `qa-sweep` skill holds the full taxonomy:

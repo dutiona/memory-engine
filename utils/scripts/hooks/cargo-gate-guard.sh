@@ -40,7 +40,10 @@ input="$(cat)"
 if command -v jq >/dev/null 2>&1; then
 	cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 else
-	cmd="$(printf '%s' "$input" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p')"
+	# `[^"]*` (not greedy `.*`) stops at the first closing quote of the value, so a
+	# later JSON key cannot bleed into the captured command. A command containing an
+	# escaped quote (`\"`) is the jq path's job; this fallback is best-effort.
+	cmd="$(printf '%s' "$input" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 fi
 
 [ -z "${cmd:-}" ] && exit 0
@@ -65,9 +68,11 @@ norm="${norm//';'/$'\n'}"
 norm="${norm//'&&'/$'\n'}"
 norm="${norm//'||'/$'\n'}"
 
-GATE_RE='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*cargo[[:space:]]+(\+[^[:space:]]+[[:space:]]+)?(test|clippy|build|doc|nextest)\b'
+# `([^[:alnum:]_]|$)` is the POSIX-ERE word boundary (`\b` is a GNU/BSD extension,
+# not portable POSIX ERE) — it keeps `build`/`tail` from matching `buildx`/`tailor`.
+GATE_RE='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*cargo[[:space:]]+(\+[^[:space:]]+[[:space:]]+)?(test|clippy|build|doc|nextest)([^[:alnum:]_]|$)'
 # A pipe (`|` or `|&`) into head/tail, allowing a leading path (`/usr/bin/head`).
-PIPE_RE='\|&?[[:space:]]*([^[:space:]|]*/)?(head|tail)\b'
+PIPE_RE='\|&?[[:space:]]*([^[:space:]|]*/)?(head|tail)([^[:alnum:]_]|$)'
 
 while IFS= read -r seg; do
 	[ -z "$seg" ] && continue
