@@ -27,18 +27,26 @@ use serde::{Deserialize, Serialize};
 ///
 /// ## Wire format (byte-identical to `String`)
 ///
-/// Serializes as a **plain JSON string** via
+/// Serializes as a **plain string** via
 /// `#[serde(into = "String", from = "String")]`, preserving byte-for-byte
-/// compatibility with the old `relation_type: String` field in every
-/// JSON/MessagePack payload (`GraphEdgeSnapshot`, archive `.pak` files,
-/// `EngineSnapshot`).
+/// compatibility with the old `relation_type: String` field across every
+/// payload — a JSON string in JSON payloads (`EngineSnapshot` dumps and archive
+/// `.pak` files, which are zstd-compressed JSON) and a `MessagePack` string in
+/// the `MessagePack` snapshot sidecar (`GraphEdgeSnapshot`).
 ///
-/// ## Comparison
+/// ## Equality
 ///
-/// `PartialEq<&str>` and `PartialEq<str>` are implemented so call sites that
+/// Equality is **semantic**, not structural: two values are equal iff their
+/// canonical [`as_str`](RelationType::as_str) spelling matches. `PartialEq`,
+/// `Eq` and `Hash` are hand-written (not derived) so the redundant
+/// representation `Custom("co_session")` compares and hashes equal to
+/// `CoSession`. Without this, structural equality would break the
+/// `deserialize(serialize(x)) == x` round-trip law (deserialize folds
+/// `Custom("co_session")` back to `CoSession`) and defeat `HashSet` dedup.
+/// `PartialEq<&str>` / `PartialEq<str>` are also provided so call sites that
 /// compare `edge.relation_type == "supersedes"` continue to compile without
 /// churn.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(into = "String", from = "String")]
 pub enum RelationType {
     /// Edges linking facts that co-occur in the same session.
@@ -125,6 +133,30 @@ impl FromStr for RelationType {
     /// Satisfies generic bounds that require `str::parse::<RelationType>()`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self::from(s))
+    }
+}
+
+// --- Semantic equality (hand-written, not derived) ---
+//
+// Two relation types are equal iff their canonical on-wire string (`as_str`)
+// matches. The canonicalizing `From` admits a redundant representation —
+// `Custom("co_session")` means the same as `CoSession` — and structural
+// equality would treat those as distinct, breaking the
+// `deserialize(serialize(x)) == x` round-trip (deserialize folds the redundant
+// form back to the variant) and `HashSet` dedup. `Hash` delegates to the same
+// `as_str` key so the `Eq`/`Hash` contract (`a == b ⇒ hash(a) == hash(b)`) holds.
+
+impl PartialEq for RelationType {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for RelationType {}
+
+impl std::hash::Hash for RelationType {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
     }
 }
 
@@ -294,6 +326,57 @@ mod tests {
         assert!("co_session" == RelationType::CoSession);
         assert!("supersedes" == RelationType::Supersedes);
         assert!("other" != RelationType::CoSession);
+    }
+
+    // --- Semantic self-equality: redundant Custom(canonical) == named variant ---
+
+    #[test]
+    fn custom_canonical_equals_named_variant_and_dedups() {
+        let pairs = [
+            (
+                RelationType::Custom("co_session".into()),
+                RelationType::CoSession,
+            ),
+            (
+                RelationType::Custom("supplements".into()),
+                RelationType::Supplements,
+            ),
+            (
+                RelationType::Custom("contradicts".into()),
+                RelationType::Contradicts,
+            ),
+            (
+                RelationType::Custom("supersedes".into()),
+                RelationType::Supersedes,
+            ),
+        ];
+        for (custom, named) in pairs {
+            assert_eq!(
+                custom, named,
+                "Custom(canonical) must equal the named variant"
+            );
+            // Eq/Hash contract: equal values must hash equally.
+            let mut h1 = std::collections::hash_map::DefaultHasher::new();
+            let mut h2 = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&custom, &mut h1);
+            std::hash::Hash::hash(&named, &mut h2);
+            assert_eq!(
+                std::hash::Hasher::finish(&h1),
+                std::hash::Hasher::finish(&h2),
+                "equal RelationType values must hash equally"
+            );
+            // HashSet collapses the redundant representation into one.
+            let set: std::collections::HashSet<RelationType> =
+                [custom.clone(), named.clone()].into_iter().collect();
+            assert_eq!(set.len(), 1, "redundant representations must dedup to one");
+        }
+        // The serialize -> deserialize round-trip is identity under == even for
+        // the redundant representation (deserialize canonicalizes it).
+        let custom = RelationType::Custom("supersedes".into());
+        let json = serde_json::to_string(&custom).unwrap();
+        let back: RelationType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, custom);
+        assert_eq!(back, RelationType::Supersedes);
     }
 
     // --- Serde: plain-string wire format ---

@@ -290,7 +290,17 @@ mod tests {
                 id in any::<i64>(),
                 source_fact_id in any::<i64>(),
                 target_fact_id in any::<i64>(),
-                relation_type_str in ".{0,16}",
+                // Mix the 4 canonical spellings (so the named variants traverse
+                // the .pak round-trip, not just the Custom arm) with the original
+                // bounded arbitrary-string strategy (weighted to keep Custom
+                // well-covered).
+                relation_type_str in prop_oneof![
+                    4 => proptest::string::string_regex(".{0,16}").expect("valid regex"),
+                    1 => Just("co_session".to_string()),
+                    1 => Just("supplements".to_string()),
+                    1 => Just("contradicts".to_string()),
+                    1 => Just("supersedes".to_string()),
+                ],
                 // Discretized weight (n/1000) for the same exact-round-trip reason
                 // as the importance/embedding strategies above. Drawn from `i32` so
                 // `f64::from` is exact (no `cast_precision_loss`).

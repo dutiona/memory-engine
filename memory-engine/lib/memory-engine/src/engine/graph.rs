@@ -9,8 +9,11 @@ use super::MemoryEngine;
 impl MemoryEngine {
     // --- Public API: Co-session edge creation ---
 
-    /// Relation type for edges linking facts that co-occur in the same session.
-    const CO_SESSION_RELATION: &str = "co_session";
+    /// Relation type (canonical wire string) for edges linking facts that
+    /// co-occur in the same session. Derived from [`RelationType::CoSession`] so
+    /// the string passed to the storage seam and the variant mirrored into the
+    /// in-memory graph share a single source of truth.
+    const CO_SESSION_RELATION: &str = RelationType::CoSession.as_str();
     /// Default weight for co-session edges — weaker than explicit semantic
     /// relationships by design intent. Note: the current forgetting system uses
     /// raw `graph.degree()` (unweighted), so the weight does not yet reduce
