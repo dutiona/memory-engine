@@ -298,10 +298,16 @@ mod tests {
             timestamp: Utc::now(),
             scope_id: 999_999, // no such scope → FK violation when enforcement is ON
         };
+        let err = store
+            .insert_or_dedup(&activity, 300)
+            .expect_err("dangling scope_id FK must be rejected when foreign_keys=ON (#485)");
+        // Assert the rejection is the FK constraint *specifically* — not an
+        // incidental NOT NULL / UNIQUE / CHECK / JSON error. A bare `is_err()`
+        // would pass for the wrong reason if a future schema change made the
+        // insert fail some other way, silently masking a lost FK pragma.
         assert!(
-            store.insert_or_dedup(&activity, 300).is_err(),
-            "activity insert with a dangling scope_id FK must be rejected when \
-             foreign_keys=ON (#485); Ok means the test harness lost the pragma"
+            err.to_string().to_lowercase().contains("foreign key"),
+            "expected a FOREIGN KEY violation (proof the pragma is ON); got: {err}"
         );
     }
 
