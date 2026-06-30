@@ -105,23 +105,7 @@ impl EmbeddingProvider for MockEmbedder {
 /// This is the dominant shape used by store-level and search tests where the
 /// content hash is not meaningful (the store computes or ignores it).
 pub fn new_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-    NewFact {
-        content: content.into(),
-        content_hash: String::new(),
-        embedding,
-        fact_type: FactType::Episodic,
-        t_created: Utc::now(),
-        t_expired: None,
-        t_valid: None,
-        t_invalid: None,
-        source_event_id: None,
-        scope_id: 1,
-        base_importance: 0.5,
-        access_count: 0,
-        last_accessed: Utc::now(),
-        metadata: serde_json::json!({}),
-        is_pinned: false,
-    }
+    new_fact_with_type(content, embedding, FactType::Episodic)
 }
 
 /// Build a [`NewFact`] with `FactType::Semantic` and a blake3 content hash.
