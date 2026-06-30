@@ -109,10 +109,18 @@ impl From<&str> for RelationType {
 impl From<String> for RelationType {
     /// Infallible, canonicalizing construction from an owned `String`.
     ///
-    /// Delegates to [`From<&str>`] so the canonical-variant logic lives in
-    /// exactly one place.
+    /// Matches on the borrowed slice and reuses the owned `String` for the
+    /// [`Custom`](RelationType::Custom) arm, avoiding the redundant allocation a
+    /// delegation to `From<&str>` would incur. The canonical set is kept in sync
+    /// with `From<&str>` and [`as_str`](RelationType::as_str).
     fn from(s: String) -> Self {
-        Self::from(s.as_str())
+        match s.as_str() {
+            "co_session" => Self::CoSession,
+            "supplements" => Self::Supplements,
+            "contradicts" => Self::Contradicts,
+            "supersedes" => Self::Supersedes,
+            _ => Self::Custom(s),
+        }
     }
 }
 
