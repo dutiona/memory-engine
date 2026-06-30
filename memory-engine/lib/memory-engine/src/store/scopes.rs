@@ -15,6 +15,11 @@ impl<'a> ScopeStore<'a> {
     }
 
     /// Get a scope by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if no scope with `id` exists.
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn get(&self, id: i64) -> Result<ScopeNode> {
         self.conn
             .query_row(
@@ -38,6 +43,12 @@ impl<'a> ScopeStore<'a> {
     }
 
     /// Find a scope by `parent_id` + label.
+    ///
+    /// Returns `Ok(None)` if no match is found.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn find_by_label(&self, parent_id: i64, label: &str) -> Result<Option<ScopeNode>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, parent_id, label, depth FROM scopes WHERE parent_id = ?1 AND label = ?2",
@@ -67,6 +78,11 @@ impl<'a> ScopeStore<'a> {
     /// label here can break round-tripping through
     /// [`crate::scope::ScopeTree::resolve_path`]. Prefer [`Self::ensure_path`]
     /// for a validated, idempotent alternative.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure (e.g. FK violation if
+    /// `parent_id` does not exist, or a UNIQUE constraint on `(parent_id, label)`).
     pub fn insert(&self, parent_id: i64, label: &str, depth: i64) -> Result<ScopeNode> {
         self.conn.execute(
             "INSERT INTO scopes (parent_id, label, depth) VALUES (?1, ?2, ?3)",
@@ -106,6 +122,13 @@ impl<'a> ScopeStore<'a> {
     ///
     /// All top-level segments are children of root (id=1). Uses
     /// `INSERT OR IGNORE` + `SELECT` for race-safe creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Conflict` if `path` is empty or any segment is
+    /// invalid (empty, contains `/`, has leading/trailing whitespace, or exceeds
+    /// [`crate::scope::MAX_SEGMENT_LEN`] bytes).
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn ensure_path(&self, path: &str) -> Result<i64> {
         if path.is_empty() {
             return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
@@ -140,6 +163,10 @@ impl<'a> ScopeStore<'a> {
     }
 
     /// List all scopes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_all(&self) -> Result<Vec<ScopeNode>> {
         let mut stmt = self
             .conn

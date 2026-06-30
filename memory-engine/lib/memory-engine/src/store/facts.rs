@@ -608,6 +608,11 @@ impl<'a> FactStore<'a> {
     /// List active facts in a set of scopes with importance >= threshold,
     /// excluding specific fact IDs, ordered by importance DESC.
     ///
+    /// # Panics
+    ///
+    /// Panics if `scope_ids` or `exclude_ids` cannot be serialized to JSON —
+    /// infallible in practice for `&[i64]` / `&HashSet<i64>`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
@@ -648,6 +653,15 @@ impl<'a> FactStore<'a> {
     /// pushed down to SQL (`LIMIT ?`) so the DB never transmits or deserializes the
     /// embedding BLOBs of facts beyond the cap (#395) — matching the pattern of
     /// `list_by_importance_score`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scope_ids` cannot be serialized to JSON — infallible in practice
+    /// for `&[i64]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
     pub fn list_pinned(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Fact>> {
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let base =
@@ -682,6 +696,17 @@ impl<'a> FactStore<'a> {
     /// returns ALL due facts). Pushing both down (#396) keeps the resume Tier-3
     /// path from materializing — and decoding the embedding BLOB of — every due
     /// fact only to filter+cap it in Rust, matching `list_by_importance_score`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `exclude` cannot be serialized to JSON — infallible in practice
+    /// for `&[i64]`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `MemoryError::Serialization` if `scope_ids` cannot be serialized
+    ///   to JSON (infallible in practice for `&[i64]`).
+    /// - Returns `MemoryError::Database` on query failure.
     pub fn list_due(
         &self,
         now: DateTime<Utc>,
@@ -1080,6 +1105,15 @@ impl<'a> FactStore<'a> {
 
     /// List active facts ordered by materialized `importance_score`, excluding IDs in `exclude`.
     /// Pass empty `scope_ids` to query across all scopes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `exclude` or `scope_ids` cannot be serialized to JSON —
+    /// infallible in practice for `&HashSet<i64>` / `&[i64]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on query failure.
     pub fn list_by_importance_score(
         &self,
         scope_ids: &[i64],
@@ -1178,6 +1212,11 @@ impl<'a> FactStore<'a> {
     /// List active facts in a set of scopes, excluding specific fact IDs,
     /// ordered by `t_created` DESC (most recent first).
     ///
+    /// # Panics
+    ///
+    /// Panics if `scope_ids` or `exclude_ids` cannot be serialized to JSON —
+    /// infallible in practice for `&[i64]` / `&HashSet<i64>`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::Database` on query failure.
@@ -1230,6 +1269,11 @@ impl<'a> FactStore<'a> {
     /// into the SQL JSON path, **never bound**, so it must never carry client input.
     /// A runtime guard rejects a non-identifier key in **all** build profiles
     /// (not just `debug`), since the key is interpolated into SQL.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scope_ids` cannot be serialized to JSON — infallible in practice
+    /// for `&[i64]`.
     ///
     /// # Errors
     ///
@@ -4050,5 +4094,38 @@ mod tests {
             matches!(err, MemoryError::Internal(ref m) if m == "boom"),
             "the callback's own error must propagate verbatim, got {err:?}"
         );
+    }
+
+    /// All `FactType` variants survive an insert → `get()` roundtrip through the
+    /// real `SQLite` store (#500).
+    ///
+    /// This exercises both the write path (`fact_type_to_str` → stored string) and
+    /// the read path (`str_to_fact_type` → parsed enum) for every variant in one
+    /// test. A mutation that returns the wrong stored string for any variant, or
+    /// that maps the wrong stored string to the wrong variant on read-back, fails
+    /// here. The three variants are exhaustive (no `#[non_exhaustive]`), so adding
+    /// a new variant without updating the serialisation paths will be caught by a
+    /// compile-time match exhaustiveness error before this test runs.
+    #[test]
+    fn all_fact_types_survive_store_roundtrip() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let variants = [FactType::Episodic, FactType::Semantic, FactType::Procedural];
+        for expected in variants {
+            let fact = crate::test_utils::new_fact_with_type(
+                "roundtrip content",
+                vec![0.1; DIM],
+                expected,
+            );
+            let id = store.insert(&fact).unwrap();
+            let retrieved = store
+                .get(id)
+                .unwrap_or_else(|e| panic!("get failed for variant {expected:?}: {e}"));
+            assert_eq!(
+                retrieved.fact_type, expected,
+                "fact_type roundtrip failed: inserted {expected:?}, read back {:?}",
+                retrieved.fact_type
+            );
+        }
     }
 }

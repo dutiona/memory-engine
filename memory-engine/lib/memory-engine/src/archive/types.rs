@@ -24,25 +24,52 @@ pub const CURRENT_PAK_VERSION: u32 = 2;
 /// (design: "archival is compaction preserving the event log").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivePak {
+    /// On-disk format version; checked on read against [`CURRENT_PAK_VERSION`].
     pub pak_version: u32,
+    /// Schema version of the engine that wrote this pak; used for forward-compatibility
+    /// checks on read.
     pub engine_schema_version: u32,
+    /// Embedding dimension of the facts stored in this pak. Must match the engine's
+    /// configured `embed_dim` before any vectors are compared.
     pub embed_dim: usize,
+    /// System timestamp when this pak was written (wall-clock, UTC).
     pub created_at: DateTime<Utc>,
+    /// Archived facts; ordering is by `id` ascending (insertion order).
     pub facts: Vec<Fact>,
+    /// Archived edges whose both endpoints are in `facts` (internal edges only).
     pub edges: Vec<Edge>,
 }
 
 /// Policy controlling which facts are eligible for archival.
 #[derive(Debug, Clone)]
 pub struct ArchivePolicy {
+    /// Only facts whose system-time expiry (`t_expired`) is strictly before this
+    /// instant are candidates for archival.
     pub expired_before: DateTime<Utc>,
+    /// Minimum number of candidate facts required to trigger an archival pass.
+    /// If fewer candidates exist, `archive()` returns `None` without writing a
+    /// `.pak` file.
     pub min_facts: usize,
 }
 
 impl Default for ArchivePolicy {
+    /// Returns a policy with a 30-day look-back cutoff relative to the current
+    /// wall-clock time and a 100-fact minimum batch size.
+    ///
+    /// The `expired_before` cutoff is captured from the wall clock **when
+    /// `default()` is called** — a retention policy's horizon is "facts that
+    /// expired at least 30 days ago", which is meaningless without anchoring to
+    /// *now*. Computing it here (rather than as a fixed compile-time timestamp)
+    /// avoids silently archiving nothing — or everything — depending on when the
+    /// binary was built.
+    ///
+    /// Note: the cutoff is frozen at construction, so a once-built `default()`
+    /// does **not** slide its horizon forward over time. In a long-running
+    /// process, construct a fresh `ArchivePolicy` (or set `expired_before`
+    /// explicitly) per archival run.
     fn default() -> Self {
         Self {
-            expired_before: Utc::now() - chrono::Duration::days(30),
+            expired_before: Utc::now() - chrono::TimeDelta::days(30),
             min_facts: 100,
         }
     }
@@ -61,16 +88,28 @@ pub struct ArchiveStats {
 /// A row from the `archive_manifest` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveManifestEntry {
+    /// Auto-assigned primary key from `archive_manifest.id`.
     pub id: i64,
+    /// Relative path to the `.pak` file from the archive directory; never contains
+    /// `..` or an absolute anchor (enforced by the path-traversal guard on read).
     pub pak_path: String,
+    /// System timestamp when the archival commit completed (wall-clock, UTC).
     pub created_at: DateTime<Utc>,
+    /// Number of facts stored in the pak.
     pub fact_count: i64,
+    /// Number of edges stored in the pak.
     pub edge_count: i64,
+    /// Smallest fact id in the pak (used for manifest-level skip optimization).
     pub fact_id_min: i64,
+    /// Largest fact id in the pak (used for manifest-level skip optimization).
     pub fact_id_max: i64,
+    /// Earliest `t_created` timestamp among facts in the pak (system time).
     pub t_created_min: DateTime<Utc>,
+    /// Latest `t_created` timestamp among facts in the pak (system time).
     pub t_created_max: DateTime<Utc>,
+    /// Compressed file size in bytes.
     pub size_bytes: i64,
+    /// Blake3 hex digest of the compressed pak file for integrity verification.
     pub blake3_hash: String,
 }
 

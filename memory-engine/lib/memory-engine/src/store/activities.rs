@@ -23,6 +23,11 @@ impl<'a> ActivityStore<'a> {
     /// `dedup_window_secs` of the most recent matching activity.
     ///
     /// Returns `(id, was_deduplicated)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure (e.g. FK violation if
+    /// `activity.scope_id` references a non-existent scope).
     pub fn insert_or_dedup(
         &self,
         activity: &NewActivity,
@@ -101,6 +106,11 @@ impl<'a> ActivityStore<'a> {
     ///
     /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
     /// impl can call it in non-test builds (#630).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if no activity with `id` exists.
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn get(&self, id: i64) -> Result<Activity> {
         self.conn
             .query_row(
@@ -123,6 +133,10 @@ impl<'a> ActivityStore<'a> {
     ///
     /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
     /// impl can call it in non-test builds (#630).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_by_session(&self, session_id: &str, limit: Option<usize>) -> Result<Vec<Activity>> {
         let base = "SELECT id, session_id, tool_name, args_hash, args, result_summary,
                         outcome_class, status, occurrence_count, first_seen, last_seen,
@@ -143,6 +157,10 @@ impl<'a> ActivityStore<'a> {
     /// List recent activities for a set of scope IDs, most recent first.
     ///
     /// Uses `idx_activities_scope_recent` for efficient lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn list_recent_by_scope(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Activity>> {
         if scope_ids.is_empty() {
             return Ok(Vec::new());
@@ -170,6 +188,11 @@ impl<'a> ActivityStore<'a> {
     }
 
     /// Update the status of an activity and optionally link to a promoted fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if no activity with `id` exists.
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn update_status(
         &self,
         id: i64,
@@ -193,6 +216,10 @@ impl<'a> ActivityStore<'a> {
     ///
     /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
     /// impl can call it in non-test builds (#630).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Database` on SQL failure.
     pub fn count_by_session(&self, session_id: &str) -> Result<i64> {
         self.conn
             .query_row(

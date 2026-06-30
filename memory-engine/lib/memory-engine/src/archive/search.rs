@@ -125,6 +125,8 @@ const fn entry_is_prunable(_entry: &ArchiveManifestEntry, _query: &MemoryQuery) 
 /// # Errors
 ///
 /// Returns `MemoryError::Archive` on I/O or decompression failure.
+/// Returns `MemoryError::Serialization` if a `.pak` file's JSON is corrupt or
+/// truncated (surfaced by `read_pak` during decompression and deserialization).
 pub fn search_archives(
     archive_dir: &Path,
     manifest_entries: &[ArchiveManifestEntry],
