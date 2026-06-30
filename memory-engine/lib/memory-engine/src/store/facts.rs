@@ -4093,4 +4093,37 @@ mod tests {
             "the callback's own error must propagate verbatim, got {err:?}"
         );
     }
+
+    /// All `FactType` variants survive an insert → `get()` roundtrip through the
+    /// real `SQLite` store (#500).
+    ///
+    /// This exercises both the write path (`fact_type_to_str` → stored string) and
+    /// the read path (`str_to_fact_type` → parsed enum) for every variant in one
+    /// test. A mutation that returns the wrong stored string for any variant, or
+    /// that maps the wrong stored string to the wrong variant on read-back, fails
+    /// here. The three variants are exhaustive (no `#[non_exhaustive]`), so adding
+    /// a new variant without updating the serialisation paths will be caught by a
+    /// compile-time match exhaustiveness error before this test runs.
+    #[test]
+    fn all_fact_types_survive_store_roundtrip() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let variants = [FactType::Episodic, FactType::Semantic, FactType::Procedural];
+        for expected in variants {
+            let fact = crate::test_utils::new_fact_with_type(
+                "roundtrip content",
+                vec![0.1; DIM],
+                expected,
+            );
+            let id = store.insert(&fact).unwrap();
+            let retrieved = store
+                .get(id)
+                .unwrap_or_else(|e| panic!("get failed for variant {expected:?}: {e}"));
+            assert_eq!(
+                retrieved.fact_type, expected,
+                "fact_type roundtrip failed: inserted {expected:?}, read back {:?}",
+                retrieved.fact_type
+            );
+        }
+    }
 }

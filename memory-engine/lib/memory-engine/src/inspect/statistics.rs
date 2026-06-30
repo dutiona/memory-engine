@@ -563,4 +563,83 @@ mod tests {
             "exactly the two active, past-t_valid, non-invalidated facts are due"
         );
     }
+
+    // --- nested scopes + edges coverage (#500) ----------------------------
+    //
+    // ScopeStats.max_depth was always observed as 0 (root-only) in every
+    // existing test, so the MAX(depth) aggregation had no positive coverage.
+    // EdgeStats is separately covered by
+    // `edges_total_active_expired_are_distinct_and_correctly_partitioned`, but
+    // that test does not reach the ScopeStats path with non-zero max_depth.
+    // This test exercises both in one fixture: two user scopes at depth 1 and
+    // depth 2 (≥2 levels), plus two edges whose counts are asserted non-zero.
+    //
+    // A mutation that hard-codes max_depth=0 or zeros edge totals fails here.
+    // A mutation that reads MAX(id) instead of MAX(depth) for scopes also fails
+    // because the depth-2 scope has id=3 while its depth is 2 — only if both
+    // happen to be equal would the mutation survive, which does not hold in the
+    // general case (root has id=1/depth=0, depth-1 scope has id=2/depth=1, etc.).
+
+    #[test]
+    fn nested_scopes_and_edges_are_counted_correctly() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        // id=1 (depth=0) is the root scope inserted by init_schema.
+        // Insert a depth-1 scope under root ...
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (2, 1, 'child', 1)",
+            [],
+        )
+        .unwrap();
+        // ... and a depth-2 scope under the depth-1 scope.
+        conn.execute(
+            "INSERT INTO scopes (id, parent_id, label, depth) VALUES (3, 2, 'grandchild', 2)",
+            [],
+        )
+        .unwrap();
+
+        // Two facts to satisfy the edges FK constraints.
+        let f1 = insert_raw_fact(&conn, "scope fact 1", None, None, None);
+        let f2 = insert_raw_fact(&conn, "scope fact 2", None, None, None);
+
+        // Two active edges.
+        let store = EdgeStore::new(&conn);
+        store
+            .insert(&NewEdge {
+                source_fact_id: f1,
+                target_fact_id: f2,
+                relation_type: "relates_to".into(),
+                weight: 1.0,
+                t_created: chrono::Utc::now(),
+                t_expired: None,
+                scope_id: 1,
+            })
+            .unwrap();
+        store
+            .insert(&NewEdge {
+                source_fact_id: f2,
+                target_fact_id: f1,
+                relation_type: "related_from".into(),
+                weight: 1.0,
+                t_created: chrono::Utc::now(),
+                t_expired: None,
+                scope_id: 2,
+            })
+            .unwrap();
+
+        let stats = super::compute_statistics(&conn, None).unwrap();
+
+        // Three scopes total: root (depth=0) + depth-1 + depth-2.
+        assert_eq!(stats.scopes.total, 3, "root + two nested scopes");
+        // max_depth must reflect the deepest inserted scope, not hard-code 0.
+        assert_eq!(
+            stats.scopes.max_depth, 2,
+            "deepest scope is at depth 2 (grandchild)"
+        );
+        // Both edges are active (t_expired IS NULL).
+        assert_eq!(stats.edges.total, 2, "two edges total");
+        assert_eq!(stats.edges.active, 2, "both edges are active");
+        assert_eq!(stats.edges.expired, 0, "no expired edges");
+    }
 }
