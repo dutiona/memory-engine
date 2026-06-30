@@ -275,20 +275,9 @@ mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
     use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactOptions, AddFactRequest, EmbeddingFingerprint, FactType, Outcome};
+    use crate::types::{AddFactOptions, AddFactRequest, FactType, Outcome};
 
     const DIM: usize = 4;
-
-    struct FixedEmbed;
-    impl EmbeddingProvider for FixedEmbed {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-            Ok(vec![1.0, 0.0, 0.0, 0.0])
-        }
-
-        fn fingerprint(&self) -> EmbeddingFingerprint {
-            EmbeddingFingerprint::new("mock", "test", 4)
-        }
-    }
 
     async fn add(engine: &MemoryEngine, content: &str, ft: FactType, importance: f64) -> i64 {
         let req = AddFactRequest {
@@ -304,7 +293,8 @@ mod tests {
         engine
             .add_fact(
                 &req,
-                std::sync::Arc::new(FixedEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await

@@ -20,12 +20,12 @@ use crate::types::{EmbeddingFingerprint, EventType, FactType, NewEvent, NewFact}
 
 // --- DB helpers ---
 
-/// Open an in-memory SQLite connection with all pragmas (including
+/// Open an in-memory `SQLite` connection with all pragmas (including
 /// `foreign_keys = ON`) and the latest schema applied.
 ///
 /// Use this in every store-level `fn setup() -> Connection` instead of
 /// `Connection::open_in_memory()`, which skips the FK pragma (#485).
-pub(crate) fn setup_memory_db() -> Connection {
+pub fn setup_memory_db() -> Connection {
     let conn = open_memory().expect("open in-memory db");
     init_schema(&conn).expect("init schema");
     conn
@@ -44,7 +44,7 @@ pub(crate) fn setup_memory_db() -> Connection {
 /// **Not a replacement for purpose-built doubles.** If a test needs
 /// dimension-mismatching, call-counting, error injection, or text-dependent
 /// output, keep the local struct — those properties encode intent.
-pub(crate) struct MockEmbedder {
+pub struct MockEmbedder {
     dim: usize,
     value: f32,
     /// When `Some`, overrides `value` and returns this exact vector.
@@ -55,7 +55,7 @@ impl MockEmbedder {
     /// Constant-vector embedder that returns `vec![0.5; dim]`.
     ///
     /// This is the most common pattern across store and consolidation tests.
-    pub(crate) fn new(dim: usize) -> Self {
+    pub fn new(dim: usize) -> Self {
         Self {
             dim,
             value: 0.5,
@@ -64,7 +64,7 @@ impl MockEmbedder {
     }
 
     /// Constant-vector embedder that returns `vec![value; dim]`.
-    pub(crate) fn constant(dim: usize, value: f32) -> Self {
+    pub fn constant(dim: usize, value: f32) -> Self {
         Self {
             dim,
             value,
@@ -77,7 +77,7 @@ impl MockEmbedder {
     /// Covers the family of `FakeEmbed` / `FixedEmbedder` / `FixedEmbed`
     /// structs that all produce this exact vector (inspect, ingest, lineage,
     /// apply, cognitive tests).
-    pub(crate) fn fixed4() -> Self {
+    pub fn fixed4() -> Self {
         Self {
             dim: 4,
             value: 0.0,
@@ -88,11 +88,9 @@ impl MockEmbedder {
 
 impl EmbeddingProvider for MockEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-        if let Some(ref v) = self.fixed {
-            Ok(v.clone())
-        } else {
-            Ok(vec![self.value; self.dim])
-        }
+        self.fixed
+            .as_ref()
+            .map_or_else(|| Ok(vec![self.value; self.dim]), |v| Ok(v.clone()))
     }
 
     fn fingerprint(&self) -> EmbeddingFingerprint {
@@ -106,7 +104,7 @@ impl EmbeddingProvider for MockEmbedder {
 ///
 /// This is the dominant shape used by store-level and search tests where the
 /// content hash is not meaningful (the store computes or ignores it).
-pub(crate) fn new_fact(content: &str, embedding: Vec<f32>) -> NewFact {
+pub fn new_fact(content: &str, embedding: Vec<f32>) -> NewFact {
     NewFact {
         content: content.into(),
         content_hash: String::new(),
@@ -130,7 +128,7 @@ pub(crate) fn new_fact(content: &str, embedding: Vec<f32>) -> NewFact {
 ///
 /// Used by engine-level tests that go through dedup/conflict paths where the
 /// hash is significant (e.g. `engine/tests.rs`, `engine/mod.rs` resolve tests).
-pub(crate) fn new_fact_hashed(content: &str, embedding: Vec<f32>) -> NewFact {
+pub fn new_fact_hashed(content: &str, embedding: Vec<f32>) -> NewFact {
     NewFact::builder(content, embedding, FactType::Semantic)
         .content_hash(blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string())
         .build()
@@ -140,11 +138,7 @@ pub(crate) fn new_fact_hashed(content: &str, embedding: Vec<f32>) -> NewFact {
 ///
 /// Use this when the test needs to vary the fact type (e.g. `hybrid.rs`
 /// multi-type filter tests).
-pub(crate) fn new_fact_with_type(
-    content: &str,
-    embedding: Vec<f32>,
-    fact_type: FactType,
-) -> NewFact {
+pub fn new_fact_with_type(content: &str, embedding: Vec<f32>, fact_type: FactType) -> NewFact {
     NewFact {
         content: content.into(),
         content_hash: String::new(),
@@ -170,7 +164,7 @@ pub(crate) fn new_fact_with_type(
 ///
 /// Covers `store/events.rs` and `storage/sqlite/event_log.rs` which both had
 /// identical two-argument `make_event(source, session_id)` helpers.
-pub(crate) fn new_event(source: &str, session_id: Option<&str>) -> NewEvent {
+pub fn new_event(source: &str, session_id: Option<&str>) -> NewEvent {
     NewEvent {
         timestamp: Utc::now(),
         event_type: EventType::Interaction,

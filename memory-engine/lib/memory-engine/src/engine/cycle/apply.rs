@@ -81,23 +81,13 @@ mod tests {
 
     const DIM: usize = 4;
 
-    struct FixedEmbed;
-    impl EmbeddingProvider for FixedEmbed {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-            Ok(vec![0.1, 0.2, 0.3, 0.4])
-        }
-
-        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-            crate::types::EmbeddingFingerprint::new("mock", "test", 4)
-        }
-    }
-
     async fn engine() -> MemoryEngine {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         // Stamp the embedding identity so apply tests can apply pre-computed-vector
         // deltas (AddFact/Synthesize) — #613 requires a recorded identity for those.
         // This mirrors production, where facts (and thus the identity) exist before a
-        // cycle runs. Same fingerprint FixedEmbed records, so a later `add()` is a no-op.
+        // cycle runs. Same fingerprint MockEmbedder::fixed4() records, so a later
+        // `add()` is a no-op.
         engine
             .storage()
             .store_embedding_fingerprint(&crate::types::EmbeddingFingerprint::new(
@@ -119,7 +109,8 @@ mod tests {
         engine
             .add_fact(
                 &req,
-                std::sync::Arc::new(FixedEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await

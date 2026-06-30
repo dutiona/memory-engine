@@ -244,21 +244,6 @@ mod tests {
         }
     }
 
-    /// Mock embedder returning a fixed-dimension constant vector.
-    struct MockEmbedder {
-        embed_dim: usize,
-    }
-
-    impl EmbeddingProvider for MockEmbedder {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-            Ok(vec![0.5; self.embed_dim])
-        }
-
-        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-            crate::types::EmbeddingFingerprint::new("mock", "test", self.embed_dim)
-        }
-    }
-
     fn insert_fact(conn: &Connection, dim: usize, content: &str, embedding: Vec<f32>) -> i64 {
         let store = FactStore::new(conn, dim);
         store
@@ -299,7 +284,7 @@ mod tests {
         insert_fact(&conn, dim, "c2c", vec![0.03, 0.97, 0.0, 0.0]);
 
         let mock_gen = MockGenerator;
-        let mock_embed = MockEmbedder { embed_dim: dim };
+        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
         let clusters = cluster(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
         assert_eq!(clusters, 2);
 
@@ -320,7 +305,7 @@ mod tests {
         insert_fact(&conn, dim, "b", vec![0.99, 0.01, 0.0, 0.0]);
 
         let mock_gen = MockGenerator;
-        let mock_embed = MockEmbedder { embed_dim: dim };
+        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
         let clusters = cluster(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
         assert_eq!(clusters, 0);
     }
@@ -336,7 +321,7 @@ mod tests {
         insert_fact(&conn, dim, "gamma", vec![0.98, 0.02, 0.0, 0.0]);
 
         let mock_gen = MockGenerator;
-        let mock_embed = MockEmbedder { embed_dim: dim };
+        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
         cluster(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
 
         let summaries = SummaryStore::new(&conn, dim)
@@ -358,7 +343,7 @@ mod tests {
         insert_fact(&conn, dim, "z", vec![0.98, 0.02, 0.0, 0.0]);
 
         let mock_gen = MockGenerator;
-        let mock_embed = MockEmbedder { embed_dim: dim };
+        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
 
         // Run twice — should have exactly the same result
         cluster(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
@@ -389,7 +374,7 @@ mod tests {
         let made = cluster(
             &loose,
             &MockGenerator,
-            &MockEmbedder { embed_dim: dim },
+            &crate::test_utils::MockEmbedder::new(dim),
             dim,
             2,
             0.85,
@@ -405,7 +390,7 @@ mod tests {
         let made = cluster(
             &strict,
             &MockGenerator,
-            &MockEmbedder { embed_dim: dim },
+            &crate::test_utils::MockEmbedder::new(dim),
             dim,
             2,
             0.95,
@@ -551,7 +536,7 @@ mod tests {
         cluster(
             conn,
             &MockGenerator,
-            &MockEmbedder { embed_dim: dim },
+            &crate::test_utils::MockEmbedder::new(dim),
             dim,
             2,
             0.85,

@@ -15,20 +15,6 @@ use crate::types::{
 
 const DIM: usize = 4;
 
-struct MockEmbedder {
-    dim: usize,
-}
-
-impl EmbeddingProvider for MockEmbedder {
-    fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-        Ok(vec![0.5; self.dim])
-    }
-
-    fn fingerprint(&self) -> EmbeddingFingerprint {
-        EmbeddingFingerprint::new("mock", "test", self.dim)
-    }
-}
-
 /// Keyword-driven embedder that maps a small fixed vocabulary to orthogonal
 /// basis vectors in a 4-dimensional space (issue #453).
 ///
@@ -198,7 +184,7 @@ async fn ingest_returns_event_id() {
 async fn add_fact_returns_fact_id() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let id = engine
         .add_fact(
             &AddFactRequest {
@@ -220,7 +206,7 @@ async fn add_fact_returns_fact_id() {
 async fn query_returns_results_after_adding_facts() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -363,7 +349,7 @@ async fn embed_dim_validation_rejects_mismatch() {
                     scope: None,
                     opts: None,
                 },
-                std::sync::Arc::new(MockEmbedder { dim: 768 })
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::new(768))
                     as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
@@ -408,7 +394,7 @@ async fn first_add_fact_records_embedding_meta() {
         "no identity before any write"
     );
 
-    let expected = MockEmbedder { dim: DIM }.fingerprint();
+    let expected = crate::test_utils::MockEmbedder::new(DIM).fingerprint();
     let req = |c: &str| AddFactRequest {
         content: c.into(),
         fact_type: FactType::Semantic,
@@ -419,7 +405,8 @@ async fn first_add_fact_records_embedding_meta() {
     engine
         .add_fact(
             &req("a"),
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
         .await
@@ -470,13 +457,13 @@ async fn verify_embedding_identity_enforces_match() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     // Fresh store has no identity yet -> any same-dim provider is compatible.
     engine
-        .verify_embedding_identity(&MockEmbedder { dim: DIM })
+        .verify_embedding_identity(&crate::test_utils::MockEmbedder::new(DIM))
         .await
         .expect("fresh store compatible with any same-dim provider");
     // ...but a wrong-dim provider still fails fast on a fresh store (would otherwise
     // fail on every later write/query).
     let dim_err = engine
-        .verify_embedding_identity(&MockEmbedder { dim: DIM + 1 })
+        .verify_embedding_identity(&crate::test_utils::MockEmbedder::new(DIM + 1))
         .await
         .expect_err("wrong-dim provider must fail the eager check on a fresh store");
     assert!(
@@ -495,7 +482,8 @@ async fn verify_embedding_identity_enforces_match() {
     engine
         .add_fact(
             &req,
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             None,
         )
         .await
@@ -503,7 +491,7 @@ async fn verify_embedding_identity_enforces_match() {
 
     // Matching provider -> Ok; differing provider -> EmbeddingModelMismatch.
     engine
-        .verify_embedding_identity(&MockEmbedder { dim: DIM })
+        .verify_embedding_identity(&crate::test_utils::MockEmbedder::new(DIM))
         .await
         .expect("matching provider passes the eager check");
     let err = engine
@@ -583,7 +571,8 @@ async fn noop_bootstrap_does_not_stamp_identity() {
     let report = engine
         .bootstrap_session(
             std::io::Cursor::new(""),
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             std::sync::Arc::new(crate::KeywordExtractor)
                 as std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
             &crate::BootstrapConfig::default(),
@@ -624,7 +613,8 @@ async fn noop_bootstrap_then_real_write_records_real_embedder() {
     engine
         .bootstrap_session(
             std::io::Cursor::new(""),
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             std::sync::Arc::new(crate::KeywordExtractor)
                 as std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
             &crate::BootstrapConfig::default(),
@@ -675,7 +665,8 @@ async fn bootstrap_creating_facts_stamps_identity() {
     let report = engine
         .bootstrap_session(
             std::io::Cursor::new(fixture),
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             std::sync::Arc::new(crate::KeywordExtractor)
                 as std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
             &crate::BootstrapConfig::default(),
@@ -686,7 +677,7 @@ async fn bootstrap_creating_facts_stamps_identity() {
     assert!(report.facts_created > 0, "fixture should create facts");
     assert_eq!(
         engine.storage().load_embedding_fingerprint().await.unwrap(),
-        Some(MockEmbedder { dim: DIM }.fingerprint()),
+        Some(crate::test_utils::MockEmbedder::new(DIM).fingerprint()),
         "a fact-creating bootstrap records the embedder's fingerprint"
     );
 }
@@ -701,7 +692,8 @@ async fn noop_bootstrap_directory_does_not_stamp_identity() {
     let report = engine
         .bootstrap_directory(
             dir.path(),
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             std::sync::Arc::new(crate::KeywordExtractor)
                 as std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
             &crate::BootstrapConfig::default(),
@@ -735,7 +727,8 @@ async fn bootstrap_directory_creating_facts_stamps_identity() {
     let report = engine
         .bootstrap_directory(
             dir.path(),
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             std::sync::Arc::new(crate::KeywordExtractor)
                 as std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
             &crate::BootstrapConfig::default(),
@@ -746,7 +739,7 @@ async fn bootstrap_directory_creating_facts_stamps_identity() {
     assert!(report.facts_created > 0, "fixture should create facts");
     assert_eq!(
         engine.storage().load_embedding_fingerprint().await.unwrap(),
-        Some(MockEmbedder { dim: DIM }.fingerprint()),
+        Some(crate::test_utils::MockEmbedder::new(DIM).fingerprint()),
         "a fact-creating directory bootstrap records the embedder's fingerprint"
     );
 }
@@ -764,7 +757,8 @@ async fn memory_directory_stamps_identity_even_when_empty() {
     engine
         .bootstrap_memory_directory(
             dir.path(),
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             &crate::BootstrapConfig::default(),
             None,
         )
@@ -772,7 +766,7 @@ async fn memory_directory_stamps_identity_even_when_empty() {
         .unwrap();
     assert_eq!(
         engine.storage().load_embedding_fingerprint().await.unwrap(),
-        Some(MockEmbedder { dim: DIM }.fingerprint()),
+        Some(crate::test_utils::MockEmbedder::new(DIM).fingerprint()),
         "memory-directory import is meta-first: it stamps even with no files"
     );
 }
@@ -841,7 +835,8 @@ async fn consolidate_deduplicates_similar_facts() {
     let stats = engine
         .consolidate(
             std::sync::Arc::new(MockGen) as std::sync::Arc<dyn SummaryGenerator>,
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             &config,
         )
         .await
@@ -874,7 +869,8 @@ async fn consolidate_is_idempotent() {
     let _stats1 = engine
         .consolidate(
             std::sync::Arc::new(MockGen) as std::sync::Arc<dyn SummaryGenerator>,
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             &config,
         )
         .await
@@ -882,7 +878,8 @@ async fn consolidate_is_idempotent() {
     let stats2 = engine
         .consolidate(
             std::sync::Arc::new(MockGen) as std::sync::Arc<dyn SummaryGenerator>,
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             &config,
         )
         .await
@@ -955,7 +952,8 @@ async fn consolidate_runs_consumer_callbacks_without_holding_write_lock() {
     let stats = engine
         .consolidate(
             std::sync::Arc::new(generator) as std::sync::Arc<dyn SummaryGenerator>,
-            std::sync::Arc::new(MockEmbedder { dim: DIM }) as std::sync::Arc<dyn EmbeddingProvider>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
             &config,
         )
         .await
@@ -1451,7 +1449,7 @@ async fn list_summaries_empty() {
 async fn add_fact_with_custom_importance() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let opts = AddFactOptions {
         base_importance: Some(0.9),
         ..Default::default()
@@ -1478,7 +1476,7 @@ async fn add_fact_with_custom_importance() {
 async fn add_fact_with_temporal_bounds() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let now = Utc::now();
     let opts = AddFactOptions {
         t_valid: Some(now - chrono::Duration::hours(1)),
@@ -1508,7 +1506,7 @@ async fn add_fact_with_temporal_bounds() {
 async fn add_fact_with_scope_path() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let id = engine
         .add_fact(
             &AddFactRequest {
@@ -1531,7 +1529,7 @@ async fn add_fact_with_scope_path() {
 async fn add_fact_none_opts_uses_defaults() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let id = engine
         .add_fact(
             &AddFactRequest {
@@ -1566,7 +1564,7 @@ async fn engine_concurrent_reads() {
 
     let engine = std::sync::Arc::new(MemoryEngine::builder(DIM).path(db_path).build().unwrap());
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -1635,7 +1633,7 @@ async fn engine_write_then_read_across_threads() {
     let e_w = engine.clone();
     let writer = tokio::spawn(async move {
         let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-            std::sync::Arc::new(MockEmbedder { dim: DIM });
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
         e_w.add_fact(
             &AddFactRequest {
                 content: "Concurrent write test".into(),
@@ -1694,7 +1692,7 @@ async fn resume_empty_engine() {
 async fn resume_with_facts() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     // Add a pinned fact (appears in tier 1)
     let opts_pinned = AddFactOptions {
@@ -1789,7 +1787,7 @@ fn resume_config_default_now_is_none() {
 async fn resume_stamps_surfaced_at_on_pinned_due_fact() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let now = Utc::now();
     let past = now - chrono::Duration::hours(1);
 
@@ -1837,7 +1835,7 @@ async fn resume_stamps_surfaced_at_on_pinned_due_fact() {
 async fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let now = Utc::now();
     let past = now - chrono::Duration::hours(1);
 
@@ -1885,7 +1883,7 @@ async fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
 async fn resume_does_not_stamp_invalidated_pinned_due_fact() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let now = Utc::now();
     let past = now - chrono::Duration::hours(2);
     let past_invalid = now - chrono::Duration::hours(1);
@@ -1946,7 +1944,7 @@ async fn resume_does_not_stamp_invalidated_pinned_due_fact() {
 async fn resume_surfaced_at_is_idempotent() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let now = Utc::now();
     let past = now - chrono::Duration::hours(1);
     let later = now + chrono::Duration::hours(2);
@@ -2008,7 +2006,7 @@ async fn resume_surfaced_at_is_idempotent() {
 async fn list_due_surfaced_at_is_idempotent() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let now = Utc::now();
     let past = now - chrono::Duration::hours(1);
     let later = now + chrono::Duration::hours(2);
@@ -2073,7 +2071,7 @@ async fn list_due_surfaced_at_is_idempotent() {
 async fn resume_with_existing_scope_path_excludes_sibling_scope() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     // Two sibling scopes under a common parent: project/alpha and project/beta.
     let alpha_id = engine.ensure_scope_path("project/alpha").await.unwrap();
@@ -2174,7 +2172,7 @@ async fn query_nonexistent_scope_returns_empty() {
 
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     // Add a fact at root scope so there's something to find if search were unscoped
     engine
@@ -2210,7 +2208,7 @@ async fn query_nonexistent_scope_returns_empty() {
 async fn list_due_returns_scheduled_facts() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let past = Utc::now() - chrono::Duration::hours(1);
     let future = Utc::now() + chrono::Duration::hours(1);
 
@@ -2297,7 +2295,7 @@ async fn list_due_returns_scheduled_facts() {
 async fn pin_unpin_fact() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let id = engine
         .add_fact(
             &AddFactRequest {
@@ -2324,7 +2322,7 @@ async fn pin_unpin_fact() {
 async fn add_fact_with_explicit_pin() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let opts = AddFactOptions {
         pinned: Some(true),
         ..Default::default()
@@ -2357,7 +2355,7 @@ async fn add_fact_with_classifier() {
 
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let classifier: std::sync::Arc<dyn PersistenceClassifier> = std::sync::Arc::new(PinSemantic);
 
     let id = engine
@@ -2404,7 +2402,7 @@ async fn explicit_pin_overrides_classifier() {
 
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let classifier = AlwaysPin;
 
     // Explicitly set pinned=false — should override the classifier
@@ -2435,7 +2433,7 @@ async fn explicit_pin_overrides_classifier() {
 async fn execute_query_empty_returns_active_facts() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -2482,7 +2480,7 @@ async fn execute_query_empty_returns_active_facts() {
 async fn execute_query_text_search() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -2526,7 +2524,7 @@ async fn execute_query_text_search() {
 async fn execute_query_scope_only() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     // Add fact to "project:demo" scope (auto-created by add_fact)
     engine
@@ -2581,7 +2579,7 @@ async fn execute_query_scope_only() {
 async fn execute_query_subtree_multi_segment_scope() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     engine
         .add_fact(
@@ -2632,7 +2630,7 @@ async fn execute_query_subtree_multi_segment_scope() {
 async fn execute_query_fact_type_filter() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -2680,7 +2678,7 @@ async fn execute_query_fact_type_filter() {
 async fn execute_query_importance_threshold() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let opts_low = AddFactOptions {
         base_importance: Some(0.1),
@@ -2732,7 +2730,7 @@ async fn execute_query_importance_threshold() {
 async fn execute_query_pinned_only() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let id = engine
         .add_fact(
@@ -2779,7 +2777,7 @@ async fn execute_query_pinned_only() {
 async fn execute_query_future_dated_excluded() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     // Regular fact
     engine
@@ -2870,7 +2868,7 @@ async fn execute_query_search_mode_conflict() {
 async fn execute_query_search_mode_inference() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -2900,7 +2898,7 @@ async fn execute_query_search_mode_inference() {
 async fn execute_query_period_filter() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let now = Utc::now();
 
     // Fact valid in the past
@@ -2959,7 +2957,7 @@ async fn execute_query_period_filter() {
 async fn execute_query_composed_filters() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let opts_high = AddFactOptions {
         base_importance: Some(0.9),
@@ -3039,7 +3037,7 @@ async fn execute_query_empty_results() {
 async fn execute_query_default_limit() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     // Add 60 facts (over the default limit of 50)
     for i in 0..60 {
@@ -3123,7 +3121,7 @@ impl Reranker for SpyReranker {
 async fn reranker_none_results_unchanged() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -3168,7 +3166,7 @@ async fn reranker_reverses_order() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -3253,7 +3251,7 @@ async fn reranker_skipped_for_vector_only_no_text() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -3300,7 +3298,7 @@ async fn reranker_applies_to_fts_only_mode() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -3347,7 +3345,7 @@ async fn reranker_applies_to_vector_mode_with_text() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -3400,7 +3398,7 @@ async fn rerank_depth_overfetches_then_truncates() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     // Insert 10 facts
     for i in 0..10 {
@@ -3462,7 +3460,7 @@ async fn reranker_error_propagates() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -3518,7 +3516,7 @@ async fn debug_output_includes_reranker() {
 async fn rerank_depth_none_falls_back_to_limit() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     for i in 0..10 {
         engine
@@ -3554,7 +3552,7 @@ async fn rerank_depth_none_falls_back_to_limit() {
 /// Helper: ingest an event with a `session_id` and add a fact linked to it.
 async fn add_session_fact(engine: &MemoryEngine, content: &str, session_id: &str) -> (i64, i64) {
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let event = NewEvent {
         timestamp: Utc::now(),
         event_type: EventType::Interaction,
@@ -3783,7 +3781,7 @@ async fn add_scoped_session_fact(
     scope_path: &str,
 ) -> (i64, i64) {
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let event = NewEvent {
         timestamp: Utc::now(),
         event_type: EventType::Interaction,
@@ -3919,7 +3917,7 @@ async fn reranker_rejects_out_of_bounds_index() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -3961,7 +3959,7 @@ async fn reranker_rejects_duplicates() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -4018,7 +4016,7 @@ async fn reranker_allows_valid_subset() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -4082,7 +4080,7 @@ async fn reranker_allows_filtering_subset() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -4145,7 +4143,7 @@ async fn reranker_rejects_non_finite_score() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -4211,7 +4209,7 @@ async fn reranker_rejects_output_too_long() {
         .build()
         .unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     engine
         .add_fact(
             &AddFactRequest {
@@ -4285,7 +4283,7 @@ async fn embed_batch_default_impl_loops_embed() {
 
 #[tokio::test]
 async fn embed_batch_empty_returns_empty() {
-    let embedder = MockEmbedder { dim: DIM };
+    let embedder = crate::test_utils::MockEmbedder::new(DIM);
     let result = embedder.embed_batch(&[]).unwrap();
     assert!(result.is_empty());
 }
@@ -4294,7 +4292,7 @@ async fn embed_batch_empty_returns_empty() {
 async fn add_facts_batch_inserts_all_facts() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let entries: Vec<AddFactRequest> = (0..5)
         .map(|i| AddFactRequest {
@@ -4328,7 +4326,7 @@ async fn add_facts_batch_inserts_all_facts() {
 async fn add_facts_batch_empty_returns_empty() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let ids = engine
         .add_facts_batch(&[], embedder.clone(), None)
@@ -4341,7 +4339,7 @@ async fn add_facts_batch_empty_returns_empty() {
 async fn add_facts_batch_with_scopes() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let entries = vec![
         AddFactRequest {
@@ -4392,7 +4390,7 @@ async fn add_facts_batch_with_classifier() {
 
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let classifier = AlwaysPin;
 
     let entries = vec![AddFactRequest {
@@ -4441,7 +4439,7 @@ async fn add_facts_batch_classifier_interleaved_slots_align() {
 
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     // The classifier-decided slots (None) are deliberately NON-palindromic in
     // their verdicts (slots 0/2/4 → pin/skip/skip), so a mis-ordered stitch
@@ -4636,7 +4634,7 @@ async fn add_facts_batch_rollback_on_insert_failure() {
         scope: Some("rollback/scope-a".into()),
         opts: None,
     }];
-    let good_embedder = MockEmbedder { dim: DIM };
+    let good_embedder = crate::test_utils::MockEmbedder::new(DIM);
     let ids = engine
         .add_facts_batch(
             &good_entries,
@@ -4656,7 +4654,7 @@ async fn add_facts_batch_rollback_on_insert_failure() {
 async fn add_facts_batch_temporal_consistency() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let entries: Vec<AddFactRequest> = (0..3)
         .map(|i| AddFactRequest {
@@ -5084,7 +5082,7 @@ async fn builder_embed_dim_mismatch_is_rejected() {
                     scope: None,
                     opts: None,
                 },
-                std::sync::Arc::new(MockEmbedder { dim: DIM })
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
                     as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
@@ -5115,7 +5113,7 @@ async fn add_fact_invalid_scope_path_returns_scope_label_conflict() {
     // typed `Conflict(ScopeLabel)` — not a generic Database/Internal error.
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let err = engine
         .add_fact(
@@ -5183,7 +5181,7 @@ async fn add_fact_rejects_out_of_range_importance() {
     // still succeeds.
     let engine = MemoryEngine::builder(DIM).build().unwrap();
     let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-        std::sync::Arc::new(MockEmbedder { dim: DIM });
+        std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
 
     let request = |importance: f64| AddFactRequest {
         content: format!("importance = {importance}"),
@@ -5326,7 +5324,7 @@ mod snapshot_integration {
     }
 
     async fn add_test_fact(engine: &MemoryEngine, content: &str) -> i64 {
-        let embedder = MockEmbedder { dim: DIM };
+        let embedder = crate::test_utils::MockEmbedder::new(DIM);
         engine
             .add_fact(
                 &AddFactRequest {
@@ -5516,7 +5514,7 @@ mod snapshot_integration {
         // dimension-independent accessors keep working.
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-            std::sync::Arc::new(MockEmbedder { dim: DIM });
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
         let req = |content: &str| AddFactRequest {
             content: content.into(),
             fact_type: FactType::Semantic,
@@ -5587,13 +5585,13 @@ mod snapshot_integration {
                 MemoryEngine::open_from_config(&EngineConfig::new(db_path.clone(), DIM), None)
                     .unwrap();
             let old: std::sync::Arc<dyn EmbeddingProvider> =
-                std::sync::Arc::new(MockEmbedder { dim: DIM });
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
             for c in ["alpha", "beta", "gamma"] {
                 ids.push(engine.add_fact(&req(c), old.clone(), None).await.unwrap());
             }
 
             let new_provider: std::sync::Arc<dyn EmbeddingProvider> =
-                std::sync::Arc::new(MockEmbedder { dim: D2 });
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::new(D2));
             let new_fp = EmbeddingFingerprint::new("mock", "test", D2);
             let outcome = engine.reconstruct(&new_fp, &new_provider).await.unwrap();
             assert_eq!(outcome.promoted, 3);
@@ -5660,7 +5658,7 @@ mod snapshot_integration {
     async fn fence_covers_representative_gated_surface() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-            std::sync::Arc::new(MockEmbedder { dim: DIM });
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
         let req = |content: &str| AddFactRequest {
             content: content.into(),
             fact_type: FactType::Semantic,
@@ -5729,7 +5727,7 @@ mod expired_probe_e2e {
     /// FTS5, so the expired probe's `MATCH` query can find it) and return its id.
     async fn add_indexed_fact(engine: &MemoryEngine, content: &str) -> i64 {
         let embedder: std::sync::Arc<dyn EmbeddingProvider> =
-            std::sync::Arc::new(MockEmbedder { dim: DIM });
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM));
         engine
             .add_fact(
                 &AddFactRequest {

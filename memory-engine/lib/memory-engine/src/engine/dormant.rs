@@ -77,6 +77,8 @@ mod tests {
     use crate::traits::EmbeddingProvider;
     use crate::types::{AddFactRequest, FactType};
 
+    // kept: purpose-built - caller supplies the exact embedding vector so tests can
+    // control per-fact importance-weighted distances precisely. Not a generic double.
     struct FixedEmbedder(Vec<f32>);
     impl EmbeddingProvider for FixedEmbedder {
         fn embed(&self, _text: &str) -> Result<Vec<f32>> {

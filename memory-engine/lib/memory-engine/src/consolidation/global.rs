@@ -135,21 +135,6 @@ mod tests {
         }
     }
 
-    /// Mock embedder returning a fixed-dimension constant vector.
-    struct MockEmbedder {
-        embed_dim: usize,
-    }
-
-    impl EmbeddingProvider for MockEmbedder {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-            Ok(vec![0.5; self.embed_dim])
-        }
-
-        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-            crate::types::EmbeddingFingerprint::new("mock", "test", self.embed_dim)
-        }
-    }
-
     #[test]
     fn global_integration_summarizes_clusters() {
         let conn = open_memory().unwrap();
@@ -172,7 +157,7 @@ mod tests {
         }
 
         let mock_gen = MockGenerator;
-        let mock_embed = MockEmbedder { embed_dim: dim };
+        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
         let count =
             global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();
         assert_eq!(count, 1);
@@ -194,7 +179,7 @@ mod tests {
         let dim = 4;
 
         let mock_gen = MockGenerator;
-        let mock_embed = MockEmbedder { embed_dim: dim };
+        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
         let count =
             global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();
         assert_eq!(count, 0);
@@ -219,7 +204,7 @@ mod tests {
             .unwrap();
 
         let mock_gen = MockGenerator;
-        let mock_embed = MockEmbedder { embed_dim: dim };
+        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
 
         // Run twice
         global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();

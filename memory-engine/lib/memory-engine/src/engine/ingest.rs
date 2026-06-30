@@ -505,17 +505,6 @@ mod tests {
 
     const DIM: usize = 4;
 
-    struct FakeEmbed;
-    impl EmbeddingProvider for FakeEmbed {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-            Ok(vec![0.1, 0.2, 0.3, 0.4])
-        }
-
-        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-            crate::types::EmbeddingFingerprint::new("mock", "test", 4)
-        }
-    }
-
     /// An oversized event payload is rejected by `ingest` before it touches the
     /// write path.
     #[tokio::test]
@@ -562,7 +551,8 @@ mod tests {
         let err = engine
             .add_fact(
                 &req,
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -590,7 +580,8 @@ mod tests {
             engine
                 .add_fact(
                     &ok_req,
-                    std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                    std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                        as std::sync::Arc<dyn EmbeddingProvider>,
                     None
                 )
                 .await
@@ -613,7 +604,8 @@ mod tests {
         let err = engine
             .add_fact(
                 &req,
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -650,7 +642,8 @@ mod tests {
         let results = engine
             .add_facts_batch_partial(
                 &entries,
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await
@@ -688,7 +681,8 @@ mod tests {
         let results = engine
             .add_facts_batch_partial(
                 &entries,
-                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
                 None,
             )
             .await

@@ -288,7 +288,10 @@ mod tests {
     const DIM: usize = 4;
     const SPACE: &str = "shadow";
 
-    /// A constant-vector embedder — the backfill *mechanism* (windowing,
+    // kept: distinct fingerprint model "recon-test" (vs "mock") - reconstruct tests
+    // deliberately use a different model name to probe the fingerprint-swap path.
+    // vec![0.5; dim] output matches MockEmbedder::new(dim) but the fingerprint diverges.
+    /// A constant-vector embedder -- the backfill *mechanism* (windowing,
     /// resumability, idempotency) is what these tests exercise; vector content is
     /// irrelevant here (T4 uses a distinguishable embedder for the promote swap).
     struct ConstEmbedder {
@@ -432,8 +435,10 @@ mod tests {
 
     // --- reconstruct() end-to-end (#623 T4) ---
 
+    // kept: purpose-built - parameterized model slug + value so reconstruction tests
+    // can assert that old vs new identities and vectors are observably different.
     /// A distinguishable embedder: every text maps to the constant `[value; dim]`,
-    /// and a unique `model` slug — so old vs new vectors AND identities are
+    /// and a unique `model` slug -- so old vs new vectors AND identities are
     /// observably different across a reconstruction.
     struct TagEmbedder {
         model: &'static str,
@@ -656,6 +661,8 @@ mod tests {
         // actually returns wider vectors must be rejected before its blobs reach
         // `fact_vectors` — otherwise the promote copy-swaps corruption straight into
         // `facts.embedding` (the same-dim guard only checks the declared dim).
+        // kept: purpose-built - tests that declared dim != actual output dim is
+        // rejected. MockEmbedder always returns consistent dim; this intentionally lies.
         struct LyingEmbedder {
             declared: usize,
             actual: usize,

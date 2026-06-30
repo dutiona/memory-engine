@@ -462,19 +462,6 @@ mod tests {
         }
     }
 
-    /// Mock embedder returning a fixed-dimension constant vector.
-    struct MockEmbedder;
-
-    impl EmbeddingProvider for MockEmbedder {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-            Ok(vec![0.5; DIM])
-        }
-
-        fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-            crate::types::EmbeddingFingerprint::new("mock", "test", DIM)
-        }
-    }
-
     /// Insert an active fact, returning its id.
     fn insert_fact(conn: &Connection, content: &str, embedding: Vec<f32>, importance: f64) -> i64 {
         let store = FactStore::new(conn, DIM);
@@ -515,7 +502,7 @@ mod tests {
         let (stats, expired) = consolidate(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -554,7 +541,14 @@ mod tests {
             min_cluster_size: 0,
             ..Default::default()
         };
-        let err = consolidate(&conn, &MockGenerator, &MockEmbedder, DIM, &bad).unwrap_err();
+        let err = consolidate(
+            &conn,
+            &MockGenerator,
+            &crate::test_utils::MockEmbedder::new(DIM),
+            DIM,
+            &bad,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("min_cluster_size"),
             "error should name the offending parameter, got: {err}"
@@ -586,7 +580,7 @@ mod tests {
         let (stats, expired) = consolidate(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -628,7 +622,7 @@ mod tests {
         let (stats, _) = consolidate(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -667,7 +661,7 @@ mod tests {
         let (stats, _) = consolidate(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -679,7 +673,7 @@ mod tests {
 
         assert_eq!(
             crate::store::embedding_meta::load(&conn).unwrap(),
-            Some(MockEmbedder.fingerprint()),
+            Some(crate::test_utils::MockEmbedder::new(DIM).fingerprint()),
             "a summary-writing consolidation records the embedder's fingerprint"
         );
     }
@@ -697,7 +691,7 @@ mod tests {
         consolidate(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -732,7 +726,7 @@ mod tests {
         let (stats, expired) = consolidate(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -757,7 +751,7 @@ mod tests {
         let err = consolidate(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -789,7 +783,7 @@ mod tests {
         let err = consolidate(
             &conn,
             &FailingGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -836,7 +830,7 @@ mod tests {
         let (stats, expired) = consolidate(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -873,7 +867,7 @@ mod tests {
         let (stats, expired) = consolidate_with_caps(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
             1,
@@ -935,7 +929,7 @@ mod tests {
         let (stats, expired) = consolidate_with_caps(
             &conn,
             &MockGenerator,
-            &MockEmbedder,
+            &crate::test_utils::MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
             1,
@@ -975,7 +969,14 @@ mod tests {
 
         let config = ConsolidationConfig::default();
         let snapshot = load_snapshot(&conn, DIM, &config).unwrap();
-        let plan = compute_plan(&snapshot, &MockGenerator, &MockEmbedder, DIM, &config).unwrap();
+        let plan = compute_plan(
+            &snapshot,
+            &MockGenerator,
+            &crate::test_utils::MockEmbedder::new(DIM),
+            DIM,
+            &config,
+        )
+        .unwrap();
         assert_eq!(
             plan.dedup.expirations.len(),
             1,
@@ -1015,7 +1016,14 @@ mod tests {
 
         let config = ConsolidationConfig::default();
         let snapshot = load_snapshot(&conn, DIM, &config).unwrap();
-        let plan = compute_plan(&snapshot, &MockGenerator, &MockEmbedder, DIM, &config).unwrap();
+        let plan = compute_plan(
+            &snapshot,
+            &MockGenerator,
+            &crate::test_utils::MockEmbedder::new(DIM),
+            DIM,
+            &config,
+        )
+        .unwrap();
         assert_eq!(plan.dedup.expirations.len(), 1);
         let survivor = plan.dedup.expirations[0].survivor;
         let loser = plan.dedup.expirations[0].loser;
@@ -1073,7 +1081,14 @@ mod tests {
 
         let config = ConsolidationConfig::default();
         let snapshot = load_snapshot(&conn, DIM, &config).unwrap();
-        let plan = compute_plan(&snapshot, &MockGenerator, &MockEmbedder, DIM, &config).unwrap();
+        let plan = compute_plan(
+            &snapshot,
+            &MockGenerator,
+            &crate::test_utils::MockEmbedder::new(DIM),
+            DIM,
+            &config,
+        )
+        .unwrap();
         let survivor = plan.dedup.expirations[0].survivor;
 
         // Concurrently expire the survivor → the plan's summary view is now stale.
