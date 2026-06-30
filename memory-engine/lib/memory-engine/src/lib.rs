@@ -128,6 +128,10 @@ pub(crate) mod resume;
 pub(crate) mod scope;
 pub(crate) mod store;
 
+// === Shared test utilities (#485 / #120) ===
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 // === Re-exports: flat access to the most-used consumer types ===
 #[cfg(feature = "archive")]
 pub use archive::{ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVerifyResult};
