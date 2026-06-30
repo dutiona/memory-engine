@@ -15,16 +15,21 @@ pub type UpcasterFn = fn(serde_json::Value) -> Result<serde_json::Value>;
 /// semantics are preserved. Only `get_upcasted`/`list_upcasted` apply the chain.
 #[derive(Clone)]
 pub struct UpcasterRegistry {
-    /// `(event_type, from_revision)` → upcaster function
-    upcasters: HashMap<(String, u16), UpcasterFn>,
+    /// `event_type` → (`from_revision` → upcaster function).
+    ///
+    /// Two-level map so the hot upcasting loop can look up the event type's chain
+    /// once (by `&str` borrow, no allocation) and then index into it by revision
+    /// without cloning the event-type string on every step.
+    upcasters: HashMap<String, HashMap<u16, UpcasterFn>>,
     /// `event_type` → latest known revision
     latest: HashMap<String, u16>,
 }
 
 impl std::fmt::Debug for UpcasterRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count: usize = self.upcasters.values().map(HashMap::len).sum();
         f.debug_struct("UpcasterRegistry")
-            .field("registered_upcasters", &self.upcasters.len())
+            .field("registered_upcasters", &count)
             .field("latest_revisions", &self.latest)
             .finish()
     }
@@ -49,10 +54,12 @@ impl UpcasterRegistry {
     /// Number of registered upcaster functions. Used by the construction
     /// equivalence harness to prove the builder preserves the registry verbatim
     /// (deterministic, unlike the `Debug` impl's `HashMap` ordering).
+    ///
+    /// Counts individual (`event_type`, `from_revision`) pairs across all chains.
     #[must_use]
     #[allow(dead_code)] // observed only by the equivalence test harness
     pub(crate) fn registered_count(&self) -> usize {
-        self.upcasters.len()
+        self.upcasters.values().map(HashMap::len).sum()
     }
 
     /// Register an upcaster that transforms `event_type` payloads from
@@ -63,7 +70,9 @@ impl UpcasterRegistry {
     pub fn register(&mut self, event_type: &str, from_revision: u16, func: UpcasterFn) {
         let target = from_revision.saturating_add(1);
         self.upcasters
-            .insert((event_type.to_string(), from_revision), func);
+            .entry(event_type.to_string())
+            .or_default()
+            .insert(from_revision, func);
         let current = self.latest.entry(event_type.to_string()).or_insert(1);
         if target > *current {
             *current = target;
@@ -102,11 +111,11 @@ impl UpcasterRegistry {
 
         let mut value = payload;
         let mut rev = current_revision;
-        let type_key = event_type.to_string();
+        // Look up the inner chain once by &str — no String allocation in the loop.
+        let chain = self.upcasters.get(event_type);
 
         while rev < latest {
-            let key = (type_key.clone(), rev);
-            let func = self.upcasters.get(&key).ok_or_else(|| {
+            let func = chain.and_then(|inner| inner.get(&rev)).ok_or_else(|| {
                 MigrationError::MissingUpcaster(format!(
                     "missing upcaster for event type '{event_type}' from revision {rev} to {}",
                     rev + 1

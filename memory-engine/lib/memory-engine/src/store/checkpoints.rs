@@ -106,7 +106,7 @@ impl<'a> CheckpointStore<'a> {
             .prepare(
                 "SELECT session_id, scope_path, summary, last_activity_id, checkpoint_at, metadata
                  FROM session_checkpoints
-                 ORDER BY checkpoint_at DESC
+                 ORDER BY checkpoint_at DESC, session_id DESC
                  LIMIT ?1",
             )
             .map_err(MemoryError::Database)?;
