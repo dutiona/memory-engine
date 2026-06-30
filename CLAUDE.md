@@ -32,16 +32,30 @@ uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
 
 Feature flags: `backend-sqlite` (default; the in-process SQLite backend — a #633 marker today, since `rusqlite` is still unconditional), `backend-postgres` (the #633 `PgBackend`: `deadpool-postgres` pool + fresh v14 migration chain + `SchemaManager`), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`, `test-util` (cross-crate test-only port hooks). At least one backend feature must be enabled (a `compile_error!` in `lib.rs` enforces it). `tokio` is a **non-optional** dependency — the engine is async-native, so there is no `async` feature to toggle (#702). The `backend-postgres` live tests are `#[ignore]`-by-default (they need a Docker/Postgres testcontainer): `cargo test -p memory-engine --features backend-postgres -- --ignored`.
 
-**Workspace verification gate** — run before every commit, especially when modifying `error.rs`, `types.rs`, `traits.rs`, `lib.rs`, or any public API:
+**Verification gate — this is the CI contract** (`.github/workflows/ci.yml`); run it before every commit, especially when touching `error.rs`, `types/`, `traits.rs`, `lib.rs`, or any public API. These are the _exact_ commands CI runs — a local pass that diverges from them (weaker features, narrower scope, piped output) is a **false pass**:
 
 ```bash
-cargo build --workspace               # ALL crates compile
-cargo test --workspace                # ALL crates' tests pass
-cargo clippy --workspace --all-targets # ALL crates lint-clean
-cargo deny check                      # supply-chain gate (advisories/licenses/bans/sources)
+cargo fmt --all --check                                                # Format
+cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
+cargo build --workspace --all-features                                 # Build (also runs default-feature build in CI)
+cargo test  --workspace --all-features                                 # Test — NB: --all-features, or ann/archive/eval tests never run
+RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
+  cargo doc --no-deps -p memory-engine --all-features                  # Docs — broken/private intra-doc links (core crate only; #915 widens to --workspace)
+cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
-The workspace contains 4 crates: `memory-engine` (core), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. The CLI, MCP, and embed crates consume the core's public API — changes to error variants, type definitions, or trait signatures can break them silently if only the root crate is checked.
+The workspace contains **4 crates** (`memory-engine` core, `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`); the CLI/MCP/embed crates consume the core's public API, so `--workspace` is mandatory — a change to error variants, type definitions, or trait signatures can break them silently if only the root crate is checked.
+
+**Verification traps** — each one cost a real super-qa rework cycle; the `qa-sweep` skill holds the full taxonomy:
+
+1. **Never pipe a cargo gate through `head`/`tail`/`grep`.** Truncation hides RED results _and_ the pipe discards cargo's exit code (PIPESTATUS) → false green. Run unpiped, or redirect to a file and read it. (Enforced by the `cargo-gate-guard.sh` hook below.)
+2. **`clippy --all-features` _compiles_ tests; it does not _run_ them** — only `cargo test --all-features` does. A clippy-green diff can still have RED tests.
+3. **`cargo build` green ≠ tests green** for file moves / `include_str!` / `[[test]]` registration — only `cargo test` catches a dropped or dark test target (56 eval tests were dark for weeks this way).
+4. **Proptests pass "lucky" at low case counts** — raise `PROPTEST_CASES` before trusting a property holds.
+5. **Triage findings against _current_ main, not the issue snapshot** — file:lines drift across reorgs; a parked issue may already be fixed elsewhere (re-`grep`/`gh issue view` first).
+6. **A "magic constant" or "dead" item may be intentional** (a named sentinel, epic-foundation scaffolding) — pickaxe (`git log -S`) + check the roadmap before "fixing" or deleting it.
+
+A repo-local **PreToolUse hook** (`utils/scripts/hooks/cargo-gate-guard.sh`) mechanically blocks trap #1; wire it via `.claude/settings.json` (gitignored, so local-only — see the script header for the one-line wiring). The committed `.md` files remain the guardrail that reaches every agent on a fresh clone.
 
 **Supply-chain gate** — `deny.toml` at the repo root configures [`cargo-deny`](https://embarkstudios.github.io/cargo-deny/) and runs as the `cargo-deny` CI job. It fails on RustSec security advisories (against the full all-features graph) and on disallowed licenses or non-crates.io sources; duplicate transitive versions are surfaced as non-blocking warnings. Install locally with `cargo install cargo-deny --locked`. Note: the MSRV is **Rust 1.88**, required by the workspace's own use of **let-chains** (a 1.88 language feature). It was originally raised from 1.85 to take `time` 0.3.47 (RUSTSEC-2026-0009); that dependency has since been dropped (rusqlite narrowed to `bundled`), but the let-chain usage keeps the floor at 1.88.
 
