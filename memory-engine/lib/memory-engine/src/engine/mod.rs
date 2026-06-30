@@ -1070,7 +1070,7 @@ mod proptest_conflict {
     use super::MemoryEngine;
     use crate::graph::MemoryGraph;
     use crate::traits::{ConflictArbiter, CrudDecision};
-    use crate::types::{Fact, FactType, NewEdge, NewFact};
+    use crate::types::{Fact, FactType, NewEdge, NewFact, RelationType};
 
     const DIM: usize = 4;
 
@@ -1094,7 +1094,7 @@ mod proptest_conflict {
     }
 
     /// Canonical edge key for set-equality comparisons: `(source, target, relation)`.
-    type EdgeKey = (i64, i64, String);
+    type EdgeKey = (i64, i64, RelationType);
 
     /// Enumerate all edges currently held by the in-memory graph as a set of
     /// `(source, target, relation_type)` triples.
@@ -1183,7 +1183,7 @@ mod proptest_conflict {
                         .insert_edge(&NewEdge {
                             source_fact_id: old_id,
                             target_fact_id: side_id,
-                            relation_type: "related".to_string(),
+                            relation_type: "related".into(),
                             weight: 1.0,
                             t_created: now,
                             t_expired: None,

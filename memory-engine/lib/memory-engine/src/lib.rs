@@ -171,8 +171,8 @@ pub use types::{
     LineageSnapshotEntry, MergeGroup, NewActivity, NewEdge, NewEvent, NewFact, NewFactBuilder,
     NewLineageRecord, NewSummary, Outcome, OutcomeClass, OutcomeCounts, ParseActivityStatusError,
     ProjectContext, PromoteOutcome, PromoteRequest, PromotionProvenance, PromotionResult,
-    RecordActivityRequest, RecordActivityResult, ScopeNode, ScopeQuery, SessionCheckpoint,
-    SessionFact, Summary,
+    RecordActivityRequest, RecordActivityResult, RelationType, ScopeNode, ScopeQuery,
+    SessionCheckpoint, SessionFact, Summary,
 };
 
 // Storage port — tight flat re-export of the umbrella + cross-cutting types only.

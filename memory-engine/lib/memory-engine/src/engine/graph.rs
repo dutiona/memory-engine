@@ -2,6 +2,7 @@ use chrono::Utc;
 
 use crate::error::{MemoryError, Result};
 use crate::graph::EdgeData;
+use crate::types::RelationType;
 
 use super::MemoryEngine;
 
@@ -62,7 +63,6 @@ impl MemoryEngine {
         }
 
         let now = Utc::now();
-        let relation = Self::CO_SESSION_RELATION.to_string();
 
         // Batch-dedup + edge inserts run in one transaction below the seam
         // (`insert_cosession_edges_atomic`). The engine resolves `scope_ids`
@@ -88,7 +88,7 @@ impl MemoryEngine {
                     tgt,
                     EdgeData {
                         edge_id,
-                        relation_type: relation.clone(),
+                        relation_type: RelationType::CoSession,
                         weight: Self::CO_SESSION_WEIGHT,
                     },
                 );

@@ -290,7 +290,7 @@ mod tests {
                 id in any::<i64>(),
                 source_fact_id in any::<i64>(),
                 target_fact_id in any::<i64>(),
-                relation_type in ".{0,16}",
+                relation_type_str in ".{0,16}",
                 // Discretized weight (n/1000) for the same exact-round-trip reason
                 // as the importance/embedding strategies above. Drawn from `i32` so
                 // `f64::from` is exact (no `cast_precision_loss`).
@@ -303,7 +303,7 @@ mod tests {
                     id,
                     source_fact_id,
                     target_fact_id,
-                    relation_type,
+                    relation_type: crate::types::RelationType::from(relation_type_str.as_str()),
                     weight,
                     t_created: ts_from_secs(t_created_s),
                     t_expired: t_expired_s.map(ts_from_secs),

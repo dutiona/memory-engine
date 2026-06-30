@@ -400,7 +400,7 @@ fn restore_edges(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
             edge.id,
             edge.source_fact_id,
             edge.target_fact_id,
-            edge.relation_type,
+            edge.relation_type.as_str(),
             edge.weight,
             t_created,
             t_expired,

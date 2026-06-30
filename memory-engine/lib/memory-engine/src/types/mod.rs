@@ -5,6 +5,7 @@ mod cognitive;
 mod events;
 mod facts;
 mod provenance;
+mod relation;
 mod scope;
 
 pub use activity::*;
@@ -12,4 +13,5 @@ pub use cognitive::*;
 pub use events::*;
 pub use facts::*;
 pub use provenance::*;
+pub use relation::*;
 pub use scope::*;

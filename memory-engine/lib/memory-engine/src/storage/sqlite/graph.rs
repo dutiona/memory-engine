@@ -25,8 +25,8 @@ use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
 use crate::types::{
-    Edge, EmbeddingFingerprint, Fact, FactScoringRow, FactType, NewEdge, NewFact, ScopeNode,
-    SessionFact,
+    Edge, EmbeddingFingerprint, Fact, FactScoringRow, FactType, NewEdge, NewFact, RelationType,
+    ScopeNode, SessionFact,
 };
 
 /// `(fact_ids, scope_ids_to_cache, embeddings)` — the result of the batch-insert
@@ -835,7 +835,7 @@ impl FactGraph for SqliteBackend {
                             let edge_id = edge_store.insert(&NewEdge {
                                 source_fact_id: src,
                                 target_fact_id: tgt,
-                                relation_type: relation.clone(),
+                                relation_type: RelationType::from(relation.as_str()),
                                 weight,
                                 scope_id,
                                 t_created: now,
@@ -912,7 +912,7 @@ impl FactGraph for SqliteBackend {
                         let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
                             source_fact_id: new_id,
                             target_fact_id: old_id,
-                            relation_type: relation.clone(),
+                            relation_type: RelationType::from(relation.as_str()),
                             weight,
                             scope_id,
                             t_created: now,
@@ -930,7 +930,7 @@ impl FactGraph for SqliteBackend {
                         let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
                             source_fact_id: new_id,
                             target_fact_id: old_id,
-                            relation_type: relation.clone(),
+                            relation_type: RelationType::from(relation.as_str()),
                             weight,
                             scope_id,
                             t_created: now,

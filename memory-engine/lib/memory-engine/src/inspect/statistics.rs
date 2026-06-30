@@ -459,7 +459,7 @@ mod tests {
         let active_edge = |rel: &str| NewEdge {
             source_fact_id: f1,
             target_fact_id: f2,
-            relation_type: rel.to_owned(),
+            relation_type: rel.into(),
             weight: 1.0,
             t_created: chrono::Utc::now(),
             t_expired: None,

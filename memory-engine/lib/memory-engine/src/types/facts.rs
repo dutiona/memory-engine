@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::relation::RelationType;
+
 /// Semantic alias for fact identifiers. Lives in `facts` (a leaf module) so the
 /// provenance/cognitive submodules can both reference it without a module cycle.
 pub type FactId = i64;
@@ -239,7 +241,7 @@ pub struct Edge {
     pub id: i64,
     pub source_fact_id: i64,
     pub target_fact_id: i64,
-    pub relation_type: String,
+    pub relation_type: RelationType,
     pub weight: f64,
     pub t_created: DateTime<Utc>,
     pub t_expired: Option<DateTime<Utc>>,
@@ -565,7 +567,7 @@ impl NewFactBuilder {
 pub struct NewEdge {
     pub source_fact_id: i64,
     pub target_fact_id: i64,
-    pub relation_type: String,
+    pub relation_type: RelationType,
     pub weight: f64,
     pub t_created: DateTime<Utc>,
     pub t_expired: Option<DateTime<Utc>>,
