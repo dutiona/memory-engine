@@ -4,7 +4,7 @@
 
 ## What This Is
 
-Embedded Rust library (edition 2024, Rust 1.85+) providing durable long-term memory for AI agents. Single facade type `MemoryEngine` with 5 primitives: Ingest, Query, Consolidate, Forget, Resolve. Zero LLM/network dependencies — consumers implement traits (`EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker`).
+Embedded Rust library (edition 2024, **Rust 1.88+** — the workspace uses let-chains) providing durable long-term memory for AI agents. Single facade type `MemoryEngine` (async-native; DB methods are `async fn` over an `Arc<dyn StorageBackend>` — `tokio` is non-optional) with 5 primitives: Ingest, Query, Consolidate, Forget, Resolve. Zero LLM/network dependencies — consumers implement traits (`EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker`).
 
 Part of a four-layer cognitive architecture. Companion repos: `knowledge-base` (Python MCP server, Knowledge layer), `autonomous-agent-project` (research, no code).
 
@@ -18,41 +18,64 @@ No external services needed — SQLite is bundled via `rusqlite`.
 
 ## Verify
 
+These are the **exact** commands CI runs (`.github/workflows/ci.yml`). A local pass that diverges from them — weaker features, narrower scope, or piped output — is a **false pass**:
+
 ```bash
-cargo build --workspace               # ALL 3 crates must compile
-cargo test --workspace                # ALL 3 crates' tests must pass
-cargo clippy --workspace --all-targets # ALL 3 crates must lint-clean (pedantic + nursery)
-cargo fmt --check                     # must pass — no reformats
+cargo fmt --all --check                                                # Format
+cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
+cargo build --workspace                                                # Build (default features)
+cargo build --workspace --all-features                                 # Build (all features)
+cargo test  --workspace --all-features                                 # Test — --all-features is mandatory, or ann/archive/eval tests never run
+export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only)
+cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
+cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
-Run all four commands after every change. Do not skip any.
+Run all of them after every change. Do not skip any, and do not substitute a weaker variant. CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
 
-**Critical:** The workspace contains 3 crates: `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`. Changes to `error.rs`, `types.rs`, `traits.rs`, or any public API in the core crate can break the CLI and MCP crates silently if only the root crate is checked. Always use `--workspace`.
+**Critical:** The workspace contains **4 crates** — `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. Changes to `error.rs`, `types/`, `traits.rs`, or any public API in the core crate can break the CLI, MCP, and embed crates silently if only the root crate is checked. Always use `--workspace`.
+
+**Verification traps** (each cost a real rework cycle):
+
+1. **Never pipe a cargo gate through `head`/`tail`** — truncation hides RED results and the pipe drops cargo's exit code → false green. Run unpiped or redirect to a file. (`grep` doesn't truncate but also masks the exit code — check `${PIPESTATUS[0]}` if you must filter.)
+2. **`clippy --all-features` compiles tests but does not run them** — only `cargo test --all-features` runs them.
+3. **`cargo build` green ≠ tests green** for file moves / `include_str!` / `[[test]]` registration — only `cargo test` catches a dark test target.
+4. **Triage findings against current `main`, not the issue snapshot** — file:lines drift across reorgs; a "magic constant" or "dead" item may be an intentional sentinel or epic-foundation (`git log -S` + check the roadmap before changing it).
 
 ## Project Layout
 
+The workspace is a virtual root (no root package); crates live under `memory-engine/`. Paths are **`memory-engine/lib/memory-engine/src/…`**, not `src/…` (the #814 bin/lib reorg).
+
 ```
-src/
-  lib.rs              # Crate root, re-exports
-  engine.rs           # MemoryEngine facade, EngineConfig
-  types.rs            # Core data types (Event, Fact, Edge, Summary, enums)
-  traits.rs           # Consumer-implemented traits
-  error.rs            # MemoryError enum (thiserror)
-  store/              # SQLite persistence (schema, events, facts, edges, summaries, scopes)
-  search/             # Hybrid retrieval (FTS5, vector, HNSW, RRF merge)
-  graph/              # In-memory petgraph knowledge graph
-  consolidation/      # 3-pass pipeline (dedup, cluster, global)
-  forgetting/         # Ebbinghaus decay + importance scoring
-  conflict/           # Bi-temporal conflict resolution
-  pool/               # ConnectionPool (N readers + 1 writer)
-  scope/              # Hierarchical scope tree
-  resume/             # 4-tier cognitive boot (pinned → importance → due → recent)
-  bootstrap/          # Claude Code JSONL session import
-  inspect/            # Debugging APIs (explain, replay, dump, restore, statistics)
-tests/                # Integration tests
-benches/              # Criterion benchmarks
-examples/             # 3 runnable examples
-docs/                 # Sphinx narrative documentation
+memory-engine/
+  lib/memory-engine/src/   # core crate (the library)
+    lib.rs                 # crate root, re-exports; backend compile_error! guard
+    engine/                # MemoryEngine facade, EngineConfig, conflict resolution (was engine.rs + conflict/)
+    types/                 # core data types (Event, Fact, Edge, Summary, enums) — split into submodules
+    traits.rs              # consumer-implemented traits (zero LLM/network deps in core)
+    error.rs               # MemoryError enum (thiserror)
+    store/                 # original SQLite stores (events, facts, edges, summaries, scopes)
+    storage/               # #628 pluggable StorageBackend: sqlite/ (live) + postgres/ (skeleton)
+    search/                # hybrid retrieval (FTS5 + vector + HNSW, RRF merge)
+    graph/                 # in-memory petgraph knowledge graph
+    consolidation/         # 3-pass pipeline (dedup, cluster, global)
+    forgetting/            # Ebbinghaus decay + multi-signal importance
+    pool/                  # ConnectionPool (N readers + 1 writer)
+    scope/                 # hierarchical scope tree
+    resume/                # 4-tier cognitive boot (pinned → importance → due → recent)
+    bootstrap/             # Claude Code JSONL session import
+    inspect/               # debugging APIs (explain, replay, dump, restore, statistics)
+    limits.rs              # resource/size guards
+  lib/embed/               # memory-engine-embed (HTTP embedding provider + HttpDeltaProposer)
+  bin/cli/                 # memory-engine-cli (inspector binary)
+  bin/mcp/                 # memory-engine-mcp (MCP server)
+tests/                     # workspace integration tests
+benches/                   # Criterion benchmarks
+examples/                  # runnable examples
+fuzz/                      # cargo-fuzz targets (detached workspace, nightly-only)
+utils/                     # scripts (github-pm tooling, hooks)
+docs/                      # Sphinx narrative documentation
 ```
 
 ## Rules
