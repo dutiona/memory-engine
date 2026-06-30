@@ -56,14 +56,20 @@ impl Default for ArchivePolicy {
     /// Returns a policy with a 30-day look-back cutoff relative to the current
     /// wall-clock time and a 100-fact minimum batch size.
     ///
-    /// The `expired_before` cutoff is intentionally now-relative: a retention
-    /// policy's default horizon is "facts that expired at least 30 days ago",
-    /// which is meaningless without anchoring to *now*. Storing a fixed timestamp
-    /// would silently archive nothing (or everything) depending on when the binary
-    /// was built.
+    /// The `expired_before` cutoff is captured from the wall clock **when
+    /// `default()` is called** — a retention policy's horizon is "facts that
+    /// expired at least 30 days ago", which is meaningless without anchoring to
+    /// *now*. Computing it here (rather than as a fixed compile-time timestamp)
+    /// avoids silently archiving nothing — or everything — depending on when the
+    /// binary was built.
+    ///
+    /// Note: the cutoff is frozen at construction, so a once-built `default()`
+    /// does **not** slide its horizon forward over time. In a long-running
+    /// process, construct a fresh `ArchivePolicy` (or set `expired_before`
+    /// explicitly) per archival run.
     fn default() -> Self {
         Self {
-            expired_before: Utc::now() - chrono::Duration::days(30),
+            expired_before: Utc::now() - chrono::TimeDelta::days(30),
             min_facts: 100,
         }
     }

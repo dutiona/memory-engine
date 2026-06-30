@@ -704,7 +704,9 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// - Returns `MemoryError::Serialization` if `scope_ids` cannot be serialized
+    ///   to JSON (infallible in practice for `&[i64]`).
+    /// - Returns `MemoryError::Database` on query failure.
     pub fn list_due(
         &self,
         now: DateTime<Utc>,
