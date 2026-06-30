@@ -253,23 +253,8 @@ mod tests {
     }
 
     fn make_fact(content: &str) -> NewFact {
-        NewFact {
-            content: content.into(),
-            content_hash: String::new(),
-            embedding: vec![0.1; DIM],
-            fact_type: FactType::Episodic,
-            t_created: Utc::now(),
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            scope_id: 1,
-            base_importance: 0.5,
-            access_count: 0,
-            last_accessed: Utc::now(),
-            metadata: serde_json::json!({}),
-            is_pinned: false,
-        }
+        // kept: single-arg (embedding fixed to vec![0.1; DIM] using local DIM const)
+        crate::test_utils::new_fact(content, vec![0.1; DIM])
     }
 
     #[test]

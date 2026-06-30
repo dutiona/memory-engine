@@ -132,9 +132,7 @@ impl ConflictArbiter for CapturingArbiter {
 }
 
 fn make_new_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-    NewFact::builder(content, embedding, FactType::Semantic)
-        .content_hash(blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string())
-        .build()
+    crate::test_utils::new_fact_hashed(content, embedding)
 }
 
 /// Test helper: insert a raw fact via the storage backend (bypasses engine's `add_fact`).

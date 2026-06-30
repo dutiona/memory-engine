@@ -586,27 +586,11 @@ mod tests {
     }
 
     fn make_fact_with(content: &str, embedding: Vec<f32>, fact_type: FactType) -> NewFact {
-        NewFact {
-            content: content.into(),
-            content_hash: String::new(),
-            embedding,
-            fact_type,
-            t_created: Utc::now(),
-            t_expired: None,
-            t_valid: None,
-            t_invalid: None,
-            source_event_id: None,
-            scope_id: 1,
-            base_importance: 0.5,
-            access_count: 0,
-            last_accessed: Utc::now(),
-            metadata: serde_json::json!({}),
-            is_pinned: false,
-        }
+        crate::test_utils::new_fact_with_type(content, embedding, fact_type)
     }
 
     fn make_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-        make_fact_with(content, embedding, FactType::Episodic)
+        crate::test_utils::new_fact(content, embedding)
     }
 
     /// Like [`make_fact`], but lets a fixture carry explicit valid-time bounds.
@@ -617,6 +601,7 @@ mod tests {
     /// fact). This override is the seam the bi-temporal tests need to drive a fact
     /// that is future-dated (`t_valid > cutoff`) or already invalidated
     /// (`t_invalid <= cutoff`).
+    // kept: distinct — sets t_valid/t_invalid for bi-temporal filter tests.
     fn make_fact_temporal(
         content: &str,
         embedding: Vec<f32>,

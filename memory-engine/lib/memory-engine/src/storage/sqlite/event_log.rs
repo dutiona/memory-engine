@@ -145,8 +145,6 @@ impl EventLog for SqliteBackend {
 mod tests {
     use std::sync::Arc;
 
-    use chrono::Utc;
-
     use super::super::SqliteBackend;
     use crate::error::MemoryError;
     use crate::pool::ConnectionPool;
@@ -160,17 +158,7 @@ mod tests {
     }
 
     fn make_event(source: &str, session_id: Option<&str>) -> NewEvent {
-        NewEvent {
-            timestamp: Utc::now(),
-            event_type: EventType::Interaction,
-            payload: serde_json::json!({ "k": "v" }),
-            source: source.into(),
-            session_id: session_id.map(Into::into),
-            scope_id: 1,
-            origin_node_id: "local".into(),
-            sequence_id: 0,
-            created_at: None,
-        }
+        crate::test_utils::new_event(source, session_id)
     }
 
     #[tokio::test]

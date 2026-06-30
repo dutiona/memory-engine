@@ -900,6 +900,8 @@ mod proptest_temporal {
     use super::{fact_overlaps_period, passes_temporal_cutoff};
     use crate::types::{Fact, FactType};
 
+    // kept: returns `Fact` (not `NewFact`), takes t_valid/t_invalid — bi-temporal
+    // test fixture; semantics differ entirely from test_utils::new_fact*.
     /// Build a `Fact` carrying only the valid-time fields the helpers read;
     /// every other field is an inert placeholder.
     fn make_fact(t_valid: Option<DateTime<Utc>>, t_invalid: Option<DateTime<Utc>>) -> Fact {
@@ -1070,7 +1072,7 @@ mod proptest_conflict {
     use super::MemoryEngine;
     use crate::graph::MemoryGraph;
     use crate::traits::{ConflictArbiter, CrudDecision};
-    use crate::types::{Fact, FactType, NewEdge, NewFact, RelationType};
+    use crate::types::{Fact, NewEdge, NewFact, RelationType};
 
     const DIM: usize = 4;
 
@@ -1088,9 +1090,8 @@ mod proptest_conflict {
 
     /// Build a `NewFact` with a distinct content string and a fixed embedding.
     fn make_fact(content: &str) -> NewFact {
-        NewFact::builder(content, vec![0.5_f32; DIM], FactType::Semantic)
-            .content_hash(blake3::hash(content.as_bytes()).to_hex().as_str()[..32].to_string())
-            .build()
+        // kept: single-arg wrapper (embedding fixed to vec![0.5; DIM] using local DIM const)
+        crate::test_utils::new_fact_hashed(content, vec![0.5_f32; DIM])
     }
 
     /// Canonical edge key for set-equality comparisons: `(source, target, relation)`.
