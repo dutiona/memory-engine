@@ -7,6 +7,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::store::edges::EdgeStore;
+use crate::types::RelationType;
 
 /// Hard upper bound on the number of edges accepted from a single snapshot
 /// sidecar (50M).
@@ -46,8 +47,8 @@ fn check_edge_count_bound(count: usize) -> Result<()> {
 pub struct EdgeData {
     /// `SQLite` row id of the edge.
     pub edge_id: i64,
-    /// Relationship label (e.g. "contradicts", "supplements").
-    pub relation_type: String,
+    /// Relationship label (e.g. `"contradicts"`, `"supplements"`).
+    pub relation_type: RelationType,
     /// Numeric weight for the edge.
     pub weight: f64,
 }
@@ -291,7 +292,7 @@ impl MemoryGraph {
                 edge.source_fact_id,
                 edge.target_fact_id,
                 edge.id,
-                &edge.relation_type,
+                edge.relation_type.clone(),
                 edge.weight,
             );
         }
@@ -413,7 +414,7 @@ impl MemoryGraph {
                 edge.source,
                 edge.target,
                 edge.edge_id,
-                &edge.relation_type,
+                edge.relation_type.clone(),
                 edge.weight,
             );
         }
@@ -426,7 +427,7 @@ impl MemoryGraph {
         source: i64,
         target: i64,
         edge_id: i64,
-        relation_type: &str,
+        relation_type: RelationType,
         weight: f64,
     ) {
         self.add_edge(
@@ -434,7 +435,7 @@ impl MemoryGraph {
             target,
             EdgeData {
                 edge_id,
-                relation_type: relation_type.to_owned(),
+                relation_type,
                 weight,
             },
         );
@@ -453,12 +454,12 @@ mod tests {
     use chrono::Utc;
 
     use crate::store::schema::{init_schema, open_memory};
-    use crate::types::NewEdge;
+    use crate::types::{NewEdge, RelationType};
 
     fn make_edge_data(id: i64, rel: &str) -> EdgeData {
         EdgeData {
             edge_id: id,
-            relation_type: rel.to_string(),
+            relation_type: RelationType::from(rel),
             weight: 1.0,
         }
     }
@@ -996,7 +997,7 @@ mod tests {
         let e1 = NewEdge {
             source_fact_id: 1,
             target_fact_id: 2,
-            relation_type: "active".to_string(),
+            relation_type: "active".into(),
             weight: 1.0,
             scope_id: 1,
             t_created: now,
@@ -1005,7 +1006,7 @@ mod tests {
         let e2 = NewEdge {
             source_fact_id: 2,
             target_fact_id: 3,
-            relation_type: "expired".to_string(),
+            relation_type: "expired".into(),
             weight: 1.0,
             scope_id: 1,
             t_created: now,
@@ -1053,7 +1054,7 @@ mod tests {
             .insert(&NewEdge {
                 source_fact_id: 1,
                 target_fact_id: 2,
-                relation_type: "weighted".to_string(),
+                relation_type: "weighted".into(),
                 weight: 0.625,
                 scope_id: 1,
                 t_created: now,
@@ -1085,7 +1086,7 @@ mod tests {
             .insert(&NewEdge {
                 source_fact_id: 1,
                 target_fact_id: 2,
-                relation_type: "first".to_string(),
+                relation_type: "first".into(),
                 weight: 1.0,
                 scope_id: 1,
                 t_created: now,
@@ -1096,7 +1097,7 @@ mod tests {
             .insert(&NewEdge {
                 source_fact_id: 1,
                 target_fact_id: 2,
-                relation_type: "second".to_string(),
+                relation_type: "second".into(),
                 weight: 1.0,
                 scope_id: 1,
                 t_created: now,
@@ -1116,8 +1117,9 @@ mod tests {
         // Both relation types are present, edge_ids distinct.
         let snap = graph.to_snapshot();
         let mut rels: Vec<_> = snap.edges.iter().map(|e| e.relation_type.clone()).collect();
-        rels.sort();
-        assert_eq!(rels, vec!["first".to_string(), "second".to_string()]);
+        rels.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(rels[0], "first");
+        assert_eq!(rels[1], "second");
         let ids: HashSet<i64> = snap.edges.iter().map(|e| e.edge_id).collect();
         assert_eq!(ids.len(), 2);
     }
@@ -1167,7 +1169,7 @@ mod proptests {
                 t,
                 EdgeData {
                     edge_id,
-                    relation_type: "rel".to_string(),
+                    relation_type: "rel".into(),
                     weight: 1.0,
                 },
             );

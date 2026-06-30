@@ -3,7 +3,7 @@ use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
 use crate::store::{parse_optional_timestamp, parse_timestamp};
-use crate::types::{Edge, NewEdge};
+use crate::types::{Edge, NewEdge, RelationType};
 
 /// Store for graph edges with bi-temporal support.
 pub struct EdgeStore<'a> {
@@ -14,11 +14,12 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
     let t_created_str: String = row.get("t_created")?;
     let t_expired_str: Option<String> = row.get("t_expired")?;
 
+    let relation_type_str: String = row.get("relation_type")?;
     Ok(Edge {
         id: row.get("id")?,
         source_fact_id: row.get("source_fact_id")?,
         target_fact_id: row.get("target_fact_id")?,
-        relation_type: row.get("relation_type")?,
+        relation_type: RelationType::from(relation_type_str),
         weight: row.get("weight")?,
         t_created: parse_timestamp(&t_created_str)?,
         t_expired: parse_optional_timestamp(t_expired_str.as_deref())?,
@@ -46,7 +47,7 @@ impl<'a> EdgeStore<'a> {
             params![
                 edge.source_fact_id,
                 edge.target_fact_id,
-                edge.relation_type,
+                edge.relation_type.as_str(),
                 edge.weight,
                 edge.t_created.to_rfc3339(),
                 edge.t_expired.map(|dt| dt.to_rfc3339()),
@@ -425,7 +426,7 @@ mod tests {
         NewEdge {
             source_fact_id: source,
             target_fact_id: target,
-            relation_type: rel.to_string(),
+            relation_type: rel.into(),
             weight: 1.0,
             t_created: Utc::now(),
             t_expired: None,

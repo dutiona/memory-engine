@@ -186,11 +186,12 @@ impl ConsolidationStore for SqliteBackend {
         use crate::store::facts::FactStore;
         use crate::store::lineage::LineageStore;
         use crate::store::schema::{get_config, set_config};
-        use crate::types::{EventType, NewEdge, NewEvent, NewLineageRecord, PromotionProvenance};
+        use crate::types::{
+            EventType, NewEdge, NewEvent, NewLineageRecord, PromotionProvenance, RelationType,
+        };
 
         // Config keys — local copies of the private consts in engine/cycle/apply.rs.
         const LAST_DREAM_CYCLE_AT: &str = "last_dream_cycle_at";
-        const SUPERSEDES_RELATION: &str = "supersedes";
         const DREAM_CYCLE_HISTORY: &str = "dream_cycle_history";
         const DREAM_CYCLE_HISTORY_MAX: usize = 8;
 
@@ -480,7 +481,7 @@ impl ConsolidationStore for SqliteBackend {
                             let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
                                 source_fact_id: *new_id,
                                 target_fact_id: *old_id,
-                                relation_type: SUPERSEDES_RELATION.to_owned(),
+                                relation_type: RelationType::Supersedes,
                                 weight: 1.0,
                                 t_created: now,
                                 t_expired: None,
@@ -509,7 +510,7 @@ impl ConsolidationStore for SqliteBackend {
                                 let edge_id = EdgeStore::new(&tx).insert(&NewEdge {
                                     source_fact_id: synth_id,
                                     target_fact_id: *src,
-                                    relation_type: SUPERSEDES_RELATION.to_owned(),
+                                    relation_type: RelationType::Supersedes,
                                     weight: 1.0,
                                     t_created: now,
                                     t_expired: None,

@@ -14,11 +14,9 @@
 use crate::engine::MemoryEngine;
 use crate::error::Result;
 use crate::graph::EdgeData;
+use crate::types::RelationType;
 
 use super::report::{ApplyResult, CycleReport};
-
-/// `relation_type` of the in-memory graph edge mirrored for a `CycleDelta::Supersede`.
-const SUPERSEDES_RELATION: &str = "supersedes";
 
 impl MemoryEngine {
     /// Validate and apply a [`CycleReport`] atomically.
@@ -60,7 +58,7 @@ impl MemoryEngine {
                     old_id,
                     EdgeData {
                         edge_id,
-                        relation_type: SUPERSEDES_RELATION.to_owned(),
+                        relation_type: RelationType::Supersedes,
                         weight: 1.0,
                     },
                 );

@@ -22,7 +22,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MemoryError, Result};
-use crate::types::ScopeNode;
+use crate::types::{RelationType, ScopeNode};
 
 /// Current snapshot format version. Bump on breaking changes to the snapshot
 /// layout or type definitions.
@@ -173,7 +173,7 @@ pub struct GraphEdgeSnapshot {
     pub edge_id: i64,
     pub source: i64,
     pub target: i64,
-    pub relation_type: String,
+    pub relation_type: RelationType,
     pub weight: f64,
 }
 
@@ -867,9 +867,20 @@ mod tests {
                 edge_id in any::<i64>(),
                 source in any::<i64>(),
                 target in any::<i64>(),
-                relation_type in ".*",
+                // Mix the 4 canonical spellings (so the named variants traverse
+                // the snapshot round-trip, not just the Custom arm) with the
+                // original arbitrary-string strategy (weighted to keep Custom
+                // well-covered).
+                relation_type_str in prop_oneof![
+                    4 => proptest::string::string_regex(".*").expect("valid regex"),
+                    1 => Just("co_session".to_string()),
+                    1 => Just("supplements".to_string()),
+                    1 => Just("contradicts".to_string()),
+                    1 => Just("supersedes".to_string()),
+                ],
                 weight in proptest::num::f64::NORMAL | proptest::num::f64::ZERO,
             ) -> GraphEdgeSnapshot {
+                let relation_type = RelationType::from(relation_type_str.as_str());
                 GraphEdgeSnapshot { edge_id, source, target, relation_type, weight }
             }
         }

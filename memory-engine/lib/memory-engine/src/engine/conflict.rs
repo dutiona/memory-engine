@@ -3,7 +3,7 @@ use chrono::Utc;
 use crate::error::Result;
 use crate::graph::EdgeData;
 use crate::traits::{ConflictArbiter, ConflictResolution, CrudDecision};
-use crate::types::NewFact;
+use crate::types::{NewFact, RelationType};
 
 use super::MemoryEngine;
 
@@ -147,7 +147,7 @@ impl MemoryEngine {
                             old_id,
                             EdgeData {
                                 edge_id,
-                                relation_type: relation.to_string(),
+                                relation_type: RelationType::from(relation),
                                 weight: Self::CONFLICT_EDGE_WEIGHT,
                             },
                         );
@@ -161,7 +161,7 @@ impl MemoryEngine {
                             old_id,
                             EdgeData {
                                 edge_id,
-                                relation_type: relation.to_string(),
+                                relation_type: RelationType::from(relation),
                                 weight: Self::CONFLICT_EDGE_WEIGHT,
                             },
                         );

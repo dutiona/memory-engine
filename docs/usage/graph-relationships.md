@@ -45,7 +45,7 @@ pub struct Edge {
     pub id: i64,
     pub source_fact_id: i64,
     pub target_fact_id: i64,
-    pub relation_type: String,
+    pub relation_type: RelationType,
     pub weight: f64,
     pub t_created: DateTime<Utc>,
     pub t_expired: Option<DateTime<Utc>>,
@@ -59,7 +59,7 @@ For insertion:
 pub struct NewEdge {
     pub source_fact_id: i64,
     pub target_fact_id: i64,
-    pub relation_type: String,
+    pub relation_type: RelationType,
     pub weight: f64,
     pub t_created: DateTime<Utc>,
     pub t_expired: Option<DateTime<Utc>>,
@@ -67,7 +67,7 @@ pub struct NewEdge {
 }
 ```
 
-The `relation_type` is a free-form string. Built-in processes use `"supersedes"` (conflict resolution), `"duplicates"` (consolidation), and `"co_session"` (session co-occurrence), but the schema does not constrain it.
+The `relation_type` is a `RelationType` — an **open enum** with four canonical variants emitted by built-in processes: `CoSession` (session co-occurrence), `Supplements` and `Contradicts` (conflict resolution), and `Supersedes` (conflict resolution + consolidation). Any other label is carried as `RelationType::Custom(String)`, so the set is extensible and the schema (a `TEXT` column) does not constrain it. The type serializes as a **plain string** (e.g. `"co_session"`), so it is byte-compatible on the wire and on disk with the previous free-form `String` field.
 
 ## In-memory edge data
 
@@ -76,7 +76,7 @@ The petgraph edge weight stores a subset of the full edge:
 ```rust
 pub struct EdgeData {
     pub edge_id: i64,
-    pub relation_type: String,
+    pub relation_type: RelationType,
     pub weight: f64,
 }
 ```
