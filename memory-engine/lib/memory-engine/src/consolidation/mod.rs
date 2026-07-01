@@ -536,11 +536,12 @@ mod tests {
         // `dedup_threshold` is valid but `min_cluster_size` is not, so the error
         // must come from validation rather than a pass. If validation did NOT run
         // first, the valid threshold would have expired one near-duplicate.
-        let bad = ConsolidationConfig {
-            dedup_threshold: 0.90,
-            min_cluster_size: 0,
-            ..Default::default()
-        };
+        // `ConsolidationConfig` is `#[non_exhaustive]` and now lives in the `me-traits`
+        // crate, so it can no longer be struct-literal'd here — build it via the builder.
+        let bad = ConsolidationConfig::builder()
+            .dedup_threshold(0.90)
+            .min_cluster_size(0)
+            .build();
         let err = consolidate(
             &conn,
             &MockGenerator,

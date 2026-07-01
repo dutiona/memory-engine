@@ -116,7 +116,9 @@ pub use me_types::error;
 pub mod inspect;
 pub mod search;
 pub mod storage;
-pub mod traits;
+// `traits` is relocated to the L0.5 `me-traits` crate (Wave 2 #816); the crate
+// re-export preserves `memory_engine::traits::*` and every internal `crate::traits::`.
+pub use me_traits as traits;
 pub use me_types::types; // relocated to me-types (Wave 2 #816); see `error` above
 
 // === Internal modules (implementation details) ===
@@ -149,6 +151,11 @@ pub use engine::{EngineConfig, MemoryEngine};
 // test guards the list.
 pub use forgetting::{ForgetPolicy, PruneStats};
 pub use inspect::types as inspect_types;
+pub use me_traits::{
+    ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
+    CycleCtx, DeltaProposer, DreamCycle, EmbeddingProvider, InsightStream, PersistenceClassifier,
+    Reranker, SummarizableContent, SummaryGenerator,
+};
 pub use me_types::error::{
     ArchiveError, ConflictError, CycleError, MemoryError, MigrationError, RerankerError, Result,
     StorageError,
@@ -160,11 +167,6 @@ pub use search::{
 };
 pub use store::UpcasterRegistry;
 pub use store::schema::CURRENT_SCHEMA_VERSION;
-pub use traits::{
-    ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
-    CycleCtx, DeltaProposer, DreamCycle, EmbeddingProvider, InsightStream, PersistenceClassifier,
-    Reranker, SummarizableContent, SummaryGenerator,
-};
 // Explicit re-export of the full `types` public surface, enumerated for the
 // same reason as `error` above: a transparent, audit-able crate-root API where
 // adding a public type is a deliberate edit, not an implicit consequence of a

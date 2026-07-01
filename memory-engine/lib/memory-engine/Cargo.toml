@@ -18,6 +18,8 @@ autoexamples = false
 [dependencies]
 # L0 data + error vocabulary (Wave 2 #816). Bare path-dep: internal, never published.
 me-types = { path = "../me-types" }
+# L0.5 consumer/contract traits (Wave 2 #816).
+me-traits = { path = "../me-traits" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
