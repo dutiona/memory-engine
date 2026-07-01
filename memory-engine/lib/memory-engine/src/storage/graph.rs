@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 
 use crate::error::Result;
 use crate::types::{
-    Edge, Fact, FactScoringRow, FactType, NewEdge, NewFact, ScopeNode, SessionFact,
+    Edge, Fact, FactScoringRow, FactType, NewEdge, NewEvent, NewFact, ScopeNode, SessionFact,
 };
 
 /// Core knowledge graph: facts, edges, the scope hierarchy.
@@ -439,60 +439,53 @@ pub trait FactGraph: Send + Sync {
     ) -> Result<(crate::forgetting::PruneStats, Vec<i64>)>;
 
     // -------------------------------------------------------------------------
-    // Stage E bootstrap seams — the conn-threaded import pipelines run below the
-    // seam on the write connection (where a blocking `EmbeddingProvider`/extractor
-    // is nested-runtime-safe). The engine resolves the scope id up front and passes
-    // owned `Arc` consumer handles; ownership moves straight through the blocking
-    // boundary. Each preserves the per-session/per-file savepoint atomicity exactly.
+    // Bootstrap batch ingest — the transactional envelope behind BOTH bootstrap
+    // import pipelines (#816 E.4b trim). The engine parses / extracts / **embeds**
+    // facade-side (consumer callbacks run on a blocking thread there) and hands this
+    // port an optional marker event + a pre-embedded batch; the atomic work below the
+    // seam is driver-only — no consumer trait and no facade vocab
+    // (`SessionExtractor`/`BootstrapConfig`/`BootstrapReport`) crosses the seam.
     // -------------------------------------------------------------------------
 
-    /// Import one JSONL session log into historical memory (one savepoint).
+    /// Atomically ingest an optional idempotency-**marker** event plus a batch of
+    /// pre-embedded `facts` in a single savepoint.
     ///
-    /// # Errors
+    /// When `marker` is `Some`, it is inserted first and its assigned id becomes
+    /// **every** fact's `source_event_id` (the session path's provenance anchor — any
+    /// value the caller set on [`NewFact::source_event_id`](crate::types::NewFact) is
+    /// overwritten). When `None` (the `--memory-dir` path — one file per call, no
+    /// event), each fact keeps its own `source_event_id`. Each fact is then
+    /// dedup-with-reinforced ([`insert_or_reinforce_fact`](Self::insert_or_reinforce_fact)
+    /// semantics). If **any** fact is newly created, the embedding identity
+    /// `fingerprint` is recorded-if-absent at the tail of the savepoint (#643: the
+    /// identity commits atomically with the vectors it describes; a batch that only
+    /// reinforces writes no new vector and leaves the store unstamped, so a later real
+    /// first write can still establish the true identity).
     ///
-    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
-    /// read-only backend, or an embedding / extraction / store error.
-    async fn bootstrap_session_atomic(
+    /// The caller owns the idempotency **decision** (a `Some` marker is always
+    /// inserted) and builds its report from the returned per-fact flags. `facts` is
+    /// taken by value so the impl can stamp `source_event_id` in place without cloning
+    /// the (embedding-bearing) `NewFact`s.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (savepoint rolled
+    /// back)`. Bootstrap deliberately does **not** touch the HNSW sidecar (the vector
+    /// index is rebuilt from the DB at open), so — unlike
+    /// [`insert_or_reinforce_fact`](Self::insert_or_reinforce_fact) — no post-commit
+    /// index notification fires, and the `IndexInconsistent` post-commit exception the
+    /// other atomic methods carry does not apply here. This keeps both bootstrap paths
+    /// consistent (neither populates the live index mid-run).
+    ///
+    /// # Returns
+    ///
+    /// `(fact_id, reinforced)` per fact, in the same order as `facts`;
+    /// `reinforced == false` ⟹ a new row was created.
+    async fn ingest_bootstrap_batch_atomic(
         &self,
-        reader: Box<dyn std::io::BufRead + Send>,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport>;
-
-    /// Import every top-level `*.jsonl` session log in `dir` (each its own savepoint).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
-    /// read-only backend, [`MemoryError::Io`](crate::error::MemoryError::Io) on a
-    /// traversal failure, or an embedding / store error.
-    async fn bootstrap_directory_atomic(
-        &self,
-        dir: std::path::PathBuf,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport>;
-
-    /// Import native `.md` memory files (recursive) from `dir` — autocommit per file.
-    /// Stamps the embedding identity meta-first (#643) before the first file.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
-    /// read-only backend, [`MemoryError::Io`](crate::error::MemoryError::Io) on a
-    /// traversal failure, or an embedding / store error.
-    async fn bootstrap_memory_directory_atomic(
-        &self,
-        dir: std::path::PathBuf,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport>;
+        marker: Option<&NewEvent>,
+        facts: Vec<NewFact>,
+        fingerprint: &crate::types::EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<Vec<(i64, bool)>>;
 }
