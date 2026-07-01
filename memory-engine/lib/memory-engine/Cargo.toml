@@ -17,11 +17,14 @@ autoexamples = false
 
 [dependencies]
 # L0 data + error vocabulary (Wave 2 #816). Bare path-dep: internal, never published.
-me-types = { path = "../me-types" }
+# Versioned path-deps: the facade is publishable, so cargo-deny's wildcard rule
+# (which exempts only publish=false crates) requires a version on these internal
+# deps (plan §D.1). The version is used only on `cargo publish`; the build uses `path`.
+me-types = { path = "../me-types", version = "0.1.0" }
 # L0.5 consumer/contract traits (Wave 2 #816).
-me-traits = { path = "../me-traits" }
+me-traits = { path = "../me-traits", version = "0.1.0" }
 # L1 persistence port: StorageBackend trait family + MemoryCtx + UpcasterRegistry (Wave 2 #816).
-me-storage = { path = "../me-storage" }
+me-storage = { path = "../me-storage", version = "0.1.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

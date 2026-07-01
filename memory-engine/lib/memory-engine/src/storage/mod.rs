@@ -2,15 +2,15 @@
 //!
 //! The port trait family — the six bounded-context traits ([`FactGraph`], [`EventLog`],
 //! [`SearchIndex`], [`ConsolidationStore`], [`SessionStore`], [`SchemaManager`])
-//! aggregated by the [`StorageBackend`] umbrella, the feature-gated [`ColdStorage`]
+//! aggregated by the [`StorageBackend`] umbrella, the feature-gated `ColdStorage`
 //! trait, the closed [`FactFilter`]/[`TemporalFilter`] query vocabulary, and
 //! [`MemoryCtx`] — lives in `me-storage`. This module **re-exports** it (both the
 //! submodules and the flat trait names) so every existing `crate::storage::graph::FactGraph`
 //! and `crate::storage::FactGraph` path keeps resolving.
 //!
 //! What stays here (until S2 carves the backends into `me-backend-{sqlite,postgres}`):
-//! the concrete impls [`SqliteBackend`] (`sqlite`) and [`PgBackend`] (`postgres`,
-//! feature-gated), plus the cross-backend [`conformance`] battery. No SQL string or
+//! the concrete impls [`SqliteBackend`] (`sqlite`) and `PgBackend` (`postgres`,
+//! feature-gated), plus the cross-backend `conformance` battery. No SQL string or
 //! driver type crosses the port — that contract now lives in `me-storage`.
 
 #[cfg(feature = "backend-postgres")]

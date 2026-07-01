@@ -1,8 +1,8 @@
 //! Session log bootstrap: parse Claude Code JSONL session logs into historical memory.
 //!
 //! Pipeline (#816 E.4b — orchestration is engine-side, DB writes are one atomic
-//! port call): JSONL → [`parse_session`] → *[idempotency check, engine-side]* →
-//! [`prepare_session`] (reconstruct → classify → keyword pre-filter → extract →
+//! port call): JSONL → `parse_session` → *idempotency check (engine-side)* →
+//! `prepare_session` (reconstruct → classify → keyword pre-filter → extract →
 //! **embed**) → `StorageBackend::ingest_bootstrap_batch_atomic`. Parse + prepare run on
 //! a blocking thread (the consumer `EmbeddingProvider`/`SessionExtractor` may block);
 //! no connection or driver type is threaded through this module anymore.

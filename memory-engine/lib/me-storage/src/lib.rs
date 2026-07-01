@@ -8,7 +8,7 @@
 //! - the `StorageBackend` trait family — six bounded-context traits
 //!   ([`FactGraph`], [`EventLog`], [`SearchIndex`], [`ConsolidationStore`],
 //!   [`SessionStore`], [`SchemaManager`]) aggregated by the [`StorageBackend`]
-//!   umbrella, plus the feature-gated [`ColdStorage`] trait and the closed
+//!   umbrella, plus the feature-gated `ColdStorage` trait and the closed
 //!   [`FactFilter`]/[`TemporalFilter`] query vocabulary;
 //! - [`MemoryCtx`] — the universal capability handle the L3 primitives operate on;
 //! - [`UpcasterRegistry`] — the event-payload versioning policy the port applies on
