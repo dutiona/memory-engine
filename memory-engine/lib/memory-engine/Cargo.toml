@@ -8,6 +8,12 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"
 keywords = ["memory", "ai-agent", "semantic-search", "knowledge-graph", "event-sourcing"]
 categories = ["database", "science"]
+# Not published during the Wave 2 decomposition (#816): the facade path-depends on the
+# publish=false leaf crates (me-types/me-traits/me-storage), so a `cargo publish` would
+# resolve them as non-existent registry deps (Codex, PR #928). Marking the facade
+# publish=false keeps the workspace internally consistent while the leaf boundaries are
+# still moving across S2–S6; the real publishing strategy is decided at Wave 2 completion.
+publish = false
 # Tests, benches, and examples live at the REPO TOP LEVEL — ../../../{tests,benches,
 # examples} — not under this crate dir, so Cargo auto-discovery finds nothing and each
 # target is attached explicitly by `path` below (the bin/lib layout reorg).
@@ -16,15 +22,13 @@ autobenches = false
 autoexamples = false
 
 [dependencies]
-# L0 data + error vocabulary (Wave 2 #816). Bare path-dep: internal, never published.
-# Versioned path-deps: the facade is publishable, so cargo-deny's wildcard rule
-# (which exempts only publish=false crates) requires a version on these internal
-# deps (plan §D.1). The version is used only on `cargo publish`; the build uses `path`.
-me-types = { path = "../me-types", version = "0.1.0" }
-# L0.5 consumer/contract traits (Wave 2 #816).
-me-traits = { path = "../me-traits", version = "0.1.0" }
-# L1 persistence port: StorageBackend trait family + MemoryCtx + UpcasterRegistry (Wave 2 #816).
-me-storage = { path = "../me-storage", version = "0.1.0" }
+# Internal L0/L0.5/L1 crates (Wave 2 #816). Bare path-deps: now that the facade is
+# publish=false, cargo-deny's `allow-wildcard-paths` exempts first-party path deps of
+# private crates, so the `version` keys that a publishable facade would have required
+# (plan §D.1) are dropped — matching the leaf-crate convention.
+me-types = { path = "../me-types" }
+me-traits = { path = "../me-traits" }
+me-storage = { path = "../me-storage" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
