@@ -157,6 +157,17 @@ impl MemoryEngine {
         report.merge(&prepared_report);
 
         // --- Report accounting from the per-fact created/reinforced flags. ---
+        // The port returns exactly one flag per input fact, in order (its documented
+        // contract), so `metas` (one per fact) and `flags` align 1:1. Guard that now-
+        // cross-crate invariant: a mismatch would let `zip` silently truncate into an
+        // under-counted report, so surface it as a typed error rather than drop rows (#725).
+        if metas.len() != flags.len() {
+            return Err(crate::error::MemoryError::Internal(format!(
+                "bootstrap ingest returned {} flags for {} facts (port contract violation)",
+                flags.len(),
+                metas.len()
+            )));
+        }
         let mut importance_sum = 0.0;
         for ((fact_type, base_importance, redactions), (_, reinforced)) in
             metas.into_iter().zip(flags)
