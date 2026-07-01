@@ -5,5 +5,6 @@
 mod policy;
 mod types;
 
+pub use me_types::types::forgetting::PruneStats;
 pub use policy::prune;
-pub use types::{ForgetPolicy, PruneStats};
+pub use types::ForgetPolicy;

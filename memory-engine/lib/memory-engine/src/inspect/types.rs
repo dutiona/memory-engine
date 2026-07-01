@@ -1,12 +1,20 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    ConsolidationLevel, Edge, EmbeddingFingerprint, Event, EventType, Fact, LineageSnapshotEntry,
-    ScopeNode, Summary,
+    Edge, EmbeddingFingerprint, Event, EventType, Fact, LineageSnapshotEntry, ScopeNode, Summary,
+};
+
+/// `DumpFormat`, `EngineStatistics`, and the `*Stats` tree moved to `me-types` (Wave 2
+/// #816 E.4b Phase B) as pure serde DTOs; re-exported here so `crate::inspect::types::*`
+/// and (via `inspect::mod`'s `pub use types::*`) `crate::inspect::*` keep resolving.
+/// `EngineSnapshot`/`EmbeddingSpaceSnapshot`/`FactVectorSnapshot` stay in this module —
+/// they are import/export wire types tied to the engine's own snapshot machinery.
+pub use me_types::types::inspect::{
+    DumpFormat, EdgeStats, EngineStatistics, EventStats, FactStats, ScopeStats, StorageStats,
+    SummaryStats,
 };
 
 // ---------------------------------------------------------------------------
@@ -148,20 +156,8 @@ pub enum ReplayOrder {
 // ---------------------------------------------------------------------------
 // Dump
 // ---------------------------------------------------------------------------
-
-/// Output format for a full engine dump.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DumpFormat {
-    /// Plain JSON (uncompressed).
-    Json(PathBuf),
-    /// Gzip-compressed JSON. Requires the `compress-gzip` feature.
-    JsonGzip(PathBuf),
-    /// Zstandard-compressed JSON. Requires the `compress-zstd` feature.
-    JsonZstd(PathBuf),
-    /// Atomic `SQLite` backup via `VACUUM INTO` (file-backed and in-memory engines).
-    Sqlite(PathBuf),
-}
+//
+// `DumpFormat` moved to `me-types` — see the re-export near the top of this file.
 
 /// One embedding-space registry row in a snapshot (#622).
 ///
@@ -230,73 +226,16 @@ pub struct EngineSnapshot {
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
-
-/// Aggregate statistics for the engine.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineStatistics {
-    pub facts: FactStats,
-    pub edges: EdgeStats,
-    pub summaries: SummaryStats,
-    pub scopes: ScopeStats,
-    pub events: EventStats,
-    pub storage: StorageStats,
-}
-
-/// Fact-level statistics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactStats {
-    pub total: i64,
-    pub active: i64,
-    pub expired: i64,
-    pub pinned: i64,
-    pub due: i64,
-}
-
-/// Edge-level statistics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EdgeStats {
-    pub total: i64,
-    pub active: i64,
-    pub expired: i64,
-}
-
-/// Summary-level statistics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SummaryStats {
-    pub total: i64,
-    pub by_level: BTreeMap<ConsolidationLevel, i64>,
-}
-
-/// Scope tree statistics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScopeStats {
-    pub total: i64,
-    pub max_depth: i64,
-}
-
-/// Event log statistics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EventStats {
-    pub total: i64,
-}
-
-/// Storage-level statistics.
-///
-/// `main_db_bytes` excludes WAL/SHM sidecars.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StorageStats {
-    pub page_count: i64,
-    pub page_size: i64,
-    pub main_db_bytes: i64,
-    pub file_path: Option<String>,
-}
+//
+// `EngineStatistics` and the `*Stats` tree moved to `me-types` — see the
+// re-export near the top of this file.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    use crate::types::{FactType, PromotionProvenance};
+    use crate::types::{ConsolidationLevel, FactType, PromotionProvenance};
 
     /// `serialize → deserialize` must round-trip to a value equal to the original.
     /// These types are the engine's import/export wire format (`EngineSnapshot`

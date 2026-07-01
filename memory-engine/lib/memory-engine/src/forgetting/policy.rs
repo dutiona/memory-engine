@@ -3,12 +3,13 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
-use super::types::{ForgetPolicy, PruneStats};
+use super::types::ForgetPolicy;
 use crate::error::Result;
 use crate::graph::MemoryGraph;
 use crate::storage::StorageBackend;
 use crate::store::facts::FactScoringRow;
 use crate::types::{Fact, FactType};
+use me_types::types::forgetting::PruneStats;
 
 /// Argument to `ln()` for access-frequency normalization: 100 + 1.
 /// Gives `ln(101)` as the divisor so that 100 accesses produce a full score of 1.0.

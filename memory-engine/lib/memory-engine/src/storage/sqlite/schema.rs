@@ -215,6 +215,13 @@ impl SchemaManager for SqliteBackend {
             DumpFormat::Sqlite(path) => {
                 self.block_write(move |c| dump::dump_sqlite(c, &path)).await
             }
+            // `DumpFormat` is `#[non_exhaustive]` (now defined in `me-types`, a
+            // different crate, so the compiler enforces this even though every
+            // current variant is covered above): a future variant added there
+            // surfaces as a clear error here instead of a compile break.
+            _ => Err(crate::error::MemoryError::NotImplemented(
+                "unrecognized DumpFormat variant".into(),
+            )),
         }
     }
 

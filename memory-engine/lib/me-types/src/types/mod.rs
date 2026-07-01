@@ -1,11 +1,20 @@
 //! Core domain types, split by concept (#401). Flat re-exports preserve the
 //! `crate::types::*` public API.
 mod activity;
+/// Cold-storage archive DTOs (`ArchiveManifestEntry`).
+#[cfg(feature = "archive")]
+pub mod archive;
 mod cognitive;
+/// Consolidation-pipeline seam types.
+pub mod consolidation;
 /// Dream-cycle report DTOs (the delta-based `CycleReport` vocabulary, R7).
 pub mod cycle_report;
 mod events;
 mod facts;
+/// Forgetting/prune output (`PruneStats`).
+pub mod forgetting;
+/// Inspection statistics + dump-format DTOs.
+pub mod inspect;
 mod provenance;
 mod relation;
 mod scope;
