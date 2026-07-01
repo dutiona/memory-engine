@@ -16,10 +16,12 @@ pub mod lineage;
 pub mod schema;
 pub mod scopes;
 pub mod summaries;
-pub mod upcaster;
 
 pub use scopes::ScopeStore;
-pub use upcaster::UpcasterRegistry;
+// `UpcasterRegistry`/`UpcasterFn` carved into the me-storage (L1) port (Wave 2 #816);
+// re-exported here (type + module) so `crate::store::UpcasterRegistry` AND
+// `crate::store::upcaster::{UpcasterRegistry, UpcasterFn}` keep resolving unchanged.
+pub use me_storage::{UpcasterRegistry, upcaster};
 
 use chrono::{DateTime, Utc};
 

@@ -10,14 +10,14 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
-use crate::types::{Activity, ActivityStatus, NewActivity, SessionCheckpoint};
+use me_types::error::Result;
+use me_types::types::{Activity, ActivityStatus, NewActivity, SessionCheckpoint};
 
 /// Session activity stream + checkpoint cursors.
 ///
 /// # Errors
-/// Every method returns [`MemoryError::Storage`](crate::error::MemoryError::Storage)
-/// on a backend failure (or [`NotFound`](crate::error::MemoryError::NotFound) for a
+/// Every method returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage)
+/// on a backend failure (or [`NotFound`](me_types::error::MemoryError::NotFound) for a
 /// missing id).
 #[async_trait]
 pub trait SessionStore: Send + Sync {

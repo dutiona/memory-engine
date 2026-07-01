@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "memory-engine/lib/me-types",
     "memory-engine/lib/me-traits",
+    "memory-engine/lib/me-storage",
     "memory-engine/lib/memory-engine",
     "memory-engine/lib/embed",
     "memory-engine/bin/cli",

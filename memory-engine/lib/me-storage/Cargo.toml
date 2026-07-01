@@ -1,0 +1,40 @@
+[package]
+name = "me-storage"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Layer-1 persistence port (the StorageBackend trait family + MemoryCtx + UpcasterRegistry) for the memory-engine workspace (Wave 2 #816)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal crate: never published, so it uses bare path-deps and is exempt
+# from cargo-deny's published-crate wildcard rule (plan §D.1).
+publish = false
+
+[dependencies]
+me-types = { path = "../me-types" }
+# L0.5 edge (plan §A.1 deviation): `MemoryCtx` names `Option<&Arc<dyn Reranker>>` and
+# the archive context names `&Arc<dyn ColdStorage>` — both consumer traits in me-traits.
+# Acyclic (L1 -> L0.5).
+me-traits = { path = "../me-traits" }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+# The relocated `UpcasterRegistry` proptests (`proptest_chain`) live with it here.
+proptest = "1"
+# `backend.rs`'s async-through-`dyn` object-safety test uses `#[tokio::test]`.
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[features]
+# Gates the `ColdStorage` port trait + the archive-related surface of the
+# `StorageBackend` umbrella (backend.rs). Forwards to `me-types/archive` so the
+# relocated `ArchiveManifestEntry` (me_types::types::archive) resolves.
+archive = ["me-types/archive"]
+# Exposes the test-only `SchemaManager::raw_exec` port hook (`#[cfg(any(test,
+# feature = "test-util"))]`). The facade forwards its own `test-util` here so the
+# trait method and its backend impl are feature-gated in lockstep (plan §D.2).
+test-util = []
+
+[lints]
+workspace = true

@@ -1,42 +1,20 @@
-//! The persistence **port** — the trait family the engine talks to instead of
-//! `rusqlite` directly.
+//! The persistence **port**, now carved into the [`me_storage`] crate (Wave 2 #816, L1).
 //!
-//! Deliberately separate from [`crate::traits`] (consumer *capability-injection*
-//! traits like [`EmbeddingProvider`](crate::traits::EmbeddingProvider)): this is
-//! an *infrastructure* port (how facts are persisted/retrieved), and conflating
-//! the two is how such seams rot. No SQL string or driver type appears in this
-//! module — backends translate the closed [`FactFilter`] / bi-temporal
-//! [`TemporalFilter`] to their dialect and map driver errors to the
-//! driver-opaque [`StorageError`](crate::error::StorageError) at the seam.
+//! The port trait family — the six bounded-context traits ([`FactGraph`], [`EventLog`],
+//! [`SearchIndex`], [`ConsolidationStore`], [`SessionStore`], [`SchemaManager`])
+//! aggregated by the [`StorageBackend`] umbrella, the feature-gated [`ColdStorage`]
+//! trait, the closed [`FactFilter`]/[`TemporalFilter`] query vocabulary, and
+//! [`MemoryCtx`] — lives in `me-storage`. This module **re-exports** it (both the
+//! submodules and the flat trait names) so every existing `crate::storage::graph::FactGraph`
+//! and `crate::storage::FactGraph` path keeps resolving.
 //!
-//! ## Shape
-//!
-//! Six bounded-context traits — [`FactGraph`], [`EventLog`], [`SearchIndex`],
-//! [`ConsolidationStore`], [`SessionStore`], [`SchemaManager`] — aggregated by the
-//! [`StorageBackend`] umbrella so the engine holds one `Arc<dyn StorageBackend>`;
-//! the bounded traits are what tests mock in isolation (a forgetting test mocks
-//! only [`FactGraph`]). `ColdStorage` is a **separate**, feature-gated
-//! (`archive`) trait held as `Option<Arc<dyn ColdStorage>>`, not a supertrait
-//! bound — so the umbrella's type stays feature-invariant.
-//!
-//! `async_trait` everywhere (the umbrella must be `dyn`-safe); timestamps cross as
-//! `chrono::DateTime<Utc>` (the `SQLite` padded-RFC3339-TEXT lexicographic-ordering
-//! trick becomes a `SQLite`-private serialization detail, no longer a
-//! cross-cutting invariant a contributor can break from the engine side).
+//! What stays here (until S2 carves the backends into `me-backend-{sqlite,postgres}`):
+//! the concrete impls [`SqliteBackend`] (`sqlite`) and [`PgBackend`] (`postgres`,
+//! feature-gated), plus the cross-backend [`conformance`] battery. No SQL string or
+//! driver type crosses the port — that contract now lives in `me-storage`.
 
-pub mod backend;
-pub mod capabilities;
-#[cfg(feature = "archive")]
-pub mod cold_storage;
-pub mod consolidation;
-pub mod event_log;
-pub mod filter;
-pub mod graph;
 #[cfg(feature = "backend-postgres")]
 pub mod postgres;
-pub mod schema;
-pub mod search_index;
-pub mod session;
 pub mod sqlite;
 
 /// Cross-backend conformance battery (#632) — asserts the `StorageBackend` CONTRACT
@@ -44,17 +22,24 @@ pub mod sqlite;
 #[cfg(test)]
 mod conformance;
 
-pub use backend::StorageBackend;
-pub use capabilities::{BackendCapabilities, LexicalRanker};
+// --- The port surface, re-exported from the me-storage crate. ---
+// Submodule re-exports so `crate::storage::<portmod>::Trait` module paths still resolve.
 #[cfg(feature = "archive")]
-pub use cold_storage::ColdStorage;
-pub use consolidation::ConsolidationStore;
-pub use event_log::EventLog;
-pub use filter::{FactFilter, MetadataPredicate, TemporalFilter};
-pub use graph::FactGraph;
+pub use me_storage::cold_storage;
+pub use me_storage::{
+    backend, capabilities, consolidation, ctx, event_log, filter, graph, schema, search_index,
+    session,
+};
+// Flat trait/type re-exports so `crate::storage::Trait` paths still resolve.
+#[cfg(feature = "archive")]
+pub use me_storage::ColdStorage;
+pub use me_storage::{
+    BackendCapabilities, ConsolidationStore, EventLog, FactFilter, FactGraph, LexicalRanker,
+    MemoryCtx, MetadataPredicate, SchemaManager, SearchIndex, SessionStore, StorageBackend,
+    TemporalFilter,
+};
+
+// --- The concrete backend impls (remain in the monolith until S2). ---
 #[cfg(feature = "backend-postgres")]
 pub use postgres::PgBackend;
-pub use schema::SchemaManager;
-pub use search_index::SearchIndex;
-pub use session::SessionStore;
 pub use sqlite::SqliteBackend;

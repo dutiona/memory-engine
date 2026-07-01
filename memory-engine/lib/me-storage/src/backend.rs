@@ -34,9 +34,7 @@
 //! - `ArchiveManifestStore` (`archive_manifest.rs`) → `ColdStorage` (cfg archive);
 //!   pak file I/O stays free functions.
 
-use crate::storage::{
-    ConsolidationStore, EventLog, FactGraph, SchemaManager, SearchIndex, SessionStore,
-};
+use crate::{ConsolidationStore, EventLog, FactGraph, SchemaManager, SearchIndex, SessionStore};
 
 /// The single persistence handle the engine holds (`Arc<dyn StorageBackend>`).
 ///
@@ -79,7 +77,7 @@ mod tests {
     fn _assert_arc(_: std::sync::Arc<dyn StorageBackend>) {}
 
     #[cfg(feature = "archive")]
-    fn _assert_cold_storage_obj_safe(_: &dyn crate::storage::ColdStorage) {}
+    fn _assert_cold_storage_obj_safe(_: &dyn crate::ColdStorage) {}
 
     // Callability (Codex BLOCKER): vtable-forms ≠ callable under async_trait's
     // hidden `Self: Sync` future bound. Actually `.await` an async method through a
@@ -89,7 +87,7 @@ mod tests {
     // conformance suite — not pulled forward here.
     #[tokio::test]
     async fn async_method_callable_through_dyn() {
-        use crate::storage::FactFilter;
+        use crate::FactFilter;
         use async_trait::async_trait;
 
         struct Dummy;
@@ -100,7 +98,7 @@ mod tests {
                 _q: &str,
                 _f: &FactFilter,
                 _k: usize,
-            ) -> crate::error::Result<Vec<(i64, f64)>> {
+            ) -> me_types::error::Result<Vec<(i64, f64)>> {
                 Ok(vec![(7, 1.5)])
             }
             async fn vector_search(
@@ -108,15 +106,15 @@ mod tests {
                 _e: &[f32],
                 _f: &FactFilter,
                 _k: usize,
-            ) -> crate::error::Result<Vec<(i64, f64)>> {
+            ) -> me_types::error::Result<Vec<(i64, f64)>> {
                 Ok(vec![])
             }
             async fn lexical_count_expired(
                 &self,
                 _q: &str,
-                _fact_type: Option<&crate::types::FactType>,
+                _fact_type: Option<&me_types::types::FactType>,
                 _scope_ids: Option<&[i64]>,
-            ) -> crate::error::Result<usize> {
+            ) -> me_types::error::Result<usize> {
                 Ok(0)
             }
         }

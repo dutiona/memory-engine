@@ -14,8 +14,8 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::error::Result;
-use crate::types::{
+use me_types::error::Result;
+use me_types::types::{
     Edge, Fact, FactScoringRow, FactType, NewEdge, NewEvent, NewFact, ScopeNode, SessionFact,
 };
 
@@ -24,8 +24,8 @@ use crate::types::{
 /// All methods are async (boxed via `async_trait`): the `SQLite` backend wraps
 /// sync `rusqlite` in `spawn_blocking`; a Postgres backend is natively async. No
 /// SQL or driver type crosses this boundary — filtering is expressed via explicit
-/// params / [`crate::storage::FactFilter`], results are domain types from
-/// [`crate::types`].
+/// params / [`crate::FactFilter`], results are domain types from
+/// [`me_types::types`].
 ///
 /// # Scope filtering (`scope_ids` — read the contract, it is non-uniform)
 /// The `scope_ids: &[i64]` parameter has a **method-dependent empty-slice
@@ -47,10 +47,10 @@ use crate::types::{
 /// the existing contract verbatim.
 ///
 /// # Errors
-/// Every method returns [`MemoryError::Storage`](crate::error::MemoryError::Storage)
-/// wrapping a [`StorageError`](crate::error::StorageError) on a backend failure,
+/// Every method returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage)
+/// wrapping a [`StorageError`](me_types::error::StorageError) on a backend failure,
 /// or a more specific `MemoryError` variant where applicable (e.g.
-/// [`NotFound`](crate::error::MemoryError::NotFound) for a missing id).
+/// [`NotFound`](me_types::error::MemoryError::NotFound) for a missing id).
 #[async_trait]
 pub trait FactGraph: Send + Sync {
     // --- facts: write ---
@@ -162,7 +162,7 @@ pub trait FactGraph: Send + Sync {
     /// **Precondition (security):** `marker_key` MUST be a non-empty
     /// `[A-Za-z0-9_]+` identifier — it is interpolated into the backend's JSON
     /// path, so a backend MUST reject anything else with
-    /// [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) rather than
+    /// [`MemoryError::Conflict`](me_types::error::MemoryError::Conflict) rather than
     /// build the query (the seam preserves the `SQLite` impl's injection guard).
     async fn list_active_facts_by_metadata_key_recent(
         &self,
@@ -197,7 +197,7 @@ pub trait FactGraph: Send + Sync {
     /// only an *active* edge is affected, so `Ok(())` always means this call
     /// transitioned an active edge to expired.
     ///
-    /// Returns [`MemoryError::NotFound`](crate::error::MemoryError::NotFound) if
+    /// Returns [`MemoryError::NotFound`](me_types::error::MemoryError::NotFound) if
     /// no active edge with `id` exists (unknown id, or already expired) — the
     /// write affected 0 rows. Mirrors [`expire_fact`](Self::expire_fact); a
     /// backend MUST honor this rows-affected contract. The `SQLite` impl honors
@@ -271,7 +271,7 @@ pub trait FactGraph: Send + Sync {
     async fn insert_fact_atomic(
         &self,
         fact: &NewFact,
-        fingerprint: &crate::types::EmbeddingFingerprint,
+        fingerprint: &me_types::types::EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<i64>;
 
@@ -305,7 +305,7 @@ pub trait FactGraph: Send + Sync {
         &self,
         facts: &[NewFact],
         scope_paths: &[Option<String>],
-        fingerprint: &crate::types::EmbeddingFingerprint,
+        fingerprint: &me_types::types::EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<(Vec<i64>, Vec<i64>)>;
 
@@ -341,7 +341,7 @@ pub trait FactGraph: Send + Sync {
     /// transaction — the former conflict-resolution path, now encapsulated below
     /// the storage seam.
     ///
-    /// The consumer [`ConflictArbiter`](crate::traits::ConflictArbiter) decision is
+    /// The consumer [`ConflictArbiter`](me_traits::ConflictArbiter) decision is
     /// made engine-side **before** this call; this method performs only the DB
     /// writes the decision implies, all-or-nothing, so a mid-sequence failure can
     /// never leave a partial bi-temporal state (e.g. an old fact expired+invalidated
@@ -384,7 +384,7 @@ pub trait FactGraph: Send + Sync {
     /// `Delete`/`Noop`.
     async fn resolve_conflict_atomic(
         &self,
-        decision: crate::traits::CrudDecision,
+        decision: me_traits::CrudDecision,
         old_id: i64,
         new_fact: &NewFact,
         relation: &str,
@@ -408,7 +408,7 @@ pub trait FactGraph: Send + Sync {
     async fn select_archive_candidates(
         &self,
         expired_before: DateTime<Utc>,
-    ) -> Result<(Vec<crate::types::Fact>, Vec<crate::types::Edge>)>;
+    ) -> Result<(Vec<me_types::types::Fact>, Vec<me_types::types::Edge>)>;
 
     /// Atomically materialize importance scores for the active set and expire the
     /// sub-threshold facts (cascading edge expiry) in a single transaction.
@@ -436,7 +436,7 @@ pub trait FactGraph: Send + Sync {
         scored: &[(i64, f64)],
         to_expire: &[i64],
         now: DateTime<Utc>,
-    ) -> Result<(crate::forgetting::PruneStats, Vec<i64>)>;
+    ) -> Result<(me_types::types::forgetting::PruneStats, Vec<i64>)>;
 
     // -------------------------------------------------------------------------
     // Bootstrap batch ingest — the transactional envelope behind BOTH bootstrap
@@ -452,7 +452,7 @@ pub trait FactGraph: Send + Sync {
     ///
     /// When `marker` is `Some`, it is inserted first and its assigned id becomes
     /// **every** fact's `source_event_id` (the session path's provenance anchor — any
-    /// value the caller set on [`NewFact::source_event_id`](crate::types::NewFact) is
+    /// value the caller set on [`NewFact::source_event_id`](me_types::types::NewFact) is
     /// overwritten). When `None` (the `--memory-dir` path — one file per call, no
     /// event), each fact keeps its own `source_event_id`. Each fact is then
     /// dedup-with-reinforced ([`insert_or_reinforce_fact`](Self::insert_or_reinforce_fact)
@@ -485,7 +485,7 @@ pub trait FactGraph: Send + Sync {
         &self,
         marker: Option<&NewEvent>,
         facts: Vec<NewFact>,
-        fingerprint: &crate::types::EmbeddingFingerprint,
+        fingerprint: &me_types::types::EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<Vec<(i64, bool)>>;
 }
