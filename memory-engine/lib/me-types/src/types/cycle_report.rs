@@ -1,16 +1,16 @@
 //! Delta-based cycle report types (R7).
 //!
-//! A [`DreamCycle`](crate::traits::DreamCycle) does not mutate the store directly.
-//! Instead it returns a [`CycleReport`] — an ordered log of [`CycleDelta`] operations
-//! plus a three-layer [`IdentityOutput`] and bookkeeping [`CycleMetadata`]. The engine
+//! A `DreamCycle` does not mutate the store directly.
+//! Instead it returns a `CycleReport` — an ordered log of `CycleDelta` operations
+//! plus a three-layer `IdentityOutput` and bookkeeping `CycleMetadata`. The engine
 //! validates and applies the whole report atomically via
-//! [`MemoryEngine::apply_cycle_report`](crate::MemoryEngine::apply_cycle_report).
+//! `MemoryEngine::apply_cycle_report`.
 //!
 //! This is the ACE incremental-delta discipline (arXiv:2510.04618): a cycle *proposes*
 //! a bounded, typed, replayable set of mutations rather than rewriting accumulated
 //! state wholesale — making the DC context-collapse failure mode (arXiv:2504.07952)
 //! structurally impossible for consumer LLM implementations. The shipped default
-//! [`DefaultDreamCycle`](crate::DefaultDreamCycle) is pure-Rust and deterministic, so
+//! `DefaultDreamCycle` is pure-Rust and deterministic, so
 //! it needs no such protection itself; the delta vocabulary exists for the *consumer*.
 
 use chrono::{DateTime, Utc};
@@ -40,11 +40,11 @@ pub struct TimeWindow {
 
 /// Three-layer behavioral identity output (ANCHORS / CORE / PREDICTIONS).
 ///
-/// **This crate defines the type only.** The shipped [`DefaultDreamCycle`](crate::DefaultDreamCycle)
+/// **This crate defines the type only.** The shipped `DefaultDreamCycle`
 /// emits [`IdentityOutput::empty`]; the computation of the three layers is owned by #57.
 ///
 /// Marked `#[non_exhaustive]` so #57 can add fields without breaking existing
-/// [`DreamCycle`](crate::traits::DreamCycle) implementations — external code constructs
+/// `DreamCycle` implementations — external code constructs
 /// it via [`IdentityOutput::empty`] / [`Default`], not a struct literal.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -65,7 +65,7 @@ impl IdentityOutput {
     }
 }
 
-/// One atomic mutation proposed by a [`DreamCycle`](crate::traits::DreamCycle).
+/// One atomic mutation proposed by a `DreamCycle`.
 ///
 /// The engine validates the whole `Vec<CycleDelta>` then applies it in a single
 /// transaction (all-or-nothing). Marked `#[non_exhaustive]`: #578 may add variants
@@ -142,7 +142,7 @@ pub struct CycleMetadata {
     pub processed_ids: Vec<FactId>,
 }
 
-/// Report returned by [`DreamCycle::run`](crate::traits::DreamCycle::run): an ordered
+/// Report returned by `DreamCycle::run`: an ordered
 /// delta log + identity output + metadata.
 ///
 /// A plain constructible struct (intentionally **not** `#[non_exhaustive]`): external
@@ -154,7 +154,7 @@ pub struct CycleReport {
     pub metadata: CycleMetadata,
 }
 
-/// Why [`MemoryEngine::run_dream_cycle_guarded`](crate::MemoryEngine::run_dream_cycle_guarded)
+/// Why `MemoryEngine::run_dream_cycle_guarded`
 /// declined to run a cycle.
 ///
 /// `#[non_exhaustive]`: new skip *reasons* (e.g. a future distributed-lock contention
@@ -171,7 +171,7 @@ pub enum SkipReason {
     },
 }
 
-/// Outcome of [`MemoryEngine::run_dream_cycle_guarded`](crate::MemoryEngine::run_dream_cycle_guarded):
+/// Outcome of `MemoryEngine::run_dream_cycle_guarded`:
 /// the cycle either **ran** (producing a [`CycleReport`]) or was **skipped** (deferred).
 ///
 /// Deliberately **not** `#[non_exhaustive]` so consumers can match `Ran`/`Skipped`
@@ -188,7 +188,7 @@ pub enum CycleOutcome {
 
 /// Per-variant tally of what an applied report changed.
 ///
-/// Returned by [`MemoryEngine::apply_cycle_report`](crate::MemoryEngine::apply_cycle_report);
+/// Returned by `MemoryEngine::apply_cycle_report`;
 /// the old counts-based report is derivable from this for any future observability
 /// layer (e.g. an MCP wrapper). Engine-constructed only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

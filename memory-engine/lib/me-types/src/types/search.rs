@@ -1,9 +1,9 @@
 //! Search/query result vocabulary — the DTOs the retrieval surface speaks.
 //!
 //! Pure data types (no `rusqlite`, no search logic): the query input
-//! ([`SearchQuery`]), the result ([`SearchResult`]/[`MatchType`]), the response
-//! ([`QueryResponse`]/[`QueryDiagnostics`]), the [`SearchMode`] selector, and the
-//! [`RRF_K`] fusion constant. Homed in `me-types` (Wave 2 #816) so the consumer
+//! (`SearchQuery`), the result (`SearchResult`/`MatchType`), the response
+//! (`QueryResponse`/`QueryDiagnostics`), the `SearchMode` selector, and the
+//! `RRF_K` fusion constant. Homed in `me-types` (Wave 2 #816) so the consumer
 //! traits (`Reranker` returns `Vec<SearchResult>`), the backend, and the query
 //! crate all share one definition. The fusion *logic* (`rrf_merge`, hybrid search)
 //! stays in the retrieval layer.
@@ -54,27 +54,30 @@ pub enum MatchType {
 ///     .fact_type(FactType::Semantic);
 /// ```
 ///
-/// This mirrors [`MemoryQuery`](crate::MemoryQuery)'s builder style and is
+/// This mirrors `MemoryQuery`'s builder style and is
 /// misuse- and forward-compatibility-resistant: adding a field is a non-breaking
 /// change for callers, who never had to spell out the `None` defaults.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
-    // Fields are `pub(crate)`: external callers MUST use the builder
-    // (`SearchQuery::new(..)` + the chainable setters), which `#[non_exhaustive]`
-    // already enforces for construction. Intra-crate the engine still constructs
-    // via `new()` and writes fields directly (see `engine::query`).
-    pub(crate) text: Option<String>,
-    pub(crate) embedding: Option<Vec<f32>>,
-    pub(crate) mode: SearchMode,
-    pub(crate) limit: usize,
+    // Fields are `pub` (widened from `pub(crate)` in Wave 2 #816): the retrieval
+    // layer — `me-query`'s hybrid search and the SQLite backend's strategies — reads
+    // and writes them directly, now across the crate boundary the `me-types` carve
+    // introduced. `#[non_exhaustive]` still forbids external struct-literal
+    // construction, so callers must start from the builder (`SearchQuery::new(..)` +
+    // the chainable setters); the widening only exposes the fields of an
+    // already-constructed query.
+    pub text: Option<String>,
+    pub embedding: Option<Vec<f32>>,
+    pub mode: SearchMode,
+    pub limit: usize,
     /// How many candidates to pass to the reranker before truncating to `limit`.
     /// Clamped to at least `limit` — can only widen the candidate pool, never shrink it.
     /// When `None`, falls back to `limit` (no over-fetch).
-    pub(crate) rerank_depth: Option<usize>,
-    pub(crate) valid_at: Option<DateTime<Utc>>,
-    pub(crate) fact_type: Option<FactType>,
-    pub(crate) scope: Option<crate::types::ScopeQuery>,
+    pub rerank_depth: Option<usize>,
+    pub valid_at: Option<DateTime<Utc>>,
+    pub fact_type: Option<FactType>,
+    pub scope: Option<crate::types::ScopeQuery>,
 }
 
 impl SearchQuery {

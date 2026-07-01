@@ -13,7 +13,7 @@ use crate::types::facts::FactId;
 /// The owning `lineage_id` (DB row PK) is **not** part of this envelope — it is a
 /// property of the row, not of the provenance. Read paths return it alongside the
 /// envelope in the companion [`LineageRecord`] / [`LineageSnapshotEntry`], and the
-/// write path returns it in [`PromotionResult`](crate::PromotionResult). Previously this struct carried a
+/// write path returns it in `PromotionResult`. Previously this struct carried a
 /// phantom `lineage_id: i64` with `#[serde(skip_serializing, default)]` that was
 /// always `0` on deserialization and reconstructed from the PK on read — a lying
 /// field with an invisible "0 means not-yet-persisted" invariant. It is removed.
@@ -45,10 +45,10 @@ pub struct NewLineageRecord {
 }
 
 /// One proposed merge: a set of source facts an
-/// [`LlmDreamCycle`](crate::LlmDreamCycle) should collapse into a single
+/// `LlmDreamCycle` should collapse into a single
 /// synthesized `summary`.
 ///
-/// The output of a [`DeltaProposer`](crate::traits::DeltaProposer), it is a raw
+/// The output of a `DeltaProposer`, it is a raw
 /// **proposal** — deliberately a plain DTO with no enforced invariants. It crosses
 /// the HTTP boundary (an LLM backend deserializes it from model JSON), so rejecting a
 /// malformed group at parse time would deny the cycle the chance to clamp it. The
@@ -67,7 +67,7 @@ pub struct MergeGroup {
 
 /// A consolidation backend's proposal: the merge groups it wants applied.
 ///
-/// Returned by [`DeltaProposer::propose`](crate::traits::DeltaProposer::propose). An
+/// Returned by `DeltaProposer::propose`. An
 /// empty `merges` (the proposer found nothing to consolidate) is a valid state, not an
 /// error — the cycle turns it into a no-op report. v1 carries only merges; future
 /// proposal kinds (e.g. promotions) are additive.

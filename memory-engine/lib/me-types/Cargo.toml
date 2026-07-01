@@ -1,0 +1,38 @@
+[package]
+name = "me-types"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Layer-0 data + error vocabulary for the memory-engine workspace (Wave 2 #816)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal crate: never published to crates.io, so it uses bare path-deps
+# and is exempt from cargo-deny's published-crate wildcard rule (plan §D.1).
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+# `MemoryError::Database(#[from] rusqlite::Error)` (error.rs) embeds the SQLite
+# driver's error type. The orphan rule forces the `From` impl to live wherever
+# `MemoryError` is defined, so L0 me-types must carry `rusqlite`. `bundled` keeps
+# the crate self-buildable (`cargo build -p me-types`) without a system libsqlite3.
+# Decoupling this (→ `Database(String)` + backend-side mapping) is tracked as a
+# follow-up — it is the real unblocker for #633's future `dep:rusqlite` gating.
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[features]
+# No-op gate mirroring the facade's `archive` feature: `QueryDiagnostics`
+# (types::search) carries `#[cfg(feature = "archive")]` fields, so the facade's
+# `archive` feature forwards here (`me-types/archive`) to keep the DTO shape
+# consistent across the workspace. Adds no dependency — the gated fields are plain
+# scalars.
+archive = []
+
+[lints]
+workspace = true

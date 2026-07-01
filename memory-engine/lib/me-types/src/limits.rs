@@ -9,7 +9,7 @@
 //! Operator-controlled paths are intentionally exempt: `restore_*` reconstructs
 //! an engine from a trusted snapshot/backup and must round-trip whatever it
 //! contains (consistent with the trusted-path contract on
-//! [`crate::inspect::dump::dump_sqlite`]).
+//! `crate::inspect::dump::dump_sqlite`).
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::types::NewFact;

@@ -109,12 +109,15 @@ compile_error!(
 // === Public modules (consumer-facing API) ===
 pub mod bootstrap;
 pub mod engine;
-pub mod error;
+// `error` + `types` are relocated to the L0 `me-types` crate (Wave 2 #816). The
+// module re-export preserves `memory_engine::error::*` (and every internal
+// `crate::error::` path) with no call-site churn.
+pub use me_types::error;
 pub mod inspect;
 pub mod search;
 pub mod storage;
 pub mod traits;
-pub mod types;
+pub use me_types::types; // relocated to me-types (Wave 2 #816); see `error` above
 
 // === Internal modules (implementation details) ===
 #[cfg(feature = "archive")]
@@ -122,7 +125,7 @@ pub(crate) mod archive;
 pub(crate) mod consolidation;
 pub(crate) mod forgetting;
 pub(crate) mod graph;
-pub(crate) mod limits;
+pub(crate) use me_types::limits; // relocated to me-types (Wave 2 #816)
 pub(crate) mod pool;
 pub(crate) mod resume;
 pub(crate) mod scope;
@@ -144,12 +147,12 @@ pub use engine::{EngineConfig, MemoryEngine};
 // than glob-imported so the crate-root API is auditable and a new public error
 // type must be added here deliberately. The `reexports_are_accessible` smoke
 // test guards the list.
-pub use error::{
+pub use forgetting::{ForgetPolicy, PruneStats};
+pub use inspect::types as inspect_types;
+pub use me_types::error::{
     ArchiveError, ConflictError, CycleError, MemoryError, MigrationError, RerankerError, Result,
     StorageError,
 };
-pub use forgetting::{ForgetPolicy, PruneStats};
-pub use inspect::types as inspect_types;
 pub use resume::{ResumeConfig, ResumeContext};
 pub use search::{
     MatchType, MemoryQuery, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
@@ -168,7 +171,7 @@ pub use traits::{
 // glob. Kept in source order; the `reexports_are_accessible` smoke test guards
 // a representative subset, and `cargo build --workspace --all-features` proves
 // the whole list still satisfies every downstream consumer.
-pub use types::{
+pub use me_types::types::{
     Activity, ActivityStatus, AddFactOptions, AddFactRequest, ClassifierInput, ConsolidationLevel,
     ConsolidationProposal, DreamCycleConfig, Edge, EmbeddingFingerprint, Event, EventFilter,
     EventType, Fact, FactId, FactScoringRow, FactType, Insight, LineageId, LineageRecord,

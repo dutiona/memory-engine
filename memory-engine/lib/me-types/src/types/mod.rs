@@ -11,9 +11,10 @@ mod relation;
 mod scope;
 /// Search/query result vocabulary (`SearchResult`/`SearchQuery`/`QueryResponse`…).
 pub mod search;
-/// Snapshot DTOs (the serde sidecar projections). Kept as a namespaced submodule
-/// rather than flat-re-exported: these are internal wire types, not part of the
-/// flat `crate::types::*` public vocabulary.
+/// Snapshot DTOs (the serde sidecar projections).
+///
+/// Kept as a namespaced submodule rather than flat-re-exported: these are internal
+/// wire types, not part of the flat `crate::types::*` public vocabulary.
 pub mod snapshot;
 
 pub use activity::*;

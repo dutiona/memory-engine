@@ -12,16 +12,16 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConflictError {
-    /// A [`MemoryQuery`](crate::MemoryQuery) combined options that are
+    /// A `MemoryQuery` combined options that are
     /// mutually exclusive or incomplete (e.g. a half-open period, `valid_at`
-    /// together with a period, or a [`SearchMode`](crate::SearchMode)
+    /// together with a period, or a `SearchMode`
     /// missing its required input). The string names the specific rule violated.
     #[error("{0}")]
     QueryValidation(String),
 
     /// A configuration or policy parameter is out of its accepted range — e.g. a
     /// non-positive half-life, a weight below zero, or a ratio/percentile outside
-    /// `[0.0, 1.0]`. Raised by [`ForgetPolicy::validate`](crate::forgetting::ForgetPolicy::validate)
+    /// `[0.0, 1.0]`. Raised by `ForgetPolicy::validate`
     /// and [`DreamCycleConfig::validate`](crate::types::DreamCycleConfig::validate).
     /// The string describes the offending parameter and its value.
     #[error("{0}")]
@@ -58,7 +58,7 @@ pub enum ConflictError {
     DumpTargetIsDirectory,
 
     /// A consumer-supplied trait implementation (e.g. a
-    /// [`ConflictArbiter`](crate::traits::ConflictArbiter) or other injected
+    /// `ConflictArbiter` or other injected
     /// provider) reported a failure that the engine surfaces as a conflict. The
     /// string carries the consumer's message.
     #[error("{0}")]
@@ -83,7 +83,7 @@ pub enum ConflictError {
 ///
 /// This is the typed payload of [`MemoryError::Reranker`]. It distinguishes two
 /// origins: a failure reported by the consumer-supplied
-/// [`Reranker`](crate::traits::Reranker) itself ([`Provider`](RerankerError::Provider)),
+/// `Reranker` itself ([`Provider`](RerankerError::Provider)),
 /// and the four output-contract violations the engine detects *after* the
 /// reranker returns (`validate_reranker_output`). The engine-detected variants
 /// carry the offending values as fields, so a caller can `match` on the precise
@@ -94,7 +94,7 @@ pub enum ConflictError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RerankerError {
-    /// The consumer-supplied [`Reranker`](crate::traits::Reranker) returned an
+    /// The consumer-supplied `Reranker` returned an
     /// error from its `rerank` call (e.g. an API call, timeout, or inference
     /// failure). The string carries the consumer's message verbatim.
     #[error("{0}")]
@@ -295,7 +295,7 @@ pub enum MigrationError {
     Incompatible(String),
 }
 
-/// A failure while validating or applying a [`CycleReport`](crate::CycleReport).
+/// A failure while validating or applying a `CycleReport`.
 ///
 /// This is the typed payload of [`MemoryError::Cycle`]. Each variant maps to a
 /// specific reason a delta could not be applied — a dangling fact reference, an
@@ -349,12 +349,21 @@ pub enum CycleError {
 
     /// A cycle reported selecting facts (`facts_selected > 0`) but left
     /// `processed_ids` empty — a `DreamCycle` impl violating the
-    /// [`processed_ids` contract](crate::traits::DreamCycle::run). Those facts would
+    /// `processed_ids` contract. Those facts would
     /// never be dream-marked, so the #209 guarded cycle would defer forever.
     #[error(
         "malformed cycle report: facts_selected={facts_selected} but processed_ids is empty (DreamCycle::run contract violated)"
     )]
     MalformedReport { facts_selected: usize },
+
+    /// The apply/validate path encountered an unhandled `CycleDelta` variant.
+    ///
+    /// [`CycleDelta`](crate::types::cycle_report::CycleDelta) is `#[non_exhaustive]`
+    /// (#578 may add R9/R13 variants), so a backend built before such a variant exists
+    /// rejects it loudly here rather than silently skipping the mutation. Reaching this
+    /// means the apply path must be extended for the new variant.
+    #[error("unsupported cycle delta variant (apply path predates a newer CycleDelta)")]
+    UnsupportedDelta,
 }
 
 /// A failure that originates **at the pluggable-storage seam** and cannot be

@@ -321,6 +321,9 @@ impl ConsolidationStore for SqliteBackend {
                                     expired_in_report.insert(*src);
                                 }
                             }
+                            // `CycleDelta` is `#[non_exhaustive]` (#578): reject an
+                            // unknown future variant loudly rather than skip validation.
+                            _ => return Err(MemoryError::Cycle(CycleError::UnsupportedDelta)),
                         }
                     }
                     for id in &report.metadata.processed_ids {
@@ -541,6 +544,9 @@ impl ConsolidationStore for SqliteBackend {
                             #[cfg(feature = "ann")]
                             to_index.push((synth_id, new_fact.embedding.clone()));
                         }
+                        // `CycleDelta` is `#[non_exhaustive]` (#578): reject an unknown
+                        // future variant loudly rather than silently skip applying it.
+                        _ => return Err(MemoryError::Cycle(CycleError::UnsupportedDelta)),
                     }
                 }
 
@@ -660,6 +666,9 @@ impl ConsolidationStore for SqliteBackend {
 
         let dim = self.embed_dim;
         let mut fact = fact.clone();
+        // Cloned before `fact` is moved into `block_write`; only the `ann` post-commit
+        // HNSW notify (below) consumes it, so gate the clone out of non-`ann` builds.
+        #[cfg(feature = "ann")]
         let embedding = fact.embedding.clone();
         let scope_path = scope_path.map(str::to_owned);
         let source_fact_ids = source_fact_ids.to_vec();

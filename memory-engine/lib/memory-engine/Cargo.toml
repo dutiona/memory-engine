@@ -16,6 +16,8 @@ autobenches = false
 autoexamples = false
 
 [dependencies]
+# L0 data + error vocabulary (Wave 2 #816). Bare path-dep: internal, never published.
+me-types = { path = "../me-types" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -164,7 +166,9 @@ default = ["backend-sqlite"]
 ann = ["dep:hnsw", "dep:space", "dep:rand"]
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
-archive = ["compress-zstd"]
+# Forwards to `me-types/archive` so `QueryDiagnostics`'s `#[cfg(feature = "archive")]`
+# fields (types::search, now in me-types) compile in step with the facade (plan §D.2).
+archive = ["compress-zstd", "me-types/archive"]
 # The default in-process SQLite backend. NOTE (#633): this is a *marker* feature — it
 # does NOT yet gate `mod sqlite` or `rusqlite`. The engine open path hardcodes
 # `SqliteBackend` (`engine::init_from_pool`), so a true PG-only build is not

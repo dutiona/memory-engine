@@ -124,7 +124,7 @@ pub struct Fact {
     pub source_event_id: Option<i64>,
     /// **Base importance** — the consumer-supplied prior set once at insertion
     /// (via [`AddFactOptions::base_importance`], default `0.5`), a finite value in
-    /// `[0.0, 1.0]`. The [`add_fact`](crate::MemoryEngine::add_fact) /
+    /// `[0.0, 1.0]`. The `add_fact` /
     /// `add_facts_batch` entry points validate this range (#571); a few
     /// direct-insert paths (bootstrap, snapshot restore) do not yet enforce it
     /// (#584), so a `Fact` materialized that way could carry an out-of-range value.
@@ -161,7 +161,7 @@ pub struct Fact {
 impl Fact {
     /// `importance_score` assigned to a transient [`Fact`] that has never been
     /// scored — e.g. a synthetic candidate built for the
-    /// [`ConflictArbiter`](crate::traits::ConflictArbiter), or a pseudo-fact
+    /// `ConflictArbiter`, or a pseudo-fact
     /// derived during global consolidation. A neutral midpoint, deliberately
     /// not a real computed score.
     ///
@@ -171,7 +171,7 @@ impl Fact {
     pub const UNSCORED_IMPORTANCE: f64 = 0.5;
 
     /// Build a transient, pre-insert [`Fact`] from a [`NewFact`] to hand to
-    /// [`ConflictArbiter::arbitrate`](crate::traits::ConflictArbiter::arbitrate).
+    /// `ConflictArbiter::arbitrate`.
     ///
     /// `id` is `0` (not yet assigned by the DB) and `importance_score` is the
     /// [`Self::UNSCORED_IMPORTANCE`] sentinel — NOT the eventual stored score.
@@ -185,7 +185,13 @@ impl Fact {
     /// **Arbiter input caveat:** the returned `Fact` is synthetic. Arbiters must
     /// rely on `content`, `fact_type`, `base_importance`, and `metadata` — never
     /// on `id` (always `0`) or `importance_score` (always the sentinel `0.5`).
-    pub(crate) fn from_new_for_arbiter(nf: &NewFact) -> Self {
+    // Internal arbiter seam (Wave 2 #816): widened to `pub` only so the conflict
+    // path (engine::conflict → me-resolve) can build a synthetic `Fact` from a
+    // `NewFact` across the crate boundary — it needs `Fact`'s private fields, so it
+    // must live here in me-types. `#[doc(hidden)]` keeps it out of the rendered API.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_new_for_arbiter(nf: &NewFact) -> Self {
         Self {
             id: 0, // placeholder, not yet inserted
             content: nf.content.clone(),
@@ -217,7 +223,7 @@ impl Fact {
     /// the resume surfacing walk and the `explain` `FactState::Due` classifier so
     /// the two cannot silently drift (#477). It is the Rust mirror of the SQL
     /// `WHERE` clause in `FactStore::list_due` / `SchemaManager::statistics` and of
-    /// [`TemporalFilter::ValidDue`](crate::storage::TemporalFilter::ValidDue).
+    /// `TemporalFilter::ValidDue`.
     ///
     /// # Scope (what this predicate does NOT cover)
     ///
@@ -260,7 +266,7 @@ pub struct Summary {
     pub scope_id: i64,
 }
 
-/// Optional parameters for [`crate::engine::MemoryEngine::add_fact`].
+/// Optional parameters for `crate::engine::MemoryEngine::add_fact`.
 ///
 /// All fields default to `None`, which uses the engine's defaults
 /// (`base_importance=0.5`, metadata={}, no temporal bounds).
@@ -268,8 +274,8 @@ pub struct Summary {
 pub struct AddFactOptions {
     /// Override default base importance (0.5). Must be in [0, 1]; an out-of-range
     /// or non-finite value is rejected with `Conflict(PolicyParameter)` by
-    /// [`add_fact`](crate::engine::MemoryEngine::add_fact) and
-    /// [`add_facts_batch`](crate::engine::MemoryEngine::add_facts_batch).
+    /// `add_fact` and
+    /// `add_facts_batch`.
     pub base_importance: Option<f64>,
     /// Override default metadata (empty object).
     pub metadata: Option<serde_json::Value>,
@@ -287,8 +293,8 @@ pub struct AddFactOptions {
     pub last_accessed: Option<DateTime<Utc>>,
 }
 
-/// Input descriptor for [`crate::engine::MemoryEngine::add_fact`] and
-/// [`crate::engine::MemoryEngine::add_facts_batch`].
+/// Input descriptor for `crate::engine::MemoryEngine::add_fact` and
+/// `crate::engine::MemoryEngine::add_facts_batch`.
 ///
 /// Bundles all data-level parameters for fact insertion. Infrastructure
 /// concerns (embedder, classifier) remain separate method parameters.
@@ -340,7 +346,7 @@ impl NewFact {
     /// [`NewFactBuilder`]) and can be overridden with the builder's setters.
     ///
     /// ```
-    /// use memory_engine::types::{FactType, NewFact};
+    /// use me_types::types::{FactType, NewFact};
     ///
     /// let fact = NewFact::builder("user prefers terse replies", vec![0.1; 384], FactType::Semantic)
     ///     .base_importance(0.8)
@@ -359,7 +365,7 @@ impl NewFact {
 
 /// The owned view a classifier receives at classification time.
 ///
-/// Passed to [`PersistenceClassifier::should_pin`](crate::traits::PersistenceClassifier::should_pin),
+/// Passed to `PersistenceClassifier::should_pin`,
 /// it carries the *only* fields a classifier is authorised to read: `content`,
 /// `fact_type`, `base_importance`, and `metadata`.
 ///
@@ -391,7 +397,7 @@ pub struct ClassifierInput {
 }
 
 /// Fluent builder for [`NewFact`], mirroring the ergonomics of
-/// [`MemoryEngineBuilder`](crate::MemoryEngineBuilder).
+/// `MemoryEngineBuilder`.
 ///
 /// Constructed via [`NewFact::builder`]. The three essential fields (`content`,
 /// `embedding`, `fact_type`) are required up front; every other field defaults:
