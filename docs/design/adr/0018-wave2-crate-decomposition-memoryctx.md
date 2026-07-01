@@ -97,10 +97,32 @@ build on these boundaries have the durable _why_.
   sub-crates, not the facade), so the consumer-facing contract is guarded by
   `reexports_are_accessible` + the fact that cli/mcp/embed compile — the tool's value is
   making the _deliberate_ signature breaks greppable.
-- **`test-util` is a forwarded feature** — the port's `#[cfg(any(test, feature =
-"test-util"))]` hooks (e.g. `SchemaManager::raw_exec`) need the facade to forward
-  `test-util` to `me-storage` so the trait method and its backend impl gate in lockstep
-  once split across crates.
+- **`test-util` is the SOLE switch for the cross-crate test seam** — the port's test-only
+  hooks (`SchemaManager::raw_exec`) are gated `#[cfg(feature = "test-util")]`, **not**
+  `cfg(any(test, feature = "test-util"))`. `cfg(test)` is per-crate — never set for a
+  dependency — so once the trait decl (`me-storage`) and its impls + consumers (facade)
+  split across crates, a `test` disjunct desyncs them: `cargo build --workspace --tests`
+  with default features drops the decl while the facade's `cfg(test)` pulls the impl in
+  (`E0407`), and a naive dev-dep forcing `me-storage/test-util` inverts it to `E0046` (decl
+  without impl on the plain-lib target, since a dependency's feature never enables the
+  facade's own). The fix makes the feature the single source of truth: the facade forwards
+  `test-util = ["me-storage/test-util"]`, and the #632 conformance battery + the one
+  `raw_exec`-driving engine test that _consume_ the seam are gated
+  `cfg(all(test, feature = "test-util"))` / `cfg(feature = "test-util")`. Consequence:
+  they run under `--all-features` (CI's test job) but not bare `cargo test`. This was the
+  **S1 review-remediation A1 finding** — the original S1 gate missed it because it never
+  ran the CI MSRV job's exact `cargo build --workspace --tests --examples` (default
+  features), the one command that exercises the desync.
+- **S1 review-remediation B1 (bootstrap idempotency atomicity):** the bootstrap-seam trim
+  (Opt 2) split the `skip_existing` count (facade, read pool) from the marker insert
+  (`ingest_bootstrap_batch_atomic`, write pool), losing the pre-#816 check-and-write
+  atomicity → a TOCTOU where concurrent same-session bootstraps could double-insert a
+  marker. Fixed by giving the port primitive a `skip_if_present: Option<&EventFilter>`
+  guard checked _inside_ the savepoint and a `BootstrapIngestOutcome::{Skipped, Ingested}`
+  return; the facade `count_events` early-out stays as a cheap embed-skip optimization.
+  This is internal-port evolution (consumers call the `MemoryEngine` facade, not the port
+  trait), guarded by `reexports_are_accessible` + cli/mcp/embed builds like the rest of the
+  carve — not a consumer-facing break, so point 8's "unchanged except two" still holds.
 
 ## References
 

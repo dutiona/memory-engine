@@ -432,8 +432,11 @@ fn prepare_one_memory(
 // The `--memory-dir` import loop (discover → per-file prepare+embed → autocommit
 // insert-or-reinforce) is driven engine-side by `MemoryEngine::bootstrap_memory_directory`
 // (see `engine/bootstrap.rs`): each file goes through [`prepare_memory_file`] on a
-// blocking thread, then the port's `insert_or_reinforce_fact`. The meta-first identity
-// stamp (#643) is a single `record_embedding_fingerprint_if_absent` before the loop.
+// blocking thread, then the port's `ingest_bootstrap_batch_atomic` (marker-less,
+// one fact per call) — which routes the `insert_or_reinforce` below the seam while
+// keeping the `.md` path off the live HNSW index, matching the session path. The
+// meta-first identity stamp (#643) is a single `record_embedding_fingerprint_if_absent`
+// before the loop.
 // Discovery ([`collect_md_files`]) + per-file parsing ([`parse_memory_file`]) live here.
 
 #[cfg(test)]

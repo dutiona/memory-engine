@@ -167,16 +167,20 @@ pub trait SchemaManager: Send + Sync {
     /// orphan-`.pak` cleanup guard), or an `UPDATE` that downgrades an event's
     /// stored revision to exercise replay-time upcasting (#543).
     ///
-    /// Gated to `cfg(test)` / the `test-util` feature so it never reaches the
-    /// public API. The #632 conformance suite requires every backend to provide
-    /// it (in its own SQL dialect) so the failure-injection tests can run.
+    /// Gated to the `test-util` feature so it never reaches the public API. It is a
+    /// **feature**, not `cfg(test)`: since #816 this trait lives in `me-storage` while
+    /// the impls and the conformance suite live in the facade, and `cfg(test)` is
+    /// per-crate — never set for a dependency — so it cannot keep a cross-crate
+    /// decl+impl pair in lockstep. The feature is the single switch (the facade forwards
+    /// `test-util = ["me-storage/test-util"]`, and the #632 conformance battery that
+    /// consumes this seam is gated `cfg(all(test, feature = "test-util"))`).
     ///
     /// # Errors
     ///
     /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// SQL or backend failure, or [`MemoryError::ReadOnly`](me_types::error::MemoryError::ReadOnly)
     /// on a read-only backend.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(feature = "test-util")]
     async fn raw_exec(&self, sql: &str) -> Result<()>;
 
     // -------------------------------------------------------------------------

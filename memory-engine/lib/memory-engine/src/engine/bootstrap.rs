@@ -4,6 +4,7 @@ use crate::bootstrap::{
     BootstrapConfig, BootstrapReport, ParsedSession, PrepareCtx, PreparedSession, SessionExtractor,
 };
 use crate::error::Result;
+use crate::storage::BootstrapIngestOutcome;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{EventFilter, FactType};
 
@@ -76,13 +77,23 @@ impl MemoryEngine {
             return Ok(report);
         }
 
-        // --- Idempotency check, BEFORE the expensive embed ---
-        if config.skip_existing {
-            let filter = Self::bootstrap_marker_filter(&parsed.session_id);
-            if self.storage.count_events(&filter).await? > 0 {
-                report.sessions_skipped = 1;
-                return Ok(report);
-            }
+        // The bootstrap-marker idempotency filter (only when `skip_existing`). Built here,
+        // before `parsed` is moved into the prepare closure, so it can be reused for BOTH
+        // the cheap read-pool early-out below AND the authoritative under-lock guard
+        // passed to `ingest_bootstrap_batch_atomic` (#816 B1).
+        let skip_filter = config
+            .skip_existing
+            .then(|| Self::bootstrap_marker_filter(&parsed.session_id));
+
+        // --- Cheap early-out, BEFORE the expensive embed: skip a session already
+        //     bootstrapped. Optimization only — it runs on the read pool and races the
+        //     write, so it is NOT authoritative; the guard inside the atomic ingest below
+        //     is what makes concurrent same-session bootstraps non-duplicating. ---
+        if let Some(filter) = &skip_filter
+            && self.storage.count_events(filter).await? > 0
+        {
+            report.sessions_skipped = 1;
+            return Ok(report);
         }
 
         // --- Prepare (reconstruct → classify → prefilter → extract → embed) off the
@@ -107,11 +118,6 @@ impl MemoryEngine {
             facts,
             report: prepared_report,
         } = prepared;
-        // Fold the prepare-time tallies (turns / candidates / outcome / category /
-        // turn-level redactions / events) into the entries-seeded report. The per-fact
-        // created/reinforced accounting below needs the atomic-ingest result first.
-        report.merge(&prepared_report);
-
         // Split the accounting metadata off before the facts are moved into the port
         // (which consumes them to stamp `source_event_id`).
         let mut metas = Vec::with_capacity(facts.len());
@@ -121,11 +127,34 @@ impl MemoryEngine {
             new_facts.push(fact);
         }
 
-        // --- Atomic ingest: marker + batch, dedup-with-reinforce, identity stamp. ---
-        let flags = self
+        // --- Atomic ingest: under-lock idempotency guard + marker + batch,
+        //     dedup-with-reinforce, identity stamp. ---
+        let flags = match self
             .storage
-            .ingest_bootstrap_batch_atomic(Some(&marker), new_facts, &fingerprint, self.embed_dim)
-            .await?;
+            .ingest_bootstrap_batch_atomic(
+                Some(&marker),
+                skip_filter.as_ref(),
+                new_facts,
+                &fingerprint,
+                self.embed_dim,
+            )
+            .await?
+        {
+            // Lost the race with a concurrent same-session bootstrap that committed its
+            // marker between our early-out and this write. Report a clean skip (matching
+            // the pre-embed early-out) and discard the prepared work — do NOT merge the
+            // prepare-time tallies, so a raced-skip looks exactly like an early skip.
+            BootstrapIngestOutcome::Skipped => {
+                report.sessions_skipped = 1;
+                return Ok(report);
+            }
+            BootstrapIngestOutcome::Ingested(flags) => flags,
+        };
+
+        // Fold the prepare-time tallies (turns / candidates / outcome / category /
+        // turn-level redactions / events) into the entries-seeded report — only on the
+        // ingested path (a raced-skip returned above with just entries + sessions_skipped).
+        report.merge(&prepared_report);
 
         // --- Report accounting from the per-fact created/reinforced flags. ---
         let mut importance_sum = 0.0;
@@ -354,15 +383,33 @@ impl MemoryEngine {
                     // through the bootstrap primitive (rather than `insert_or_reinforce_fact`)
                     // keeps the `.md` path from populating the live HNSW index, matching
                     // the session path and the pre-#816 behavior.
-                    let flags = self
+                    // No idempotency filter: the `.md` path dedups on content, so it
+                    // never skips → always `Ingested`. Matched defensively (rather than
+                    // unwrapped) to keep this library path panic-free (#725).
+                    let flags = match self
                         .storage
                         .ingest_bootstrap_batch_atomic(
+                            None,
                             None,
                             vec![fact],
                             &fingerprint,
                             self.embed_dim,
                         )
-                        .await?;
+                        .await?
+                    {
+                        BootstrapIngestOutcome::Ingested(flags) => flags,
+                        BootstrapIngestOutcome::Skipped => {
+                            // Unreachable: this path passes `skip_if_present = None`.
+                            // `debug_assert` fires loudly in dev/test if a future change
+                            // ever threads a filter here, but compiles out in release so
+                            // the library stays panic-free for consumers (#725).
+                            debug_assert!(
+                                false,
+                                "memory-dir ingest passes no skip filter; Skipped is unreachable"
+                            );
+                            Vec::new()
+                        }
+                    };
                     let reinforced = flags.first().is_some_and(|&(_, r)| r);
                     if reinforced {
                         report.facts_reinforced += 1;

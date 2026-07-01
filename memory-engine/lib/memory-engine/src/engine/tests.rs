@@ -4968,6 +4968,10 @@ async fn builder_wires_search_config() {
     // );
 }
 
+// Gated on `test-util`: this test drives the `raw_exec` seam (to downgrade a stored
+// event revision), which since #816 is only present under the `test-util` feature —
+// `cfg(test)` alone no longer reaches a trait method that now lives in `me-storage`.
+#[cfg(feature = "test-util")]
 #[tokio::test]
 async fn builder_threads_upcaster_registry_in_memory() {
     // Regression for #543: `.upcaster_registry(custom).build()` with NO `.path()`

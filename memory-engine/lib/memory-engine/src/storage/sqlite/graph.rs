@@ -20,13 +20,13 @@ use chrono::{DateTime, Utc};
 
 use super::{SqliteBackend, stream_consumer_dropped};
 use crate::error::Result;
-use crate::storage::graph::FactGraph;
+use crate::storage::graph::{BootstrapIngestOutcome, FactGraph};
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
 use crate::types::{
-    Edge, EmbeddingFingerprint, Fact, FactScoringRow, FactType, NewEdge, NewEvent, NewFact,
-    RelationType, ScopeNode, SessionFact,
+    Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
+    NewFact, RelationType, ScopeNode, SessionFact,
 };
 
 /// `(fact_ids, scope_ids_to_cache, embeddings)` — the result of the batch-insert
@@ -1038,16 +1038,30 @@ impl FactGraph for SqliteBackend {
     async fn ingest_bootstrap_batch_atomic(
         &self,
         marker: Option<&NewEvent>,
+        skip_if_present: Option<&EventFilter>,
         facts: Vec<NewFact>,
         fingerprint: &EmbeddingFingerprint,
         expected_dim: usize,
-    ) -> Result<Vec<(i64, bool)>> {
+    ) -> Result<BootstrapIngestOutcome> {
         let upcaster = Arc::clone(&self.upcaster_registry);
         let marker = marker.cloned();
+        let skip_if_present = skip_if_present.cloned();
         let fingerprint = fingerprint.clone();
         self.block_write(move |conn| {
             conn.execute_batch("SAVEPOINT ingest_bootstrap")?;
-            let outcome = (|| -> Result<Vec<(i64, bool)>> {
+            let outcome = (|| -> Result<BootstrapIngestOutcome> {
+                // Authoritative idempotency guard, checked FIRST inside the savepoint
+                // (under the write lock): a matching event ⟹ the batch is a no-op. This
+                // restores the pre-#816 check-and-write atomicity — before the seam trim
+                // the count and the marker insert shared one write connection, so
+                // concurrent same-session bootstraps could not both write a marker; after
+                // the trim the facade's `count_events` early-out runs on the READ pool,
+                // racing this write. Re-checking here closes that TOCTOU (#816 B1).
+                if let Some(filter) = &skip_if_present
+                    && crate::store::events::EventStore::new(conn, &upcaster).count(filter)? > 0
+                {
+                    return Ok(BootstrapIngestOutcome::Skipped);
+                }
                 // Session path: insert the marker first; its id anchors the batch's
                 // provenance (backfilled onto every fact). Memory-dir path: no marker,
                 // facts keep their own `source_event_id` (`None`).
@@ -1080,7 +1094,7 @@ impl FactGraph for SqliteBackend {
                         expected_dim,
                     )?;
                 }
-                Ok(out)
+                Ok(BootstrapIngestOutcome::Ingested(out))
             })();
             match outcome {
                 Ok(out) => {
@@ -2071,5 +2085,78 @@ mod tests {
             "port must return same candidates as direct store"
         );
         assert_eq!(port_facts.len(), 1, "only the expired fact qualifies");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_batch_skips_under_lock_when_marker_present() {
+        // #816 B1: `skip_if_present` is the AUTHORITATIVE idempotency guard — it runs
+        // inside the savepoint (under the write lock), so a same-session bootstrap whose
+        // marker already exists is forced to a no-op. Deterministic proxy for the
+        // concurrent race the pre-fix TOCTOU allowed: pre-seed the marker via a first
+        // ingest, then a second call with the matching filter must return `Skipped` and
+        // leave the event log unchanged (no duplicate marker — the actual damage).
+        use crate::storage::{BootstrapIngestOutcome, EventLog};
+        use crate::types::{EmbeddingFingerprint, EventFilter, EventType, NewEvent};
+
+        let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
+        let fp = EmbeddingFingerprint::new("mock", "test", DIM);
+        let marker = NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::SystemEvent,
+            payload: serde_json::json!({ "action": "bootstrap_session", "session_id": "s1" }),
+            source: "bootstrap".into(),
+            session_id: Some("s1".into()),
+            scope_id: 1,
+            origin_node_id: "bootstrap".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        let filter = EventFilter {
+            session_id: Some("s1".into()),
+            source: Some("bootstrap".into()),
+            ..EventFilter::default()
+        };
+
+        // 1st ingest: the filter matches nothing yet → Ingested (marker + one fact).
+        let first = be
+            .ingest_bootstrap_batch_atomic(
+                Some(&marker),
+                Some(&filter),
+                vec![fact("a", [0.1; DIM])],
+                &fp,
+                DIM,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, BootstrapIngestOutcome::Ingested(ref f) if f.len() == 1),
+            "first ingest must commit the batch"
+        );
+        assert_eq!(
+            be.count_events(&filter).await.unwrap(),
+            1,
+            "exactly one marker after the first ingest"
+        );
+
+        // 2nd ingest, SAME filter: the marker now exists → Skipped, nothing written.
+        let second = be
+            .ingest_bootstrap_batch_atomic(
+                Some(&marker),
+                Some(&filter),
+                vec![fact("b", [0.2; DIM])],
+                &fp,
+                DIM,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, BootstrapIngestOutcome::Skipped),
+            "second ingest must skip under the lock when the marker is already present"
+        );
+        assert_eq!(
+            be.count_events(&filter).await.unwrap(),
+            1,
+            "a skipped ingest must NOT insert a duplicate marker (the pre-fix TOCTOU damage)"
+        );
     }
 }

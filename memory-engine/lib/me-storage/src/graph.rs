@@ -16,8 +16,25 @@ use chrono::{DateTime, Utc};
 
 use me_types::error::Result;
 use me_types::types::{
-    Edge, Fact, FactScoringRow, FactType, NewEdge, NewEvent, NewFact, ScopeNode, SessionFact,
+    Edge, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent, NewFact, ScopeNode,
+    SessionFact,
 };
+
+/// Outcome of [`FactGraph::ingest_bootstrap_batch_atomic`].
+///
+/// Distinguishes a batch that committed from one the under-lock idempotency guard
+/// short-circuited, so the caller can report `sessions_skipped` faithfully without a
+/// sentinel (an empty flag `Vec` is ambiguous — it also means "an empty batch was
+/// ingested"). See the method's `skip_if_present` contract.
+#[derive(Debug)]
+pub enum BootstrapIngestOutcome {
+    /// The `skip_if_present` filter matched an existing event **under the write lock**,
+    /// so nothing was written and the savepoint was released empty.
+    Skipped,
+    /// The batch committed. `(fact_id, reinforced)` per input fact, in `facts` order;
+    /// `reinforced == false` ⟹ a new row was created.
+    Ingested(Vec<(i64, bool)>),
+}
 
 /// Core knowledge graph: facts, edges, the scope hierarchy.
 ///
@@ -450,6 +467,18 @@ pub trait FactGraph: Send + Sync {
     /// Atomically ingest an optional idempotency-**marker** event plus a batch of
     /// pre-embedded `facts` in a single savepoint.
     ///
+    /// When `skip_if_present` is `Some`, it is counted **first, inside the savepoint
+    /// (under the write lock)**: a non-zero count releases the savepoint empty and
+    /// returns [`BootstrapIngestOutcome::Skipped`] without writing anything. This is the
+    /// authoritative idempotency guard — the session path passes its bootstrap-marker
+    /// filter here so the check and the marker insert share one write connection, exactly
+    /// as they did before the #816 seam trim. (A caller MAY *also* run the same filter
+    /// through [`EventLog::count_events`](crate::EventLog) beforehand as a cheap
+    /// read-pool early-out to skip embedding a known-bootstrapped session, but that outer
+    /// check races the write and is only an optimization; this under-lock check is what
+    /// makes concurrent same-key bootstraps non-duplicating.) The `--memory-dir` path
+    /// passes `None` (content-dedup handles its idempotency; it never skips).
+    ///
     /// When `marker` is `Some`, it is inserted first and its assigned id becomes
     /// **every** fact's `source_event_id` (the session path's provenance anchor — any
     /// value the caller set on [`NewFact::source_event_id`](me_types::types::NewFact) is
@@ -462,15 +491,18 @@ pub trait FactGraph: Send + Sync {
     /// reinforces writes no new vector and leaves the store unstamped, so a later real
     /// first write can still establish the true identity).
     ///
-    /// The caller owns the idempotency **decision** (a `Some` marker is always
-    /// inserted) and builds its report from the returned per-fact flags. `facts` is
-    /// taken by value so the impl can stamp `source_event_id` in place without cloning
+    /// With `skip_if_present == None` the caller owns the idempotency decision and a
+    /// `Some` marker is unconditionally inserted; with `skip_if_present == Some` the port
+    /// owns it under the lock (above) and inserts the marker only if the guard passes.
+    /// Either way the caller builds its report from the returned per-fact flags. `facts`
+    /// is taken by value so the impl can stamp `source_event_id` in place without cloning
     /// the (embedding-bearing) `NewFact`s.
     ///
     /// # Contract
     ///
-    /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (savepoint rolled
-    /// back)`. Bootstrap deliberately does **not** touch the HNSW sidecar (the vector
+    /// `Ok(Ingested) ⟹ all sub-ops committed; Ok(Skipped) ⟹ nothing written (savepoint
+    /// released empty); Err ⟹ store byte-identical (savepoint rolled back)`. Bootstrap
+    /// deliberately does **not** touch the HNSW sidecar (the vector
     /// index is rebuilt from the DB at open), so — unlike
     /// [`insert_or_reinforce_fact`](Self::insert_or_reinforce_fact) — no post-commit
     /// index notification fires, and the `IndexInconsistent` post-commit exception the
@@ -479,13 +511,15 @@ pub trait FactGraph: Send + Sync {
     ///
     /// # Returns
     ///
-    /// `(fact_id, reinforced)` per fact, in the same order as `facts`;
-    /// `reinforced == false` ⟹ a new row was created.
+    /// [`BootstrapIngestOutcome::Ingested`] with `(fact_id, reinforced)` per fact in
+    /// `facts` order (`reinforced == false` ⟹ a new row was created), or
+    /// [`BootstrapIngestOutcome::Skipped`] when `skip_if_present` matched under the lock.
     async fn ingest_bootstrap_batch_atomic(
         &self,
         marker: Option<&NewEvent>,
+        skip_if_present: Option<&EventFilter>,
         facts: Vec<NewFact>,
         fingerprint: &me_types::types::EmbeddingFingerprint,
         expected_dim: usize,
-    ) -> Result<Vec<(i64, bool)>>;
+    ) -> Result<BootstrapIngestOutcome>;
 }

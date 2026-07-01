@@ -48,7 +48,7 @@ pub use consolidation::ConsolidationStore;
 pub use ctx::MemoryCtx;
 pub use event_log::EventLog;
 pub use filter::{FactFilter, MetadataPredicate, TemporalFilter};
-pub use graph::FactGraph;
+pub use graph::{BootstrapIngestOutcome, FactGraph};
 pub use schema::SchemaManager;
 pub use search_index::SearchIndex;
 pub use session::SessionStore;

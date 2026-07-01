@@ -175,7 +175,7 @@ impl SchemaManager for PgBackend {
         ))
     }
 
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(feature = "test-util")]
     async fn raw_exec(&self, sql: &str) -> Result<()> {
         self.read_only_guard()?;
         let sql = sql.to_string();

@@ -235,7 +235,7 @@ impl SchemaManager for SqliteBackend {
     // TEST-ONLY raw SQL escape (#727) — `execute_batch` on the write connection, so
     // a read-only pool rejects it with `MemoryError::ReadOnly` and a driver error
     // is mapped to `Storage(Backend)` by the seam.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(feature = "test-util")]
     async fn raw_exec(&self, sql: &str) -> Result<()> {
         let sql = sql.to_owned();
         self.block_write(move |c| c.execute_batch(&sql).map_err(Into::into))

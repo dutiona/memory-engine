@@ -19,7 +19,13 @@ pub mod sqlite;
 
 /// Cross-backend conformance battery (#632) — asserts the `StorageBackend` CONTRACT
 /// against `Arc<dyn StorageBackend>` directly. Test-only; see its module docs.
-#[cfg(test)]
+///
+/// Gated on `test-util` (not bare `test`) because it drives the `SchemaManager::raw_exec`
+/// failure-injection seam, which — since the #816 split moved the trait into `me-storage`
+/// — is only present when the `test-util` feature is on (a cross-crate escape hatch cannot
+/// ride `cfg(test)`). CI's `--all-features` test job runs it; bare `cargo test` no longer
+/// does (run `cargo test --features test-util` locally to exercise it).
+#[cfg(all(test, feature = "test-util"))]
 mod conformance;
 
 // --- The port surface, re-exported from the me-storage crate. ---
@@ -34,9 +40,9 @@ pub use me_storage::{
 #[cfg(feature = "archive")]
 pub use me_storage::ColdStorage;
 pub use me_storage::{
-    BackendCapabilities, ConsolidationStore, EventLog, FactFilter, FactGraph, LexicalRanker,
-    MemoryCtx, MetadataPredicate, SchemaManager, SearchIndex, SessionStore, StorageBackend,
-    TemporalFilter,
+    BackendCapabilities, BootstrapIngestOutcome, ConsolidationStore, EventLog, FactFilter,
+    FactGraph, LexicalRanker, MemoryCtx, MetadataPredicate, SchemaManager, SearchIndex,
+    SessionStore, StorageBackend, TemporalFilter,
 };
 
 // --- The concrete backend impls (remain in the monolith until S2). ---
