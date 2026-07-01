@@ -90,7 +90,7 @@ The crate is organized into modules with clear responsibilities:
 | `search/`          | Query layer. FTS5 (BM25), vector (cosine similarity, brute-force or HNSW via `ann` feature), strategy dispatch, and hybrid (RRF) search.                                                                                                                                                     |
 | `graph/`           | `MemoryGraph` wrapper around `petgraph::DiGraph`. Loaded from SQLite on startup, kept in sync on mutations.                                                                                                                                                                                  |
 | `scope/`           | `ScopeTree` for hierarchical isolation. In-memory tree structure, backed by `ScopeStore` in SQLite.                                                                                                                                                                                          |
-| `resume/`          | Session bootstrapping. `MemoryEngine::resume_context()` (an `async` engine method) implements 4-tier retrieval (pinned → high_importance → due → recent).                                                                                                                                     |
+| `resume/`          | Session bootstrapping. `MemoryEngine::resume_context()` (an `async` engine method) implements 4-tier retrieval (pinned → high_importance → due → recent).                                                                                                                                    |
 | `consolidation/`   | Three-pass memory compression: local dedup, cluster fusion, global integration.                                                                                                                                                                                                              |
 | `forgetting/`      | Ebbinghaus decay with multi-signal importance scoring.                                                                                                                                                                                                                                       |
 | `engine::conflict` | Bi-temporal conflict resolution (`MemoryEngine::resolve_conflict`) delegated to the consumer `ConflictArbiter`.                                                                                                                                                                              |
@@ -134,6 +134,57 @@ All public methods take `&self` (the engine mutates only `close`). A clean shutd
 ```
 
 This design replaced an earlier single-writer `!Send` design (Phase 1-2) where the engine owned a single `Connection` and could not be shared across threads, and the thread-pooled `ConnectionPool` of Phase 3. The #631 cutover made the engine fully async-native behind the `StorageBackend` port: the same trait will host a Postgres backend (#633/#634) with no engine change.
+
+## Crate decomposition (Wave 2 #816)
+
+The module boxes in the diagrams above describe the _logical_ layering; Wave 2 (#816) makes that layering a **physical, acyclic DAG of per-concern crates**, so the library boundary, the link graph, and the public/private surface are visible rather than "Cargo magic". The former single core crate is being carved into thirteen crates (plus a dev-only `me-test-support`); **S1 has landed** — `me-types`, `me-traits`, and `me-storage` are real crates — and slices S2–S6 carve the backends and primitives out of the `memory-engine` facade. The locked structural decisions are in [ADR 0018](adr/0018-wave2-crate-decomposition-memoryctx.md); the full crate map (with per-crate DONE/PENDING status) is in [the crate layout reference](../reference/crate-layout.md).
+
+```{mermaid}
+graph TD
+    facade["memory-engine (L4 facade)"]
+    subgraph L3["L3 — primitives"]
+        prims["me-ingest · me-query · me-consolidate<br/>me-forget · me-resolve · me-archive"]
+    end
+    subgraph L2["L2 — backends + projections"]
+        backends["me-backend-sqlite · me-backend-postgres · me-index"]
+    end
+    storage["me-storage (L1 — storage port)"]
+    traits["me-traits (L0.5 — contracts)"]
+    types["me-types (L0 — data + error)"]
+
+    facade --> prims
+    prims --> backends
+    backends --> storage
+    storage --> traits
+    traits --> types
+    storage --> types
+```
+
+**The acyclicity invariant.** Edges point strictly **down** by layer — a crate may depend only on crates in a lower layer. This is the primary invariant of the decomposition and it is **compiler-enforced**: `cargo` rejects any re-introduced cycle at resolve time, and a CI `cargo tree` check catches a back-edge before merge. `me-index` (the graph/scope projections) depends on `{me-storage, me-types}` only — not `me-traits` — so the projections stay backend-free and mockable. Two deliberate public-API breaks are gated by `cargo public-api` (ADR 0018 decision #8): `DreamCycle::run(&dyn CycleCtx)` (landed in S1) and `VectorSearchStrategy::search(&dyn SearchIndex)` (deferred to S4).
+
+**Status today.** `me-types` (L0), `me-traits` (L0.5), and `me-storage` (L1) exist as separate workspace members under `memory-engine/lib/`. The `memory-engine` facade re-exports them (the four-layer `types` / `error` / `traits` / `storage` seam is unchanged) and still physically owns the backends and primitives as modules until they carve out in S2–S5.
+
+## `MemoryCtx`
+
+`MemoryCtx<'a>` is the **universal capability handle** every primitive receives. It carries _only_ what every primitive needs, so a primitive that needs nothing more can be called with just this handle:
+
+| Field             | Type                          | Purpose                                                                        |
+| ----------------- | ----------------------------- | ------------------------------------------------------------------------------ |
+| `storage`         | `&'a Arc<dyn StorageBackend>` | The single persistence port. All DB-touching work `.await`s this.              |
+| `embed_dim`       | `usize`                       | The embedding dimension the handle was opened at.                              |
+| `read_only`       | `bool`                        | Whether the engine was opened read-only (write primitives check this).         |
+| `reopen_required` | `&'a AtomicUsize`             | The reconstruction dimension fence (#742): `0` = open; non-zero `D′` = fenced. |
+
+Two gates are relocated verbatim from `engine::mod` onto the handle:
+
+- **`ensure_open()`** — the read-fence gate every embedding-touching primitive calls at entry; returns `MemoryError::EmbeddingReopenRequired { new_dim }` once a different-dim reconstruction has fenced the handle, until the consumer reopens at `D′`.
+- **`ensure_writable()`** — the write gate; returns `MemoryError::ReadOnly` if the engine was opened read-only.
+
+`MemoryCtx` is `Copy` (two references + a `usize` + a `bool`), so a primitive hands it to a helper without ceremony. The lifetime `'a` ties it to the facade-owned state for the duration of one call — it is intentionally **not** `'static`/`Serialize`.
+
+**Universal borrow-bundle + loose extras.** The handle deliberately does _not_ carry every capability a primitive might use. Per-primitive extras — `graph`, `scope_tree`, `reranker`, `cold`, `db_path` — are passed as **explicit loose parameters**, so each free-fn signature _declares_ exactly which extra capabilities it uses (ADR 0018 decision #3). This keeps the universal handle small and makes each primitive's capability set greppable from its signature.
+
+`MemoryCtx` is homed in `me-storage` (L1), not the facade and not a separate `me-ctx` crate, because its load-bearing field is the storage port — it is _about_ storage access. It is **defined in S1**; the L3 primitive crates (me-ingest / me-query / me-consolidate / me-forget / me-resolve / me-archive) **consume it in S3/S4**.
 
 ## Data Flow
 
