@@ -20,4 +20,11 @@
 
 pub mod error;
 pub mod limits;
+/// Shared test-only factory helpers (`new_fact`/`new_event` family).
+///
+/// Gated behind the `test-util` feature (Wave 2 #816, Commit 2 of the
+/// `me-backend-sqlite` carve). Every consumer that needs a `NewFact`/`NewEvent`
+/// test double depends on this instead of duplicating the factories.
+#[cfg(feature = "test-util")]
+pub mod test_util;
 pub mod types;

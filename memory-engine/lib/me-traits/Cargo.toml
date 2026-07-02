@@ -17,5 +17,11 @@ async-trait = "0.1"
 # field is a `serde_json::Value` (a me-types type). Test-only.
 serde_json = "1.0"
 
+[features]
+# Exposes the shared `MockEmbedder` test double (Wave 2 #816, me-backend-sqlite
+# carve, Commit 2) to every consumer crate's own tests, cross-crate (`#[cfg(test)]`
+# does not reach across a crate boundary — only a Cargo feature does).
+test-util = []
+
 [lints]
 workspace = true

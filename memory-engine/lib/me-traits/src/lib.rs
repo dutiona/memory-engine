@@ -21,6 +21,14 @@ use me_types::types::{
     ClassifierInput, ConsolidationProposal, EmbeddingFingerprint, Fact, OutcomeCounts,
 };
 
+/// Shared `EmbeddingProvider` test double (`MockEmbedder`).
+///
+/// Gated behind the `test-util` feature (Wave 2 #816, `me-backend-sqlite` carve,
+/// Commit 2): `#[cfg(test)]` does not reach across a crate boundary — only a
+/// Cargo feature does, so every consumer crate's own tests opt in via this.
+#[cfg(feature = "test-util")]
+pub mod test_util;
+
 // --- Phase 1: Embedding provider (fully used) ---
 
 /// Trait for computing text embeddings.
