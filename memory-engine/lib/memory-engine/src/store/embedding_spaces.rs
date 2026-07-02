@@ -14,7 +14,7 @@
 //! `UNIQUE(status) WHERE status = 'active'` (mirrors KB's `idx_embed_spaces_one_active`).
 //! It cannot be bypassed by any writer, now or in a future wave. A violation is remapped
 //! by [`map_single_active_violation`] to a diagnosable error rather than an opaque
-//! `Database` one.
+//! `Storage(StorageError::Backend)` one.
 //!
 //! ## Future seams (do NOT implement here — separate issues)
 //!
@@ -27,6 +27,7 @@
 //! - Promoting [`SpaceStatus`] / [`EmbeddingSpace`] to public `types.rs` types — **#689**,
 //!   when a multi-space API is actually exposed to consumers.
 
+use crate::error::StorageError;
 use rusqlite::Connection;
 
 use crate::error::{MemoryError, MigrationError, Result};
@@ -156,18 +157,18 @@ const SELECT_COLS: &str =
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure, `MemoryError::Internal` if more than
+/// Returns `MemoryError::Storage` on query failure, `MemoryError::Internal` if more than
 /// one active row exists (impossible under the partial unique index — fail loud, never
 /// pick arbitrarily) or if a stored dimension/status is corrupt.
 pub fn find_active(conn: &Connection) -> Result<Option<EmbeddingSpace>> {
     let sql = format!("SELECT {SELECT_COLS} WHERE status = 'active'");
-    let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query([])?;
-    let Some(first) = rows.next()? else {
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::backend)?;
+    let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+    let Some(first) = rows.next().map_err(StorageError::backend)? else {
         return Ok(None);
     };
-    let space = row_to_space(first)??;
-    if rows.next()?.is_some() {
+    let space = row_to_space(first).map_err(StorageError::backend)??;
+    if rows.next().map_err(StorageError::backend)?.is_some() {
         return Err(MemoryError::Internal(
             "multiple active embedding spaces — single-active invariant corrupted".into(),
         ));
@@ -181,14 +182,14 @@ pub fn find_active(conn: &Connection) -> Result<Option<EmbeddingSpace>> {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure, or `MemoryError::Internal`/`Migration`
+/// Returns `MemoryError::Storage` on query failure, or `MemoryError::Internal`/`Migration`
 /// if a stored dimension/status is corrupt.
 pub fn find_by_name(conn: &Connection, name: &str) -> Result<Option<EmbeddingSpace>> {
     let sql = format!("SELECT {SELECT_COLS} WHERE name = ?1");
-    let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query([name])?;
-    match rows.next()? {
-        Some(row) => Ok(Some(row_to_space(row)??)),
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::backend)?;
+    let mut rows = stmt.query([name]).map_err(StorageError::backend)?;
+    match rows.next().map_err(StorageError::backend)? {
+        Some(row) => Ok(Some(row_to_space(row).map_err(StorageError::backend)??)),
         None => Ok(None),
     }
 }
@@ -197,15 +198,15 @@ pub fn find_by_name(conn: &Connection, name: &str) -> Result<Option<EmbeddingSpa
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure, or `MemoryError::Internal`/`Migration`
+/// Returns `MemoryError::Storage` on query failure, or `MemoryError::Internal`/`Migration`
 /// if a stored dimension/status is corrupt.
 pub fn list_spaces(conn: &Connection) -> Result<Vec<EmbeddingSpace>> {
     let sql = format!("SELECT {SELECT_COLS} ORDER BY created_at, name");
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::backend)?;
     let mut out = Vec::new();
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        out.push(row_to_space(row)??);
+    let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+    while let Some(row) = rows.next().map_err(StorageError::backend)? {
+        out.push(row_to_space(row).map_err(StorageError::backend)??);
     }
     Ok(out)
 }
@@ -222,7 +223,7 @@ pub fn list_spaces(conn: &Connection) -> Result<Vec<EmbeddingSpace>> {
 /// # Errors
 ///
 /// Returns `MemoryError::Internal` (via [`map_single_active_violation`]) if the insert
-/// would create a second active space, `MemoryError::Database` on any other write failure,
+/// would create a second active space, `MemoryError::Storage` on any other write failure,
 /// or `MemoryError::Internal` if a dimension overflows `i64`.
 pub fn insert_active(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
     let (dim, base) = dims_to_sql(&space.fingerprint)?;
@@ -253,7 +254,7 @@ pub fn insert_active(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on a `name` PK collision or any other write failure, or
+/// Returns `MemoryError::Storage` on a `name` PK collision or any other write failure, or
 /// `MemoryError::Internal` if a dimension overflows `i64`.
 pub fn insert_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
     let (dim, base) = dims_to_sql(&space.fingerprint)?;
@@ -285,7 +286,7 @@ pub fn insert_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()
 /// # Errors
 ///
 /// Returns `MemoryError::Internal` if the name is taken by an incompatible space,
-/// or `MemoryError::Database` on a write failure.
+/// or `MemoryError::Storage` on a write failure.
 pub fn begin_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
     match find_by_name(conn, &space.name)? {
         None => insert_populating(conn, space),
@@ -308,12 +309,13 @@ pub fn begin_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()>
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on write failure.
+/// Returns `MemoryError::Storage` on write failure.
 pub fn deprecate(conn: &Connection, name: &str) -> Result<()> {
     conn.execute(
         "UPDATE embedding_spaces SET status = 'deprecated' WHERE name = ?1",
         rusqlite::params![name],
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -326,7 +328,7 @@ pub fn deprecate(conn: &Connection, name: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns `MemoryError::Internal` if activating `name` would create a second
-/// active space (the ordering was violated), or `MemoryError::Database` on any
+/// active space (the ordering was violated), or `MemoryError::Storage` on any
 /// other write failure.
 pub fn activate(conn: &Connection, name: &str) -> Result<()> {
     conn.execute(
@@ -353,18 +355,20 @@ pub fn activate(conn: &Connection, name: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on write failure or `MemoryError::Internal` if a
+/// Returns `MemoryError::Storage` on write failure or `MemoryError::Internal` if a
 /// dimension overflows `i64`.
 pub fn upsert_active_fingerprint(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
     let (dim, base) = dims_to_sql(fp)?;
     // Re-stamp the current active row in place (at most one exists, by the partial
     // unique index), whatever its name.
-    let updated = conn.execute(
-        "UPDATE embedding_spaces
+    let updated = conn
+        .execute(
+            "UPDATE embedding_spaces
             SET model = ?1, provider = ?2, dim = ?3, matryoshka_base_dim = ?4, element_type = ?5
           WHERE status = 'active'",
-        rusqlite::params![fp.model, fp.provider, dim, base, fp.element_type],
-    )?;
+            rusqlite::params![fp.model, fp.provider, dim, base, fp.element_type],
+        )
+        .map_err(StorageError::backend)?;
     if updated == 0 {
         // No active space yet — seed the canonical `default` active row.
         conn.execute(
@@ -379,7 +383,8 @@ pub fn upsert_active_fingerprint(conn: &Connection, fp: &EmbeddingFingerprint) -
                 base,
                 fp.element_type,
             ],
-        )?;
+        )
+        .map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -402,7 +407,7 @@ fn dims_to_sql(fp: &EmbeddingFingerprint) -> Result<(i64, Option<i64>)> {
 
 /// Remap a single-active partial-unique-index violation to a diagnosable engine error.
 /// Any other rusqlite error — including a `name` PRIMARY KEY collision — passes through
-/// unchanged (→ `MemoryError::Database`); only the `UNIQUE` extended code is the
+/// unchanged (→ `MemoryError::Storage`); only the `UNIQUE` extended code is the
 /// single-active index firing, so we gate on it rather than the generic constraint code.
 fn map_single_active_violation(e: rusqlite::Error) -> MemoryError {
     use rusqlite::ErrorCode;
@@ -419,7 +424,7 @@ fn map_single_active_violation(e: rusqlite::Error) -> MemoryError {
                 .into(),
         );
     }
-    MemoryError::Database(e)
+    StorageError::backend(e).into()
 }
 
 #[cfg(test)]
@@ -492,7 +497,7 @@ mod tests {
     #[test]
     fn single_active_index_rejects_second_active() {
         // The partial unique index makes a second active row unrepresentable; the error
-        // is remapped to a diagnosable Internal (not an opaque Database), and the first
+        // is remapped to a diagnosable Internal (not an opaque Storage(Backend)), and the first
         // row is untouched.
         let conn = fresh_conn();
         let a = EmbeddingFingerprint::new("model-a", "tei", 8);
@@ -522,7 +527,7 @@ mod tests {
     #[test]
     fn name_pk_collision_is_not_mislabeled_single_active() {
         // A PRIMARY KEY collision on `name` (not the status='active' partial index) must
-        // surface as a plain Database error, not the "single-active invariant violated"
+        // surface as a plain Storage(Backend) error, not the "single-active invariant violated"
         // message — only the UNIQUE extended code is the single-active index firing.
         let conn = fresh_conn();
         // A deprecated 'default' row: re-inserting 'default'/active PK-collides on name
@@ -542,8 +547,11 @@ mod tests {
         )
         .expect_err("name PK collision must error");
         assert!(
-            matches!(err, MemoryError::Database(_)),
-            "PK collision must pass through as Database, got {err:?}"
+            matches!(
+                err,
+                MemoryError::Storage(crate::error::StorageError::Backend(_))
+            ),
+            "PK collision must pass through as Storage(Backend), got {err:?}"
         );
     }
 

@@ -27,8 +27,6 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
         // maps to invalid_params alongside `Conflict` — not the internal-error default.
         MemoryError::Cycle(e) => ErrorData::invalid_params(format!("cycle error: {e}"), None),
 
-        MemoryError::Database(e) => ErrorData::internal_error(format!("database error: {e}"), None),
-
         MemoryError::Serialization(e) => {
             ErrorData::internal_error(format!("serialization error: {e}"), None)
         }
@@ -155,13 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn database_maps_to_internal() {
-        let err = MemoryError::Database(rusqlite::Error::QueryReturnedNoRows);
-        let mcp = to_mcp_error(err);
-        assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-    }
-
-    #[test]
     fn cycle_maps_to_invalid_params() {
         use memory_engine::error::CycleError;
         let err = MemoryError::Cycle(CycleError::UnknownFact(7));
@@ -176,7 +167,10 @@ mod tests {
         let err = MemoryError::Storage(StorageError::Backend("boom".into()));
         let mcp = to_mcp_error(err);
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-        assert!(mcp.message.contains("storage error"));
+        // #926: backend failures used to surface via the deleted `Database` arm as
+        // "database error: …"; they now flow through `Storage` as "storage error: …".
+        // Pin the exact prefix so that user-visible text change can never silently regress.
+        assert!(mcp.message.starts_with("storage error:"), "{}", mcp.message);
     }
 
     #[test]

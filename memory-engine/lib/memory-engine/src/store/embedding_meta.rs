@@ -36,7 +36,7 @@ use crate::types::EmbeddingFingerprint;
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure, or `MemoryError::Internal` if a stored
+/// Returns `MemoryError::Storage` on query failure, or `MemoryError::Internal` if a stored
 /// dimension/status in the registry is corrupt (never a silent default, because the stored
 /// `dim` drives vector deserialization).
 pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
@@ -50,7 +50,7 @@ pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on write failure or `MemoryError::Internal` if a
+/// Returns `MemoryError::Storage` on write failure or `MemoryError::Internal` if a
 /// dimension overflows `i64`.
 pub fn store(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
     super::embedding_spaces::upsert_active_fingerprint(conn, fp)

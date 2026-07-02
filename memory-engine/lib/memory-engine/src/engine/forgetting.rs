@@ -16,7 +16,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Conflict` if the policy is invalid.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
         self.ensure_open()?;
         // The prune walk reads the in-memory graph (degree per fact) *before* any
@@ -36,7 +36,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    /// Returns `MemoryError::Database` if the update fails.
+    /// Returns `MemoryError::Storage` if the update fails.
     pub async fn pin_fact(&self, id: i64) -> Result<()> {
         self.storage.set_fact_pinned(id, true).await
     }
@@ -46,7 +46,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    /// Returns `MemoryError::Database` if the update fails.
+    /// Returns `MemoryError::Storage` if the update fails.
     pub async fn unpin_fact(&self, id: i64) -> Result<()> {
         self.storage.set_fact_pinned(id, false).await
     }

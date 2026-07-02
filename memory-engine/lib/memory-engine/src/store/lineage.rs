@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
@@ -29,7 +30,7 @@ impl<'a> LineageStore<'a> {
     ///
     /// Returns `MemoryError::Lineage` if the `wisdom_fact_id` does not exist or
     /// is expired, or if any source fact ID does not exist.
-    /// Returns `MemoryError::Database` on insert failure (e.g., duplicate
+    /// Returns `MemoryError::Storage` on insert failure (e.g., duplicate
     /// `wisdom_fact_id`).
     pub fn insert(
         &self,
@@ -41,11 +42,14 @@ impl<'a> LineageStore<'a> {
         // fact is a tombstone and must not anchor fresh lineage. Doing the check
         // here turns an opaque FK `Database` error into a clear `Lineage` cause
         // and additionally rejects the expired case the FK cannot catch.
-        let wisdom_active: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE id = ?1 AND t_expired IS NULL",
-            params![record.wisdom_fact_id],
-            |r| r.get(0),
-        )?;
+        let wisdom_active: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE id = ?1 AND t_expired IS NULL",
+                params![record.wisdom_fact_id],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::backend)?;
         if wisdom_active == 0 {
             return Err(MemoryError::Lineage(format!(
                 "wisdom fact {} does not exist or is expired; cannot record lineage",
@@ -58,11 +62,14 @@ impl<'a> LineageStore<'a> {
             let unique_ids: std::collections::BTreeSet<i64> =
                 record.source_fact_ids.iter().copied().collect();
             let ids_json = serde_json::to_string(&unique_ids)?;
-            let count: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM facts WHERE id IN (SELECT value FROM json_each(?1))",
-                params![ids_json],
-                |r| r.get(0),
-            )?;
+            let count: i64 = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM facts WHERE id IN (SELECT value FROM json_each(?1))",
+                    params![ids_json],
+                    |r| r.get(0),
+                )
+                .map_err(StorageError::backend)?;
             let expected = i64::try_from(unique_ids.len())
                 .map_err(|e| MemoryError::Internal(e.to_string()))?;
             if count != expected {
@@ -77,11 +84,13 @@ impl<'a> LineageStore<'a> {
         let source_ids_json = serde_json::to_string(&record.source_fact_ids)?;
         let prov_json = serde_json::to_string(provenance)?;
 
-        self.conn.execute(
-            "INSERT INTO lineage (wisdom_fact_id, source_fact_ids, provenance)
+        self.conn
+            .execute(
+                "INSERT INTO lineage (wisdom_fact_id, source_fact_ids, provenance)
              VALUES (?1, ?2, ?3)",
-            params![record.wisdom_fact_id, source_ids_json, prov_json],
-        )?;
+                params![record.wisdom_fact_id, source_ids_json, prov_json],
+            )
+            .map_err(StorageError::backend)?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -92,21 +101,23 @@ impl<'a> LineageStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on insert failure.
+    /// Returns `MemoryError::Storage` on insert failure.
     pub fn insert_raw(&self, entry: &LineageSnapshotEntry) -> Result<()> {
         let source_ids_json = serde_json::to_string(&entry.source_fact_ids)?;
         let prov_json = serde_json::to_string(&entry.provenance)?;
 
-        self.conn.execute(
-            "INSERT INTO lineage (lineage_id, wisdom_fact_id, source_fact_ids, provenance)
+        self.conn
+            .execute(
+                "INSERT INTO lineage (lineage_id, wisdom_fact_id, source_fact_ids, provenance)
              VALUES (?1, ?2, ?3, ?4)",
-            params![
-                entry.lineage_id,
-                entry.wisdom_fact_id,
-                source_ids_json,
-                prov_json,
-            ],
-        )?;
+                params![
+                    entry.lineage_id,
+                    entry.wisdom_fact_id,
+                    source_ids_json,
+                    prov_json,
+                ],
+            )
+            .map_err(StorageError::backend)?;
         Ok(())
     }
 
@@ -120,10 +131,13 @@ impl<'a> LineageStore<'a> {
         &self,
         wisdom_fact_id: i64,
     ) -> Result<(LineageRecord, PromotionProvenance)> {
-        let mut stmt = self.conn.prepare(
-            "SELECT lineage_id, wisdom_fact_id, source_fact_ids, provenance
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT lineage_id, wisdom_fact_id, source_fact_ids, provenance
              FROM lineage WHERE wisdom_fact_id = ?1",
-        )?;
+            )
+            .map_err(StorageError::backend)?;
         let result = stmt.query_row(params![wisdom_fact_id], |row| {
             let lineage_id: i64 = row.get(0)?;
             let wfid: i64 = row.get(1)?;
@@ -147,7 +161,7 @@ impl<'a> LineageStore<'a> {
             Err(rusqlite::Error::QueryReturnedNoRows) => Err(MemoryError::Lineage(format!(
                 "no lineage record for wisdom fact {wisdom_fact_id}"
             ))),
-            Err(e) => Err(MemoryError::Database(e)),
+            Err(e) => Err(StorageError::backend(e).into()),
         }
     }
 
@@ -161,7 +175,8 @@ impl<'a> LineageStore<'a> {
     pub fn get_source_fact_ids(&self, wisdom_fact_id: i64) -> Result<Vec<i64>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT source_fact_ids FROM lineage WHERE wisdom_fact_id = ?1")?;
+            .prepare("SELECT source_fact_ids FROM lineage WHERE wisdom_fact_id = ?1")
+            .map_err(StorageError::backend)?;
         let result = stmt.query_row(params![wisdom_fact_id], |row| {
             let json: String = row.get(0)?;
             Ok(json)
@@ -171,7 +186,7 @@ impl<'a> LineageStore<'a> {
             Err(rusqlite::Error::QueryReturnedNoRows) => Err(MemoryError::Lineage(format!(
                 "no lineage record for wisdom fact {wisdom_fact_id}"
             ))),
-            Err(e) => Err(MemoryError::Database(e)),
+            Err(e) => Err(StorageError::backend(e).into()),
         }
     }
 
@@ -181,12 +196,15 @@ impl<'a> LineageStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn delete(&self, wisdom_fact_id: i64) -> Result<bool> {
-        let rows = self.conn.execute(
-            "DELETE FROM lineage WHERE wisdom_fact_id = ?1",
-            params![wisdom_fact_id],
-        )?;
+        let rows = self
+            .conn
+            .execute(
+                "DELETE FROM lineage WHERE wisdom_fact_id = ?1",
+                params![wisdom_fact_id],
+            )
+            .map_err(StorageError::backend)?;
         Ok(rows > 0)
     }
 
@@ -194,13 +212,16 @@ impl<'a> LineageStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn has_lineage(&self, wisdom_fact_id: i64) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM lineage WHERE wisdom_fact_id = ?1",
-            params![wisdom_fact_id],
-            |r| r.get(0),
-        )?;
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM lineage WHERE wisdom_fact_id = ?1",
+                params![wisdom_fact_id],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::backend)?;
         Ok(count > 0)
     }
 
@@ -208,22 +229,25 @@ impl<'a> LineageStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     /// Returns `MemoryError::Serialization` on malformed stored JSON.
     pub fn for_each<F>(&self, mut f: F) -> Result<()>
     where
         F: FnMut(LineageSnapshotEntry) -> Result<()>,
     {
-        let mut stmt = self.conn.prepare(
-            "SELECT lineage_id, wisdom_fact_id, source_fact_ids, provenance
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT lineage_id, wisdom_fact_id, source_fact_ids, provenance
              FROM lineage ORDER BY lineage_id ASC",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let lineage_id: i64 = row.get(0)?;
-            let wisdom_fact_id: i64 = row.get(1)?;
-            let source_ids_json: String = row.get(2)?;
-            let prov_json: String = row.get(3)?;
+            )
+            .map_err(StorageError::backend)?;
+        let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+        while let Some(row) = rows.next().map_err(StorageError::backend)? {
+            let lineage_id: i64 = row.get(0).map_err(StorageError::backend)?;
+            let wisdom_fact_id: i64 = row.get(1).map_err(StorageError::backend)?;
+            let source_ids_json: String = row.get(2).map_err(StorageError::backend)?;
+            let prov_json: String = row.get(3).map_err(StorageError::backend)?;
             let source_fact_ids: Vec<i64> = serde_json::from_str(&source_ids_json)?;
             let provenance: PromotionProvenance = serde_json::from_str(&prov_json)?;
             // `lineage_id` lives on the snapshot entry (the row PK), not on the
@@ -379,7 +403,10 @@ mod tests {
 
         // Second insert with same wisdom_fact_id should fail (unique index)
         let err = store.insert(&new_rec, &test_provenance()).unwrap_err();
-        assert!(matches!(err, MemoryError::Database(_)));
+        assert!(matches!(
+            err,
+            MemoryError::Storage(crate::error::StorageError::Backend(_))
+        ));
     }
 
     #[test]

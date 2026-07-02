@@ -201,7 +201,7 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Database`](me_types::error::MemoryError::Database) on a
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// `name` collision or write failure, or
     /// [`MemoryError::Internal`](me_types::error::MemoryError::Internal) if the
     /// dimension overflows `i64`.

@@ -3,6 +3,7 @@
 //! These set the durability/concurrency pragmas on freshly opened connections
 //! and toggle/verify foreign-key enforcement around table-rebuild migrations.
 
+use crate::error::StorageError;
 use rusqlite::Connection;
 
 use crate::error::{MigrationError, Result};
@@ -10,8 +11,8 @@ use crate::error::{MigrationError, Result};
 /// Pragmas safe for read-only connections — skip WAL and synchronous.
 pub(super) fn set_pragmas_read_only(conn: &Connection) -> Result<()> {
     for pragma in &["PRAGMA foreign_keys = ON", "PRAGMA busy_timeout = 5000"] {
-        let mut stmt = conn.prepare(pragma)?;
-        let _ = stmt.query([])?;
+        let mut stmt = conn.prepare(pragma).map_err(StorageError::backend)?;
+        let _ = stmt.query([]).map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -25,9 +26,9 @@ pub(super) fn set_pragmas(conn: &Connection) -> Result<()> {
         "PRAGMA busy_timeout = 5000",
         "PRAGMA synchronous = NORMAL",
     ] {
-        let mut stmt = conn.prepare(pragma)?;
+        let mut stmt = conn.prepare(pragma).map_err(StorageError::backend)?;
         // Consume all rows (PRAGMAs return 0 or 1 rows).
-        let _ = stmt.query([])?;
+        let _ = stmt.query([]).map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -38,14 +39,16 @@ pub(super) fn set_foreign_keys(conn: &Connection, enabled: bool) -> Result<()> {
     } else {
         "PRAGMA foreign_keys = OFF"
     };
-    conn.execute_batch(sql)?;
+    conn.execute_batch(sql).map_err(StorageError::backend)?;
     Ok(())
 }
 
 pub(super) fn check_foreign_keys(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
-    let mut rows = stmt.query([])?;
-    if rows.next()?.is_some() {
+    let mut stmt = conn
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(StorageError::backend)?;
+    let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+    if rows.next().map_err(StorageError::backend)?.is_some() {
         return Err(MigrationError::Incompatible(
             "foreign key violations detected after table rebuild".to_string(),
         )

@@ -1,8 +1,9 @@
 //! Store operations for session checkpoints.
 
+use crate::error::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::{MemoryError, Result};
+use crate::error::Result;
 use crate::types::SessionCheckpoint;
 
 use super::parse_timestamp;
@@ -21,7 +22,7 @@ impl<'a> CheckpointStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn upsert(&self, checkpoint: &SessionCheckpoint) -> Result<()> {
         self.conn
             .execute(
@@ -43,7 +44,7 @@ impl<'a> CheckpointStore<'a> {
                     checkpoint.metadata.to_string(),
                 ],
             )
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
         Ok(())
     }
 
@@ -56,7 +57,7 @@ impl<'a> CheckpointStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn get(&self, session_id: &str) -> Result<Option<SessionCheckpoint>> {
         self.conn
             .query_row(
@@ -67,7 +68,7 @@ impl<'a> CheckpointStore<'a> {
                 row_to_checkpoint,
             )
             .optional()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Get the most recent checkpoint for a scope path.
@@ -76,7 +77,7 @@ impl<'a> CheckpointStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn get_by_scope(&self, scope_path: &str) -> Result<Option<SessionCheckpoint>> {
         self.conn
             .query_row(
@@ -89,7 +90,7 @@ impl<'a> CheckpointStore<'a> {
                 row_to_checkpoint,
             )
             .optional()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// List recent checkpoints, most recent first.
@@ -99,7 +100,7 @@ impl<'a> CheckpointStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_recent(&self, limit: usize) -> Result<Vec<SessionCheckpoint>> {
         let mut stmt = self
             .conn
@@ -109,15 +110,15 @@ impl<'a> CheckpointStore<'a> {
                  ORDER BY checkpoint_at DESC, session_id DESC
                  LIMIT ?1",
             )
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
         let rows = stmt
             .query_map(
                 params![i64::try_from(limit).unwrap_or(i64::MAX)],
                 row_to_checkpoint,
             )
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<_, _>>()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 }
 

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-use crate::error::{ConflictError, MemoryError, MigrationError, Result};
+use crate::error::{ConflictError, MemoryError, MigrationError, Result, StorageError};
 use crate::store::events::event_type_to_str;
 use crate::store::lineage::LineageStore;
 use crate::store::schema::{CURRENT_SCHEMA_VERSION, STORAGE_EPOCH, set_config};
@@ -289,16 +289,28 @@ pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
 ///
 /// The root scope (id=1) inserted by `init_schema` is expected and excluded.
 fn assert_empty_db(conn: &Connection) -> Result<()> {
-    let event_count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
-    let fact_count: i64 = conn.query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))?;
-    let edge_count: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
-    let summary_count: i64 = conn.query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))?;
+    let event_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
+    let fact_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
+    let edge_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
+    let summary_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM summaries", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
     // scopes: root scope (id=1) is expected from init_schema
-    let scope_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM scopes WHERE id > 1", [], |r| r.get(0))?;
-    let lineage_count: i64 = conn.query_row("SELECT COUNT(*) FROM lineage", [], |r| r.get(0))?;
-    let fact_vector_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM fact_vectors", [], |r| r.get(0))?;
+    let scope_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM scopes WHERE id > 1", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
+    let lineage_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM lineage", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
+    let fact_vector_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM fact_vectors", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
 
     let total = event_count
         + fact_count
@@ -316,11 +328,13 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
 /// Insert all snapshot events, preserving explicit IDs. Helper for
 /// [`restore_snapshot_into`].
 fn restore_events(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT INTO events (id, timestamp, event_type, payload, source, session_id, \
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO events (id, timestamp, event_type, payload, source, session_id, \
          scope_id, origin_node_id, sequence_id, created_at, event_revision) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-    )?;
+        )
+        .map_err(StorageError::backend)?;
     for event in &snapshot.events {
         let ts = event.timestamp.to_rfc3339();
         let et = event_type_to_str(&event.event_type);
@@ -338,7 +352,8 @@ fn restore_events(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
             event.sequence_id,
             created,
             event.event_revision,
-        ])?;
+        ])
+        .map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -346,12 +361,14 @@ fn restore_events(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
 /// Insert all snapshot facts, preserving explicit IDs. Helper for
 /// [`restore_snapshot_into`].
 fn restore_facts(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, \
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, \
          t_expired, t_valid, t_invalid, source_event_id, importance, access_count, \
          last_accessed, metadata, scope_id, is_pinned, importance_score, surfaced_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-    )?;
+        )
+        .map_err(StorageError::backend)?;
     for fact in &snapshot.facts {
         let embedding_blob = serialize_embedding(&fact.embedding);
         let ft = crate::store::facts::fact_type_to_str(&fact.fact_type);
@@ -380,7 +397,8 @@ fn restore_facts(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
             fact.is_pinned,
             fact.importance_score,
             fact.surfaced_at.map(|dt| dt.to_rfc3339()),
-        ])?;
+        ])
+        .map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -388,11 +406,13 @@ fn restore_facts(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
 /// Insert all snapshot edges, preserving explicit IDs. Helper for
 /// [`restore_snapshot_into`].
 fn restore_edges(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT INTO edges (id, source_fact_id, target_fact_id, relation_type, weight, \
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO edges (id, source_fact_id, target_fact_id, relation_type, weight, \
          t_created, t_expired, scope_id) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-    )?;
+        )
+        .map_err(StorageError::backend)?;
     for edge in &snapshot.edges {
         let t_created = edge.t_created.to_rfc3339();
         let t_expired = edge.t_expired.map(|dt| dt.to_rfc3339());
@@ -405,7 +425,8 @@ fn restore_edges(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
             t_created,
             t_expired,
             edge.scope_id,
-        ])?;
+        ])
+        .map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -419,7 +440,7 @@ fn restore_edges(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
 /// # Errors
 ///
 /// Returns [`MemoryError::Migration`] on a corrupt legacy `embedding_meta` value or an
-/// unrecognized space status, and [`MemoryError::Database`]/[`MemoryError::Internal`] on
+/// unrecognized space status, and [`MemoryError::Storage`]/[`MemoryError::Internal`] on
 /// insert failure (e.g. a second active space).
 fn restore_embedding_spaces(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
     if snapshot.embedding_spaces.is_empty() {
@@ -458,10 +479,12 @@ fn restore_fact_vectors(conn: &Connection, snapshot: &EngineSnapshot) -> Result<
         return Ok(());
     }
     let mut stmt = conn
-        .prepare("INSERT INTO fact_vectors (fact_id, space_id, embedding) VALUES (?1, ?2, ?3)")?;
+        .prepare("INSERT INTO fact_vectors (fact_id, space_id, embedding) VALUES (?1, ?2, ?3)")
+        .map_err(StorageError::backend)?;
     for fv in &snapshot.fact_vectors {
         let blob = serialize_embedding(&fv.embedding);
-        stmt.execute(rusqlite::params![fv.fact_id, fv.space_id, blob])?;
+        stmt.execute(rusqlite::params![fv.fact_id, fv.space_id, blob])
+            .map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -473,7 +496,7 @@ fn restore_fact_vectors(conn: &Connection, snapshot: &EngineSnapshot) -> Result<
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`] on any SQL failure (transaction rolls back).
+/// Returns [`MemoryError::Storage`] on any SQL failure (transaction rolls back).
 /// Returns [`MemoryError::Conflict`] if the database is not empty.
 /// Propagates the validation errors from [`validate_snapshot`]:
 /// [`MemoryError::Migration`] if the snapshot's `schema_version` is newer than
@@ -481,30 +504,39 @@ fn restore_fact_vectors(conn: &Connection, snapshot: &EngineSnapshot) -> Result<
 /// [`MemoryError::Internal`] if `embed_dim` is zero or the root scope is missing.
 /// Returns [`MemoryError::Serialization`] if a summary's `source_fact_ids`
 /// cannot be serialized to JSON.
+#[allow(
+    clippy::too_many_lines,
+    reason = "#926 mapped each rusqlite seam call via `.map_err(StorageError::backend)`, whose line-wrapping pushed this already-long restore fn one line over 100 — mechanical verbosity, no added logic"
+)]
 pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
     validate_snapshot(snapshot)?;
     assert_empty_db(conn)?;
 
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
 
     // 1. Replace scopes with snapshot's scopes (preserving original IDs).
     //    When the snapshot has scopes, delete the auto-inserted root and reinsert all.
     //    When the snapshot has no scopes (empty snapshot), keep the root from init_schema.
     if !snapshot.scopes.is_empty() {
-        tx.execute("DELETE FROM scopes", [])?;
+        tx.execute("DELETE FROM scopes", [])
+            .map_err(StorageError::backend)?;
 
         // 2. Insert scopes (sorted by depth then id to satisfy parent FK).
         let mut scope_idx: Vec<usize> = (0..snapshot.scopes.len()).collect();
         scope_idx.sort_by_key(|&i| (snapshot.scopes[i].depth, snapshot.scopes[i].id));
-        let mut stmt =
-            tx.prepare("INSERT INTO scopes (id, parent_id, label, depth) VALUES (?1, ?2, ?3, ?4)")?;
+        let mut stmt = tx
+            .prepare("INSERT INTO scopes (id, parent_id, label, depth) VALUES (?1, ?2, ?3, ?4)")
+            .map_err(StorageError::backend)?;
         for scope in scope_idx.into_iter().map(|i| &snapshot.scopes[i]) {
             stmt.execute(rusqlite::params![
                 scope.id,
                 scope.parent_id,
                 scope.label,
                 scope.depth,
-            ])?;
+            ])
+            .map_err(StorageError::backend)?;
         }
     }
 
@@ -515,11 +547,13 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
 
     // 6. Insert summaries.
     {
-        let mut stmt = tx.prepare(
-            "INSERT INTO summaries (id, content, embedding, level, source_fact_ids, \
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO summaries (id, content, embedding, level, source_fact_ids, \
              created_at, scope_id) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
+            )
+            .map_err(StorageError::backend)?;
         for summary in &snapshot.summaries {
             let embedding_blob = serialize_embedding(&summary.embedding);
             let level = crate::store::summaries::level_to_str(&summary.level);
@@ -533,7 +567,8 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
                 source_ids,
                 created,
                 summary.scope_id,
-            ])?;
+            ])
+            .map_err(StorageError::backend)?;
         }
     }
 
@@ -597,7 +632,7 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
     )?;
 
     // 10. Commit.
-    tx.commit()?;
+    tx.commit().map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -609,11 +644,13 @@ fn reset_autoincrement(conn: &Connection, table: &str, max_id: i64) -> Result<()
     conn.execute(
         "DELETE FROM sqlite_sequence WHERE name = ?1",
         rusqlite::params![table],
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     conn.execute(
         "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
         rusqlite::params![table, max_id],
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }
 

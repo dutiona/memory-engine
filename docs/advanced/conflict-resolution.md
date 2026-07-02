@@ -115,6 +115,6 @@ The in-memory graph is updated after the transaction commits:
 
 - `MemoryError::NotFound` if `old_id` doesn't exist in the database.
 - Errors from the arbiter's `arbitrate()` call propagate directly.
-- `MemoryError::Database` on SQL failures.
+- `MemoryError::Storage(StorageError::Backend)` on backend/SQL failures (the driver error is mapped opaquely at the storage seam; #926).
 
 The arbiter can return errors to signal that it cannot make a decision (e.g., insufficient context). This aborts the resolution without any side effects.

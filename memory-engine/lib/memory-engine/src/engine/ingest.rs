@@ -17,7 +17,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    /// Returns `MemoryError::Database` on insert failure.
+    /// Returns `MemoryError::Storage` on insert failure.
     pub async fn ingest(&self, event: &NewEvent) -> Result<i64> {
         self.ensure_open()?;
         check_json_size(&event.payload, "event payload")?;

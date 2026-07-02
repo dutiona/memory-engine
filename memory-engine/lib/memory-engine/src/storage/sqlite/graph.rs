@@ -12,6 +12,7 @@
 //! `embed_dim` is captured as a `let` binding outside the closure so `FactStore`
 //! construction is not coupled to `self` inside the blocking thread.
 
+use crate::error::StorageError;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -70,7 +71,8 @@ impl SqliteBackend {
 
         // Verbatim body of ingest.rs:397-476: savepoint wrapping stamp +
         // scope-resolve + per-fact insert.
-        conn.execute_batch("SAVEPOINT batch_insert")?;
+        conn.execute_batch("SAVEPOINT batch_insert")
+            .map_err(StorageError::backend)?;
 
         let result: Result<BatchInsertResult> = (|| {
             // Record the embedding identity on first write (#613), inside the
@@ -127,7 +129,8 @@ impl SqliteBackend {
 
         match result {
             Ok(triple) => {
-                conn.execute_batch("RELEASE batch_insert")?;
+                conn.execute_batch("RELEASE batch_insert")
+                    .map_err(StorageError::backend)?;
                 Ok(triple)
             }
             Err(e) => {
@@ -719,11 +722,13 @@ impl FactGraph for SqliteBackend {
                 // Verbatim body of ingest.rs:228-231: one unchecked_transaction wrapping
                 // stamp_identity + FactStore::insert so a vector is never committed
                 // without an established, matching identity (the #614 silent-corruption guard).
-                let tx = conn.unchecked_transaction()?;
+                let tx = conn
+                    .unchecked_transaction()
+                    .map_err(StorageError::backend)?;
                 // stamp_identity equivalent: record-if-absent or compare-and-reject
                 crate::store::embedding_meta::record_if_absent(&tx, &fingerprint, expected_dim)?;
                 let id = FactStore::new(&tx, dim).insert(&fact)?;
-                tx.commit()?;
+                tx.commit().map_err(StorageError::backend)?;
                 Ok(id)
             })
             .await?;
@@ -820,7 +825,9 @@ impl FactGraph for SqliteBackend {
         self.block_write(move |conn| {
             // Verbatim body of engine/graph.rs:71-101: one unchecked_transaction
             // wrapping batch-dedup + edge inserts.
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(StorageError::backend)?;
             let edge_store = EdgeStore::new(&tx);
 
             let existing = edge_store.list_active_pairs_by_facts(&fact_ids, &relation)?;
@@ -847,7 +854,7 @@ impl FactGraph for SqliteBackend {
                 }
             }
 
-            tx.commit()?;
+            tx.commit().map_err(StorageError::backend)?;
             Ok(new_edges)
         })
         .await
@@ -895,7 +902,9 @@ impl FactGraph for SqliteBackend {
                 match decision {
                     CrudDecision::Noop => Ok((None, None)),
                     CrudDecision::Add => {
-                        let tx = conn.unchecked_transaction()?;
+                        let tx = conn
+                            .unchecked_transaction()
+                            .map_err(StorageError::backend)?;
                         // #335 (TOCTOU): the arbiter decided on `old_id` as read
                         // BEFORE this transaction opened. Re-validate it is still
                         // active here; if it was expired concurrently in that window,
@@ -918,11 +927,13 @@ impl FactGraph for SqliteBackend {
                             t_created: now,
                             t_expired: None,
                         })?;
-                        tx.commit()?;
+                        tx.commit().map_err(StorageError::backend)?;
                         Ok((Some(new_id), Some(edge_id)))
                     }
                     CrudDecision::Update => {
-                        let tx = conn.unchecked_transaction()?;
+                        let tx = conn
+                            .unchecked_transaction()
+                            .map_err(StorageError::backend)?;
                         cascade_expire(&tx)?;
                         // Insert the replacement fact.
                         let new_id = FactStore::new(&tx, dim).insert(&new_fact)?;
@@ -936,13 +947,15 @@ impl FactGraph for SqliteBackend {
                             t_created: now,
                             t_expired: None,
                         })?;
-                        tx.commit()?;
+                        tx.commit().map_err(StorageError::backend)?;
                         Ok((Some(new_id), Some(edge_id)))
                     }
                     CrudDecision::Delete => {
-                        let tx = conn.unchecked_transaction()?;
+                        let tx = conn
+                            .unchecked_transaction()
+                            .map_err(StorageError::backend)?;
                         cascade_expire(&tx)?;
-                        tx.commit()?;
+                        tx.commit().map_err(StorageError::backend)?;
                         Ok((None, None))
                     }
                 }
@@ -998,7 +1011,9 @@ impl FactGraph for SqliteBackend {
         let to_expire = to_expire.to_vec();
         let (stats, expired) = self
             .block_write(move |conn| {
-                let tx = conn.unchecked_transaction()?;
+                let tx = conn
+                    .unchecked_transaction()
+                    .map_err(StorageError::backend)?;
                 let fact_store = FactStore::new(&tx, dim);
                 let edge_store = EdgeStore::new(&tx);
 
@@ -1010,7 +1025,7 @@ impl FactGraph for SqliteBackend {
                     fact_store.expire(fact_id, now)?;
                     edge_store.expire_by_fact(fact_id, now)?;
                 }
-                tx.commit()?;
+                tx.commit().map_err(StorageError::backend)?;
 
                 let stats = crate::forgetting::PruneStats {
                     facts_expired: to_expire.len(),
@@ -1048,7 +1063,7 @@ impl FactGraph for SqliteBackend {
         let skip_if_present = skip_if_present.cloned();
         let fingerprint = fingerprint.clone();
         self.block_write(move |conn| {
-            conn.execute_batch("SAVEPOINT ingest_bootstrap")?;
+            conn.execute_batch("SAVEPOINT ingest_bootstrap").map_err(StorageError::backend)?;
             let outcome = (|| -> Result<BootstrapIngestOutcome> {
                 // Authoritative idempotency guard, checked FIRST inside the savepoint
                 // (under the write lock): a matching event ⟹ the batch is a no-op. This
@@ -1098,7 +1113,7 @@ impl FactGraph for SqliteBackend {
             })();
             match outcome {
                 Ok(out) => {
-                    conn.execute_batch("RELEASE ingest_bootstrap")?;
+                    conn.execute_batch("RELEASE ingest_bootstrap").map_err(StorageError::backend)?;
                     Ok(out)
                 }
                 Err(e) => {
@@ -1885,7 +1900,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, MemoryError::Storage(_) | MemoryError::Database(_)),
+            matches!(err, MemoryError::Storage(_)),
             "expected a storage/database error from FK violation, got {err:?}"
         );
 

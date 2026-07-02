@@ -374,9 +374,10 @@ pub enum CycleError {
 /// `String` **inside each backend** and never cross the trait seam — the engine
 /// depends on the storage port, not on any SQL driver. Causes that *do* have a
 /// precise `MemoryError` home (migration, pool, (de)serialization, not-found) are
-/// reported through those existing variants, not duplicated here (continues the
-/// #560 "one variant per recoverable cause" arc — the existing
-/// [`Database`](MemoryError::Database) variant stays for `SQLite`-internal use).
+/// reported through those existing variants, not duplicated here (completes the
+/// #560 "one variant per recoverable cause" arc — #926 removed the driver-typed
+/// `Database` variant, so backend driver errors now route here via
+/// [`StorageError::backend`]).
 ///
 /// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
 /// downstream `match` expressions must include a wildcard (`_`) arm.
@@ -403,6 +404,21 @@ pub enum StorageError {
     },
 }
 
+impl StorageError {
+    /// Map any backend driver error (`rusqlite::Error`, `tokio_postgres::Error`, …)
+    /// into the opaque [`Backend`](StorageError::Backend) variant, stringified at the
+    /// seam so **no driver type leaks past the storage port** (#926). Generic over
+    /// [`Display`](std::fmt::Display), so L0 `me-types` needs no driver dependency.
+    ///
+    /// Because [`MemoryError`] carries `#[from] StorageError`, a backend call site can
+    /// write `.map_err(StorageError::backend)?` and `?` performs the second hop
+    /// (`StorageError` → [`MemoryError::Storage`]) automatically.
+    #[must_use]
+    pub fn backend<E: std::fmt::Display>(err: E) -> Self {
+        Self::Backend(err.to_string())
+    }
+}
+
 /// Errors returned by the memory engine.
 ///
 /// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
@@ -413,10 +429,6 @@ pub enum MemoryError {
     /// A requested entity (fact, event, scope, snapshot, …) does not exist.
     #[error("not found: {0}")]
     NotFound(String),
-
-    /// An underlying `SQLite` operation failed (query, statement, or connection).
-    #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
 
     /// JSON (de)serialization of a payload, snapshot, or config failed.
     #[error("serialization error: {0}")]
@@ -607,10 +619,18 @@ mod tests {
     }
 
     #[test]
-    fn from_rusqlite_error() {
-        let sqlite_err = rusqlite::Error::QueryReturnedNoRows;
-        let err: MemoryError = sqlite_err.into();
-        assert!(matches!(err, MemoryError::Database(_)));
+    fn backend_helper_maps_into_storage() {
+        // #926: `StorageError::backend` stringifies any `Display` error at the seam
+        // (no driver type in L0); `.into()`/`?` then lifts it to `MemoryError::Storage`
+        // via the `#[from] StorageError` impl. Replaces the old `#[from] rusqlite::Error`
+        // round-trip test, since `me-types` no longer depends on `rusqlite`.
+        let se = StorageError::backend("query returned no rows");
+        assert!(matches!(se, StorageError::Backend(_)));
+        let err: MemoryError = se.into();
+        assert!(matches!(
+            err,
+            MemoryError::Storage(StorageError::Backend(_))
+        ));
     }
 
     #[test]

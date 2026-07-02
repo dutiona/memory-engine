@@ -8,6 +8,7 @@
 //! schema at that version — never reference the live DDL constants from
 //! `mod.rs`, which may evolve in future versions.
 
+use crate::error::StorageError;
 use rusqlite::Connection;
 
 use crate::error::{MigrationError, Result};
@@ -27,19 +28,22 @@ pub(super) fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
             ON scopes(parent_id, label);
         -- Insert root scope (sentinel). Only root has parent_id=NULL.
         INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (1, NULL, 'root', 0);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     conn.execute_batch(
         "ALTER TABLE facts ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE edges ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE events ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE summaries ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
          CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
          CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
          CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -54,7 +58,8 @@ pub(super) fn recreate_facts_fts_v3(conn: &Connection) -> Result<()> {
             tokenize='porter unicode61'
         );
         INSERT INTO facts_fts(rowid, content) SELECT id, content FROM facts;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     conn.execute_batch(
         "CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN
             INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
@@ -66,7 +71,8 @@ pub(super) fn recreate_facts_fts_v3(conn: &Connection) -> Result<()> {
             INSERT INTO facts_fts(facts_fts, rowid, content) VALUES ('delete', old.id, old.content);
             INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
         END;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -77,6 +83,10 @@ pub(super) fn recreate_facts_fts_v3(conn: &Connection) -> Result<()> {
 /// `PRAGMA foreign_keys = OFF` (handled by the migration framework).
 ///
 /// Rebuild order respects FK dependencies: events → facts → edges → summaries.
+#[allow(
+    clippy::too_many_lines,
+    reason = "#926 mapped each rusqlite seam call via `.map_err(StorageError::backend)`, whose line-wrapping pushed this already-long migration fn a few lines over 100 — mechanical verbosity, no added logic"
+)]
 pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     // 1. Drop FTS triggers and virtual table (they reference facts)
     conn.execute_batch(
@@ -84,7 +94,8 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
          DROP TRIGGER IF EXISTS facts_fts_ad;
          DROP TRIGGER IF EXISTS facts_fts_au;
          DROP TABLE IF EXISTS facts_fts;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
 
     // 2. Rebuild events (no FK deps from other data tables)
     conn.execute_batch(
@@ -101,7 +112,8 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             SELECT id, timestamp, event_type, payload, source, session_id, scope_id FROM events;
         DROP TABLE events;
         ALTER TABLE events_new RENAME TO events;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
 
     // 3. Rebuild facts (source_event_id references events)
     conn.execute_batch(
@@ -130,7 +142,8 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             last_accessed, metadata, scope_id FROM facts;
         DROP TABLE facts;
         ALTER TABLE facts_new RENAME TO facts;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
 
     // 4. Rebuild edges (source/target_fact_id reference facts)
     conn.execute_batch(
@@ -150,7 +163,8 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             t_created, t_expired, scope_id FROM edges;
         DROP TABLE edges;
         ALTER TABLE edges_new RENAME TO edges;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
 
     // 5. Rebuild summaries (no FK deps from other data tables)
     conn.execute_batch(
@@ -169,7 +183,8 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
             created_at, scope_id FROM summaries;
         DROP TABLE summaries;
         ALTER TABLE summaries_new RENAME TO summaries;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
 
     // 6+7. Recreate the FTS5 virtual table and its sync triggers.
     recreate_facts_fts_v3(conn)?;
@@ -189,7 +204,7 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
         CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
         CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);",
-    )?;
+    ).map_err(StorageError::backend)?;
 
     Ok(())
 }
@@ -200,32 +215,37 @@ pub(super) fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "ALTER TABLE facts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE facts ADD COLUMN importance_score REAL NOT NULL DEFAULT 0.5;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     // Backfill: seed importance_score from base importance for existing rows
-    conn.execute("UPDATE facts SET importance_score = importance", [])?;
+    conn.execute("UPDATE facts SET importance_score = importance", [])
+        .map_err(StorageError::backend)?;
     conn.execute_batch(
         "ALTER TABLE events ADD COLUMN origin_node_id TEXT NOT NULL DEFAULT 'local';
          ALTER TABLE events ADD COLUMN sequence_id INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE events ADD COLUMN created_at TEXT;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
          CREATE INDEX IF NOT EXISTS idx_facts_importance_score ON facts(importance_score);
          CREATE INDEX IF NOT EXISTS idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
          CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, sequence_id);",
-    )?;
+    ).map_err(StorageError::backend)?;
     Ok(())
 }
 
 /// Add `event_revision` column for per-event-type envelope versioning.
 pub(super) fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
-    conn.execute_batch("ALTER TABLE events ADD COLUMN event_revision INTEGER NOT NULL DEFAULT 1;")?;
+    conn.execute_batch("ALTER TABLE events ADD COLUMN event_revision INTEGER NOT NULL DEFAULT 1;")
+        .map_err(StorageError::backend)?;
     Ok(())
 }
 
 /// Add `surfaced_at` column for tracking when due facts are first returned to consumers.
 pub(super) fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
-    conn.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")?;
+    conn.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")
+        .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -251,7 +271,8 @@ pub(super) fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_manifest_path
             ON archive_manifest(pak_path);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -265,7 +286,8 @@ pub(super) fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_wisdom_fact_id
             ON lineage(wisdom_fact_id);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -308,7 +330,8 @@ pub(super) fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_checkpoints_scope
             ON session_checkpoints(scope_path);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -328,7 +351,8 @@ pub(super) fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
         "DROP INDEX IF EXISTS idx_activities_dedup;
          CREATE INDEX idx_activities_dedup
              ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -339,7 +363,8 @@ pub(super) fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
 /// otherwise full-scan the table. The fresh-init path adds the same index via
 /// `INDEXES_DDL`, so fresh and migrated databases converge.
 pub(super) fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);")?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);")
+        .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -355,7 +380,8 @@ pub(super) fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
 /// write. The `DELETE` is idempotent (a no-op on a fresh v12 DB that never had the
 /// key), and runs inside the migration framework's per-step transaction.
 pub(super) fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
-    conn.execute_batch("DELETE FROM config WHERE key = 'embed_dim';")?;
+    conn.execute_batch("DELETE FROM config WHERE key = 'embed_dim';")
+        .map_err(StorageError::backend)?;
     Ok(())
 }
 
@@ -405,7 +431,8 @@ pub(super) fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_spaces_one_active
             ON embedding_spaces(status) WHERE status = 'active';",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
 
     // Fold a present legacy identity into one active 'default' row. The table was just
     // created empty in this same step, so a plain INSERT cannot conflict (the version
@@ -434,8 +461,10 @@ pub(super) fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
                     .transpose()?,
                 fp.element_type,
             ],
-        )?;
-        conn.execute_batch("DELETE FROM config WHERE key = 'embedding_meta';")?;
+        )
+        .map_err(StorageError::backend)?;
+        conn.execute_batch("DELETE FROM config WHERE key = 'embedding_meta';")
+            .map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -457,6 +486,7 @@ pub(super) fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
             PRIMARY KEY (fact_id, space_id)
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS idx_fact_vectors_space ON fact_vectors(space_id);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     Ok(())
 }

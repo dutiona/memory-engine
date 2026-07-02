@@ -24,7 +24,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
     /// Returns `MemoryError::Lineage` if the wisdom fact is missing or expired,
     /// or a source fact ID does not exist.
-    /// Returns `MemoryError::Database` on insert failure.
+    /// Returns `MemoryError::Storage` on insert failure.
     ///
     /// `#[cfg(test)]`: production promotion writes lineage atomically inside
     /// [`promote_in_conn`](crate::engine::MemoryEngine::promote_in_conn) (one

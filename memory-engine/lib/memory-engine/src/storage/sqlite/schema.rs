@@ -18,6 +18,8 @@
 //! `true_idf = true`, `server_side_vector = false` (brute-force in-process scan;
 //! HNSW moves into the backend in #631).
 
+#[cfg(feature = "test-util")]
+use crate::error::StorageError;
 use async_trait::async_trait;
 
 use super::SqliteBackend;
@@ -238,8 +240,11 @@ impl SchemaManager for SqliteBackend {
     #[cfg(feature = "test-util")]
     async fn raw_exec(&self, sql: &str) -> Result<()> {
         let sql = sql.to_owned();
-        self.block_write(move |c| c.execute_batch(&sql).map_err(Into::into))
-            .await
+        self.block_write(move |c| {
+            c.execute_batch(&sql)
+                .map_err(|e| StorageError::backend(e).into())
+        })
+        .await
     }
 
     // -------------------------------------------------------------------------

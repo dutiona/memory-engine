@@ -37,7 +37,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on write failure, or
+    /// Returns `MemoryError::Storage` on write failure, or
     /// `MemoryError::ReadOnly` if the engine is read-only.
     pub async fn record_activity(
         &self,
@@ -160,7 +160,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    /// Returns `MemoryError::Database` on write failure.
+    /// Returns `MemoryError::Storage` on write failure.
     pub async fn checkpoint_session(
         &self,
         session_id: &str,

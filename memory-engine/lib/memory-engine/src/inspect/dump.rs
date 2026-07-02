@@ -259,11 +259,11 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
 
     if let Err(serde_err) = serialize_all() {
         // Prefer the original typed store/DB error stashed by a `SeqStreamer`
-        // over the serde wrapper, so `Database`/`Io` survive the dump's error
+        // over the serde wrapper, so `Storage`/`Io` survive the dump's error
         // contract instead of collapsing to `MemoryError::Serialization`.
         return Err(store_err
             .into_inner()
-            .unwrap_or_else(|| MemoryError::Serialization(serde_err)));
+            .unwrap_or(MemoryError::Serialization(serde_err)));
     }
 
     writer.flush()?;
@@ -290,7 +290,7 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
 /// * A serde *element* error is stashed locally and re-raised verbatim as the
 ///   true cause (the placeholder [`MemoryError`] used to abort `iterate` never
 ///   escapes).
-/// * A genuine *store/DB* error ([`MemoryError::Database`], [`MemoryError::Io`],
+/// * A genuine *store/DB* error ([`MemoryError::Storage`], [`MemoryError::Io`],
 ///   …) is funneled through [`serde::ser::Error::custom`] so it can abort the
 ///   serializer — but the **original typed [`MemoryError`]** is *also* stashed
 ///   into the shared `store_err` cell so the caller ([`stream_snapshot`]) can
@@ -388,7 +388,7 @@ where
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`] on SQL failure,
+/// Returns [`MemoryError::Storage`] on SQL failure,
 /// [`MemoryError::Io`] on filesystem failure, or
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()> {
@@ -411,7 +411,7 @@ pub fn dump_json(conn: &Connection, embed_dim: usize, path: &Path) -> Result<()>
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`] on SQL failure,
+/// Returns [`MemoryError::Storage`] on SQL failure,
 /// [`MemoryError::Io`] on filesystem failure, or
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-gzip")]
@@ -437,7 +437,7 @@ pub fn dump_json_gzip(conn: &Connection, embed_dim: usize, path: &Path) -> Resul
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`] on SQL failure,
+/// Returns [`MemoryError::Storage`] on SQL failure,
 /// [`MemoryError::Io`] on filesystem or zstd I/O failure, or
 /// [`MemoryError::Serialization`] on JSON serialization failure.
 #[cfg(feature = "compress-zstd")]

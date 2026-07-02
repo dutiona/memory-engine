@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use rusqlite::{Connection, ToSql, params_from_iter};
 
 use crate::error::Result;
@@ -31,7 +32,7 @@ pub struct FtsResult {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` for non-FTS5 database errors.
+/// Returns `MemoryError::Storage` for non-FTS5 database errors.
 pub fn fts_search(
     conn: &Connection,
     query: &str,
@@ -56,7 +57,7 @@ pub fn fts_search(
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` for non-FTS5 database errors.
+/// Returns `MemoryError::Storage` for non-FTS5 database errors.
 pub fn fts_search_filtered(
     conn: &Connection,
     query: &str,
@@ -72,7 +73,7 @@ pub fn fts_search_filtered(
          ORDER BY score LIMIT ?",
         filter.where_clause
     );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::backend)?;
 
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
     // Param order mirrors the `?` order in the SQL above: MATCH query first, then
@@ -121,22 +122,24 @@ pub fn fts_search_filtered(
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` for non-FTS5 database errors.
+/// Returns `MemoryError::Storage` for non-FTS5 database errors.
 pub fn fts_count_expired(
     conn: &Connection,
     query: &str,
     fact_type: Option<&FactType>,
     scope_ids: Option<&[i64]>,
 ) -> Result<usize> {
-    let mut stmt = conn.prepare(
-        "SELECT COUNT(*) \
+    let mut stmt = conn
+        .prepare(
+            "SELECT COUNT(*) \
          FROM facts_fts \
          JOIN facts AS f ON f.id = facts_fts.rowid \
          WHERE facts_fts MATCH ?1 \
            AND f.t_expired IS NOT NULL \
            AND (?2 IS NULL OR f.fact_type = ?2) \
            AND (?3 IS NULL OR f.scope_id IN (SELECT value FROM json_each(?3)))",
-    )?;
+        )
+        .map_err(StorageError::backend)?;
 
     let fact_type_str: Option<&str> = fact_type.map(fact_type_to_str);
     let scope_ids_json = serialize_scope_ids(scope_ids)?;

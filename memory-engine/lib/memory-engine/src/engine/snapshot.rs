@@ -14,6 +14,7 @@
 //! The blake3 checksum covers the payload bytes only. Header is checked first
 //! (cheap) so `format_version/embed_dim` mismatches reject without hashing.
 
+use crate::error::StorageError;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -175,7 +176,7 @@ pub fn read_fingerprint(conn: &Connection) -> Result<DbFingerprint> {
             })
         },
     )
-    .map_err(MemoryError::from)
+    .map_err(|e| StorageError::backend(e).into())
 }
 
 // ---------------------------------------------------------------------------

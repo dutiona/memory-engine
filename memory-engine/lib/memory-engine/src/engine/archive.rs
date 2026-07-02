@@ -50,7 +50,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::Archive` on I/O failure.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
     pub async fn archive(&self, policy: &ArchivePolicy) -> Result<Option<ArchiveStats>> {
         self.ensure_open()?;
@@ -143,7 +143,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub async fn list_archives(&self) -> Result<Vec<ArchiveManifestEntry>> {
         self.cold.list_archive_manifest().await
     }
@@ -154,7 +154,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     /// I/O errors for individual `.pak` files are reported per-entry, not propagated.
     pub async fn verify_archives(&self) -> Result<Vec<ArchiveVerifyResult>> {
         let entries = self.list_archives().await?;
@@ -327,7 +327,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on manifest read failure.
+    /// Returns `MemoryError::Storage` on manifest read failure.
     /// Returns `MemoryError::Archive` on `.pak` I/O or decompression failure.
     pub(crate) async fn search_archives_fallback(
         &self,

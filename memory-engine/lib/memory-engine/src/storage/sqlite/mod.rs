@@ -20,9 +20,9 @@
 //! - **Conn selection (D-design):** read methods → `ConnectionPool::read`; write
 //!   methods → `ConnectionPool::try_write` (so a read-only pool rejects writes
 //!   with [`MemoryError::ReadOnly`] — Key Design Decision #6, preserved for free).
-//! - **No driver type crosses the seam (D4):** a `rusqlite` failure surfaces as
-//!   [`MemoryError::Database`] from the concrete store; `map_seam_err` maps it to
-//!   [`MemoryError::Storage`] wrapping [`StorageError::Backend`] at the boundary.
+//! - **No driver type crosses the seam (D4):** a `rusqlite` failure is mapped at
+//!   its call site via [`StorageError::backend`] into [`MemoryError::Storage`]
+//!   wrapping [`StorageError::Backend`], so no driver type ever reaches the seam (#926).
 //!   Semantic variants (`NotFound`, `Migration`, `EmbeddingDimension`, `Conflict`,
 //!   `ReadOnly`, `Internal`, …) already have a precise home and pass through.
 //! - **Async (D1):** the backend is async-native — `spawn_blocking` needs a tokio
@@ -35,7 +35,12 @@
 
 use std::sync::Arc;
 
-use crate::error::{MemoryError, Result, StorageError};
+use crate::error::{MemoryError, Result};
+// `StorageError` lost its last non-test user when #926 removed `map_seam_err`;
+// it is still referenced by the `#[cfg(test)]` tests and this module's seam
+// doc-links, so import it for those configs only (avoids an unused-import warn).
+#[cfg(any(test, doc))]
+use crate::error::StorageError;
 use crate::pool::ConnectionPool;
 #[cfg(feature = "ann")]
 use crate::search::ann::HnswStrategy;
@@ -147,7 +152,7 @@ impl SqliteBackend {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on a pool or query failure, or
+    /// Returns `MemoryError::Storage` on a pool or query failure, or
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     // Non-ann builds see only `self.search_config = Some(cfg); Ok(self)` which
     // clippy flags as `missing_const_for_fn`. It is not const: under `ann` the
@@ -189,7 +194,7 @@ impl SqliteBackend {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on a pool/query failure or
+    /// Returns `MemoryError::Storage` on a pool/query failure or
     /// `MemoryError::EmbeddingDimension` on a corrupt snapshot/stored embedding.
     #[cfg_attr(
         not(feature = "ann"),
@@ -284,7 +289,7 @@ impl SqliteBackend {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on pool or query failure, or
+    /// Returns `MemoryError::Storage` on pool or query failure, or
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     #[cfg(feature = "ann")]
     pub fn hnsw_snapshot(&self) -> Result<Option<crate::types::snapshot::HnswSnapshot>> {
@@ -401,37 +406,25 @@ fn map_join(e: tokio::task::JoinError) -> MemoryError {
     MemoryError::Pool(format!("task join error: {e}"))
 }
 
-/// D4: confine `rusqlite` below the seam. A raw driver failure
-/// ([`MemoryError::Database`]) becomes opaque [`StorageError::Backend`]; every
-/// semantic variant (which has a precise `MemoryError` home) passes through.
-fn map_seam_err<T>(r: Result<T>) -> Result<T> {
-    match r {
-        Err(MemoryError::Database(e)) => {
-            Err(MemoryError::Storage(StorageError::Backend(e.to_string())))
-        }
-        other => other,
-    }
-}
-
 impl SqliteBackend {
     /// Acquire a READ connection and run `f` on a blocking thread.
     ///
     /// The pool `Arc` is cloned in; the `!Send` read guard is acquired *inside* the
     /// closure (acquiring it on the executor would not compile and would serialize
-    /// the runtime). Driver errors are mapped at the boundary by [`map_seam_err`].
+    /// the runtime). Driver errors are mapped to [`StorageError::Backend`] at each
+    /// call site via [`StorageError::backend`] (#926), not at this boundary.
     async fn block_read<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&rusqlite::Connection) -> Result<T> + Send + 'static,
     {
         let pool = Arc::clone(&self.pool);
-        let out = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let conn = pool.read()?;
             f(&conn)
         })
         .await
-        .map_err(map_join)?;
-        map_seam_err(out)
+        .map_err(map_join)?
     }
 
     /// Acquire the WRITE connection (via [`ConnectionPool::try_write`], so a
@@ -443,13 +436,12 @@ impl SqliteBackend {
         F: FnOnce(&rusqlite::Connection) -> Result<T> + Send + 'static,
     {
         let pool = Arc::clone(&self.pool);
-        let out = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let conn = pool.try_write()?;
             f(&conn)
         })
         .await
-        .map_err(map_join)?;
-        map_seam_err(out)
+        .map_err(map_join)?
     }
 
     /// Stream rows produced by a blocking `&Connection` scan to a non-`'static`,
@@ -490,7 +482,7 @@ impl SqliteBackend {
         }
         drop(rx); // unblock / abort the scan's next blocking_send
 
-        let scan_res = map_seam_err(handle.await.map_err(map_join)?);
+        let scan_res = handle.await.map_err(map_join)?;
         // The callback error wins over the scan's induced send failure; otherwise
         // surface any mid-scan SQL error.
         cb_err.map_or(scan_res, Err)
@@ -518,20 +510,25 @@ mod tests {
     async fn block_read_runs_and_returns() {
         let be = memory_backend();
         let n: i64 = be
-            .block_read(|c| Ok(c.query_row("SELECT 1 + 1", [], |r| r.get(0))?))
+            .block_read(|c| {
+                Ok(c.query_row("SELECT 1 + 1", [], |r| r.get(0))
+                    .map_err(StorageError::backend)?)
+            })
             .await
             .unwrap();
         assert_eq!(n, 2);
     }
 
     #[tokio::test]
-    async fn block_read_maps_database_error_to_storage_backend() {
-        // D4 witness, at the precise boundary where the mapping lives: a Database
-        // error returned from the closure must surface as Storage(Backend).
+    async fn block_read_surfaces_closure_error() {
+        // block_read propagates a closure error unchanged (driver errors are mapped
+        // at the source since #926).
         let be = memory_backend();
         let err = be
             .block_read(|_| -> Result<()> {
-                Err(MemoryError::Database(rusqlite::Error::QueryReturnedNoRows))
+                Err(MemoryError::Storage(StorageError::Backend(
+                    "simulated backend failure".into(),
+                )))
             })
             .await
             .unwrap_err();
@@ -574,13 +571,19 @@ mod tests {
         let ro = ConnectionPool::open_read_only(&path, 4, 2).unwrap();
         let be = SqliteBackend::from_pool(Arc::new(ro), Arc::new(UpcasterRegistry::new()));
         let err = be
-            .block_write(|c| Ok(c.execute("CREATE TABLE t (x)", [])?))
+            .block_write(|c| {
+                Ok(c.execute("CREATE TABLE t (x)", [])
+                    .map_err(StorageError::backend)?)
+            })
             .await
             .unwrap_err();
         assert!(matches!(err, MemoryError::ReadOnly), "got {err:?}");
         // Reads still work on a read-only backend.
         let one: i64 = be
-            .block_read(|c| Ok(c.query_row("SELECT 1", [], |r| r.get(0))?))
+            .block_read(|c| {
+                Ok(c.query_row("SELECT 1", [], |r| r.get(0))
+                    .map_err(StorageError::backend)?)
+            })
             .await
             .unwrap();
         assert_eq!(one, 1);
@@ -647,7 +650,9 @@ mod tests {
                 |_conn, tx| {
                     tx.blocking_send(0_i64)
                         .map_err(|_| stream_consumer_dropped())?;
-                    Err(MemoryError::Database(rusqlite::Error::QueryReturnedNoRows))
+                    Err(MemoryError::Storage(StorageError::Backend(
+                        "simulated scan failure".into(),
+                    )))
                 },
                 &mut |_row: i64| Ok(()),
             )

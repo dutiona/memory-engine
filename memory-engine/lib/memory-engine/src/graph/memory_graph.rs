@@ -270,7 +270,7 @@ impl MemoryGraph {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn load_from_db(conn: &Connection) -> Result<Self> {
         let store = EdgeStore::new(conn);
         let active_edges = store.list_active()?;

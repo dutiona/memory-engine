@@ -54,7 +54,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     /// Returns `MemoryError::Reranker` if a configured [`Reranker`](crate::traits::Reranker)
     /// fails or returns an invalid permutation.
     ///
@@ -124,7 +124,7 @@ impl MemoryEngine {
     /// - `valid_at` and `period` are both set (mutually exclusive)
     /// - `search_mode` conflicts with available text/embedding inputs
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub async fn execute_query(&self, query: &MemoryQuery) -> Result<QueryResponse> {
         self.ensure_open()?;
         // --- Validation ---

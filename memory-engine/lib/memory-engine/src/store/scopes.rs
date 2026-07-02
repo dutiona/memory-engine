@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use rusqlite::Connection;
 
 use crate::error::{ConflictError, MemoryError, Result};
@@ -19,7 +20,7 @@ impl<'a> ScopeStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if no scope with `id` exists.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn get(&self, id: i64) -> Result<ScopeNode> {
         self.conn
             .query_row(
@@ -38,7 +39,7 @@ impl<'a> ScopeStore<'a> {
                 rusqlite::Error::QueryReturnedNoRows => {
                     MemoryError::NotFound(format!("scope id={id}"))
                 }
-                other => other.into(),
+                other => StorageError::backend(other).into(),
             })
     }
 
@@ -48,22 +49,24 @@ impl<'a> ScopeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn find_by_label(&self, parent_id: i64, label: &str) -> Result<Option<ScopeNode>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, parent_id, label, depth FROM scopes WHERE parent_id = ?1 AND label = ?2",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![parent_id, label], |row| {
-            Ok(ScopeNode {
-                id: row.get(0)?,
-                parent_id: row.get(1)?,
-                label: row.get(2)?,
-                depth: row.get(3)?,
+        ).map_err(StorageError::backend)?;
+        let mut rows = stmt
+            .query_map(rusqlite::params![parent_id, label], |row| {
+                Ok(ScopeNode {
+                    id: row.get(0)?,
+                    parent_id: row.get(1)?,
+                    label: row.get(2)?,
+                    depth: row.get(3)?,
+                })
             })
-        })?;
+            .map_err(StorageError::backend)?;
         match rows.next() {
             Some(Ok(node)) => Ok(Some(node)),
-            Some(Err(e)) => Err(e.into()),
+            Some(Err(e)) => Err(StorageError::backend(e).into()),
             None => Ok(None),
         }
     }
@@ -81,13 +84,15 @@ impl<'a> ScopeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure (e.g. FK violation if
+    /// Returns `MemoryError::Storage` on SQL failure (e.g. FK violation if
     /// `parent_id` does not exist, or a UNIQUE constraint on `(parent_id, label)`).
     pub fn insert(&self, parent_id: i64, label: &str, depth: i64) -> Result<ScopeNode> {
-        self.conn.execute(
-            "INSERT INTO scopes (parent_id, label, depth) VALUES (?1, ?2, ?3)",
-            rusqlite::params![parent_id, label, depth],
-        )?;
+        self.conn
+            .execute(
+                "INSERT INTO scopes (parent_id, label, depth) VALUES (?1, ?2, ?3)",
+                rusqlite::params![parent_id, label, depth],
+            )
+            .map_err(StorageError::backend)?;
         let id = self.conn.last_insert_rowid();
         Ok(ScopeNode {
             id,
@@ -128,7 +133,7 @@ impl<'a> ScopeStore<'a> {
     /// Returns `MemoryError::Conflict` if `path` is empty or any segment is
     /// invalid (empty, contains `/`, has leading/trailing whitespace, or exceeds
     /// [`crate::scope::MAX_SEGMENT_LEN`] bytes).
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn ensure_path(&self, path: &str) -> Result<i64> {
         if path.is_empty() {
             return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
@@ -144,17 +149,22 @@ impl<'a> ScopeStore<'a> {
             Self::validate_label(segment)?;
 
             // INSERT OR IGNORE: if the scope already exists, this is a no-op.
-            self.conn.execute(
-                "INSERT OR IGNORE INTO scopes (parent_id, label, depth) VALUES (?1, ?2, ?3)",
-                rusqlite::params![parent_id, segment, depth],
-            )?;
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO scopes (parent_id, label, depth) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![parent_id, segment, depth],
+                )
+                .map_err(StorageError::backend)?;
 
             // SELECT: get the id (whether just inserted or already existed).
-            let id: i64 = self.conn.query_row(
-                "SELECT id FROM scopes WHERE parent_id = ?1 AND label = ?2",
-                rusqlite::params![parent_id, segment],
-                |row| row.get(0),
-            )?;
+            let id: i64 = self
+                .conn
+                .query_row(
+                    "SELECT id FROM scopes WHERE parent_id = ?1 AND label = ?2",
+                    rusqlite::params![parent_id, segment],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::backend)?;
 
             parent_id = id;
         }
@@ -166,21 +176,24 @@ impl<'a> ScopeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_all(&self) -> Result<Vec<ScopeNode>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, parent_id, label, depth FROM scopes ORDER BY id")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ScopeNode {
-                id: row.get(0)?,
-                parent_id: row.get(1)?,
-                label: row.get(2)?,
-                depth: row.get(3)?,
+            .prepare("SELECT id, parent_id, label, depth FROM scopes ORDER BY id")
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ScopeNode {
+                    id: row.get(0)?,
+                    parent_id: row.get(1)?,
+                    label: row.get(2)?,
+                    depth: row.get(3)?,
+                })
             })
-        })?;
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
     /// Iterate all scopes row-by-row, calling `f` for each.
     ///
@@ -190,7 +203,7 @@ impl<'a> ScopeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// Returns `MemoryError::Storage` on SQL failure, or propagates any
     /// error returned by `f`.
     pub fn for_each<F>(&self, mut f: F) -> Result<()>
     where
@@ -198,14 +211,15 @@ impl<'a> ScopeStore<'a> {
     {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, parent_id, label, depth FROM scopes ORDER BY id")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
+            .prepare("SELECT id, parent_id, label, depth FROM scopes ORDER BY id")
+            .map_err(StorageError::backend)?;
+        let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+        while let Some(row) = rows.next().map_err(StorageError::backend)? {
             let scope = ScopeNode {
-                id: row.get(0)?,
-                parent_id: row.get(1)?,
-                label: row.get(2)?,
-                depth: row.get(3)?,
+                id: row.get(0).map_err(StorageError::backend)?,
+                parent_id: row.get(1).map_err(StorageError::backend)?,
+                label: row.get(2).map_err(StorageError::backend)?,
+                depth: row.get(3).map_err(StorageError::backend)?,
             };
             f(scope)?;
         }

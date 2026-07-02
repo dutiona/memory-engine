@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::archive::types::ArchiveManifestEntry;
-use crate::error::Result;
+use crate::error::{Result, StorageError};
 
 /// Store for archive manifest entries — tracks `.pak` files in the database.
 pub struct ArchiveManifestStore<'a> {
@@ -55,25 +55,27 @@ impl<'a> ArchiveManifestStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure (e.g. duplicate `pak_path`).
+    /// Returns `MemoryError::Storage` on SQL failure (e.g. duplicate `pak_path`).
     pub fn insert(&self, m: &NewArchiveManifest<'_>) -> Result<i64> {
-        self.conn.execute(
-            "INSERT INTO archive_manifest (pak_path, created_at, fact_count, edge_count,
+        self.conn
+            .execute(
+                "INSERT INTO archive_manifest (pak_path, created_at, fact_count, edge_count,
               fact_id_min, fact_id_max, t_created_min, t_created_max, size_bytes, blake3_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                m.pak_path,
-                m.created_at.to_rfc3339(),
-                m.fact_count,
-                m.edge_count,
-                m.fact_id_min,
-                m.fact_id_max,
-                m.t_created_min.to_rfc3339(),
-                m.t_created_max.to_rfc3339(),
-                m.size_bytes,
-                m.blake3_hash,
-            ],
-        )?;
+                rusqlite::params![
+                    m.pak_path,
+                    m.created_at.to_rfc3339(),
+                    m.fact_count,
+                    m.edge_count,
+                    m.fact_id_min,
+                    m.fact_id_max,
+                    m.t_created_min.to_rfc3339(),
+                    m.t_created_max.to_rfc3339(),
+                    m.size_bytes,
+                    m.blake3_hash,
+                ],
+            )
+            .map_err(StorageError::backend)?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -81,45 +83,50 @@ impl<'a> ArchiveManifestStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list(&self) -> Result<Vec<ArchiveManifestEntry>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, pak_path, created_at, fact_count, edge_count,
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, pak_path, created_at, fact_count, edge_count,
                     fact_id_min, fact_id_max, t_created_min, t_created_max,
                     size_bytes, blake3_hash
              FROM archive_manifest ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let created_at_str: String = row.get(2)?;
-            let t_created_min_str: String = row.get(7)?;
-            let t_created_max_str: String = row.get(8)?;
+            )
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let created_at_str: String = row.get(2)?;
+                let t_created_min_str: String = row.get(7)?;
+                let t_created_max_str: String = row.get(8)?;
 
-            let parse_dt = |s: String, col_idx: usize| -> rusqlite::Result<DateTime<Utc>> {
-                s.parse().map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        col_idx,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
+                let parse_dt = |s: String, col_idx: usize| -> rusqlite::Result<DateTime<Utc>> {
+                    s.parse().map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            col_idx,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })
+                };
+
+                Ok(ArchiveManifestEntry {
+                    id: row.get(0)?,
+                    pak_path: row.get(1)?,
+                    created_at: parse_dt(created_at_str, 2)?,
+                    fact_count: row.get(3)?,
+                    edge_count: row.get(4)?,
+                    fact_id_min: row.get(5)?,
+                    fact_id_max: row.get(6)?,
+                    t_created_min: parse_dt(t_created_min_str, 7)?,
+                    t_created_max: parse_dt(t_created_max_str, 8)?,
+                    size_bytes: row.get(9)?,
+                    blake3_hash: row.get(10)?,
                 })
-            };
-
-            Ok(ArchiveManifestEntry {
-                id: row.get(0)?,
-                pak_path: row.get(1)?,
-                created_at: parse_dt(created_at_str, 2)?,
-                fact_count: row.get(3)?,
-                edge_count: row.get(4)?,
-                fact_id_min: row.get(5)?,
-                fact_id_max: row.get(6)?,
-                t_created_min: parse_dt(t_created_min_str, 7)?,
-                t_created_max: parse_dt(t_created_max_str, 8)?,
-                size_bytes: row.get(9)?,
-                blake3_hash: row.get(10)?,
             })
-        })?;
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Delete a manifest entry by id.
@@ -128,14 +135,17 @@ impl<'a> ArchiveManifestStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     // Forward-looking: archive management CLI will use this.
     #[allow(dead_code)]
     pub fn delete(&self, id: i64) -> Result<bool> {
-        let deleted = self.conn.execute(
-            "DELETE FROM archive_manifest WHERE id = ?1",
-            rusqlite::params![id],
-        )?;
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM archive_manifest WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .map_err(StorageError::backend)?;
         Ok(deleted > 0)
     }
 }

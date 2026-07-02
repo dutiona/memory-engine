@@ -23,7 +23,7 @@ pub trait VectorSearchStrategy: Send + Sync {
     /// # Errors
     ///
     /// Returns `MemoryError::EmbeddingDimension` if query dimension mismatches,
-    /// or `MemoryError::Database` on query failure.
+    /// or `MemoryError::Storage` on query failure.
     fn search(
         &self,
         conn: &Connection,
