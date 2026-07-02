@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
-use crate::archive::types::ArchiveManifestEntry;
 use crate::error::{Result, StorageError};
+use me_types::types::archive::ArchiveManifestEntry;
 
 /// Store for archive manifest entries — tracks `.pak` files in the database.
 pub struct ArchiveManifestStore<'a> {
