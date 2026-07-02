@@ -395,9 +395,12 @@ impl MemoryEngine {
                     // keeps the `.md` path from populating the live HNSW index, matching
                     // the session path and the pre-#816 behavior.
                     // No idempotency filter: the `.md` path dedups on content, so it
-                    // never skips → always `Ingested`. Matched defensively (rather than
-                    // unwrapped) to keep this library path panic-free (#725).
-                    let flags = match self
+                    // never skips → always `Ingested` with exactly one flag (one fact in).
+                    // Enforce that storage-port contract with a typed error, mirroring the
+                    // session path's length guard above (#725): an out-of-contract backend
+                    // must fail loudly, not silently miscount facts_created/reinforced/
+                    // secrets_redacted in release (a `debug_assert` would compile out there).
+                    let reinforced = match self
                         .storage
                         .ingest_bootstrap_batch_atomic(
                             None,
@@ -408,20 +411,22 @@ impl MemoryEngine {
                         )
                         .await?
                     {
-                        BootstrapIngestOutcome::Ingested(flags) => flags,
+                        BootstrapIngestOutcome::Ingested(flags) => match flags.as_slice() {
+                            [(_, reinforced)] => *reinforced,
+                            other => {
+                                return Err(crate::error::MemoryError::Internal(format!(
+                                    "memory-dir bootstrap ingest returned {} flags for 1 fact (port contract violation)",
+                                    other.len()
+                                )));
+                            }
+                        },
                         BootstrapIngestOutcome::Skipped => {
-                            // Unreachable: this path passes `skip_if_present = None`.
-                            // `debug_assert` fires loudly in dev/test if a future change
-                            // ever threads a filter here, but compiles out in release so
-                            // the library stays panic-free for consumers (#725).
-                            debug_assert!(
-                                false,
-                                "memory-dir ingest passes no skip filter; Skipped is unreachable"
-                            );
-                            Vec::new()
+                            return Err(crate::error::MemoryError::Internal(
+                                "memory-dir bootstrap passed no skip filter but storage returned Skipped (port contract violation)"
+                                    .to_string(),
+                            ));
                         }
                     };
-                    let reinforced = flags.first().is_some_and(|&(_, r)| r);
                     if reinforced {
                         report.facts_reinforced += 1;
                     } else {
