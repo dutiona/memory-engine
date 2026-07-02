@@ -1,0 +1,33 @@
+[package]
+name = "me-index"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Layer-2 (L2) in-memory projections (MemoryGraph + ScopeTree) for the memory-engine workspace (Wave 2 #816 / S2)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal crate: never published, so it uses bare path-deps and is exempt
+# from cargo-deny's published-crate wildcard rule (plan §D.1).
+publish = false
+
+[dependencies]
+me-types = { path = "../me-types" }
+# No `[workspace.dependencies]` table exists in the root manifest (only
+# `[workspace.package]` / `[workspace.lints]`), so third-party deps are bare
+# versions here too, matching `me-storage`'s convention (its `chrono`/`serde_json`
+# are plain `version = "..."`, not `workspace = true`) rather than the facade-style
+# `workspace = true` the plan sketch assumed.
+petgraph = "0.7"
+
+[dev-dependencies]
+# The pure-graph proptests (`graph::memory_graph::proptests`) moved verbatim.
+proptest = "1"
+
+[features]
+# Gates `MemoryGraph::remove_node` (archival prune, #879/#833). Forwarded by the
+# facade's own `archive` feature (`me-index/archive`) so the two stay in lockstep;
+# needs no me-types archive types itself, so it is a bare marker.
+archive = []
+
+[lints]
+workspace = true

@@ -126,11 +126,14 @@ pub use me_types::types; // relocated to me-types (Wave 2 #816); see `error` abo
 pub(crate) mod archive;
 pub(crate) mod consolidation;
 pub(crate) mod forgetting;
-pub(crate) mod graph;
+// `graph` + `scope` are relocated to the L2 `me-index` crate (Wave 2 #816 / S2): the
+// backend-free in-memory projections (`MemoryGraph`, `ScopeTree`). The re-export
+// preserves `crate::graph::*` / `crate::scope::*` for every internal call site.
+pub(crate) use me_index::graph;
+pub(crate) use me_index::scope;
 pub(crate) use me_types::limits; // relocated to me-types (Wave 2 #816)
 pub(crate) mod pool;
 pub(crate) mod resume;
-pub(crate) mod scope;
 pub(crate) mod store;
 
 // === Shared test utilities (#485 / #120) ===

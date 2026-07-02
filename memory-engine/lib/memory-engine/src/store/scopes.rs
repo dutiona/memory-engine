@@ -76,8 +76,8 @@ impl<'a> ScopeStore<'a> {
     /// **Does not validate the label.** Unlike [`Self::ensure_path`], this
     /// low-level method inserts `label` verbatim — callers are responsible for
     /// ensuring it is non-empty, contains no `/`, has no leading/trailing
-    /// whitespace, and is at most [`crate::scope::MAX_SEGMENT_LEN`] bytes (the
-    /// rules enforced by [`crate::scope::validate_segment`]). Storing a malformed
+    /// whitespace, and is at most [`crate::types::MAX_SEGMENT_LEN`] bytes (the
+    /// rules enforced by [`crate::types::validate_segment`]). Storing a malformed
     /// label here can break round-tripping through
     /// [`crate::scope::ScopeTree::resolve_path`]. Prefer [`Self::ensure_path`]
     /// for a validated, idempotent alternative.
@@ -104,14 +104,14 @@ impl<'a> ScopeStore<'a> {
 
     /// Validate a scope label segment (write path).
     ///
-    /// Applies the shared structural rules from [`crate::scope::validate_segment`]
+    /// Applies the shared structural rules from [`crate::types::validate_segment`]
     /// (non-empty, no `/`, at most 256 bytes) on the trimmed label, plus the
     /// write-path-only rule that the label must have no leading/trailing
     /// whitespace — so that stored labels always round-trip through
     /// [`crate::scope::ScopeTree::resolve_path`].
     fn validate_label(label: &str) -> Result<()> {
         let trimmed = label.trim();
-        crate::scope::validate_segment(trimmed)
+        crate::types::validate_segment(trimmed)
             .map_err(|reason| MemoryError::Conflict(ConflictError::ScopeLabel(reason.into())))?;
         if trimmed != label {
             return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
@@ -132,7 +132,7 @@ impl<'a> ScopeStore<'a> {
     ///
     /// Returns `MemoryError::Conflict` if `path` is empty or any segment is
     /// invalid (empty, contains `/`, has leading/trailing whitespace, or exceeds
-    /// [`crate::scope::MAX_SEGMENT_LEN`] bytes).
+    /// [`crate::types::MAX_SEGMENT_LEN`] bytes).
     /// Returns `MemoryError::Storage` on SQL failure.
     pub fn ensure_path(&self, path: &str) -> Result<i64> {
         if path.is_empty() {

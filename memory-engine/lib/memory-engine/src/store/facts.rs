@@ -101,7 +101,7 @@ fn content_hash(content: &str) -> String {
 ///
 /// This set is *exactly* the population whose edges the `SQLite` foreign key
 /// (`edges.source_fact_id/target_fact_id REFERENCES facts(id)`) honors on a full
-/// [`load_from_db`](crate::graph::MemoryGraph::load_from_db) rebuild — and that
+/// `load_from_db` rebuild — and that
 /// is *all* facts, not just active ones. `load_from_db` loads every *active edge*
 /// (`edges.t_expired IS NULL`), and an active edge can legitimately point at an
 /// *expired* fact: the conflict-resolution `contradicts` edge `new → old` is

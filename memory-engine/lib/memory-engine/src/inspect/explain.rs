@@ -419,7 +419,21 @@ mod tests {
                 weight: 1.0,
             },
         );
-        graph.ensure_node(99);
+        // Materialize an isolated-but-present node 99 via the public API: add a
+        // self-loop, then remove its edges — `remove_edges_by_fact` drops the edge
+        // but keeps the node (documented post-condition). `MemoryGraph::ensure_node`
+        // itself is `pub(crate)` inside `me-index` (Wave 2 #816 / S2), so this
+        // facade test can no longer reach it directly across the crate boundary.
+        graph.add_edge(
+            99,
+            99,
+            EdgeData {
+                edge_id: 2,
+                relation_type: "self".into(),
+                weight: 1.0,
+            },
+        );
+        graph.remove_edges_by_fact(99);
 
         let ctx = build_graph_context(&graph, 99);
         assert_eq!(ctx.degree, 0);
