@@ -31,6 +31,8 @@ me-traits = { path = "../me-traits" }
 me-storage = { path = "../me-storage" }
 # L2 in-memory projections (MemoryGraph + ScopeTree), backend-free (Wave 2 #816 / S2).
 me-index = { path = "../me-index" }
+# L2 SQLite persistence leaves (store + connection pool), Wave 2 #816 / S2 sub-PR 2a.
+me-backend-sqlite = { path = "../me-backend-sqlite" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -76,6 +78,14 @@ proptest = "1"
 # is `#[ignore]` so `cargo test --all-features` stays green without a Docker daemon.
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# Force these leaf crates' `test-util` feature ON for every `cargo test` of this
+# crate, regardless of whether `--features test-util` was passed explicitly
+# (Wave 2 #816, me-backend-sqlite carve, Commit 2): `crate::test_utils` re-exports
+# their `test-util`-gated helpers, and many plain `#[cfg(test)]`-only call sites
+# (consolidation/, engine/, inspect/, search/) must keep compiling under a bare
+# `cargo test -p memory-engine` with no feature flags, matching today's baseline.
+me-types = { path = "../me-types", features = ["test-util"] }
+me-traits = { path = "../me-traits", features = ["test-util"] }
 
 [[bench]]
 name = "search_bench"
@@ -183,8 +193,16 @@ compress-zstd = ["dep:zstd"]
 # Also forwards to `me-index/archive` (Wave 2 #816 / S2) so `MemoryGraph::remove_node`
 # — `#[cfg(any(feature = "archive", test))]`-gated in me-index, called by
 # `engine/archive.rs`'s own `#[cfg(feature = "archive")]` prune path — is compiled in
-# lockstep with the facade's `archive` feature.
-archive = ["compress-zstd", "me-types/archive", "me-storage/archive", "me-index/archive"]
+# lockstep with the facade's `archive` feature. Also forwards to
+# `me-backend-sqlite/archive` (Wave 2 #816 / S2, sub-PR 2a) so
+# `store/archive_manifest.rs` compiles in lockstep too.
+archive = [
+    "compress-zstd",
+    "me-types/archive",
+    "me-storage/archive",
+    "me-index/archive",
+    "me-backend-sqlite/archive",
+]
 # The default in-process SQLite backend. NOTE (#633): this is a *marker* feature — it
 # does NOT yet gate `mod sqlite` or `rusqlite`. The engine open path hardcodes
 # `SqliteBackend` (`engine::init_from_pool`), so a true PG-only build is not
@@ -203,8 +221,11 @@ backend-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
 # `SchemaManager::raw_exec`) for cross-crate tests — notably the #632 conformance
 # suite, where every backend must provide the seam for the failure-injection
 # tests to run. Always active for this crate's own `#[cfg(test)]` builds; not part
-# of the public API surface and never enabled in release builds.
-test-util = ["me-storage/test-util"]
+# of the public API surface and never enabled in release builds. Forwards to
+# `me-types`/`me-traits` (Wave 2 #816, me-backend-sqlite carve, Commit 2) so a
+# downstream consumer building with `--features test-util` also gets the shared
+# `NewFact`/`NewEvent`/`MockEmbedder` test doubles those crates now own.
+test-util = ["me-storage/test-util", "me-types/test-util", "me-traits/test-util"]
 
 [lints.rust]
 unsafe_code = "forbid"

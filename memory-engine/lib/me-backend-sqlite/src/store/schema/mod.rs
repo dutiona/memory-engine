@@ -1,9 +1,9 @@
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use std::path::Path;
 
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, MigrationError, Result};
+use me_types::error::{MemoryError, MigrationError, Result};
 
 mod backup;
 mod config;
@@ -243,6 +243,12 @@ pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
 /// - The storage epoch is from the future
 ///
 /// This is the read-only counterpart of [`init_schema`] + [`migrate`].
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage`/`MemoryError::Migration` for any of the
+/// conditions listed above (missing config table, unsupported/stale schema
+/// version, or a future storage epoch).
 pub fn validate_schema_version(conn: &Connection) -> Result<()> {
     // Check if config table exists
     let has_config: bool = conn

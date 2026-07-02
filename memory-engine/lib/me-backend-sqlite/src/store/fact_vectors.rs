@@ -23,13 +23,13 @@
 //! Re-embedding expired facts costs a few extra provider calls; a homogeneous
 //! active space is the correctness invariant that buys.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::{Connection, params};
 
-use crate::error::{MemoryError, Result};
 use crate::store::embedding_spaces::{self, SpaceStatus};
 use crate::store::serialize_embedding;
-use crate::types::PromoteOutcome;
+use me_types::error::{MemoryError, Result};
+use me_types::types::PromoteOutcome;
 
 /// Fetch the next window of facts that still lack a vector in `space_id`
 /// (cursorless anti-join), as `(fact_id, content)` pairs.
@@ -49,8 +49,8 @@ use crate::types::PromoteOutcome;
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on query
-/// failure, or [`MemoryError::Internal`](crate::error::MemoryError::Internal) if
+/// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on query
+/// failure, or [`MemoryError::Internal`](me_types::error::MemoryError::Internal) if
 /// `limit` overflows `i64`.
 pub fn next_backfill_window(
     conn: &Connection,
@@ -95,7 +95,7 @@ pub fn next_backfill_window(
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+/// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
 /// write failure — including a foreign-key violation if `space_id` is not a
 /// registered space or a `fact_id` does not exist (FK enforcement is ON).
 pub fn write_backfill_batch(
@@ -126,14 +126,16 @@ pub fn write_backfill_batch(
     Ok(inserted)
 }
 
-/// Count facts that still lack a vector in `space_id` — the same anti-join as
+/// Count facts that still lack a vector in `space_id`.
+///
+/// The same anti-join as
 /// [`next_backfill_window`], reduced to a count. `0` means the space is fully
 /// backfilled: the promote completeness gate (#623 D6). Covers every fact.
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on query
-/// failure, or [`MemoryError::Internal`](crate::error::MemoryError::Internal) if
+/// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on query
+/// failure, or [`MemoryError::Internal`](me_types::error::MemoryError::Internal) if
 /// the stored count is negative (impossible).
 pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
     let n: i64 = conn
@@ -149,8 +151,9 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
     usize::try_from(n).map_err(|_| MemoryError::Internal("negative unbackfilled count".into()))
 }
 
-/// Atomically promote the `populating` space to active (#623 D6) — the O(N)
-/// copy-swap. **One transaction**, never decomposed (the #631-incident lesson:
+/// Atomically promote the `populating` space to active (#623 D6) — the O(N) copy-swap.
+///
+/// **One transaction**, never decomposed (the #631-incident lesson:
 /// any `?` before `commit` drops the transaction and rusqlite rolls back, so a
 /// mid-promote failure can never leave partial state).
 ///
@@ -265,7 +268,9 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
     })
 }
 
-/// Stream every `fact_vectors` row (all non-active spaces) for the dump, yielding
+/// Stream every `fact_vectors` row (all non-active spaces) for the dump.
+///
+/// Yields
 /// `(fact_id, space_id, embedding)` one row at a time — O(1) peak memory, matching
 /// the streaming snapshot writer. Ordered by `(space_id, fact_id)` for a stable
 /// dump.
@@ -280,8 +285,8 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on query
-/// failure, [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+/// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on query
+/// failure, [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension)
 /// if a stored blob is not its space's dim, or any error the callback returns.
 pub fn for_each<F>(conn: &Connection, embed_dim: usize, mut cb: F) -> Result<()>
 where
@@ -308,15 +313,17 @@ where
     Ok(())
 }
 
-/// Count the vectors stored for `space_id`. Test-only inspection helper (the
-/// promote and dump paths read `fact_vectors` with their own queries); gated so it
+/// Count the vectors stored for `space_id`. Test-only inspection helper.
+///
+/// The
+/// promote and dump paths read `fact_vectors` with their own queries; gated so it
 /// never reaches the lib target as dead code. Un-gate if a production caller needs
 /// a per-space count.
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on query
-/// failure, or [`MemoryError::Internal`](crate::error::MemoryError::Internal) if
+/// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on query
+/// failure, or [`MemoryError::Internal`](me_types::error::MemoryError::Internal) if
 /// the stored count is negative (impossible).
 #[cfg(test)]
 pub fn count_vectors(conn: &Connection, space_id: &str) -> Result<usize> {
@@ -339,7 +346,7 @@ mod tests {
     };
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
-    use crate::types::{EmbeddingFingerprint, FactType, NewFact};
+    use me_types::types::{EmbeddingFingerprint, FactType, NewFact};
 
     const DIM: usize = 4;
     const SPACE: &str = "shadow";
@@ -535,7 +542,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                MemoryError::Storage(crate::error::StorageError::Backend(_))
+                MemoryError::Storage(me_types::error::StorageError::Backend(_))
             ),
             "got {err:?}"
         );
@@ -689,7 +696,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                MemoryError::Storage(crate::error::StorageError::Backend(_))
+                MemoryError::Storage(me_types::error::StorageError::Backend(_))
             ),
             "got {err:?}"
         );

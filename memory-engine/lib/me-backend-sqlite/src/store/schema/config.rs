@@ -5,10 +5,10 @@
 //! [`migrate`](super::migrate) and [`init_schema`](super::init_schema) for the
 //! lifecycle keys they seed.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::Connection;
 
-use crate::error::Result;
+use me_types::error::Result;
 
 /// Read a config value by key.
 ///

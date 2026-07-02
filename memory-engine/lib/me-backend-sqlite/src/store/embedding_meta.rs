@@ -26,8 +26,8 @@
 
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, Result};
-use crate::types::EmbeddingFingerprint;
+use me_types::error::{MemoryError, Result};
+use me_types::types::EmbeddingFingerprint;
 
 /// Load the persisted embedding identity, if one has been recorded.
 ///
@@ -101,8 +101,9 @@ pub fn record_if_absent(
     Ok(candidate.clone())
 }
 
-/// Verify a candidate identity is compatible with the store's recorded one, without
-/// writing. Returns `Ok(())` on a fresh store (no identity yet — nothing to disagree
+/// Verify a candidate identity is compatible with the store's recorded one, without writing.
+///
+/// Returns `Ok(())` on a fresh store (no identity yet — nothing to disagree
 /// with) or when `candidate` equals the stored tuple.
 ///
 /// This is the read-only counterpart to [`record_if_absent`], used for the **eager
@@ -134,9 +135,10 @@ fn ensure_match(stored: &EmbeddingFingerprint, candidate: &EmbeddingFingerprint)
     })
 }
 
-/// Require that a store has a recorded embedding identity before a
-/// **pre-computed-embedding** write (one with no live `EmbeddingProvider` to
-/// fingerprint — `promote`, or a cycle `AddFact`/`Synthesize` delta).
+/// Require that a store has a recorded embedding identity before a **pre-computed-embedding** write.
+///
+/// A pre-computed-embedding write is one with no live `EmbeddingProvider` to
+/// fingerprint — `promote`, or a cycle `AddFact`/`Synthesize` delta.
 ///
 /// Such a write cannot establish the identity itself (#613 has no fingerprint to
 /// record; declaring a model for a pre-computed vector is #615), so committing it

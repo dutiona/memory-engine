@@ -555,7 +555,7 @@ fn migrate_v12_to_v13_roundtrips_fingerprint() {
     // element_type are both exercised.
     let conn = open_memory().unwrap();
     simulate_v12(&conn);
-    let fp = crate::types::EmbeddingFingerprint::with_matryoshka(
+    let fp = me_types::types::EmbeddingFingerprint::with_matryoshka(
         "Qwen/Qwen3-Embedding-0.6B",
         "tei",
         1024,
@@ -2404,7 +2404,7 @@ fn read_only_open_reads_registry() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ro.db");
     let path_str = path.to_str().unwrap();
-    let fp = crate::types::EmbeddingFingerprint::new("model-a", "tei", 8);
+    let fp = me_types::types::EmbeddingFingerprint::new("model-a", "tei", 8);
     {
         let conn = open_connection(path_str).unwrap();
         init_schema(&conn).unwrap();

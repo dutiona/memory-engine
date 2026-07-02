@@ -1,5 +1,6 @@
 ---
-source: src/store/schema/mod.rs
+source: memory-engine/lib/me-backend-sqlite/src/store/schema/tests.rs
+assertion_line: 1736
 expression: actual
 ---
 -- index: idx_activities_dedup

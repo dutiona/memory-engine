@@ -13,7 +13,7 @@
 //! The exactly-one-active invariant is **structural**: a partial unique index
 //! `UNIQUE(status) WHERE status = 'active'` (mirrors KB's `idx_embed_spaces_one_active`).
 //! It cannot be bypassed by any writer, now or in a future wave. A violation is remapped
-//! by [`map_single_active_violation`] to a diagnosable error rather than an opaque
+//! by `map_single_active_violation` to a diagnosable error rather than an opaque
 //! `Storage(StorageError::Backend)` one.
 //!
 //! ## Future seams (do NOT implement here — separate issues)
@@ -27,11 +27,11 @@
 //! - Promoting [`SpaceStatus`] / [`EmbeddingSpace`] to public `types.rs` types — **#689**,
 //!   when a multi-space API is actually exposed to consumers.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, MigrationError, Result};
-use crate::types::EmbeddingFingerprint;
+use me_types::error::{MemoryError, MigrationError, Result};
+use me_types::types::EmbeddingFingerprint;
 
 /// Lifecycle status of an embedding space in the registry (#622).
 ///
@@ -51,6 +51,7 @@ pub enum SpaceStatus {
 
 impl SpaceStatus {
     /// On-disk TEXT spelling. MUST match the table's `CHECK(status IN …)` list.
+    #[must_use]
     pub const fn as_sql(self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -102,6 +103,7 @@ impl EmbeddingSpace {
 
     /// The degenerate single `active` space carrying `fingerprint`.
     #[cfg(test)]
+    #[must_use]
     pub fn default_active(fingerprint: EmbeddingFingerprint) -> Self {
         Self {
             name: Self::DEFAULT_NAME.to_string(),
@@ -211,18 +213,19 @@ pub fn list_spaces(conn: &Connection) -> Result<Vec<EmbeddingSpace>> {
     Ok(out)
 }
 
-/// Insert a registry row **with `space.status` verbatim** — not necessarily
-/// `active` despite the name. Two callers: the `embedding_meta` facade recording
+/// Insert a registry row **with `space.status` verbatim** — not necessarily `active` despite the name.
+///
+/// Two callers: the `embedding_meta` facade recording
 /// the first `active` space, and dump **restore**, which replays every snapshot
 /// space (`active` / `populating` / `deprecated`) to rebuild a multi-space store
 /// — including a post-#623-reconstruction one. The single-active partial index
-/// still rejects a *second* active row (remapped via [`map_single_active_violation`]),
+/// still rejects a *second* active row (remapped via `map_single_active_violation`),
 /// so restoring a (necessarily single-active) snapshot is safe. (Contrast
 /// [`insert_populating`], which *forces* `populating`.)
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Internal` (via [`map_single_active_violation`]) if the insert
+/// Returns `MemoryError::Internal` (via `map_single_active_violation`) if the insert
 /// would create a second active space, `MemoryError::Storage` on any other write failure,
 /// or `MemoryError::Internal` if a dimension overflows `i64`.
 pub fn insert_active(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
@@ -275,8 +278,9 @@ pub fn insert_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()
     Ok(())
 }
 
-/// Idempotently open a `populating` space for #623 reconstruction — supports
-/// crash-resume, so re-running a reconstruction continues an existing populating
+/// Idempotently open a `populating` space for #623 reconstruction.
+///
+/// Supports crash-resume, so re-running a reconstruction continues an existing populating
 /// space rather than erroring on the `name` collision. By the current state of
 /// `space.name`:
 /// - absent → insert it as `populating` (a fresh reconstruction).
@@ -319,11 +323,13 @@ pub fn deprecate(conn: &Connection, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Flip a space to `active` (#623 promote, step 4). MUST be called **after** the
+/// Flip a space to `active` (#623 promote, step 4).
+///
+/// MUST be called **after** the
 /// current active row has been demoted in the same transaction (the
 /// demote-then-activate ordering), so the single-active partial index never
 /// transiently sees two `active` rows. A violation is remapped (via
-/// [`map_single_active_violation`]) to a diagnosable `Internal` error.
+/// `map_single_active_violation`) to a diagnosable `Internal` error.
 ///
 /// # Errors
 ///
@@ -339,8 +345,9 @@ pub fn activate(conn: &Connection, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Overwrite the **active** space's identity in place (the `store` upsert —
-/// restore/import and unconditional re-stamp), addressing it **by status**. If no
+/// Overwrite the **active** space's identity in place (the `store` upsert).
+///
+/// This is restore/import and unconditional re-stamp, addressing it **by status**. If no
 /// active space exists yet (a fresh store, or the pre-#622 restore-legacy path),
 /// insert the canonical `default` active row.
 ///
@@ -549,7 +556,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                MemoryError::Storage(crate::error::StorageError::Backend(_))
+                MemoryError::Storage(me_types::error::StorageError::Backend(_))
             ),
             "PK collision must pass through as Storage(Backend), got {err:?}"
         );

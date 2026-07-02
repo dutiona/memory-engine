@@ -1,15 +1,15 @@
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, MigrationError, Result};
 use crate::store::schema::{
     init_schema, migrate, open_connection, open_connection_read_only,
     open_memory as open_memory_conn,
 };
+use me_types::error::{MemoryError, MigrationError, Result};
 
 /// Default bound on how long [`ConnectionPool::read`] waits for a read
 /// connection to become available before failing with [`MemoryError::Pool`].
@@ -437,7 +437,7 @@ impl ConnectionPool {
     ///
     /// - File-backed: pops from the bounded pool. If exhausted, waits on a
     ///   `Condvar` for a connection to be returned, up to
-    ///   `read_acquire_timeout` (default [`DEFAULT_READ_ACQUIRE_TIMEOUT`]).
+    ///   `read_acquire_timeout` (default `DEFAULT_READ_ACQUIRE_TIMEOUT`).
     /// - In-memory: locks the write connection (serialized but correct).
     ///
     /// The happy path (a connection available immediately) returns without
@@ -448,7 +448,7 @@ impl ConnectionPool {
     /// In in-memory mode this locks the **same** `Mutex` as
     /// [`write`](Self::write)/[`try_write`](Self::try_write) — and as a *prior*
     /// in-memory `read()`, since an in-memory read guard
-    /// ([`SerializedReadGuard`]) holds that very `write_conn` lock. The
+    /// (`SerializedReadGuard`) holds that very `write_conn` lock. The
     /// `parking_lot::Mutex` is non-reentrant, so calling `read()` on a thread
     /// that already holds **any** guard locking `write_conn` (a write guard OR an
     /// earlier in-memory read guard) self-deadlocks (a release-build hang; a
@@ -462,6 +462,12 @@ impl ConnectionPool {
     /// Returns [`MemoryError::Pool`] if no read connection becomes available
     /// within `read_acquire_timeout` — turning a previously-unbounded hang
     /// (e.g. a leaked or deadlocked guard) into an observable failure.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, panics on the in-memory reentrancy violation described
+    /// above (`assert_not_reentrant`); compiled out in release builds, where the
+    /// same violation instead hangs (see above).
     pub fn read(&self) -> Result<ReadConn<'_>> {
         // Dispatch on the canonical backend discriminant, never on a derived
         // count (#340/#356). In-memory mode has no pooled read connections, so
@@ -550,7 +556,7 @@ impl ConnectionPool {
     /// # In-memory reentrancy hazard (#278)
     ///
     /// In in-memory mode [`read`](Self::read) locks this **same** connection —
-    /// the [`SerializedReadGuard`] it returns holds `write_conn`'s lock to
+    /// the `SerializedReadGuard` it returns holds `write_conn`'s lock to
     /// serialize reads. The `parking_lot::Mutex` is **non-reentrant**, so the
     /// hazard runs in *both* directions on one thread, and both self-deadlock
     /// (release: hangs forever; debug: the shared reentrancy marker fires):
@@ -562,13 +568,22 @@ impl ConnectionPool {
     ///
     /// Drop every guard locking `write_conn` before re-entering on either side.
     /// File-backed pools are unaffected (reads come from a separate pool).
-    pub(crate) fn write(&self) -> WriteGuard<'_> {
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/{cold_storage,graph,consolidation,search_index}.rs`
+    // test modules call this directly from the facade (a different crate now).
+    // `me-backend-sqlite` is `publish = false` (workspace-internal only, never a
+    // public dependency), so this does not expose the footgun outside the
+    // workspace; reverts to `pub(crate)` when `storage/sqlite/` joins this crate
+    // (sub-PR 2b), restoring the original #416 restriction in full.
+    pub fn write(&self) -> WriteGuard<'_> {
         #[cfg(debug_assertions)]
         assert_not_reentrant(std::ptr::from_ref::<Self>(self) as usize);
         self.make_write_guard(self.write_conn.lock())
     }
 
     /// Attempt to lock the write connection.
+    ///
+    /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the pool was opened read-only.
     ///

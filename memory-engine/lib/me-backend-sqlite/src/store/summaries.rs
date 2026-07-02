@@ -1,10 +1,11 @@
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::{Connection, params};
 
-use crate::error::{MemoryError, Result};
 use crate::store::{deserialize_embedding, parse_timestamp, serialize_embedding};
-use crate::types::{ConsolidationLevel, NewSummary, Summary};
+use me_types::error::{MemoryError, Result};
+use me_types::types::{ConsolidationLevel, NewSummary, Summary};
 
+#[must_use]
 pub const fn level_to_str(level: &ConsolidationLevel) -> &'static str {
     match level {
         ConsolidationLevel::Local => "local",
@@ -17,7 +18,7 @@ pub const fn level_to_str(level: &ConsolidationLevel) -> &'static str {
 ///
 /// This is the single fallible parser for the persisted level encoding produced
 /// by [`level_to_str`]; it is the inverse of that function. Both the summary
-/// row mapper and [`crate::inspect::statistics::compute_statistics`] route
+/// row mapper and `compute_statistics` route
 /// through it so an unrecognised level (a corrupted row, or a new variant that
 /// missed an encoding update) surfaces as an error instead of being silently
 /// dropped from the `by_level` histogram (#337).
@@ -48,8 +49,11 @@ pub struct SummaryStore<'a> {
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> SummaryStore<'a> {
     /// Create a new `SummaryStore` borrowing the given connection.
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/consolidation.rs` constructs `SummaryStore` from
+    // the facade; reverts to `pub(crate)` in sub-PR 2b.
     #[must_use]
-    pub(crate) const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
+    pub const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
         Self { conn, embed_dim }
     }
 

@@ -1,8 +1,8 @@
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::{Connection, params};
 
-use crate::error::{MemoryError, Result};
-use crate::types::{LineageRecord, LineageSnapshotEntry, NewLineageRecord, PromotionProvenance};
+use me_types::error::{MemoryError, Result};
+use me_types::types::{LineageRecord, LineageSnapshotEntry, NewLineageRecord, PromotionProvenance};
 
 /// Store for the `lineage` sidecar table — provenance tracking for promoted wisdom facts.
 pub struct LineageStore<'a> {
@@ -12,8 +12,11 @@ pub struct LineageStore<'a> {
 #[allow(dead_code)] // complete CRUD API — engine facade wires methods incrementally
 impl<'a> LineageStore<'a> {
     /// Create a new `LineageStore` borrowing the given connection.
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/consolidation.rs` constructs `LineageStore` from
+    // the facade; reverts to `pub(crate)` in sub-PR 2b.
     #[must_use]
-    pub(crate) const fn new(conn: &'a Connection) -> Self {
+    pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 
@@ -405,7 +408,7 @@ mod tests {
         let err = store.insert(&new_rec, &test_provenance()).unwrap_err();
         assert!(matches!(
             err,
-            MemoryError::Storage(crate::error::StorageError::Backend(_))
+            MemoryError::Storage(me_types::error::StorageError::Backend(_))
         ));
     }
 
