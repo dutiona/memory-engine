@@ -29,6 +29,8 @@ autoexamples = false
 me-types = { path = "../me-types" }
 me-traits = { path = "../me-traits" }
 me-storage = { path = "../me-storage" }
+# L2 in-memory projections (MemoryGraph + ScopeTree), backend-free (Wave 2 #816 / S2).
+me-index = { path = "../me-index" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -39,7 +41,6 @@ blake3 = "1"
 rmp-serde = "1"
 tempfile = "3"
 tracing = "0.1"
-petgraph = "0.7"
 parking_lot = "0.12"
 tokio = { version = "1", features = ["rt", "macros", "sync", "net"] }
 hnsw = { version = "0.11", optional = true }
@@ -179,7 +180,11 @@ compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
 # Forwards to `me-types/archive` so `QueryDiagnostics`'s `#[cfg(feature = "archive")]`
 # fields (types::search, now in me-types) compile in step with the facade (plan §D.2).
-archive = ["compress-zstd", "me-types/archive", "me-storage/archive"]
+# Also forwards to `me-index/archive` (Wave 2 #816 / S2) so `MemoryGraph::remove_node`
+# — `#[cfg(any(feature = "archive", test))]`-gated in me-index, called by
+# `engine/archive.rs`'s own `#[cfg(feature = "archive")]` prune path — is compiled in
+# lockstep with the facade's `archive` feature.
+archive = ["compress-zstd", "me-types/archive", "me-storage/archive", "me-index/archive"]
 # The default in-process SQLite backend. NOTE (#633): this is a *marker* feature — it
 # does NOT yet gate `mod sqlite` or `rusqlite`. The engine open path hardcodes
 # `SqliteBackend` (`engine::init_from_pool`), so a true PG-only build is not

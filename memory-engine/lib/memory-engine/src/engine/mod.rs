@@ -29,6 +29,7 @@ pub(crate) mod cycle;
 mod dormant;
 mod forgetting;
 mod graph;
+mod graph_load;
 mod ingest;
 mod inspect;
 mod lineage;
@@ -304,8 +305,8 @@ impl MemoryEngine {
             (graph, scope_tree, HnswOpenSource::Snapshot(hnsw_payload))
         } else {
             let conn = pool.read()?;
-            let graph = MemoryGraph::load_from_db(&conn)?;
-            let scope_tree = ScopeTree::load(&conn)?;
+            let graph = graph_load::load_graph_from_db(&conn)?;
+            let scope_tree = graph_load::load_scope_tree(&conn)?;
             drop(conn);
             (graph, scope_tree, HnswOpenSource::Rebuild)
         };

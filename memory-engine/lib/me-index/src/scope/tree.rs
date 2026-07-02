@@ -1,15 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use rusqlite::Connection;
-
-use crate::error::Result;
-use crate::store::ScopeStore;
-use crate::types::{ScopeNode, ScopeQuery};
+use me_types::types::{ScopeNode, ScopeQuery};
 
 /// In-memory cache of the scope hierarchy.
 ///
-/// Built from the database via [`ScopeTree::load`]. Supports path resolution,
-/// ancestor/descendant traversal, and query resolution — all without DB access.
+/// Built from an already-loaded node set via [`ScopeTree::from_nodes`] (the
+/// facade's backend glue reads the nodes from the store and calls this).
+/// Supports path resolution, ancestor/descendant traversal, and query
+/// resolution — all without DB access.
 pub struct ScopeTree {
     nodes: HashMap<i64, ScopeNode>,
     children: HashMap<i64, Vec<i64>>,
@@ -18,7 +16,7 @@ pub struct ScopeTree {
 impl ScopeTree {
     /// Build the `(nodes, children)` index maps from a node iterator.
     ///
-    /// Shared by [`ScopeTree::load`] (from the DB) and
+    /// Shared by [`ScopeTree::from_nodes`] (an already-loaded node set) and
     /// [`ScopeTree::from_snapshot`] (from a serialized snapshot): both insert
     /// each node into `nodes` by id and register it under its parent's
     /// `children` list.
@@ -41,12 +39,17 @@ impl ScopeTree {
         (nodes, children)
     }
 
-    /// Build tree from all scopes in the database.
-    pub fn load(conn: &Connection) -> Result<Self> {
-        let store = ScopeStore::new(conn);
-        let all = store.list_all()?;
-        let (nodes, children) = Self::build_index(all);
-        Ok(Self { nodes, children })
+    /// Build a tree from an already-loaded set of scope nodes — the connection-free
+    /// core of the removed DB loader (the facade's `load_scope_tree` glue reads the
+    /// nodes from the backend and calls this). Parallels `MemoryGraph::from_active_edges`.
+    #[must_use]
+    pub fn from_nodes<I>(nodes: I) -> Self
+    where
+        I: IntoIterator<Item = ScopeNode>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let (nodes, children) = Self::build_index(nodes);
+        Self { nodes, children }
     }
 
     /// Root scope id (database-assigned, always 1).
@@ -65,7 +68,7 @@ impl ScopeTree {
     /// `resolve_path(path_for_id(root))` round-trips rather than returning
     /// `None` (the representation is invertible). The empty string `""` is
     /// **not** a root synonym — it resolves to `None`, agreeing with the write
-    /// path ([`crate::store::ScopeStore::ensure_path`] rejects `""`) and keeping
+    /// path (`ScopeStore::ensure_path` rejects `""`) and keeping
     /// an empty/defaulted scope query from silently meaning "the entire store".
     ///
     /// For any other input, segments are separated by `/`. Returns `None` if any
@@ -74,12 +77,13 @@ impl ScopeTree {
     ///
     /// **Whitespace:** each segment is trimmed of ASCII whitespace before lookup,
     /// so `resolve_path(" user:michael")` matches the stored label `user:michael`.
-    /// This diverges from [`crate::store::ScopeStore::ensure_path`], which
+    /// This diverges from `ScopeStore::ensure_path`, which
     /// *rejects* a label with surrounding whitespace (`MemoryError::Conflict`).
     /// The asymmetry is intentional and safe: because `ensure_path` guarantees no
     /// stored label ever carries surrounding whitespace, the trim here can only
     /// recover the un-padded label — it is defensive, not permissive. Use
     /// `ensure_path` when you need the input itself validated rather than coerced.
+    #[must_use]
     pub fn resolve_path(&self, path: &str) -> Option<i64> {
         // Root synonym: the canonical "/" rendered by `path_for_id`. Handled up
         // front so the per-segment loop never sees the two empty segments "/"
@@ -97,10 +101,10 @@ impl ScopeTree {
         for segment in path.split('/') {
             let segment = segment.trim();
             // Shared structural validation (non-empty, no '/', <= 256 bytes) —
-            // the single source of truth in `crate::scope::validate_segment`,
+            // the single source of truth in `me_types::types::validate_segment`,
             // also used by `ScopeStore::ensure_path` on the write path. Any
             // failure is indistinguishable from "not found" here, so map to None.
-            if super::validate_segment(segment).is_err() {
+            if me_types::types::validate_segment(segment).is_err() {
                 return None;
             }
             let child_ids = self.children.get(&current)?;
@@ -118,6 +122,7 @@ impl ScopeTree {
     /// cycle) would otherwise loop forever. We stop the walk the first time an
     /// id repeats. For a valid (acyclic) tree this is byte-identical to a plain
     /// parent-walk — no id ever repeats, so the guard never fires.
+    #[must_use]
     pub fn ancestors(&self, scope_id: i64) -> Vec<i64> {
         let mut result = Vec::new();
         let mut current = Some(scope_id);
@@ -140,6 +145,7 @@ impl ScopeTree {
     /// enqueue ids forever. We skip any id already visited. For a valid
     /// (acyclic) tree this is byte-identical to a plain BFS — each node is
     /// reachable on exactly one path, so the guard never skips a real node.
+    #[must_use]
     pub fn subtree(&self, scope_id: i64) -> Vec<i64> {
         let mut result = Vec::new();
         let mut visited = HashSet::new();
@@ -163,6 +169,7 @@ impl ScopeTree {
     ///
     /// Returns ancestors of `scope_id` PLUS the subtree rooted at `scope_id`.
     /// Deduplicates `scope_id` itself (appears in both ancestors and subtree).
+    #[must_use]
     pub fn inherited(&self, scope_id: i64) -> Vec<i64> {
         let mut result = self.ancestors(scope_id);
         // subtree includes scope_id itself, but ancestors already has it
@@ -176,6 +183,7 @@ impl ScopeTree {
     }
 
     /// Resolve a [`ScopeQuery`] to a set of `scope_ids`.
+    #[must_use]
     pub fn resolve_query(&self, query: &ScopeQuery) -> Option<Vec<i64>> {
         match query {
             ScopeQuery::Exact(path) => self.resolve_path(path).map(|id| vec![id]),
@@ -258,14 +266,24 @@ impl ScopeTree {
     }
 
     /// Snapshot all nodes for serialization.
-    pub(crate) fn to_snapshot(&self) -> crate::types::snapshot::ScopeTreeSnapshot {
-        crate::types::snapshot::ScopeTreeSnapshot {
+    ///
+    /// `pub` (was `pub(crate)` pre-carve, Wave 2 #816 / S2): the facade calls this
+    /// across the new `me-index` crate boundary (`MemoryEngine`'s snapshot-save
+    /// path), which `pub(crate)` cannot reach from a downstream crate.
+    #[must_use]
+    pub fn to_snapshot(&self) -> me_types::types::snapshot::ScopeTreeSnapshot {
+        me_types::types::snapshot::ScopeTreeSnapshot {
             nodes: self.nodes.values().cloned().collect(),
         }
     }
 
-    /// Rebuild tree from a snapshot (same logic as `load` but from snapshot data).
-    pub(crate) fn from_snapshot(snap: &crate::types::snapshot::ScopeTreeSnapshot) -> Self {
+    /// Rebuild tree from a snapshot (same logic as `from_nodes` but from snapshot data).
+    ///
+    /// `pub` (was `pub(crate)` pre-carve, Wave 2 #816 / S2): the facade calls this
+    /// across the new `me-index` crate boundary (`MemoryEngine`'s snapshot-load
+    /// path), which `pub(crate)` cannot reach from a downstream crate.
+    #[must_use]
+    pub fn from_snapshot(snap: &me_types::types::snapshot::ScopeTreeSnapshot) -> Self {
         let (nodes, children) = Self::build_index(snap.nodes.iter().cloned());
         Self { nodes, children }
     }
@@ -274,20 +292,38 @@ impl ScopeTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::schema::{init_schema, migrate, open_memory};
 
     fn setup_tree() -> ScopeTree {
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
-        migrate(&conn, None).unwrap();
-
-        // Create: root -> user:michael -> project:demo
-        //                              -> project:other
-        let store = ScopeStore::new(&conn);
-        store.ensure_path("user:michael/project:demo").unwrap();
-        store.ensure_path("user:michael/project:other").unwrap();
-
-        ScopeTree::load(&conn).unwrap()
+        // In-memory mirror of what `ScopeStore::ensure_path` would create for
+        //   user:michael/project:demo  and  user:michael/project:other
+        // (root id=1, ids assigned depth-first). Built without a SQLite backend so
+        // this stays a me-index unit test (Wave 2 #816 / S2 — me-index is backend-free).
+        ScopeTree::from_nodes(vec![
+            ScopeNode {
+                id: 1,
+                parent_id: None,
+                label: "root".into(),
+                depth: 0,
+            },
+            ScopeNode {
+                id: 2,
+                parent_id: Some(1),
+                label: "user:michael".into(),
+                depth: 1,
+            },
+            ScopeNode {
+                id: 3,
+                parent_id: Some(2),
+                label: "project:demo".into(),
+                depth: 2,
+            },
+            ScopeNode {
+                id: 4,
+                parent_id: Some(2),
+                label: "project:other".into(),
+                depth: 2,
+            },
+        ])
     }
 
     #[test]
@@ -710,62 +746,5 @@ mod tests {
         // walk would loop forever without cycle protection. It must return
         // *something* finite (Some or None) and not hang.
         let _ = tree.path_for_id(10);
-    }
-
-    mod proptest_scope {
-        use super::*;
-        use proptest::prelude::*;
-
-        fn scope_segment() -> impl Strategy<Value = String> {
-            "[a-z]{1,8}:[a-z]{1,8}"
-        }
-
-        fn scope_path(max_depth: usize) -> impl Strategy<Value = String> {
-            proptest::collection::vec(scope_segment(), 1..max_depth).prop_map(|segs| segs.join("/"))
-        }
-
-        proptest! {
-            #![proptest_config(ProptestConfig::with_cases(32))]
-
-            #[test]
-            fn resolve_roundtrip(path in scope_path(4)) {
-                let conn = open_memory().unwrap();
-                init_schema(&conn).unwrap();
-                migrate(&conn, None).unwrap();
-
-                let store = ScopeStore::new(&conn);
-                store.ensure_path(&path).unwrap();
-                let tree = ScopeTree::load(&conn).unwrap();
-
-                let resolved = tree.resolve_path(&path);
-                prop_assert!(resolved.is_some(),
-                    "path '{path}' was created but not resolvable");
-
-                let id = resolved.unwrap();
-                let reconstructed = tree.path_for_id(id);
-                prop_assert_eq!(reconstructed.as_deref(), Some(path.as_str()),
-                    "path_for_id roundtrip failed");
-            }
-
-            #[test]
-            fn ancestors_always_end_at_root(path in scope_path(4)) {
-                let conn = open_memory().unwrap();
-                init_schema(&conn).unwrap();
-                migrate(&conn, None).unwrap();
-
-                let store = ScopeStore::new(&conn);
-                store.ensure_path(&path).unwrap();
-                let tree = ScopeTree::load(&conn).unwrap();
-
-                let id = tree.resolve_path(&path).unwrap();
-                let ancestors = tree.ancestors(id);
-
-                prop_assert!(!ancestors.is_empty());
-                prop_assert_eq!(*ancestors.last().unwrap(), ScopeTree::root_id(),
-                    "ancestor chain should end at root");
-                prop_assert_eq!(ancestors[0], id,
-                    "ancestor chain should start at the node itself");
-            }
-        }
     }
 }

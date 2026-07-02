@@ -21,3 +21,38 @@ pub enum ScopeQuery {
     /// Facts at ancestors + at this scope path's subtree (full inherited context).
     Inherited(String),
 }
+
+/// Maximum byte length of a single scope-path segment (label).
+pub const MAX_SEGMENT_LEN: usize = 256;
+
+/// Validate the *structural* rules a single scope-path segment must satisfy:
+/// non-empty, no embedded `/`, and at most [`MAX_SEGMENT_LEN`] bytes.
+///
+/// This is the single source of truth shared by the two scope APIs that must
+/// agree on what a valid segment is: the **write** path (`ScopeStore::ensure_path`,
+/// which wraps the failure reason in a `ConflictError::ScopeLabel`) and the **read**
+/// path (`ScopeTree::resolve_path`, which maps any failure to `None`). It is homed in
+/// `me-types` (L0) so both the `SQLite` backend and the in-memory index depend on it
+/// *downward* — this is what keeps the graph/scope ↔ store carve acyclic (Wave 2
+/// #816 / S2).
+///
+/// The "no surrounding whitespace" rule is intentionally *not* enforced here: it is a
+/// write-path-only constraint applied by `ScopeStore::validate_label`, so the read
+/// path can keep its defensive trim (a segment with incidental whitespace can never
+/// match a stored — already-trimmed — label anyway).
+///
+/// # Errors
+///
+/// Returns a static reason string when `segment` violates a structural rule.
+pub fn validate_segment(segment: &str) -> std::result::Result<(), &'static str> {
+    if segment.is_empty() {
+        return Err("scope label must not be empty");
+    }
+    if segment.contains('/') {
+        return Err("scope label must not contain '/'");
+    }
+    if segment.len() > MAX_SEGMENT_LEN {
+        return Err("scope label must be at most 256 bytes");
+    }
+    Ok(())
+}

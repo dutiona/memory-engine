@@ -3,11 +3,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use rusqlite::Connection;
 
-use crate::error::Result;
-use crate::store::edges::EdgeStore;
-use crate::types::RelationType;
+use me_types::error::Result;
+use me_types::types::RelationType;
 
 /// Hard upper bound on the number of edges accepted from a single snapshot
 /// sidecar (50M).
@@ -34,7 +32,7 @@ const MAX_SNAPSHOT_EDGES: usize = 50_000_000;
 /// materializing tens of millions of edge descriptors.
 fn check_edge_count_bound(count: usize) -> Result<()> {
     if count > MAX_SNAPSHOT_EDGES {
-        return Err(crate::error::MemoryError::Internal(format!(
+        return Err(me_types::error::MemoryError::Internal(format!(
             "snapshot edge count {count} exceeds the maximum of {MAX_SNAPSHOT_EDGES}; \
              discarding sidecar and rebuilding from the database"
         )));
@@ -101,13 +99,13 @@ impl MemoryGraph {
     /// scans O(E) and removes at most one edge. Short-circuits after the
     /// first match.
     ///
-    /// In-memory twin of the single-edge store primitive
-    /// [`EdgeStore::expire`](crate::store::edges::EdgeStore::expire), reached via
-    /// [`MemoryEngine::expire_edge`]: when one edge is soft-expired in the store
-    /// *without* expiring either endpoint fact, this drops the matching edge from
+    /// In-memory twin of the single-edge store primitive `EdgeStore::expire`,
+    /// reached via `MemoryEngine::expire_edge`: when one edge is soft-expired in
+    /// the store *without* expiring either endpoint fact, this drops the matching edge from
     /// the derived graph cache so reads (degree, neighbors, components,
     /// `explain_fact` context) stay consistent — the edge counterpart of
-    /// [`Self::remove_node`]. Its fact-level sibling
+    /// `remove_node` (`#[cfg(feature = "archive")]`-gated, so not always a
+    /// resolvable intra-doc link). Its fact-level sibling
     /// [`remove_edges_by_fact`](Self::remove_edges_by_fact) handles the bulk
     /// fact-supersession path; this single-edge one is now wired through
     /// `MemoryEngine::expire_edge` (#879).
@@ -263,29 +261,15 @@ impl MemoryGraph {
         self.graph.edge_count()
     }
 
-    /// Rebuild the graph from all active (non-expired) edges in `SQLite`.
-    ///
-    /// This is the recovery path if the in-memory graph ever drifts from
-    /// the database. Called on `MemoryEngine::open`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Storage` on SQL failure.
-    pub fn load_from_db(conn: &Connection) -> Result<Self> {
-        let store = EdgeStore::new(conn);
-        let active_edges = store.list_active()?;
-        Ok(Self::from_active_edges(&active_edges))
-    }
-
     /// Build the graph from an already-loaded set of active edges.
     ///
-    /// The connection-free core of [`load_from_db`](Self::load_from_db): the async
-    /// engine rebuilds its in-memory graph from the `list_active_edges` port read
-    /// (e.g. after consolidation or a dream cycle expires facts) without reaching a
-    /// raw `&Connection`. Isolated nodes are not represented (edges only), matching
-    /// `load_from_db` semantics exactly.
+    /// The connection-free core of the backend loader (the async engine rebuilds
+    /// its in-memory graph from the `list_active_edges` port read — e.g. after
+    /// consolidation or a dream cycle expires facts, or on `MemoryEngine::open`'s
+    /// recovery path when there is no snapshot — without reaching a raw
+    /// `&Connection`). Isolated nodes are not represented (edges only).
     #[must_use]
-    pub fn from_active_edges(active_edges: &[crate::types::Edge]) -> Self {
+    pub fn from_active_edges(active_edges: &[me_types::types::Edge]) -> Self {
         let mut graph = Self::new();
         for edge in active_edges {
             graph.add_edges_from_iter(
@@ -302,8 +286,13 @@ impl MemoryGraph {
     /// Extract all edges for snapshotting.
     ///
     /// No isolated nodes — matches `load_from_db` semantics (edges only).
-    pub(crate) fn to_snapshot(&self) -> crate::types::snapshot::GraphSnapshot {
-        use crate::types::snapshot::{GraphEdgeSnapshot, GraphSnapshot};
+    ///
+    /// `pub` (was `pub(crate)` pre-carve, Wave 2 #816 / S2): the facade calls this
+    /// across the new `me-index` crate boundary (`MemoryEngine`'s snapshot-save
+    /// path), which `pub(crate)` cannot reach from a downstream crate.
+    #[must_use]
+    pub fn to_snapshot(&self) -> me_types::types::snapshot::GraphSnapshot {
+        use me_types::types::snapshot::{GraphEdgeSnapshot, GraphSnapshot};
         let edges = self
             .graph
             .edge_references()
@@ -330,8 +319,8 @@ impl MemoryGraph {
     /// *unkeyed* (a corruption check, not an authenticity control), so a local
     /// actor able to write the sidecar — or plain on-disk corruption — can present
     /// a structurally-invalid edge list. This builds the same edge-only graph as
-    /// [`load_from_db`](Self::load_from_db) and validates against **exactly**
-    /// `load_from_db`'s trust boundary — neither looser nor stricter.
+    /// the backend loader (`load_from_db`) and validates against **exactly**
+    /// that loader's trust boundary — neither looser nor stricter.
     ///
     /// That boundary is the `edges.source_fact_id/target_fact_id REFERENCES
     /// facts(id)` foreign key, which `load_from_db` relies on to guarantee every
@@ -349,7 +338,7 @@ impl MemoryGraph {
     ///
     /// Three defense-in-depth gates (#257, #412, #499):
     ///
-    /// 1. **Count bound** — reject more than [`MAX_SNAPSHOT_EDGES`] edges before
+    /// 1. **Count bound** — reject more than `MAX_SNAPSHOT_EDGES` edges before
     ///    any per-edge allocation (CWE-400 / CWE-770: unbounded petgraph/`HashMap`
     ///    growth at cold start). This is a cheap, fingerprint-less function-level
     ///    invariant, *not* the primary runtime defense: at runtime the on-disk
@@ -371,13 +360,17 @@ impl MemoryGraph {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Internal`](crate::error::MemoryError::Internal) when
+    /// Returns [`MemoryError::Internal`](me_types::error::MemoryError::Internal) when
     /// the edge count exceeds the cap, any edge carries a non-positive
     /// `source`/`target`/`edge_id`, or any edge `source`/`target` is absent from
     /// `existing_fact_ids`. The caller treats this as "discard the sidecar and
     /// rebuild from the authoritative database"; it never panics.
-    pub(crate) fn from_snapshot(
-        snap: &crate::types::snapshot::GraphSnapshot,
+    ///
+    /// `pub` (was `pub(crate)` pre-carve, Wave 2 #816 / S2): the facade calls this
+    /// across the new `me-index` crate boundary (`MemoryEngine`'s snapshot-load
+    /// path), which `pub(crate)` cannot reach from a downstream crate.
+    pub fn from_snapshot(
+        snap: &me_types::types::snapshot::GraphSnapshot,
         existing_fact_ids: &HashSet<i64>,
     ) -> Result<Self> {
         check_edge_count_bound(snap.edges.len())?;
@@ -386,7 +379,7 @@ impl MemoryGraph {
         for edge in &snap.edges {
             // Gate 2: cheap structural pre-filter — rowids are strictly positive.
             if edge.source <= 0 || edge.target <= 0 || edge.edge_id <= 0 {
-                return Err(crate::error::MemoryError::Internal(format!(
+                return Err(me_types::error::MemoryError::Internal(format!(
                     "snapshot edge {edge_id} carries a non-positive rowid \
                      (source={source}, target={target}, edge_id={edge_id}); \
                      discarding sidecar and rebuilding from the database",
@@ -401,7 +394,7 @@ impl MemoryGraph {
             if !existing_fact_ids.contains(&edge.source)
                 || !existing_fact_ids.contains(&edge.target)
             {
-                return Err(crate::error::MemoryError::Internal(format!(
+                return Err(me_types::error::MemoryError::Internal(format!(
                     "snapshot edge {edge_id} references a fact id absent from the \
                      existing-fact set (source={source}, target={target}); discarding \
                      sidecar and rebuilding from the database",
@@ -451,10 +444,7 @@ impl Default for MemoryGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-
-    use crate::store::schema::{init_schema, open_memory};
-    use crate::types::{NewEdge, RelationType};
+    use me_types::types::RelationType;
 
     fn make_edge_data(id: i64, rel: &str) -> EdgeData {
         EdgeData {
@@ -818,16 +808,16 @@ mod tests {
         // Baseline: a well-formed snapshot (positive ids, within the cap, all
         // endpoints present in the existing fact set) builds the graph faithfully —
         // the revalidation does not reject good data.
-        let snap = crate::types::snapshot::GraphSnapshot {
+        let snap = me_types::types::snapshot::GraphSnapshot {
             edges: vec![
-                crate::types::snapshot::GraphEdgeSnapshot {
+                me_types::types::snapshot::GraphEdgeSnapshot {
                     edge_id: 1,
                     source: 10,
                     target: 20,
                     relation_type: "supplements".into(),
                     weight: 0.5,
                 },
-                crate::types::snapshot::GraphEdgeSnapshot {
+                me_types::types::snapshot::GraphEdgeSnapshot {
                     edge_id: 2,
                     source: 20,
                     target: 30,
@@ -855,8 +845,8 @@ mod tests {
         // but is expired: it is present in `existing` (the `SELECT id FROM facts`
         // set), so the snapshot edge that mirrors what `load_from_db` would load MUST
         // be accepted — never falsely rejected into a needless full DB rebuild.
-        let snap = crate::types::snapshot::GraphSnapshot {
-            edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
+        let snap = me_types::types::snapshot::GraphSnapshot {
+            edges: vec![me_types::types::snapshot::GraphEdgeSnapshot {
                 edge_id: 1,
                 source: 10, // active synthetic
                 target: 20, // existing-but-EXPIRED source
@@ -886,8 +876,8 @@ mod tests {
         let existing: HashSet<i64> = [10, 20].into_iter().collect();
 
         // Phantom target (30 does not exist).
-        let snap_target = crate::types::snapshot::GraphSnapshot {
-            edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
+        let snap_target = me_types::types::snapshot::GraphSnapshot {
+            edges: vec![me_types::types::snapshot::GraphEdgeSnapshot {
                 edge_id: 1,
                 source: 10,
                 target: 30,
@@ -898,14 +888,14 @@ mod tests {
         assert!(
             matches!(
                 MemoryGraph::from_snapshot(&snap_target, &existing),
-                Err(crate::error::MemoryError::Internal(_))
+                Err(me_types::error::MemoryError::Internal(_))
             ),
             "positive-but-nonexistent target must be rejected as a phantom node"
         );
 
         // Phantom source (99 does not exist).
-        let snap_source = crate::types::snapshot::GraphSnapshot {
-            edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
+        let snap_source = me_types::types::snapshot::GraphSnapshot {
+            edges: vec![me_types::types::snapshot::GraphEdgeSnapshot {
                 edge_id: 1,
                 source: 99,
                 target: 20,
@@ -916,7 +906,7 @@ mod tests {
         assert!(
             matches!(
                 MemoryGraph::from_snapshot(&snap_source, &existing),
-                Err(crate::error::MemoryError::Internal(_))
+                Err(me_types::error::MemoryError::Internal(_))
             ),
             "positive-but-nonexistent source must be rejected as a phantom node"
         );
@@ -932,8 +922,8 @@ mod tests {
         // fires before the set membership lookup, so an empty existing set suffices.
         let existing: HashSet<i64> = HashSet::new();
         for (source, target) in [(0, 20), (-1, 20), (10, 0), (10, -5)] {
-            let snap = crate::types::snapshot::GraphSnapshot {
-                edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
+            let snap = me_types::types::snapshot::GraphSnapshot {
+                edges: vec![me_types::types::snapshot::GraphEdgeSnapshot {
                     edge_id: 1,
                     source,
                     target,
@@ -944,7 +934,7 @@ mod tests {
             assert!(
                 matches!(
                     MemoryGraph::from_snapshot(&snap, &existing),
-                    Err(crate::error::MemoryError::Internal(_))
+                    Err(me_types::error::MemoryError::Internal(_))
                 ),
                 "non-positive endpoint ({source}, {target}) must be rejected"
             );
@@ -956,8 +946,8 @@ mod tests {
         // An edge_id is a SQLite rowid too; <= 0 signals a corrupt/tampered
         // edge record. Endpoints are valid + existing so only the edge_id triggers.
         let existing: HashSet<i64> = [10, 20].into_iter().collect();
-        let snap = crate::types::snapshot::GraphSnapshot {
-            edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
+        let snap = me_types::types::snapshot::GraphSnapshot {
+            edges: vec![me_types::types::snapshot::GraphEdgeSnapshot {
                 edge_id: 0,
                 source: 10,
                 target: 20,
@@ -967,7 +957,7 @@ mod tests {
         };
         assert!(matches!(
             MemoryGraph::from_snapshot(&snap, &existing),
-            Err(crate::error::MemoryError::Internal(_))
+            Err(me_types::error::MemoryError::Internal(_))
         ));
     }
 
@@ -985,157 +975,7 @@ mod tests {
         assert!(check_edge_count_bound(MAX_SNAPSHOT_EDGES).is_ok());
         let err = check_edge_count_bound(MAX_SNAPSHOT_EDGES + 1)
             .expect_err("over-cap edge count must be rejected");
-        assert!(matches!(err, crate::error::MemoryError::Internal(_)));
-    }
-
-    #[test]
-    fn load_from_db_skips_expired() {
-        let conn = setup_db();
-        let store = EdgeStore::new(&conn);
-
-        let now = Utc::now();
-        let e1 = NewEdge {
-            source_fact_id: 1,
-            target_fact_id: 2,
-            relation_type: "active".into(),
-            weight: 1.0,
-            scope_id: 1,
-            t_created: now,
-            t_expired: None,
-        };
-        let e2 = NewEdge {
-            source_fact_id: 2,
-            target_fact_id: 3,
-            relation_type: "expired".into(),
-            weight: 1.0,
-            scope_id: 1,
-            t_created: now,
-            t_expired: None,
-        };
-
-        let id1 = store.insert(&e1).unwrap();
-        let id2 = store.insert(&e2).unwrap();
-        store.expire(id2, now).unwrap();
-
-        let graph = MemoryGraph::load_from_db(&conn).unwrap();
-        assert_eq!(graph.edge_count(), 1);
-        assert!(graph.has_node(1));
-        assert!(graph.has_node(2));
-        assert!(!graph.has_node(3)); // only appeared in the expired edge
-
-        // The active edge should be loadable
-        let neighbors = graph.neighbors(1);
-        assert_eq!(neighbors, vec![2]);
-
-        // Verify we loaded the right edge_id
-        let _ = id1; // used for insert, graph has it as EdgeData.edge_id
-    }
-
-    #[test]
-    fn load_from_db_empty_edges_table() {
-        // #499 (graph/testing-load-from-db-edge-cases): an edges table with no
-        // active rows yields an empty graph — no nodes, no edges, no panic.
-        let conn = setup_db();
-        let graph = MemoryGraph::load_from_db(&conn).unwrap();
-        assert_eq!(graph.edge_count(), 0);
-        assert_eq!(graph.node_count(), 0);
-        assert!(!graph.has_node(1));
-    }
-
-    #[test]
-    fn load_from_db_preserves_edge_weight() {
-        // #499: weight preservation through the DB load path. Insert an edge with a
-        // distinctive non-unit weight and assert it round-trips into the loaded
-        // graph's `EdgeData.weight` (observed via the snapshot projection).
-        let conn = setup_db();
-        let store = EdgeStore::new(&conn);
-        let now = Utc::now();
-        store
-            .insert(&NewEdge {
-                source_fact_id: 1,
-                target_fact_id: 2,
-                relation_type: "weighted".into(),
-                weight: 0.625,
-                scope_id: 1,
-                t_created: now,
-                t_expired: None,
-            })
-            .unwrap();
-
-        let graph = MemoryGraph::load_from_db(&conn).unwrap();
-        assert_eq!(graph.edge_count(), 1);
-
-        let snap = graph.to_snapshot();
-        assert_eq!(snap.edges.len(), 1);
-        let e = &snap.edges[0];
-        assert_eq!(e.source, 1);
-        assert_eq!(e.target, 2);
-        assert_eq!(e.relation_type, "weighted");
-        assert!((e.weight - 0.625).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn load_from_db_parallel_edges() {
-        // #499: two active edges with the same (source, target) are both loaded —
-        // petgraph is a multigraph, so a parallel edge must not collapse. Each
-        // edge keeps its own edge_id/relation_type.
-        let conn = setup_db();
-        let store = EdgeStore::new(&conn);
-        let now = Utc::now();
-        store
-            .insert(&NewEdge {
-                source_fact_id: 1,
-                target_fact_id: 2,
-                relation_type: "first".into(),
-                weight: 1.0,
-                scope_id: 1,
-                t_created: now,
-                t_expired: None,
-            })
-            .unwrap();
-        store
-            .insert(&NewEdge {
-                source_fact_id: 1,
-                target_fact_id: 2,
-                relation_type: "second".into(),
-                weight: 1.0,
-                scope_id: 1,
-                t_created: now,
-                t_expired: None,
-            })
-            .unwrap();
-
-        let graph = MemoryGraph::load_from_db(&conn).unwrap();
-        // Both parallel edges survive (multigraph), but only one node pair.
-        assert_eq!(graph.edge_count(), 2);
-        assert_eq!(graph.node_count(), 2);
-        // 1 → 2 appears twice in the outgoing neighbor list.
-        assert_eq!(graph.neighbors(1), vec![2, 2]);
-        assert_eq!(graph.degree(1), 2);
-        assert_eq!(graph.degree(2), 2);
-
-        // Both relation types are present, edge_ids distinct.
-        let snap = graph.to_snapshot();
-        let mut rels: Vec<_> = snap.edges.iter().map(|e| e.relation_type.clone()).collect();
-        rels.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        assert_eq!(rels[0], "first");
-        assert_eq!(rels[1], "second");
-        let ids: HashSet<i64> = snap.edges.iter().map(|e| e.edge_id).collect();
-        assert_eq!(ids.len(), 2);
-    }
-
-    fn setup_db() -> Connection {
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
-        // Insert dummy facts for FK constraints
-        for (content, hash) in &[("f1", "h1"), ("f2", "h2"), ("f3", "h3")] {
-            conn.execute(
-                "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, importance, access_count, last_accessed, metadata)
-                 VALUES (?1, ?2, X'00000000', 'episodic', datetime('now'), 0.5, 0, datetime('now'), '{}')",
-                rusqlite::params![content, hash],
-            ).unwrap();
-        }
-        conn
+        assert!(matches!(err, me_types::error::MemoryError::Internal(_)));
     }
 }
 
