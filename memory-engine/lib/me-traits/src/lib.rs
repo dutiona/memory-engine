@@ -1,8 +1,25 @@
+//! # me-traits
+//!
+//! Layer-0.5 (L0.5) of the memory-engine crate workspace (Wave 2, #816).
+//!
+//! The consumer/contract traits the engine delegates all LLM/network work to
+//! (`EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`,
+//! `PersistenceClassifier`, `Reranker`, `DreamCycle`, `DeltaProposer`,
+//! `InsightStream`), plus the read-only `CycleCtx` handle and the non-DTO companion
+//! types. Depends only on `me-types` — a thin leaf over the data layer.
+
+// Panic-safety gate (#725): `unwrap_used = "deny"` (workspace lints) forbids
+// `.unwrap()` in production paths. This crate's own `#[cfg(test)]` tests are exempt.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 use async_trait::async_trait;
 
-use crate::error::Result;
-use crate::search::hybrid::SearchResult;
-use crate::types::{ClassifierInput, ConsolidationProposal, EmbeddingFingerprint, Fact};
+use me_types::error::Result;
+use me_types::types::cycle_report::{CycleMetadata, CycleReport, TimeWindow};
+use me_types::types::search::SearchResult;
+use me_types::types::{
+    ClassifierInput, ConsolidationProposal, EmbeddingFingerprint, Fact, OutcomeCounts,
+};
 
 // --- Phase 1: Embedding provider (fully used) ---
 
@@ -47,7 +64,7 @@ pub trait EmbeddingProvider: Send + Sync {
     /// providers (`Mock`, `Hash`, `Passthrough`) need no change and queries embed
     /// identically to documents.
     ///
-    /// The **core never calls this** — [`MemoryQuery`](crate::MemoryQuery) carries a
+    /// The **core never calls this** — `MemoryQuery` carries a
     /// pre-computed vector, so query embedding happens only at the consumer layer
     /// (MCP/CLI). The method lives on the provider trait so that consumer layer has a
     /// single place to express the asymmetry.
@@ -105,7 +122,7 @@ pub trait EmbeddingProvider: Send + Sync {
 /// feed [`SummaryGenerator::summarize`] a slice of [`SummarizableContent`].
 ///
 /// Summaries are embedded by the [`EmbeddingProvider`] passed alongside the
-/// generator into [`consolidate`](crate::engine::MemoryEngine::consolidate), so
+/// generator into `consolidate`, so
 /// summary text shares the fact/summary vector space. The generator only produces
 /// text — it never embeds (issue #116: embedding lived here as a duplicate of
 /// [`EmbeddingProvider::embed`]).
@@ -156,14 +173,14 @@ impl<'a> SummarizableContent<'a> {
 ///
 /// This is the seam that makes the consolidation backend **pluggable**: an
 /// `LlmDreamCycle` (a [`DreamCycle`] impl) delegates the "what to merge" decision to
-/// a `DeltaProposer`, while the shipped [`DefaultDreamCycle`](crate::DefaultDreamCycle)
+/// a `DeltaProposer`, while the shipped `DefaultDreamCycle`
 /// makes that decision deterministically in pure Rust. Choosing a backend is choosing
 /// a `&dyn DreamCycle`; choosing *this* trait's impl selects the LLM that drives one.
 ///
 /// The proposer returns **ids + summary text only** — it does not embed and does not
 /// touch the store. The owning `LlmDreamCycle` clamps each group's `source_ids` to the
 /// window it fed, embeds the summary via its own [`EmbeddingProvider`], and emits a
-/// [`CycleDelta::Synthesize`](crate::engine::cycle::CycleDelta::Synthesize). This keeps
+/// `CycleDelta::Synthesize`. This keeps
 /// the engine LLM-free and the proposer side-effect-free.
 ///
 /// Requires `Send + Sync`: like the other consumer providers, a proposer is shared
@@ -191,13 +208,13 @@ pub trait ConflictArbiter: Send + Sync {
     /// Decide how to resolve a conflict between an existing and a new fact.
     ///
     /// **Arbiter input caveat:** when called from
-    /// [`MemoryEngine::resolve_conflict`](crate::MemoryEngine::resolve_conflict),
+    /// `MemoryEngine::resolve_conflict`,
     /// `new_fact` is a pre-insert synthetic [`Fact`] built via
-    /// [`Fact::from_new_for_arbiter`](crate::types::Fact) from a
-    /// [`NewFact`](crate::types::NewFact) before it has been persisted or scored.
+    /// [`Fact::from_new_for_arbiter`](me_types::types::Fact) from a
+    /// [`NewFact`](me_types::types::NewFact) before it has been persisted or scored.
     /// Its `id` is always `0` (not yet assigned by the DB) and `importance_score`
     /// is always the
-    /// [`Fact::UNSCORED_IMPORTANCE`](crate::types::Fact::UNSCORED_IMPORTANCE)
+    /// [`Fact::UNSCORED_IMPORTANCE`](me_types::types::Fact::UNSCORED_IMPORTANCE)
     /// sentinel (`0.5`), NOT the eventual stored score. Implementations must rely
     /// on `content`, `fact_type`, `base_importance`, and `metadata` — never on
     /// `id` or `importance_score`.
@@ -268,7 +285,7 @@ pub trait PersistenceClassifier: Send + Sync {
 ///
 /// These invariants are enforced at runtime by `MemoryEngine::query()`.
 /// Violations produce `MemoryError::Reranker` with the matching
-/// [`RerankerError`](crate::error::RerankerError) variant
+/// [`RerankerError`](me_types::error::RerankerError) variant
 /// (`OutputTooLong`, `OutOfBoundsIndex`, `DuplicateIndex`, `NonFiniteScore`).
 pub trait Reranker: Send + Sync {
     /// Rerank candidates for the given query text.
@@ -280,7 +297,7 @@ pub trait Reranker: Send + Sync {
     /// # Errors
     ///
     /// Returns `MemoryError::Reranker` (wrapping
-    /// [`RerankerError::Provider`](crate::error::RerankerError::Provider)) if
+    /// [`RerankerError::Provider`](me_types::error::RerankerError::Provider)) if
     /// reranking fails (e.g., API call, inference error).
     fn rerank(&self, query: &str, candidates: &[SearchResult]) -> Result<Vec<(usize, f64)>>;
 
@@ -309,30 +326,74 @@ pub trait InsightStream: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if recording fails.
-    fn record(&self, insight: crate::types::Insight) -> Result<()>;
+    fn record(&self, insight: me_types::types::Insight) -> Result<()>;
+}
+
+/// The read-capability handle a [`DreamCycle`] receives during [`run`](DreamCycle::run).
+///
+/// `DreamCycle::run` is **planning**, not writing: it reads the time window and prior
+/// state and returns a delta-based [`CycleReport`] for the caller to apply. `CycleCtx`
+/// is exactly the read surface those impls use. It is implemented by the engine's
+/// concrete `CycleContext`; abstracting it behind
+/// this trait is what lets the `DreamCycle` contract name no engine/consolidation type
+/// (Wave 2 #816 — the trait layer stays a leaf over the data layer). The write
+/// capabilities (consolidate / forget / promote) run later, in the engine's apply path,
+/// not through this handle.
+///
+/// `Send + Sync` (like every sibling consumer trait, #631/#386): a `&dyn CycleCtx` is
+/// borrowed across `.await` inside the `Send` cycle future.
+#[async_trait]
+pub trait CycleCtx: Send + Sync {
+    /// The window of facts this cycle was asked to process.
+    fn time_window(&self) -> TimeWindow;
+
+    /// Previously promoted wisdom (active, pinned) — read to avoid re-detecting
+    /// already-promoted patterns (generative-output isolation).
+    fn prior_wisdom(&self) -> &[Fact];
+
+    /// Metadata of recent prior cycles (newest last), for cycle-id sequencing and
+    /// drift detection against existing wisdom.
+    fn prior_reports(&self) -> &[CycleMetadata];
+
+    /// The cycle's input set: facts in `window` not already processed by a prior cycle
+    /// (the `dream_cycle` marker excludes them).
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the read fails.
+    async fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>>;
+
+    /// Aggregated outcome counts for many facts in a single query (batch rescoring).
+    /// Facts with no recorded outcomes (or unknown ids) are absent from the map;
+    /// callers treat a missing key as
+    /// [`OutcomeCounts::default`](me_types::types::OutcomeCounts).
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the query fails.
+    async fn outcome_counts_batch(
+        &self,
+        fact_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, OutcomeCounts>>;
 }
 
 /// Periodic batch processing: consolidation, pattern detection, promotion.
 ///
-/// Consumer-implemented. Called on a schedule (e.g., end of session, daily).
-/// The implementation drives the full pipeline through a
-/// [`CycleContext`](crate::engine::cycle::CycleContext) — the retrieve-before-reflect
-/// wrapper around the capability-restricted
-/// [`DreamContext`](crate::engine::cognitive::DreamContext): it exposes the
-/// query/consolidate/promote capability bag via
-/// [`dream()`](crate::engine::cycle::CycleContext::dream) **plus** the retrieved
-/// prior wisdom, prior cycle metadata, and the time window to process.
+/// Consumer-implemented. Called on a schedule (e.g., end of session, daily). `run`
+/// receives a [`CycleCtx`] — the retrieve-before-reflect read surface (time window +
+/// prior wisdom + prior cycle metadata, plus `list_undreamt_in_period` /
+/// `outcome_counts_batch`). The engine's concrete
+/// `CycleContext` implements it.
 ///
-/// `run` **proposes** mutations as a delta-based [`CycleReport`](crate::CycleReport);
+/// `run` **proposes** mutations as a delta-based `CycleReport`;
 /// it does not write to the store. The caller applies the report via
-/// [`MemoryEngine::apply_cycle_report`](crate::MemoryEngine::apply_cycle_report) — the
+/// `MemoryEngine::apply_cycle_report` — the
 /// produce/apply split is what enables a human review gate before promotion.
 ///
 /// Passed as `&dyn DreamCycle` per-call (not stored in the engine).
 ///
-/// `run` is async (`#[async_trait]`): the cycle drives the engine through the
-/// now-async [`DreamContext`](crate::engine::cognitive::DreamContext) capability bag
-/// (query / consolidate / forget / promote all await the storage port).
+/// `run` is async (`#[async_trait]`): the [`CycleCtx`] read methods await the storage
+/// port.
 ///
 /// The `Send + Sync` supertrait bound (#631) keeps the engine's
 /// `run_dream_cycle_guarded(&self, cycle: &dyn DreamCycle)` future `Send`: borrowing a
@@ -346,30 +407,25 @@ pub trait InsightStream: Send + Sync {
 pub trait DreamCycle: Send + Sync {
     /// Run one cycle of the cognitive pipeline, returning a delta-based report.
     ///
-    /// The [`CycleContext`](crate::engine::cycle::CycleContext) provides read access
-    /// and consolidation delegation via
-    /// [`dream()`](crate::engine::cycle::CycleContext::dream), plus retrieve-before-reflect
-    /// prior state.
+    /// `ctx` is the [`CycleCtx`] read surface (the engine passes its concrete
+    /// `CycleContext`).
     ///
     /// # Contract
     ///
     /// **Every fact the cycle touches — selects for its window, adjusts (`AdjustScore`),
     /// or tags (`TagOutcome`) — MUST appear in
-    /// [`CycleMetadata::processed_ids`](crate::CycleMetadata), whether or not it produced
+    /// `CycleMetadata::processed_ids`, whether or not it produced
     /// a delta.** At apply time those ids are stamped with the `dream_cycle` marker, which
     /// (a) makes a re-run idempotent and (b) removes them from the #209 caller-write
-    /// signal ([`MemoryEngine::run_dream_cycle_guarded`](crate::MemoryEngine::run_dream_cycle_guarded)).
+    /// signal (`MemoryEngine::run_dream_cycle_guarded`).
     /// An implementation that omits a selected-but-no-delta fact leaves it permanently
     /// "caller-written" — the guarded cycle would then defer forever. The shipped
-    /// [`DefaultDreamCycle`](crate::DefaultDreamCycle) satisfies this by construction.
+    /// `DefaultDreamCycle` satisfies this by construction.
     ///
     /// # Errors
     ///
     /// Returns an error if the cycle fails.
-    async fn run(
-        &self,
-        ctx: &crate::engine::cycle::CycleContext<'_>,
-    ) -> Result<crate::engine::cycle::CycleReport>;
+    async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport>;
 }
 
 /// Configuration for the consolidation process.
@@ -426,8 +482,8 @@ impl ConsolidationConfig {
     /// Validate configuration parameters.
     ///
     /// Enforced at the consolidation entry point
-    /// ([`MemoryEngine::consolidate`](crate::MemoryEngine::consolidate)), mirroring
-    /// [`ForgetPolicy::validate`](crate::forgetting::ForgetPolicy::validate) at the
+    /// (`MemoryEngine::consolidate`), mirroring
+    /// `ForgetPolicy::validate` at the
     /// forget entry point.
     ///
     /// # Errors
@@ -437,7 +493,7 @@ impl ConsolidationConfig {
     /// if `min_cluster_size < 2` (a cluster requires at least two members to be
     /// fused into a summary).
     pub fn validate(&self) -> Result<()> {
-        use crate::error::{ConflictError, MemoryError};
+        use me_types::error::{ConflictError, MemoryError};
 
         if !self.dedup_threshold.is_finite() || !(0.0..=1.0).contains(&self.dedup_threshold) {
             return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
@@ -524,7 +580,7 @@ pub struct ConflictResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::FactType;
+    use me_types::types::FactType;
 
     fn stub_classifier_input() -> ClassifierInput {
         ClassifierInput {
@@ -663,11 +719,11 @@ mod tests {
     fn embedding_provider_is_object_safe() {
         struct Dummy;
         impl EmbeddingProvider for Dummy {
-            fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
+            fn embed(&self, _text: &str) -> me_types::error::Result<Vec<f32>> {
                 Ok(vec![0.0])
             }
-            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            fn fingerprint(&self) -> me_types::types::EmbeddingFingerprint {
+                me_types::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
         let provider: &dyn EmbeddingProvider = &Dummy;
@@ -683,7 +739,7 @@ mod tests {
             fn summarize(
                 &self,
                 _items: &[SummarizableContent<'_>],
-            ) -> crate::error::Result<String> {
+            ) -> me_types::error::Result<String> {
                 Ok(String::new())
             }
         }
@@ -694,7 +750,7 @@ mod tests {
     fn conflict_arbiter_is_object_safe() {
         struct Dummy;
         impl ConflictArbiter for Dummy {
-            fn arbitrate(&self, _old: &Fact, _new: &Fact) -> crate::error::Result<CrudDecision> {
+            fn arbitrate(&self, _old: &Fact, _new: &Fact) -> me_types::error::Result<CrudDecision> {
                 Ok(CrudDecision::Noop)
             }
         }
@@ -718,7 +774,7 @@ mod tests {
                 &self,
                 _query: &str,
                 _candidates: &[SearchResult],
-            ) -> crate::error::Result<Vec<(usize, f64)>> {
+            ) -> me_types::error::Result<Vec<(usize, f64)>> {
                 Ok(vec![])
             }
             fn name(&self) -> &'static str {
@@ -735,12 +791,12 @@ mod tests {
     fn embed_batch_default_loops_embed() {
         struct Counter(std::sync::atomic::AtomicUsize);
         impl EmbeddingProvider for Counter {
-            fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
+            fn embed(&self, _text: &str) -> me_types::error::Result<Vec<f32>> {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(vec![1.0, 2.0])
             }
-            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-                crate::types::EmbeddingFingerprint::new("mock", "test", 2)
+            fn fingerprint(&self) -> me_types::types::EmbeddingFingerprint {
+                me_types::types::EmbeddingFingerprint::new("mock", "test", 2)
             }
         }
         let c = Counter(std::sync::atomic::AtomicUsize::new(0));
@@ -756,11 +812,11 @@ mod tests {
     fn embed_batch_empty_returns_empty() {
         struct Dummy;
         impl EmbeddingProvider for Dummy {
-            fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
+            fn embed(&self, _text: &str) -> me_types::error::Result<Vec<f32>> {
                 Ok(vec![0.0])
             }
-            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            fn fingerprint(&self) -> me_types::types::EmbeddingFingerprint {
+                me_types::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
         assert!(Dummy.embed_batch(&[]).unwrap().is_empty());
@@ -770,13 +826,13 @@ mod tests {
     fn embed_batch_propagates_error() {
         struct Failing;
         impl EmbeddingProvider for Failing {
-            fn embed(&self, _text: &str) -> crate::error::Result<Vec<f32>> {
-                Err(crate::error::MemoryError::Conflict(
-                    crate::error::ConflictError::Arbitration("boom".into()),
+            fn embed(&self, _text: &str) -> me_types::error::Result<Vec<f32>> {
+                Err(me_types::error::MemoryError::Conflict(
+                    me_types::error::ConflictError::Arbitration("boom".into()),
                 ))
             }
-            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            fn fingerprint(&self) -> me_types::types::EmbeddingFingerprint {
+                me_types::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
         assert!(Failing.embed_batch(&["a"]).is_err());
@@ -792,11 +848,11 @@ mod tests {
         // unaffected by the asymmetric trait extension.
         struct Symmetric;
         impl EmbeddingProvider for Symmetric {
-            fn embed(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+            fn embed(&self, text: &str) -> me_types::error::Result<Vec<f32>> {
                 Ok(vec![text.len() as f32])
             }
-            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            fn fingerprint(&self) -> me_types::types::EmbeddingFingerprint {
+                me_types::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
         let p = Symmetric;
@@ -815,17 +871,17 @@ mod tests {
             query_calls: std::sync::atomic::AtomicUsize,
         }
         impl EmbeddingProvider for QueryCounter {
-            fn embed(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+            fn embed(&self, text: &str) -> me_types::error::Result<Vec<f32>> {
                 Ok(vec![text.len() as f32])
             }
-            fn embed_query(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+            fn embed_query(&self, text: &str) -> me_types::error::Result<Vec<f32>> {
                 self.query_calls
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Simulate a query prefix: documents would NOT see this.
                 self.embed(&format!("Q:{text}"))
             }
-            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            fn fingerprint(&self) -> me_types::types::EmbeddingFingerprint {
+                me_types::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
         let p = QueryCounter {
@@ -850,15 +906,15 @@ mod tests {
         // independently dispatchable through the trait object (vtable).
         struct Asymmetric;
         impl EmbeddingProvider for Asymmetric {
-            fn embed(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+            fn embed(&self, text: &str) -> me_types::error::Result<Vec<f32>> {
                 Ok(vec![text.len() as f32])
             }
-            fn embed_query(&self, text: &str) -> crate::error::Result<Vec<f32>> {
+            fn embed_query(&self, text: &str) -> me_types::error::Result<Vec<f32>> {
                 // Simulate a query instruction prefix lengthening the input.
                 self.embed(&format!("Q:{text}"))
             }
-            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
-                crate::types::EmbeddingFingerprint::new("mock", "test", 1)
+            fn fingerprint(&self) -> me_types::types::EmbeddingFingerprint {
+                me_types::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
         let p: &dyn EmbeddingProvider = &Asymmetric;

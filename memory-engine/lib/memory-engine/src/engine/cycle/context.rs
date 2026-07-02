@@ -10,13 +10,13 @@
 //!
 //! The capability bag is preserved by **composition**, not thrown away — `CycleContext`
 //! borrows the engine for the duration of the call, so it is intentionally not
-//! `Serialize`/`'static`; only the persisted [`CycleMetadata`](super::report::CycleMetadata)
+//! `Serialize`/`'static`; only the persisted [`CycleMetadata`](super::CycleMetadata)
 //! crosses the storage boundary.
 
 use crate::engine::cognitive::DreamContext;
 use crate::types::Fact;
 
-use super::report::{CycleMetadata, TimeWindow};
+use super::{CycleMetadata, TimeWindow};
 
 /// Context passed to [`DreamCycle::run`](crate::traits::DreamCycle::run).
 ///
@@ -70,5 +70,36 @@ impl<'a> CycleContext<'a> {
     #[must_use]
     pub const fn time_window(&self) -> TimeWindow {
         self.time_window
+    }
+}
+
+/// `CycleContext` is the concrete implementation of the [`CycleCtx`](crate::traits::CycleCtx)
+/// read surface the [`DreamCycle`](crate::traits::DreamCycle) contract names — the seam
+/// (Wave 2 #816) that keeps the trait layer free of any engine/consolidation type. The
+/// `dream().*` indirection is flattened: each method delegates to the inner
+/// [`DreamContext`].
+#[async_trait::async_trait]
+impl crate::traits::CycleCtx for CycleContext<'_> {
+    fn time_window(&self) -> TimeWindow {
+        self.time_window
+    }
+
+    fn prior_wisdom(&self) -> &[Fact] {
+        &self.prior_wisdom
+    }
+
+    fn prior_reports(&self) -> &[CycleMetadata] {
+        &self.prior_reports
+    }
+
+    async fn list_undreamt_in_period(&self, window: TimeWindow) -> crate::error::Result<Vec<Fact>> {
+        self.ctx.list_undreamt_in_period(window).await
+    }
+
+    async fn outcome_counts_batch(
+        &self,
+        fact_ids: &[i64],
+    ) -> crate::error::Result<std::collections::HashMap<i64, crate::types::OutcomeCounts>> {
+        self.ctx.outcome_counts_batch(fact_ids).await
     }
 }

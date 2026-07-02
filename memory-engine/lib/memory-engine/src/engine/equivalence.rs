@@ -22,9 +22,9 @@
 
 use super::MemoryEngine;
 use crate::error::Result;
-use crate::search::hybrid::SearchResult;
 use crate::search::strategy::SearchConfig;
 use crate::traits::Reranker;
+use crate::types::search::SearchResult;
 
 const DIM: usize = 384;
 

@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
-use crate::types::{
+use me_types::error::Result;
+use me_types::types::{
     ConsolidationLevel, LineageRecord, LineageSnapshotEntry, NewLineageRecord, NewSummary,
     PromotionProvenance, Summary,
 };
@@ -15,9 +15,9 @@ use crate::types::{
 /// Consolidation outputs: summaries + wisdom lineage.
 ///
 /// # Errors
-/// Every method returns [`MemoryError::Storage`](crate::error::MemoryError::Storage)
-/// on a backend failure (or [`NotFound`](crate::error::MemoryError::NotFound) /
-/// [`Lineage`](crate::error::MemoryError::Lineage) where applicable).
+/// Every method returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage)
+/// on a backend failure (or [`NotFound`](me_types::error::MemoryError::NotFound) /
+/// [`Lineage`](me_types::error::MemoryError::Lineage) where applicable).
 #[async_trait]
 pub trait ConsolidationStore: Send + Sync {
     // --- summaries ---
@@ -57,7 +57,7 @@ pub trait ConsolidationStore: Send + Sync {
     // Stage A atomic port method (Fork B, §3 of the #631 plan)
     // -------------------------------------------------------------------------
 
-    /// Atomically apply a validated [`CycleReport`](crate::CycleReport)'s DB-touching deltas in a
+    /// Atomically apply a validated [`CycleReport`](me_types::types::cycle_report::CycleReport)'s DB-touching deltas in a
     /// single `rusqlite` transaction, returning the supersede-edge triples that
     /// the engine must mirror into its in-memory graph after commit.
     ///
@@ -112,11 +112,11 @@ pub trait ConsolidationStore: Send + Sync {
     /// - `to_index` — `(fact_id, embedding)` pairs for HNSW `notify_insert`
     async fn apply_cycle_deltas_atomic(
         &self,
-        report: &crate::engine::cycle::CycleReport,
+        report: &me_types::types::cycle_report::CycleReport,
         embed_dim: usize,
-        upcaster_registry: &crate::store::upcaster::UpcasterRegistry,
+        upcaster_registry: &crate::upcaster::UpcasterRegistry,
     ) -> Result<(
-        crate::engine::cycle::ApplyResult,
+        me_types::types::cycle_report::ApplyResult,
         Vec<(i64, i64, i64)>,
         Vec<i64>,
         Vec<(i64, Vec<f32>)>,
@@ -136,14 +136,14 @@ pub trait ConsolidationStore: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) if
-    /// `config` fails validation, [`MemoryError::Migration`](crate::error::MemoryError::Migration)
+    /// Returns [`MemoryError::Conflict`](me_types::error::MemoryError::Conflict) if
+    /// `config` fails validation, [`MemoryError::Migration`](me_types::error::MemoryError::Migration)
     /// if the stored watermark cannot be parsed, or
-    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a read failure.
+    /// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a read failure.
     async fn load_consolidation_snapshot(
         &self,
-        config: crate::traits::ConsolidationConfig,
-    ) -> Result<crate::consolidation::Snapshot>;
+        config: me_traits::ConsolidationConfig,
+    ) -> Result<me_types::types::consolidation::Snapshot>;
 
     /// Phase 3 — apply a fully-computed `ConsolidationPlan`
     /// in a single transaction, firing the post-commit HNSW `notify_expire` for the
@@ -157,13 +157,13 @@ pub trait ConsolidationStore: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a write
-    /// failure or [`MemoryError::Serialization`](crate::error::MemoryError::Serialization)
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a write
+    /// failure or [`MemoryError::Serialization`](me_types::error::MemoryError::Serialization)
     /// on a summary serialization failure.
     async fn apply_plan(
         &self,
-        plan: crate::consolidation::ConsolidationPlan,
-    ) -> Result<(crate::traits::ConsolidationStats, Vec<i64>)>;
+        plan: me_types::types::consolidation::ConsolidationPlan,
+    ) -> Result<(me_traits::ConsolidationStats, Vec<i64>)>;
 
     /// Atomically promote a pre-built wisdom fact + its lineage record in one
     /// transaction — the standalone `promote()` write path. Resolves `scope_path`
@@ -190,9 +190,9 @@ pub trait ConsolidationStore: Send + Sync {
     /// `(PromotionResult, scope_ids_to_cache)`.
     async fn promote_atomic(
         &self,
-        fact: &crate::types::NewFact,
+        fact: &me_types::types::NewFact,
         scope_path: Option<&str>,
         source_fact_ids: &[i64],
-        provenance: &crate::types::PromotionProvenance,
-    ) -> Result<(crate::types::PromotionResult, Vec<i64>)>;
+        provenance: &me_types::types::PromotionProvenance,
+    ) -> Result<(me_types::types::PromotionResult, Vec<i64>)>;
 }

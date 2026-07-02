@@ -40,7 +40,12 @@ mod migrations;
 mod pool;
 mod schema;
 
-#[cfg(test)]
+// Gated on `test-util` (not bare `test`): the live-PG suite drives the
+// `SchemaManager::raw_exec` failure-injection seam, which since #816 A1 lives behind the
+// `test-util` feature (a cross-crate trait method can't ride `cfg(test)`). Every test here
+// is `#[ignore]` (needs a Docker Postgres), so run it with
+// `--features backend-postgres,test-util -- --ignored`.
+#[cfg(all(test, feature = "test-util"))]
 mod tests;
 
 pub use pool::PgPool;

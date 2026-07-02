@@ -10,12 +10,12 @@ use crate::error::{MemoryError, MigrationError, RerankerError, Result};
 use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::scope::ScopeTree;
-use crate::search::hybrid::{MatchType, SearchResult};
 use crate::search::strategy::SearchConfig;
 use crate::storage::StorageBackend;
 use crate::storage::sqlite::SqliteBackend;
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, Reranker};
+use crate::types::search::{MatchType, SearchResult};
 use crate::types::{ConsolidationLevel, EmbeddingFingerprint, Fact};
 
 mod activity;
@@ -350,7 +350,13 @@ impl MemoryEngine {
     fn try_load_snapshot(
         pool: &ConnectionPool,
         embed_dim: usize,
-    ) -> Result<Option<(MemoryGraph, ScopeTree, Option<snapshot::HnswSnapshot>)>> {
+    ) -> Result<
+        Option<(
+            MemoryGraph,
+            ScopeTree,
+            Option<crate::types::snapshot::HnswSnapshot>,
+        )>,
+    > {
         let Some(db_path) = pool.path() else {
             return Ok(None); // in-memory engine
         };

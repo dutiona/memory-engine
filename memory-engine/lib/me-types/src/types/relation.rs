@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// `Custom("co_session")`. Unknown strings become `Custom`.
 ///
 /// ```
-/// use memory_engine::RelationType;
+/// use me_types::types::RelationType;
 ///
 /// assert_eq!(RelationType::from("co_session"), RelationType::CoSession);
 /// assert_eq!(RelationType::from("supplements"), RelationType::Supplements);

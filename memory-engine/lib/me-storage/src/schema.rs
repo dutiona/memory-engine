@@ -9,9 +9,9 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
-use crate::storage::capabilities::BackendCapabilities;
-use crate::types::{EmbeddingFingerprint, PromoteOutcome};
+use crate::capabilities::BackendCapabilities;
+use me_types::error::Result;
+use me_types::types::{EmbeddingFingerprint, PromoteOutcome};
 
 /// Backend lifecycle the engine drives post-open.
 ///
@@ -20,14 +20,14 @@ use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 /// `#[async_trait]`.
 ///
 /// # Errors
-/// Async methods return [`MemoryError::Storage`](crate::error::MemoryError::Storage)
-/// on a backend failure, or [`MemoryError::Migration`](crate::error::MemoryError::Migration)
+/// Async methods return [`MemoryError::Storage`](me_types::error::MemoryError::Storage)
+/// on a backend failure, or [`MemoryError::Migration`](me_types::error::MemoryError::Migration)
 /// for a migration/compatibility failure. The fingerprint methods add two:
 /// [`record_embedding_fingerprint_if_absent`](Self::record_embedding_fingerprint_if_absent)
-/// returns [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+/// returns [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension)
 /// when `candidate.dim` disagrees with the recorded (or expected) identity, and
 /// [`require_embedding_fingerprint_present`](Self::require_embedding_fingerprint_present)
-/// returns [`MemoryError::Internal`](crate::error::MemoryError::Internal) when no
+/// returns [`MemoryError::Internal`](me_types::error::MemoryError::Internal) when no
 /// fingerprint has been recorded yet (the open-time identity guard).
 #[async_trait]
 pub trait SchemaManager: Send + Sync {
@@ -97,7 +97,7 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// fingerprint read or sidecar write failure.
     ///
     /// Takes the snapshots **by value**: the engine builds them fresh at
@@ -105,45 +105,49 @@ pub trait SchemaManager: Send + Sync {
     /// backend's blocking boundary (no deep-clone of a large graph).
     async fn write_engine_snapshot(
         &self,
-        graph: crate::engine::snapshot::GraphSnapshot,
-        scope_tree: crate::engine::snapshot::ScopeTreeSnapshot,
+        graph: me_types::types::snapshot::GraphSnapshot,
+        scope_tree: me_types::types::snapshot::ScopeTreeSnapshot,
     ) -> Result<bool>;
 
     // -------------------------------------------------------------------------
     // Stage E (cutover) inspection ports — relocate the raw-`&Connection` free
-    // functions in `crate::inspect` below the seam. The engine lost its pool, so
+    // functions in the facade's `inspect` module below the seam. The engine lost its pool, so
     // these methods supply their own db-path / fingerprint from backend-private
     // state. HNSW + driver types never cross the port.
     // -------------------------------------------------------------------------
 
     /// Compute aggregate engine statistics (fact/edge/summary/scope/event counts
     /// + storage metrics). Replaces `inspect::statistics::compute_statistics`; the
-    /// backend supplies its own db path for [`StorageStats::file_path`](crate::inspect::types::StorageStats::file_path).
+    /// backend supplies its own db path for [`StorageStats::file_path`](me_types::types::inspect::StorageStats::file_path).
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// backend failure.
-    async fn statistics(&self) -> Result<crate::inspect::EngineStatistics>;
+    async fn statistics(&self) -> Result<me_types::types::inspect::EngineStatistics>;
 
-    /// Export full engine state to a file in the requested [`DumpFormat`](crate::inspect::types::DumpFormat).
+    /// Export full engine state to a file in the requested [`DumpFormat`](me_types::types::inspect::DumpFormat).
     ///
     /// Relocates `inspect::dump::{dump_json,_gzip,_zstd,dump_sqlite}` below the
     /// seam: the JSON variants stream via a read connection; the `Sqlite`
     /// (`VACUUM INTO`) variant routes through the write connection so a read-only
-    /// backend rejects it with [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly). Feature-gated compression
+    /// backend rejects it with [`MemoryError::ReadOnly`](me_types::error::MemoryError::ReadOnly). Feature-gated compression
     /// dispatch lives in the impl, keeping this trait surface `#[cfg]`-free.
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Io`](crate::error::MemoryError::Io) on filesystem
-    /// failure, [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) if a
+    /// Returns [`MemoryError::Io`](me_types::error::MemoryError::Io) on filesystem
+    /// failure, [`MemoryError::Conflict`](me_types::error::MemoryError::Conflict) if a
     /// dump target resolves to the live database or a directory,
-    /// [`MemoryError::NotImplemented`](crate::error::MemoryError::NotImplemented) for
-    /// a compression format whose feature is disabled, [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly) for
+    /// [`MemoryError::NotImplemented`](me_types::error::MemoryError::NotImplemented) for
+    /// a compression format whose feature is disabled, [`MemoryError::ReadOnly`](me_types::error::MemoryError::ReadOnly) for
     /// the `Sqlite` format on a read-only backend, or
-    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend failure.
-    async fn dump_state(&self, embed_dim: usize, format: crate::inspect::DumpFormat) -> Result<()>;
+    /// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a backend failure.
+    async fn dump_state(
+        &self,
+        embed_dim: usize,
+        format: me_types::types::inspect::DumpFormat,
+    ) -> Result<()>;
 
     /// Read-only check that a candidate embedding fingerprint is compatible with
     /// the store's recorded identity (the #614/#615 eager fail-fast). Delegates to
@@ -151,9 +155,9 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::EmbeddingModelMismatch`](crate::error::MemoryError::EmbeddingModelMismatch)
+    /// Returns [`MemoryError::EmbeddingModelMismatch`](me_types::error::MemoryError::EmbeddingModelMismatch)
     /// if an identity is recorded and `candidate` differs from it, or
-    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend failure.
+    /// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a backend failure.
     async fn check_embedding_compatible(&self, candidate: &EmbeddingFingerprint) -> Result<()>;
 
     /// Execute a raw SQL statement or batch against the backend — no parameter
@@ -163,16 +167,20 @@ pub trait SchemaManager: Send + Sync {
     /// orphan-`.pak` cleanup guard), or an `UPDATE` that downgrades an event's
     /// stored revision to exercise replay-time upcasting (#543).
     ///
-    /// Gated to `cfg(test)` / the `test-util` feature so it never reaches the
-    /// public API. The #632 conformance suite requires every backend to provide
-    /// it (in its own SQL dialect) so the failure-injection tests can run.
+    /// Gated to the `test-util` feature so it never reaches the public API. It is a
+    /// **feature**, not `cfg(test)`: since #816 this trait lives in `me-storage` while
+    /// the impls and the conformance suite live in the facade, and `cfg(test)` is
+    /// per-crate — never set for a dependency — so it cannot keep a cross-crate
+    /// decl+impl pair in lockstep. The feature is the single switch (the facade forwards
+    /// `test-util = ["me-storage/test-util"]`, and the #632 conformance battery that
+    /// consumes this seam is gated `cfg(all(test, feature = "test-util"))`).
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
-    /// SQL or backend failure, or [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly)
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
+    /// SQL or backend failure, or [`MemoryError::ReadOnly`](me_types::error::MemoryError::ReadOnly)
     /// on a read-only backend.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(feature = "test-util")]
     async fn raw_exec(&self, sql: &str) -> Result<()>;
 
     // -------------------------------------------------------------------------
@@ -193,9 +201,9 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on a
+    /// Returns [`MemoryError::Database`](me_types::error::MemoryError::Database) on a
     /// `name` collision or write failure, or
-    /// [`MemoryError::Internal`](crate::error::MemoryError::Internal) if the
+    /// [`MemoryError::Internal`](me_types::error::MemoryError::Internal) if the
     /// dimension overflows `i64`.
     async fn begin_populating_space(
         &self,
@@ -211,8 +219,8 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
-    /// backend failure, or [`MemoryError::Internal`](crate::error::MemoryError::Internal)
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
+    /// backend failure, or [`MemoryError::Internal`](me_types::error::MemoryError::Internal)
     /// if `limit` overflows `i64`.
     async fn next_backfill_window(
         &self,
@@ -228,7 +236,7 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// backend or foreign-key failure (an unregistered `space` or unknown
     /// `fact_id`).
     async fn write_backfill_batch(&self, space: &str, rows: Vec<(i64, Vec<f32>)>) -> Result<usize>;
@@ -238,7 +246,7 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// backend failure.
     async fn count_unbackfilled(&self, space: &str) -> Result<usize>;
 
@@ -251,12 +259,12 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+    /// Returns [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension)
     /// for a different-dim populating space,
-    /// [`MemoryError::Internal`](crate::error::MemoryError::Internal) if there is no
+    /// [`MemoryError::Internal`](me_types::error::MemoryError::Internal) if there is no
     /// active space, the populating space is missing or not `populating`, or the
     /// completeness gate fails, or
-    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend
+    /// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a backend
     /// failure (which rolls the transaction back).
     async fn promote_space(&self, populating: &str) -> Result<PromoteOutcome>;
 
@@ -265,7 +273,7 @@ pub trait SchemaManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// backend failure.
     async fn deprecate_space(&self, name: &str) -> Result<()>;
 }

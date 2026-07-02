@@ -1,19 +1,14 @@
-//! Configuration and output types for the forget/prune operation.
+//! Configuration type for the forget/prune operation.
 //!
 //! [`ForgetPolicy`] is the consumer-tunable policy controlling Ebbinghaus decay
-//! and multi-signal importance scoring; [`PruneStats`] is the plain output struct
-//! returned by a prune pass. Both live here (rather than in `traits.rs`) because
-//! neither is a trait — `traits.rs` declares the consumer behaviour contracts,
-//! while these are the concrete forgetting-layer types they configure and return.
+//! and multi-signal importance scoring. Lives here (rather than in `traits.rs`)
+//! because it isn't a trait — `traits.rs` declares the consumer behaviour
+//! contracts, while this is the concrete forgetting-layer type it configures.
+//! The output type `PruneStats` (pure data) has moved to `me-types` (Wave 2
+//! #816 E.4b Phase B); re-exported from `forgetting::mod` as
+//! `crate::forgetting::PruneStats`.
 
 use crate::error::Result;
-
-/// Statistics returned by the forget/prune operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PruneStats {
-    pub facts_expired: usize,
-    pub facts_evaluated: usize,
-}
 
 /// Policy for forgetting/pruning stale facts.
 ///

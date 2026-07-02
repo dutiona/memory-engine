@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = [
+    "memory-engine/lib/me-types",
+    "memory-engine/lib/me-traits",
+    "memory-engine/lib/me-storage",
     "memory-engine/lib/memory-engine",
     "memory-engine/lib/embed",
     "memory-engine/bin/cli",
@@ -16,6 +19,23 @@ exclude = [".worktrees", "fuzz"]
 # `rust-version.workspace = true`.
 [workspace.package]
 rust-version = "1.88"
+
+# Shared lint policy (Wave 2 #816): the decomposition creates many internal crates,
+# so the panic-safety (#725) + `unsafe_code = "forbid"` gates live here once and each
+# crate inherits with `[lints] workspace = true` instead of duplicating the block.
+# (The facade keeps its own inline `[lints]` for now — it also registers the
+# fuzz-only `cfg(fuzzing)`; it migrates to `workspace = true` in a later slice.)
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Embedded-library panic-safety gate (#725): an `.unwrap()` in a production path
+# aborts the *consumer's* process, so it is denied in library code. Tests opt out
+# per-crate-root with `#![cfg_attr(test, allow(clippy::unwrap_used))]`.
+unwrap_used = "deny"
 
 # `[profile.*]` is honoured ONLY in the workspace-root manifest of a virtual workspace
 # (Cargo ignores — with a warning — any profile set in a member). Moved here verbatim

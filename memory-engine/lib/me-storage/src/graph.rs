@@ -14,18 +14,35 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::error::Result;
-use crate::types::{
-    Edge, Fact, FactScoringRow, FactType, NewEdge, NewFact, ScopeNode, SessionFact,
+use me_types::error::Result;
+use me_types::types::{
+    Edge, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent, NewFact, ScopeNode,
+    SessionFact,
 };
+
+/// Outcome of [`FactGraph::ingest_bootstrap_batch_atomic`].
+///
+/// Distinguishes a batch that committed from one the under-lock idempotency guard
+/// short-circuited, so the caller can report `sessions_skipped` faithfully without a
+/// sentinel (an empty flag `Vec` is ambiguous — it also means "an empty batch was
+/// ingested"). See the method's `skip_if_present` contract.
+#[derive(Debug)]
+pub enum BootstrapIngestOutcome {
+    /// The `skip_if_present` filter matched an existing event **under the write lock**,
+    /// so nothing was written and the savepoint was released empty.
+    Skipped,
+    /// The batch committed. `(fact_id, reinforced)` per input fact, in `facts` order;
+    /// `reinforced == false` ⟹ a new row was created.
+    Ingested(Vec<(i64, bool)>),
+}
 
 /// Core knowledge graph: facts, edges, the scope hierarchy.
 ///
 /// All methods are async (boxed via `async_trait`): the `SQLite` backend wraps
 /// sync `rusqlite` in `spawn_blocking`; a Postgres backend is natively async. No
 /// SQL or driver type crosses this boundary — filtering is expressed via explicit
-/// params / [`crate::storage::FactFilter`], results are domain types from
-/// [`crate::types`].
+/// params / [`crate::FactFilter`], results are domain types from
+/// [`me_types::types`].
 ///
 /// # Scope filtering (`scope_ids` — read the contract, it is non-uniform)
 /// The `scope_ids: &[i64]` parameter has a **method-dependent empty-slice
@@ -47,10 +64,10 @@ use crate::types::{
 /// the existing contract verbatim.
 ///
 /// # Errors
-/// Every method returns [`MemoryError::Storage`](crate::error::MemoryError::Storage)
-/// wrapping a [`StorageError`](crate::error::StorageError) on a backend failure,
+/// Every method returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage)
+/// wrapping a [`StorageError`](me_types::error::StorageError) on a backend failure,
 /// or a more specific `MemoryError` variant where applicable (e.g.
-/// [`NotFound`](crate::error::MemoryError::NotFound) for a missing id).
+/// [`NotFound`](me_types::error::MemoryError::NotFound) for a missing id).
 #[async_trait]
 pub trait FactGraph: Send + Sync {
     // --- facts: write ---
@@ -162,7 +179,7 @@ pub trait FactGraph: Send + Sync {
     /// **Precondition (security):** `marker_key` MUST be a non-empty
     /// `[A-Za-z0-9_]+` identifier — it is interpolated into the backend's JSON
     /// path, so a backend MUST reject anything else with
-    /// [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) rather than
+    /// [`MemoryError::Conflict`](me_types::error::MemoryError::Conflict) rather than
     /// build the query (the seam preserves the `SQLite` impl's injection guard).
     async fn list_active_facts_by_metadata_key_recent(
         &self,
@@ -197,7 +214,7 @@ pub trait FactGraph: Send + Sync {
     /// only an *active* edge is affected, so `Ok(())` always means this call
     /// transitioned an active edge to expired.
     ///
-    /// Returns [`MemoryError::NotFound`](crate::error::MemoryError::NotFound) if
+    /// Returns [`MemoryError::NotFound`](me_types::error::MemoryError::NotFound) if
     /// no active edge with `id` exists (unknown id, or already expired) — the
     /// write affected 0 rows. Mirrors [`expire_fact`](Self::expire_fact); a
     /// backend MUST honor this rows-affected contract. The `SQLite` impl honors
@@ -271,7 +288,7 @@ pub trait FactGraph: Send + Sync {
     async fn insert_fact_atomic(
         &self,
         fact: &NewFact,
-        fingerprint: &crate::types::EmbeddingFingerprint,
+        fingerprint: &me_types::types::EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<i64>;
 
@@ -305,7 +322,7 @@ pub trait FactGraph: Send + Sync {
         &self,
         facts: &[NewFact],
         scope_paths: &[Option<String>],
-        fingerprint: &crate::types::EmbeddingFingerprint,
+        fingerprint: &me_types::types::EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<(Vec<i64>, Vec<i64>)>;
 
@@ -341,7 +358,7 @@ pub trait FactGraph: Send + Sync {
     /// transaction — the former conflict-resolution path, now encapsulated below
     /// the storage seam.
     ///
-    /// The consumer [`ConflictArbiter`](crate::traits::ConflictArbiter) decision is
+    /// The consumer [`ConflictArbiter`](me_traits::ConflictArbiter) decision is
     /// made engine-side **before** this call; this method performs only the DB
     /// writes the decision implies, all-or-nothing, so a mid-sequence failure can
     /// never leave a partial bi-temporal state (e.g. an old fact expired+invalidated
@@ -384,7 +401,7 @@ pub trait FactGraph: Send + Sync {
     /// `Delete`/`Noop`.
     async fn resolve_conflict_atomic(
         &self,
-        decision: crate::traits::CrudDecision,
+        decision: me_traits::CrudDecision,
         old_id: i64,
         new_fact: &NewFact,
         relation: &str,
@@ -408,7 +425,7 @@ pub trait FactGraph: Send + Sync {
     async fn select_archive_candidates(
         &self,
         expired_before: DateTime<Utc>,
-    ) -> Result<(Vec<crate::types::Fact>, Vec<crate::types::Edge>)>;
+    ) -> Result<(Vec<me_types::types::Fact>, Vec<me_types::types::Edge>)>;
 
     /// Atomically materialize importance scores for the active set and expire the
     /// sub-threshold facts (cascading edge expiry) in a single transaction.
@@ -436,63 +453,73 @@ pub trait FactGraph: Send + Sync {
         scored: &[(i64, f64)],
         to_expire: &[i64],
         now: DateTime<Utc>,
-    ) -> Result<(crate::forgetting::PruneStats, Vec<i64>)>;
+    ) -> Result<(me_types::types::forgetting::PruneStats, Vec<i64>)>;
 
     // -------------------------------------------------------------------------
-    // Stage E bootstrap seams — the conn-threaded import pipelines run below the
-    // seam on the write connection (where a blocking `EmbeddingProvider`/extractor
-    // is nested-runtime-safe). The engine resolves the scope id up front and passes
-    // owned `Arc` consumer handles; ownership moves straight through the blocking
-    // boundary. Each preserves the per-session/per-file savepoint atomicity exactly.
+    // Bootstrap batch ingest — the transactional envelope behind BOTH bootstrap
+    // import pipelines (#816 E.4b trim). The engine parses / extracts / **embeds**
+    // facade-side (consumer callbacks run on a blocking thread there) and hands this
+    // port an optional marker event + a pre-embedded batch; the atomic work below the
+    // seam is driver-only — no consumer trait and no facade vocab
+    // (`SessionExtractor`/`BootstrapConfig`/`BootstrapReport`) crosses the seam.
     // -------------------------------------------------------------------------
 
-    /// Import one JSONL session log into historical memory (one savepoint).
+    /// Atomically ingest an optional idempotency-**marker** event plus a batch of
+    /// pre-embedded `facts` in a single savepoint.
     ///
-    /// # Errors
+    /// When `skip_if_present` is `Some`, it is counted **first, inside the savepoint
+    /// (under the write lock)**: a non-zero count releases the savepoint empty and
+    /// returns [`BootstrapIngestOutcome::Skipped`] without writing anything. This is the
+    /// authoritative idempotency guard — the session path passes its bootstrap-marker
+    /// filter here so the check and the marker insert share one write connection, exactly
+    /// as they did before the #816 seam trim. (A caller MAY *also* run the same filter
+    /// through [`EventLog::count_events`](crate::EventLog) beforehand as a cheap
+    /// read-pool early-out to skip embedding a known-bootstrapped session, but that outer
+    /// check races the write and is only an optimization; this under-lock check is what
+    /// makes concurrent same-key bootstraps non-duplicating.) The `--memory-dir` path
+    /// passes `None` (content-dedup handles its idempotency; it never skips).
     ///
-    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
-    /// read-only backend, or an embedding / extraction / store error.
-    async fn bootstrap_session_atomic(
+    /// When `marker` is `Some`, it is inserted first and its assigned id becomes
+    /// **every** fact's `source_event_id` (the session path's provenance anchor — any
+    /// value the caller set on [`NewFact::source_event_id`](me_types::types::NewFact) is
+    /// overwritten). When `None` (the `--memory-dir` path — one file per call, no
+    /// event), each fact keeps its own `source_event_id`. Each fact is then
+    /// dedup-with-reinforced ([`insert_or_reinforce_fact`](Self::insert_or_reinforce_fact)
+    /// semantics). If **any** fact is newly created, the embedding identity
+    /// `fingerprint` is recorded-if-absent at the tail of the savepoint (#643: the
+    /// identity commits atomically with the vectors it describes; a batch that only
+    /// reinforces writes no new vector and leaves the store unstamped, so a later real
+    /// first write can still establish the true identity).
+    ///
+    /// With `skip_if_present == None` the caller owns the idempotency decision and a
+    /// `Some` marker is unconditionally inserted; with `skip_if_present == Some` the port
+    /// owns it under the lock (above) and inserts the marker only if the guard passes.
+    /// Either way the caller builds its report from the returned per-fact flags. `facts`
+    /// is taken by value so the impl can stamp `source_event_id` in place without cloning
+    /// the (embedding-bearing) `NewFact`s.
+    ///
+    /// # Contract
+    ///
+    /// `Ok(Ingested) ⟹ all sub-ops committed; Ok(Skipped) ⟹ nothing written (savepoint
+    /// released empty); Err ⟹ store byte-identical (savepoint rolled back)`. Bootstrap
+    /// deliberately does **not** touch the HNSW sidecar (the vector
+    /// index is rebuilt from the DB at open), so — unlike
+    /// [`insert_or_reinforce_fact`](Self::insert_or_reinforce_fact) — no post-commit
+    /// index notification fires, and the `IndexInconsistent` post-commit exception the
+    /// other atomic methods carry does not apply here. This keeps both bootstrap paths
+    /// consistent (neither populates the live index mid-run).
+    ///
+    /// # Returns
+    ///
+    /// [`BootstrapIngestOutcome::Ingested`] with `(fact_id, reinforced)` per fact in
+    /// `facts` order (`reinforced == false` ⟹ a new row was created), or
+    /// [`BootstrapIngestOutcome::Skipped`] when `skip_if_present` matched under the lock.
+    async fn ingest_bootstrap_batch_atomic(
         &self,
-        reader: Box<dyn std::io::BufRead + Send>,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport>;
-
-    /// Import every top-level `*.jsonl` session log in `dir` (each its own savepoint).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
-    /// read-only backend, [`MemoryError::Io`](crate::error::MemoryError::Io) on a
-    /// traversal failure, or an embedding / store error.
-    async fn bootstrap_directory_atomic(
-        &self,
-        dir: std::path::PathBuf,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport>;
-
-    /// Import native `.md` memory files (recursive) from `dir` — autocommit per file.
-    /// Stamps the embedding identity meta-first (#643) before the first file.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) on a
-    /// read-only backend, [`MemoryError::Io`](crate::error::MemoryError::Io) on a
-    /// traversal failure, or an embedding / store error.
-    async fn bootstrap_memory_directory_atomic(
-        &self,
-        dir: std::path::PathBuf,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport>;
+        marker: Option<&NewEvent>,
+        skip_if_present: Option<&EventFilter>,
+        facts: Vec<NewFact>,
+        fingerprint: &me_types::types::EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<BootstrapIngestOutcome>;
 }

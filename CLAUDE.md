@@ -14,7 +14,10 @@ Companion repos:
 ## Commands
 
 ```bash
-cargo build                           # debug build (root crate only)
+cargo build                           # debug build (facade crate only)
+cargo build -p me-types               # L0 data + error vocabulary (Wave 2 #816)
+cargo build -p me-traits              # L0.5 consumer/contract traits
+cargo build -p me-storage             # L1 persistence port + MemoryCtx + UpcasterRegistry
 cargo build -p memory-engine-cli      # CLI inspector binary
 cargo build -p memory-engine-mcp      # MCP server binary
 cargo build -p memory-engine-embed    # HTTP embedding provider crate
@@ -30,7 +33,7 @@ cargo doc --no-deps --open            # API reference
 uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
 ```
 
-Feature flags: `backend-sqlite` (default; the in-process SQLite backend — a #633 marker today, since `rusqlite` is still unconditional), `backend-postgres` (the #633 `PgBackend`: `deadpool-postgres` pool + fresh v14 migration chain + `SchemaManager`), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`, `test-util` (cross-crate test-only port hooks). At least one backend feature must be enabled (a `compile_error!` in `lib.rs` enforces it). `tokio` is a **non-optional** dependency — the engine is async-native, so there is no `async` feature to toggle (#702). The `backend-postgres` live tests are `#[ignore]`-by-default (they need a Docker/Postgres testcontainer): `cargo test -p memory-engine --features backend-postgres -- --ignored`.
+Feature flags: `backend-sqlite` (default; the in-process SQLite backend — a #633 marker today, since `rusqlite` is still unconditional), `backend-postgres` (the #633 `PgBackend`: `deadpool-postgres` pool + fresh v14 migration chain + `SchemaManager`), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`, `test-util` (cross-crate test-only port hooks). At least one backend feature must be enabled (a `compile_error!` in `lib.rs` enforces it). `tokio` is a **non-optional** dependency — the engine is async-native, so there is no `async` feature to toggle (#702). The `backend-postgres` live tests are `#[ignore]`-by-default (they need a Docker/Postgres testcontainer) and also require `test-util` (they drive the `raw_exec` failure-injection seam, which is `test-util`-gated since #816): `cargo test -p memory-engine --features backend-postgres,test-util -- --ignored`.
 
 **Verification gate — this is the CI contract** (`.github/workflows/ci.yml`); run it before every commit, especially when touching `error.rs`, `types/`, `traits.rs`, `lib.rs`, or any public API. These are the _exact_ commands CI runs — a local pass that diverges from them (weaker features, narrower scope, piped output) is a **false pass**:
 
@@ -48,7 +51,7 @@ cargo deny check                                                       # Supply-
 
 CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
 
-The workspace contains **4 crates** (`memory-engine` core, `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`); the CLI/MCP/embed crates consume the core's public API, so `--workspace` is mandatory — a change to error variants, type definitions, or trait signatures can break them silently if only the root crate is checked.
+The workspace contains **7 crates**: the Wave 2 (#816) core decomposition has begun (S1 done) — `me-types` (L0 data + error vocabulary), `me-traits` (L0.5 consumer/contract traits), and `me-storage` (L1 persistence port + `MemoryCtx` + `UpcasterRegistry`) are now carved out as separate acyclic leaves; the `memory-engine` facade re-exports them (public API unchanged) and still holds the backends + primitives as modules (they carve into `me-backend-*` / `me-index` / `me-{ingest,query,consolidate,forget,resolve,archive}` in slices S2–S5 — see ADR 0018 / #925). Plus `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`, which consume the facade's public API. `--workspace` is mandatory — a change to error variants, type definitions, or trait signatures can break the consumers silently if only one crate is checked.
 
 **Verification traps** — each one cost a real super-qa rework cycle; the `qa-sweep` skill holds the full taxonomy:
 

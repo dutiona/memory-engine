@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::types::FactType;
+use me_types::types::FactType;
 
 /// A closed, declarative filter over the fact table, consumed by the
 /// `SearchIndex` retrieval methods.
@@ -130,7 +130,7 @@ pub enum MetadataPredicate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::FactType;
+    use me_types::types::FactType;
 
     #[test]
     fn default_filter_is_unconstrained_and_active() {

@@ -3,11 +3,12 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use crate::error::{ConflictError, MemoryError, Result};
-use crate::search::hybrid::{
-    QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult, port_hybrid_search,
-};
+use crate::search::hybrid::port_hybrid_search;
 use crate::search::query::MemoryQuery;
 use crate::types::Fact;
+use crate::types::search::{
+    QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
+};
 
 use super::{
     MemoryEngine, fact_overlaps_period, fact_to_search_result, passes_temporal_cutoff,

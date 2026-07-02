@@ -20,13 +20,13 @@ use chrono::{DateTime, Utc};
 
 use super::{SqliteBackend, stream_consumer_dropped};
 use crate::error::Result;
-use crate::storage::graph::FactGraph;
+use crate::storage::graph::{BootstrapIngestOutcome, FactGraph};
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
 use crate::types::{
-    Edge, EmbeddingFingerprint, Fact, FactScoringRow, FactType, NewEdge, NewFact, RelationType,
-    ScopeNode, SessionFact,
+    Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
+    NewFact, RelationType, ScopeNode, SessionFact,
 };
 
 /// `(fact_ids, scope_ids_to_cache, embeddings)` — the result of the batch-insert
@@ -1030,85 +1030,89 @@ impl FactGraph for SqliteBackend {
         Ok((stats, expired))
     }
 
-    // WRITE — one JSONL session import (savepoint) below the seam.
-    async fn bootstrap_session_atomic(
+    // WRITE — pre-embedded bootstrap batch (one savepoint) below the seam. The engine
+    // parses/extracts/embeds facade-side; this anchors the optional marker event,
+    // dedup-with-reinforces the batch, and stamps identity if any created. It does NOT
+    // fire the HNSW notify (unlike `insert_or_reinforce_fact`): bootstrap facts enter
+    // the vector index only on the next open — kept consistent across both paths.
+    async fn ingest_bootstrap_batch_atomic(
         &self,
-        reader: Box<dyn std::io::BufRead + Send>,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport> {
-        let dim = self.embed_dim;
+        marker: Option<&NewEvent>,
+        skip_if_present: Option<&EventFilter>,
+        facts: Vec<NewFact>,
+        fingerprint: &EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<BootstrapIngestOutcome> {
         let upcaster = Arc::clone(&self.upcaster_registry);
+        let marker = marker.cloned();
+        let skip_if_present = skip_if_present.cloned();
+        let fingerprint = fingerprint.clone();
         self.block_write(move |conn| {
-            let ctx = crate::bootstrap::BootstrapContext {
-                conn,
-                embed_dim: dim,
-                upcaster_registry: &upcaster,
-                embedder: &*embedder,
-                extractor: &*extractor,
-                config: &config,
-                classifier: classifier.as_deref(),
-                scope_id,
-            };
-            crate::bootstrap::bootstrap_session_inner(&ctx, reader)
-        })
-        .await
-    }
-
-    // WRITE — directory of JSONL session imports (per-session savepoints) below the seam.
-    async fn bootstrap_directory_atomic(
-        &self,
-        dir: std::path::PathBuf,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        extractor: std::sync::Arc<dyn crate::bootstrap::SessionExtractor>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport> {
-        let dim = self.embed_dim;
-        let upcaster = Arc::clone(&self.upcaster_registry);
-        self.block_write(move |conn| {
-            let ctx = crate::bootstrap::BootstrapContext {
-                conn,
-                embed_dim: dim,
-                upcaster_registry: &upcaster,
-                embedder: &*embedder,
-                extractor: &*extractor,
-                config: &config,
-                classifier: classifier.as_deref(),
-                scope_id,
-            };
-            crate::bootstrap::bootstrap_directory_inner(&ctx, &dir)
-        })
-        .await
-    }
-
-    // WRITE — native `.md` memory directory import (autocommit per file) below the seam.
-    async fn bootstrap_memory_directory_atomic(
-        &self,
-        dir: std::path::PathBuf,
-        embedder: std::sync::Arc<dyn crate::traits::EmbeddingProvider>,
-        config: crate::bootstrap::BootstrapConfig,
-        classifier: Option<std::sync::Arc<dyn crate::traits::PersistenceClassifier>>,
-        scope_id: i64,
-    ) -> Result<crate::bootstrap::BootstrapReport> {
-        let dim = self.embed_dim;
-        self.block_write(move |conn| {
-            // Meta-first identity stamp (#643): record before the first file, because
-            // this path is autocommit-per-file (no wrapping savepoint to defer under).
-            crate::store::embedding_meta::record_if_absent(conn, &embedder.fingerprint(), dim)?;
-            crate::bootstrap::memory_dir::bootstrap_memory_directory_inner(
-                conn,
-                dim,
-                &dir,
-                &*embedder,
-                &config,
-                classifier.as_deref(),
-                scope_id,
-            )
+            conn.execute_batch("SAVEPOINT ingest_bootstrap")?;
+            let outcome = (|| -> Result<BootstrapIngestOutcome> {
+                // Authoritative idempotency guard, checked FIRST inside the savepoint
+                // (under the write lock): a matching event ⟹ the batch is a no-op. This
+                // restores the pre-#816 check-and-write atomicity — before the seam trim
+                // the count and the marker insert shared one write connection, so
+                // concurrent same-session bootstraps could not both write a marker; after
+                // the trim the facade's `count_events` early-out runs on the READ pool,
+                // racing this write. Re-checking here closes that TOCTOU (#816 B1).
+                if let Some(filter) = &skip_if_present
+                    && crate::store::events::EventStore::new(conn, &upcaster).count(filter)? > 0
+                {
+                    return Ok(BootstrapIngestOutcome::Skipped);
+                }
+                // Session path: insert the marker first; its id anchors the batch's
+                // provenance (backfilled onto every fact). Memory-dir path: no marker,
+                // facts keep their own `source_event_id` (`None`).
+                let marker_id = match &marker {
+                    Some(marker) => {
+                        Some(crate::store::events::EventStore::new(conn, &upcaster).insert(marker)?)
+                    }
+                    None => None,
+                };
+                let fact_store = FactStore::new(conn, expected_dim);
+                let mut out = Vec::with_capacity(facts.len());
+                let mut any_created = false;
+                for mut fact in facts {
+                    if let Some(marker_id) = marker_id {
+                        // #520 dedup keys on content, so a reinforced fact keeps its
+                        // original source event; only newly-created facts adopt this one.
+                        fact.source_event_id = Some(marker_id);
+                    }
+                    let (id, reinforced) = fact_store.insert_or_reinforce(&fact)?;
+                    any_created |= !reinforced;
+                    out.push((id, reinforced));
+                }
+                // #643: stamp the embedding identity only once a new vector has actually
+                // been written, at the tail of the savepoint so it commits atomically
+                // with the facts it describes.
+                if any_created {
+                    crate::store::embedding_meta::record_if_absent(
+                        conn,
+                        &fingerprint,
+                        expected_dim,
+                    )?;
+                }
+                Ok(BootstrapIngestOutcome::Ingested(out))
+            })();
+            match outcome {
+                Ok(out) => {
+                    conn.execute_batch("RELEASE ingest_bootstrap")?;
+                    Ok(out)
+                }
+                Err(e) => {
+                    // ROLLBACK TO restores the savepoint but keeps it open — RELEASE it
+                    // to close it and leave the writer out of an open transaction.
+                    if let Err(rb) = conn.execute_batch("ROLLBACK TO ingest_bootstrap") {
+                        tracing::warn!(error = %rb, "savepoint ROLLBACK TO ingest_bootstrap failed");
+                    }
+                    if let Err(rel) = conn.execute_batch("RELEASE ingest_bootstrap") {
+                        tracing::warn!(error = %rel, "savepoint RELEASE ingest_bootstrap (after rollback) failed");
+                    }
+                    Err(e)
+                }
+            }
         })
         .await
     }
@@ -2081,5 +2085,78 @@ mod tests {
             "port must return same candidates as direct store"
         );
         assert_eq!(port_facts.len(), 1, "only the expired fact qualifies");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_batch_skips_under_lock_when_marker_present() {
+        // #816 B1: `skip_if_present` is the AUTHORITATIVE idempotency guard — it runs
+        // inside the savepoint (under the write lock), so a same-session bootstrap whose
+        // marker already exists is forced to a no-op. Deterministic proxy for the
+        // concurrent race the pre-fix TOCTOU allowed: pre-seed the marker via a first
+        // ingest, then a second call with the matching filter must return `Skipped` and
+        // leave the event log unchanged (no duplicate marker — the actual damage).
+        use crate::storage::{BootstrapIngestOutcome, EventLog};
+        use crate::types::{EmbeddingFingerprint, EventFilter, EventType, NewEvent};
+
+        let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
+        let fp = EmbeddingFingerprint::new("mock", "test", DIM);
+        let marker = NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::SystemEvent,
+            payload: serde_json::json!({ "action": "bootstrap_session", "session_id": "s1" }),
+            source: "bootstrap".into(),
+            session_id: Some("s1".into()),
+            scope_id: 1,
+            origin_node_id: "bootstrap".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        let filter = EventFilter {
+            session_id: Some("s1".into()),
+            source: Some("bootstrap".into()),
+            ..EventFilter::default()
+        };
+
+        // 1st ingest: the filter matches nothing yet → Ingested (marker + one fact).
+        let first = be
+            .ingest_bootstrap_batch_atomic(
+                Some(&marker),
+                Some(&filter),
+                vec![fact("a", [0.1; DIM])],
+                &fp,
+                DIM,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, BootstrapIngestOutcome::Ingested(ref f) if f.len() == 1),
+            "first ingest must commit the batch"
+        );
+        assert_eq!(
+            be.count_events(&filter).await.unwrap(),
+            1,
+            "exactly one marker after the first ingest"
+        );
+
+        // 2nd ingest, SAME filter: the marker now exists → Skipped, nothing written.
+        let second = be
+            .ingest_bootstrap_batch_atomic(
+                Some(&marker),
+                Some(&filter),
+                vec![fact("b", [0.2; DIM])],
+                &fp,
+                DIM,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, BootstrapIngestOutcome::Skipped),
+            "second ingest must skip under the lock when the marker is already present"
+        );
+        assert_eq!(
+            be.count_events(&filter).await.unwrap(),
+            1,
+            "a skipped ingest must NOT insert a duplicate marker (the pre-fix TOCTOU damage)"
+        );
     }
 }

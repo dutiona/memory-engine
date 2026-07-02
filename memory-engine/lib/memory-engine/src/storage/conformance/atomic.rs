@@ -181,7 +181,7 @@ pub async fn prune_atomic_rollback<F: ConformanceBackend>(f: &F) {
 /// Injected by dropping `config` so the final `set_config(last_dream_cycle_at)` at the
 /// END of the transaction faults, AFTER all deltas have run.
 pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
-    use crate::engine::cycle::{
+    use crate::types::cycle_report::{
         CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
     };
     use crate::types::{Outcome, PromotionProvenance};

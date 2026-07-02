@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::error::{MigrationError, Result};
+use me_types::error::{MigrationError, Result};
 
 /// Function that transforms an event payload from revision N to N+1.
 pub type UpcasterFn = fn(serde_json::Value) -> Result<serde_json::Value>;
@@ -56,9 +56,10 @@ impl UpcasterRegistry {
     /// (deterministic, unlike the `Debug` impl's `HashMap` ordering).
     ///
     /// Counts individual (`event_type`, `from_revision`) pairs across all chains.
+    // `pub` (not `pub(crate)`): the construction-equivalence harness that observes this
+    // now lives in the facade crate (Wave 2 #816), so it reads it cross-crate.
     #[must_use]
-    #[allow(dead_code)] // observed only by the equivalence test harness
-    pub(crate) fn registered_count(&self) -> usize {
+    pub fn registered_count(&self) -> usize {
         self.upcasters.values().map(HashMap::len).sum()
     }
 
@@ -132,7 +133,7 @@ impl UpcasterRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::MemoryError;
+    use me_types::error::MemoryError;
 
     #[test]
     fn empty_returns_unchanged() {

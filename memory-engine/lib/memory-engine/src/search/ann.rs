@@ -309,8 +309,8 @@ impl HnswStrategy {
         &self,
         conn: &Connection,
         embed_dim: usize,
-    ) -> Result<crate::engine::snapshot::HnswSnapshot> {
-        use crate::engine::snapshot::{HnswEntry, HnswSnapshot};
+    ) -> Result<crate::types::snapshot::HnswSnapshot> {
+        use crate::types::snapshot::{HnswEntry, HnswSnapshot};
 
         let mut stmt =
             conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")?;
@@ -345,7 +345,7 @@ impl HnswStrategy {
     /// the wrong size, or `MemoryError::Internal` if HNSW does not assign sequential
     /// IDs starting from 0.
     pub(crate) fn from_snapshot(
-        snap: &crate::engine::snapshot::HnswSnapshot,
+        snap: &crate::types::snapshot::HnswSnapshot,
         embed_dim: usize,
     ) -> Result<Self> {
         // Snapshot entries are already decoded, so each is infallible — wrap in
@@ -1440,7 +1440,7 @@ mod tests {
             // The shared `build_hnsw_inner` kernel enforces the dimension check for
             // the snapshot path identically to the DB path: a wrong-width entry must
             // surface `EmbeddingDimension`, not corrupt the index.
-            use crate::engine::snapshot::{HnswEntry, HnswSnapshot};
+            use crate::types::snapshot::{HnswEntry, HnswSnapshot};
 
             let snap = HnswSnapshot {
                 entries: vec![HnswEntry {

@@ -2,7 +2,7 @@
 //! (`archive`).
 //!
 //! A **separate** trait, held by the engine as `Option<Arc<dyn ColdStorage>>` —
-//! NOT a [`StorageBackend`](crate::storage::StorageBackend) supertrait bound, so
+//! NOT a [`StorageBackend`](crate::StorageBackend) supertrait bound, so
 //! the umbrella's type stays stable across feature sets. Only the manifest CRUD is
 //! on the trait; the `.pak` file mechanics (`write_pak_and_hash` / `read_pak` /
 //! `hash_file` / `verify_pak`) stay as feature-gated free functions in
@@ -11,13 +11,13 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::archive::ArchiveManifestEntry;
-use crate::error::Result;
+use me_types::error::Result;
+use me_types::types::archive::ArchiveManifestEntry;
 
 /// Cold-storage `.pak` manifest CRUD.
 ///
 /// # Errors
-/// Every method returns [`MemoryError::Storage`](crate::error::MemoryError::Storage)
+/// Every method returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage)
 /// on a backend failure.
 #[async_trait]
 pub trait ColdStorage: Send + Sync {

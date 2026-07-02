@@ -302,8 +302,8 @@ impl MemoryGraph {
     /// Extract all edges for snapshotting.
     ///
     /// No isolated nodes — matches `load_from_db` semantics (edges only).
-    pub(crate) fn to_snapshot(&self) -> crate::engine::snapshot::GraphSnapshot {
-        use crate::engine::snapshot::{GraphEdgeSnapshot, GraphSnapshot};
+    pub(crate) fn to_snapshot(&self) -> crate::types::snapshot::GraphSnapshot {
+        use crate::types::snapshot::{GraphEdgeSnapshot, GraphSnapshot};
         let edges = self
             .graph
             .edge_references()
@@ -377,7 +377,7 @@ impl MemoryGraph {
     /// `existing_fact_ids`. The caller treats this as "discard the sidecar and
     /// rebuild from the authoritative database"; it never panics.
     pub(crate) fn from_snapshot(
-        snap: &crate::engine::snapshot::GraphSnapshot,
+        snap: &crate::types::snapshot::GraphSnapshot,
         existing_fact_ids: &HashSet<i64>,
     ) -> Result<Self> {
         check_edge_count_bound(snap.edges.len())?;
@@ -818,16 +818,16 @@ mod tests {
         // Baseline: a well-formed snapshot (positive ids, within the cap, all
         // endpoints present in the existing fact set) builds the graph faithfully —
         // the revalidation does not reject good data.
-        let snap = crate::engine::snapshot::GraphSnapshot {
+        let snap = crate::types::snapshot::GraphSnapshot {
             edges: vec![
-                crate::engine::snapshot::GraphEdgeSnapshot {
+                crate::types::snapshot::GraphEdgeSnapshot {
                     edge_id: 1,
                     source: 10,
                     target: 20,
                     relation_type: "supplements".into(),
                     weight: 0.5,
                 },
-                crate::engine::snapshot::GraphEdgeSnapshot {
+                crate::types::snapshot::GraphEdgeSnapshot {
                     edge_id: 2,
                     source: 20,
                     target: 30,
@@ -855,8 +855,8 @@ mod tests {
         // but is expired: it is present in `existing` (the `SELECT id FROM facts`
         // set), so the snapshot edge that mirrors what `load_from_db` would load MUST
         // be accepted — never falsely rejected into a needless full DB rebuild.
-        let snap = crate::engine::snapshot::GraphSnapshot {
-            edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+        let snap = crate::types::snapshot::GraphSnapshot {
+            edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
                 edge_id: 1,
                 source: 10, // active synthetic
                 target: 20, // existing-but-EXPIRED source
@@ -886,8 +886,8 @@ mod tests {
         let existing: HashSet<i64> = [10, 20].into_iter().collect();
 
         // Phantom target (30 does not exist).
-        let snap_target = crate::engine::snapshot::GraphSnapshot {
-            edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+        let snap_target = crate::types::snapshot::GraphSnapshot {
+            edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
                 edge_id: 1,
                 source: 10,
                 target: 30,
@@ -904,8 +904,8 @@ mod tests {
         );
 
         // Phantom source (99 does not exist).
-        let snap_source = crate::engine::snapshot::GraphSnapshot {
-            edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+        let snap_source = crate::types::snapshot::GraphSnapshot {
+            edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
                 edge_id: 1,
                 source: 99,
                 target: 20,
@@ -932,8 +932,8 @@ mod tests {
         // fires before the set membership lookup, so an empty existing set suffices.
         let existing: HashSet<i64> = HashSet::new();
         for (source, target) in [(0, 20), (-1, 20), (10, 0), (10, -5)] {
-            let snap = crate::engine::snapshot::GraphSnapshot {
-                edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+            let snap = crate::types::snapshot::GraphSnapshot {
+                edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
                     edge_id: 1,
                     source,
                     target,
@@ -956,8 +956,8 @@ mod tests {
         // An edge_id is a SQLite rowid too; <= 0 signals a corrupt/tampered
         // edge record. Endpoints are valid + existing so only the edge_id triggers.
         let existing: HashSet<i64> = [10, 20].into_iter().collect();
-        let snap = crate::engine::snapshot::GraphSnapshot {
-            edges: vec![crate::engine::snapshot::GraphEdgeSnapshot {
+        let snap = crate::types::snapshot::GraphSnapshot {
+            edges: vec![crate::types::snapshot::GraphEdgeSnapshot {
                 edge_id: 0,
                 source: 10,
                 target: 20,

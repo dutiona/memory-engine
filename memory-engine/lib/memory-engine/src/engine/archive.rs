@@ -417,6 +417,10 @@ mod tests {
     /// because the table was dropped) must NOT leave an orphan `.pak` file behind.
     /// The `.pak` is written before the commit transaction; without on-error
     /// cleanup it would be a permanent disk leak with no manifest row (CWE-459).
+    // Uses the `raw_exec` failure-injection seam, which since #816 A1 is gated on
+    // `test-util` (a cross-crate trait method can't ride `cfg(test)`); without this gate
+    // the test breaks `cargo test --features archive` (E0599). Runs under --all-features.
+    #[cfg(feature = "test-util")]
     #[tokio::test]
     async fn archive_cleans_up_pak_when_commit_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -739,6 +743,9 @@ mod tests {
     /// flagged. The shared [`is_within_archive_dir`] containment check
     /// (`archive/search.rs`, widened to `pub(crate)` for exactly this reuse)
     /// rejects it before any filesystem access.
+    // Uses the `raw_exec` failure-injection seam (test-util-gated since #816 A1), so this
+    // test compiles only with `test-util` on — matching the sibling `commit_fails` test.
+    #[cfg(feature = "test-util")]
     #[tokio::test]
     async fn verify_archives_rejects_path_traversal_manifest_entry() {
         use crate::archive::search::is_within_archive_dir;

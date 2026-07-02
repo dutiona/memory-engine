@@ -6,11 +6,17 @@ rust-version = "1.88"
 description = "HTTP embedding provider for memory-engine — OpenAI and Ollama compatible"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"
+# Not published during the Wave 2 decomposition (#816): this crate depends on the
+# now-publish=false `memory-engine` facade (which in turn path-depends on the publish=false
+# leaf crates), so it cannot be published to crates.io until the split stabilizes (Codex,
+# PR #928). publish=false keeps the workspace consistent; revisit at Wave 2 completion.
+publish = false
 
 [dependencies]
-# Publishable library: the intra-workspace dep carries a version (not a bare path)
-# so it is not a cargo-deny wildcard and the crate stays crates.io-publishable.
-memory-engine = { path = "../memory-engine", version = "0.1.0" }
+# Bare path-dep: with this crate publish=false, cargo-deny's `allow-wildcard-paths`
+# exempts the first-party path dep, so the `version` key a publishable crate would have
+# needed is dropped.
+memory-engine = { path = "../memory-engine" }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

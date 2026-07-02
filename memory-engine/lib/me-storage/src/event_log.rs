@@ -9,14 +9,14 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
-use crate::types::{Event, EventFilter, NewEvent};
+use me_types::error::Result;
+use me_types::types::{Event, EventFilter, NewEvent};
 
 /// The append-only event log.
 ///
 /// # Errors
-/// Every method returns [`MemoryError::Storage`](crate::error::MemoryError::Storage)
-/// on a backend failure (or [`NotFound`](crate::error::MemoryError::NotFound) for a
+/// Every method returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage)
+/// on a backend failure (or [`NotFound`](me_types::error::MemoryError::NotFound) for a
 /// missing id).
 #[async_trait]
 pub trait EventLog: Send + Sync {
@@ -36,14 +36,14 @@ pub trait EventLog: Send + Sync {
     /// Aggregate outcome-signal counts for one fact via a SQL `GROUP BY` push-down
     /// over the `OutcomeSignal` events (restoring the push-down the cutover would
     /// otherwise lose by materializing the window in memory). Returns
-    /// [`OutcomeCounts::default`](crate::types::OutcomeCounts) when the fact has no
+    /// [`OutcomeCounts::default`](me_types::types::OutcomeCounts) when the fact has no
     /// recorded outcomes. Does **not** validate fact existence — the caller does.
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// backend failure.
-    async fn count_outcome_signals(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts>;
+    async fn count_outcome_signals(&self, fact_id: i64) -> Result<me_types::types::OutcomeCounts>;
 
     /// Batch variant of [`count_outcome_signals`](Self::count_outcome_signals):
     /// one `GROUP BY fact_id, outcome` scan filtered to `fact_ids`. Facts with no
@@ -52,10 +52,10 @@ pub trait EventLog: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
+    /// Returns [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a
     /// backend failure.
     async fn count_outcome_signals_batch(
         &self,
         fact_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, crate::types::OutcomeCounts>>;
+    ) -> Result<std::collections::HashMap<i64, me_types::types::OutcomeCounts>>;
 }

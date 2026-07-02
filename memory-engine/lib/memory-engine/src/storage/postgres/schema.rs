@@ -147,8 +147,8 @@ impl SchemaManager for PgBackend {
 
     async fn write_engine_snapshot(
         &self,
-        _graph: crate::engine::snapshot::GraphSnapshot,
-        _scope_tree: crate::engine::snapshot::ScopeTreeSnapshot,
+        _graph: crate::types::snapshot::GraphSnapshot,
+        _scope_tree: crate::types::snapshot::ScopeTreeSnapshot,
     ) -> Result<bool> {
         // PgBackend has no sidecar snapshot mechanism — the trait doc names this exact
         // case as the `Ok(false)` ("no durable snapshot location") return.
@@ -175,7 +175,7 @@ impl SchemaManager for PgBackend {
         ))
     }
 
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(feature = "test-util")]
     async fn raw_exec(&self, sql: &str) -> Result<()> {
         self.read_only_guard()?;
         let sql = sql.to_string();

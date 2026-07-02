@@ -10,7 +10,7 @@ pub type LineageId = i64;
 
 /// A high-value observation captured by the intelligence layer.
 ///
-/// Used as input to [`crate::traits::InsightStream::record`].
+/// Used as input to `crate::traits::InsightStream::record`.
 /// The consumer creates `Insight` values during conversations to capture
 /// reasoning, decisions, and connections that only the model can make.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,7 +27,7 @@ pub struct Insight {
     pub scope: Option<String>,
 }
 
-// `CycleReport` (delta-based, R7) now lives in `crate::engine::cycle::report` and is
+// `CycleReport` (delta-based, R7) now lives in `crate::types::cycle_report` and is
 // re-exported from the crate root. The old counts-based struct was removed in #49.
 
 /// Per-`FactType` compression configuration for `DreamCycle`.
@@ -93,9 +93,9 @@ impl DreamCycleConfig {
 /// Request to promote a fact to wisdom with provenance tracking.
 ///
 /// Carries a precomputed embedding so the engine does not need an
-/// [`crate::traits::EmbeddingProvider`] at promotion time — the `DreamCycle`
+/// `crate::traits::EmbeddingProvider` at promotion time — the `DreamCycle`
 /// consumer owns its embedder and computes the embedding before calling
-/// [`DreamContext::promote`](crate::engine::cognitive::DreamContext::promote).
+/// `DreamContext::promote`.
 #[derive(Debug, Clone)]
 pub struct PromoteRequest {
     /// The promoted fact text.
@@ -127,7 +127,7 @@ pub struct PromotionResult {
 
 /// Outcome of an atomic background-reconstruction promote (#623 D6).
 ///
-/// Returned by [`SchemaManager::promote_space`](crate::storage::schema::SchemaManager::promote_space)
+/// Returned by `SchemaManager::promote_space`
 /// after the new (`populating`) space's vectors have been copy-swapped into the
 /// active serving store (`facts.embedding`) and the registry status flipped — all
 /// in one transaction. Internal-only this wave; the operator surface that renders
@@ -151,7 +151,7 @@ pub struct PromoteOutcome {
     /// The active vectors all changed, so a live in-process vector index (HNSW) must
     /// rebuild. Always `true` for a promote — even same-dim, the vectors are new. The
     /// engine acts on this by calling
-    /// [`SearchIndex::rebuild_vector_index`](crate::storage::SearchIndex::rebuild_vector_index)
+    /// `SearchIndex::rebuild_vector_index`
     /// on the **same-dim** path (#624); a **different-dim** promote rebuilds on the
     /// required reopen (#742). This flag is the operator-facing signal (#689) that the
     /// active vectors changed — **not** an assertion that the index is currently stale.

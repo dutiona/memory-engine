@@ -31,7 +31,7 @@ use crate::traits::{
     ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummarizableContent,
     SummaryGenerator,
 };
-use crate::types::{EmbeddingFingerprint, Fact, NewSummary};
+use crate::types::Fact;
 
 /// Safety cap for the O(N·M) dedup pass (`compute_dedup`). Beyond this many active facts
 /// the pass is **skipped and the consolidation watermark is NOT advanced**, so the
@@ -76,41 +76,10 @@ fn summarize_and_embed(
     Ok((text, embedding))
 }
 
-/// An immutable read-phase snapshot of everything [`compute_plan`] needs, captured
-/// under a brief lock and then released so the compute phase runs lock-free (#409).
-pub struct Snapshot {
-    /// The active set, loaded once (#389). Empty when `over_both_caps` (the load was
-    /// short-circuited, #659) — distinguished from a genuinely empty store by the flag.
-    active_facts: Vec<Fact>,
-    /// `last_consolidated_at` watermark scoping the dedup "new facts" set.
-    last: Option<DateTime<Utc>>,
-    /// Single run-level timestamp; the watermark advances to this on success.
-    now: DateTime<Utc>,
-    /// The corpus exceeded BOTH safety caps, so the (expensive) `list_active` load was
-    /// skipped (#659): the plan is a complete no-op (dedup skipped, clustering skipped).
-    over_both_caps: bool,
-}
-
-/// The fully-computed plan for one consolidation run — pure data produced lock-free by
-/// [`compute_plan`] and applied atomically by [`apply_plan`] (#409). Holds no borrow of
-/// the store, so it survives the gap between releasing the read lock and acquiring the
-/// write lock.
-pub struct ConsolidationPlan {
-    /// Dedup decision (expirations + importance inheritances) as data.
-    dedup: dedup::DedupComputed,
-    /// Whether clustering ran (vs. skipped over the cap). Gates the summary writes so
-    /// existing summaries are preserved when the pass could not run (#345).
-    cluster_ran: bool,
-    /// New cluster summaries to write (already summarized + embedded).
-    cluster_summaries: Vec<NewSummary>,
-    /// New global summary to write, if any.
-    global_summary: Option<NewSummary>,
-    /// The embedder's fingerprint to stamp, set **iff** a summary vector was produced
-    /// (#643). Captured during compute so `apply_plan` needs no embedder.
-    embedding_fingerprint: Option<EmbeddingFingerprint>,
-    /// Run-level timestamp (expiry stamp + watermark).
-    now: DateTime<Utc>,
-}
+/// `Snapshot` and `ConsolidationPlan` — the read-phase snapshot and the fully-computed
+/// plan — moved to `me-types` (Wave 2 #816 E.4b Phase B) as pure data; re-exported here
+/// so `crate::consolidation::{Snapshot, ConsolidationPlan}` keep resolving.
+pub use me_types::types::consolidation::{ConsolidationPlan, Snapshot};
 
 /// Phase 1 — load the read snapshot under a brief lock (engine: production caps).
 ///
@@ -439,7 +408,7 @@ mod tests {
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
     use crate::store::summaries::SummaryStore;
-    use crate::types::{ConsolidationLevel, FactType, NewFact};
+    use crate::types::{ConsolidationLevel, FactType, NewFact, NewSummary};
 
     const DIM: usize = 4;
 
@@ -536,11 +505,12 @@ mod tests {
         // `dedup_threshold` is valid but `min_cluster_size` is not, so the error
         // must come from validation rather than a pass. If validation did NOT run
         // first, the valid threshold would have expired one near-duplicate.
-        let bad = ConsolidationConfig {
-            dedup_threshold: 0.90,
-            min_cluster_size: 0,
-            ..Default::default()
-        };
+        // `ConsolidationConfig` is `#[non_exhaustive]` and now lives in the `me-traits`
+        // crate, so it can no longer be struct-literal'd here — build it via the builder.
+        let bad = ConsolidationConfig::builder()
+            .dedup_threshold(0.90)
+            .min_cluster_size(0)
+            .build();
         let err = consolidate(
             &conn,
             &MockGenerator,

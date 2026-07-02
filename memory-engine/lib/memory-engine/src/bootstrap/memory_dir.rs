@@ -26,15 +26,12 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::store::facts::FactStore;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{ClassifierInput, FactType, NewFact};
 
 use super::BootstrapConfig;
-use super::metrics::BootstrapReport;
 use super::redact;
 
 /// Baseline importance for curated native-memory facts. Higher than the
@@ -268,7 +265,7 @@ fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
 }
 
 /// Recursively collect `*.md` files under `dir` into `out`.
-fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+pub fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         // `file_type()` reads the dirent's own type (no extra `stat`) and does
@@ -306,23 +303,59 @@ fn build_metadata(path: &Path, parsed: &ParsedMemory, route_kb: bool) -> serde_j
     metadata
 }
 
-/// Build and store one fact from a parsed `.md` memory file.
+/// Read → parse → redact → **embed** one `.md` memory file.
 ///
-/// Returns the importance to fold into the prewarm average — `0.0` when the
-/// fact was *reinforced* rather than created (reinforcement updates no prewarm
-/// counters). Updates `report`'s `facts_created`/`facts_reinforced`/
-/// `secrets_redacted` and the prewarm tallies in place.
-#[allow(clippy::too_many_arguments)]
-fn import_one_memory(
-    fact_store: &FactStore,
+/// Pure compute plus the consumer callbacks (`embed`/`should_pin`) — **no DB
+/// access**. Run inside `spawn_blocking` (a blocking `EmbeddingProvider` must not
+/// park the async executor). Returns `None` when the file is skipped — unreadable or
+/// an empty body (best-effort, non-fatal, mirrors the old per-file loop) — else
+/// `Some((fact, redaction_count))`; the redactions fold into the report only on the
+/// *created* branch (caller-side). An embedding failure returns `Err` (aborts the
+/// run, matching the old `?`).
+///
+/// # Errors
+///
+/// Returns an embedding error (which aborts the run; a re-run resumes idempotently).
+pub fn prepare_memory_file(
+    path: &Path,
+    embedder: &dyn EmbeddingProvider,
+    config: &BootstrapConfig,
+    classifier: Option<&dyn PersistenceClassifier>,
+    scope_id: i64,
+) -> Result<Option<(NewFact, usize)>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "skipping unreadable memory file");
+            return Ok(None);
+        }
+    };
+    let parsed = parse_memory_file(&raw);
+    // Files with an empty body (e.g. a frontmatter-only stub) carry no fact.
+    if parsed.body.is_empty() {
+        return Ok(None);
+    }
+    let (fact, redactions) =
+        prepare_one_memory(embedder, config, classifier, scope_id, path, &parsed)?;
+    Ok(Some((fact, redactions)))
+}
+
+/// Build one `NewFact` from a parsed `.md` memory file — redact, backdate, embed.
+///
+/// The pure-compute half of the former `import_one_memory`; the DB insert
+/// (dedup-with-reinforce) and the report accounting moved to the caller (facade),
+/// which drives the autocommit-per-file loop through the storage port. Returns
+/// `(fact, redaction_count)`; the redactions are added to the report only on the
+/// *created* branch (idempotent audit counter), so they are carried out here rather
+/// than pre-summed.
+fn prepare_one_memory(
     embedder: &dyn EmbeddingProvider,
     config: &BootstrapConfig,
     classifier: Option<&dyn PersistenceClassifier>,
     scope_id: i64,
     path: &Path,
     parsed: &ParsedMemory,
-    report: &mut BootstrapReport,
-) -> Result<f64> {
+) -> Result<(NewFact, usize)> {
     // Backdate priority: frontmatter date > filename-encoded date > file mtime
     // > now(). Native memory files carry no frontmatter date but encode the
     // authored date in the filename; mtime tracks in-place rewrites (≈ import
@@ -393,93 +426,18 @@ fn import_one_memory(
         is_pinned,
     };
 
-    let (_, reinforced) = fact_store.insert_or_reinforce(&new_fact)?;
-    if reinforced {
-        report.facts_reinforced += 1;
-        return Ok(0.0);
-    }
-    report.facts_created += 1;
-    report.secrets_redacted += redactions;
-    match fact_type {
-        FactType::Episodic => report.prewarm_metrics.episodic_count += 1,
-        FactType::Semantic => report.prewarm_metrics.semantic_count += 1,
-        FactType::Procedural => report.prewarm_metrics.procedural_count += 1,
-    }
-    Ok(MEMORY_IMPORTANCE)
+    Ok((new_fact, redactions))
 }
 
-/// Import every `*.md` memory file under `dir` (recursive) into the store.
-///
-/// Each file becomes one fact: body as content, `t_created` backdated from the
-/// frontmatter date, else a filename-encoded date, else the file mtime,
-/// type-routed per [`classify_memory_type`],
-/// redaction-gated, and dedup-with-reinforced. Files with an empty body (e.g. a
-/// frontmatter-only stub) are skipped. Unreadable files are logged and skipped,
-/// not fatal.
-///
-/// # Errors
-///
-/// Returns `MemoryError::Io` if `dir` cannot be traversed, or an embedding/DB
-/// error from processing a file (which aborts the run; a re-run resumes
-/// idempotently).
-pub fn bootstrap_memory_directory_inner(
-    conn: &Connection,
-    embed_dim: usize,
-    dir: &Path,
-    embedder: &dyn EmbeddingProvider,
-    config: &BootstrapConfig,
-    classifier: Option<&dyn PersistenceClassifier>,
-    scope_id: i64,
-) -> Result<BootstrapReport> {
-    let mut report = BootstrapReport::default();
-    let fact_store = FactStore::new(conn, embed_dim);
-
-    let mut files = Vec::new();
-    collect_md_files(dir, &mut files)?;
-    files.sort();
-
-    let mut importance_sum = 0.0;
-
-    for path in &files {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "skipping unreadable memory file");
-                report.memory_files_skipped += 1;
-                continue;
-            }
-        };
-
-        let parsed = parse_memory_file(&raw);
-        if parsed.body.is_empty() {
-            report.memory_files_skipped += 1;
-            continue;
-        }
-        report.memory_files_parsed += 1;
-
-        importance_sum += import_one_memory(
-            &fact_store,
-            embedder,
-            config,
-            classifier,
-            scope_id,
-            path,
-            &parsed,
-            &mut report,
-        )?;
-    }
-
-    let total = report.prewarm_metrics.total_count();
-    if total > 0 {
-        // Tiny tally (<< 2^52): the usize -> f64 cast cannot lose precision.
-        #[allow(clippy::cast_precision_loss)]
-        {
-            report.prewarm_metrics.avg_importance = importance_sum / total as f64;
-        }
-    }
-
-    Ok(report)
-}
+// The `--memory-dir` import loop (discover → per-file prepare+embed → autocommit
+// insert-or-reinforce) is driven engine-side by `MemoryEngine::bootstrap_memory_directory`
+// (see `engine/bootstrap.rs`): each file goes through [`prepare_memory_file`] on a
+// blocking thread, then the port's `ingest_bootstrap_batch_atomic` (marker-less,
+// one fact per call) — which routes the `insert_or_reinforce` below the seam while
+// keeping the `.md` path off the live HNSW index, matching the session path. The
+// meta-first identity stamp (#643) is a single `record_embedding_fingerprint_if_absent`
+// before the loop.
+// Discovery ([`collect_md_files`]) + per-file parsing ([`parse_memory_file`]) live here.
 
 #[cfg(test)]
 mod tests {

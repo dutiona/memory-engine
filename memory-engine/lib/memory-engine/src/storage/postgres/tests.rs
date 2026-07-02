@@ -4,10 +4,13 @@
 //!
 //! **Every test is `#[ignore]` by default** so `cargo test --all-features` stays GREEN
 //! on a machine with no Docker daemon (mirrors the conformance arm's inert `#[ignore]`
-//! and the #621 gated-TEI-smoke-test precedent). Run the live suite with:
+//! and the #621 gated-TEI-smoke-test precedent). This module is gated
+//! `cfg(all(test, feature = "test-util"))` because it drives the `raw_exec`
+//! failure-injection seam (test-util-gated since #816 A1), so the live suite needs the
+//! `test-util` feature too. Run it with:
 //!
 //! ```text
-//! cargo test -p memory-engine --features backend-postgres -- --ignored
+//! cargo test -p memory-engine --features backend-postgres,test-util -- --ignored
 //! ```
 //!
 //! The `migrated_backend` helper (a `pgvector/pgvector:pg17` container + a migrated

@@ -18,14 +18,14 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
-use crate::storage::FactFilter;
-use crate::types::FactType;
+use crate::FactFilter;
+use me_types::error::Result;
+use me_types::types::FactType;
 
 /// Lexical + vector retrieval, returning ranked `(fact_id, score)` pairs.
 ///
 /// # Errors
-/// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend
+/// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a backend
 /// failure (a malformed query is *not* an error — it returns an empty result).
 #[async_trait]
 pub trait SearchIndex: Send + Sync {
@@ -40,7 +40,7 @@ pub trait SearchIndex: Send + Sync {
     ///
     /// `embedding` must have the backend's configured dimension; a slice of the
     /// wrong length (including empty) is a
-    /// [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension),
+    /// [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension),
     /// not an empty result.
     async fn vector_search(
         &self,
@@ -106,9 +106,9 @@ pub trait SearchIndex: Send + Sync {
     /// seam.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend
+    /// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a backend
     /// failure, or
-    /// [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
+    /// [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension)
     /// if a stored embedding has the wrong width.
     async fn rebuild_vector_index(&self) -> Result<()> {
         Ok(())

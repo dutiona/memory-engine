@@ -8,8 +8,8 @@ use crate::engine::cycle::{
 };
 use crate::error::{MemoryError, MigrationError, Result};
 use crate::forgetting::{ForgetPolicy, PruneStats};
-use crate::search::hybrid::{SearchQuery, SearchResult};
 use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
+use crate::types::search::{SearchQuery, SearchResult};
 use crate::types::{Fact, NewFact, PromoteRequest, PromotionResult};
 
 // Re-import trait types used in public API signatures
@@ -401,8 +401,9 @@ impl MemoryEngine {
 mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
-    use crate::engine::cycle::{CycleContext, CycleMetadata, CycleReport, IdentityOutput};
+    use crate::engine::cycle::{CycleMetadata, CycleReport, IdentityOutput};
     use crate::error::MemoryError;
+    use crate::traits::CycleCtx;
     use crate::types::{FactType, Insight, PromoteRequest, PromotionProvenance};
 
     // --- Stub implementations ---
@@ -435,7 +436,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DreamCycle for NoopCycle {
-        async fn run(&self, ctx: &CycleContext<'_>) -> Result<CycleReport> {
+        async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {
             Ok(CycleReport {
                 deltas: vec![],
                 identity: IdentityOutput::empty(),
@@ -529,7 +530,7 @@ mod tests {
     struct SelectingButEmptyCycle;
     #[async_trait::async_trait]
     impl DreamCycle for SelectingButEmptyCycle {
-        async fn run(&self, ctx: &CycleContext<'_>) -> Result<CycleReport> {
+        async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {
             Ok(CycleReport {
                 deltas: vec![],
                 identity: IdentityOutput::empty(),

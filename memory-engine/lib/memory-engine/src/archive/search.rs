@@ -12,9 +12,9 @@ use std::time::Instant;
 use crate::archive::pak::read_pak;
 use crate::archive::types::ArchiveManifestEntry;
 use crate::error::Result;
-use crate::search::hybrid::{MatchType, SearchResult};
 use crate::search::query::MemoryQuery;
 use crate::search::vector::cosine_similarity;
+use crate::types::search::{MatchType, SearchResult};
 
 /// Summary result from scanning archives.
 pub struct ArchiveSearchResult {
