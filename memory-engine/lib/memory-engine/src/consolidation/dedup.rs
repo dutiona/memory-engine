@@ -193,7 +193,7 @@ pub(super) fn compute_dedup(
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on SQL failure, or `MemoryError::NotFound` from an
+/// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::NotFound` from an
 /// importance update if a fact row is missing (facts are soft-deleted, so this does not
 /// fire for a merely-expired row).
 pub(super) fn apply_dedup(

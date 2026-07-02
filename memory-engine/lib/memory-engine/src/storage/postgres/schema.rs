@@ -9,7 +9,7 @@
 //!
 //! The embedding-fingerprint methods reimplement the `store::embedding_meta` /
 //! `store::embedding_spaces` logic in PG SQL (R11): those free functions take a
-//! `&rusqlite::Connection` and return `MemoryError::Database` (a `#[from]
+//! `&rusqlite::Connection` and return `MemoryError::Storage` (a `#[from]
 //! rusqlite::Error` variant Postgres cannot construct), so PG re-expresses the SQL and
 //! maps driver errors via [`pg_err`], while preserving the *exact* semantic variants
 //! (`EmbeddingDimension`, `EmbeddingModelMismatch`, `Internal`).

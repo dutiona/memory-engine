@@ -46,10 +46,14 @@ fn index_exists(conn: &Connection, name: &str) -> bool {
 
 /// Test helper: creates v1 schema (Phase 1 tables only, no scopes, no `scope_id`).
 fn init_schema_v1(conn: &Connection) -> Result<()> {
-    conn.execute_batch(TABLES_V1_DDL)?;
-    conn.execute_batch(FTS5_DDL)?;
-    conn.execute_batch(TRIGGERS_DDL)?;
-    conn.execute_batch(INDEXES_V1_DDL)?;
+    conn.execute_batch(TABLES_V1_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(FTS5_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(TRIGGERS_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(INDEXES_V1_DDL)
+        .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "1")?;
     Ok(())
 }
@@ -122,11 +126,16 @@ CREATE INDEX IF NOT EXISTS idx_edges_expired ON edges(t_expired);
 
 /// Test helper: creates v2 schema (v1 + scopes + `scope_id` columns, no v3 columns).
 fn init_schema_v2(conn: &Connection) -> Result<()> {
-    conn.execute_batch(TABLES_V2_DDL)?;
-    conn.execute_batch(SCOPES_DDL)?;
-    conn.execute_batch(FTS5_DDL)?;
-    conn.execute_batch(TRIGGERS_DDL)?;
-    conn.execute_batch(INDEXES_V2_DDL)?;
+    conn.execute_batch(TABLES_V2_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(SCOPES_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(FTS5_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(TRIGGERS_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(INDEXES_V2_DDL)
+        .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "2")?;
     Ok(())
 }
@@ -211,11 +220,16 @@ CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);
 
 /// Test helper: creates v4 schema (v3 + `is_pinned`, `importance_score`, event envelope).
 fn init_schema_v4(conn: &Connection) -> Result<()> {
-    conn.execute_batch(TABLES_V4_DDL)?;
-    conn.execute_batch(SCOPES_DDL_V4)?;
-    conn.execute_batch(FTS5_DDL_V4)?;
-    conn.execute_batch(TRIGGERS_DDL_V4)?;
-    conn.execute_batch(INDEXES_V4_DDL)?;
+    conn.execute_batch(TABLES_V4_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(SCOPES_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(FTS5_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(TRIGGERS_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(INDEXES_V4_DDL)
+        .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "4")?;
     Ok(())
 }
@@ -343,11 +357,16 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
 /// Frozen v5 schema for testing v5→v6 migration.
 /// Identical to v4 but with `event_revision` on events table.
 fn init_schema_v5(conn: &Connection) -> Result<()> {
-    conn.execute_batch(TABLES_V5_DDL)?;
-    conn.execute_batch(SCOPES_DDL_V4)?;
-    conn.execute_batch(FTS5_DDL_V4)?;
-    conn.execute_batch(TRIGGERS_DDL_V4)?;
-    conn.execute_batch(INDEXES_V4_DDL)?;
+    conn.execute_batch(TABLES_V5_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(SCOPES_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(FTS5_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(TRIGGERS_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(INDEXES_V4_DDL)
+        .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "5")?;
     Ok(())
 }
@@ -898,19 +917,22 @@ fn migration_v1_through_v3_preserves_data() {
 /// Creates a v2-migrated schema: v1 tables + ALTER TABLE `scope_id` (no FK).
 fn init_schema_v2_migrated(conn: &Connection) -> Result<()> {
     init_schema_v1(conn)?;
-    conn.execute_batch(SCOPES_DDL)?;
+    conn.execute_batch(SCOPES_DDL)
+        .map_err(StorageError::backend)?;
     conn.execute_batch(
         "ALTER TABLE facts ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
              ALTER TABLE edges ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
              ALTER TABLE events ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
              ALTER TABLE summaries ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
              CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
              CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
              CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope_id);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "2")?;
     Ok(())
 }
@@ -1895,12 +1917,18 @@ fn validate_schema_version_old_version_err() {
 
 /// Frozen v6 schema: v5 tables + `surfaced_at` on facts, no `archive_manifest`.
 fn init_schema_v6(conn: &Connection) -> Result<()> {
-    conn.execute_batch(TABLES_V5_DDL)?;
-    conn.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")?;
-    conn.execute_batch(SCOPES_DDL_V4)?;
-    conn.execute_batch(FTS5_DDL_V4)?;
-    conn.execute_batch(TRIGGERS_DDL_V4)?;
-    conn.execute_batch(INDEXES_V4_DDL)?;
+    conn.execute_batch(TABLES_V5_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(SCOPES_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(FTS5_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(TRIGGERS_DDL_V4)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(INDEXES_V4_DDL)
+        .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "6")?;
     Ok(())
 }
@@ -1980,8 +2008,10 @@ fn fresh_db_has_archive_manifest_table() {
 /// Create a v7 schema by initing v8 and removing lineage artifacts.
 fn init_schema_v7(conn: &Connection) -> Result<()> {
     init_schema(conn)?;
-    conn.execute_batch("DROP TABLE IF EXISTS lineage;")?;
-    conn.execute_batch("DROP INDEX IF EXISTS idx_lineage_wisdom_fact_id;")?;
+    conn.execute_batch("DROP TABLE IF EXISTS lineage;")
+        .map_err(StorageError::backend)?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_lineage_wisdom_fact_id;")
+        .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "7")?;
     Ok(())
 }
@@ -2058,13 +2088,20 @@ fn fresh_db_has_lineage_table() {
 /// Create a v8 schema by initing v9 and removing activity/checkpoint artifacts.
 fn init_schema_v8(conn: &Connection) -> Result<()> {
     init_schema(conn)?;
-    conn.execute_batch("DROP TABLE IF EXISTS session_checkpoints;")?;
-    conn.execute_batch("DROP TABLE IF EXISTS activities;")?;
-    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_session;")?;
-    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_dedup;")?;
-    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_scope_recent;")?;
-    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_status;")?;
-    conn.execute_batch("DROP INDEX IF EXISTS idx_checkpoints_scope;")?;
+    conn.execute_batch("DROP TABLE IF EXISTS session_checkpoints;")
+        .map_err(StorageError::backend)?;
+    conn.execute_batch("DROP TABLE IF EXISTS activities;")
+        .map_err(StorageError::backend)?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_session;")
+        .map_err(StorageError::backend)?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_dedup;")
+        .map_err(StorageError::backend)?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_scope_recent;")
+        .map_err(StorageError::backend)?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_status;")
+        .map_err(StorageError::backend)?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_checkpoints_scope;")
+        .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "8")?;
     Ok(())
 }
@@ -2194,11 +2231,13 @@ fn init_schema_v9_buggy_dedup_index(conn: &Connection) -> Result<()> {
     init_schema(conn)?;
     // Replace the (now-fixed 5-col) index with the original buggy 4-col form
     // to simulate a fresh-v9 database created before the corrective migration.
-    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_dedup;")?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_activities_dedup;")
+        .map_err(StorageError::backend)?;
     conn.execute_batch(
         "CREATE INDEX idx_activities_dedup
                 ON activities(session_id, tool_name, args_hash, outcome_class);",
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", "9")?;
     Ok(())
 }

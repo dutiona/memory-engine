@@ -92,7 +92,7 @@ impl SearchIndex for SqliteBackend {
             })
             .await
             .map_err(super::map_join)?;
-            return super::map_seam_err(out);
+            return out;
         }
 
         self.block_read(move |c| {

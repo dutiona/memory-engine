@@ -168,7 +168,7 @@ impl MemoryEngineBuilder<InMemory> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` if the connection or schema setup fails.
+    /// Returns `MemoryError::Storage` if the connection or schema setup fails.
     pub fn build(self) -> Result<MemoryEngine> {
         let pool = ConnectionPool::open_memory(self.embed_dim)?;
         MemoryEngine::init_from_pool(

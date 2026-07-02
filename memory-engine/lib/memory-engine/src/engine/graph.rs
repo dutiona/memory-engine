@@ -39,7 +39,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     /// Returns `MemoryError::NotFound` if `scope` is `Some` but the path
     /// does not exist.
     pub async fn link_session_facts(&self, session_id: &str, scope: Option<&str>) -> Result<usize> {
@@ -127,7 +127,7 @@ impl MemoryEngine {
     /// - [`MemoryError::NotFound`](crate::error::MemoryError::NotFound) — no
     ///   *active* edge with `edge_id` exists (unknown id, or already expired); the
     ///   write affected 0 rows, so the graph is not modified.
-    /// - [`MemoryError::Database`](crate::error::MemoryError::Database) on SQL
+    /// - [`MemoryError::Storage`](crate::error::MemoryError::Storage) on SQL
     ///   failure.
     pub async fn expire_edge(&self, edge_id: i64) -> Result<()> {
         let now = Utc::now();

@@ -21,6 +21,7 @@ mod cluster;
 mod dedup;
 mod global;
 
+use crate::error::StorageError;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
@@ -86,7 +87,7 @@ pub use me_types::types::consolidation::{ConsolidationPlan, Snapshot};
 /// # Errors
 ///
 /// Returns `MemoryError::Conflict` if `config` fails validation, `MemoryError::Migration`
-/// if `last_consolidated_at` cannot be parsed, or `MemoryError::Database` on read failure.
+/// if `last_consolidated_at` cannot be parsed, or `MemoryError::Storage` on read failure.
 pub fn load_snapshot(
     conn: &Connection,
     embed_dim: usize,
@@ -276,14 +277,16 @@ fn compute_plan_capped(
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on SQL failure, or `MemoryError::Serialization` on a
+/// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::Serialization` on a
 /// summary serialization failure.
 pub fn apply_plan(
     conn: &Connection,
     plan: &ConsolidationPlan,
     embed_dim: usize,
 ) -> Result<(ConsolidationStats, Vec<i64>)> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
 
     // Dedup writes: importance inheritances + expirations (concurrency-tolerant, #409).
     // Returns the ids actually expired plus whether a survivor disappeared in the gap.
@@ -320,7 +323,7 @@ pub fn apply_plan(
         set_config(&tx, "last_consolidated_at", &plan.now.to_rfc3339())?;
     }
 
-    tx.commit()?;
+    tx.commit().map_err(StorageError::backend)?;
 
     let stats = ConsolidationStats {
         duplicates_removed: applied.expired.len(),

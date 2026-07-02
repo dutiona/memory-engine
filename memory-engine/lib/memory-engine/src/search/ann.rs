@@ -4,6 +4,7 @@
 //! Uses the `hnsw` crate (rust-cv) which owns inserted vectors,
 //! avoiding lifetime issues with the HNSW graph.
 
+use crate::error::StorageError;
 use space::Metric;
 
 use crate::search::cosine_similarity;
@@ -187,23 +188,26 @@ impl HnswStrategy {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure, `MemoryError::Internal` if
+    /// Returns `MemoryError::Storage` on query failure, `MemoryError::Internal` if
     /// HNSW does not assign sequential IDs starting from 0, or
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     fn build_inner(conn: &Connection, embed_dim: usize) -> Result<HnswInner> {
-        let mut stmt =
-            conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")?;
+        let mut stmt = conn
+            .prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")
+            .map_err(StorageError::backend)?;
         // The mapped-rows iterator borrows `stmt`, which is owned here and outlives
         // the `build_hnsw_inner` call below — so the kernel can pull rows lazily.
         // Each item is fallible: a rusqlite row error or a wrong-width blob is
         // threaded through as `Err`, and `build_hnsw_inner` short-circuits on it.
-        let rows = stmt.query_map([], |row| {
-            let id: i64 = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((id, blob))
-        })?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob))
+            })
+            .map_err(StorageError::backend)?;
         let decoded = rows.map(|row| {
-            let (fact_id, blob) = row?;
+            let (fact_id, blob) = row.map_err(StorageError::backend)?;
             let embedding = deserialize_embedding(&blob, embed_dim)?;
             Ok((fact_id, embedding))
         });
@@ -215,7 +219,7 @@ impl HnswStrategy {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure, or
+    /// Returns `MemoryError::Storage` on query failure, or
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     pub fn build_from_db(conn: &Connection, embed_dim: usize) -> Result<Self> {
         Ok(Self {
@@ -250,7 +254,7 @@ impl HnswStrategy {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure, or
+    /// Returns `MemoryError::Storage` on query failure, or
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     #[allow(
         clippy::significant_drop_tightening,
@@ -299,7 +303,7 @@ impl HnswStrategy {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure, or
+    /// Returns `MemoryError::Storage` on query failure, or
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     #[allow(
         clippy::unused_self,
@@ -312,17 +316,20 @@ impl HnswStrategy {
     ) -> Result<crate::types::snapshot::HnswSnapshot> {
         use crate::types::snapshot::{HnswEntry, HnswSnapshot};
 
-        let mut stmt =
-            conn.prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")?;
-        let rows = stmt.query_map([], |row| {
-            let id: i64 = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((id, blob))
-        })?;
+        let mut stmt = conn
+            .prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob))
+            })
+            .map_err(StorageError::backend)?;
 
         let mut entries = Vec::new();
         for row in rows {
-            let (fact_id, blob) = row?;
+            let (fact_id, blob) = row.map_err(StorageError::backend)?;
             let embedding = deserialize_embedding(&blob, embed_dim)?;
             entries.push(HnswEntry { fact_id, embedding });
         }
@@ -591,7 +598,7 @@ impl VectorSearchStrategy for HnswStrategy {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure, `MemoryError::Serialization`
+/// Returns `MemoryError::Storage` on query failure, `MemoryError::Serialization`
 /// if the id/scope JSON cannot be built, or `MemoryError::EmbeddingDimension` if a
 /// stored embedding has the wrong width.
 fn fetch_candidate_embeddings(
@@ -612,25 +619,29 @@ fn fetch_candidate_embeddings(
         serde_json::to_string(candidate_ids).map_err(crate::error::MemoryError::Serialization)?;
     let scope_json = serialize_scope_ids(scope_ids)?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, embedding FROM facts
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, embedding FROM facts
          WHERE id IN (SELECT value FROM json_each(?1))
            AND t_expired IS NULL
            AND (?2 IS NULL OR fact_type = ?2)
            AND (?3 IS NULL OR scope_id IN (SELECT value FROM json_each(?3)))",
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![ids_json, fact_type.map(fact_type_to_str), scope_json],
-        |row| {
-            let id: i64 = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((id, blob))
-        },
-    )?;
+        )
+        .map_err(StorageError::backend)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![ids_json, fact_type.map(fact_type_to_str), scope_json],
+            |row| {
+                let id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob))
+            },
+        )
+        .map_err(StorageError::backend)?;
 
     let mut out = HashMap::with_capacity(candidate_ids.len());
     for row in rows {
-        let (fact_id, blob) = row?;
+        let (fact_id, blob) = row.map_err(StorageError::backend)?;
         let embedding = deserialize_embedding(&blob, embed_dim)?;
         out.insert(fact_id, embedding);
     }

@@ -68,15 +68,25 @@ build on these boundaries have the durable _why_.
    `memory-engine-embed` publish. The publishable crates carry **versioned** path-deps on
    their internal deps (cargo-deny's wildcard rule does not exempt public crates).
 
-8. **Two deliberate, gated public-API breaks** (`cargo public-api` in the per-slice gate,
+8. **Three deliberate, gated public-API breaks** (`cargo public-api` in the per-slice gate,
    this ADR the record): (a) **`DreamCycle::run(&dyn CycleCtx)`** replacing
    `&CycleContext` — necessary so `me-traits` does not depend on `me-consolidate` (the DTO
    move alone leaves that cycle); `CycleCtx` is a `me-traits` capability trait enumerating
    the exact read-set the shipped `DefaultDreamCycle`/`LlmDreamCycle` use, and
    `me-consolidate`'s `CycleContext` _implements_ it. Landed in **S1** (keystone).
    (b) **`VectorSearchStrategy::search`** taking a storage port (`&dyn SearchIndex`)
-   instead of `&Connection` — deferred to **S4** (still `&Connection` after S1). `§M`'s
-   "public API unchanged" is amended to "unchanged **except** these two, gated".
+   instead of `&Connection` — deferred to **S4** (still `&Connection` after S1).
+   (c) **`MemoryError::Database` variant removed** (#926, at **S2**-start) — the SQLite
+   driver's `rusqlite::Error` no longer appears in the L0 public error enum; backend driver
+   errors now surface via `MemoryError::Storage(StorageError::Backend(String))`, mapped at
+   each backend call site through the new `StorageError::backend(impl Display)` helper. The
+   orphan rule previously pinned `impl From<rusqlite::Error> for MemoryError` — and thus
+   `rusqlite` + bundled SQLite — into L0 `me-types`; removing the variant lets `me-types`
+   drop `rusqlite` entirely (unblocking #633's `dep:rusqlite` gating). `#[non_exhaustive]`
+   on `MemoryError` softens the impact — only explicit `Database(_)` arms break, not
+   exhaustiveness. The `storage::sqlite::map_seam_err` boundary remap is deleted (subsumed:
+   the guarantee moves from a runtime match to compiler-enforced source-mapping). `§M`'s
+   "public API unchanged" is amended to "unchanged **except** these three, gated".
 
 ## Consequences
 
@@ -122,7 +132,7 @@ build on these boundaries have the durable _why_.
   return; the facade `count_events` early-out stays as a cheap embed-skip optimization.
   This is internal-port evolution (consumers call the `MemoryEngine` facade, not the port
   trait), guarded by `reexports_are_accessible` + cli/mcp/embed builds like the rest of the
-  carve — not a consumer-facing break, so point 8's "unchanged except two" still holds.
+  carve — not a consumer-facing break, so point 8's "unchanged except three" still holds.
 
 ## References
 

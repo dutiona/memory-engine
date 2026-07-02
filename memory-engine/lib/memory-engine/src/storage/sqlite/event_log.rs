@@ -3,6 +3,7 @@
 //! The [`UpcasterRegistry`](crate::store::upcaster::UpcasterRegistry) is a backend
 //! construction detail (cloned into each closure), never crossing a method boundary.
 
+use crate::error::StorageError;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -71,19 +72,23 @@ impl EventLog for SqliteBackend {
     // `engine/outcome.rs::get_outcome_counts`).
     async fn count_outcome_signals(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts> {
         self.block_read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT json_extract(payload, '$.outcome') AS outcome, COUNT(*) AS cnt
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json_extract(payload, '$.outcome') AS outcome, COUNT(*) AS cnt
                  FROM events
                  WHERE event_type = 'OutcomeSignal'
                    AND json_extract(payload, '$.fact_id') = ?1
                  GROUP BY outcome",
-            )?;
+                )
+                .map_err(StorageError::backend)?;
             let mut counts = crate::types::OutcomeCounts::default();
-            let rows = stmt.query_map(rusqlite::params![fact_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
-            })?;
+            let rows = stmt
+                .query_map(rusqlite::params![fact_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                })
+                .map_err(StorageError::backend)?;
             for row in rows {
-                let (outcome_str, cnt) = row?;
+                let (outcome_str, cnt) = row.map_err(StorageError::backend)?;
                 match outcome_str.as_str() {
                     "Positive" => counts.positive = cnt,
                     "Negative" => counts.negative = cnt,
@@ -107,26 +112,30 @@ impl EventLog for SqliteBackend {
         }
         let ids_json = serde_json::to_string(fact_ids)?;
         self.block_read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT json_extract(payload, '$.fact_id') AS fid,
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json_extract(payload, '$.fact_id') AS fid,
                         json_extract(payload, '$.outcome') AS outcome,
                         COUNT(*) AS cnt
                  FROM events
                  WHERE event_type = 'OutcomeSignal'
                    AND json_extract(payload, '$.fact_id') IN (SELECT value FROM json_each(?1))
                  GROUP BY fid, outcome",
-            )?;
+                )
+                .map_err(StorageError::backend)?;
             let mut by_fact: std::collections::HashMap<i64, crate::types::OutcomeCounts> =
                 std::collections::HashMap::new();
-            let rows = stmt.query_map(rusqlite::params![ids_json], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, u32>(2)?,
-                ))
-            })?;
+            let rows = stmt
+                .query_map(rusqlite::params![ids_json], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                })
+                .map_err(StorageError::backend)?;
             for row in rows {
-                let (fid, outcome_str, cnt) = row?;
+                let (fid, outcome_str, cnt) = row.map_err(StorageError::backend)?;
                 let entry = by_fact.entry(fid).or_default();
                 match outcome_str.as_str() {
                     "Positive" => entry.positive = cnt,

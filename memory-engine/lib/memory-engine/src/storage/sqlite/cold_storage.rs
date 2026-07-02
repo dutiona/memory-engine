@@ -337,11 +337,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::error::MemoryError::Archive(_)
-                    | crate::error::MemoryError::Database(_)
-                    | crate::error::MemoryError::Storage(_)
+                crate::error::MemoryError::Archive(_) | crate::error::MemoryError::Storage(_)
             ),
-            "expected Archive, Database or Storage error, got {err:?}"
+            "expected Archive or Storage error, got {err:?}"
         );
 
         // Manifest must be byte-identical to before: only the one pre-seeded entry,

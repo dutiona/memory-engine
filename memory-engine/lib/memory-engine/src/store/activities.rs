@@ -1,5 +1,6 @@
 //! Store operations for activity records.
 
+use crate::error::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{MemoryError, Result};
@@ -26,7 +27,7 @@ impl<'a> ActivityStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure (e.g. FK violation if
+    /// Returns `MemoryError::Storage` on SQL failure (e.g. FK violation if
     /// `activity.scope_id` references a non-existent scope).
     pub fn insert_or_dedup(
         &self,
@@ -61,7 +62,7 @@ impl<'a> ActivityStore<'a> {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
 
         if let Some((existing_id, count)) = existing {
             self.conn
@@ -74,7 +75,7 @@ impl<'a> ActivityStore<'a> {
                      WHERE id = ?4",
                     params![count + 1, ts, activity.result_summary, existing_id],
                 )
-                .map_err(MemoryError::Database)?;
+                .map_err(StorageError::backend)?;
             return Ok((existing_id, true));
         }
 
@@ -96,7 +97,7 @@ impl<'a> ActivityStore<'a> {
                     activity.scope_id,
                 ],
             )
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
 
         let id = self.conn.last_insert_rowid();
         Ok((id, false))
@@ -110,7 +111,7 @@ impl<'a> ActivityStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if no activity with `id` exists.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn get(&self, id: i64) -> Result<Activity> {
         self.conn
             .query_row(
@@ -125,7 +126,7 @@ impl<'a> ActivityStore<'a> {
                 rusqlite::Error::QueryReturnedNoRows => {
                     MemoryError::NotFound(format!("activity {id}"))
                 }
-                other => MemoryError::Database(other),
+                other => StorageError::backend(other).into(),
             })
     }
 
@@ -136,7 +137,7 @@ impl<'a> ActivityStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_by_session(&self, session_id: &str, limit: Option<usize>) -> Result<Vec<Activity>> {
         let base = "SELECT id, session_id, tool_name, args_hash, args, result_summary,
                         outcome_class, status, occurrence_count, first_seen, last_seen,
@@ -146,12 +147,12 @@ impl<'a> ActivityStore<'a> {
                  ORDER BY last_seen DESC";
         let limit_i64: i64 = limit.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
         let sql = format!("{base} LIMIT ?2");
-        let mut stmt = self.conn.prepare(&sql).map_err(MemoryError::Database)?;
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
         let rows = stmt
             .query_map(params![session_id, limit_i64], row_to_activity)
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<_, _>>()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// List recent activities for a set of scope IDs, most recent first.
@@ -160,14 +161,12 @@ impl<'a> ActivityStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_recent_by_scope(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Activity>> {
         if scope_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let ids_json = serde_json::to_string(scope_ids).map_err(|e| {
-            MemoryError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-        })?;
+        let ids_json = serde_json::to_string(scope_ids).map_err(MemoryError::Serialization)?;
         let mut stmt = self
             .conn
             .prepare(
@@ -179,12 +178,12 @@ impl<'a> ActivityStore<'a> {
                  ORDER BY last_seen DESC
                  LIMIT ?2",
             )
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
         let rows = stmt
             .query_map(params![ids_json, limit], row_to_activity)
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<_, _>>()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Update the status of an activity and optionally link to a promoted fact.
@@ -192,7 +191,7 @@ impl<'a> ActivityStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if no activity with `id` exists.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn update_status(
         &self,
         id: i64,
@@ -205,7 +204,7 @@ impl<'a> ActivityStore<'a> {
                 "UPDATE activities SET status = ?1, promoted_fact_id = ?2 WHERE id = ?3",
                 params![status.to_string(), promoted_fact_id, id],
             )
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
         if rows == 0 {
             return Err(MemoryError::NotFound(format!("activity {id}")));
         }
@@ -219,7 +218,7 @@ impl<'a> ActivityStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn count_by_session(&self, session_id: &str) -> Result<i64> {
         self.conn
             .query_row(
@@ -227,7 +226,7 @@ impl<'a> ActivityStore<'a> {
                 params![session_id],
                 |row| row.get(0),
             )
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -310,7 +311,7 @@ impl ConnectionPool {
     /// (256): each read connection is a real OS file descriptor, so an excessive
     /// value is rejected (not clamped) before it can exhaust the FD table /
     /// over-allocate (#415, CWE-770/789).
-    /// Returns `MemoryError::Database` if any connection or schema setup fails.
+    /// Returns `MemoryError::Storage` if any connection or schema setup fails.
     /// Returns `MemoryError::Migration` if the schema version cannot be determined
     /// or the stored version is newer than the compiled-in maximum.
     /// Returns `MemoryError::UnsupportedEpoch` if the database was written by a
@@ -332,7 +333,7 @@ impl ConnectionPool {
         for _ in 0..read_pool_size {
             let conn = open_connection(&path_str)?;
             conn.execute_batch("PRAGMA query_only = ON")
-                .map_err(MemoryError::Database)?;
+                .map_err(StorageError::backend)?;
             read_conns.push(conn);
         }
 
@@ -354,7 +355,7 @@ impl ConnectionPool {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` if connection or schema setup fails.
+    /// Returns `MemoryError::Storage` if connection or schema setup fails.
     pub fn open_memory(embed_dim: usize) -> Result<Self> {
         let conn = open_memory_conn()?;
         init_schema(&conn)?;
@@ -389,7 +390,7 @@ impl ConnectionPool {
     /// connection; #340/#356), or if it exceeds `MAX_READ_POOL` (256): each read
     /// connection is a real OS file descriptor, so an oversized value is rejected
     /// rather than allowed to exhaust the FD table (#415, CWE-770/789).
-    /// Returns `MemoryError::Database` if any connection or pragma setup fails.
+    /// Returns `MemoryError::Storage` if any connection or pragma setup fails.
     /// Returns `MemoryError::Migration` if the file does not exist, the schema
     /// is uninitialized, or the schema needs migration.
     /// Returns `MemoryError::UnsupportedEpoch` if the DB epoch is from the future.

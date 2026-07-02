@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use rusqlite::{Connection, params_from_iter};
 
 use crate::error::Result;
@@ -80,7 +81,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure, or
+/// Returns `MemoryError::Storage` on query failure, or
 /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
 //
 // The live SQLite path goes through `vector_search_filtered`; this unfiltered
@@ -112,7 +113,7 @@ pub(crate) fn vector_search(
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure, or
+/// Returns `MemoryError::Storage` on query failure, or
 /// `MemoryError::EmbeddingDimension` if a stored (or the query) embedding has the
 /// wrong size.
 pub fn vector_search_filtered(
@@ -133,17 +134,19 @@ pub fn vector_search_filtered(
         "SELECT id, embedding FROM facts WHERE {}",
         filter.where_clause
     );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::backend)?;
 
-    let rows = stmt.query_map(params_from_iter(filter.bind_refs()), |row| {
-        let id: i64 = row.get(0)?;
-        let blob: Vec<u8> = row.get(1)?;
-        Ok((id, blob))
-    })?;
+    let rows = stmt
+        .query_map(params_from_iter(filter.bind_refs()), |row| {
+            let id: i64 = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })
+        .map_err(StorageError::backend)?;
 
     let mut scored: Vec<VectorResult> = Vec::new();
     for row in rows {
-        let (id, blob) = row?;
+        let (id, blob) = row.map_err(StorageError::backend)?;
         let embedding = deserialize_embedding(&blob, embed_dim)?;
         let score = cosine_similarity(query_embedding, &embedding);
         scored.push(VectorResult { fact_id: id, score });

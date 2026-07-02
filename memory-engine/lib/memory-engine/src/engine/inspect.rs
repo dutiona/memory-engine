@@ -12,7 +12,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
         self.ensure_open()?;
         self.storage.statistics().await
@@ -29,7 +29,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub async fn list_recent_insights(
         &self,
         scope_path: &str,
@@ -61,7 +61,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub async fn replay_events(
         &self,
         filter: &crate::inspect::ReplayFilter,
@@ -88,7 +88,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if the fact doesn't exist.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     ///
     /// # Lock strategy
     ///
@@ -157,7 +157,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if the fact doesn't exist.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub async fn fact_history(&self, id: i64) -> Result<crate::inspect::FactHistory> {
         self.ensure_open()?;
         // The bi-temporal timeline is pure over a single fact's timestamps: fetch via
@@ -182,7 +182,7 @@ impl MemoryEngine {
     ///
     /// Returns [`MemoryError::Io`](crate::MemoryError::Io) on filesystem failure.
     /// Returns [`MemoryError::Conflict`](crate::MemoryError::Conflict) if the target path resolves to the live database.
-    /// Returns [`MemoryError::Database`](crate::MemoryError::Database) on SQL failure.
+    /// Returns [`MemoryError::Storage`](crate::MemoryError::Storage) on SQL failure.
     /// Returns [`MemoryError::Serialization`](crate::MemoryError::Serialization) for the JSON formats if snapshot
     /// serialization fails.
     /// Returns [`MemoryError::NotImplemented`](crate::MemoryError::NotImplemented) if a compression format is used

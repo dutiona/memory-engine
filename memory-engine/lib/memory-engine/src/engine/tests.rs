@@ -5278,7 +5278,7 @@ async fn restore_sqlite_non_sqlite_file_returns_database_error() {
     // `restore_sqlite` accepts only a real SQLite backup. A regular file that is
     // NOT a SQLite database passes the `is_file()` precondition, gets copied to
     // the target, and then fails when the probe connection runs its first
-    // statement against the bogus header — surfacing `MemoryError::Database`.
+    // statement against the bogus header — surfacing `MemoryError::Storage`.
     // The orphaned copy must be cleaned up.
     let dir = tempfile::tempdir().unwrap();
     let bogus = dir.path().join("not_a_db.bin");
@@ -5290,7 +5290,10 @@ async fn restore_sqlite_non_sqlite_file_returns_database_error() {
 
     let err = MemoryEngine::restore_sqlite(&bogus, &config).unwrap_err();
     assert!(
-        matches!(err, MemoryError::Database(_)),
+        matches!(
+            err,
+            MemoryError::Storage(crate::error::StorageError::Backend(_))
+        ),
         "expected Database error when restoring from a non-SQLite file, got {err:?}"
     );
     // The copied orphan must be removed on the failure path.

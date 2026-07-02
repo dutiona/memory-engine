@@ -633,7 +633,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub async fn get_config(&self, key: &str) -> Result<Option<String>> {
         self.storage.get_config(key).await
     }
@@ -643,7 +643,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    /// Returns `MemoryError::Database` on write failure.
+    /// Returns `MemoryError::Storage` on write failure.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
         self.storage.set_config(key, value).await
     }
@@ -717,7 +717,7 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
-    /// Returns `MemoryError::Database` on insert failure.
+    /// Returns `MemoryError::Storage` on insert failure.
     pub async fn ensure_scope_path(&self, path: &str) -> Result<i64> {
         let id = self.storage.ensure_scope_path(path).await?;
         self.cache_scope_chain(id).await?;
@@ -743,7 +743,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
         self.ensure_open()?;
         self.storage.list_active_facts(limit).await
@@ -753,7 +753,7 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub async fn list_summaries(
         &self,
         level: &ConsolidationLevel,

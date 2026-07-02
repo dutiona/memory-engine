@@ -23,6 +23,7 @@
 //! Re-embedding expired facts costs a few extra provider calls; a homogeneous
 //! active space is the correctness invariant that buys.
 
+use crate::error::StorageError;
 use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
@@ -48,7 +49,7 @@ use crate::types::PromoteOutcome;
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on query
+/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on query
 /// failure, or [`MemoryError::Internal`](crate::error::MemoryError::Internal) if
 /// `limit` overflows `i64`.
 pub fn next_backfill_window(
@@ -59,18 +60,24 @@ pub fn next_backfill_window(
 ) -> Result<Vec<(i64, String)>> {
     let limit = i64::try_from(limit)
         .map_err(|_| MemoryError::Internal("backfill window limit exceeds i64".into()))?;
-    let mut stmt = conn.prepare(
-        "SELECT f.id, f.content
+    let mut stmt = conn
+        .prepare(
+            "SELECT f.id, f.content
            FROM facts f
            LEFT JOIN fact_vectors v ON v.fact_id = f.id AND v.space_id = ?1
           WHERE v.fact_id IS NULL AND f.id > ?2
           ORDER BY f.id
           LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(params![space_id, after_id, limit], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        )
+        .map_err(StorageError::backend)?;
+    let rows = stmt
+        .query_map(params![space_id, after_id, limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(StorageError::backend)?;
+    Ok(rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(StorageError::backend)?)
 }
 
 /// Idempotently write a batch of `(fact_id, embedding)` rows into `space_id`.
@@ -88,7 +95,7 @@ pub fn next_backfill_window(
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on a
+/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a
 /// write failure — including a foreign-key violation if `space_id` is not a
 /// registered space or a `fact_id` does not exist (FK enforcement is ON).
 pub fn write_backfill_batch(
@@ -96,20 +103,26 @@ pub fn write_backfill_batch(
     space_id: &str,
     rows: &[(i64, Vec<f32>)],
 ) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
     let mut inserted = 0usize;
     {
-        let mut stmt = tx.prepare(
-            "INSERT INTO fact_vectors (fact_id, space_id, embedding)
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO fact_vectors (fact_id, space_id, embedding)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(fact_id, space_id) DO NOTHING",
-        )?;
+            )
+            .map_err(StorageError::backend)?;
         for (fact_id, embedding) in rows {
             let blob = serialize_embedding(embedding);
-            inserted += stmt.execute(params![fact_id, space_id, blob])?;
+            inserted += stmt
+                .execute(params![fact_id, space_id, blob])
+                .map_err(StorageError::backend)?;
         }
     }
-    tx.commit()?;
+    tx.commit().map_err(StorageError::backend)?;
     Ok(inserted)
 }
 
@@ -119,18 +132,20 @@ pub fn write_backfill_batch(
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on query
+/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on query
 /// failure, or [`MemoryError::Internal`](crate::error::MemoryError::Internal) if
 /// the stored count is negative (impossible).
 pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*)
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
            FROM facts f
            LEFT JOIN fact_vectors v ON v.fact_id = f.id AND v.space_id = ?1
           WHERE v.fact_id IS NULL",
-        params![space_id],
-        |row| row.get(0),
-    )?;
+            params![space_id],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::backend)?;
     usize::try_from(n).map_err(|_| MemoryError::Internal("negative unbackfilled count".into()))
 }
 
@@ -169,9 +184,11 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
 ///
 /// Returns [`MemoryError::Internal`] if there is no active space, the populating
 /// space is absent or not `populating`, or the completeness gate fails, or
-/// [`MemoryError::Database`] on a write failure (which rolls the transaction back).
+/// [`MemoryError::Storage`] on a write failure (which rolls the transaction back).
 pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutcome> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
 
     // (0) Resolve both spaces. NO dim guard: a promote is dimension-agnostic at the
     // storage layer (the copy-swap below is a blob-level UPDATE), so #742 allows the
@@ -214,14 +231,17 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
         "INSERT INTO fact_vectors (fact_id, space_id, embedding)
          SELECT id, ?1, embedding FROM facts",
         params![active.name],
-    )?;
+    )
+    .map_err(StorageError::backend)?;
 
     // (3) Copy-swap the populating vectors into the active serving store.
-    let promoted = tx.execute(
-        "UPDATE facts SET embedding =
+    let promoted = tx
+        .execute(
+            "UPDATE facts SET embedding =
             (SELECT embedding FROM fact_vectors WHERE fact_id = facts.id AND space_id = ?1)",
-        params![populating],
-    )?;
+            params![populating],
+        )
+        .map_err(StorageError::backend)?;
 
     // (4) Demote-then-activate (the partial-unique index never sees two actives).
     embedding_spaces::deprecate(&tx, &active.name)?;
@@ -231,9 +251,10 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
     tx.execute(
         "DELETE FROM fact_vectors WHERE space_id = ?1",
         params![populating],
-    )?;
+    )
+    .map_err(StorageError::backend)?;
 
-    tx.commit()?;
+    tx.commit().map_err(StorageError::backend)?;
 
     Ok(PromoteOutcome {
         promoted,
@@ -259,7 +280,7 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on query
+/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on query
 /// failure, [`MemoryError::EmbeddingDimension`](crate::error::MemoryError::EmbeddingDimension)
 /// if a stored blob is not its space's dim, or any error the callback returns.
 pub fn for_each<F>(conn: &Connection, embed_dim: usize, mut cb: F) -> Result<()>
@@ -272,14 +293,14 @@ where
         .into_iter()
         .map(|s| (s.name, s.fingerprint.dim))
         .collect();
-    let mut stmt = conn.prepare(
-        "SELECT fact_id, space_id, embedding FROM fact_vectors ORDER BY space_id, fact_id",
-    )?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let fact_id: i64 = row.get(0)?;
-        let space_id: String = row.get(1)?;
-        let blob: Vec<u8> = row.get(2)?;
+    let mut stmt = conn
+        .prepare("SELECT fact_id, space_id, embedding FROM fact_vectors ORDER BY space_id, fact_id")
+        .map_err(StorageError::backend)?;
+    let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+    while let Some(row) = rows.next().map_err(StorageError::backend)? {
+        let fact_id: i64 = row.get(0).map_err(StorageError::backend)?;
+        let space_id: String = row.get(1).map_err(StorageError::backend)?;
+        let blob: Vec<u8> = row.get(2).map_err(StorageError::backend)?;
         let dim = space_dims.get(&space_id).copied().unwrap_or(embed_dim);
         let embedding = crate::store::deserialize_embedding(&blob, dim)?;
         cb(fact_id, space_id, embedding)?;
@@ -294,16 +315,18 @@ where
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`](crate::error::MemoryError::Database) on query
+/// Returns [`MemoryError::Storage`](crate::error::MemoryError::Storage) on query
 /// failure, or [`MemoryError::Internal`](crate::error::MemoryError::Internal) if
 /// the stored count is negative (impossible).
 #[cfg(test)]
 pub fn count_vectors(conn: &Connection, space_id: &str) -> Result<usize> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM fact_vectors WHERE space_id = ?1",
-        params![space_id],
-        |row| row.get(0),
-    )?;
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM fact_vectors WHERE space_id = ?1",
+            params![space_id],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::backend)?;
     usize::try_from(n).map_err(|_| MemoryError::Internal("negative vector count".into()))
 }
 
@@ -509,7 +532,13 @@ mod tests {
         let conn = fresh_conn();
         let a = insert_fact(&conn, "alpha");
         let err = write_backfill_batch(&conn, "no-such-space", &vecs(&[a])).expect_err("FK");
-        assert!(matches!(err, MemoryError::Database(_)), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                MemoryError::Storage(crate::error::StorageError::Backend(_))
+            ),
+            "got {err:?}"
+        );
     }
 
     // --- promote (#623 T3) ---
@@ -657,7 +686,13 @@ mod tests {
         .expect("install trigger");
 
         let err = promote_space(&conn, SPACE).expect_err("mid-tx failure");
-        assert!(matches!(err, MemoryError::Database(_)), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                MemoryError::Storage(crate::error::StorageError::Backend(_))
+            ),
+            "got {err:?}"
+        );
 
         conn.execute_batch("DROP TRIGGER fail_swap;")
             .expect("drop trigger");

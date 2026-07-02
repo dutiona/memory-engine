@@ -15,13 +15,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
-# `MemoryError::Database(#[from] rusqlite::Error)` (error.rs) embeds the SQLite
-# driver's error type. The orphan rule forces the `From` impl to live wherever
-# `MemoryError` is defined, so L0 me-types must carry `rusqlite`. `bundled` keeps
-# the crate self-buildable (`cargo build -p me-types`) without a system libsqlite3.
-# Decoupling this (→ `Database(String)` + backend-side mapping) is tracked as a
-# follow-up — it is the real unblocker for #633's future `dep:rusqlite` gating.
-rusqlite = { version = "0.34", features = ["bundled"] }
 
 [dev-dependencies]
 proptest = "1"

@@ -68,7 +68,7 @@ pub(super) fn compute_global(
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on SQL failure, or `MemoryError::Serialization` on
+/// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::Serialization` on
 /// JSON serialization failure.
 pub(super) fn apply_global(
     conn: &Connection,

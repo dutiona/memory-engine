@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -36,9 +37,9 @@ pub const STORAGE_EPOCH: u16 = 1;
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` if the connection or pragma setup fails.
+/// Returns `MemoryError::Storage` if the connection or pragma setup fails.
 pub fn open_connection(path: &str) -> Result<Connection> {
-    let conn = Connection::open(path)?;
+    let conn = Connection::open(path).map_err(StorageError::backend)?;
     set_pragmas(&conn)?;
     Ok(conn)
 }
@@ -51,13 +52,14 @@ pub fn open_connection(path: &str) -> Result<Connection> {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` if the connection or pragma setup fails.
+/// Returns `MemoryError::Storage` if the connection or pragma setup fails.
 pub fn open_connection_read_only(path: &str) -> Result<Connection> {
     use rusqlite::OpenFlags;
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    )
+    .map_err(StorageError::backend)?;
     set_pragmas_read_only(&conn)?;
     Ok(conn)
 }
@@ -66,9 +68,9 @@ pub fn open_connection_read_only(path: &str) -> Result<Connection> {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` if the connection or pragma setup fails.
+/// Returns `MemoryError::Storage` if the connection or pragma setup fails.
 pub fn open_memory() -> Result<Connection> {
-    let conn = Connection::open_in_memory()?;
+    let conn = Connection::open_in_memory().map_err(StorageError::backend)?;
     set_pragmas(&conn)?;
     Ok(conn)
 }
@@ -84,22 +86,29 @@ pub fn open_memory() -> Result<Connection> {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` if any DDL statement fails.
+/// Returns `MemoryError::Storage` if any DDL statement fails.
 pub fn init_schema(conn: &Connection) -> Result<()> {
-    let is_fresh: bool = conn.query_row(
-        "SELECT COUNT(*) = 0 FROM sqlite_master WHERE type='table' AND name='config'",
-        [],
-        |r| r.get(0),
-    )?;
+    let is_fresh: bool = conn
+        .query_row(
+            "SELECT COUNT(*) = 0 FROM sqlite_master WHERE type='table' AND name='config'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StorageError::backend)?;
     if !is_fresh {
         return Ok(()); // existing DB — let migrate() handle evolution
     }
     // Fresh DB: create full latest schema
-    conn.execute_batch(TABLES_DDL)?;
-    conn.execute_batch(SCOPES_DDL)?;
-    conn.execute_batch(FTS5_DDL)?;
-    conn.execute_batch(TRIGGERS_DDL)?;
-    conn.execute_batch(INDEXES_DDL)?;
+    conn.execute_batch(TABLES_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(SCOPES_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(FTS5_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(TRIGGERS_DDL)
+        .map_err(StorageError::backend)?;
+    conn.execute_batch(INDEXES_DDL)
+        .map_err(StorageError::backend)?;
     set_config(conn, "schema_version", &CURRENT_SCHEMA_VERSION.to_string())?;
     set_config(conn, "storage_epoch", &STORAGE_EPOCH.to_string())?;
     Ok(())
@@ -190,7 +199,9 @@ pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
                 set_foreign_keys(conn, false)?;
             }
             let result: Result<()> = (|| {
-                let tx = conn.unchecked_transaction()?;
+                let tx = conn
+                    .unchecked_transaction()
+                    .map_err(StorageError::backend)?;
                 migration(&tx)?;
                 if *disable_fk {
                     // Verify FK integrity BEFORE committing. PRAGMA foreign_key_check
@@ -200,7 +211,7 @@ pub fn migrate(conn: &Connection, backup_dir: Option<&Path>) -> Result<()> {
                     check_foreign_keys(&tx)?;
                 }
                 set_config(&tx, "schema_version", &target.to_string())?;
-                tx.commit()?;
+                tx.commit().map_err(StorageError::backend)?;
                 Ok(())
             })();
             if *disable_fk {
@@ -240,7 +251,7 @@ pub fn validate_schema_version(conn: &Connection) -> Result<()> {
             [],
             |r| r.get(0),
         )
-        .map_err(MemoryError::Database)?;
+        .map_err(StorageError::backend)?;
 
     if !has_config {
         return Err(MigrationError::Incompatible(

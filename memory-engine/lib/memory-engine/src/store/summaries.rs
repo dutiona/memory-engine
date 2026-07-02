@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use rusqlite::{Connection, params};
 
 use crate::error::{MemoryError, Result};
@@ -58,7 +59,7 @@ impl<'a> SummaryStore<'a> {
     ///
     /// Returns `MemoryError::EmbeddingDimension` if the embedding length
     /// doesn't match `embed_dim`.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn insert(&self, summary: &NewSummary) -> Result<i64> {
         if summary.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
@@ -81,7 +82,7 @@ impl<'a> SummaryStore<'a> {
                 summary.created_at.to_rfc3339(),
                 summary.scope_id,
             ],
-        )?;
+        ).map_err(StorageError::backend)?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -102,7 +103,7 @@ impl<'a> SummaryStore<'a> {
                 rusqlite::Error::QueryReturnedNoRows => {
                     MemoryError::NotFound(format!("summary {id}"))
                 }
-                other => MemoryError::Database(other),
+                other => StorageError::backend(other).into(),
             })
     }
 
@@ -110,15 +111,20 @@ impl<'a> SummaryStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_by_level(&self, level: &ConsolidationLevel) -> Result<Vec<Summary>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
              FROM summaries WHERE level = ?1",
-        )?;
+            )
+            .map_err(StorageError::backend)?;
         let summaries = stmt
-            .query_map(params![level_to_str(level)], |row| self.row_to_summary(row))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map(params![level_to_str(level)], |row| self.row_to_summary(row))
+            .map_err(StorageError::backend)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StorageError::backend)?;
         Ok(summaries)
     }
 
@@ -126,15 +132,20 @@ impl<'a> SummaryStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_all(&self) -> Result<Vec<Summary>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
              FROM summaries ORDER BY id ASC",
-        )?;
+            )
+            .map_err(StorageError::backend)?;
         let summaries = stmt
-            .query_map([], |row| self.row_to_summary(row))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map([], |row| self.row_to_summary(row))
+            .map_err(StorageError::backend)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StorageError::backend)?;
         Ok(summaries)
     }
 
@@ -146,19 +157,22 @@ impl<'a> SummaryStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// Returns `MemoryError::Storage` on SQL failure, or propagates any
     /// error returned by `f`.
     pub fn for_each<F>(&self, mut f: F) -> Result<()>
     where
         F: FnMut(Summary) -> Result<()>,
     {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, content, embedding, level, source_fact_ids, created_at, scope_id
              FROM summaries ORDER BY id ASC",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let summary = self.row_to_summary(row)?;
+            )
+            .map_err(StorageError::backend)?;
+        let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+        while let Some(row) = rows.next().map_err(StorageError::backend)? {
+            let summary = self.row_to_summary(row).map_err(StorageError::backend)?;
             f(summary)?;
         }
         Ok(())
@@ -170,12 +184,15 @@ impl<'a> SummaryStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn delete_by_level(&self, level: &ConsolidationLevel) -> Result<usize> {
-        let count = self.conn.execute(
-            "DELETE FROM summaries WHERE level = ?1",
-            params![level_to_str(level)],
-        )?;
+        let count = self
+            .conn
+            .execute(
+                "DELETE FROM summaries WHERE level = ?1",
+                params![level_to_str(level)],
+            )
+            .map_err(StorageError::backend)?;
         Ok(count)
     }
 

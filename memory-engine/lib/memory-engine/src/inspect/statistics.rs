@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -14,7 +15,7 @@ use crate::store::summaries::str_to_level;
 ///
 /// # Errors
 ///
-/// Returns [`MemoryError::Database`] on SQL failure.
+/// Returns [`MemoryError::Storage`] on SQL failure.
 pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<EngineStatistics> {
     let now = Utc::now();
     let now_str = now.to_rfc3339();
@@ -31,18 +32,20 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
          FROM facts",
         [&now_str],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-    )?;
+    ).map_err(StorageError::backend)?;
 
     // Edge counts — one conditional-aggregation scan instead of three (#394).
-    let (edge_total, edge_active, edge_expired): (i64, i64, i64) = conn.query_row(
-        "SELECT \
+    let (edge_total, edge_active, edge_expired): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT \
             COUNT(*), \
             COALESCE(SUM(t_expired IS NULL), 0), \
             COALESCE(SUM(t_expired IS NOT NULL), 0) \
          FROM edges",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(StorageError::backend)?;
 
     // Summary counts by level — the GROUP BY already partitions the table, so its
     // counts sum to the total; deriving `summary_total` from them (rather than a
@@ -54,32 +57,45 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
     let mut by_level = BTreeMap::new();
     let mut summary_total: i64 = 0;
     {
-        let mut stmt = conn.prepare("SELECT level, COUNT(*) FROM summaries GROUP BY level")?;
-        let rows = stmt.query_map([], |row| {
-            let level = str_to_level(&row.get::<_, String>(0)?)?;
-            let count: i64 = row.get(1)?;
-            Ok((level, count))
-        })?;
+        let mut stmt = conn
+            .prepare("SELECT level, COUNT(*) FROM summaries GROUP BY level")
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let level = str_to_level(&row.get::<_, String>(0)?)?;
+                let count: i64 = row.get(1)?;
+                Ok((level, count))
+            })
+            .map_err(StorageError::backend)?;
         for row in rows {
-            let (level, count) = row?;
+            let (level, count) = row.map_err(StorageError::backend)?;
             summary_total += count;
             by_level.insert(level, count);
         }
     }
 
     // Scope counts
-    let scope_total: i64 = conn.query_row("SELECT COUNT(*) FROM scopes", [], |r| r.get(0))?;
-    let scope_max_depth: i64 =
-        conn.query_row("SELECT COALESCE(MAX(depth), 0) FROM scopes", [], |r| {
+    let scope_total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM scopes", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
+    let scope_max_depth: i64 = conn
+        .query_row("SELECT COALESCE(MAX(depth), 0) FROM scopes", [], |r| {
             r.get(0)
-        })?;
+        })
+        .map_err(StorageError::backend)?;
 
     // Event count
-    let event_total: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+    let event_total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
 
     // Storage stats
-    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    let page_count: i64 = conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
+    let page_size: i64 = conn
+        .query_row("PRAGMA page_size", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
     let main_db_bytes = page_count.checked_mul(page_size).ok_or_else(|| {
         crate::error::MemoryError::Internal(format!(
             "storage size overflow: page_count {page_count} * page_size {page_size}"
@@ -416,7 +432,10 @@ mod tests {
 
         let err = super::compute_statistics(&conn, None).unwrap_err();
         assert!(
-            matches!(err, crate::error::MemoryError::Database(_)),
+            matches!(
+                err,
+                crate::error::MemoryError::Storage(crate::error::StorageError::Backend(_))
+            ),
             "expected a Database error from the unknown level, got: {err:?}"
         );
         // Pin the *cause*, not just the variant: the #337 guard must surface the

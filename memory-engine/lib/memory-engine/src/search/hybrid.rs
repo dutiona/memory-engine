@@ -47,7 +47,7 @@ pub fn rrf_merge(fts: &[(i64, f64)], vec: &[(i64, f32)], k: u32) -> Vec<(i64, f6
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure.
+/// Returns `MemoryError::Storage` on query failure.
 /// Returns `MemoryError::EmbeddingDimension` if the query embedding or a stored
 /// embedding does not match the configured dimension during vector search.
 //
@@ -119,7 +119,7 @@ pub(crate) fn hybrid_search(
 ///
 /// # Errors
 ///
-/// Propagates `MemoryError::Database` on query failure and
+/// Propagates `MemoryError::Storage` on query failure and
 /// `MemoryError::EmbeddingDimension` on a wrong-length embedding (vector path).
 fn collect_candidates(
     conn: &Connection,

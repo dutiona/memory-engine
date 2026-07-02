@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::{MemoryError, Result};
+use crate::error::{MemoryError, Result, StorageError};
 use crate::store::{
     deserialize_embedding, parse_optional_timestamp, parse_timestamp, serialize_embedding,
 };
@@ -67,7 +67,7 @@ pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
 /// What a *read-path* caller sees, end-to-end: the read sites ([`row_to_fact`],
 /// [`row_to_scoring_row`]) box this `Internal` into
 /// `rusqlite::Error::FromSqlConversionFailure`, which re-maps to
-/// [`MemoryError::Database`] via its `#[from]`. So the surfaced top-level variant
+/// [`MemoryError::Storage`] via its `#[from]`. So the surfaced top-level variant
 /// is `Database` (a *data* error — the correct class for corrupt stored data, and
 /// crucially **not** `NotFound`, which is exactly the conflation #366 reported),
 /// with this `Internal` preserved as the boxed source for diagnostics. The
@@ -114,13 +114,17 @@ fn content_hash(content: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Database` on query failure.
+/// Returns `MemoryError::Storage` on query failure.
 pub fn existing_fact_ids(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM facts")?;
-    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM facts")
+        .map_err(StorageError::backend)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(StorageError::backend)?;
     let mut ids = std::collections::HashSet::new();
     for row in rows {
-        ids.insert(row?);
+        ids.insert(row.map_err(StorageError::backend)?);
     }
     Ok(ids)
 }
@@ -140,7 +144,7 @@ impl<'a> FactStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::EmbeddingDimension` if embedding length != `embed_dim`.
-    /// Returns `MemoryError::Database` on insert failure.
+    /// Returns `MemoryError::Storage` on insert failure.
     pub fn insert(&self, fact: &NewFact) -> Result<i64> {
         if fact.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
@@ -159,31 +163,33 @@ impl<'a> FactStore<'a> {
         let last_accessed = fact.last_accessed.to_rfc3339();
         let metadata_str = serde_json::to_string(&fact.metadata)?;
 
-        self.conn.execute(
-            "INSERT INTO facts (content, content_hash, embedding, fact_type,
+        self.conn
+            .execute(
+                "INSERT INTO facts (content, content_hash, embedding, fact_type,
                 t_created, t_expired, t_valid, t_invalid,
                 source_event_id, importance, access_count, last_accessed, metadata, scope_id,
                 is_pinned, importance_score, surfaced_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL)",
-            params![
-                fact.content,
-                hash,
-                blob,
-                fact_type_str,
-                t_created,
-                t_expired,
-                t_valid,
-                t_invalid,
-                fact.source_event_id,
-                fact.base_importance, // -> DB column `importance`
-                fact.access_count,
-                last_accessed,
-                metadata_str,
-                fact.scope_id,
-                i64::from(fact.is_pinned),
-                fact.base_importance, // seed importance_score from base importance
-            ],
-        )?;
+                params![
+                    fact.content,
+                    hash,
+                    blob,
+                    fact_type_str,
+                    t_created,
+                    t_expired,
+                    t_valid,
+                    t_invalid,
+                    fact.source_event_id,
+                    fact.base_importance, // -> DB column `importance`
+                    fact.access_count,
+                    last_accessed,
+                    metadata_str,
+                    fact.scope_id,
+                    i64::from(fact.is_pinned),
+                    fact.base_importance, // seed importance_score from base importance
+                ],
+            )
+            .map_err(StorageError::backend)?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -220,7 +226,7 @@ impl<'a> FactStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::EmbeddingDimension` if embedding length != `embed_dim`.
-    /// Returns `MemoryError::Database` on query or insert failure.
+    /// Returns `MemoryError::Storage` on query or insert failure.
     pub fn insert_or_reinforce(&self, fact: &NewFact) -> Result<(i64, bool)> {
         if fact.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
@@ -240,7 +246,8 @@ impl<'a> FactStore<'a> {
                 params![hash, fact.content, fact.scope_id],
                 |row| row.get(0),
             )
-            .optional()?;
+            .optional()
+            .map_err(StorageError::backend)?;
 
         match existing {
             Some(id) => {
@@ -251,22 +258,24 @@ impl<'a> FactStore<'a> {
                 // store relies on for t_created/t_valid string comparison.)
                 let t_created = fact.t_created.to_rfc3339();
                 let last_accessed = fact.last_accessed.to_rfc3339();
-                self.conn.execute(
-                    "UPDATE facts
+                self.conn
+                    .execute(
+                        "UPDATE facts
                      SET access_count = access_count + 1,
                          t_created = min(t_created, ?1),
                          last_accessed = max(last_accessed, ?2),
                          is_pinned = max(is_pinned, ?3),
                          importance = max(importance, ?4)
                      WHERE id = ?5",
-                    params![
-                        t_created,
-                        last_accessed,
-                        i64::from(fact.is_pinned),
-                        fact.base_importance,
-                        id
-                    ],
-                )?;
+                        params![
+                            t_created,
+                            last_accessed,
+                            i64::from(fact.is_pinned),
+                            fact.base_importance,
+                            id
+                        ],
+                    )
+                    .map_err(StorageError::backend)?;
                 Ok((id, true))
             }
             None => Ok((self.insert(fact)?, false)),
@@ -281,12 +290,15 @@ impl<'a> FactStore<'a> {
     pub fn get(&self, id: i64) -> Result<Fact> {
         let mut stmt = self
             .conn
-            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts WHERE id = ?1"))?;
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts WHERE id = ?1"))
+            .map_err(StorageError::backend)?;
         let dim = self.embed_dim;
-        let mut rows = stmt.query_map(params![id], |row| row_to_fact(row, dim))?;
+        let mut rows = stmt
+            .query_map(params![id], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
         match rows.next() {
             Some(Ok(fact)) => Ok(fact),
-            Some(Err(e)) => Err(e.into()),
+            Some(Err(e)) => Err(StorageError::backend(e).into()),
             None => Err(MemoryError::NotFound(format!("fact {id}"))),
         }
     }
@@ -305,20 +317,25 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn get_many(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, Fact>> {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
         let ids_json = serde_json::to_string(ids)?;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {FACT_COLUMNS} FROM facts WHERE id IN (SELECT value FROM json_each(?1))"
-        ))?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts WHERE id IN (SELECT value FROM json_each(?1))"
+            ))
+            .map_err(StorageError::backend)?;
         let dim = self.embed_dim;
-        let rows = stmt.query_map(params![ids_json], |row| row_to_fact(row, dim))?;
+        let rows = stmt
+            .query_map(params![ids_json], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
         let mut out = std::collections::HashMap::with_capacity(ids.len());
         for row in rows {
-            let fact = row?;
+            let fact = row.map_err(StorageError::backend)?;
             out.insert(fact.id, fact);
         }
         Ok(out)
@@ -333,7 +350,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_active(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
         let base = format!("SELECT {FACT_COLUMNS} FROM facts WHERE t_expired IS NULL");
         let limit_i64: i64 = limit.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
@@ -342,12 +359,14 @@ impl<'a> FactStore<'a> {
         // order-sensitive, so a stable insertion (rowid) order makes their output
         // reproducible rather than dependent on the storage engine's scan choice.
         let sql = format!("{base} ORDER BY id LIMIT ?1");
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
         let dim = self.embed_dim;
-        let rows = stmt.query_map(params![limit_i64], |row| row_to_fact(row, dim))?;
+        let rows = stmt
+            .query_map(params![limit_i64], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
         let mut facts = Vec::new();
         for row in rows {
-            facts.push(row?);
+            facts.push(row.map_err(StorageError::backend)?);
         }
         Ok(facts)
     }
@@ -362,13 +381,16 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn count_active(&self) -> Result<usize> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE t_expired IS NULL",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE t_expired IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::backend)?;
         Ok(usize::try_from(count).unwrap_or(0))
     }
 
@@ -381,13 +403,16 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn is_active(&self, id: i64) -> Result<bool> {
-        let active: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM facts WHERE id = ?1 AND t_expired IS NULL)",
-            params![id],
-            |row| row.get(0),
-        )?;
+        let active: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM facts WHERE id = ?1 AND t_expired IS NULL)",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::backend)?;
         Ok(active)
     }
 
@@ -401,15 +426,20 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_active_scoring(&self) -> Result<Vec<FactScoringRow>> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {SCORING_COLUMNS} FROM facts WHERE t_expired IS NULL"
-        ))?;
-        let rows = stmt.query_map([], row_to_scoring_row)?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {SCORING_COLUMNS} FROM facts WHERE t_expired IS NULL"
+            ))
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map([], row_to_scoring_row)
+            .map_err(StorageError::backend)?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(row?);
+            out.push(row.map_err(StorageError::backend)?);
         }
         Ok(out)
     }
@@ -421,20 +451,25 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_active_at(&self, valid_at: DateTime<Utc>) -> Result<Vec<Fact>> {
         let valid_at_str = valid_at.to_rfc3339();
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {FACT_COLUMNS} FROM facts
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL
                AND (t_valid IS NULL OR t_valid <= ?1)
                AND (t_invalid IS NULL OR t_invalid > ?1)"
-        ))?;
+            ))
+            .map_err(StorageError::backend)?;
         let dim = self.embed_dim;
-        let rows = stmt.query_map(params![valid_at_str], |row| row_to_fact(row, dim))?;
+        let rows = stmt
+            .query_map(params![valid_at_str], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
         let mut facts = Vec::new();
         for row in rows {
-            facts.push(row?);
+            facts.push(row.map_err(StorageError::backend)?);
         }
         Ok(facts)
     }
@@ -455,7 +490,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_dormant(
         &self,
         importance_threshold: f64,
@@ -487,7 +522,7 @@ impl<'a> FactStore<'a> {
                AND (t_invalid IS NULL OR t_invalid > ?2){scope_clause}"
         );
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
         let dim = self.embed_dim;
 
         // Build params: [threshold, now, scope_json?]. `?3` is bound only when a
@@ -498,12 +533,14 @@ impl<'a> FactStore<'a> {
             all_params.push(Box::new(json));
         }
 
-        let rows = stmt.query_map(rusqlite::params_from_iter(all_params), |row| {
-            row_to_fact(row, dim)
-        })?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(all_params), |row| {
+                row_to_fact(row, dim)
+            })
+            .map_err(StorageError::backend)?;
         let mut facts = Vec::new();
         for row in rows {
-            facts.push(row?);
+            facts.push(row.map_err(StorageError::backend)?);
         }
         Ok(facts)
     }
@@ -515,10 +552,13 @@ impl<'a> FactStore<'a> {
     /// Returns `MemoryError::NotFound` if no rows affected.
     pub fn expire(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
         let now_str = now.to_rfc3339();
-        let changed = self.conn.execute(
-            "UPDATE facts SET t_expired = ?1 WHERE id = ?2 AND t_expired IS NULL",
-            params![now_str, id],
-        )?;
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE facts SET t_expired = ?1 WHERE id = ?2 AND t_expired IS NULL",
+                params![now_str, id],
+            )
+            .map_err(StorageError::backend)?;
         if changed == 0 {
             return Err(MemoryError::NotFound(format!("fact {id}")));
         }
@@ -543,7 +583,7 @@ impl<'a> FactStore<'a> {
         let changed = self.conn.execute(
             "UPDATE facts SET t_expired = ?1, t_invalid = ?1 WHERE id = ?2 AND t_expired IS NULL",
             params![now_str, id],
-        )?;
+        ).map_err(StorageError::backend)?;
         if changed == 0 {
             return Err(MemoryError::NotFound(format!("fact {id}")));
         }
@@ -557,10 +597,13 @@ impl<'a> FactStore<'a> {
     ///
     /// Returns `MemoryError::NotFound` if no rows affected.
     pub fn update_base_importance(&self, id: i64, base_importance: f64) -> Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE facts SET importance = ?1 WHERE id = ?2",
-            params![base_importance, id],
-        )?;
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE facts SET importance = ?1 WHERE id = ?2",
+                params![base_importance, id],
+            )
+            .map_err(StorageError::backend)?;
         if changed == 0 {
             return Err(MemoryError::NotFound(format!("fact {id}")));
         }
@@ -577,7 +620,7 @@ impl<'a> FactStore<'a> {
         let changed = self.conn.execute(
             "UPDATE facts SET access_count = access_count + 1, last_accessed = ?1 WHERE id = ?2",
             params![now_str, id],
-        )?;
+        ).map_err(StorageError::backend)?;
         if changed == 0 {
             return Err(MemoryError::NotFound(format!("fact {id}")));
         }
@@ -590,19 +633,24 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_by_scope_importance(&self, scope_id: i64, limit: usize) -> Result<Vec<Fact>> {
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let dim = self.embed_dim;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {FACT_COLUMNS} FROM facts
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL AND scope_id = ?1
              ORDER BY importance DESC
              LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(params![scope_id, limit_i64], |row| row_to_fact(row, dim))?;
+            ))
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map(params![scope_id, limit_i64], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// List active facts in a set of scopes with importance >= threshold,
@@ -615,7 +663,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_by_scopes_importance(
         &self,
         scope_ids: &[i64],
@@ -628,21 +676,26 @@ impl<'a> FactStore<'a> {
         let exclude_json = serde_json::to_string(&exclude_ids.iter().copied().collect::<Vec<_>>())
             .expect("serialize exclude_ids");
         let dim = self.embed_dim;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {FACT_COLUMNS} FROM facts
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
                AND importance >= ?2
                AND id NOT IN (SELECT value FROM json_each(?3))
              ORDER BY importance DESC
              LIMIT ?4"
-        ))?;
-        let rows = stmt.query_map(
-            params![scope_json, min_importance, exclude_json, limit_i64],
-            |row| row_to_fact(row, dim),
-        )?;
+            ))
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map(
+                params![scope_json, min_importance, exclude_json, limit_i64],
+                |row| row_to_fact(row, dim),
+            )
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// List active pinned (unforgettable) facts, optionally filtered by scope,
@@ -661,7 +714,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_pinned(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Fact>> {
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let base =
@@ -669,21 +722,25 @@ impl<'a> FactStore<'a> {
         let dim = self.embed_dim;
         if scope_ids.is_empty() {
             let sql = format!("{base} ORDER BY importance_score DESC LIMIT ?1");
-            let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params![limit_i64], |row| row_to_fact(row, dim))?;
+            let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params![limit_i64], |row| row_to_fact(row, dim))
+                .map_err(StorageError::backend)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Into::into)
+                .map_err(|e| StorageError::backend(e).into())
         } else {
             let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
             let sql = format!(
                 "{base} AND scope_id IN (SELECT value FROM json_each(?1)) ORDER BY importance_score DESC LIMIT ?2"
             );
-            let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params![scope_json, limit_i64], |row| {
-                row_to_fact(row, dim)
-            })?;
+            let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
+            let rows = stmt
+                .query_map(rusqlite::params![scope_json, limit_i64], |row| {
+                    row_to_fact(row, dim)
+                })
+                .map_err(StorageError::backend)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Into::into)
+                .map_err(|e| StorageError::backend(e).into())
         }
     }
 
@@ -706,7 +763,7 @@ impl<'a> FactStore<'a> {
     ///
     /// - Returns `MemoryError::Serialization` if `scope_ids` cannot be serialized
     ///   to JSON (infallible in practice for `&[i64]`).
-    /// - Returns `MemoryError::Database` on query failure.
+    /// - Returns `MemoryError::Storage` on query failure.
     pub fn list_due(
         &self,
         now: DateTime<Utc>,
@@ -759,13 +816,15 @@ impl<'a> FactStore<'a> {
 
         let sql =
             format!("{base}{scope_clause}{exclude_clause} ORDER BY t_valid ASC{limit_clause}");
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
         let dim = self.embed_dim;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            row_to_fact(row, dim)
-        })?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                row_to_fact(row, dim)
+            })
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Earliest future `t_valid` among active facts with `t_valid > now`.
@@ -789,11 +848,12 @@ impl<'a> FactStore<'a> {
             params.push(Box::new(serde_json::to_string(scope_ids)?));
             format!("{base} AND scope_id IN (SELECT value FROM json_each(?2))")
         };
-        let mut stmt = self.conn.prepare(&sql)?;
-        let result: Option<String> =
-            stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?;
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
+        let result: Option<String> = stmt
+            .query_row(rusqlite::params_from_iter(params), |r| r.get(0))
+            .map_err(StorageError::backend)?;
         match result {
-            Some(s) => Ok(Some(parse_timestamp(&s)?)),
+            Some(s) => Ok(Some(parse_timestamp(&s).map_err(StorageError::backend)?)),
             None => Ok(None),
         }
     }
@@ -815,27 +875,32 @@ impl<'a> FactStore<'a> {
         self.conn.execute(
             "UPDATE facts SET surfaced_at = ?1 WHERE id IN (SELECT value FROM json_each(?2)) AND surfaced_at IS NULL",
             params![now_str, ids_json],
-        )?;
+        ).map_err(StorageError::backend)?;
         // Re-read persisted values for ALL requested IDs (handles concurrent races)
         let mut stmt = self.conn.prepare(
             "SELECT id, surfaced_at FROM facts WHERE id IN (SELECT value FROM json_each(?1)) AND surfaced_at IS NOT NULL",
-        )?;
-        let rows = stmt.query_map(params![ids_json], |row| {
-            let id: i64 = row.get(0)?;
-            let ts_str: String = row.get(1)?;
-            let ts = parse_timestamp(&ts_str)?;
-            Ok((id, ts))
-        })?;
+        ).map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map(params![ids_json], |row| {
+                let id: i64 = row.get(0)?;
+                let ts_str: String = row.get(1)?;
+                let ts = parse_timestamp(&ts_str)?;
+                Ok((id, ts))
+            })
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Set the pinned flag on a fact.
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
-        let rows = self.conn.execute(
-            "UPDATE facts SET is_pinned = ?1 WHERE id = ?2",
-            rusqlite::params![i64::from(pinned), id],
-        )?;
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE facts SET is_pinned = ?1 WHERE id = ?2",
+                rusqlite::params![i64::from(pinned), id],
+            )
+            .map_err(StorageError::backend)?;
         if rows == 0 {
             return Err(crate::error::MemoryError::NotFound(format!("fact {id}")));
         }
@@ -846,15 +911,18 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_all(&self) -> Result<Vec<Fact>> {
         let mut stmt = self
             .conn
-            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts ORDER BY id ASC"))?;
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts ORDER BY id ASC"))
+            .map_err(StorageError::backend)?;
         let dim = self.embed_dim;
-        let rows = stmt.query_map([], |row| row_to_fact(row, dim))?;
+        let rows = stmt
+            .query_map([], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Iterate all facts row-by-row, calling `f` for each.
@@ -865,7 +933,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// Returns `MemoryError::Storage` on SQL failure, or propagates any
     /// error returned by `f`.
     pub fn for_each<F>(&self, mut f: F) -> Result<()>
     where
@@ -873,11 +941,12 @@ impl<'a> FactStore<'a> {
     {
         let mut stmt = self
             .conn
-            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts ORDER BY id ASC"))?;
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts ORDER BY id ASC"))
+            .map_err(StorageError::backend)?;
         let dim = self.embed_dim;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let fact = row_to_fact(row, dim)?;
+        let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+        while let Some(row) = rows.next().map_err(StorageError::backend)? {
+            let fact = row_to_fact(row, dim).map_err(StorageError::backend)?;
             f(fact)?;
         }
         Ok(())
@@ -893,10 +962,13 @@ impl<'a> FactStore<'a> {
     /// nonexistent id would let a caller mistake a missing fact for a successful
     /// write (#328).
     pub fn update_importance_score(&self, id: i64, score: f64) -> Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE facts SET importance_score = ?1 WHERE id = ?2",
-            rusqlite::params![score, id],
-        )?;
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE facts SET importance_score = ?1 WHERE id = ?2",
+                rusqlite::params![score, id],
+            )
+            .map_err(StorageError::backend)?;
         if changed == 0 {
             return Err(MemoryError::NotFound(format!("fact {id}")));
         }
@@ -941,7 +1013,7 @@ impl<'a> FactStore<'a> {
     /// Returns [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) wrapping
     /// [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
     /// if any score is non-finite (the statement does not run). Returns
-    /// `MemoryError::Database` on SQL failure (or `MemoryError` from JSON
+    /// `MemoryError::Storage` on SQL failure (or `MemoryError` from JSON
     /// serialization, which cannot fail for the finite `id -> f64` map built here).
     pub fn update_importance_scores_bulk(&self, scores: &[(i64, f64)]) -> Result<()> {
         if scores.is_empty() {
@@ -965,13 +1037,15 @@ impl<'a> FactStore<'a> {
             map.insert(id.to_string(), serde_json::json!(score));
         }
         let payload = serde_json::to_string(&serde_json::Value::Object(map))?;
-        self.conn.execute(
-            "UPDATE facts \
+        self.conn
+            .execute(
+                "UPDATE facts \
              SET importance_score = s.value \
              FROM json_each(?1) AS s \
              WHERE facts.id = CAST(s.key AS INTEGER)",
-            params![payload],
-        )?;
+                params![payload],
+            )
+            .map_err(StorageError::backend)?;
         Ok(())
     }
 
@@ -998,7 +1072,8 @@ impl<'a> FactStore<'a> {
                 params![id],
                 |r| r.get(0),
             )
-            .optional()?;
+            .optional()
+            .map_err(StorageError::backend)?;
         let current = current.ok_or_else(|| MemoryError::NotFound(format!("fact {id}")))?;
 
         let mut value: serde_json::Value = serde_json::from_str(&current)?;
@@ -1012,10 +1087,13 @@ impl<'a> FactStore<'a> {
         }
 
         let new_str = serde_json::to_string(&value)?;
-        let changed = self.conn.execute(
-            "UPDATE facts SET metadata = ?1 WHERE id = ?2",
-            params![new_str, id],
-        )?;
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE facts SET metadata = ?1 WHERE id = ?2",
+                params![new_str, id],
+            )
+            .map_err(StorageError::backend)?;
         if changed == 0 {
             return Err(MemoryError::NotFound(format!("fact {id}")));
         }
@@ -1052,7 +1130,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub(crate) fn list_undreamt_in_period(
         &self,
         start: DateTime<Utc>,
@@ -1089,7 +1167,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn max_caller_written_fact_id(&self) -> Result<Option<i64>> {
         self.conn
             .query_row(
@@ -1100,7 +1178,7 @@ impl<'a> FactStore<'a> {
                 [],
                 |r| r.get::<_, Option<i64>>(0),
             )
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// List active facts ordered by materialized `importance_score`, excluding IDs in `exclude`.
@@ -1113,7 +1191,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_by_importance_score(
         &self,
         scope_ids: &[i64],
@@ -1134,26 +1212,30 @@ impl<'a> FactStore<'a> {
 
         if scope_ids.is_empty() {
             let sql = format!("{base} ORDER BY importance_score DESC LIMIT ?3");
-            let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(
-                rusqlite::params![min_score, exclude_json, limit_i64],
-                |row| row_to_fact(row, dim),
-            )?;
+            let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![min_score, exclude_json, limit_i64],
+                    |row| row_to_fact(row, dim),
+                )
+                .map_err(StorageError::backend)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Into::into)
+                .map_err(|e| StorageError::backend(e).into())
         } else {
             let scope_json = serde_json::to_string(scope_ids).expect("serialize scope_ids");
             let sql = format!(
                 "{base} AND scope_id IN (SELECT value FROM json_each(?3))
                  ORDER BY importance_score DESC LIMIT ?4"
             );
-            let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(
-                rusqlite::params![min_score, exclude_json, scope_json, limit_i64],
-                |row| row_to_fact(row, dim),
-            )?;
+            let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![min_score, exclude_json, scope_json, limit_i64],
+                    |row| row_to_fact(row, dim),
+                )
+                .map_err(StorageError::backend)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Into::into)
+                .map_err(|e| StorageError::backend(e).into())
         }
     }
 
@@ -1170,42 +1252,52 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_active_by_session(
         &self,
         session_id: &str,
         scope_ids: &[i64],
     ) -> Result<Vec<SessionFact>> {
         if scope_ids.is_empty() {
-            let mut stmt = self.conn.prepare(
-                "SELECT f.id
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT f.id
                  FROM facts f
                  INNER JOIN events e ON f.source_event_id = e.id
                  WHERE e.session_id = ?1
                    AND f.t_expired IS NULL
                  ORDER BY f.id",
-            )?;
-            let rows = stmt.query_map(params![session_id], |row| {
-                Ok(SessionFact { id: row.get(0)? })
-            })?;
+                )
+                .map_err(StorageError::backend)?;
+            let rows = stmt
+                .query_map(params![session_id], |row| {
+                    Ok(SessionFact { id: row.get(0)? })
+                })
+                .map_err(StorageError::backend)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(MemoryError::Database)
+                .map_err(|e| StorageError::backend(e).into())
         } else {
             let scope_json = serde_json::to_string(scope_ids)?;
-            let mut stmt = self.conn.prepare(
-                "SELECT f.id
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT f.id
                  FROM facts f
                  INNER JOIN events e ON f.source_event_id = e.id
                  WHERE e.session_id = ?1
                    AND f.t_expired IS NULL
                    AND f.scope_id IN (SELECT value FROM json_each(?2))
                  ORDER BY f.id",
-            )?;
-            let rows = stmt.query_map(params![session_id, scope_json], |row| {
-                Ok(SessionFact { id: row.get(0)? })
-            })?;
+                )
+                .map_err(StorageError::backend)?;
+            let rows = stmt
+                .query_map(params![session_id, scope_json], |row| {
+                    Ok(SessionFact { id: row.get(0)? })
+                })
+                .map_err(StorageError::backend)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(MemoryError::Database)
+                .map_err(|e| StorageError::backend(e).into())
         }
     }
 
@@ -1219,7 +1311,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_by_scopes_recent(
         &self,
         scope_ids: &[i64],
@@ -1231,19 +1323,24 @@ impl<'a> FactStore<'a> {
         let exclude_json = serde_json::to_string(&exclude_ids.iter().copied().collect::<Vec<_>>())
             .expect("serialize exclude_ids");
         let dim = self.embed_dim;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {FACT_COLUMNS} FROM facts
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
                AND id NOT IN (SELECT value FROM json_each(?2))
              ORDER BY t_created DESC
              LIMIT ?3"
-        ))?;
-        let rows = stmt.query_map(params![scope_json, exclude_json, limit_i64], |row| {
-            row_to_fact(row, dim)
-        })?;
+            ))
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map(params![scope_json, exclude_json, limit_i64], |row| {
+                row_to_fact(row, dim)
+            })
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// List active facts in `scope_ids` whose `metadata` JSON carries the top-level
@@ -1279,7 +1376,7 @@ impl<'a> FactStore<'a> {
     ///
     /// Returns `MemoryError::Conflict(ConflictError::QueryValidation)` if
     /// `marker_key` is not a non-empty `[A-Za-z0-9_]+` identifier.
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_active_by_metadata_key_recent(
         &self,
         scope_ids: &[i64],
@@ -1308,17 +1405,22 @@ impl<'a> FactStore<'a> {
         // `json_extract` paths cannot be parameterized portably. `json_extract` (not
         // `json_type`) gives "present with a non-null value" semantics.
         let marker_predicate = format!("json_extract(metadata, '$.{marker_key}') IS NOT NULL");
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {FACT_COLUMNS} FROM facts
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts
              WHERE t_expired IS NULL
                AND scope_id IN (SELECT value FROM json_each(?1))
                AND {marker_predicate}
              ORDER BY t_created DESC
              LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(params![scope_json, limit_i64], |row| row_to_fact(row, dim))?;
+            ))
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map(params![scope_json, limit_i64], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(MemoryError::Database)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// List active facts whose validity interval overlaps the given period `[start, end)`.
@@ -1400,7 +1502,7 @@ impl<'a> FactStore<'a> {
              ORDER BY importance_score DESC, id ASC"
         );
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
             vec![Box::new(end_str), Box::new(start_str)];
         if !scope_ids.is_empty() {
@@ -1410,11 +1512,13 @@ impl<'a> FactStore<'a> {
             params.push(Box::new(ft_str));
         }
 
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-            row_to_fact(row, dim)
-        })?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                row_to_fact(row, dim)
+            })
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Hard-delete facts by ID. Used after successful archival.
@@ -1427,7 +1531,7 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn hard_delete_ids(&self, ids: &[i64]) -> Result<usize> {
         if ids.is_empty() {
             return Ok(0);
@@ -1438,7 +1542,10 @@ impl<'a> FactStore<'a> {
             .iter()
             .map(|id| id as &dyn rusqlite::types::ToSql)
             .collect();
-        let deleted = self.conn.execute(&sql, params.as_slice())?;
+        let deleted = self
+            .conn
+            .execute(&sql, params.as_slice())
+            .map_err(StorageError::backend)?;
         Ok(deleted)
     }
 
@@ -1468,20 +1575,25 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_archive_candidates(&self, expired_before: DateTime<Utc>) -> Result<Vec<Fact>> {
         let cutoff = expired_before.to_rfc3339();
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {FACT_COLUMNS} FROM facts
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts
              WHERE is_pinned = 0
                AND t_expired IS NOT NULL
                AND t_expired < ?1
              ORDER BY id ASC"
-        ))?;
+            ))
+            .map_err(StorageError::backend)?;
         let dim = self.embed_dim;
-        let rows = stmt.query_map(params![cutoff], |row| row_to_fact(row, dim))?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
 }
 
@@ -1587,7 +1699,7 @@ mod tests {
     /// exercises the private helper, but every production caller (`row_to_fact`,
     /// `row_to_scoring_row`) boxes the helper's error into
     /// `rusqlite::Error::FromSqlConversionFailure`, which re-maps to
-    /// [`MemoryError::Database`] via its `#[from]`. So the helper's `Internal`
+    /// [`MemoryError::Storage`] via its `#[from]`. So the helper's `Internal`
     /// never reaches a read-path caller as the top-level variant.
     ///
     /// What #366 actually demanded — *do not surface [`MemoryError::NotFound`] for
@@ -1623,7 +1735,10 @@ mod tests {
         // The user-visible top-level variant is Database (the helper's Internal is
         // boxed by FromSqlConversionFailure and re-mapped via `#[from]`).
         assert!(
-            matches!(err, MemoryError::Database(_)),
+            matches!(
+                err,
+                MemoryError::Storage(crate::error::StorageError::Backend(_))
+            ),
             "read-path corrupt fact_type must surface Database, got {err:?}"
         );
         // #366's actual harm — surfacing NotFound for a corrupt enum — is gone.
@@ -2780,7 +2895,10 @@ mod tests {
             "expected non-Migration error, got: {err:?}"
         );
         assert!(
-            matches!(err, MemoryError::Database(_)),
+            matches!(
+                err,
+                MemoryError::Storage(crate::error::StorageError::Backend(_))
+            ),
             "expected Database error, got: {err:?}"
         );
     }

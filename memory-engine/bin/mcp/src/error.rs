@@ -27,8 +27,6 @@ pub fn to_mcp_error(err: MemoryError) -> ErrorData {
         // maps to invalid_params alongside `Conflict` — not the internal-error default.
         MemoryError::Cycle(e) => ErrorData::invalid_params(format!("cycle error: {e}"), None),
 
-        MemoryError::Database(e) => ErrorData::internal_error(format!("database error: {e}"), None),
-
         MemoryError::Serialization(e) => {
             ErrorData::internal_error(format!("serialization error: {e}"), None)
         }
@@ -152,13 +150,6 @@ mod tests {
         let mcp = to_mcp_error(err);
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(mcp.message.contains("model mismatch"));
-    }
-
-    #[test]
-    fn database_maps_to_internal() {
-        let err = MemoryError::Database(rusqlite::Error::QueryReturnedNoRows);
-        let mcp = to_mcp_error(err);
-        assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
     }
 
     #[test]

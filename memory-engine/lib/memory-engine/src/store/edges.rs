@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
-use crate::error::{MemoryError, Result};
+use crate::error::{MemoryError, Result, StorageError};
 use crate::store::{parse_optional_timestamp, parse_timestamp};
 use crate::types::{Edge, NewEdge, RelationType};
 
@@ -39,7 +39,7 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure (e.g. FK violation).
+    /// Returns `MemoryError::Storage` on SQL failure (e.g. FK violation).
     pub fn insert(&self, edge: &NewEdge) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO edges (source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id)
@@ -53,7 +53,7 @@ impl<'a> EdgeStore<'a> {
                 edge.t_expired.map(|dt| dt.to_rfc3339()),
                 edge.scope_id,
             ],
-        )?;
+        ).map_err(StorageError::backend)?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -74,7 +74,7 @@ impl<'a> EdgeStore<'a> {
                 rusqlite::Error::QueryReturnedNoRows => {
                     MemoryError::NotFound(format!("edge {id}"))
                 }
-                other => MemoryError::Database(other),
+                other => StorageError::backend(other).into(),
             })
     }
 
@@ -88,12 +88,15 @@ impl<'a> EdgeStore<'a> {
     ///
     /// Returns `MemoryError::NotFound` if no active edge with `id` exists (the id
     /// is unknown, or the edge was already expired) — the UPDATE affected 0 rows.
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn expire(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE edges SET t_expired = ?1 WHERE id = ?2 AND t_expired IS NULL",
-            params![now.to_rfc3339(), id],
-        )?;
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE edges SET t_expired = ?1 WHERE id = ?2 AND t_expired IS NULL",
+                params![now.to_rfc3339(), id],
+            )
+            .map_err(StorageError::backend)?;
         if changed == 0 {
             return Err(MemoryError::NotFound(format!("edge {id}")));
         }
@@ -107,14 +110,17 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn expire_by_fact(&self, fact_id: i64, now: DateTime<Utc>) -> Result<usize> {
-        let count = self.conn.execute(
-            "UPDATE edges SET t_expired = ?1
+        let count = self
+            .conn
+            .execute(
+                "UPDATE edges SET t_expired = ?1
              WHERE (source_fact_id = ?2 OR target_fact_id = ?2)
                AND t_expired IS NULL",
-            params![now.to_rfc3339(), fact_id],
-        )?;
+                params![now.to_rfc3339(), fact_id],
+            )
+            .map_err(StorageError::backend)?;
         Ok(count)
     }
 
@@ -122,15 +128,17 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_all(&self) -> Result<Vec<Edge>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map([], row_to_edge)?;
+        ).map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map([], row_to_edge)
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Iterate all edges row-by-row, calling `f` for each.
@@ -141,7 +149,7 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// Returns `MemoryError::Storage` on SQL failure, or propagates any
     /// error returned by `f`.
     pub fn for_each<F>(&self, mut f: F) -> Result<()>
     where
@@ -150,10 +158,10 @@ impl<'a> EdgeStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges ORDER BY id ASC",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let edge = row_to_edge(row)?;
+        ).map_err(StorageError::backend)?;
+        let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+        while let Some(row) = rows.next().map_err(StorageError::backend)? {
+            let edge = row_to_edge(row).map_err(StorageError::backend)?;
             f(edge)?;
         }
         Ok(())
@@ -163,15 +171,17 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_active(&self) -> Result<Vec<Edge>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges WHERE t_expired IS NULL",
-        )?;
+        ).map_err(StorageError::backend)?;
         let edges = stmt
-            .query_map([], row_to_edge)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map([], row_to_edge)
+            .map_err(StorageError::backend)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StorageError::backend)?;
         Ok(edges)
     }
 
@@ -179,15 +189,17 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_active_by_source(&self, source_fact_id: i64) -> Result<Vec<Edge>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges WHERE source_fact_id = ?1 AND t_expired IS NULL",
-        )?;
+        ).map_err(StorageError::backend)?;
         let edges = stmt
-            .query_map(params![source_fact_id], row_to_edge)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map(params![source_fact_id], row_to_edge)
+            .map_err(StorageError::backend)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StorageError::backend)?;
         Ok(edges)
     }
 
@@ -197,7 +209,7 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn exists_active(
         &self,
         source_fact_id: i64,
@@ -215,7 +227,7 @@ impl<'a> EdgeStore<'a> {
                 params![source_fact_id, target_fact_id, relation_type],
                 |row| row.get(0),
             )
-            .map_err(MemoryError::Database)?;
+            .map_err(StorageError::backend)?;
         Ok(count > 0)
     }
 
@@ -231,7 +243,7 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_active_pairs_by_facts(
         &self,
         fact_ids: &[i64],
@@ -242,19 +254,24 @@ impl<'a> EdgeStore<'a> {
             return Ok(HashSet::new());
         }
         let ids_json = serde_json::to_string(fact_ids).expect("serialize fact_ids");
-        let mut stmt = self.conn.prepare(
-            "SELECT source_fact_id, target_fact_id FROM edges
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT source_fact_id, target_fact_id FROM edges
              WHERE source_fact_id IN (SELECT value FROM json_each(?1))
                AND target_fact_id IN (SELECT value FROM json_each(?1))
                AND relation_type = ?2
                AND t_expired IS NULL",
-        )?;
-        let rows = stmt.query_map(params![ids_json, relation_type], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
+            )
+            .map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map(params![ids_json, relation_type], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(StorageError::backend)?;
         let mut set = HashSet::new();
         for row in rows {
-            set.insert(row?);
+            set.insert(row.map_err(StorageError::backend)?);
         }
         Ok(set)
     }
@@ -263,15 +280,17 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn list_active_by_target(&self, target_fact_id: i64) -> Result<Vec<Edge>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_fact_id, target_fact_id, relation_type, weight, t_created, t_expired, scope_id
              FROM edges WHERE target_fact_id = ?1 AND t_expired IS NULL",
-        )?;
+        ).map_err(StorageError::backend)?;
         let edges = stmt
-            .query_map(params![target_fact_id], row_to_edge)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map(params![target_fact_id], row_to_edge)
+            .map_err(StorageError::backend)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StorageError::backend)?;
         Ok(edges)
     }
 
@@ -290,7 +309,7 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure, or
+    /// Returns `MemoryError::Storage` on SQL failure, or
     /// `MemoryError::Serialization` if the `fact_ids` slice cannot be serialized
     /// to the JSON array bound into the query (infallible in practice for
     /// `&[i64]`).
@@ -308,10 +327,12 @@ impl<'a> EdgeStore<'a> {
              WHERE source_fact_id IN (SELECT value FROM ids)
                AND target_fact_id IN (SELECT value FROM ids)
              ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(params![ids_json], row_to_edge)?;
+        ).map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map(params![ids_json], row_to_edge)
+            .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .map_err(|e| StorageError::backend(e).into())
     }
 
     /// Hard-delete edges where BOTH endpoints are in the given fact ID set.
@@ -335,18 +356,21 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn hard_delete_by_facts(&self, fact_ids: &[i64]) -> Result<usize> {
         if fact_ids.is_empty() {
             return Ok(0);
         }
         let ids_json = serde_json::to_string(fact_ids).expect("serialize fact_ids");
-        let deleted = self.conn.execute(
-            "DELETE FROM edges
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM edges
              WHERE source_fact_id IN (SELECT value FROM json_each(?1))
                AND target_fact_id IN (SELECT value FROM json_each(?1))",
-            params![ids_json],
-        )?;
+                params![ids_json],
+            )
+            .map_err(StorageError::backend)?;
         Ok(deleted)
     }
 
@@ -379,18 +403,21 @@ impl<'a> EdgeStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure.
+    /// Returns `MemoryError::Storage` on SQL failure.
     pub fn hard_delete_incident_to_facts(&self, fact_ids: &[i64]) -> Result<usize> {
         if fact_ids.is_empty() {
             return Ok(0);
         }
         let ids_json = serde_json::to_string(fact_ids).expect("serialize fact_ids");
-        let deleted = self.conn.execute(
-            "DELETE FROM edges
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM edges
              WHERE source_fact_id IN (SELECT value FROM json_each(?1))
                 OR target_fact_id IN (SELECT value FROM json_each(?1))",
-            params![ids_json],
-        )?;
+                params![ids_json],
+            )
+            .map_err(StorageError::backend)?;
         Ok(deleted)
     }
 }

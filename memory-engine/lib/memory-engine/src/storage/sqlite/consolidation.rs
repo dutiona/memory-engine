@@ -10,6 +10,7 @@
 //! Summary methods that (de)serialize embeddings capture `self.embed_dim` as a
 //! `let` binding outside the closure — the `'static` closures cannot borrow `self`.
 
+use crate::error::StorageError;
 use async_trait::async_trait;
 
 use super::{SqliteBackend, stream_consumer_dropped};
@@ -336,7 +337,7 @@ impl ConsolidationStore for SqliteBackend {
 
                 let tx = conn
                     .unchecked_transaction()
-                    .map_err(MemoryError::Database)?;
+                    .map_err(StorageError::backend)?;
 
                 // #613 guard: AddFact / Synthesize carry pre-computed embeddings with no
                 // live provider — reject against an un-stamped store. Called inside the
@@ -587,7 +588,7 @@ impl ConsolidationStore for SqliteBackend {
                     set_config(&tx, DREAM_CYCLE_HISTORY, &serde_json::to_string(&history)?)?;
                 }
 
-                tx.commit().map_err(MemoryError::Database)?;
+                tx.commit().map_err(StorageError::backend)?;
                 Ok((result, supersede_edges, expired_ids, to_index))
             })
             .await?;
@@ -676,7 +677,9 @@ impl ConsolidationStore for SqliteBackend {
 
         let (result, scope_ids_to_cache) = self
             .block_write(move |conn| {
-                let tx = conn.unchecked_transaction()?;
+                let tx = conn
+                    .unchecked_transaction()
+                    .map_err(StorageError::backend)?;
 
                 // #613/#615 promotion identity guard (pre-computed vector, no live
                 // embedder to stamp the store).
@@ -701,7 +704,7 @@ impl ConsolidationStore for SqliteBackend {
                     &provenance,
                 )?;
 
-                tx.commit().map_err(crate::error::MemoryError::Database)?;
+                tx.commit().map_err(StorageError::backend)?;
                 Ok((
                     crate::types::PromotionResult {
                         fact_id,
@@ -1106,7 +1109,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, MemoryError::Database(_) | MemoryError::Storage(_)),
+            matches!(err, MemoryError::Storage(_)),
             "expected Database or Storage error, got {err:?}"
         );
 

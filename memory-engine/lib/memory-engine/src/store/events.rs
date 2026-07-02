@@ -1,3 +1,4 @@
+use crate::error::StorageError;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
@@ -39,7 +40,7 @@ pub const fn event_type_to_str(et: &EventType) -> &'static str {
 ///
 /// What a *read-path* caller sees, end-to-end: the read site ([`row_to_event`])
 /// boxes this `Internal` into `rusqlite::Error::FromSqlConversionFailure`, which
-/// re-maps to [`MemoryError::Database`] via its `#[from]`. So the surfaced
+/// re-maps to [`MemoryError::Storage`] via its `#[from]`. So the surfaced
 /// top-level variant is `Database` (a *data* error — the correct class for corrupt
 /// stored data, and crucially **not** `NotFound`, the conflation #366 reported),
 /// with this `Internal` preserved as the boxed source. The `Internal` value here
@@ -130,7 +131,7 @@ impl<'a> EventStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on insert failure.
+    /// Returns `MemoryError::Storage` on insert failure.
     pub fn insert(&self, event: &NewEvent) -> Result<i64> {
         let timestamp_str = event.timestamp.to_rfc3339();
         let event_type_str = event_type_to_str(&event.event_type);
@@ -138,23 +139,25 @@ impl<'a> EventStore<'a> {
 
         let created_at_str = event.created_at.map(|dt| dt.to_rfc3339());
 
-        self.conn.execute(
-            "INSERT INTO events (timestamp, event_type, payload, source, session_id, scope_id,
+        self.conn
+            .execute(
+                "INSERT INTO events (timestamp, event_type, payload, source, session_id, scope_id,
                 origin_node_id, sequence_id, created_at, event_revision)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                timestamp_str,
-                event_type_str,
-                payload_str,
-                event.source,
-                event.session_id,
-                event.scope_id,
-                event.origin_node_id,
-                event.sequence_id,
-                created_at_str,
-                i64::from(self.registry.latest_revision(event_type_str)),
-            ],
-        )?;
+                params![
+                    timestamp_str,
+                    event_type_str,
+                    payload_str,
+                    event.source,
+                    event.session_id,
+                    event.scope_id,
+                    event.origin_node_id,
+                    event.sequence_id,
+                    created_at_str,
+                    i64::from(self.registry.latest_revision(event_type_str)),
+                ],
+            )
+            .map_err(StorageError::backend)?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -164,15 +167,20 @@ impl<'a> EventStore<'a> {
     ///
     /// Returns `MemoryError::NotFound` if the id doesn't exist.
     pub fn get(&self, id: i64) -> Result<Event> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
                     origin_node_id, sequence_id, created_at, event_revision
              FROM events WHERE id = ?1",
-        )?;
-        let mut rows = stmt.query_map(params![id], row_to_event)?;
+            )
+            .map_err(StorageError::backend)?;
+        let mut rows = stmt
+            .query_map(params![id], row_to_event)
+            .map_err(StorageError::backend)?;
         match rows.next() {
             Some(Ok(event)) => Ok(event),
-            Some(Err(e)) => Err(e.into()),
+            Some(Err(e)) => Err(StorageError::backend(e).into()),
             None => Err(MemoryError::NotFound(format!("event {id}"))),
         }
     }
@@ -181,18 +189,20 @@ impl<'a> EventStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list(&self, filter: &EventFilter) -> Result<Vec<Event>> {
         let (sql, values) = build_filter_query(
             "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
                     origin_node_id, sequence_id, created_at, event_revision FROM events",
             filter,
         );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(values), row_to_event)?;
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), row_to_event)
+            .map_err(StorageError::backend)?;
         let mut events = Vec::new();
         for row in rows {
-            events.push(row?);
+            events.push(row.map_err(StorageError::backend)?);
         }
         Ok(events)
     }
@@ -205,20 +215,23 @@ impl<'a> EventStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on SQL failure, or propagates any
+    /// Returns `MemoryError::Storage` on SQL failure, or propagates any
     /// error returned by `f`.
     pub fn for_each<F>(&self, mut f: F) -> Result<()>
     where
         F: FnMut(Event) -> Result<()>,
     {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, timestamp, event_type, payload, source, session_id, scope_id,
                     origin_node_id, sequence_id, created_at, event_revision
              FROM events ORDER BY timestamp ASC",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let event = row_to_event(row)?;
+            )
+            .map_err(StorageError::backend)?;
+        let mut rows = stmt.query([]).map_err(StorageError::backend)?;
+        while let Some(row) = rows.next().map_err(StorageError::backend)? {
+            let event = row_to_event(row).map_err(StorageError::backend)?;
             f(event)?;
         }
         Ok(())
@@ -228,11 +241,13 @@ impl<'a> EventStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn count(&self, filter: &EventFilter) -> Result<i64> {
         let (sql, values) = build_filter_query("SELECT COUNT(*) FROM events", filter);
-        let mut stmt = self.conn.prepare(&sql)?;
-        let count = stmt.query_row(rusqlite::params_from_iter(values), |row| row.get(0))?;
+        let mut stmt = self.conn.prepare(&sql).map_err(StorageError::backend)?;
+        let count = stmt
+            .query_row(rusqlite::params_from_iter(values), |row| row.get(0))
+            .map_err(StorageError::backend)?;
         Ok(count)
     }
 
@@ -257,7 +272,7 @@ impl<'a> EventStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Database` on query failure.
+    /// Returns `MemoryError::Storage` on query failure.
     /// Returns `MemoryError::Migration` if upcasting fails.
     pub fn list_upcasted(&self, filter: &EventFilter) -> Result<Vec<Event>> {
         let events = self.list(filter)?;
@@ -401,7 +416,7 @@ mod tests {
     /// The isolated [`str_to_event_type_rejects_unknown_as_internal`] test below
     /// only exercises the private helper; the production caller (`row_to_event`)
     /// boxes its error into `rusqlite::Error::FromSqlConversionFailure`, which
-    /// re-maps to [`MemoryError::Database`] via its `#[from]`. So the helper's
+    /// re-maps to [`MemoryError::Storage`] via its `#[from]`. So the helper's
     /// `Internal` never reaches a read-path caller as the top-level variant.
     ///
     /// What #366 actually demanded — *do not surface [`MemoryError::NotFound`] for
@@ -426,7 +441,10 @@ mod tests {
         // The user-visible top-level variant is Database (the helper's Internal is
         // boxed by FromSqlConversionFailure and re-mapped via `#[from]`).
         assert!(
-            matches!(err, MemoryError::Database(_)),
+            matches!(
+                err,
+                MemoryError::Storage(crate::error::StorageError::Backend(_))
+            ),
             "read-path corrupt event_type must surface Database, got {err:?}"
         );
         // #366's actual harm — surfacing NotFound for a corrupt enum — is gone.
