@@ -14,7 +14,7 @@
 //! `UNIQUE(status) WHERE status = 'active'` (mirrors KB's `idx_embed_spaces_one_active`).
 //! It cannot be bypassed by any writer, now or in a future wave. A violation is remapped
 //! by [`map_single_active_violation`] to a diagnosable error rather than an opaque
-//! `Database` one.
+//! `Storage(StorageError::Backend)` one.
 //!
 //! ## Future seams (do NOT implement here — separate issues)
 //!
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn single_active_index_rejects_second_active() {
         // The partial unique index makes a second active row unrepresentable; the error
-        // is remapped to a diagnosable Internal (not an opaque Database), and the first
+        // is remapped to a diagnosable Internal (not an opaque Storage(Backend)), and the first
         // row is untouched.
         let conn = fresh_conn();
         let a = EmbeddingFingerprint::new("model-a", "tei", 8);
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn name_pk_collision_is_not_mislabeled_single_active() {
         // A PRIMARY KEY collision on `name` (not the status='active' partial index) must
-        // surface as a plain Database error, not the "single-active invariant violated"
+        // surface as a plain Storage(Backend) error, not the "single-active invariant violated"
         // message — only the UNIQUE extended code is the single-active index firing.
         let conn = fresh_conn();
         // A deprecated 'default' row: re-inserting 'default'/active PK-collides on name
@@ -551,7 +551,7 @@ mod tests {
                 err,
                 MemoryError::Storage(crate::error::StorageError::Backend(_))
             ),
-            "PK collision must pass through as Database, got {err:?}"
+            "PK collision must pass through as Storage(Backend), got {err:?}"
         );
     }
 

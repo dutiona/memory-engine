@@ -167,7 +167,10 @@ mod tests {
         let err = MemoryError::Storage(StorageError::Backend("boom".into()));
         let mcp = to_mcp_error(err);
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-        assert!(mcp.message.contains("storage error"));
+        // #926: backend failures used to surface via the deleted `Database` arm as
+        // "database error: …"; they now flow through `Storage` as "storage error: …".
+        // Pin the exact prefix so that user-visible text change can never silently regress.
+        assert!(mcp.message.starts_with("storage error:"), "{}", mcp.message);
     }
 
     #[test]

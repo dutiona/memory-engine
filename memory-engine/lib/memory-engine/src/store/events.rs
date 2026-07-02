@@ -39,16 +39,18 @@ pub const fn event_type_to_str(et: &EventType) -> &'static str {
 /// embeds the offending token verbatim for diagnostics.
 ///
 /// What a *read-path* caller sees, end-to-end: the read site ([`row_to_event`])
-/// boxes this `Internal` into `rusqlite::Error::FromSqlConversionFailure`, which
-/// re-maps to [`MemoryError::Storage`] via its `#[from]`. So the surfaced
-/// top-level variant is `Database` (a *data* error — the correct class for corrupt
-/// stored data, and crucially **not** `NotFound`, the conflation #366 reported),
-/// with this `Internal` preserved as the boxed source. The `Internal` value here
-/// is therefore the directly-observable error only for a *direct* caller; the read
-/// path re-classifies it to `Database`. Both surfaced behaviors are covered by
-/// tests (`corrupt_event_type_read_path_surfaces_database_not_notfound` for the
-/// end-to-end path, `str_to_event_type_rejects_unknown_as_internal` for the direct
-/// call).
+/// boxes this `Internal` into `rusqlite::Error::FromSqlConversionFailure`; at the
+/// call site `.map_err(StorageError::backend)` stringifies that rusqlite error
+/// (whose `Display` embeds the boxed `Internal`'s message) into a
+/// `StorageError::Backend`, which `?` then lifts to [`MemoryError::Storage`]
+/// (#926). So the surfaced top-level variant is `Storage(StorageError::Backend)` —
+/// a backend/data error, and crucially **not** `NotFound`, the conflation #366
+/// reported — with the `Internal`'s diagnostic message preserved as a substring of
+/// the `Backend` string. The structured `Internal` value here is therefore the
+/// directly-observable error only for a *direct* caller; the read path re-classifies
+/// it to `Storage(Backend)`. Both surfaced behaviors are covered by tests
+/// (`corrupt_event_type_read_path_surfaces_storage_not_notfound` for the end-to-end
+/// path, `str_to_event_type_rejects_unknown_as_internal` for the direct call).
 fn str_to_event_type(s: &str) -> Result<EventType> {
     match s {
         "Interaction" => Ok(EventType::Interaction),
@@ -415,18 +417,20 @@ mod tests {
     ///
     /// The isolated [`str_to_event_type_rejects_unknown_as_internal`] test below
     /// only exercises the private helper; the production caller (`row_to_event`)
-    /// boxes its error into `rusqlite::Error::FromSqlConversionFailure`, which
-    /// re-maps to [`MemoryError::Storage`] via its `#[from]`. So the helper's
-    /// `Internal` never reaches a read-path caller as the top-level variant.
+    /// boxes its error into `rusqlite::Error::FromSqlConversionFailure`, which the
+    /// call site maps via `.map_err(StorageError::backend)` and `?` lifts to
+    /// [`MemoryError::Storage`] (#926). So the helper's `Internal` never reaches a
+    /// read-path caller as the top-level variant.
     ///
     /// What #366 actually demanded — *do not surface [`MemoryError::NotFound`] for
-    /// a corrupt enum* — is met end-to-end: the surfaced variant is `Database` (a
-    /// data error, the correct class for corrupt stored data), distinct from
-    /// `NotFound`, with `Internal("corrupt stored event_type: …")` preserved as the
-    /// boxed source. Unlike `facts`, the `events.event_type` column has **no** CHECK
-    /// constraint, so this corruption is reachable through a plain UPDATE.
+    /// a corrupt enum* — is met end-to-end: the surfaced variant is
+    /// `Storage(StorageError::Backend)` (a backend/data error), distinct from
+    /// `NotFound`, with `Internal("corrupt stored event_type: …")`'s message
+    /// preserved inside the `Backend` string. Unlike `facts`, the
+    /// `events.event_type` column has **no** CHECK constraint, so this corruption is
+    /// reachable through a plain UPDATE.
     #[test]
-    fn corrupt_event_type_read_path_surfaces_database_not_notfound() {
+    fn corrupt_event_type_read_path_surfaces_storage_not_notfound() {
         let conn = setup();
         let registry = UpcasterRegistry::new();
         let store = EventStore::new(&conn, &registry);
@@ -438,14 +442,15 @@ mod tests {
         .unwrap();
 
         let err = store.get(id).unwrap_err();
-        // The user-visible top-level variant is Database (the helper's Internal is
-        // boxed by FromSqlConversionFailure and re-mapped via `#[from]`).
+        // The user-visible top-level variant is Storage(Backend): the helper's
+        // Internal is boxed by FromSqlConversionFailure, then the call site maps it
+        // via StorageError::backend and `?` lifts StorageError into Storage (#926).
         assert!(
             matches!(
                 err,
                 MemoryError::Storage(crate::error::StorageError::Backend(_))
             ),
-            "read-path corrupt event_type must surface Database, got {err:?}"
+            "read-path corrupt event_type must surface Storage(Backend), got {err:?}"
         );
         // #366's actual harm — surfacing NotFound for a corrupt enum — is gone.
         assert!(

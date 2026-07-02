@@ -66,19 +66,20 @@ pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
 ///
 /// What a *read-path* caller sees, end-to-end: the read sites ([`row_to_fact`],
 /// [`row_to_scoring_row`]) box this `Internal` into
-/// `rusqlite::Error::FromSqlConversionFailure`, which re-maps to
-/// [`MemoryError::Storage`] via its `#[from]`. So the surfaced top-level variant
-/// is `Database` (a *data* error — the correct class for corrupt stored data, and
-/// crucially **not** `NotFound`, which is exactly the conflation #366 reported),
-/// with this `Internal` preserved as the boxed source for diagnostics. The
-/// `Internal` value here is therefore the directly-observable error only for a
-/// *direct* caller of this helper; the read path re-classifies it to `Database`.
-/// On the `SQLite` backend a `CHECK(fact_type IN (…))` constraint additionally makes
-/// this arm unreachable through ordinary SQL — it fires only on genuine on-disk
-/// tampering or a backend without that constraint. Both surfaced behaviors are
-/// covered by tests (`corrupt_fact_type_read_path_surfaces_database_not_notfound`
-/// for the end-to-end path, `str_to_fact_type_rejects_unknown_as_internal` for the
-/// direct call).
+/// `rusqlite::Error::FromSqlConversionFailure`; the call site maps that rusqlite
+/// error via `.map_err(StorageError::backend)` and `?` lifts it to
+/// [`MemoryError::Storage`] (#926). So the surfaced top-level variant is
+/// `Storage(StorageError::Backend)` (a backend/data error — and crucially **not**
+/// `NotFound`, which is exactly the conflation #366 reported), with this
+/// `Internal`'s message preserved as a substring of the `Backend` string for
+/// diagnostics. The structured `Internal` value here is therefore the
+/// directly-observable error only for a *direct* caller of this helper; the read
+/// path re-classifies it to `Storage(Backend)`. On the `SQLite` backend a
+/// `CHECK(fact_type IN (…))` constraint additionally makes this arm unreachable
+/// through ordinary SQL — it fires only on genuine on-disk tampering or a backend
+/// without that constraint. Both surfaced behaviors are covered by tests
+/// (`corrupt_fact_type_read_path_surfaces_storage_not_notfound` for the end-to-end
+/// path, `str_to_fact_type_rejects_unknown_as_internal` for the direct call).
 fn str_to_fact_type(s: &str) -> Result<FactType> {
     s.parse::<FactType>()
         .map_err(|e| MemoryError::Internal(format!("corrupt stored fact_type: {e}")))
@@ -1698,23 +1699,24 @@ mod tests {
     /// isolated [`str_to_fact_type_rejects_unknown_as_internal`] test below only
     /// exercises the private helper, but every production caller (`row_to_fact`,
     /// `row_to_scoring_row`) boxes the helper's error into
-    /// `rusqlite::Error::FromSqlConversionFailure`, which re-maps to
-    /// [`MemoryError::Storage`] via its `#[from]`. So the helper's `Internal`
-    /// never reaches a read-path caller as the top-level variant.
+    /// `rusqlite::Error::FromSqlConversionFailure`; the call site maps that via
+    /// `.map_err(StorageError::backend)` and `?` lifts it to
+    /// [`MemoryError::Storage`] (#926). So the helper's `Internal` never reaches a
+    /// read-path caller as the top-level variant.
     ///
     /// What #366 actually demanded — *do not surface [`MemoryError::NotFound`] for
     /// a corrupt enum* (which lets a caller matching `NotFound` mistake a corrupt
     /// store for "no such fact") — is met **end-to-end**: the surfaced variant is
-    /// `Database`, a data error, which is the semantically correct class for
-    /// corrupt stored data, and is distinct from `NotFound`. The diagnostic
-    /// `Internal("corrupt stored fact_type: …")` is preserved as the boxed source.
+    /// `Storage(StorageError::Backend)`, a backend/data error distinct from
+    /// `NotFound`. The diagnostic `Internal("corrupt stored fact_type: …")`'s
+    /// message is preserved as a substring of the `Backend` string.
     ///
     /// Note the `SQLite` schema carries `CHECK(fact_type IN (…))`, so this corruption
     /// is unreachable through ordinary SQL — the test must
     /// `PRAGMA ignore_check_constraints` to simulate genuine on-disk tampering or a
     /// backend without the constraint (the exact scenario the helper guards).
     #[test]
-    fn corrupt_fact_type_read_path_surfaces_database_not_notfound() {
+    fn corrupt_fact_type_read_path_surfaces_storage_not_notfound() {
         let conn = setup();
         let store = FactStore::new(&conn, DIM);
         let id = store.insert(&make_fact("p", vec![0.0; DIM])).unwrap();
@@ -1732,14 +1734,15 @@ mod tests {
             .unwrap();
 
         let err = store.get(id).unwrap_err();
-        // The user-visible top-level variant is Database (the helper's Internal is
-        // boxed by FromSqlConversionFailure and re-mapped via `#[from]`).
+        // The user-visible top-level variant is Storage(Backend): the helper's
+        // Internal is boxed by FromSqlConversionFailure, then the call site maps it
+        // via StorageError::backend and `?` lifts StorageError into Storage (#926).
         assert!(
             matches!(
                 err,
                 MemoryError::Storage(crate::error::StorageError::Backend(_))
             ),
-            "read-path corrupt fact_type must surface Database, got {err:?}"
+            "read-path corrupt fact_type must surface Storage(Backend), got {err:?}"
         );
         // #366's actual harm — surfacing NotFound for a corrupt enum — is gone.
         assert!(
@@ -2888,8 +2891,8 @@ mod tests {
         .unwrap();
 
         let err = fs.next_due_time(now, &[]).unwrap_err();
-        // A row TEXT->timestamp conversion failure is a Database error, NOT a
-        // schema migration failure.
+        // A row TEXT->timestamp conversion failure surfaces as Storage(Backend), NOT
+        // a schema migration failure.
         assert!(
             !matches!(err, MemoryError::Migration(_)),
             "expected non-Migration error, got: {err:?}"
@@ -2899,7 +2902,7 @@ mod tests {
                 err,
                 MemoryError::Storage(crate::error::StorageError::Backend(_))
             ),
-            "expected Database error, got: {err:?}"
+            "expected Storage(Backend) error, got: {err:?}"
         );
     }
 

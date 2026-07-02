@@ -161,7 +161,8 @@ impl<'a> ActivityStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Storage` on SQL failure.
+    /// Returns `MemoryError::Serialization` if the scope-id list cannot be JSON-encoded,
+    /// or `MemoryError::Storage` on backend/SQL failure.
     pub fn list_recent_by_scope(&self, scope_ids: &[i64], limit: usize) -> Result<Vec<Activity>> {
         if scope_ids.is_empty() {
             return Ok(Vec::new());
