@@ -1,15 +1,15 @@
-use crate::error::StorageError;
 use chrono::{DateTime, Utc};
+use me_types::error::StorageError;
 use rusqlite::{Connection, params};
 
-use crate::error::{MemoryError, Result};
 use crate::store::upcaster::UpcasterRegistry;
-use crate::types::{Event, EventType, NewEvent};
+use me_types::error::{MemoryError, Result};
+use me_types::types::{Event, EventType, NewEvent};
 
-// `EventFilter` relocated to `crate::types` (#629 — the dialect-free storage port
+// `EventFilter` relocated to `me_types::types` (#629 — the dialect-free storage port
 // must not reference a type living inside the SQLite store). Shim preserves the
 // original `crate::store::events::EventFilter` path.
-pub use crate::types::EventFilter;
+pub use me_types::types::EventFilter;
 
 /// Store for the append-only event log.
 pub struct EventStore<'a> {
@@ -17,6 +17,7 @@ pub struct EventStore<'a> {
     registry: &'a UpcasterRegistry,
 }
 
+#[must_use]
 pub const fn event_type_to_str(et: &EventType) -> &'static str {
     match et {
         EventType::Interaction => "Interaction",
@@ -124,8 +125,11 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
 
 impl<'a> EventStore<'a> {
     /// Create a new `EventStore` borrowing the given connection and upcaster registry.
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/{event_log,graph,consolidation}.rs` construct
+    // `EventStore` from the facade; reverts to `pub(crate)` in sub-PR 2b.
     #[must_use]
-    pub(crate) const fn new(conn: &'a Connection, registry: &'a UpcasterRegistry) -> Self {
+    pub const fn new(conn: &'a Connection, registry: &'a UpcasterRegistry) -> Self {
         Self { conn, registry }
     }
 
@@ -374,7 +378,7 @@ mod tests {
     }
 
     fn make_event(source: &str, session_id: Option<&str>) -> NewEvent {
-        crate::test_utils::new_event(source, session_id)
+        me_types::test_util::new_event(source, session_id)
     }
 
     #[test]
@@ -448,7 +452,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                MemoryError::Storage(crate::error::StorageError::Backend(_))
+                MemoryError::Storage(me_types::error::StorageError::Backend(_))
             ),
             "read-path corrupt event_type must surface Storage(Backend), got {err:?}"
         );
@@ -652,7 +656,7 @@ mod tests {
             "sequence_id": 0,
             "created_at": null
         }"#;
-        let event: crate::types::Event = serde_json::from_str(json).unwrap();
+        let event: me_types::types::Event = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_revision, 1);
 
         // With explicit event_revision
@@ -669,7 +673,7 @@ mod tests {
             "created_at": null,
             "event_revision": 3
         }"#;
-        let event_v3: crate::types::Event = serde_json::from_str(json_v3).unwrap();
+        let event_v3: me_types::types::Event = serde_json::from_str(json_v3).unwrap();
         assert_eq!(event_v3.event_revision, 3);
     }
 }

@@ -25,7 +25,7 @@ pub use me_storage::{UpcasterRegistry, upcaster};
 
 use chrono::{DateTime, Utc};
 
-use crate::error::{MemoryError, Result};
+use me_types::error::{MemoryError, Result};
 
 /// Serialize an embedding (`&[f32]`) to little-endian bytes for `SQLite` BLOB storage.
 #[must_use]
@@ -65,6 +65,11 @@ pub fn deserialize_embedding(blob: &[u8], dim: usize) -> Result<Vec<f32>> {
 }
 
 /// Parse an optional ISO 8601 timestamp from a nullable TEXT column.
+///
+/// # Errors
+///
+/// Returns a `rusqlite::Error::FromSqlConversionFailure` if `s` is `Some` and
+/// not valid RFC 3339.
 pub fn parse_optional_timestamp(s: Option<&str>) -> rusqlite::Result<Option<DateTime<Utc>>> {
     s.map_or(Ok(None), |ts| {
         DateTime::parse_from_rfc3339(ts)
@@ -80,6 +85,10 @@ pub fn parse_optional_timestamp(s: Option<&str>) -> rusqlite::Result<Option<Date
 }
 
 /// Parse a required ISO 8601 timestamp from a TEXT column.
+///
+/// # Errors
+///
+/// Returns a `rusqlite::Error::FromSqlConversionFailure` if `s` is not valid RFC 3339.
 pub fn parse_timestamp(s: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))

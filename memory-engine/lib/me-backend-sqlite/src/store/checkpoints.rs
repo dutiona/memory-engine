@@ -1,10 +1,10 @@
 //! Store operations for session checkpoints.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::Result;
-use crate::types::SessionCheckpoint;
+use me_types::error::Result;
+use me_types::types::SessionCheckpoint;
 
 use super::parse_timestamp;
 
@@ -14,7 +14,10 @@ pub struct CheckpointStore<'a> {
 }
 
 impl<'a> CheckpointStore<'a> {
-    pub(crate) const fn new(conn: &'a Connection) -> Self {
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/session.rs` constructs `CheckpointStore` from the
+    // facade; reverts to `pub(crate)` in sub-PR 2b.
+    pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 
@@ -50,7 +53,7 @@ impl<'a> CheckpointStore<'a> {
 
     /// Get a checkpoint by `session_id`.
     ///
-    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`](me_storage::SessionStore) trait
     /// impl can call it in non-test builds (#630).
     ///
     /// Returns `Ok(None)` if no checkpoint exists for this session.
@@ -95,7 +98,7 @@ impl<'a> CheckpointStore<'a> {
 
     /// List recent checkpoints, most recent first.
     ///
-    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`](me_storage::SessionStore) trait
     /// impl can call it in non-test builds (#630).
     ///
     /// # Errors
@@ -149,7 +152,7 @@ mod tests {
     use chrono::Utc;
 
     fn setup() -> Connection {
-        crate::test_utils::setup_memory_db()
+        crate::test_util::setup_memory_db()
     }
 
     #[test]

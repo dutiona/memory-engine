@@ -1,0 +1,49 @@
+[package]
+name = "me-backend-sqlite"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "SQLite persistence leaves (store + connection pool) for the memory-engine workspace (Wave 2 #816 / S2, sub-PR 2a)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal crate: never published, so it uses bare path-deps and is exempt
+# from cargo-deny's published-crate wildcard rule (plan §D.1).
+publish = false
+
+[dependencies]
+me-types = { path = "../me-types" }
+me-storage = { path = "../me-storage" }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+blake3 = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+# Forces me-types's `test-util` feature ON for this crate's own `cargo test`,
+# so `crate::store::*`'s `#[cfg(test)]` bodies see `me_types::test_util::{new_fact,
+# new_fact_with_type, new_event}` without needing an explicit `--features test-util`
+# (matches today's baseline: these store-level tests currently pass under a bare
+# `cargo test`, with no feature flag).
+me-types = { path = "../me-types", features = ["test-util"] }
+proptest = "1"
+tempfile = "3"
+insta = { version = "1", features = ["yaml", "redactions"] }
+
+[features]
+# Gates `store/archive_manifest.rs` (the `.pak` manifest table). Forwards to
+# `me-types/archive` so the relocated `ArchiveManifestEntry` resolves.
+archive = ["me-types/archive"]
+# Forwards to `me-types/test-util` so a downstream consumer building this crate
+# with `--features test-util` still gets the shared `NewFact`/`NewEvent` test
+# doubles. NOTE: this crate's own `test_util` module (`setup_memory_db`) is
+# `#[cfg(test)]`-only, not feature-gated — its only two call sites
+# (`store::activities`, `store::checkpoints`) live in this crate and are
+# themselves `#[cfg(test)]`-only, so gating the module on `feature = "test-util"`
+# too would leave it unused (and therefore warning, under `clippy -D warnings`)
+# whenever the feature is enabled outside a test build (e.g. `--all-features`).
+test-util = ["me-types/test-util"]
+
+[lints]
+workspace = true

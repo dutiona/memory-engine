@@ -5,6 +5,7 @@ members = [
     "memory-engine/lib/me-traits",
     "memory-engine/lib/me-storage",
     "memory-engine/lib/me-index",
+    "memory-engine/lib/me-backend-sqlite",
     "memory-engine/lib/memory-engine",
     "memory-engine/lib/embed",
     "memory-engine/bin/cli",

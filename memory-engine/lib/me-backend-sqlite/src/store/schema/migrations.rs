@@ -8,10 +8,10 @@
 //! schema at that version — never reference the live DDL constants from
 //! `mod.rs`, which may evolve in future versions.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::Connection;
 
-use crate::error::{MigrationError, Result};
+use me_types::error::{MigrationError, Result};
 
 pub(super) fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     // Frozen snapshot of SCOPES_DDL at v2 — do not reference the global constant,
@@ -387,7 +387,7 @@ pub(super) fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
 
 /// Decode target for the v12 `embedding_meta` config value.
 ///
-/// Deliberately a **migration-local** struct, not `crate::types::EmbeddingFingerprint`:
+/// Deliberately a **migration-local** struct, not `me_types::types::EmbeddingFingerprint`:
 /// a future change to the live type's serde shape must not silently alter what this
 /// frozen v12→v13 step means (the module's frozen-snapshot invariant). It mirrors the
 /// v12-era field set #613 persisted under the `embedding_meta` key.

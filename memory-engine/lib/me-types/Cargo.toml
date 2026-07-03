@@ -15,6 +15,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
+# Only pulled in by the `test-util` feature's `new_fact_hashed` helper
+# (content-hash factory); not a production dependency otherwise.
+blake3 = { version = "1", optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -26,6 +29,10 @@ proptest = "1"
 # consistent across the workspace. Adds no dependency — the gated fields are plain
 # scalars.
 archive = []
+# Exposes the shared `NewFact`/`NewEvent` test-factory helpers (Wave 2 #816,
+# me-backend-sqlite carve, Commit 2) to every consumer crate's own tests, cross-crate
+# (`#[cfg(test)]` does not reach across a crate boundary — only a Cargo feature does).
+test-util = ["dep:blake3"]
 
 [lints]
 workspace = true

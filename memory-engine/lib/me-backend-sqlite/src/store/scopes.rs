@@ -1,8 +1,8 @@
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::Connection;
 
-use crate::error::{ConflictError, MemoryError, Result};
-use crate::types::ScopeNode;
+use me_types::error::{ConflictError, MemoryError, Result};
+use me_types::types::ScopeNode;
 
 /// CRUD operations for the `scopes` table.
 pub struct ScopeStore<'a> {
@@ -11,7 +11,10 @@ pub struct ScopeStore<'a> {
 
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> ScopeStore<'a> {
-    pub(crate) const fn new(conn: &'a Connection) -> Self {
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/{graph,consolidation}.rs` construct `ScopeStore`
+    // from the facade; reverts to `pub(crate)` in sub-PR 2b.
+    pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 
@@ -76,10 +79,10 @@ impl<'a> ScopeStore<'a> {
     /// **Does not validate the label.** Unlike [`Self::ensure_path`], this
     /// low-level method inserts `label` verbatim — callers are responsible for
     /// ensuring it is non-empty, contains no `/`, has no leading/trailing
-    /// whitespace, and is at most [`crate::types::MAX_SEGMENT_LEN`] bytes (the
-    /// rules enforced by [`crate::types::validate_segment`]). Storing a malformed
+    /// whitespace, and is at most [`me_types::types::MAX_SEGMENT_LEN`] bytes (the
+    /// rules enforced by [`me_types::types::validate_segment`]). Storing a malformed
     /// label here can break round-tripping through
-    /// [`crate::scope::ScopeTree::resolve_path`]. Prefer [`Self::ensure_path`]
+    /// `ScopeTree::resolve_path`. Prefer [`Self::ensure_path`]
     /// for a validated, idempotent alternative.
     ///
     /// # Errors
@@ -104,14 +107,14 @@ impl<'a> ScopeStore<'a> {
 
     /// Validate a scope label segment (write path).
     ///
-    /// Applies the shared structural rules from [`crate::types::validate_segment`]
+    /// Applies the shared structural rules from [`me_types::types::validate_segment`]
     /// (non-empty, no `/`, at most 256 bytes) on the trimmed label, plus the
     /// write-path-only rule that the label must have no leading/trailing
     /// whitespace — so that stored labels always round-trip through
-    /// [`crate::scope::ScopeTree::resolve_path`].
+    /// `ScopeTree::resolve_path`.
     fn validate_label(label: &str) -> Result<()> {
         let trimmed = label.trim();
-        crate::types::validate_segment(trimmed)
+        me_types::types::validate_segment(trimmed)
             .map_err(|reason| MemoryError::Conflict(ConflictError::ScopeLabel(reason.into())))?;
         if trimmed != label {
             return Err(MemoryError::Conflict(ConflictError::ScopeLabel(
@@ -132,7 +135,7 @@ impl<'a> ScopeStore<'a> {
     ///
     /// Returns `MemoryError::Conflict` if `path` is empty or any segment is
     /// invalid (empty, contains `/`, has leading/trailing whitespace, or exceeds
-    /// [`crate::types::MAX_SEGMENT_LEN`] bytes).
+    /// [`me_types::types::MAX_SEGMENT_LEN`] bytes).
     /// Returns `MemoryError::Storage` on SQL failure.
     pub fn ensure_path(&self, path: &str) -> Result<i64> {
         if path.is_empty() {

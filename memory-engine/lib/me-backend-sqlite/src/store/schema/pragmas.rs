@@ -3,10 +3,10 @@
 //! These set the durability/concurrency pragmas on freshly opened connections
 //! and toggle/verify foreign-key enforcement around table-rebuild migrations.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::Connection;
 
-use crate::error::{MigrationError, Result};
+use me_types::error::{MigrationError, Result};
 
 /// Pragmas safe for read-only connections — skip WAL and synchronous.
 pub(super) fn set_pragmas_read_only(conn: &Connection) -> Result<()> {

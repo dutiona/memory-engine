@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
-use crate::error::{MemoryError, Result, StorageError};
 use crate::store::{parse_optional_timestamp, parse_timestamp};
-use crate::types::{Edge, NewEdge, RelationType};
+use me_types::error::{MemoryError, Result, StorageError};
+use me_types::types::{Edge, NewEdge, RelationType};
 
 /// Store for graph edges with bi-temporal support.
 pub struct EdgeStore<'a> {
@@ -30,8 +30,11 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> EdgeStore<'a> {
     /// Create a new `EdgeStore` borrowing the given connection.
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/{graph,cold_storage,consolidation}.rs` construct
+    // `EdgeStore` from the facade; reverts to `pub(crate)` in sub-PR 2b.
     #[must_use]
-    pub(crate) const fn new(conn: &'a Connection) -> Self {
+    pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 

@@ -132,11 +132,23 @@ pub(crate) mod forgetting;
 pub(crate) use me_index::graph;
 pub(crate) use me_index::scope;
 pub(crate) use me_types::limits; // relocated to me-types (Wave 2 #816)
-pub(crate) mod pool;
+// `pool` + `store` are relocated to the L2 `me-backend-sqlite` crate (Wave 2 #816
+// / S2, sub-PR 2a). The re-export preserves `pub(crate)` visibility and every
+// internal `crate::pool::*` / `crate::store::*` path (notably the ~24 in
+// `storage/sqlite/`, which stays in the facade until sub-PR 2b).
+pub(crate) use me_backend_sqlite::{pool, store};
 pub(crate) mod resume;
-pub(crate) mod store;
 
 // === Shared test utilities (#485 / #120) ===
+// Deliberately NOT widened to `any(test, feature = "test-util")` (Wave 2
+// #816, me-backend-sqlite carve, Commit 2): every call site of
+// `crate::test_utils::*` is itself `#[cfg(test)]`-only, so compiling this
+// module under a bare `feature = "test-util"` (no `cfg(test)`) — e.g.
+// `cargo build --all-features` — leaves every re-export unused, which
+// `clippy --all-features -D warnings` (the CI gate) turns into a hard
+// failure. Plain `#[cfg(test)]` is correct: the `me-types`/`me-traits`
+// dev-dependency `features = ["test-util"]` forwarding below is what makes
+// the re-exported helpers resolve during `cargo test`.
 #[cfg(test)]
 pub(crate) mod test_utils;
 

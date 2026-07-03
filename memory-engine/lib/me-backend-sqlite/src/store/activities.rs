@@ -1,10 +1,10 @@
 //! Store operations for activity records.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::{MemoryError, Result};
-use crate::types::{Activity, ActivityStatus, NewActivity, OutcomeClass};
+use me_types::error::{MemoryError, Result};
+use me_types::types::{Activity, ActivityStatus, NewActivity, OutcomeClass};
 
 use super::parse_timestamp;
 
@@ -14,7 +14,10 @@ pub struct ActivityStore<'a> {
 }
 
 impl<'a> ActivityStore<'a> {
-    pub(crate) const fn new(conn: &'a Connection) -> Self {
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/session.rs` constructs `ActivityStore` from the
+    // facade; reverts to `pub(crate)` in sub-PR 2b.
+    pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 
@@ -105,7 +108,7 @@ impl<'a> ActivityStore<'a> {
 
     /// Get an activity by id.
     ///
-    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`](me_storage::SessionStore) trait
     /// impl can call it in non-test builds (#630).
     ///
     /// # Errors
@@ -132,7 +135,7 @@ impl<'a> ActivityStore<'a> {
 
     /// List activities for a session, most recent first.
     ///
-    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`](me_storage::SessionStore) trait
     /// impl can call it in non-test builds (#630).
     ///
     /// # Errors
@@ -214,7 +217,7 @@ impl<'a> ActivityStore<'a> {
 
     /// Count activities in a session.
     ///
-    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`] trait
+    /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`](me_storage::SessionStore) trait
     /// impl can call it in non-test builds (#630).
     ///
     /// # Errors
@@ -278,7 +281,7 @@ mod tests {
     use chrono::Utc;
 
     fn setup() -> Connection {
-        crate::test_utils::setup_memory_db()
+        crate::test_util::setup_memory_db()
     }
 
     #[test]
@@ -305,7 +308,7 @@ mod tests {
         assert_eq!(fetched.status, ActivityStatus::Recorded);
     }
 
-    /// #485 regression guard: [`crate::test_utils::setup_memory_db`] MUST enable
+    /// #485 regression guard: [`crate::test_util::setup_memory_db`] MUST enable
     /// `PRAGMA foreign_keys`. With enforcement OFF (the original bug — raw
     /// `Connection::open_in_memory`), an activity whose `scope_id` references a
     /// non-existent scope inserts silently; with it ON, the FK constraint

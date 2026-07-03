@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::error::{MigrationError, Result};
+use me_types::error::{MigrationError, Result};
 
 /// Create a WAL-safe backup of the database before running migrations.
 ///

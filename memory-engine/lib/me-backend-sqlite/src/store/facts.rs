@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::{MemoryError, Result, StorageError};
 use crate::store::{
     deserialize_embedding, parse_optional_timestamp, parse_timestamp, serialize_embedding,
 };
-use crate::types::{Fact, FactType, NewFact};
+use me_types::error::{MemoryError, Result, StorageError};
+use me_types::types::{Fact, FactType, NewFact};
 
 /// Store for bi-temporal facts with embedding BLOBs.
 pub struct FactStore<'a> {
@@ -30,16 +30,17 @@ const FACT_COLUMNS: &str = "id, content, content_hash, embedding, fact_type, \
 /// [`row_to_scoring_row`].
 const SCORING_COLUMNS: &str = "id, fact_type, last_accessed, access_count, importance, is_pinned";
 
-// `FactScoringRow` and `SessionFact` relocated to `crate::types` (#629 — the
+// `FactScoringRow` and `SessionFact` relocated to `me_types::types` (#629 — the
 // dialect-free storage port must not reference types living inside the SQLite
 // store). Shims preserve the original `crate::store::facts::{FactScoringRow,
 // SessionFact}` paths (e.g. `forgetting::policy` keeps its import + trait impl).
-pub use crate::types::{FactScoringRow, SessionFact};
+pub use me_types::types::{FactScoringRow, SessionFact};
 
 #[allow(
     clippy::trivially_copy_pass_by_ref,
     reason = "used as Option<&FactType>.map(fact_type_to_str) in search paths; changing to by-value would break those call sites"
 )]
+#[must_use]
 pub const fn fact_type_to_str(ft: &FactType) -> &'static str {
     match ft {
         FactType::Episodic => "episodic",
@@ -133,8 +134,12 @@ pub fn existing_fact_ids(conn: &Connection) -> Result<std::collections::HashSet<
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> FactStore<'a> {
     /// Create a new `FactStore` borrowing the given connection.
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/{graph,cold_storage,consolidation,search_index}.rs`
+    // construct `FactStore` directly and stay in the facade until sub-PR 2b folds
+    // them into this crate, at which point this reverts to `pub(crate)`.
     #[must_use]
-    pub(crate) const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
+    pub const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
         Self { conn, embed_dim }
     }
 
@@ -830,6 +835,10 @@ impl<'a> FactStore<'a> {
 
     /// Earliest future `t_valid` among active facts with `t_valid > now`.
     /// Excludes bi-temporally invalidated facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn next_due_time(
         &self,
         now: DateTime<Utc>,
@@ -862,6 +871,10 @@ impl<'a> FactStore<'a> {
     /// Stamp `surfaced_at` for facts that have not yet been surfaced.
     /// Returns the persisted `(fact_id, surfaced_at)` pairs for ALL requested IDs
     /// (including those already stamped by a prior caller).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn stamp_surfaced(
         &self,
         fact_ids: &[i64],
@@ -894,6 +907,11 @@ impl<'a> FactStore<'a> {
     }
 
     /// Set the pinned flag on a fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::NotFound`
+    /// if no fact with `id` exists.
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
         let rows = self
             .conn
@@ -903,7 +921,7 @@ impl<'a> FactStore<'a> {
             )
             .map_err(StorageError::backend)?;
         if rows == 0 {
-            return Err(crate::error::MemoryError::NotFound(format!("fact {id}")));
+            return Err(me_types::error::MemoryError::NotFound(format!("fact {id}")));
         }
         Ok(())
     }
@@ -1001,7 +1019,7 @@ impl<'a> FactStore<'a> {
     /// would then yield as NULL and the UPDATE would try to write into the
     /// `NOT NULL` column — aborting the entire enclosing transaction. The guard is
     /// validate-all-then-execute: a single non-finite entry rejects the whole
-    /// batch with [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
+    /// batch with [`ConflictError::PolicyParameter`](me_types::error::ConflictError::PolicyParameter)
     /// and leaves **all** rows untouched. (Defense in depth: today's callers feed
     /// provably-finite `compute_importance` output, so this is unreachable — but it
     /// converts a latent opaque DB-constraint abort into a clean, typed error.)
@@ -1011,8 +1029,8 @@ impl<'a> FactStore<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) wrapping
-    /// [`ConflictError::PolicyParameter`](crate::error::ConflictError::PolicyParameter)
+    /// Returns [`MemoryError::Conflict`](me_types::error::MemoryError::Conflict) wrapping
+    /// [`ConflictError::PolicyParameter`](me_types::error::ConflictError::PolicyParameter)
     /// if any score is non-finite (the statement does not run). Returns
     /// `MemoryError::Storage` on SQL failure (or `MemoryError` from JSON
     /// serialization, which cannot fail for the finite `id -> f64` map built here).
@@ -1027,7 +1045,7 @@ impl<'a> FactStore<'a> {
         for &(id, score) in scores {
             if !score.is_finite() {
                 return Err(MemoryError::Conflict(
-                    crate::error::ConflictError::PolicyParameter(format!(
+                    me_types::error::ConflictError::PolicyParameter(format!(
                         "importance score must be finite, got {score} for fact {id}"
                     )),
                 ));
@@ -1061,7 +1079,10 @@ impl<'a> FactStore<'a> {
     ///
     /// Returns `MemoryError::Internal` if `patch` is not a JSON object, and
     /// `MemoryError::NotFound` if no fact with `id` exists.
-    pub(crate) fn merge_metadata(&self, id: i64, patch: &serde_json::Value) -> Result<()> {
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/graph.rs` calls this through `FactStore` from the
+    // facade; reverts to `pub(crate)` when `storage/sqlite/` joins this crate (2b).
+    pub fn merge_metadata(&self, id: i64, patch: &serde_json::Value) -> Result<()> {
         let patch_obj = patch.as_object().ok_or_else(|| {
             MemoryError::Internal("merge_metadata patch must be a JSON object".to_owned())
         })?;
@@ -1107,12 +1128,10 @@ impl<'a> FactStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if any id does not exist.
-    pub(crate) fn mark_dream_cycled(
-        &self,
-        ids: &[i64],
-        cycle_id: u64,
-        now: DateTime<Utc>,
-    ) -> Result<()> {
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/{graph,consolidation}.rs` call this from the
+    // facade; reverts to `pub(crate)` when `storage/sqlite/` joins this crate (2b).
+    pub fn mark_dream_cycled(&self, ids: &[i64], cycle_id: u64, now: DateTime<Utc>) -> Result<()> {
         let marker = serde_json::json!({
             "dream_cycle": { "cycled_at": now.to_rfc3339(), "cycle_id": cycle_id }
         });
@@ -1132,7 +1151,10 @@ impl<'a> FactStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::Storage` on query failure.
-    pub(crate) fn list_undreamt_in_period(
+    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
+    // sub-PR 2a): `storage/sqlite/graph.rs` calls this from the facade; reverts to
+    // `pub(crate)` when `storage/sqlite/` joins this crate (2b).
+    pub fn list_undreamt_in_period(
         &self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
@@ -1363,7 +1385,7 @@ impl<'a> FactStore<'a> {
     /// absence.
     ///
     /// `marker_key` **MUST** be a trusted caller-supplied literal (an engine const
-    /// such as [`INSIGHT_MARKER_KEY`](crate::INSIGHT_MARKER_KEY)): it is interpolated
+    /// such as `INSIGHT_MARKER_KEY`): it is interpolated
     /// into the SQL JSON path, **never bound**, so it must never carry client input.
     /// A runtime guard rejects a non-identifier key in **all** build profiles
     /// (not just `debug`), since the key is interpolated into SQL.
@@ -1394,7 +1416,7 @@ impl<'a> FactStore<'a> {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
         {
             return Err(MemoryError::Conflict(
-                crate::error::ConflictError::QueryValidation(format!(
+                me_types::error::ConflictError::QueryValidation(format!(
                     "marker_key must be a non-empty alphanumeric/underscore identifier, got {marker_key:?}"
                 )),
             ));
@@ -1434,6 +1456,10 @@ impl<'a> FactStore<'a> {
     ///
     /// Optionally filters by scope and fact type.
     /// Ordered by `importance_score DESC`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
     pub fn list_active_in_period(
         &self,
         start: DateTime<Utc>,
@@ -1688,7 +1714,7 @@ mod tests {
     }
 
     fn make_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-        crate::test_utils::new_fact(content, embedding)
+        me_types::test_util::new_fact(content, embedding)
     }
 
     /// #366 end-to-end (read path): corrupt the stored `fact_type` of a real row,
@@ -1740,7 +1766,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                MemoryError::Storage(crate::error::StorageError::Backend(_))
+                MemoryError::Storage(me_types::error::StorageError::Backend(_))
             ),
             "read-path corrupt fact_type must surface Storage(Backend), got {err:?}"
         );
@@ -2164,7 +2190,7 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    MemoryError::Conflict(crate::error::ConflictError::QueryValidation(_))
+                    MemoryError::Conflict(me_types::error::ConflictError::QueryValidation(_))
                 ),
                 "key {bad:?} should be rejected as QueryValidation, got {err:?}"
             );
@@ -2680,7 +2706,7 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    MemoryError::Conflict(crate::error::ConflictError::PolicyParameter(_))
+                    MemoryError::Conflict(me_types::error::ConflictError::PolicyParameter(_))
                 ),
                 "expected ConflictError::PolicyParameter, got {err:?}"
             );
@@ -2900,7 +2926,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                MemoryError::Storage(crate::error::StorageError::Backend(_))
+                MemoryError::Storage(me_types::error::StorageError::Backend(_))
             ),
             "expected Storage(Backend) error, got: {err:?}"
         );
@@ -4233,7 +4259,7 @@ mod tests {
         let store = FactStore::new(&conn, DIM);
         let variants = [FactType::Episodic, FactType::Semantic, FactType::Procedural];
         for expected in variants {
-            let fact = crate::test_utils::new_fact_with_type(
+            let fact = me_types::test_util::new_fact_with_type(
                 "roundtrip content",
                 vec![0.1; DIM],
                 expected,
