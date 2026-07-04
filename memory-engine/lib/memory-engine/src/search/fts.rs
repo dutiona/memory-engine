@@ -1,10 +1,10 @@
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::{Connection, ToSql, params_from_iter};
 
-use crate::error::Result;
+use me_types::error::Result;
 use crate::search::{FilterSql, serialize_scope_ids};
 use crate::store::facts::fact_type_to_str;
-use crate::types::FactType;
+use me_types::types::FactType;
 
 /// A single FTS5 search result with the fact id and BM25 relevance score.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,7 +149,7 @@ pub fn fts_count_expired(
         |row| row.get::<_, i64>(0),
     ) {
         Ok(n) => usize::try_from(n)
-            .map_err(|e| crate::error::MemoryError::Internal(format!("invalid FTS count: {e}"))),
+            .map_err(|e| me_types::error::MemoryError::Internal(format!("invalid FTS count: {e}"))),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
         Err(e) => {
             // FTS5 syntax errors are caught here, same as fts_search.
@@ -179,7 +179,7 @@ pub fn fts_count_expired(
 pub fn fuzz_fts_query(query: &str) {
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
-    use crate::types::{FactType, NewFact};
+    use me_types::types::{FactType, NewFact};
     use chrono::Utc;
 
     const DIM: usize = 4;
@@ -244,7 +244,7 @@ mod tests {
     use super::*;
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
-    use crate::types::{FactType, NewFact};
+    use me_types::types::{FactType, NewFact};
     use chrono::Utc;
 
     const DIM: usize = 4;

@@ -14,10 +14,10 @@
 use async_trait::async_trait;
 
 use super::{SqliteBackend, convert};
-use crate::error::Result;
+use me_types::error::Result;
 use crate::search::{fts_count_expired, fts_search_filtered, vector_search_filtered};
-use crate::storage::{FactFilter, SearchIndex};
-use crate::types::FactType;
+use me_storage::{FactFilter, SearchIndex};
+use me_types::types::FactType;
 
 #[async_trait]
 impl SearchIndex for SqliteBackend {
@@ -144,15 +144,15 @@ mod tests {
     use chrono::Utc;
 
     use super::super::SqliteBackend;
-    use crate::error::MemoryError;
+    use me_types::error::MemoryError;
     use crate::pool::ConnectionPool;
     use crate::search::fts::fts_search;
     use crate::search::fts_count_expired;
     use crate::search::vector::vector_search;
-    use crate::storage::{FactFilter, SearchIndex};
+    use me_storage::{FactFilter, SearchIndex};
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{FactType, NewFact};
+    use me_types::types::{FactType, NewFact};
 
     const DIM: usize = 4;
 
@@ -316,7 +316,7 @@ mod tests {
         reason = "oracle read guard intentionally spans prepare + query_map"
     )]
     async fn lexical_include_expired_returns_active_and_expired() {
-        use crate::storage::TemporalFilter;
+        use me_storage::TemporalFilter;
         let pool = seeded(&[
             fact("Rust active", [0.1; DIM], false),
             fact("Rust expired", [0.1; DIM], true),
@@ -410,7 +410,7 @@ mod tests {
         reason = "oracle read guard intentionally spans prepare + query_map"
     )]
     async fn lexical_metadata_absent_present_split_matches_store_idiom() {
-        use crate::storage::MetadataPredicate;
+        use me_storage::MetadataPredicate;
         let pool = seeded(&[
             fact_meta("Rust marked", serde_json::json!({"dream_cycle": 1}), false),
             fact_meta("Rust unmarked", serde_json::json!({}), false),
@@ -451,7 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn lexical_metadata_key_equals_binds_scalar_and_path() {
-        use crate::storage::MetadataPredicate;
+        use me_storage::MetadataPredicate;
         // Verifies the empirically-uncertain bit: a *parameter-bound* JSON path
         // (`json_extract(metadata, ?)`) plus a scalar value bind.
         let pool = seeded(&[
@@ -475,7 +475,7 @@ mod tests {
         reason = "oracle read guard intentionally spans prepare + query_map"
     )]
     async fn vector_asof_matches_temporal_window_oracle() {
-        use crate::storage::TemporalFilter;
+        use me_storage::TemporalFilter;
         use chrono::{Duration, Utc};
         let now = Utc::now();
         // valid: [now-1h, now+1h) — visible at `now`.
@@ -520,7 +520,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_key_with_special_chars_is_a_valid_json_path() {
-        use crate::storage::MetadataPredicate;
+        use me_storage::MetadataPredicate;
         // A hyphenated key must not break the JSON path (`$.user-id` is a SQLite
         // path syntax error — the key has to be quoted + escaped).
         let pool = seeded(&[
@@ -541,7 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn key_equals_null_matches_present_null_only() {
-        use crate::storage::MetadataPredicate;
+        use me_storage::MetadataPredicate;
         // KeyEquals(k, null) means "k present and explicitly JSON null" — it must
         // match {"k": null} but NOT an absent key nor a non-null value.
         let pool = seeded(&[
@@ -566,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn asof_excludes_expired_rows_even_inside_their_valid_window() {
-        use crate::storage::TemporalFilter;
+        use me_storage::TemporalFilter;
         use chrono::Utc;
         // Both facts have an open valid window (t_valid/t_invalid = None), so the
         // only thing that may exclude the expired one is the system-time guard
@@ -624,11 +624,11 @@ mod hnsw_tests {
     use super::super::SqliteBackend;
     use crate::pool::ConnectionPool;
     use crate::search::strategy::SearchConfig;
-    use crate::storage::graph::FactGraph;
-    use crate::storage::{FactFilter, SearchIndex};
+    use me_storage::graph::FactGraph;
+    use me_storage::{FactFilter, SearchIndex};
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{EmbeddingFingerprint, FactType, NewFact};
+    use me_types::types::{EmbeddingFingerprint, FactType, NewFact};
 
     const DIM: usize = 4;
 

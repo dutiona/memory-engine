@@ -1,4 +1,4 @@
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use super::types::{
     EdgeStats, EngineStatistics, EventStats, FactStats, ScopeStats, StorageStats, SummaryStats,
 };
-use crate::error::Result;
+use me_types::error::Result;
 use crate::store::summaries::str_to_level;
 
 /// Compute aggregate statistics from the database.
@@ -97,7 +97,7 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
         .query_row("PRAGMA page_size", [], |r| r.get(0))
         .map_err(StorageError::backend)?;
     let main_db_bytes = page_count.checked_mul(page_size).ok_or_else(|| {
-        crate::error::MemoryError::Internal(format!(
+        me_types::error::MemoryError::Internal(format!(
             "storage size overflow: page_count {page_count} * page_size {page_size}"
         ))
     })?;
@@ -136,8 +136,8 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
 #[cfg(test)]
 mod tests {
     use crate::engine::MemoryEngine;
-    use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactRequest, FactType};
+    use me_traits::EmbeddingProvider;
+    use me_types::types::{AddFactRequest, FactType};
 
     const DIM: usize = 4;
 
@@ -163,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn statistics_with_facts() {
-        use crate::types::AddFactOptions;
+        use me_types::types::AddFactOptions;
 
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
@@ -237,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_populated_statistics() {
-        use crate::types::AddFactOptions;
+        use me_types::types::AddFactOptions;
 
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         engine
@@ -309,7 +309,7 @@ mod tests {
     use crate::store::edges::EdgeStore;
     use crate::store::schema::{init_schema, open_memory};
     use crate::store::summaries::SummaryStore;
-    use crate::types::{ConsolidationLevel, NewEdge, NewSummary};
+    use me_types::types::{ConsolidationLevel, NewEdge, NewSummary};
 
     /// Insert a minimal valid `facts` row and return its id. Bi-temporal columns
     /// (`t_expired`, `t_valid`, `t_invalid`) are bound verbatim so the
@@ -434,7 +434,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::error::MemoryError::Storage(crate::error::StorageError::Backend(_))
+                me_types::error::MemoryError::Storage(me_types::error::StorageError::Backend(_))
             ),
             "expected a Database error from the unknown level, got: {err:?}"
         );

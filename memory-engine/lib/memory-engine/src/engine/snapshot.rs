@@ -14,7 +14,7 @@
 //! The blake3 checksum covers the payload bytes only. Header is checked first
 //! (cheap) so `format_version/embed_dim` mismatches reject without hashing.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,14 +23,14 @@ use rusqlite::Connection;
 #[cfg(test)]
 use serde::Serialize;
 
-use crate::error::{MemoryError, Result};
-use crate::types::snapshot::{DbFingerprint, SnapshotHeader, SnapshotPayload};
+use me_types::error::{MemoryError, Result};
+use me_types::types::snapshot::{DbFingerprint, SnapshotHeader, SnapshotPayload};
 #[cfg(test)]
-use crate::types::snapshot::{
+use me_types::types::snapshot::{
     GraphEdgeSnapshot, GraphSnapshot, HnswEntry, HnswSnapshot, ScopeTreeSnapshot,
 };
 #[cfg(test)]
-use crate::types::{RelationType, ScopeNode};
+use me_types::types::{RelationType, ScopeNode};
 
 /// Current snapshot format version. Bump on breaking changes to the snapshot
 /// layout or type definitions.
@@ -132,7 +132,7 @@ fn size_gate(path: &Path, cap: u64) -> SizeGate {
 
 // Snapshot DTOs (`SnapshotHeader`, `DbFingerprint`, `SnapshotPayload`,
 // `GraphSnapshot`, `GraphEdgeSnapshot`, `ScopeTreeSnapshot`, `HnswSnapshot`,
-// `HnswEntry`) moved to `crate::types::snapshot` (Wave 2 #816): pure serde DTOs
+// `HnswEntry`) moved to `me_types::types::snapshot` (Wave 2 #816): pure serde DTOs
 // belong in the data layer. This file keeps only the rusqlite + fs IO that
 // produces and consumes them (→ `me-backend-sqlite` in S2).
 

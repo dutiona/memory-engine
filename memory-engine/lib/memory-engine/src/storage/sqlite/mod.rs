@@ -35,12 +35,12 @@
 
 use std::sync::Arc;
 
-use crate::error::{MemoryError, Result};
+use me_types::error::{MemoryError, Result};
 // `StorageError` lost its last non-test user when #926 removed `map_seam_err`;
 // it is still referenced by the `#[cfg(test)]` tests and this module's seam
 // doc-links, so import it for those configs only (avoids an unused-import warn).
 #[cfg(any(test, doc))]
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use crate::pool::ConnectionPool;
 #[cfg(feature = "ann")]
 use crate::search::ann::HnswStrategy;
@@ -61,11 +61,11 @@ mod schema;
 mod search_index;
 mod session;
 
-/// The default, in-process `SQLite` implementation of [`StorageBackend`](crate::storage::StorageBackend).
+/// The default, in-process `SQLite` implementation of [`StorageBackend`](me_storage::StorageBackend).
 ///
 /// Holds the pool as `Arc<ConnectionPool>` (the `'static` `spawn_blocking` closures
 /// need an owned handle) and the [`UpcasterRegistry`] as `Arc` (cloned into every
-/// [`EventLog`](crate::storage::EventLog) closure). `embed_dim` is derived from the
+/// [`EventLog`](me_storage::EventLog) closure). `embed_dim` is derived from the
 /// pool so the two can never diverge.
 ///
 /// ## HNSW ownership (Stage B, `ann` feature)
@@ -118,7 +118,7 @@ pub enum HnswOpenSource {
     /// A validated sidecar snapshot — restore the index from this payload. The
     /// inner `Option` is the sidecar's HNSW blob (`None` when the sidecar
     /// predates HNSW, in which case the index falls back to a DB rebuild).
-    Snapshot(Option<crate::types::snapshot::HnswSnapshot>),
+    Snapshot(Option<me_types::types::snapshot::HnswSnapshot>),
 }
 
 impl SqliteBackend {
@@ -246,8 +246,8 @@ impl SqliteBackend {
     /// metadata, ids, non-Active temporal). In those cases the richer brute-force
     /// SQL path is used so no result is incorrectly included or excluded.
     #[cfg(feature = "ann")]
-    fn should_use_hnsw(&self, filter: &crate::storage::FactFilter) -> bool {
-        use crate::storage::TemporalFilter;
+    fn should_use_hnsw(&self, filter: &me_storage::FactFilter) -> bool {
+        use me_storage::TemporalFilter;
         // Replication of `engine/mod.rs:379-387` + filter-compatibility guard.
         // HNSW's batched candidate fetch only handles:
         //   t_expired IS NULL  +  fact_type  +  scope_ids
@@ -276,7 +276,7 @@ impl SqliteBackend {
         reason = "non-ann build: method exists for symmetry but is never called; \
                   the ann twin uses self.hnsw / self.search_config"
     )]
-    const fn should_use_hnsw(&self, _filter: &crate::storage::FactFilter) -> bool {
+    const fn should_use_hnsw(&self, _filter: &me_storage::FactFilter) -> bool {
         false
     }
 
@@ -292,7 +292,7 @@ impl SqliteBackend {
     /// Returns `MemoryError::Storage` on pool or query failure, or
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     #[cfg(feature = "ann")]
-    pub fn hnsw_snapshot(&self) -> Result<Option<crate::types::snapshot::HnswSnapshot>> {
+    pub fn hnsw_snapshot(&self) -> Result<Option<me_types::types::snapshot::HnswSnapshot>> {
         let Some(ref hnsw) = self.hnsw else {
             return Ok(None);
         };
@@ -315,7 +315,7 @@ impl SqliteBackend {
     #[cfg(feature = "ann")]
     pub fn load_hnsw_snapshot(
         &mut self,
-        snap: &crate::types::snapshot::HnswSnapshot,
+        snap: &me_types::types::snapshot::HnswSnapshot,
     ) -> Result<()> {
         // Only meaningful if the config requires ANN.
         let ann_threshold = self
@@ -341,7 +341,7 @@ impl SqliteBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::IndexInconsistent`](crate::error::MemoryError::IndexInconsistent)
+    /// Returns [`MemoryError::IndexInconsistent`](me_types::error::MemoryError::IndexInconsistent)
     /// if the HNSW strategy detects a corrupt index (non-sequential ID) while
     /// incorporating the vector. Callers fire this **post-commit**, so the fact
     /// is already durably persisted; an error here surfaces an inconsistent

@@ -1,16 +1,15 @@
 //! Inspection statistics + dump-format DTOs (relocated from the monolith's
-//! `inspect/types.rs`, Wave 2 #816 E.4b Phase B; `EngineSnapshot` and its
-//! sub-DTOs joined them in the S2 me-backend-sqlite carve, sub-PR 2b — see
-//! below).
+//! `inspect/types.rs`, Wave 2 #816 E.4b Phase B).
 //!
-//! Pure serde DTOs: `DumpFormat` (the export-file format selector), the
-//! `EngineStatistics` tree of aggregate stats, and the `EngineSnapshot`
-//! import/export wire format (plus its `EmbeddingSpaceSnapshot`/
-//! `FactVectorSnapshot` sub-DTOs). `EngineSnapshot` moved here because the
-//! backend's `stream_snapshot`/`dump_json` (me-backend-sqlite) construct it
-//! directly and cannot reach back into the facade for it; the facade's
-//! `inspect/types.rs` re-exports all of these so `crate::inspect::types::*`
-//! keeps resolving for every consumer (CLI/MCP import-export included).
+//! Pure serde DTOs: `DumpFormat` (the export-file format selector) and the
+//! `EngineStatistics` tree of aggregate stats.
+//!
+//! `EngineSnapshot` (plus its `EmbeddingSpaceSnapshot`/`FactVectorSnapshot`
+//! sub-DTOs) joined them in the S2 me-backend-sqlite carve (sub-PR 2b): the
+//! backend's `stream_snapshot`/`dump_json` construct it directly and cannot
+//! reach back into the facade, whose `inspect/types.rs` re-exports all of
+//! these so `crate::inspect::types::*` keeps resolving for every consumer
+//! (CLI/MCP import-export included).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

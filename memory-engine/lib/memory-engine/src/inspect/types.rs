@@ -1,17 +1,22 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Edge, Event, EventType, Fact, LineageSnapshotEntry, ScopeNode, Summary};
+#[cfg(test)]
+use crate::types::{Edge, Fact, LineageSnapshotEntry, ScopeNode, Summary};
+use crate::types::{Event, EventType};
 
-/// `DumpFormat`, `EngineStatistics`, and the `*Stats` tree moved to `me-types` (Wave 2
-/// #816 E.4b Phase B) as pure serde DTOs; `EngineSnapshot`/`EmbeddingSpaceSnapshot`/
-/// `FactVectorSnapshot` joined them in the S2 me-backend-sqlite carve (sub-PR 2b) — the
-/// backend's `stream_snapshot`/`dump_json` construct them directly and cannot reach back
-/// into the facade for them. All re-exported here so `crate::inspect::types::*` and (via
-/// `inspect::mod`'s `pub use types::*`) `crate::inspect::*` keep resolving for every
-/// consumer (CLI/MCP import-export included).
+/// `DumpFormat`/`EngineStatistics`/the `*Stats` tree/`EngineSnapshot` moved to
+/// `me-types` as pure serde DTOs (Wave 2 #816 E.4b Phase B; `EngineSnapshot`
+/// joined in the S2 me-backend-sqlite carve, sub-PR 2b).
+///
+/// `EngineSnapshot` moved because the backend's `stream_snapshot`/`dump_json`
+/// construct it directly and cannot reach back into the facade for it. All
+/// re-exported here so `crate::inspect::types::*` and (via `inspect::mod`'s
+/// `pub use types::*`) `crate::inspect::*` keep resolving for every consumer
+/// (CLI/MCP import-export included).
 pub use me_types::types::inspect::{
     DumpFormat, EdgeStats, EmbeddingSpaceSnapshot, EngineSnapshot, EngineStatistics, EventStats,
     FactStats, FactVectorSnapshot, ScopeStats, StorageStats, SummaryStats,

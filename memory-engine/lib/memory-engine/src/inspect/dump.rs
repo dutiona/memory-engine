@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde::Serializer as _;
 use serde::ser::SerializeMap as _;
 
-use crate::error::{ConflictError, MemoryError, Result};
+use me_types::error::{ConflictError, MemoryError, Result};
 use crate::inspect::types::{EmbeddingSpaceSnapshot, FactVectorSnapshot};
 use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
@@ -557,8 +557,8 @@ mod tests {
     use super::*;
     use crate::engine::MemoryEngine;
     use crate::inspect::types::{DumpFormat, EngineSnapshot};
-    use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactRequest, FactType};
+    use me_traits::EmbeddingProvider;
+    use me_types::types::{AddFactRequest, FactType};
 
     const DIM: usize = 4;
 
@@ -1227,7 +1227,7 @@ mod tests {
         use crate::store::fact_vectors::write_backfill_batch;
         use crate::store::schema::{init_schema, migrate, open_memory};
         use crate::store::serialize_embedding;
-        use crate::types::EmbeddingFingerprint;
+        use me_types::types::EmbeddingFingerprint;
 
         const SPACE: &str = "shadow";
 

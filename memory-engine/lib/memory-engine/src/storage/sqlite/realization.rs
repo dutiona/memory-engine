@@ -14,9 +14,9 @@ use chrono::Utc;
 
 use super::SqliteBackend;
 use crate::pool::ConnectionPool;
-use crate::storage::{FactFilter, FactGraph, StorageBackend};
+use me_storage::{FactFilter, FactGraph, StorageBackend};
 use crate::store::upcaster::UpcasterRegistry;
-use crate::types::{EventType, FactType, NewEvent, NewFact};
+use me_types::types::{EventType, FactType, NewEvent, NewFact};
 
 const DIM: usize = 4;
 
