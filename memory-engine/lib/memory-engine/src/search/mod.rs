@@ -1,13 +1,18 @@
 //! Hybrid search: FTS5 (BM25) + vector (cosine) + Reciprocal Rank Fusion.
-
-#[cfg(feature = "ann")]
-pub(crate) mod ann;
-pub(crate) mod filter_sql;
-pub(crate) mod fts;
+//!
+//! `ann`/`filter_sql`/`fts`/`strategy`/`vector` (the FTS5/vector search cores
+//! `SqliteBackend` drives) carved into [`me_backend_sqlite`] (Wave 2 #816 / S2,
+//! sub-PR 2b) along with `storage::sqlite` (their only consumer beyond `hybrid`/
+//! `query`, moved in the same commit). `fts`/`strategy`/`vector` are re-exported below
+//! (mirroring the 2a `store`/`pool` seam) so `hybrid`/`query` (staying) and the crate's
+//! public API keep resolving unchanged; `ann`/`filter_sql` and the `FilterSql`/
+//! `fts_count_expired`/`fts_search_filtered`/`vector_search_filtered` flat re-exports
+//! are NOT re-exported here — their only callers (`storage::sqlite::{search_index,
+//! convert}`) moved to `me-backend-sqlite` too, so nothing in the facade reaches them
+//! anymore (production or test).
+pub(crate) use me_backend_sqlite::search::{fts, strategy, vector};
 pub(crate) mod hybrid;
 pub(crate) mod query;
-pub(crate) mod strategy;
-pub(crate) mod vector;
 
 // --- Genuinely-public surface (re-exported at the crate root by `lib.rs`) ---
 //
@@ -26,33 +31,3 @@ pub use strategy::VectorSearchStrategy;
 // They are kept `pub` for those out-of-crate consumers only.
 pub use strategy::SearchConfig;
 pub use vector::cosine_similarity;
-
-// --- Impl-internal helpers: crate-private, never reachable as `memory_engine::search::*` ---
-//
-// Only the helpers that engine modules reach through the `crate::search::*`
-// facade path are re-exported here; the rest are addressed via their
-// `crate::search::<submodule>::*` paths (e.g. `fts::fts_search`,
-// `strategy::BruteForce`, `ann::HnswStrategy`), so a flat re-export would be a
-// dead import.
-pub(crate) use filter_sql::FilterSql;
-pub(crate) use fts::{fts_count_expired, fts_search_filtered};
-pub(crate) use vector::vector_search_filtered;
-
-/// Serialize an optional scope-ID slice to a JSON string for use as a SQL
-/// parameter in `json_each(?N)` expressions.
-///
-/// Returns `None` when `scope_ids` is `None` (no scope filter), letting SQL
-/// treat the parameter as NULL and skip the filter clause.
-///
-/// # Errors
-///
-/// Returns `MemoryError::Serialization` if `serde_json::to_string` fails,
-/// which cannot happen for `&[i64]` in practice.
-pub(crate) fn serialize_scope_ids(
-    scope_ids: Option<&[i64]>,
-) -> crate::error::Result<Option<String>> {
-    scope_ids
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(crate::error::MemoryError::Serialization)
-}

@@ -1,8 +1,8 @@
 use rusqlite::Connection;
 
-use crate::error::Result;
 use crate::search::vector::VectorResult;
-use crate::types::FactType;
+use me_types::error::Result;
+use me_types::types::FactType;
 
 /// Strategy for vector similarity search.
 ///
@@ -15,7 +15,7 @@ use crate::types::FactType;
 /// # Object safety
 ///
 /// This trait is object-safe (`&dyn VectorSearchStrategy` / `Box<dyn …>`).
-/// `Send + Sync` are required because [`crate::engine::MemoryEngine`] is shared
+/// `Send + Sync` are required because `MemoryEngine` is shared
 /// across threads via `Arc`.
 pub trait VectorSearchStrategy: Send + Sync {
     /// Search for the `limit` most similar facts to `query_embedding`.
@@ -42,7 +42,7 @@ pub trait VectorSearchStrategy: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::IndexInconsistent`](crate::error::MemoryError::IndexInconsistent)
+    /// Returns [`MemoryError::IndexInconsistent`](me_types::error::MemoryError::IndexInconsistent)
     /// if the strategy's in-memory index detects a structural invariant violation
     /// while incorporating the new vector (e.g. the HNSW backend assigning a
     /// non-sequential ID — index corruption). The default no-op never errors.
@@ -63,14 +63,11 @@ pub trait VectorSearchStrategy: Send + Sync {
 /// This is the default strategy and serves as the correctness oracle when
 /// testing approximate strategies.
 //
-// Crate-internal test oracle: only the `search` unit tests construct it (the
-// engine's live vector path uses `vector_search` / `HnswStrategy` directly), so
-// it is `dead_code` in a release build — suppress there rather than widen it.
-#[cfg_attr(not(test), allow(dead_code))]
-// `search` is a crate-private module, so `pub(crate)` is the honest visibility;
-// the lint only fires because the module isn't `pub`.
-#[allow(clippy::redundant_pub_crate)]
-pub(crate) struct BruteForce;
+// `pub` (not `pub(crate)`): this crate's own `search` unit tests construct it, and so
+// does the facade's `search::hybrid` test module (a cross-crate consumer, Wave 2 #816 /
+// S2 sub-PR 2b) — the engine's live vector path uses `vector_search`/`HnswStrategy`
+// directly, never this test oracle.
+pub struct BruteForce;
 
 impl VectorSearchStrategy for BruteForce {
     fn search(
@@ -159,7 +156,7 @@ mod tests {
     use super::*;
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
-    use crate::types::NewFact;
+    use me_types::types::NewFact;
 
     const DIM: usize = 4;
 
@@ -170,7 +167,7 @@ mod tests {
     }
 
     fn make_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-        crate::test_utils::new_fact(content, embedding)
+        me_types::test_util::new_fact(content, embedding)
     }
 
     #[test]

@@ -185,9 +185,15 @@ path = "../../../examples/custom_traits.rs"
 # At least one storage backend must be enabled — enforced by a `compile_error!` in
 # `lib.rs`. SQLite is the default; Postgres (#633) is opt-in.
 default = ["backend-sqlite"]
-ann = ["dep:hnsw", "dep:space", "dep:rand"]
-compress-gzip = ["dep:flate2"]
-compress-zstd = ["dep:zstd"]
+# Forwards to `me-backend-sqlite/ann` (Wave 2 #816 / S2, sub-PR 2b) so `search::ann`'s
+# HNSW strategy and `sqlite`'s HNSW dispatch/snapshot paths — now living below the
+# seam — compile in lockstep with the facade's own feature.
+ann = ["dep:hnsw", "dep:space", "dep:rand", "me-backend-sqlite/ann"]
+# Forwards to `me-backend-sqlite/compress-{gzip,zstd}` (Wave 2 #816 / S2, sub-PR 2b) so
+# `inspect::dump`'s `dump_json_gzip`/`dump_json_zstd` — now living below the seam —
+# compile in lockstep with the facade's own feature.
+compress-gzip = ["dep:flate2", "me-backend-sqlite/compress-gzip"]
+compress-zstd = ["dep:zstd", "me-backend-sqlite/compress-zstd"]
 # Forwards to `me-types/archive` so `QueryDiagnostics`'s `#[cfg(feature = "archive")]`
 # fields (types::search, now in me-types) compile in step with the facade (plan §D.2).
 # Also forwards to `me-index/archive` (Wave 2 #816 / S2) so `MemoryGraph::remove_node`
@@ -224,8 +230,18 @@ backend-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
 # of the public API surface and never enabled in release builds. Forwards to
 # `me-types`/`me-traits` (Wave 2 #816, me-backend-sqlite carve, Commit 2) so a
 # downstream consumer building with `--features test-util` also gets the shared
-# `NewFact`/`NewEvent`/`MockEmbedder` test doubles those crates now own.
-test-util = ["me-storage/test-util", "me-types/test-util", "me-traits/test-util"]
+# `NewFact`/`NewEvent`/`MockEmbedder` test doubles those crates now own. Also forwards to
+# `me-backend-sqlite/test-util` (sub-PR 2b): `sqlite::schema`'s own `impl SchemaManager`
+# now lives there, and its `raw_exec` is itself `#[cfg(feature = "test-util")]` — without
+# this forward, enabling `test-util` on the facade alone does not satisfy the trait for
+# `SqliteBackend` (E0046: `raw_exec` not implemented) because Cargo features are
+# per-crate, not implicitly transitive.
+test-util = [
+    "me-storage/test-util",
+    "me-types/test-util",
+    "me-traits/test-util",
+    "me-backend-sqlite/test-util",
+]
 
 [lints.rust]
 unsafe_code = "forbid"

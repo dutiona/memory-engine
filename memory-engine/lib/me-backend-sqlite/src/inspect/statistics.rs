@@ -1,14 +1,14 @@
-use crate::error::StorageError;
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::Utc;
 use rusqlite::Connection;
 
-use super::types::{
+use me_types::error::{MemoryError, Result, StorageError};
+use me_types::types::inspect::{
     EdgeStats, EngineStatistics, EventStats, FactStats, ScopeStats, StorageStats, SummaryStats,
 };
-use crate::error::Result;
+
 use crate::store::summaries::str_to_level;
 
 /// Compute aggregate statistics from the database.
@@ -97,7 +97,7 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
         .query_row("PRAGMA page_size", [], |r| r.get(0))
         .map_err(StorageError::backend)?;
     let main_db_bytes = page_count.checked_mul(page_size).ok_or_else(|| {
-        crate::error::MemoryError::Internal(format!(
+        MemoryError::Internal(format!(
             "storage size overflow: page_count {page_count} * page_size {page_size}"
         ))
     })?;
@@ -135,169 +135,6 @@ pub fn compute_statistics(conn: &Connection, db_path: Option<&Path>) -> Result<E
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::MemoryEngine;
-    use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactRequest, FactType};
-
-    const DIM: usize = 4;
-
-    #[tokio::test]
-    async fn empty_engine_statistics() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let stats = engine.statistics().await.unwrap();
-        assert_eq!(stats.facts.total, 0);
-        assert_eq!(stats.facts.active, 0);
-        assert_eq!(stats.facts.expired, 0);
-        assert_eq!(stats.facts.pinned, 0);
-        assert_eq!(stats.facts.due, 0);
-        assert_eq!(stats.edges.total, 0);
-        assert_eq!(stats.summaries.total, 0);
-        // Root scope always exists
-        assert!(stats.scopes.total >= 1);
-        assert_eq!(stats.events.total, 0);
-        assert!(stats.storage.page_count > 0);
-        assert!(stats.storage.page_size > 0);
-        assert!(stats.storage.main_db_bytes > 0);
-        assert!(stats.storage.file_path.is_none());
-    }
-
-    #[tokio::test]
-    async fn statistics_with_facts() {
-        use crate::types::AddFactOptions;
-
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "fact one".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "fact two".into(),
-                    fact_type: FactType::Episodic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-        // Add a pinned fact
-        let pin_opts = AddFactOptions {
-            pinned: Some(true),
-            ..Default::default()
-        };
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "pinned fact".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: Some(pin_opts),
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let stats = engine.statistics().await.unwrap();
-        assert_eq!(stats.facts.total, 3);
-        assert_eq!(stats.facts.active, 3);
-        assert_eq!(stats.facts.expired, 0);
-        assert_eq!(stats.facts.pinned, 1);
-    }
-
-    #[tokio::test]
-    async fn snapshot_empty_engine_statistics() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let stats = engine.statistics().await.unwrap();
-        insta::assert_yaml_snapshot!(stats, {
-            ".storage.page_count" => "[page_count]",
-            ".storage.page_size" => "[page_size]",
-            ".storage.main_db_bytes" => "[db_bytes]",
-        });
-    }
-
-    #[tokio::test]
-    async fn snapshot_populated_statistics() {
-        use crate::types::AddFactOptions;
-
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "fact one".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "fact two".into(),
-                    fact_type: FactType::Episodic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-        let pin_opts = AddFactOptions {
-            pinned: Some(true),
-            ..Default::default()
-        };
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "pinned fact".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: Some(pin_opts),
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let stats = engine.statistics().await.unwrap();
-        insta::assert_yaml_snapshot!(stats, {
-            ".storage.page_count" => "[page_count]",
-            ".storage.page_size" => "[page_size]",
-            ".storage.main_db_bytes" => "[db_bytes]",
-        });
-    }
-
     // --- by_level aggregation path (#462) ---------------------------------
     //
     // These drive `compute_statistics` directly against a raw connection so the
@@ -305,11 +142,18 @@ mod tests {
     // consolidation pass's clustering thresholds. Summaries are inserted via the
     // real `SummaryStore`, so the persisted `level` encoding and the
     // `str_to_level` round-trip are both covered.
+    //
+    // The MemoryEngine-level tests that used to live alongside these
+    // (empty_engine_statistics, statistics_with_facts, snapshot_{empty,populated}_
+    // statistics) moved to the facade's engine/inspect.rs — they build a full
+    // MemoryEngine, which this crate cannot reach (Wave 2 #816 / S2, sub-PR 2b).
 
     use crate::store::edges::EdgeStore;
     use crate::store::schema::{init_schema, open_memory};
     use crate::store::summaries::SummaryStore;
-    use crate::types::{ConsolidationLevel, NewEdge, NewSummary};
+    use me_types::types::{ConsolidationLevel, NewEdge, NewSummary};
+
+    const DIM: usize = 4;
 
     /// Insert a minimal valid `facts` row and return its id. Bi-temporal columns
     /// (`t_expired`, `t_valid`, `t_invalid`) are bound verbatim so the
@@ -434,7 +278,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::error::MemoryError::Storage(crate::error::StorageError::Backend(_))
+                me_types::error::MemoryError::Storage(me_types::error::StorageError::Backend(_))
             ),
             "expected a Database error from the unknown level, got: {err:?}"
         );

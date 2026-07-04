@@ -1,13 +1,12 @@
 ---
-source: src/inspect/statistics.rs
-assertion_line: 216
+source: src/engine/inspect.rs
 expression: stats
 ---
 facts:
-  total: 0
-  active: 0
+  total: 3
+  active: 3
   expired: 0
-  pinned: 0
+  pinned: 1
   due: 0
 edges:
   total: 0

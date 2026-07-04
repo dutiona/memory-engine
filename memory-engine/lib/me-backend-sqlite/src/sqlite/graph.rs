@@ -12,7 +12,7 @@
 //! `embed_dim` is captured as a `let` binding outside the closure so `FactStore`
 //! construction is not coupled to `self` inside the blocking thread.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -20,12 +20,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use super::{SqliteBackend, stream_consumer_dropped};
-use crate::error::Result;
-use crate::storage::graph::{BootstrapIngestOutcome, FactGraph};
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
-use crate::types::{
+use me_storage::graph::{BootstrapIngestOutcome, FactGraph};
+use me_types::error::Result;
+use me_types::types::{
     Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
     NewFact, RelationType, ScopeNode, SessionFact,
 };
@@ -62,7 +62,7 @@ impl SqliteBackend {
         // same length. Reject a mismatch with a typed error rather than panicking
         // on an out-of-bounds index (or silently dropping facts via a zip).
         if facts.len() != scope_paths.len() {
-            return Err(crate::error::MemoryError::Internal(format!(
+            return Err(me_types::error::MemoryError::Internal(format!(
                 "batch insert: facts ({}) and scope_paths ({}) length mismatch",
                 facts.len(),
                 scope_paths.len()
@@ -866,14 +866,14 @@ impl FactGraph for SqliteBackend {
     // fact expired+invalidated with no inserted successor = silent data loss).
     async fn resolve_conflict_atomic(
         &self,
-        decision: crate::traits::CrudDecision,
+        decision: me_traits::CrudDecision,
         old_id: i64,
         new_fact: &NewFact,
         relation: &str,
         weight: f64,
         now: DateTime<Utc>,
     ) -> Result<(Option<i64>, Option<i64>)> {
-        use crate::traits::CrudDecision;
+        use me_traits::CrudDecision;
 
         // Capture the embedding before moving `new_fact` into the closure, for the
         // post-commit HNSW notify (mirrors insert_fact_atomic).
@@ -912,7 +912,7 @@ impl FactGraph for SqliteBackend {
                         // an already-expired fact. (The Update/Delete arms self-guard
                         // via `expire_and_invalidate`'s `WHERE t_expired IS NULL`.)
                         if !FactStore::new(&tx, dim).is_active(old_id)? {
-                            return Err(crate::error::MemoryError::NotFound(format!(
+                            return Err(me_types::error::MemoryError::NotFound(format!(
                                 "fact {old_id} is no longer active (expired since arbitration)"
                             )));
                         }
@@ -1005,7 +1005,7 @@ impl FactGraph for SqliteBackend {
         scored: &[(i64, f64)],
         to_expire: &[i64],
         now: DateTime<Utc>,
-    ) -> Result<(crate::forgetting::PruneStats, Vec<i64>)> {
+    ) -> Result<(me_types::types::forgetting::PruneStats, Vec<i64>)> {
         let dim = self.embed_dim;
         let scored = scored.to_vec();
         let to_expire = to_expire.to_vec();
@@ -1027,7 +1027,7 @@ impl FactGraph for SqliteBackend {
                 }
                 tx.commit().map_err(StorageError::backend)?;
 
-                let stats = crate::forgetting::PruneStats {
+                let stats = me_types::types::forgetting::PruneStats {
                     facts_expired: to_expire.len(),
                     facts_evaluated: scored.len(),
                 };
@@ -1141,12 +1141,12 @@ mod tests {
     use chrono::Utc;
 
     use super::super::SqliteBackend;
-    use crate::error::{ConflictError, MemoryError};
     use crate::pool::ConnectionPool;
-    use crate::storage::graph::FactGraph;
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{Edge, Fact, FactType, NewEdge, NewFact};
+    use me_storage::graph::FactGraph;
+    use me_types::error::{ConflictError, MemoryError};
+    use me_types::types::{Edge, Fact, FactType, NewEdge, NewFact};
 
     const DIM: usize = 4;
 
@@ -1591,9 +1591,9 @@ mod tests {
     // Stage A — parity + rollback tests for atomic port methods
     // =========================================================================
 
-    use crate::storage::schema::SchemaManager;
     use crate::store::embedding_meta;
-    use crate::types::EmbeddingFingerprint;
+    use me_storage::schema::SchemaManager;
+    use me_types::types::EmbeddingFingerprint;
 
     fn fp() -> EmbeddingFingerprint {
         EmbeddingFingerprint::new("test-model", "tei", DIM)
@@ -1929,7 +1929,7 @@ mod tests {
         let new = fact("new", [0.9; DIM]);
         let (new_id, edge_id) = be
             .resolve_conflict_atomic(
-                crate::traits::CrudDecision::Update,
+                me_traits::CrudDecision::Update,
                 old_id,
                 &new,
                 "contradicts",
@@ -1976,7 +1976,7 @@ mod tests {
 
         let err = be
             .resolve_conflict_atomic(
-                crate::traits::CrudDecision::Update,
+                me_traits::CrudDecision::Update,
                 old_id,
                 &bad,
                 "contradicts",
@@ -2020,7 +2020,7 @@ mod tests {
         // Expire old_id first — stands in for a concurrent Delete landing in the
         // read→write window.
         be.resolve_conflict_atomic(
-            crate::traits::CrudDecision::Delete,
+            me_traits::CrudDecision::Delete,
             old_id,
             &fact("ignored", [0.0; DIM]),
             "",
@@ -2033,7 +2033,7 @@ mod tests {
         // Add against the now-expired old_id must be rejected.
         let err = be
             .resolve_conflict_atomic(
-                crate::traits::CrudDecision::Add,
+                me_traits::CrudDecision::Add,
                 old_id,
                 &fact("supplement", [0.5; DIM]),
                 "supplements",
@@ -2110,8 +2110,8 @@ mod tests {
         // concurrent race the pre-fix TOCTOU allowed: pre-seed the marker via a first
         // ingest, then a second call with the matching filter must return `Skipped` and
         // leave the event log unchanged (no duplicate marker — the actual damage).
-        use crate::storage::{BootstrapIngestOutcome, EventLog};
-        use crate::types::{EmbeddingFingerprint, EventFilter, EventType, NewEvent};
+        use me_storage::{BootstrapIngestOutcome, EventLog};
+        use me_types::types::{EmbeddingFingerprint, EventFilter, EventType, NewEvent};
 
         let be = backend(Arc::new(ConnectionPool::open_memory(DIM).unwrap()));
         let fp = EmbeddingFingerprint::new("mock", "test", DIM);

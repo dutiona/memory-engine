@@ -1,7 +1,14 @@
+// `Connection` is production-unused here since `apply_clusters` moved to
+// me-backend-sqlite (sub-PR 2b) — needed only by this file's own `#[cfg(test)]`
+// `cluster_fusion` helper and the test module below (via `use super::*`).
+#[cfg(test)]
 use rusqlite::Connection;
 
 use crate::error::Result;
 use crate::search::vector::cosine_similarity;
+// Used by this file's own `#[cfg(test)]` module (via `use super::*`) to verify writes
+// `apply_clusters` (now in me-backend-sqlite) made — not by any production fn here.
+#[cfg(test)]
 use crate::store::summaries::SummaryStore;
 use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
 use crate::types::{ConsolidationLevel, Fact, NewSummary};
@@ -118,27 +125,15 @@ pub(super) fn compute_clusters(
     })
 }
 
-/// Apply computed cluster summaries inside the caller's write context (#409): clear the
-/// prior cluster-level summaries (idempotent), then insert the new ones. Call this only
-/// when the pass actually ran ([`ClusterComputed::ran`]) — over the cap, existing
-/// summaries must be preserved because there are no replacements.
-///
-/// # Errors
-///
-/// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::Serialization` on
-/// JSON serialization failure.
-pub(super) fn apply_clusters(
-    conn: &Connection,
-    embed_dim: usize,
-    summaries: &[NewSummary],
-) -> Result<()> {
-    let summary_store = SummaryStore::new(conn, embed_dim);
-    summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
-    for summary in summaries {
-        summary_store.insert(summary)?;
-    }
-    Ok(())
-}
+/// Apply computed cluster summaries inside the caller's write context (#409) — relocated
+/// to `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b) along with
+/// [`apply_plan`](super::apply_plan), its only production caller (which now calls the
+/// backend crate's own copy directly, not this re-export). Re-exported here so this
+/// file's own `#[cfg(test)]`-only [`cluster_fusion`] wrapper (composing
+/// [`compute_clusters`] + `apply_clusters` for this module's unit tests) keeps resolving
+/// unchanged.
+#[cfg(test)]
+pub(super) use me_backend_sqlite::consolidation::apply_clusters;
 
 /// Cluster fusion pass — compute + apply on a single connection.
 ///

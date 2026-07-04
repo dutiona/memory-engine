@@ -14,7 +14,7 @@
 //! The blake3 checksum covers the payload bytes only. Header is checked first
 //! (cheap) so `format_version/embed_dim` mismatches reject without hashing.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,14 +23,14 @@ use rusqlite::Connection;
 #[cfg(test)]
 use serde::Serialize;
 
-use crate::error::{MemoryError, Result};
-use crate::types::snapshot::{DbFingerprint, SnapshotHeader, SnapshotPayload};
+use me_types::error::{MemoryError, Result};
+use me_types::types::snapshot::{DbFingerprint, SnapshotHeader, SnapshotPayload};
 #[cfg(test)]
-use crate::types::snapshot::{
+use me_types::types::snapshot::{
     GraphEdgeSnapshot, GraphSnapshot, HnswEntry, HnswSnapshot, ScopeTreeSnapshot,
 };
 #[cfg(test)]
-use crate::types::{RelationType, ScopeNode};
+use me_types::types::{RelationType, ScopeNode};
 
 /// Current snapshot format version. Bump on breaking changes to the snapshot
 /// layout or type definitions.
@@ -132,7 +132,7 @@ fn size_gate(path: &Path, cap: u64) -> SizeGate {
 
 // Snapshot DTOs (`SnapshotHeader`, `DbFingerprint`, `SnapshotPayload`,
 // `GraphSnapshot`, `GraphEdgeSnapshot`, `ScopeTreeSnapshot`, `HnswSnapshot`,
-// `HnswEntry`) moved to `crate::types::snapshot` (Wave 2 #816): pure serde DTOs
+// `HnswEntry`) moved to `me_types::types::snapshot` (Wave 2 #816): pure serde DTOs
 // belong in the data layer. This file keeps only the rusqlite + fs IO that
 // produces and consumes them (→ `me-backend-sqlite` in S2).
 
@@ -141,6 +141,7 @@ fn size_gate(path: &Path, cap: u64) -> SizeGate {
 // ---------------------------------------------------------------------------
 
 /// Derive the snapshot sidecar path from the database path.
+#[must_use]
 pub fn snapshot_path(db_path: &Path) -> PathBuf {
     let mut p = db_path.as_os_str().to_owned();
     p.push(".snapshot");
@@ -155,6 +156,10 @@ pub fn snapshot_path(db_path: &Path) -> PathBuf {
 ///
 /// Uses a single query with subselects for atomicity within the `SQLite`
 /// read transaction.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` on SQL failure.
 pub fn read_fingerprint(conn: &Connection) -> Result<DbFingerprint> {
     conn.query_row(
         "SELECT \
@@ -193,6 +198,11 @@ pub fn read_fingerprint(conn: &Connection) -> Result<DbFingerprint> {
 /// 4. `fsync` the file.
 /// 5. Atomic rename via `persist()`.
 /// 6. `fsync` the parent directory for rename durability.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Internal` if serialization fails or the header exceeds a
+/// `u32` byte length, or `MemoryError::Io` on any filesystem failure.
 pub fn write_to_file(
     header: &SnapshotHeader,
     payload: &SnapshotPayload,
@@ -269,6 +279,12 @@ pub fn fuzz_wrap_payload(payload: &[u8], embed_dim: usize) -> Vec<u8> {
 /// Returns `None` on any failure (missing file, corrupt data, version
 /// mismatch, checksum failure, `embed_dim` mismatch). Never errors — all
 /// failures are logged and treated as "snapshot unavailable".
+///
+/// # Panics
+///
+/// Cannot panic: the internal `4`-byte header-length slice is length-checked
+/// (`data.len() >= 4 + 1 + 1 + BLAKE3_LEN`) before the `try_into().expect(...)` that
+/// converts it to a fixed-size array.
 pub fn load_from_file(path: &Path, embed_dim: usize) -> Option<(SnapshotHeader, SnapshotPayload)> {
     // Size guard BEFORE reading the file into memory: an oversized or tampered
     // sidecar must not be slurped wholesale into a Vec<u8> (see

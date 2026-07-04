@@ -8,8 +8,9 @@ use serde::Serialize;
 use serde::Serializer as _;
 use serde::ser::SerializeMap as _;
 
-use crate::error::{ConflictError, MemoryError, Result};
-use crate::inspect::types::{EmbeddingSpaceSnapshot, FactVectorSnapshot};
+use me_types::error::{ConflictError, MemoryError, Result};
+use me_types::types::inspect::{EmbeddingSpaceSnapshot, FactVectorSnapshot};
+
 use crate::store::UpcasterRegistry;
 use crate::store::edges::EdgeStore;
 use crate::store::events::EventStore;
@@ -124,10 +125,9 @@ fn mint_sqlite_vacuum_tmp(dir: &Path) -> std::io::Result<tempfile::NamedTempFile
 
 /// Stream engine state as JSON to `writer`, one entity at a time.
 ///
-/// Produces the same JSON format as [`super::types::EngineSnapshot`] but never
-/// holds more than one entity in memory per collection.  Peak memory drops from
-/// O(total entities) to O(1), making this suitable for databases with 100K+
-/// facts.
+/// Produces the same JSON format as [`me_types::types::inspect::EngineSnapshot`] but
+/// never holds more than one entity in memory per collection. Peak memory drops from
+/// O(total entities) to O(1), making this suitable for databases with 100K+ facts.
 fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W) -> Result<()> {
     let registry = UpcasterRegistry::new(); // raw events, no upcasting
 
@@ -155,14 +155,14 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
 
     // Serialize the whole snapshot object through serde's `SerializeMap` rather
     // than hand-assembling JSON braces and field names. Each `serialize_entry`
-    // key below is a string literal that must mirror an [`EngineSnapshot`] field:
-    // because the keys are literals (not derived from the struct), the compiler
-    // CANNOT catch a rename/reorder that drifts this writer from the struct.
-    // That drift is caught only at RUNTIME by the tests —
-    // `streaming_output_matches_snapshot_schema` (a renamed/dropped key fails the
-    // round-trip deserialize) and `streaming_header_keeps_embed_dim_leading` (a
-    // reordered leading scalar fails the order assertion). Keep both green when
-    // editing the keys or order here.
+    // key below is a string literal that must mirror an
+    // [`EngineSnapshot`](me_types::types::inspect::EngineSnapshot) field: because
+    // the keys are literals (not derived from the struct), the compiler CANNOT
+    // catch a rename/reorder that drifts this writer from the struct. That drift
+    // is caught only at RUNTIME by the tests — `streaming_output_matches_snapshot_schema`
+    // (a renamed/dropped key fails the round-trip deserialize) and
+    // `streaming_header_keeps_embed_dim_leading` (a reordered leading scalar fails
+    // the order assertion). Keep both green when editing the keys or order here.
     //
     // The collections are serialized row-by-row via [`SeqStreamer`] adapters, so
     // peak memory stays O(1) per collection — the same streaming guarantee the
@@ -555,52 +555,20 @@ pub fn dump_sqlite(conn: &Connection, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::MemoryEngine;
-    use crate::inspect::types::{DumpFormat, EngineSnapshot};
-    use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactRequest, FactType};
+    use me_types::types::inspect::EngineSnapshot;
 
     const DIM: usize = 4;
 
-    #[tokio::test]
-    async fn json_dump_roundtrip() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "test fact".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let json_path = dir.path().join("dump.json");
-        engine
-            .dump_state(&DumpFormat::Json(json_path.clone()))
-            .await
-            .unwrap();
-
-        // Deserialize and verify
-        let content = std::fs::read_to_string(&json_path).unwrap();
-        let snapshot: EngineSnapshot = serde_json::from_str(&content).unwrap();
-        assert_eq!(snapshot.facts.len(), 1);
-        assert_eq!(snapshot.facts[0].content, "test fact");
-        assert_eq!(snapshot.embed_dim, DIM);
-        assert!(!snapshot.scopes.is_empty()); // root scope
-    }
+    // The MemoryEngine-level tests that used to live alongside these
+    // (json_dump_roundtrip, sqlite_dump_from_in_memory,
+    // {gzip,zstd}_dump_has_correct_magic_bytes, snapshot_populated_engine_dump) moved
+    // to the facade's engine/inspect.rs — they build a full MemoryEngine, which this
+    // crate cannot reach (Wave 2 #816 / S2, sub-PR 2b).
 
     /// Verify that streaming produces valid JSON that round-trips through
     /// `EngineSnapshot` deserialization — the format contract with restore.
-    #[tokio::test]
-    async fn streaming_output_matches_snapshot_schema() {
+    #[test]
+    fn streaming_output_matches_snapshot_schema() {
         use crate::store::schema::{init_schema, migrate, open_memory};
         use crate::store::serialize_embedding;
 
@@ -644,8 +612,8 @@ mod tests {
     }
 
     /// Verify empty database produces a valid (empty) snapshot.
-    #[tokio::test]
-    async fn streaming_empty_database() {
+    #[test]
+    fn streaming_empty_database() {
         use crate::store::schema::{init_schema, migrate, open_memory};
 
         let conn = open_memory().unwrap();
@@ -665,8 +633,8 @@ mod tests {
     }
 
     /// Stress test: 10K facts streamed to buffer. Verifies correctness at scale.
-    #[tokio::test]
-    async fn streaming_10k_facts_roundtrips() {
+    #[test]
+    fn streaming_10k_facts_roundtrips() {
         use crate::store::schema::{init_schema, migrate, open_memory};
         use crate::store::serialize_embedding;
 
@@ -699,170 +667,11 @@ mod tests {
         assert_eq!(snapshot.embed_dim, DIM);
     }
 
-    #[tokio::test]
-    async fn sqlite_dump_from_in_memory() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "in-memory fact".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("dump.db");
-        engine
-            .dump_state(&DumpFormat::Sqlite(db_path.clone()))
-            .await
-            .unwrap();
-
-        // Verify the dump is a valid SQLite database with our data.
-        let dump_conn = rusqlite::Connection::open_with_flags(
-            &db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let count: i64 = dump_conn
-            .query_row("SELECT count(*) FROM facts", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 1);
-    }
-
-    #[cfg(feature = "compress-gzip")]
-    #[tokio::test]
-    async fn gzip_dump_has_correct_magic_bytes() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "gzip test".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dump.json.gz");
-        engine
-            .dump_state(&DumpFormat::JsonGzip(path.clone()))
-            .await
-            .unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(bytes.len() > 2, "file too small");
-        assert_eq!(bytes[0], 0x1f, "gzip magic byte 0");
-        assert_eq!(bytes[1], 0x8b, "gzip magic byte 1");
-    }
-
-    #[cfg(feature = "compress-zstd")]
-    #[tokio::test]
-    async fn zstd_dump_has_correct_magic_bytes() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "zstd test".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dump.json.zst");
-        engine
-            .dump_state(&DumpFormat::JsonZstd(path.clone()))
-            .await
-            .unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(bytes.len() > 4, "file too small");
-        assert_eq!(&bytes[..4], &[0x28, 0xb5, 0x2f, 0xfd], "zstd magic bytes");
-    }
-
-    #[tokio::test]
-    async fn snapshot_empty_engine_dump() {
-        use crate::store::schema::{init_schema, migrate, open_memory};
-
-        let conn = open_memory().unwrap();
-        init_schema(&conn).unwrap();
-        migrate(&conn, None).unwrap();
-
-        let mut buf = Vec::new();
-        stream_snapshot(&conn, DIM, &mut buf).unwrap();
-        let snapshot: EngineSnapshot = serde_json::from_slice(&buf).unwrap();
-
-        insta::assert_yaml_snapshot!(snapshot, {
-            ".config" => insta::sorted_redaction(),
-        });
-    }
-
-    #[tokio::test]
-    async fn snapshot_populated_engine_dump() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        engine
-            .add_fact(
-                &AddFactRequest {
-                    content: "snapshot fact".into(),
-                    fact_type: FactType::Semantic,
-                    source_event_id: None,
-                    scope: None,
-                    opts: None,
-                },
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let json_path = dir.path().join("dump.json");
-        engine
-            .dump_state(&DumpFormat::Json(json_path.clone()))
-            .await
-            .unwrap();
-
-        let content = std::fs::read_to_string(&json_path).unwrap();
-        let snapshot: EngineSnapshot = serde_json::from_str(&content).unwrap();
-
-        insta::assert_yaml_snapshot!(snapshot, {
-            ".facts[].t_created" => "[timestamp]",
-            ".facts[].last_accessed" => "[timestamp]",
-            ".facts[].embedding" => "[embedding]",
-            ".facts[].content_hash" => "[hash]",
-            ".events" => "[]",
-            ".config" => "{}",
-        });
-    }
-
     /// L6 hardening: a mistaken or hostile dump target that is a directory must
     /// be refused with a clear typed error, not the opaque `remove_file`-on-a-
     /// directory I/O failure the bare `path.exists()` check produced before.
-    #[tokio::test]
-    async fn dump_sqlite_refuses_directory_target() {
+    #[test]
+    fn dump_sqlite_refuses_directory_target() {
         use crate::store::schema::{init_schema, open_memory};
 
         let conn = open_memory().unwrap();
@@ -891,8 +700,8 @@ mod tests {
     /// a real on-disk connection. Non-vacuous: deleting the guard would let
     /// `VACUUM INTO` proceed against the source, so this returns `Ok` (or a
     /// different error) and fails the exact-variant `matches!` below.
-    #[tokio::test]
-    async fn dump_sqlite_refuses_to_overwrite_live_db() {
+    #[test]
+    fn dump_sqlite_refuses_to_overwrite_live_db() {
         use crate::store::schema::{init_schema, open_connection};
 
         let dir = tempfile::tempdir().unwrap();
@@ -931,8 +740,8 @@ mod tests {
     /// would treat the symlink as a distinct path and let the dump clobber the
     /// live DB through the link.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn dump_sqlite_refuses_symlink_resolving_to_live_db() {
+    #[test]
+    fn dump_sqlite_refuses_symlink_resolving_to_live_db() {
         use crate::store::schema::{init_schema, open_connection};
 
         let dir = tempfile::tempdir().unwrap();
@@ -981,8 +790,8 @@ mod tests {
     /// accepted (the dump succeeds), so the assertion fails if the NUL is not
     /// what triggers the rejection.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn dump_sqlite_rejects_null_byte_path() {
+    #[test]
+    fn dump_sqlite_rejects_null_byte_path() {
         use crate::store::schema::{init_schema, open_connection};
 
         let dir = tempfile::tempdir().unwrap();
@@ -1059,8 +868,8 @@ mod tests {
     /// byte-capped `peek_embed_dim_from_reader` can find it. After the move to a
     /// `serialize_map`-based writer, assert both that the first three keys are the
     /// expected scalars in order AND that `embed_dim` sits within a tiny byte cap.
-    #[tokio::test]
-    async fn streaming_header_keeps_embed_dim_leading() {
+    #[test]
+    fn streaming_header_keeps_embed_dim_leading() {
         use crate::store::schema::{init_schema, migrate, open_memory};
 
         let conn = open_memory().unwrap();
@@ -1106,8 +915,8 @@ mod tests {
     /// A symlink resolving to a directory must also be refused — `is_dir()`
     /// follows the link, so the guard is not bypassed by indirection.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn dump_sqlite_refuses_symlink_to_directory() {
+    #[test]
+    fn dump_sqlite_refuses_symlink_to_directory() {
         use crate::store::schema::{init_schema, open_memory};
 
         let conn = open_memory().unwrap();
@@ -1134,8 +943,8 @@ mod tests {
     /// rather than follow the link and clobber its target. This closes the
     /// in-engine TOCTOU window beneath the mcp-level path guard.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn dump_json_refuses_symlinked_tmp_leaf() {
+    #[test]
+    fn dump_json_refuses_symlinked_tmp_leaf() {
         use crate::store::schema::{init_schema, migrate, open_memory};
 
         let conn = open_memory().unwrap();
@@ -1173,8 +982,8 @@ mod tests {
     /// file. This closes the `VACUUM INTO` symlink-leaf TOCTOU that the mcp
     /// lstat-reject alone left racy.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn dump_sqlite_replaces_symlinked_target_without_following() {
+    #[test]
+    fn dump_sqlite_replaces_symlinked_target_without_following() {
         use crate::store::schema::{init_schema, open_memory};
 
         let conn = open_memory().unwrap();
@@ -1221,13 +1030,13 @@ mod tests {
     /// test populates a `populating` space with per-fact vectors, streams, and
     /// asserts the snapshot carries both, including the exact `(fact_id, space_id,
     /// embedding)` payloads.
-    #[tokio::test]
-    async fn streaming_carries_embedding_spaces_and_fact_vectors() {
+    #[test]
+    fn streaming_carries_embedding_spaces_and_fact_vectors() {
         use crate::store::embedding_spaces::{EmbeddingSpace, SpaceStatus, insert_populating};
         use crate::store::fact_vectors::write_backfill_batch;
         use crate::store::schema::{init_schema, migrate, open_memory};
         use crate::store::serialize_embedding;
-        use crate::types::EmbeddingFingerprint;
+        use me_types::types::EmbeddingFingerprint;
 
         const SPACE: &str = "shadow";
 
@@ -1372,5 +1181,25 @@ mod tests {
             recovered.to_string().contains(SENTINEL),
             "the recovered error must still carry the sentinel ({SENTINEL:?}), got: {recovered}"
         );
+    }
+
+    /// #499 (`snapshot_empty_engine_dump`): a raw-connection streaming dump,
+    /// snapshotted via insta — kept here (not the facade) because it drives
+    /// `stream_snapshot` directly, not `MemoryEngine`.
+    #[test]
+    fn snapshot_empty_engine_dump() {
+        use crate::store::schema::{init_schema, migrate, open_memory};
+
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+
+        let mut buf = Vec::new();
+        stream_snapshot(&conn, DIM, &mut buf).unwrap();
+        let snapshot: EngineSnapshot = serde_json::from_slice(&buf).unwrap();
+
+        insta::assert_yaml_snapshot!(snapshot, {
+            ".config" => insta::sorted_redaction(),
+        });
     }
 }

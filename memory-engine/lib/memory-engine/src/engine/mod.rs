@@ -39,7 +39,10 @@ mod reconstruct;
 mod restore;
 mod resume;
 mod scheduling;
-pub(crate) mod snapshot;
+// Carved into `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b); re-exported so every
+// `snapshot::*` reference below (and `crate::engine::snapshot::*` elsewhere) keeps
+// resolving unchanged.
+pub(crate) use me_backend_sqlite::snapshot;
 
 #[cfg(feature = "archive")]
 mod archive;

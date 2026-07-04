@@ -44,11 +44,8 @@ pub struct NewArchiveManifest<'a> {
 
 impl<'a> ArchiveManifestStore<'a> {
     /// Create a new `ArchiveManifestStore` borrowing the given connection.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/cold_storage.rs` constructs `ArchiveManifestStore`
-    // from the facade; reverts to `pub(crate)` in sub-PR 2b.
     #[must_use]
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 

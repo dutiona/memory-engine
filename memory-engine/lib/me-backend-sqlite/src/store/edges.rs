@@ -30,9 +30,9 @@ fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<Edge> {
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> EdgeStore<'a> {
     /// Create a new `EdgeStore` borrowing the given connection.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/{graph,cold_storage,consolidation}.rs` construct
-    // `EdgeStore` from the facade; reverts to `pub(crate)` in sub-PR 2b.
+    // Stays `pub` (Wave 2 #816, me-backend-sqlite carve): `storage/sqlite/` joined
+    // this crate in sub-PR 2b, but the facade's own `engine/graph_load.rs` still
+    // constructs `EdgeStore` directly across the crate boundary.
     #[must_use]
     pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }

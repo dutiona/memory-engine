@@ -4,7 +4,7 @@
 //! Uses the `hnsw` crate (rust-cv) which owns inserted vectors,
 //! avoiding lifetime issues with the HNSW graph.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use space::Metric;
 
 use crate::search::cosine_similarity;
@@ -45,11 +45,11 @@ use rand::rngs::SmallRng;
 use rusqlite::Connection;
 use space::Neighbor;
 
-use crate::error::Result;
 use crate::search::strategy::VectorSearchStrategy;
 use crate::search::vector::VectorResult;
 use crate::store::deserialize_embedding;
-use crate::types::FactType;
+use me_types::error::Result;
+use me_types::types::FactType;
 
 /// HNSW approximate nearest neighbor strategy.
 ///
@@ -148,14 +148,14 @@ impl HnswStrategy {
         for entry in entries {
             let (fact_id, embedding) = entry?;
             if embedding.len() != embed_dim {
-                return Err(crate::error::MemoryError::EmbeddingDimension {
+                return Err(me_types::error::MemoryError::EmbeddingDimension {
                     expected: embed_dim,
                     actual: embedding.len(),
                 });
             }
             let hnsw_id = index.insert(embedding, &mut searcher);
             if hnsw_id != index_to_fact.len() {
-                return Err(crate::error::MemoryError::Internal(format!(
+                return Err(me_types::error::MemoryError::Internal(format!(
                     "HNSW index must assign sequential IDs (got {hnsw_id}, expected {})",
                     index_to_fact.len()
                 )));
@@ -313,8 +313,8 @@ impl HnswStrategy {
         &self,
         conn: &Connection,
         embed_dim: usize,
-    ) -> Result<crate::types::snapshot::HnswSnapshot> {
-        use crate::types::snapshot::{HnswEntry, HnswSnapshot};
+    ) -> Result<me_types::types::snapshot::HnswSnapshot> {
+        use me_types::types::snapshot::{HnswEntry, HnswSnapshot};
 
         let mut stmt = conn
             .prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")
@@ -352,7 +352,7 @@ impl HnswStrategy {
     /// the wrong size, or `MemoryError::Internal` if HNSW does not assign sequential
     /// IDs starting from 0.
     pub(crate) fn from_snapshot(
-        snap: &crate::types::snapshot::HnswSnapshot,
+        snap: &me_types::types::snapshot::HnswSnapshot,
         embed_dim: usize,
     ) -> Result<Self> {
         // Snapshot entries are already decoded, so each is infallible — wrap in
@@ -384,7 +384,7 @@ impl VectorSearchStrategy for HnswStrategy {
         scope_ids: Option<&[i64]>,
     ) -> Result<Vec<VectorResult>> {
         if query_embedding.len() != self.embed_dim {
-            return Err(crate::error::MemoryError::EmbeddingDimension {
+            return Err(me_types::error::MemoryError::EmbeddingDimension {
                 expected: self.embed_dim,
                 actual: query_embedding.len(),
             });
@@ -534,7 +534,7 @@ impl VectorSearchStrategy for HnswStrategy {
             // durable write already landed, so this surfaces as
             // `IndexInconsistent` ("rebuild the index, do not retry the write"),
             // never as a write failure.
-            return Err(crate::error::MemoryError::IndexInconsistent {
+            return Err(me_types::error::MemoryError::IndexInconsistent {
                 fact_id,
                 detail: format!(
                     "HNSW sequential ID invariant violated on insert: index has {} \
@@ -615,8 +615,8 @@ fn fetch_candidate_embeddings(
         return Ok(HashMap::new());
     }
 
-    let ids_json =
-        serde_json::to_string(candidate_ids).map_err(crate::error::MemoryError::Serialization)?;
+    let ids_json = serde_json::to_string(candidate_ids)
+        .map_err(me_types::error::MemoryError::Serialization)?;
     let scope_json = serialize_scope_ids(scope_ids)?;
 
     let mut stmt = conn
@@ -737,8 +737,8 @@ mod tests {
         use crate::search::strategy::VectorSearchStrategy;
         use crate::store::facts::FactStore;
         use crate::store::schema::{init_schema, open_memory};
-        use crate::types::{FactType, NewFact};
         use chrono::Utc;
+        use me_types::types::{FactType, NewFact};
 
         const DIM: usize = 4;
 
@@ -860,7 +860,7 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    crate::error::MemoryError::IndexInconsistent { fact_id: 42, .. }
+                    me_types::error::MemoryError::IndexInconsistent { fact_id: 42, .. }
                 ),
                 "expected MemoryError::IndexInconsistent {{ fact_id: 42, .. }}, got {err:?}"
             );
@@ -939,7 +939,7 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(
                 err,
-                crate::error::MemoryError::EmbeddingDimension {
+                me_types::error::MemoryError::EmbeddingDimension {
                     expected: 4,
                     actual: 2
                 }
@@ -1451,7 +1451,7 @@ mod tests {
             // The shared `build_hnsw_inner` kernel enforces the dimension check for
             // the snapshot path identically to the DB path: a wrong-width entry must
             // surface `EmbeddingDimension`, not corrupt the index.
-            use crate::types::snapshot::{HnswEntry, HnswSnapshot};
+            use me_types::types::snapshot::{HnswEntry, HnswSnapshot};
 
             let snap = HnswSnapshot {
                 entries: vec![HnswEntry {
@@ -1465,7 +1465,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(crate::error::MemoryError::EmbeddingDimension {
+                    Err(me_types::error::MemoryError::EmbeddingDimension {
                         expected: 4,
                         actual: 2
                     })
@@ -1494,7 +1494,7 @@ mod tests {
 
             let err = strategy.rebuild_from_db(&conn).unwrap_err();
             assert!(
-                matches!(err, crate::error::MemoryError::EmbeddingDimension { .. }),
+                matches!(err, me_types::error::MemoryError::EmbeddingDimension { .. }),
                 "wrong-width stored embedding must abort the rebuild, got {err:?}"
             );
             assert_eq!(

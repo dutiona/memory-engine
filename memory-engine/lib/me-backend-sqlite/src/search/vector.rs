@@ -1,10 +1,10 @@
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use rusqlite::{Connection, params_from_iter};
 
-use crate::error::Result;
 use crate::search::FilterSql;
 use crate::store::deserialize_embedding;
-use crate::types::FactType;
+use me_types::error::Result;
+use me_types::types::FactType;
 
 /// A single vector search result with fact id and cosine similarity score.
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +124,7 @@ pub fn vector_search_filtered(
     filter: &FilterSql,
 ) -> Result<Vec<VectorResult>> {
     if query_embedding.len() != embed_dim {
-        return Err(crate::error::MemoryError::EmbeddingDimension {
+        return Err(me_types::error::MemoryError::EmbeddingDimension {
             expected: embed_dim,
             actual: query_embedding.len(),
         });
@@ -189,7 +189,7 @@ mod tests {
     use super::*;
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
-    use crate::types::{FactType, NewFact};
+    use me_types::types::{FactType, NewFact};
 
     const DIM: usize = 4;
 
@@ -200,7 +200,7 @@ mod tests {
     }
 
     fn make_fact_with_embedding(content: &str, embedding: Vec<f32>) -> NewFact {
-        crate::test_utils::new_fact(content, embedding)
+        me_types::test_util::new_fact(content, embedding)
     }
 
     #[test]
@@ -304,7 +304,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(
             err,
-            crate::error::MemoryError::EmbeddingDimension {
+            me_types::error::MemoryError::EmbeddingDimension {
                 expected: 4,
                 actual: 2
             }

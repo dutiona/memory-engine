@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use super::SqliteBackend;
-use crate::archive::ArchiveManifestEntry;
-use crate::error::Result;
-use crate::storage::cold_storage::ColdStorage;
 use crate::store::archive_manifest::{ArchiveManifestStore, NewArchiveManifest};
+use me_storage::cold_storage::ColdStorage;
+use me_types::error::Result;
+use me_types::types::archive::ArchiveManifestEntry;
 
 #[async_trait]
 impl ColdStorage for SqliteBackend {
@@ -86,9 +86,9 @@ impl ColdStorage for SqliteBackend {
         blake3_hash: &str,
         fact_ids: &[i64],
     ) -> Result<()> {
-        use crate::error::ArchiveError;
         use crate::store::edges::EdgeStore;
         use crate::store::facts::FactStore;
+        use me_types::error::ArchiveError;
 
         let pak_filename = pak_filename.to_owned();
         let blake3_hash = blake3_hash.to_owned();
@@ -142,11 +142,11 @@ mod tests {
 
     use super::super::SqliteBackend;
     use crate::pool::ConnectionPool;
-    use crate::storage::cold_storage::ColdStorage;
     use crate::store::edges::EdgeStore;
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{FactType, NewEdge, NewFact};
+    use me_storage::cold_storage::ColdStorage;
+    use me_types::types::{FactType, NewEdge, NewFact};
 
     const DIM: usize = 4;
 
@@ -337,7 +337,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::error::MemoryError::Archive(_) | crate::error::MemoryError::Storage(_)
+                me_types::error::MemoryError::Archive(_) | me_types::error::MemoryError::Storage(_)
             ),
             "expected Archive or Storage error, got {err:?}"
         );

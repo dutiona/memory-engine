@@ -3,16 +3,16 @@
 //! The [`UpcasterRegistry`](crate::store::upcaster::UpcasterRegistry) is a backend
 //! construction detail (cloned into each closure), never crossing a method boundary.
 
-use crate::error::StorageError;
+use me_types::error::StorageError;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use super::{SqliteBackend, stream_consumer_dropped};
-use crate::error::Result;
-use crate::storage::EventLog;
 use crate::store::events::EventStore;
-use crate::types::{Event, EventFilter, NewEvent};
+use me_storage::EventLog;
+use me_types::error::Result;
+use me_types::types::{Event, EventFilter, NewEvent};
 
 #[async_trait]
 impl EventLog for SqliteBackend {
@@ -70,7 +70,7 @@ impl EventLog for SqliteBackend {
 
     // READ — outcome-signal aggregation push-down (verbatim SQL from the pre-cutover
     // `engine/outcome.rs::get_outcome_counts`).
-    async fn count_outcome_signals(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts> {
+    async fn count_outcome_signals(&self, fact_id: i64) -> Result<me_types::types::OutcomeCounts> {
         self.block_read(move |conn| {
             let mut stmt = conn
                 .prepare(
@@ -81,7 +81,7 @@ impl EventLog for SqliteBackend {
                  GROUP BY outcome",
                 )
                 .map_err(StorageError::backend)?;
-            let mut counts = crate::types::OutcomeCounts::default();
+            let mut counts = me_types::types::OutcomeCounts::default();
             let rows = stmt
                 .query_map(rusqlite::params![fact_id], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
@@ -106,7 +106,7 @@ impl EventLog for SqliteBackend {
     async fn count_outcome_signals_batch(
         &self,
         fact_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, crate::types::OutcomeCounts>> {
+    ) -> Result<std::collections::HashMap<i64, me_types::types::OutcomeCounts>> {
         if fact_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -123,7 +123,7 @@ impl EventLog for SqliteBackend {
                  GROUP BY fid, outcome",
                 )
                 .map_err(StorageError::backend)?;
-            let mut by_fact: std::collections::HashMap<i64, crate::types::OutcomeCounts> =
+            let mut by_fact: std::collections::HashMap<i64, me_types::types::OutcomeCounts> =
                 std::collections::HashMap::new();
             let rows = stmt
                 .query_map(rusqlite::params![ids_json], |row| {
@@ -155,11 +155,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::super::SqliteBackend;
-    use crate::error::MemoryError;
     use crate::pool::ConnectionPool;
-    use crate::storage::EventLog;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{Event, EventFilter, EventType, NewEvent};
+    use me_storage::EventLog;
+    use me_types::error::MemoryError;
+    use me_types::types::{Event, EventFilter, EventType, NewEvent};
 
     fn backend() -> SqliteBackend {
         let pool = ConnectionPool::open_memory(4).unwrap();
@@ -167,7 +167,7 @@ mod tests {
     }
 
     fn make_event(source: &str, session_id: Option<&str>) -> NewEvent {
-        crate::test_utils::new_event(source, session_id)
+        me_types::test_util::new_event(source, session_id)
     }
 
     #[tokio::test]

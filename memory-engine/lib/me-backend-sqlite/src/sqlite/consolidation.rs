@@ -10,15 +10,15 @@
 //! Summary methods that (de)serialize embeddings capture `self.embed_dim` as a
 //! `let` binding outside the closure — the `'static` closures cannot borrow `self`.
 
-use crate::error::StorageError;
 use async_trait::async_trait;
+use me_types::error::StorageError;
 
 use super::{SqliteBackend, stream_consumer_dropped};
-use crate::error::Result;
-use crate::storage::consolidation::ConsolidationStore;
 use crate::store::lineage::LineageStore;
 use crate::store::summaries::SummaryStore;
-use crate::types::{
+use me_storage::consolidation::ConsolidationStore;
+use me_types::error::Result;
+use me_types::types::{
     ConsolidationLevel, LineageRecord, LineageSnapshotEntry, NewLineageRecord, NewSummary,
     PromotionProvenance, Summary,
 };
@@ -169,25 +169,25 @@ impl ConsolidationStore for SqliteBackend {
     #[allow(clippy::too_many_lines)]
     async fn apply_cycle_deltas_atomic(
         &self,
-        report: &crate::types::cycle_report::CycleReport,
+        report: &me_types::types::cycle_report::CycleReport,
         embed_dim: usize,
         upcaster_registry: &crate::store::upcaster::UpcasterRegistry,
     ) -> Result<(
-        crate::types::cycle_report::ApplyResult,
+        me_types::types::cycle_report::ApplyResult,
         Vec<(i64, i64, i64)>,
         Vec<i64>,
         Vec<(i64, Vec<f32>)>,
     )> {
         use chrono::Utc;
 
-        use crate::error::{CycleError, MemoryError};
         use crate::store::edges::EdgeStore;
         use crate::store::events::EventStore;
         use crate::store::facts::FactStore;
         use crate::store::lineage::LineageStore;
         use crate::store::schema::{get_config, set_config};
-        use crate::types::cycle_report::{ApplyResult, CycleDelta, IMPORTANCE_STEP};
-        use crate::types::{
+        use me_types::error::{CycleError, MemoryError};
+        use me_types::types::cycle_report::{ApplyResult, CycleDelta, IMPORTANCE_STEP};
+        use me_types::types::{
             EventType, NewEdge, NewEvent, NewLineageRecord, PromotionProvenance, RelationType,
         };
 
@@ -205,7 +205,7 @@ impl ConsolidationStore for SqliteBackend {
                 // Verbatim from validate_report in apply.rs:364-462
                 {
                     fn ensure_active(
-                        f: &crate::types::Fact,
+                        f: &me_types::types::Fact,
                         expired_in_report: &std::collections::HashSet<i64>,
                     ) -> Result<()> {
                         if f.t_expired.is_some() || expired_in_report.contains(&f.id) {
@@ -216,7 +216,7 @@ impl ConsolidationStore for SqliteBackend {
 
                     let store = FactStore::new(conn, embed_dim);
                     let require_fact =
-                        |id: i64, missing: CycleError| -> Result<crate::types::Fact> {
+                        |id: i64, missing: CycleError| -> Result<me_types::types::Fact> {
                             match store.get(id) {
                                 Ok(f) => Ok(f),
                                 Err(MemoryError::NotFound(_)) => Err(MemoryError::Cycle(missing)),
@@ -242,20 +242,20 @@ impl ConsolidationStore for SqliteBackend {
                                     || !(0.0..=1.0).contains(&nf.base_importance)
                                 {
                                     return Err(MemoryError::Conflict(
-                                        crate::error::ConflictError::PolicyParameter(format!(
+                                        me_types::error::ConflictError::PolicyParameter(format!(
                                             "base_importance must be in [0, 1], got {}",
                                             nf.base_importance
                                         )),
                                     ));
                                 }
-                                crate::limits::check_str_size(&nf.content, "fact content")?;
-                                crate::limits::check_json_size(&nf.metadata, "fact metadata")?;
+                                me_types::limits::check_str_size(&nf.content, "fact content")?;
+                                me_types::limits::check_json_size(&nf.metadata, "fact metadata")?;
                             }
                             CycleDelta::AdjustScore {
                                 fact_id,
                                 adjustment,
                             } => {
-                                use crate::types::cycle_report::MAX_ADJUSTMENT;
+                                use me_types::types::cycle_report::MAX_ADJUSTMENT;
                                 if adjustment.abs() > MAX_ADJUSTMENT {
                                     return Err(MemoryError::Cycle(
                                         CycleError::AdjustmentOutOfRange {
@@ -300,14 +300,17 @@ impl ConsolidationStore for SqliteBackend {
                                     || !(0.0..=1.0).contains(&new_fact.base_importance)
                                 {
                                     return Err(MemoryError::Conflict(
-                                        crate::error::ConflictError::PolicyParameter(format!(
+                                        me_types::error::ConflictError::PolicyParameter(format!(
                                             "base_importance must be in [0, 1], got {}",
                                             new_fact.base_importance
                                         )),
                                     ));
                                 }
-                                crate::limits::check_str_size(&new_fact.content, "fact content")?;
-                                crate::limits::check_json_size(
+                                me_types::limits::check_str_size(
+                                    &new_fact.content,
+                                    "fact content",
+                                )?;
+                                me_types::limits::check_json_size(
                                     &new_fact.metadata,
                                     "fact metadata",
                                 )?;
@@ -429,7 +432,7 @@ impl ConsolidationStore for SqliteBackend {
                                 );
                             }
                             let prov_clone = provenance.clone();
-                            let promote_fact = crate::types::NewFact {
+                            let promote_fact = me_types::types::NewFact {
                                 content: source.content,
                                 content_hash: String::new(),
                                 embedding: source.embedding.clone(),
@@ -575,7 +578,7 @@ impl ConsolidationStore for SqliteBackend {
 
                 // append_cycle_history verbatim from apply.rs:467-479
                 {
-                    let mut history: Vec<crate::types::cycle_report::CycleMetadata> =
+                    let mut history: Vec<me_types::types::cycle_report::CycleMetadata> =
                         match get_config(&tx, DREAM_CYCLE_HISTORY)? {
                             Some(s) => serde_json::from_str(&s)?,
                             None => Vec::new(),
@@ -626,7 +629,7 @@ impl ConsolidationStore for SqliteBackend {
     // READ — Phase 1 consolidation snapshot (wraps `consolidation::load_snapshot`).
     async fn load_consolidation_snapshot(
         &self,
-        config: crate::traits::ConsolidationConfig,
+        config: me_traits::ConsolidationConfig,
     ) -> Result<crate::consolidation::Snapshot> {
         let dim = self.embed_dim;
         self.block_read(move |c| crate::consolidation::load_snapshot(c, dim, &config))
@@ -638,7 +641,7 @@ impl ConsolidationStore for SqliteBackend {
     async fn apply_plan(
         &self,
         plan: crate::consolidation::ConsolidationPlan,
-    ) -> Result<(crate::traits::ConsolidationStats, Vec<i64>)> {
+    ) -> Result<(me_traits::ConsolidationStats, Vec<i64>)> {
         let dim = self.embed_dim;
         let (stats, expired) = self
             .block_write(move |c| crate::consolidation::apply_plan(c, &plan, dim))
@@ -656,11 +659,11 @@ impl ConsolidationStore for SqliteBackend {
     // WRITE — standalone promote (fact + lineage in one tx) + post-commit HNSW notify.
     async fn promote_atomic(
         &self,
-        fact: &crate::types::NewFact,
+        fact: &me_types::types::NewFact,
         scope_path: Option<&str>,
         source_fact_ids: &[i64],
-        provenance: &crate::types::PromotionProvenance,
-    ) -> Result<(crate::types::PromotionResult, Vec<i64>)> {
+        provenance: &me_types::types::PromotionProvenance,
+    ) -> Result<(me_types::types::PromotionResult, Vec<i64>)> {
         use crate::store::facts::FactStore;
         use crate::store::lineage::LineageStore;
         use crate::store::scopes::ScopeStore;
@@ -697,7 +700,7 @@ impl ConsolidationStore for SqliteBackend {
 
                 let fact_id = FactStore::new(&tx, dim).insert(&fact)?;
                 let lineage_id = LineageStore::new(&tx).insert(
-                    &crate::types::NewLineageRecord {
+                    &me_types::types::NewLineageRecord {
                         wisdom_fact_id: fact_id,
                         source_fact_ids,
                     },
@@ -706,7 +709,7 @@ impl ConsolidationStore for SqliteBackend {
 
                 tx.commit().map_err(StorageError::backend)?;
                 Ok((
-                    crate::types::PromotionResult {
+                    me_types::types::PromotionResult {
                         fact_id,
                         lineage_id,
                     },
@@ -734,12 +737,12 @@ mod tests {
     use chrono::Utc;
 
     use super::super::SqliteBackend;
-    use crate::error::MemoryError;
     use crate::pool::ConnectionPool;
-    use crate::storage::consolidation::ConsolidationStore;
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{
+    use me_storage::consolidation::ConsolidationStore;
+    use me_types::error::MemoryError;
+    use me_types::types::{
         ConsolidationLevel, FactType, LineageSnapshotEntry, NewFact, NewLineageRecord, NewSummary,
         PromotionProvenance,
     };
@@ -932,7 +935,7 @@ mod tests {
         let be = seeded_with_facts();
         // Get fact ids from the seeded backend
         let facts = {
-            use crate::storage::graph::FactGraph as _;
+            use me_storage::graph::FactGraph as _;
             be.list_all_facts().await.unwrap()
         };
         let (wf_id, sf_id) = (facts[0].id, facts[1].id);
@@ -970,7 +973,7 @@ mod tests {
     async fn lineage_has_and_delete() {
         let be = seeded_with_facts();
         let facts = {
-            use crate::storage::graph::FactGraph as _;
+            use me_storage::graph::FactGraph as _;
             be.list_all_facts().await.unwrap()
         };
         let (wf_id, sf_id) = (facts[0].id, facts[1].id);
@@ -999,7 +1002,7 @@ mod tests {
     async fn lineage_insert_raw_and_for_each() {
         let be = seeded_with_facts();
         let facts = {
-            use crate::storage::graph::FactGraph as _;
+            use me_storage::graph::FactGraph as _;
             be.list_all_facts().await.unwrap()
         };
         let (wf_id, sf_id) = (facts[0].id, facts[1].id);
@@ -1037,10 +1040,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::significant_drop_tightening)]
     async fn apply_cycle_deltas_atomic_rollback_on_mid_tx_error() {
-        use crate::storage::graph::FactGraph as _;
         use crate::store::embedding_meta;
-        use crate::types::EmbeddingFingerprint;
-        use crate::types::cycle_report::{
+        use me_storage::graph::FactGraph as _;
+        use me_types::types::EmbeddingFingerprint;
+        use me_types::types::cycle_report::{
             CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
         };
 

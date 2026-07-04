@@ -12,9 +12,9 @@ pub struct LineageStore<'a> {
 #[allow(dead_code)] // complete CRUD API — engine facade wires methods incrementally
 impl<'a> LineageStore<'a> {
     /// Create a new `LineageStore` borrowing the given connection.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/consolidation.rs` constructs `LineageStore` from
-    // the facade; reverts to `pub(crate)` in sub-PR 2b.
+    // Stays `pub` (Wave 2 #816, me-backend-sqlite carve): `storage/sqlite/` joined
+    // this crate in sub-PR 2b, but the facade's own `inspect/restore.rs` still
+    // constructs `LineageStore` directly across the crate boundary.
     #[must_use]
     pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }

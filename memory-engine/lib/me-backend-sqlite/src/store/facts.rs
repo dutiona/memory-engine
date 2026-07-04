@@ -134,10 +134,10 @@ pub fn existing_fact_ids(conn: &Connection) -> Result<std::collections::HashSet<
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> FactStore<'a> {
     /// Create a new `FactStore` borrowing the given connection.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/{graph,cold_storage,consolidation,search_index}.rs`
-    // construct `FactStore` directly and stay in the facade until sub-PR 2b folds
-    // them into this crate, at which point this reverts to `pub(crate)`.
+    // Stays `pub` (Wave 2 #816, me-backend-sqlite carve): `storage/sqlite/` joined
+    // this crate in sub-PR 2b, but the facade has many remaining direct callers
+    // across the crate boundary (`engine/graph_load.rs`, `inspect/restore.rs`,
+    // `search/hybrid.rs`, and several `#[cfg(test)]` modules).
     #[must_use]
     pub const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
         Self { conn, embed_dim }
@@ -1079,10 +1079,7 @@ impl<'a> FactStore<'a> {
     ///
     /// Returns `MemoryError::Internal` if `patch` is not a JSON object, and
     /// `MemoryError::NotFound` if no fact with `id` exists.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/graph.rs` calls this through `FactStore` from the
-    // facade; reverts to `pub(crate)` when `storage/sqlite/` joins this crate (2b).
-    pub fn merge_metadata(&self, id: i64, patch: &serde_json::Value) -> Result<()> {
+    pub(crate) fn merge_metadata(&self, id: i64, patch: &serde_json::Value) -> Result<()> {
         let patch_obj = patch.as_object().ok_or_else(|| {
             MemoryError::Internal("merge_metadata patch must be a JSON object".to_owned())
         })?;
@@ -1128,10 +1125,12 @@ impl<'a> FactStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::NotFound` if any id does not exist.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/{graph,consolidation}.rs` call this from the
-    // facade; reverts to `pub(crate)` when `storage/sqlite/` joins this crate (2b).
-    pub fn mark_dream_cycled(&self, ids: &[i64], cycle_id: u64, now: DateTime<Utc>) -> Result<()> {
+    pub(crate) fn mark_dream_cycled(
+        &self,
+        ids: &[i64],
+        cycle_id: u64,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let marker = serde_json::json!({
             "dream_cycle": { "cycled_at": now.to_rfc3339(), "cycle_id": cycle_id }
         });
@@ -1151,10 +1150,7 @@ impl<'a> FactStore<'a> {
     /// # Errors
     ///
     /// Returns `MemoryError::Storage` on query failure.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/graph.rs` calls this from the facade; reverts to
-    // `pub(crate)` when `storage/sqlite/` joins this crate (2b).
-    pub fn list_undreamt_in_period(
+    pub(crate) fn list_undreamt_in_period(
         &self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,

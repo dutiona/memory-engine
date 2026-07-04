@@ -1,6 +1,6 @@
 //! `FactFilter` → `FilterSql` translation for the `SQLite` search path.
 //!
-//! The [`SearchIndex`](crate::storage::SearchIndex) trait takes a rich
+//! The [`SearchIndex`](me_storage::SearchIndex) trait takes a rich
 //! [`FactFilter`]; this renders **all** of its dimensions into a parametrized SQL
 //! boolean fragment ([`FilterSql`]) that the shared `search/{fts,vector}` cores
 //! drop after `WHERE`/`AND` (#684). Each predicate transcribes the *exact* `SQLite`
@@ -28,10 +28,10 @@
 use rusqlite::ToSql;
 use serde_json::Value;
 
-use crate::error::{MemoryError, Result};
 use crate::search::{FilterSql, serialize_scope_ids};
-use crate::storage::{FactFilter, MetadataPredicate, TemporalFilter};
 use crate::store::facts::fact_type_to_str;
+use me_storage::{FactFilter, MetadataPredicate, TemporalFilter};
+use me_types::error::{MemoryError, Result};
 
 /// Translate a [`FactFilter`] into a [`FilterSql`] fragment for the search cores.
 ///
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn every_dimension_contributes_exactly_one_clause_and_its_params() {
         let f = FactFilter::new()
-            .fact_type(crate::types::FactType::Semantic)
+            .fact_type(me_types::types::FactType::Semantic)
             .scope_ids(vec![1, 2])
             .ids(vec![10])
             .pinned(true)

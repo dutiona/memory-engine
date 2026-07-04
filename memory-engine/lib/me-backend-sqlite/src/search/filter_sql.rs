@@ -15,10 +15,10 @@
 
 use rusqlite::ToSql;
 
-use crate::error::Result;
 use crate::search::serialize_scope_ids;
 use crate::store::facts::fact_type_to_str;
-use crate::types::FactType;
+use me_types::error::Result;
+use me_types::types::FactType;
 
 /// A SQL boolean expression (a `WHERE`-clause body) and its positional params.
 ///

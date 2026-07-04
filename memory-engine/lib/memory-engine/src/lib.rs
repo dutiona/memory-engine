@@ -222,8 +222,9 @@ pub use engine::cycle::{
 /// Re-exports the otherwise crate-internal parser entry points so cargo-fuzz
 /// targets can drive untrusted-byte ingest directly:
 ///
-/// - [`engine::snapshot::load_from_file`] — the crate-internal binary snapshot
-///   reader (u32 LE header + msgpack header/payload + blake3).
+/// - [`me_backend_sqlite::snapshot::load_from_file`] — the binary snapshot reader
+///   (u32 LE header + msgpack header/payload + blake3), carved into
+///   `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b).
 /// - [`bootstrap::parse::parse_session_file`] /
 ///   [`bootstrap::parse::parse_content_blocks`] — the crate-internal JSONL session
 ///   parsers (`pub fn` inside a `pub(crate) mod`, so not reachable downstream).
@@ -257,10 +258,10 @@ pub mod fuzz_seam {
     #[cfg(feature = "archive")]
     pub use crate::archive::pak::read_pak;
     pub use crate::bootstrap::parse::{parse_content_blocks, parse_session_file};
-    pub use crate::engine::snapshot::{fuzz_wrap_payload, load_from_file};
     pub use crate::inspect::restore::read_snapshot;
     pub use crate::search::fts::fuzz_fts_query;
     pub use crate::store::{parse_optional_timestamp, parse_timestamp};
+    pub use me_backend_sqlite::snapshot::{fuzz_wrap_payload, load_from_file};
 }
 
 #[cfg(test)]

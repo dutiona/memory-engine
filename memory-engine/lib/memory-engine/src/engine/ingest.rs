@@ -311,17 +311,10 @@ impl MemoryEngine {
                 .await?
         };
 
-        // Invariant: the atomic insert returns exactly one id per valid entry (or
-        // an outer `Err`, rolled back). A short id vector is a backend-contract
-        // violation — surface it as an outer `Err`, not scattered in-band — which
-        // also makes the positional re-thread below total.
-        if ids.len() != valid.len() {
-            return Err(MemoryError::Internal(format!(
-                "batch insert returned {} ids for {} valid entries",
-                ids.len(),
-                valid.len()
-            )));
-        }
+        // The `insert_validated_batch` core enforces the #929 id-count invariant
+        // (exactly one id per valid entry, or an outer `Err`, rolled back), so by
+        // here `ids.len() == valid.len()` holds and the positional re-thread below
+        // is total. (The empty-`valid` branch trivially satisfies it: `ids` is empty.)
 
         // Re-thread results positionally: each valid (`None`) slot consumes the
         // next inserted id; each invalid slot keeps its validation error.
@@ -329,9 +322,10 @@ impl MemoryEngine {
         let results = validation
             .into_iter()
             .map(|v| {
-                // The count check above guarantees one id per `None` slot, so the
-                // `ok_or_else` Err is unreachable — but it keeps the re-thread
-                // panic-free (no `expect`) rather than relying on the invariant.
+                // The #929 core guard in `insert_validated_batch` guarantees one id
+                // per `None` slot, so the `ok_or_else` Err is unreachable — but it
+                // keeps the re-thread panic-free (no `expect`) rather than relying
+                // on the invariant.
                 v.map_or_else(
                     || {
                         ids_iter.next().ok_or_else(|| {
@@ -415,6 +409,22 @@ impl MemoryEngine {
             .storage
             .insert_facts_batch_atomic(&facts, &scope_paths, &fingerprint, self.embed_dim)
             .await?;
+
+        // Invariant (#929): the atomic insert must return exactly one id per input
+        // fact, in order — this method's own doc contract ("Returns the assigned ids
+        // in `entries` order"). `add_facts_batch_partial` re-checked this at its own
+        // call site but `add_facts_batch` (the non-partial caller) trusted the
+        // backend's count blindly; enforcing it once here, in the shared core, covers
+        // both callers uniformly. A short/long id vector is a backend-contract
+        // violation — surface it as a typed error rather than let a later positional
+        // zip silently truncate or panic on out-of-bounds.
+        if ids.len() != facts.len() {
+            return Err(MemoryError::Internal(format!(
+                "batch insert returned {} ids for {} facts",
+                ids.len(),
+                facts.len()
+            )));
+        }
 
         // --- Phase 5: deferred scope_tree cache (post-commit, leaf nodes only —
         // matching the prior batch behavior). Fetch nodes via the port FIRST,

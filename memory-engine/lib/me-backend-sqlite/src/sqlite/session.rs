@@ -18,11 +18,11 @@
 use async_trait::async_trait;
 
 use super::SqliteBackend;
-use crate::error::Result;
-use crate::storage::session::SessionStore;
 use crate::store::activities::ActivityStore;
 use crate::store::checkpoints::CheckpointStore;
-use crate::types::{Activity, ActivityStatus, NewActivity, SessionCheckpoint};
+use me_storage::session::SessionStore;
+use me_types::error::Result;
+use me_types::types::{Activity, ActivityStatus, NewActivity, SessionCheckpoint};
 
 #[async_trait]
 impl SessionStore for SqliteBackend {
@@ -129,9 +129,9 @@ mod tests {
 
     use super::super::SqliteBackend;
     use crate::pool::ConnectionPool;
-    use crate::storage::session::SessionStore;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::{ActivityStatus, NewActivity, OutcomeClass, SessionCheckpoint};
+    use me_storage::session::SessionStore;
+    use me_types::types::{ActivityStatus, NewActivity, OutcomeClass, SessionCheckpoint};
 
     const DIM: usize = 4;
 

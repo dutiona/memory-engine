@@ -18,17 +18,17 @@
 //! `true_idf = true`, `server_side_vector = false` (brute-force in-process scan;
 //! HNSW moves into the backend in #631).
 
-#[cfg(feature = "test-util")]
-use crate::error::StorageError;
 use async_trait::async_trait;
+#[cfg(feature = "test-util")]
+use me_types::error::StorageError;
 
 use super::SqliteBackend;
-use crate::error::Result;
-use crate::storage::capabilities::{BackendCapabilities, LexicalRanker};
-use crate::storage::schema::SchemaManager;
 use crate::store::schema::{get_config, migrate, validate_schema_version};
 use crate::store::{embedding_meta, embedding_spaces, fact_vectors};
-use crate::types::{EmbeddingFingerprint, PromoteOutcome};
+use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
+use me_storage::schema::SchemaManager;
+use me_types::error::Result;
+use me_types::types::{EmbeddingFingerprint, PromoteOutcome};
 
 #[async_trait]
 impl SchemaManager for SqliteBackend {
@@ -42,9 +42,11 @@ impl SchemaManager for SqliteBackend {
         self.block_read(|c| {
             let raw = get_config(c, "schema_version")?.unwrap_or_else(|| "1".to_string());
             raw.parse::<u32>().map_err(|_| {
-                crate::error::MemoryError::Migration(crate::error::MigrationError::Incompatible(
-                    format!("invalid schema_version: {raw}"),
-                ))
+                me_types::error::MemoryError::Migration(
+                    me_types::error::MigrationError::Incompatible(format!(
+                        "invalid schema_version: {raw}"
+                    )),
+                )
             })
         })
         .await
@@ -127,10 +129,10 @@ impl SchemaManager for SqliteBackend {
     // matching the engine's prior behavior exactly.
     async fn write_engine_snapshot(
         &self,
-        graph: crate::types::snapshot::GraphSnapshot,
-        scope_tree: crate::types::snapshot::ScopeTreeSnapshot,
+        graph: me_types::types::snapshot::GraphSnapshot,
+        scope_tree: me_types::types::snapshot::ScopeTreeSnapshot,
     ) -> Result<bool> {
-        use crate::engine::snapshot;
+        use crate::snapshot;
 
         let Some(db_path) = self.pool.path().map(std::path::Path::to_path_buf) else {
             return Ok(false); // in-memory engine — no sidecar
@@ -152,15 +154,15 @@ impl SchemaManager for SqliteBackend {
                 .map(|h| h.to_snapshot(conn, embed_dim))
                 .transpose()?;
             #[cfg(not(feature = "ann"))]
-            let hnsw_snap: Option<crate::types::snapshot::HnswSnapshot> = None;
+            let hnsw_snap: Option<me_types::types::snapshot::HnswSnapshot> = None;
 
-            let header = crate::types::snapshot::SnapshotHeader {
+            let header = me_types::types::snapshot::SnapshotHeader {
                 format_version: snapshot::FORMAT_VERSION,
                 fingerprint,
                 embed_dim,
                 engine_version: env!("CARGO_PKG_VERSION").to_string(),
             };
-            let payload = crate::types::snapshot::SnapshotPayload {
+            let payload = me_types::types::snapshot::SnapshotPayload {
                 graph,
                 scope_tree,
                 hnsw: hnsw_snap,
@@ -178,7 +180,7 @@ impl SchemaManager for SqliteBackend {
     // -------------------------------------------------------------------------
 
     // READ
-    async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
+    async fn statistics(&self) -> Result<me_types::types::inspect::EngineStatistics> {
         let db_path = self.pool.path().map(std::path::Path::to_path_buf);
         self.block_read(move |c| {
             crate::inspect::statistics::compute_statistics(c, db_path.as_deref())
@@ -187,9 +189,13 @@ impl SchemaManager for SqliteBackend {
     }
 
     // READ (JSON variants) / WRITE (`VACUUM INTO`)
-    async fn dump_state(&self, embed_dim: usize, format: crate::inspect::DumpFormat) -> Result<()> {
-        use crate::inspect::DumpFormat;
+    async fn dump_state(
+        &self,
+        embed_dim: usize,
+        format: me_types::types::inspect::DumpFormat,
+    ) -> Result<()> {
         use crate::inspect::dump;
+        use me_types::types::inspect::DumpFormat;
 
         match format {
             DumpFormat::Json(path) => {
@@ -202,7 +208,7 @@ impl SchemaManager for SqliteBackend {
                     .await
             }
             #[cfg(not(feature = "compress-gzip"))]
-            DumpFormat::JsonGzip(_) => Err(crate::error::MemoryError::NotImplemented(
+            DumpFormat::JsonGzip(_) => Err(me_types::error::MemoryError::NotImplemented(
                 "gzip compression requires the `compress-gzip` feature".into(),
             )),
             #[cfg(feature = "compress-zstd")]
@@ -211,7 +217,7 @@ impl SchemaManager for SqliteBackend {
                     .await
             }
             #[cfg(not(feature = "compress-zstd"))]
-            DumpFormat::JsonZstd(_) => Err(crate::error::MemoryError::NotImplemented(
+            DumpFormat::JsonZstd(_) => Err(me_types::error::MemoryError::NotImplemented(
                 "zstd compression requires the `compress-zstd` feature".into(),
             )),
             DumpFormat::Sqlite(path) => {
@@ -221,7 +227,7 @@ impl SchemaManager for SqliteBackend {
             // different crate, so the compiler enforces this even though every
             // current variant is covered above): a future variant added there
             // surfaces as a clear error here instead of a compile break.
-            _ => Err(crate::error::MemoryError::NotImplemented(
+            _ => Err(me_types::error::MemoryError::NotImplemented(
                 "unrecognized DumpFormat variant".into(),
             )),
         }
@@ -314,13 +320,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::super::SqliteBackend;
-    use crate::error::MemoryError;
     use crate::pool::ConnectionPool;
-    use crate::storage::capabilities::{BackendCapabilities, LexicalRanker};
-    use crate::storage::schema::SchemaManager;
     use crate::store::schema::CURRENT_SCHEMA_VERSION;
     use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::EmbeddingFingerprint;
+    use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
+    use me_storage::schema::SchemaManager;
+    use me_types::error::MemoryError;
+    use me_types::types::EmbeddingFingerprint;
 
     const DIM: usize = 4;
 
