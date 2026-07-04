@@ -12,13 +12,15 @@
 //! module re-exports it too (`pub use me_backend_sqlite::sqlite;` + `pub use
 //! me_backend_sqlite::SqliteBackend;`), so `crate::storage::sqlite::*` and
 //! `crate::storage::SqliteBackend` both keep resolving unchanged. `PgBackend` carved
-//! into [`me_backend_postgres`] in this same sub-PR (3): `pub use
-//! me_backend_postgres::PgBackend;` keeps `crate::storage::PgBackend` resolving —
-//! there is no `crate::storage::postgres` submodule path to preserve (nothing outside
-//! this file ever referenced one). The cross-backend `conformance` battery stays here
-//! until #634/#635. No SQL string or driver type crosses the port — that contract
-//! lives in `me-storage` (traits) / `me-backend-sqlite` / `me-backend-postgres` (the
-//! concrete impls).
+//! into `me_backend_postgres` in this same sub-PR (3): `pub use
+//! me_backend_postgres::PgBackend;` (behind the `backend-postgres` feature — not an
+//! intra-doc link, since the crate is an optional dependency absent from a default
+//! build) keeps `crate::storage::PgBackend` resolving — there is no
+//! `crate::storage::postgres` submodule path to preserve (nothing outside this file
+//! ever referenced one). The cross-backend `conformance` battery stays here until
+//! #634/#635. No SQL string or driver type crosses the port — that contract lives in
+//! `me-storage` (traits) / `me-backend-sqlite` / `me-backend-postgres` (the concrete
+//! impls).
 
 pub use me_backend_sqlite::sqlite;
 
