@@ -311,17 +311,10 @@ impl MemoryEngine {
                 .await?
         };
 
-        // Invariant: the atomic insert returns exactly one id per valid entry (or
-        // an outer `Err`, rolled back). A short id vector is a backend-contract
-        // violation — surface it as an outer `Err`, not scattered in-band — which
-        // also makes the positional re-thread below total.
-        if ids.len() != valid.len() {
-            return Err(MemoryError::Internal(format!(
-                "batch insert returned {} ids for {} valid entries",
-                ids.len(),
-                valid.len()
-            )));
-        }
+        // The `insert_validated_batch` core enforces the #929 id-count invariant
+        // (exactly one id per valid entry, or an outer `Err`, rolled back), so by
+        // here `ids.len() == valid.len()` holds and the positional re-thread below
+        // is total. (The empty-`valid` branch trivially satisfies it: `ids` is empty.)
 
         // Re-thread results positionally: each valid (`None`) slot consumes the
         // next inserted id; each invalid slot keeps its validation error.
@@ -329,9 +322,10 @@ impl MemoryEngine {
         let results = validation
             .into_iter()
             .map(|v| {
-                // The count check above guarantees one id per `None` slot, so the
-                // `ok_or_else` Err is unreachable — but it keeps the re-thread
-                // panic-free (no `expect`) rather than relying on the invariant.
+                // The #929 core guard in `insert_validated_batch` guarantees one id
+                // per `None` slot, so the `ok_or_else` Err is unreachable — but it
+                // keeps the re-thread panic-free (no `expect`) rather than relying
+                // on the invariant.
                 v.map_or_else(
                     || {
                         ids_iter.next().ok_or_else(|| {
