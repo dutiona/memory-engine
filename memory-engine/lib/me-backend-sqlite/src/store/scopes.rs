@@ -11,9 +11,9 @@ pub struct ScopeStore<'a> {
 
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> ScopeStore<'a> {
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/{graph,consolidation}.rs` construct `ScopeStore`
-    // from the facade; reverts to `pub(crate)` in sub-PR 2b.
+    // Stays `pub` (Wave 2 #816, me-backend-sqlite carve): `storage/sqlite/` joined
+    // this crate in sub-PR 2b, but the facade's own `engine/graph_load.rs` still
+    // constructs `ScopeStore` directly across the crate boundary.
     pub const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }

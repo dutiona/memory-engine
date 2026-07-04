@@ -14,10 +14,7 @@ pub struct ActivityStore<'a> {
 }
 
 impl<'a> ActivityStore<'a> {
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/session.rs` constructs `ActivityStore` from the
-    // facade; reverts to `pub(crate)` in sub-PR 2b.
-    pub const fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 

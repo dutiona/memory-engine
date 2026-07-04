@@ -49,9 +49,10 @@ pub struct SummaryStore<'a> {
 #[allow(dead_code)] // complete CRUD API — not all methods called through engine facade yet
 impl<'a> SummaryStore<'a> {
     /// Create a new `SummaryStore` borrowing the given connection.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/consolidation.rs` constructs `SummaryStore` from
-    // the facade; reverts to `pub(crate)` in sub-PR 2b.
+    // Stays `pub` (Wave 2 #816, me-backend-sqlite carve): `storage/sqlite/` joined
+    // this crate in sub-PR 2b, but the facade's own `#[cfg(test)]` consolidation
+    // tests (`consolidation/{cluster,global,mod}.rs`) still construct `SummaryStore`
+    // directly across the crate boundary.
     #[must_use]
     pub const fn new(conn: &'a Connection, embed_dim: usize) -> Self {
         Self { conn, embed_dim }

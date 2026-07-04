@@ -125,11 +125,8 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
 
 impl<'a> EventStore<'a> {
     /// Create a new `EventStore` borrowing the given connection and upcaster registry.
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/{event_log,graph,consolidation}.rs` construct
-    // `EventStore` from the facade; reverts to `pub(crate)` in sub-PR 2b.
     #[must_use]
-    pub const fn new(conn: &'a Connection, registry: &'a UpcasterRegistry) -> Self {
+    pub(crate) const fn new(conn: &'a Connection, registry: &'a UpcasterRegistry) -> Self {
         Self { conn, registry }
     }
 

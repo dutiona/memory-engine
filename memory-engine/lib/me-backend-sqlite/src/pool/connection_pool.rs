@@ -568,13 +568,14 @@ impl ConnectionPool {
     ///
     /// Drop every guard locking `write_conn` before re-entering on either side.
     /// File-backed pools are unaffected (reads come from a separate pool).
-    // TRANSIENT widening pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve,
-    // sub-PR 2a): `storage/sqlite/{cold_storage,graph,consolidation,search_index}.rs`
-    // test modules call this directly from the facade (a different crate now).
-    // `me-backend-sqlite` is `publish = false` (workspace-internal only, never a
-    // public dependency), so this does not expose the footgun outside the
-    // workspace; reverts to `pub(crate)` when `storage/sqlite/` joins this crate
-    // (sub-PR 2b), restoring the original #416 restriction in full.
+    // Widened pub(crate) -> pub (Wave 2 #816, me-backend-sqlite carve, sub-PR 2a).
+    // `storage/sqlite/` joined this crate in sub-PR 2b, but this stays `pub`: the
+    // facade's own engine/mod.rs (open-path init), engine/restore.rs (restore-into
+    // paths), and search/hybrid.rs (a test helper) call it directly across the crate
+    // boundary too — NOT just the storage/sqlite test modules the sub-PR 2a comment
+    // anticipated. `me-backend-sqlite` is `publish = false` (workspace-internal only,
+    // never a public dependency), so this does not expose the #416 footgun outside
+    // the workspace.
     pub fn write(&self) -> WriteGuard<'_> {
         #[cfg(debug_assertions)]
         assert_not_reentrant(std::ptr::from_ref::<Self>(self) as usize);
