@@ -1,6 +1,7 @@
 # ADR 0018: Wave 2 — per-concern crate decomposition + `MemoryCtx`
 
-**Status:** Accepted (Wave 2, #816). S1 (keystone + L0/L0.5/L1 leaves) landed; S2–S6 pending.
+**Status:** Accepted (Wave 2, #816). S1 (keystone + L0/L0.5/L1 leaves) and S2 (backends +
+projections: `me-index`, `me-backend-sqlite`, `me-backend-postgres`) landed; S3–S6 pending.
 **Date:** 2026-07-01
 
 ## Context
@@ -99,9 +100,14 @@ build on these boundaries have the durable _why_.
 - **No behavior change** — every slice is move + rewire + test-migration;
   `reexports_are_accessible` stays green and there is no test-count regression
   (`anti-#903`), asserted at every commit.
-- **S1 done:** `me-types`/`me-traits`/`me-storage` exist as true leaves; all cycles
-  broken; `MemoryCtx` defined. The backends (S2), CLEAN primitives (S3), MODERATE
-  primitives (S4), facade shrink (S5), and dylib spike (S6) are fast-follow slices.
+- **S1 + S2 done:** `me-types`/`me-traits`/`me-storage` exist as true leaves; all cycles
+  broken; `MemoryCtx` defined. `me-index` (backend-free `MemoryGraph`/`ScopeTree`
+  projections), `me-backend-sqlite` (`SqliteBackend`: store + pool + search + snapshot
+  I/O), and `me-backend-postgres` (`PgBackend` skeleton, #633, optional behind
+  `backend-postgres`, zero back-deps on `me-backend-sqlite`) are carved as separate L2
+  leaves — three independently-gated sub-PRs under the #930 slice tracker. The CLEAN
+  primitives (S3), MODERATE primitives (S4), facade shrink (S5), and dylib spike (S6)
+  are fast-follow slices.
 - **`cargo public-api` caveat:** for a crate decomposition its raw diff is
   representation-noise-dominated (relocated types + module re-exports enumerate under the
   sub-crates, not the facade), so the consumer-facing contract is guarded by
