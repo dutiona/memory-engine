@@ -416,6 +416,22 @@ impl MemoryEngine {
             .insert_facts_batch_atomic(&facts, &scope_paths, &fingerprint, self.embed_dim)
             .await?;
 
+        // Invariant (#929): the atomic insert must return exactly one id per input
+        // fact, in order — this method's own doc contract ("Returns the assigned ids
+        // in `entries` order"). `add_facts_batch_partial` re-checked this at its own
+        // call site but `add_facts_batch` (the non-partial caller) trusted the
+        // backend's count blindly; enforcing it once here, in the shared core, covers
+        // both callers uniformly. A short/long id vector is a backend-contract
+        // violation — surface it as a typed error rather than let a later positional
+        // zip silently truncate or panic on out-of-bounds.
+        if ids.len() != facts.len() {
+            return Err(MemoryError::Internal(format!(
+                "batch insert returned {} ids for {} facts",
+                ids.len(),
+                facts.len()
+            )));
+        }
+
         // --- Phase 5: deferred scope_tree cache (post-commit, leaf nodes only —
         // matching the prior batch behavior). Fetch nodes via the port FIRST,
         // then take the write lock so no guard is held across `.await`. ---
