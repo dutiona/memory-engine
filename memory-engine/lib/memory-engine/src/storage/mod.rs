@@ -8,14 +8,17 @@
 //! submodules and the flat trait names) so every existing `crate::storage::graph::FactGraph`
 //! and `crate::storage::FactGraph` path keeps resolving.
 //!
-//! What stays here (until S2 carves the backends into `me-backend-{sqlite,postgres}`):
-//! the concrete impls [`SqliteBackend`] (`sqlite`) and `PgBackend` (`postgres`,
-//! feature-gated), plus the cross-backend `conformance` battery. No SQL string or
-//! driver type crosses the port — that contract now lives in `me-storage`.
+//! [`SqliteBackend`] (`sqlite`) carved into [`me_backend_sqlite`] in this same sub-PR
+//! (2b): this module re-exports it too (`pub use me_backend_sqlite::sqlite;` +
+//! `pub use me_backend_sqlite::SqliteBackend;`), so `crate::storage::sqlite::*` and
+//! `crate::storage::SqliteBackend` both keep resolving unchanged. `PgBackend`
+//! (`postgres`, feature-gated) and the cross-backend `conformance` battery stay here
+//! until #634/#635. No SQL string or driver type crosses the port — that contract
+//! lives in `me-storage` (traits) / `me-backend-sqlite` (the `SQLite` impl).
 
 #[cfg(feature = "backend-postgres")]
 pub mod postgres;
-pub mod sqlite;
+pub use me_backend_sqlite::sqlite;
 
 /// Cross-backend conformance battery (#632) — asserts the `StorageBackend` CONTRACT
 /// against `Arc<dyn StorageBackend>` directly. Test-only; see its module docs.
@@ -45,7 +48,7 @@ pub use me_storage::{
     SessionStore, StorageBackend, TemporalFilter,
 };
 
-// --- The concrete backend impls (remain in the monolith until S2). ---
+// --- The concrete backend impls. `PgBackend` remains in the monolith until #634/#635. ---
+pub use me_backend_sqlite::SqliteBackend;
 #[cfg(feature = "backend-postgres")]
 pub use postgres::PgBackend;
-pub use sqlite::SqliteBackend;

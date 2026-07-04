@@ -115,9 +115,12 @@ pub use me_types::types::consolidation::{ConsolidationPlan, Snapshot};
 pub use me_backend_sqlite::consolidation::load_snapshot_capped;
 /// Phase 1 ([`load_snapshot`]) and phase 3 ([`apply_plan`]) — the halves of this pipeline
 /// that touch a `rusqlite::Connection` — relocated to `me-backend-sqlite` (Wave 2 #816 /
-/// S2, sub-PR 2b). Re-exported so every existing production call site —
-/// `engine/mod.rs`, `engine/consolidation.rs`, `storage/conformance/fixtures.rs` — keeps
-/// resolving unchanged.
+/// S2, sub-PR 2b) along with `sqlite::consolidation`'s `impl ConsolidationStore for
+/// SqliteBackend`, their only production caller (which now calls the backend crate's own
+/// copy directly, not this re-export, since it moved there too in the same sub-PR). Kept
+/// `#[cfg(test)]`: this file's own `consolidate`/`consolidate_with_caps` helpers and the
+/// `apply_plan_*` concurrency tests below still call these two directly.
+#[cfg(test)]
 pub use me_backend_sqlite::consolidation::{apply_plan, load_snapshot};
 
 /// Phase 2 — compute the plan **without any lock or store access** (engine: production

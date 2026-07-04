@@ -167,7 +167,7 @@ mod tests {
     }
 
     fn make_event(source: &str, session_id: Option<&str>) -> NewEvent {
-        crate::test_utils::new_event(source, session_id)
+        me_types::test_util::new_event(source, session_id)
     }
 
     #[tokio::test]

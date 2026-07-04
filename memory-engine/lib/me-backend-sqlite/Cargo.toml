@@ -32,6 +32,20 @@ tempfile = "3"
 # `compress-gzip`/`compress-zstd` features below (mirrors the facade's own wiring).
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
+# Sub-PR 2b: `sqlite::SqliteBackend` is async-native (`block_read`/`block_write`/
+# `for_each_streamed` run the sync rusqlite closure via `spawn_blocking`, and stream rows
+# back over an `mpsc` channel) and every port trait impl is `#[async_trait]`.
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "sync"] }
+# Sub-PR 2b: `snapshot.rs`'s sidecar file format (`rmp_serde::to_vec_named`/`from_slice`).
+rmp-serde = "1"
+# Sub-PR 2b: `search`'s scaling-warning + `snapshot.rs`'s reject-with-reason logging.
+tracing = "0.1"
+# Sub-PR 2b: HNSW approximate nearest-neighbor search (`search::ann`), gated by the `ann`
+# feature below — mirrors the facade's own optional deps exactly.
+hnsw = { version = "0.11", optional = true }
+space = { version = "0.17", optional = true }
+rand = { version = "0.8", features = ["small_rng"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # Sub-PR 2b: `inspect/dump.rs`'s symlink-safe temp-file creation (`O_NOFOLLOW`), moved
@@ -47,15 +61,29 @@ libc = "0.2"
 me-types = { path = "../me-types", features = ["test-util"] }
 proptest = "1"
 insta = { version = "1", features = ["yaml", "redactions"] }
+# `#[tokio::test]` across this crate's own async unit tests (storage/sqlite, moved in
+# sub-PR 2b) needs the macro + a runtime; feature-unifies with the `[dependencies]`
+# `tokio` entry above into one crate-wide feature set.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `trace`: additive, zero-runtime-cost rusqlite feature (compiles in `Connection::trace`);
+# used ONLY by the ANN batched-fetch round-trip count test (#288/#362, search::ann). Cargo
+# feature-unifies this dev entry into the test build only, so the shipped library never
+# enables `trace`. Mirrors the facade's own dev-dependency exactly.
+rusqlite = { version = "0.34", features = ["trace"] }
 
 [features]
-# Gates `store/archive_manifest.rs` (the `.pak` manifest table). Forwards to
-# `me-types/archive` so the relocated `ArchiveManifestEntry` resolves.
-archive = ["me-types/archive"]
+# Gates `store/archive_manifest.rs` (the `.pak` manifest table) and (sub-PR 2b)
+# `sqlite::cold_storage`'s `impl ColdStorage for SqliteBackend`. Forwards to
+# `me-types/archive` so the relocated `ArchiveManifestEntry` resolves, and to
+# `me-storage/archive` so the `ColdStorage` port trait resolves.
+archive = ["me-types/archive", "me-storage/archive"]
 # Sub-PR 2b: gates `inspect/dump.rs`'s `dump_json_gzip`/`dump_json_zstd`, mirroring the
 # facade's own `compress-gzip`/`compress-zstd` features exactly.
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
+# Sub-PR 2b: HNSW vector search (`search::ann`, `sqlite`'s HNSW dispatch/snapshot paths),
+# mirroring the facade's own `ann` feature exactly.
+ann = ["dep:hnsw", "dep:space", "dep:rand"]
 # Forwards to `me-types/test-util` so a downstream consumer building this crate
 # with `--features test-util` still gets the shared `NewFact`/`NewEvent` test
 # doubles. NOTE: this crate's own `test_util` module (`setup_memory_db`) is
@@ -64,7 +92,21 @@ compress-zstd = ["dep:zstd"]
 # themselves `#[cfg(test)]`-only, so gating the module on `feature = "test-util"`
 # too would leave it unused (and therefore warning, under `clippy -D warnings`)
 # whenever the feature is enabled outside a test build (e.g. `--all-features`).
-test-util = ["me-types/test-util"]
+# Also forwards to `me-storage/test-util` (sub-PR 2b): `sqlite::schema`'s `raw_exec`
+# escape hatch needs the port trait's test-only method to exist.
+test-util = ["me-types/test-util", "me-storage/test-util"]
 
-[lints]
-workspace = true
+[lints.rust]
+# Duplicated from `[workspace.lints.rust]` (Cargo rejects mixing `workspace = true` with
+# a crate-local addition in the same lint table) so this crate can additionally register
+# `fuzzing` (Sub-PR 2b: `search::fts::fuzz_fts_query`/`snapshot::fuzz_wrap_payload`,
+# set only by `cargo fuzz`, moved from the facade — same fuzz-seam functions, same
+# `--cfg fuzzing`-only cfg) without the otherwise-unknown-cfg warning under `-D warnings`.
+unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"

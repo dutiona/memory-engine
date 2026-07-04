@@ -18,12 +18,11 @@
 // than by widening the whole module. See `fuzz/fuzz_targets/snapshot_restore.rs`.
 //
 // `dump`/`statistics` relocated to `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b):
-// `compute_statistics`/`dump_json`/… are backend-internal (only `storage::sqlite::schema`
-// calls them), so they moved below the seam with the SQL that produces their data. This
-// re-export preserves `crate::inspect::{dump, statistics}` for that one caller — and for
-// `engine/inspect.rs`'s `#[cfg(test)]` tests, which build a `MemoryEngine` and so cannot
-// move into the backend crate themselves.
-pub(crate) use me_backend_sqlite::inspect::{dump, statistics};
+// `compute_statistics`/`dump_json`/… are backend-internal — their one caller,
+// `sqlite::schema`'s `SchemaManager` impl, moved there too in this same sub-PR (the big
+// `storage::sqlite` move), so no re-export is needed here at all (no facade ref remains,
+// test or production — `engine/inspect.rs`'s tests reach `MemoryEngine::statistics()`/
+// `dump_state()`, the port methods, never these free functions directly).
 pub(crate) mod explain;
 pub(crate) mod replay;
 pub(crate) mod restore;

@@ -257,7 +257,7 @@ mod tests {
 
     fn make_fact(content: &str) -> NewFact {
         // kept: single-arg (embedding fixed to vec![0.1; DIM] using local DIM const)
-        crate::test_utils::new_fact(content, vec![0.1; DIM])
+        me_types::test_util::new_fact(content, vec![0.1; DIM])
     }
 
     #[test]

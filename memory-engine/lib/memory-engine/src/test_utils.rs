@@ -11,7 +11,10 @@
 //! keeps resolving unchanged. `setup_memory_db` moved with `store/` to
 //! `me-backend-sqlite` (Commit 3) — its only two call sites
 //! (`store::activities`, `store::checkpoints`) moved with it, so it is not
-//! re-exported here.
+//! re-exported here. `new_event`'s only facade call site
+//! (`storage::sqlite::event_log`) moved to `me-backend-sqlite` too (Wave 2 #816 /
+//! S2, sub-PR 2b's `storage::sqlite` carve), repathed to `me_types::test_util::new_event`
+//! directly there, so it is not re-exported here either.
 
 pub use me_traits::test_util::MockEmbedder;
-pub use me_types::test_util::{new_event, new_fact, new_fact_hashed, new_fact_with_type};
+pub use me_types::test_util::{new_fact, new_fact_hashed, new_fact_with_type};

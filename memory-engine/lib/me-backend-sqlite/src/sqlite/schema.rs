@@ -132,7 +132,7 @@ impl SchemaManager for SqliteBackend {
         graph: me_types::types::snapshot::GraphSnapshot,
         scope_tree: me_types::types::snapshot::ScopeTreeSnapshot,
     ) -> Result<bool> {
-        use crate::engine::snapshot;
+        use crate::snapshot;
 
         let Some(db_path) = self.pool.path().map(std::path::Path::to_path_buf) else {
             return Ok(false); // in-memory engine — no sidecar

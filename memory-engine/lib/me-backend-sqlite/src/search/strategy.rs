@@ -63,14 +63,11 @@ pub trait VectorSearchStrategy: Send + Sync {
 /// This is the default strategy and serves as the correctness oracle when
 /// testing approximate strategies.
 //
-// Crate-internal test oracle: only the `search` unit tests construct it (the
-// engine's live vector path uses `vector_search` / `HnswStrategy` directly), so
-// it is `dead_code` in a release build — suppress there rather than widen it.
-#[cfg_attr(not(test), allow(dead_code))]
-// `search` is a crate-private module, so `pub(crate)` is the honest visibility;
-// the lint only fires because the module isn't `pub`.
-#[allow(clippy::redundant_pub_crate)]
-pub(crate) struct BruteForce;
+// `pub` (not `pub(crate)`): this crate's own `search` unit tests construct it, and so
+// does the facade's `search::hybrid` test module (a cross-crate consumer, Wave 2 #816 /
+// S2 sub-PR 2b) — the engine's live vector path uses `vector_search`/`HnswStrategy`
+// directly, never this test oracle.
+pub struct BruteForce;
 
 impl VectorSearchStrategy for BruteForce {
     fn search(
@@ -170,7 +167,7 @@ mod tests {
     }
 
     fn make_fact(content: &str, embedding: Vec<f32>) -> NewFact {
-        crate::test_utils::new_fact(content, embedding)
+        me_types::test_util::new_fact(content, embedding)
     }
 
     #[test]

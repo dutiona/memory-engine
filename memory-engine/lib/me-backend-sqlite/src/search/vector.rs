@@ -200,7 +200,7 @@ mod tests {
     }
 
     fn make_fact_with_embedding(content: &str, embedding: Vec<f32>) -> NewFact {
-        crate::test_utils::new_fact(content, embedding)
+        me_types::test_util::new_fact(content, embedding)
     }
 
     #[test]
