@@ -1,24 +1,29 @@
-//! The `PostgreSQL` implementation of the storage port (#633, epic #628 stage B1).
+//! # me-backend-postgres — sub-PR 3 (Wave 2 #816 / S2)
 //!
-//! `PgBackend` is the structural twin of [`SqliteBackend`](crate::storage::SqliteBackend),
-//! and its async-native opposite. `SQLite` delegates every method through
-//! `block_read`/`block_write` (`spawn_blocking` + a `!Send` `rusqlite` guard + a
-//! read-pool/write-mutex pool); Postgres is MVCC and `tokio-postgres` is natively
-//! async, so the seam here is a single `PgBackend::with_client` — *acquire a pooled
-//! client, run an async closure, map driver errors at the boundary* — with **no**
-//! `spawn_blocking` and **no** write serialization.
+//! The `PostgreSQL` implementation of the storage port (#633, epic #628 stage B1),
+//! carved out of the `memory-engine` facade.
+//!
+//! `PgBackend` is the structural twin of `SqliteBackend` (in the sibling
+//! `me-backend-sqlite` crate — not a dependency of this one), and its async-native
+//! opposite. `SQLite` delegates every method through `block_read`/`block_write`
+//! (`spawn_blocking` + a `!Send` `rusqlite` guard + a read-pool/write-mutex pool);
+//! Postgres is MVCC and `tokio-postgres` is natively async, so the seam here is a
+//! single `PgBackend::with_client` — *acquire a pooled client, run an async closure,
+//! map driver errors at the boundary* — with **no** `spawn_blocking` and **no** write
+//! serialization.
 //!
 //! ## Scope of #633 (honest boundary)
 //!
 //! This is the **skeleton**: the pool, a fresh migration chain producing the live v14
-//! logical schema (see the `migrations` module), and the [`SchemaManager`](crate::storage::SchemaManager)
-//! lifecycle/identity/config surface. It is **NOT** a full
-//! [`StorageBackend`](crate::storage::StorageBackend): the umbrella's blanket impl
-//! requires all six bounded traits, and `PgBackend` implements only `SchemaManager`
-//! here. Data CRUD (`FactGraph`/`EventLog`/`ConsolidationStore`/`SessionStore`) is
-//! #634; lexical+vector search (`SearchIndex`, the HNSW vector index) and the
-//! conformance-arm flip are #635. So `PgBackend` cannot back a `MemoryEngine` yet, and
-//! `PgFactory::make()` stays `todo!()` until #635.
+//! logical schema (see the `migrations` module), and the
+//! [`SchemaManager`](me_storage::SchemaManager) lifecycle/identity/config surface. It
+//! is **NOT** a full [`StorageBackend`](me_storage::StorageBackend): the umbrella's
+//! blanket impl requires all six bounded traits, and `PgBackend` implements only
+//! `SchemaManager` here. Data CRUD (`FactGraph`/`EventLog`/`ConsolidationStore`/
+//! `SessionStore`) is #634; lexical+vector search (`SearchIndex`, the HNSW vector
+//! index) and the conformance-arm flip are #635. So `PgBackend` cannot back a
+//! `MemoryEngine` yet, and the facade's `PgFactory::make()` stays `todo!()` until
+//! #635.
 //!
 //! ## Seam invariants (mirroring `SQLite`'s, minus the blocking concerns)
 //!
@@ -32,9 +37,13 @@
 //! - **Transactions:** the multi-statement migration chain runs in one transaction —
 //!   Postgres DDL is transactional (a genuine win over `SQLite`'s per-statement DDL).
 
+// Panic-safety gate (#725, workspace lints). This crate's own `#[cfg(test)]` unit
+// tests are exempt — a panic there is the intended failure signal.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 use std::future::Future;
 
-use crate::error::{MemoryError, Result, StorageError};
+use me_types::error::{MemoryError, Result, StorageError};
 
 mod migrations;
 mod pool;
@@ -51,7 +60,7 @@ mod tests;
 pub use pool::PgPool;
 
 /// The `PostgreSQL` backend (#633): a `deadpool-postgres` pool + a fresh v14 migration
-/// chain + the [`SchemaManager`](crate::storage::SchemaManager) lifecycle surface.
+/// chain + the [`SchemaManager`](me_storage::SchemaManager) lifecycle surface.
 ///
 /// `embed_dim` and `read_only` are mirrored from the pool at construction so a
 /// backend's dimension / read-only-ness cannot diverge from its pool's. There is **no**
@@ -102,8 +111,8 @@ impl PgBackend {
     /// # Example
     ///
     /// ```no_run
-    /// # async fn demo() -> memory_engine::error::Result<()> {
-    /// use memory_engine::storage::PgBackend;
+    /// # async fn demo() -> me_types::error::Result<()> {
+    /// use me_backend_postgres::PgBackend;
     ///
     /// // Connects, then runs the fresh v14 migration chain to HEAD.
     /// let backend = PgBackend::connect(
@@ -194,6 +203,6 @@ impl PgBackend {
     clippy::needless_pass_by_value,
     reason = "used as a `.map_err(pg_err)` fn pointer, which passes the error by value"
 )]
-pub(super) fn pg_err(e: tokio_postgres::Error) -> MemoryError {
+pub(crate) fn pg_err(e: tokio_postgres::Error) -> MemoryError {
     MemoryError::Storage(StorageError::Backend(e.to_string()))
 }

@@ -17,13 +17,12 @@
 //! `PgBackend`) is the PG-live entry point #634/#635 reuse — and the thing #635 will
 //! promote to fill `PgFactory::make()` when it flips the conformance arm.
 
+use me_storage::schema::SchemaManager;
+use me_types::error::MemoryError;
+use me_types::types::EmbeddingFingerprint;
 use testcontainers::runners::AsyncRunner as _;
 use testcontainers::{ContainerAsync, ImageExt as _};
 use testcontainers_modules::postgres::Postgres;
-
-use crate::error::MemoryError;
-use crate::storage::schema::SchemaManager;
-use crate::types::EmbeddingFingerprint;
 
 use super::{PgBackend, pg_err};
 
@@ -581,7 +580,7 @@ async fn capabilities_is_the_stock_pg_tier() {
     let caps = be.capabilities();
     assert_eq!(
         caps.lexical_ranker,
-        crate::storage::capabilities::LexicalRanker::TsRankCd
+        me_storage::capabilities::LexicalRanker::TsRankCd
     );
     assert!(caps.server_side_vector);
     assert!(!caps.true_idf);

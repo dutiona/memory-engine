@@ -7,21 +7,19 @@
 //! `embedding_spaces` + `fact_vectors`, so the stubbed methods' tables exist; only the
 //! method bodies are deferred (fillable without touching the struct or trait wiring).
 //!
-//! The embedding-fingerprint methods reimplement the `store::embedding_meta` /
-//! `store::embedding_spaces` logic in PG SQL (R11): those free functions take a
-//! `&rusqlite::Connection` and return `MemoryError::Storage` (a `#[from]
-//! rusqlite::Error` variant Postgres cannot construct), so PG re-expresses the SQL and
-//! maps driver errors via [`pg_err`], while preserving the *exact* semantic variants
-//! (`EmbeddingDimension`, `EmbeddingModelMismatch`, `Internal`).
+//! The embedding-fingerprint methods reimplement `me-backend-sqlite`'s
+//! `store::embedding_meta` / `store::embedding_spaces` logic in PG SQL (R11): those
+//! free functions take a `&rusqlite::Connection` and return `MemoryError::Storage` (a
+//! `#[from] rusqlite::Error` variant Postgres cannot construct), so PG re-expresses the
+//! SQL and maps driver errors via [`pg_err`], while preserving the *exact* semantic
+//! variants (`EmbeddingDimension`, `EmbeddingModelMismatch`, `Internal`).
 
 use async_trait::async_trait;
+use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
+use me_storage::schema::SchemaManager;
+use me_types::error::{MemoryError, Result};
+use me_types::types::{EmbeddingFingerprint, EmbeddingSpace, PromoteOutcome};
 use tokio_postgres::Client;
-
-use crate::error::{MemoryError, Result};
-use crate::storage::capabilities::{BackendCapabilities, LexicalRanker};
-use crate::storage::schema::SchemaManager;
-use crate::store::embedding_spaces::EmbeddingSpace;
-use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 
 use super::{PgBackend, migrations, pg_err};
 
@@ -147,15 +145,15 @@ impl SchemaManager for PgBackend {
 
     async fn write_engine_snapshot(
         &self,
-        _graph: crate::types::snapshot::GraphSnapshot,
-        _scope_tree: crate::types::snapshot::ScopeTreeSnapshot,
+        _graph: me_types::types::snapshot::GraphSnapshot,
+        _scope_tree: me_types::types::snapshot::ScopeTreeSnapshot,
     ) -> Result<bool> {
         // PgBackend has no sidecar snapshot mechanism — the trait doc names this exact
         // case as the `Ok(false)` ("no durable snapshot location") return.
         Ok(false)
     }
 
-    async fn statistics(&self) -> Result<crate::inspect::EngineStatistics> {
+    async fn statistics(&self) -> Result<me_types::types::inspect::EngineStatistics> {
         Err(MemoryError::NotImplemented(
             "PgBackend statistics is not implemented in #633 (inspection lands with the PG data \
              layer — see #759 (PgBackend inspection), under epic #628)"
@@ -166,7 +164,7 @@ impl SchemaManager for PgBackend {
     async fn dump_state(
         &self,
         _embed_dim: usize,
-        _format: crate::inspect::DumpFormat,
+        _format: me_types::types::inspect::DumpFormat,
     ) -> Result<()> {
         Err(MemoryError::NotImplemented(
             "PgBackend dump_state is not implemented in #633 (inspection lands with the PG data \

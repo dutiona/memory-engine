@@ -1,12 +1,13 @@
 //! The fresh `PostgreSQL` migration chain (#633).
 //!
-//! Unlike `SQLite` — which *evolved* through 14 versions (`crate::store::schema`) — the
-//! Postgres backend is **born at the v14 logical shape**. So this is ONE fresh chain,
-//! not a replay of the `SQLite` per-version migrations, and it renders the schema in
-//! idiomatic PG: real FK constraints (no FK-rebuild hack), `GENERATED ALWAYS AS
-//! IDENTITY` ids (never reused — the #209 caller-write cursor invariant), `timestamptz`
-//! / `jsonb` / `boolean`, a `tsvector` GENERATED column + GIN index (replacing `SQLite`'s
-//! FTS5 virtual table + 3 sync triggers), and `vector(N)` pgvector columns.
+//! Unlike `SQLite` — which *evolved* through 14 versions (`me-backend-sqlite`'s
+//! `sqlite::schema`) — the Postgres backend is **born at the v14 logical shape**. So
+//! this is ONE fresh chain, not a replay of the `SQLite` per-version migrations, and it
+//! renders the schema in idiomatic PG: real FK constraints (no FK-rebuild hack),
+//! `GENERATED ALWAYS AS IDENTITY` ids (never reused — the #209 caller-write cursor
+//! invariant), `timestamptz` / `jsonb` / `boolean`, a `tsvector` GENERATED column + GIN
+//! index (replacing `SQLite`'s FTS5 virtual table + 3 sync triggers), and `vector(N)`
+//! pgvector columns.
 //!
 //! ## Version numbering — logical-equivalence, NOT numeric-equality
 //!
@@ -25,7 +26,7 @@
 
 use tokio_postgres::Client;
 
-use crate::error::{MemoryError, MigrationError, Result};
+use me_types::error::{MemoryError, MigrationError, Result};
 
 use super::pg_err;
 
@@ -33,8 +34,9 @@ use super::pg_err;
 /// — see the module docs on logical-equivalence ≠ numeric-equality.
 pub const CURRENT_PG_SCHEMA_VERSION: u32 = 1;
 
-/// Cross-backend coarse-compatibility epoch — must equal `crate::store::schema::STORAGE_EPOCH`
-/// (the epoch is a *logical* gate, identical across backends).
+/// Cross-backend coarse-compatibility epoch — must equal `me-backend-sqlite`'s
+/// `sqlite::schema::STORAGE_EPOCH` (the epoch is a *logical* gate, identical across
+/// backends).
 const STORAGE_EPOCH: u16 = 1;
 
 /// pgvector's maximum column dimension. A `vector(N)` with `N` above this fails at DDL
@@ -99,7 +101,7 @@ pub async fn migrate(client: &mut Client, embed_dim: usize) -> Result<()> {
 
 /// Read-only schema compatibility check (the read-only open path): validate the
 /// `config` table exists, the epoch is compatible, and the version matches — **without**
-/// writing. Mirrors `crate::store::schema::validate_schema_version`.
+/// writing. Mirrors `me-backend-sqlite`'s `sqlite::schema::validate_schema_version`.
 ///
 /// # Errors
 ///
