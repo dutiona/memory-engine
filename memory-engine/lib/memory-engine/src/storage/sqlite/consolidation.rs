@@ -10,14 +10,14 @@
 //! Summary methods that (de)serialize embeddings capture `self.embed_dim` as a
 //! `let` binding outside the closure — the `'static` closures cannot borrow `self`.
 
-use me_types::error::StorageError;
 use async_trait::async_trait;
+use me_types::error::StorageError;
 
 use super::{SqliteBackend, stream_consumer_dropped};
-use me_types::error::Result;
-use me_storage::consolidation::ConsolidationStore;
 use crate::store::lineage::LineageStore;
 use crate::store::summaries::SummaryStore;
+use me_storage::consolidation::ConsolidationStore;
+use me_types::error::Result;
 use me_types::types::{
     ConsolidationLevel, LineageRecord, LineageSnapshotEntry, NewLineageRecord, NewSummary,
     PromotionProvenance, Summary,
@@ -180,12 +180,12 @@ impl ConsolidationStore for SqliteBackend {
     )> {
         use chrono::Utc;
 
-        use me_types::error::{CycleError, MemoryError};
         use crate::store::edges::EdgeStore;
         use crate::store::events::EventStore;
         use crate::store::facts::FactStore;
         use crate::store::lineage::LineageStore;
         use crate::store::schema::{get_config, set_config};
+        use me_types::error::{CycleError, MemoryError};
         use me_types::types::cycle_report::{ApplyResult, CycleDelta, IMPORTANCE_STEP};
         use me_types::types::{
             EventType, NewEdge, NewEvent, NewLineageRecord, PromotionProvenance, RelationType,
@@ -306,7 +306,10 @@ impl ConsolidationStore for SqliteBackend {
                                         )),
                                     ));
                                 }
-                                me_types::limits::check_str_size(&new_fact.content, "fact content")?;
+                                me_types::limits::check_str_size(
+                                    &new_fact.content,
+                                    "fact content",
+                                )?;
                                 me_types::limits::check_json_size(
                                     &new_fact.metadata,
                                     "fact metadata",
@@ -734,11 +737,11 @@ mod tests {
     use chrono::Utc;
 
     use super::super::SqliteBackend;
-    use me_types::error::MemoryError;
     use crate::pool::ConnectionPool;
-    use me_storage::consolidation::ConsolidationStore;
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
+    use me_storage::consolidation::ConsolidationStore;
+    use me_types::error::MemoryError;
     use me_types::types::{
         ConsolidationLevel, FactType, LineageSnapshotEntry, NewFact, NewLineageRecord, NewSummary,
         PromotionProvenance,
@@ -1037,8 +1040,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::significant_drop_tightening)]
     async fn apply_cycle_deltas_atomic_rollback_on_mid_tx_error() {
-        use me_storage::graph::FactGraph as _;
         use crate::store::embedding_meta;
+        use me_storage::graph::FactGraph as _;
         use me_types::types::EmbeddingFingerprint;
         use me_types::types::cycle_report::{
             CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,

@@ -39,8 +39,6 @@ use me_types::error::{MemoryError, Result};
 // `StorageError` lost its last non-test user when #926 removed `map_seam_err`;
 // it is still referenced by the `#[cfg(test)]` tests and this module's seam
 // doc-links, so import it for those configs only (avoids an unused-import warn).
-#[cfg(any(test, doc))]
-use me_types::error::StorageError;
 use crate::pool::ConnectionPool;
 #[cfg(feature = "ann")]
 use crate::search::ann::HnswStrategy;
@@ -48,6 +46,8 @@ use crate::search::strategy::SearchConfig;
 #[cfg(feature = "ann")]
 use crate::search::strategy::VectorSearchStrategy as _;
 use crate::store::upcaster::UpcasterRegistry;
+#[cfg(any(test, doc))]
+use me_types::error::StorageError;
 
 #[cfg(feature = "archive")]
 mod cold_storage;

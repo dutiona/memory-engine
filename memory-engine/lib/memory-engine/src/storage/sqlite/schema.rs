@@ -18,16 +18,16 @@
 //! `true_idf = true`, `server_side_vector = false` (brute-force in-process scan;
 //! HNSW moves into the backend in #631).
 
+use async_trait::async_trait;
 #[cfg(feature = "test-util")]
 use me_types::error::StorageError;
-use async_trait::async_trait;
 
 use super::SqliteBackend;
-use me_types::error::Result;
-use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
-use me_storage::schema::SchemaManager;
 use crate::store::schema::{get_config, migrate, validate_schema_version};
 use crate::store::{embedding_meta, embedding_spaces, fact_vectors};
+use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
+use me_storage::schema::SchemaManager;
+use me_types::error::Result;
 use me_types::types::{EmbeddingFingerprint, PromoteOutcome};
 
 #[async_trait]
@@ -42,9 +42,11 @@ impl SchemaManager for SqliteBackend {
         self.block_read(|c| {
             let raw = get_config(c, "schema_version")?.unwrap_or_else(|| "1".to_string());
             raw.parse::<u32>().map_err(|_| {
-                me_types::error::MemoryError::Migration(me_types::error::MigrationError::Incompatible(
-                    format!("invalid schema_version: {raw}"),
-                ))
+                me_types::error::MemoryError::Migration(
+                    me_types::error::MigrationError::Incompatible(format!(
+                        "invalid schema_version: {raw}"
+                    )),
+                )
             })
         })
         .await
@@ -187,9 +189,13 @@ impl SchemaManager for SqliteBackend {
     }
 
     // READ (JSON variants) / WRITE (`VACUUM INTO`)
-    async fn dump_state(&self, embed_dim: usize, format: me_types::types::inspect::DumpFormat) -> Result<()> {
-        use me_types::types::inspect::DumpFormat;
+    async fn dump_state(
+        &self,
+        embed_dim: usize,
+        format: me_types::types::inspect::DumpFormat,
+    ) -> Result<()> {
         use crate::inspect::dump;
+        use me_types::types::inspect::DumpFormat;
 
         match format {
             DumpFormat::Json(path) => {
@@ -314,12 +320,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::super::SqliteBackend;
-    use me_types::error::MemoryError;
     use crate::pool::ConnectionPool;
-    use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
-    use me_storage::schema::SchemaManager;
     use crate::store::schema::CURRENT_SCHEMA_VERSION;
     use crate::store::upcaster::UpcasterRegistry;
+    use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
+    use me_storage::schema::SchemaManager;
+    use me_types::error::MemoryError;
     use me_types::types::EmbeddingFingerprint;
 
     const DIM: usize = 4;

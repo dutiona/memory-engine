@@ -1,9 +1,9 @@
 use me_types::error::StorageError;
 use rusqlite::{Connection, ToSql, params_from_iter};
 
-use me_types::error::Result;
 use crate::search::{FilterSql, serialize_scope_ids};
 use crate::store::facts::fact_type_to_str;
+use me_types::error::Result;
 use me_types::types::FactType;
 
 /// A single FTS5 search result with the fact id and BM25 relevance score.
@@ -179,8 +179,8 @@ pub fn fts_count_expired(
 pub fn fuzz_fts_query(query: &str) {
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
-    use me_types::types::{FactType, NewFact};
     use chrono::Utc;
+    use me_types::types::{FactType, NewFact};
 
     const DIM: usize = 4;
 
@@ -244,8 +244,8 @@ mod tests {
     use super::*;
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
-    use me_types::types::{FactType, NewFact};
     use chrono::Utc;
+    use me_types::types::{FactType, NewFact};
 
     const DIM: usize = 4;
 

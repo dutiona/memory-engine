@@ -20,11 +20,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use super::{SqliteBackend, stream_consumer_dropped};
-use me_types::error::Result;
-use me_storage::graph::{BootstrapIngestOutcome, FactGraph};
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
+use me_storage::graph::{BootstrapIngestOutcome, FactGraph};
+use me_types::error::Result;
 use me_types::types::{
     Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
     NewFact, RelationType, ScopeNode, SessionFact,
@@ -1141,11 +1141,11 @@ mod tests {
     use chrono::Utc;
 
     use super::super::SqliteBackend;
-    use me_types::error::{ConflictError, MemoryError};
     use crate::pool::ConnectionPool;
-    use me_storage::graph::FactGraph;
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
+    use me_storage::graph::FactGraph;
+    use me_types::error::{ConflictError, MemoryError};
     use me_types::types::{Edge, Fact, FactType, NewEdge, NewFact};
 
     const DIM: usize = 4;
@@ -1591,8 +1591,8 @@ mod tests {
     // Stage A — parity + rollback tests for atomic port methods
     // =========================================================================
 
-    use me_storage::schema::SchemaManager;
     use crate::store::embedding_meta;
+    use me_storage::schema::SchemaManager;
     use me_types::types::EmbeddingFingerprint;
 
     fn fp() -> EmbeddingFingerprint {

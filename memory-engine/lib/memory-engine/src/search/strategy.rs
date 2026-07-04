@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
-use me_types::error::Result;
 use crate::search::vector::VectorResult;
+use me_types::error::Result;
 use me_types::types::FactType;
 
 /// Strategy for vector similarity search.

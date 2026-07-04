@@ -199,3 +199,353 @@ impl MemoryEngine {
             .await
     }
 }
+
+// The MemoryEngine-level statistics/dump tests relocated here from
+// inspect/statistics.rs and inspect/dump.rs (Wave 2 #816 / S2, sub-PR 2b): they build a
+// full MemoryEngine, which the me-backend-sqlite backend crate (where compute_statistics/
+// dump_json now live) cannot reach. The raw-Connection tests that drive those functions
+// directly moved WITH them into me-backend-sqlite's own inspect::{statistics,dump} test
+// modules.
+#[cfg(test)]
+mod tests {
+    use crate::engine::MemoryEngine;
+    use crate::inspect::types::{DumpFormat, EngineSnapshot};
+    use me_traits::EmbeddingProvider;
+    use me_types::types::{AddFactOptions, AddFactRequest, FactType};
+
+    const DIM: usize = 4;
+
+    // --- statistics.rs's engine-level tests ---------------------------------
+
+    #[tokio::test]
+    async fn empty_engine_statistics() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let stats = engine.statistics().await.unwrap();
+        assert_eq!(stats.facts.total, 0);
+        assert_eq!(stats.facts.active, 0);
+        assert_eq!(stats.facts.expired, 0);
+        assert_eq!(stats.facts.pinned, 0);
+        assert_eq!(stats.facts.due, 0);
+        assert_eq!(stats.edges.total, 0);
+        assert_eq!(stats.summaries.total, 0);
+        // Root scope always exists
+        assert!(stats.scopes.total >= 1);
+        assert_eq!(stats.events.total, 0);
+        assert!(stats.storage.page_count > 0);
+        assert!(stats.storage.page_size > 0);
+        assert!(stats.storage.main_db_bytes > 0);
+        assert!(stats.storage.file_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn statistics_with_facts() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "fact one".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "fact two".into(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+        // Add a pinned fact
+        let pin_opts = AddFactOptions {
+            pinned: Some(true),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "pinned fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(pin_opts),
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let stats = engine.statistics().await.unwrap();
+        assert_eq!(stats.facts.total, 3);
+        assert_eq!(stats.facts.active, 3);
+        assert_eq!(stats.facts.expired, 0);
+        assert_eq!(stats.facts.pinned, 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_empty_engine_statistics() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let stats = engine.statistics().await.unwrap();
+        insta::assert_yaml_snapshot!(stats, {
+            ".storage.page_count" => "[page_count]",
+            ".storage.page_size" => "[page_size]",
+            ".storage.main_db_bytes" => "[db_bytes]",
+        });
+    }
+
+    #[tokio::test]
+    async fn snapshot_populated_statistics() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "fact one".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "fact two".into(),
+                    fact_type: FactType::Episodic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+        let pin_opts = AddFactOptions {
+            pinned: Some(true),
+            ..Default::default()
+        };
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "pinned fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: Some(pin_opts),
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let stats = engine.statistics().await.unwrap();
+        insta::assert_yaml_snapshot!(stats, {
+            ".storage.page_count" => "[page_count]",
+            ".storage.page_size" => "[page_size]",
+            ".storage.main_db_bytes" => "[db_bytes]",
+        });
+    }
+
+    // --- dump.rs's engine-level tests ---------------------------------------
+
+    #[tokio::test]
+    async fn json_dump_roundtrip() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "test fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("dump.json");
+        engine
+            .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
+            .unwrap();
+
+        // Deserialize and verify
+        let content = std::fs::read_to_string(&json_path).unwrap();
+        let snapshot: EngineSnapshot = serde_json::from_str(&content).unwrap();
+        assert_eq!(snapshot.facts.len(), 1);
+        assert_eq!(snapshot.facts[0].content, "test fact");
+        assert_eq!(snapshot.embed_dim, DIM);
+        assert!(!snapshot.scopes.is_empty()); // root scope
+    }
+
+    #[tokio::test]
+    async fn sqlite_dump_from_in_memory() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "in-memory fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dump.db");
+        engine
+            .dump_state(&DumpFormat::Sqlite(db_path.clone()))
+            .await
+            .unwrap();
+
+        // Verify the dump is a valid SQLite database with our data.
+        let dump_conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = dump_conn
+            .query_row("SELECT count(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[cfg(feature = "compress-gzip")]
+    #[tokio::test]
+    async fn gzip_dump_has_correct_magic_bytes() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "gzip test".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.json.gz");
+        engine
+            .dump_state(&DumpFormat::JsonGzip(path.clone()))
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() > 2, "file too small");
+        assert_eq!(bytes[0], 0x1f, "gzip magic byte 0");
+        assert_eq!(bytes[1], 0x8b, "gzip magic byte 1");
+    }
+
+    #[cfg(feature = "compress-zstd")]
+    #[tokio::test]
+    async fn zstd_dump_has_correct_magic_bytes() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "zstd test".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.json.zst");
+        engine
+            .dump_state(&DumpFormat::JsonZstd(path.clone()))
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() > 4, "file too small");
+        assert_eq!(&bytes[..4], &[0x28, 0xb5, 0x2f, 0xfd], "zstd magic bytes");
+    }
+
+    #[tokio::test]
+    async fn snapshot_populated_engine_dump() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "snapshot fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("dump.json");
+        engine
+            .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
+            .unwrap();
+
+        let content = std::fs::read_to_string(&json_path).unwrap();
+        let snapshot: EngineSnapshot = serde_json::from_str(&content).unwrap();
+
+        insta::assert_yaml_snapshot!(snapshot, {
+            ".facts[].t_created" => "[timestamp]",
+            ".facts[].last_accessed" => "[timestamp]",
+            ".facts[].embedding" => "[embedding]",
+            ".facts[].content_hash" => "[hash]",
+            ".events" => "[]",
+            ".config" => "{}",
+        });
+    }
+}

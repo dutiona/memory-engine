@@ -15,9 +15,9 @@
 
 use rusqlite::ToSql;
 
-use me_types::error::Result;
 use crate::search::serialize_scope_ids;
 use crate::store::facts::fact_type_to_str;
+use me_types::error::Result;
 use me_types::types::FactType;
 
 /// A SQL boolean expression (a `WHERE`-clause body) and its positional params.

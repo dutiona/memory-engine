@@ -45,10 +45,10 @@ use rand::rngs::SmallRng;
 use rusqlite::Connection;
 use space::Neighbor;
 
-use me_types::error::Result;
 use crate::search::strategy::VectorSearchStrategy;
 use crate::search::vector::VectorResult;
 use crate::store::deserialize_embedding;
+use me_types::error::Result;
 use me_types::types::FactType;
 
 /// HNSW approximate nearest neighbor strategy.
@@ -615,8 +615,8 @@ fn fetch_candidate_embeddings(
         return Ok(HashMap::new());
     }
 
-    let ids_json =
-        serde_json::to_string(candidate_ids).map_err(me_types::error::MemoryError::Serialization)?;
+    let ids_json = serde_json::to_string(candidate_ids)
+        .map_err(me_types::error::MemoryError::Serialization)?;
     let scope_json = serialize_scope_ids(scope_ids)?;
 
     let mut stmt = conn
@@ -737,8 +737,8 @@ mod tests {
         use crate::search::strategy::VectorSearchStrategy;
         use crate::store::facts::FactStore;
         use crate::store::schema::{init_schema, open_memory};
-        use me_types::types::{FactType, NewFact};
         use chrono::Utc;
+        use me_types::types::{FactType, NewFact};
 
         const DIM: usize = 4;
 

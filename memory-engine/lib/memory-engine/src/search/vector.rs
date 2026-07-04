@@ -1,9 +1,9 @@
 use me_types::error::StorageError;
 use rusqlite::{Connection, params_from_iter};
 
-use me_types::error::Result;
 use crate::search::FilterSql;
 use crate::store::deserialize_embedding;
+use me_types::error::Result;
 use me_types::types::FactType;
 
 /// A single vector search result with fact id and cosine similarity score.

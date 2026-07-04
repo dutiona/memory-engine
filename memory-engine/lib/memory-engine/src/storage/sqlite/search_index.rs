@@ -14,9 +14,9 @@
 use async_trait::async_trait;
 
 use super::{SqliteBackend, convert};
-use me_types::error::Result;
 use crate::search::{fts_count_expired, fts_search_filtered, vector_search_filtered};
 use me_storage::{FactFilter, SearchIndex};
+use me_types::error::Result;
 use me_types::types::FactType;
 
 #[async_trait]
@@ -144,14 +144,14 @@ mod tests {
     use chrono::Utc;
 
     use super::super::SqliteBackend;
-    use me_types::error::MemoryError;
     use crate::pool::ConnectionPool;
     use crate::search::fts::fts_search;
     use crate::search::fts_count_expired;
     use crate::search::vector::vector_search;
-    use me_storage::{FactFilter, SearchIndex};
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
+    use me_storage::{FactFilter, SearchIndex};
+    use me_types::error::MemoryError;
     use me_types::types::{FactType, NewFact};
 
     const DIM: usize = 4;
@@ -475,8 +475,8 @@ mod tests {
         reason = "oracle read guard intentionally spans prepare + query_map"
     )]
     async fn vector_asof_matches_temporal_window_oracle() {
-        use me_storage::TemporalFilter;
         use chrono::{Duration, Utc};
+        use me_storage::TemporalFilter;
         let now = Utc::now();
         // valid: [now-1h, now+1h) — visible at `now`.
         let mut in_window = fact("a", [1.0, 0.0, 0.0, 0.0], false);
@@ -566,8 +566,8 @@ mod tests {
 
     #[tokio::test]
     async fn asof_excludes_expired_rows_even_inside_their_valid_window() {
-        use me_storage::TemporalFilter;
         use chrono::Utc;
+        use me_storage::TemporalFilter;
         // Both facts have an open valid window (t_valid/t_invalid = None), so the
         // only thing that may exclude the expired one is the system-time guard
         // `t_expired IS NULL` — the store's `list_active_at` keeps it; AsOf must too.
@@ -624,10 +624,10 @@ mod hnsw_tests {
     use super::super::SqliteBackend;
     use crate::pool::ConnectionPool;
     use crate::search::strategy::SearchConfig;
-    use me_storage::graph::FactGraph;
-    use me_storage::{FactFilter, SearchIndex};
     use crate::store::facts::FactStore;
     use crate::store::upcaster::UpcasterRegistry;
+    use me_storage::graph::FactGraph;
+    use me_storage::{FactFilter, SearchIndex};
     use me_types::types::{EmbeddingFingerprint, FactType, NewFact};
 
     const DIM: usize = 4;

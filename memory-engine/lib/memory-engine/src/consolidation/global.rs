@@ -1,6 +1,13 @@
+// `Connection` is production-unused here since `apply_global` moved to
+// me-backend-sqlite (sub-PR 2b) — needed only by this file's own `#[cfg(test)]`
+// `global_integration` helper.
+#[cfg(test)]
 use rusqlite::Connection;
 
 use crate::error::Result;
+// Test-only for the same reason as `Connection` above: `global_integration` and this
+// file's own test module (via `use super::*`) are the only remaining callers.
+#[cfg(test)]
 use crate::store::summaries::SummaryStore;
 use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
 use crate::types::{ConsolidationLevel, NewSummary};
@@ -62,26 +69,15 @@ pub(super) fn compute_global(
     }))
 }
 
-/// Apply the computed global summary inside the caller's write context (#409): clear the
-/// prior global summary (idempotent), then insert the new one if present. `None` leaves
-/// the store with no global summary (the cleared state).
-///
-/// # Errors
-///
-/// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::Serialization` on
-/// JSON serialization failure.
-pub(super) fn apply_global(
-    conn: &Connection,
-    embed_dim: usize,
-    summary: Option<&NewSummary>,
-) -> Result<()> {
-    let summary_store = SummaryStore::new(conn, embed_dim);
-    summary_store.delete_by_level(&ConsolidationLevel::Global)?;
-    if let Some(s) = summary {
-        summary_store.insert(s)?;
-    }
-    Ok(())
-}
+/// Apply the computed global summary inside the caller's write context (#409) —
+/// relocated to `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b) along with
+/// [`apply_plan`](super::apply_plan), its only production caller (which now calls the
+/// backend crate's own copy directly, not this re-export). Re-exported here so this
+/// file's own `#[cfg(test)]`-only [`global_integration`] wrapper (composing
+/// [`compute_global`] + `apply_global` for this module's unit tests) keeps resolving
+/// unchanged.
+#[cfg(test)]
+pub(super) use me_backend_sqlite::consolidation::apply_global;
 
 /// Global integration pass — compute + apply on a single connection.
 ///

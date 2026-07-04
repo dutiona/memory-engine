@@ -9,9 +9,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{SqliteBackend, stream_consumer_dropped};
-use me_types::error::Result;
-use me_storage::EventLog;
 use crate::store::events::EventStore;
+use me_storage::EventLog;
+use me_types::error::Result;
 use me_types::types::{Event, EventFilter, NewEvent};
 
 #[async_trait]
@@ -155,10 +155,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::super::SqliteBackend;
-    use me_types::error::MemoryError;
     use crate::pool::ConnectionPool;
-    use me_storage::EventLog;
     use crate::store::upcaster::UpcasterRegistry;
+    use me_storage::EventLog;
+    use me_types::error::MemoryError;
     use me_types::types::{Event, EventFilter, EventType, NewEvent};
 
     fn backend() -> SqliteBackend {

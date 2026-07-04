@@ -3,7 +3,7 @@ name = "me-backend-sqlite"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "SQLite persistence leaves (store + connection pool) for the memory-engine workspace (Wave 2 #816 / S2, sub-PR 2a)"
+description = "SQLite persistence backend for the memory-engine workspace (Wave 2 #816 / S2, sub-PR 2b)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"
 # Workspace-internal crate: never published, so it uses bare path-deps and is exempt
@@ -13,12 +13,30 @@ publish = false
 [dependencies]
 me-types = { path = "../me-types" }
 me-storage = { path = "../me-storage" }
+# Needed by the relocated consolidation module (`ConsolidationConfig`/`ConsolidationStats`,
+# Wave 2 #816 / S2 sub-PR 2b): `load_snapshot`/`apply_plan` touch `rusqlite::Connection`
+# directly, so they move below the seam with the SQL that produces/consumes them, but the
+# consumer-facing config/stats types they take/return still live in `me-traits`.
+me-traits = { path = "../me-traits" }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.34", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 blake3 = "1"
 parking_lot = "0.12"
+# Sub-PR 2b: `inspect/dump.rs`'s atomic write-then-rename (JSON dumps + the `VACUUM INTO`
+# sidecar) is production code, not test-only, so this is a real dependency (was dev-only
+# in 2a, which had no filesystem-writing code).
+tempfile = "3"
+# Sub-PR 2b: `inspect/dump.rs`'s gzip/zstd dump variants, forwarded by the
+# `compress-gzip`/`compress-zstd` features below (mirrors the facade's own wiring).
+flate2 = { version = "1", optional = true }
+zstd = { version = "0.13", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# Sub-PR 2b: `inspect/dump.rs`'s symlink-safe temp-file creation (`O_NOFOLLOW`), moved
+# verbatim from the facade (#296/#354/#414 hardening).
+libc = "0.2"
 
 [dev-dependencies]
 # Forces me-types's `test-util` feature ON for this crate's own `cargo test`,
@@ -28,13 +46,16 @@ parking_lot = "0.12"
 # `cargo test`, with no feature flag).
 me-types = { path = "../me-types", features = ["test-util"] }
 proptest = "1"
-tempfile = "3"
 insta = { version = "1", features = ["yaml", "redactions"] }
 
 [features]
 # Gates `store/archive_manifest.rs` (the `.pak` manifest table). Forwards to
 # `me-types/archive` so the relocated `ArchiveManifestEntry` resolves.
 archive = ["me-types/archive"]
+# Sub-PR 2b: gates `inspect/dump.rs`'s `dump_json_gzip`/`dump_json_zstd`, mirroring the
+# facade's own `compress-gzip`/`compress-zstd` features exactly.
+compress-gzip = ["dep:flate2"]
+compress-zstd = ["dep:zstd"]
 # Forwards to `me-types/test-util` so a downstream consumer building this crate
 # with `--features test-util` still gets the shared `NewFact`/`NewEvent` test
 # doubles. NOTE: this crate's own `test_util` module (`setup_memory_db`) is

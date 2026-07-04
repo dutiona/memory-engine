@@ -1,5 +1,5 @@
 ---
-source: src/inspect/dump.rs
+source: src/engine/inspect.rs
 expression: snapshot
 ---
 schema_version: 14

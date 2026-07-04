@@ -28,10 +28,10 @@
 use rusqlite::ToSql;
 use serde_json::Value;
 
-use me_types::error::{MemoryError, Result};
 use crate::search::{FilterSql, serialize_scope_ids};
-use me_storage::{FactFilter, MetadataPredicate, TemporalFilter};
 use crate::store::facts::fact_type_to_str;
+use me_storage::{FactFilter, MetadataPredicate, TemporalFilter};
+use me_types::error::{MemoryError, Result};
 
 /// Translate a [`FactFilter`] into a [`FilterSql`] fragment for the search cores.
 ///

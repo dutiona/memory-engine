@@ -1,19 +1,27 @@
-//! # me-backend-sqlite — sub-PR 2a (Wave 2 #816 / S2)
+//! # me-backend-sqlite — sub-PRs 2a + 2b (Wave 2 #816 / S2)
 //!
-//! The two clean-leaf `SQLite` persistence modules carved out of the `memory-engine` facade.
+//! The `SQLite` persistence leaves carved out of the `memory-engine` facade.
 //!
 //! [`store`] (the per-table `SQLite` accessors + schema migrations) and [`pool`]
-//! (the reader/writer connection pool). Depends only on `me-types` (L0) and
-//! `me-storage` (L1, for [`me_storage::UpcasterRegistry`]).
+//! (the reader/writer connection pool) landed in sub-PR 2a. Sub-PR 2b adds
+//! [`consolidation`] (the SQL-touching halves of the 3-pass pipeline —
+//! `load_snapshot`/`apply_plan`) and [`inspect`] (`compute_statistics` +
+//! `dump_json`/`dump_sqlite`/…). Both are `pub` purely so the facade can re-export the
+//! specific paths it still calls (its own `compute_plan`/orchestration stays put — see
+//! `consolidation`'s module docs) — neither is meant as a stable path for anything
+//! outside this workspace.
 //!
-//! `storage/sqlite/` (the `StorageBackend` impl that drives these modules),
-//! `search/`, the `archive/` `.pak` format, and `engine/{snapshot,graph_load}`
-//! stay in the facade — they carve out in a later sub-PR (2b).
+//! `storage/sqlite/` (the `StorageBackend` impl), `search/`, the `archive/` `.pak`
+//! format, and `engine/{snapshot,graph_load}` still stay in the facade — `sqlite`/
+//! `search`/`snapshot` carve out later in this same sub-PR 2b; `archive`/`graph_load`
+//! are out of scope for the `SQLite` backend carve entirely.
 
 // Panic-safety gate (#725, workspace lints). This crate's own `#[cfg(test)]` unit
 // tests are exempt — a panic there is the intended failure signal.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod consolidation;
+pub mod inspect;
 pub mod pool;
 pub mod store;
 

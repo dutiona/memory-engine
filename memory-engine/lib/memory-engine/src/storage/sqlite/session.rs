@@ -18,10 +18,10 @@
 use async_trait::async_trait;
 
 use super::SqliteBackend;
-use me_types::error::Result;
-use me_storage::session::SessionStore;
 use crate::store::activities::ActivityStore;
 use crate::store::checkpoints::CheckpointStore;
+use me_storage::session::SessionStore;
+use me_types::error::Result;
 use me_types::types::{Activity, ActivityStatus, NewActivity, SessionCheckpoint};
 
 #[async_trait]
@@ -129,8 +129,8 @@ mod tests {
 
     use super::super::SqliteBackend;
     use crate::pool::ConnectionPool;
-    use me_storage::session::SessionStore;
     use crate::store::upcaster::UpcasterRegistry;
+    use me_storage::session::SessionStore;
     use me_types::types::{ActivityStatus, NewActivity, OutcomeClass, SessionCheckpoint};
 
     const DIM: usize = 4;

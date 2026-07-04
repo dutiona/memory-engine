@@ -186,8 +186,11 @@ path = "../../../examples/custom_traits.rs"
 # `lib.rs`. SQLite is the default; Postgres (#633) is opt-in.
 default = ["backend-sqlite"]
 ann = ["dep:hnsw", "dep:space", "dep:rand"]
-compress-gzip = ["dep:flate2"]
-compress-zstd = ["dep:zstd"]
+# Forwards to `me-backend-sqlite/compress-{gzip,zstd}` (Wave 2 #816 / S2, sub-PR 2b) so
+# `inspect::dump`'s `dump_json_gzip`/`dump_json_zstd` — now living below the seam —
+# compile in lockstep with the facade's own feature.
+compress-gzip = ["dep:flate2", "me-backend-sqlite/compress-gzip"]
+compress-zstd = ["dep:zstd", "me-backend-sqlite/compress-zstd"]
 # Forwards to `me-types/archive` so `QueryDiagnostics`'s `#[cfg(feature = "archive")]`
 # fields (types::search, now in me-types) compile in step with the facade (plan §D.2).
 # Also forwards to `me-index/archive` (Wave 2 #816 / S2) so `MemoryGraph::remove_node`
