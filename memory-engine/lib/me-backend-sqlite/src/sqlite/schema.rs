@@ -28,7 +28,7 @@ use crate::store::{embedding_meta, embedding_spaces, fact_vectors};
 use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
 use me_storage::schema::SchemaManager;
 use me_types::error::Result;
-use me_types::types::{EmbeddingFingerprint, PromoteOutcome};
+use me_types::types::{EmbeddingFingerprint, EmbeddingSpace, PromoteOutcome, SpaceStatus};
 
 #[async_trait]
 impl SchemaManager for SqliteBackend {
@@ -264,10 +264,10 @@ impl SchemaManager for SqliteBackend {
         name: &str,
         fingerprint: &EmbeddingFingerprint,
     ) -> Result<()> {
-        let space = embedding_spaces::EmbeddingSpace {
+        let space = EmbeddingSpace {
             name: name.to_owned(),
             fingerprint: fingerprint.clone(),
-            status: embedding_spaces::SpaceStatus::Populating,
+            status: SpaceStatus::Populating,
         };
         // Idempotent: a crash-resumed reconstruction re-opens the same space.
         self.block_write(move |c| embedding_spaces::begin_populating(c, &space))

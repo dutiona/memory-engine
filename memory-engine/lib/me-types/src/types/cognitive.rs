@@ -224,6 +224,100 @@ impl EmbeddingFingerprint {
     }
 }
 
+/// Lifecycle status of an embedding space in the registry (#622).
+///
+/// Mirrors the Knowledge layer's `embed_spaces.status` enum. Exactly one space is
+/// [`Active`](SpaceStatus::Active) at any time — a structural invariant the owning
+/// backend enforces (e.g. `SQLite`'s `idx_embedding_spaces_one_active` partial unique
+/// index; PG's `idx_embedding_spaces_one_active` mirrors it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpaceStatus {
+    /// The live space. Reads and writes target it. Exactly one exists.
+    Active,
+    /// A shadow space being backfilled (#623). Not yet readable; never returned by the
+    /// single-active facade.
+    Populating,
+    /// A retired space kept for rollback/audit (#689). Not read.
+    Deprecated,
+}
+
+impl SpaceStatus {
+    /// On-disk TEXT spelling. MUST match the owning backend's `CHECK(status IN …)` list.
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Populating => "populating",
+            Self::Deprecated => "deprecated",
+        }
+    }
+
+    /// Parse the on-disk TEXT spelling. A value outside the `CHECK` list is corrupt DB
+    /// state — a hard error, never a silent default.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Migration(MigrationError::Incompatible)` for any unrecognized
+    /// status string.
+    pub fn from_sql(s: &str) -> crate::error::Result<Self> {
+        use crate::error::MigrationError;
+
+        match s {
+            "active" => Ok(Self::Active),
+            "populating" => Ok(Self::Populating),
+            "deprecated" => Ok(Self::Deprecated),
+            other => Err(MigrationError::Incompatible(format!(
+                "corrupt embedding_spaces.status: {other:?}"
+            ))
+            .into()),
+        }
+    }
+}
+
+/// One row of the embedding-space registry (#622).
+///
+/// Wraps the canonical [`EmbeddingFingerprint`] identity tuple (by composition, so the
+/// #614 full-tuple `Eq` contract and the normative serde key-set are preserved) with the
+/// layer-internal lifecycle fields. The Memory layer records exactly one `Active` row
+/// named [`DEFAULT_NAME`](EmbeddingSpace::DEFAULT_NAME).
+///
+/// Relocated from `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 3): a pure DTO with no
+/// backend coupling (plain `derive`s only), needed by both `me-backend-sqlite` (the
+/// `&Connection` row accessors in `store::embedding_spaces`) and `me-backend-postgres`
+/// (its `SchemaManager` fingerprint methods), so it belongs at the L0 layer both depend
+/// on rather than in either backend leaf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingSpace {
+    /// Unique space identifier (PK). The degenerate single space is `DEFAULT_NAME`.
+    pub name: String,
+    /// The canonical identity tuple — the cross-layer-parity fields (ADR 0015).
+    pub fingerprint: EmbeddingFingerprint,
+    /// Lifecycle status.
+    pub status: SpaceStatus,
+}
+
+impl EmbeddingSpace {
+    /// Name of the degenerate single space created by the v12→v13 migration and by the
+    /// first embedding write on a fresh DB.
+    pub const DEFAULT_NAME: &'static str = "default";
+
+    /// The degenerate single `active` space carrying `fingerprint`.
+    ///
+    /// Behind `test-util` (not bare `cfg(test)`): every call site is a downstream
+    /// crate's own test module (e.g. `me-backend-sqlite`'s store/inspect tests), and a
+    /// cross-crate `#[cfg(test)]` does not reach across the crate boundary — only a
+    /// Cargo feature does.
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn default_active(fingerprint: EmbeddingFingerprint) -> Self {
+        Self {
+            name: Self::DEFAULT_NAME.to_string(),
+            fingerprint,
+            status: SpaceStatus::Active,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

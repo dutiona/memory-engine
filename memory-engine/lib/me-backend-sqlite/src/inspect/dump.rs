@@ -1032,11 +1032,11 @@ mod tests {
     /// embedding)` payloads.
     #[test]
     fn streaming_carries_embedding_spaces_and_fact_vectors() {
-        use crate::store::embedding_spaces::{EmbeddingSpace, SpaceStatus, insert_populating};
+        use crate::store::embedding_spaces::insert_populating;
         use crate::store::fact_vectors::write_backfill_batch;
         use crate::store::schema::{init_schema, migrate, open_memory};
         use crate::store::serialize_embedding;
-        use me_types::types::EmbeddingFingerprint;
+        use me_types::types::{EmbeddingFingerprint, EmbeddingSpace, SpaceStatus};
 
         const SPACE: &str = "shadow";
 
