@@ -18,6 +18,9 @@ cargo build                           # debug build (facade crate only)
 cargo build -p me-types               # L0 data + error vocabulary (Wave 2 #816)
 cargo build -p me-traits              # L0.5 consumer/contract traits
 cargo build -p me-storage             # L1 persistence port + MemoryCtx + UpcasterRegistry
+cargo build -p me-index               # L2 backend-free MemoryGraph + ScopeTree projections
+cargo build -p me-backend-sqlite      # L2 SqliteBackend: store + pool + search + snapshot I/O
+cargo build -p me-backend-postgres    # L2 PgBackend skeleton (#633), optional behind backend-postgres
 cargo build -p memory-engine-cli      # CLI inspector binary
 cargo build -p memory-engine-mcp      # MCP server binary
 cargo build -p memory-engine-embed    # HTTP embedding provider crate
@@ -51,7 +54,7 @@ cargo deny check                                                       # Supply-
 
 CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
 
-The workspace contains **7 crates**: the Wave 2 (#816) core decomposition has begun (S1 done) — `me-types` (L0 data + error vocabulary), `me-traits` (L0.5 consumer/contract traits), and `me-storage` (L1 persistence port + `MemoryCtx` + `UpcasterRegistry`) are now carved out as separate acyclic leaves; the `memory-engine` facade re-exports them (public API unchanged) and still holds the backends + primitives as modules (they carve into `me-backend-*` / `me-index` / `me-{ingest,query,consolidate,forget,resolve,archive}` in slices S2–S5 — see ADR 0018 / #925). Plus `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`, which consume the facade's public API. `--workspace` is mandatory — a change to error variants, type definitions, or trait signatures can break the consumers silently if only one crate is checked.
+The workspace contains **10 crates**: the Wave 2 (#816) core decomposition is S1+S2 done — `me-types` (L0 data + error vocabulary, incl. the embedding-space registry DTOs), `me-traits` (L0.5 consumer/contract traits), `me-storage` (L1 persistence port + `MemoryCtx` + `UpcasterRegistry`), `me-index` (L2 backend-free `MemoryGraph`/`ScopeTree` projections), `me-backend-sqlite` (L2 `SqliteBackend`: store + pool + search + snapshot I/O), and `me-backend-postgres` (L2 `PgBackend` skeleton, #633, optional behind `backend-postgres`) are now carved out as separate acyclic leaves; the `memory-engine` facade re-exports them (public API unchanged) and still holds the L3 primitives as modules (they carve into `me-{ingest,query,consolidate,forget,resolve,archive}` in slices S3–S6 — see ADR 0018 / #925). Plus `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`, which consume the facade's public API. `--workspace` is mandatory — a change to error variants, type definitions, or trait signatures can break the consumers silently if only one crate is checked.
 
 **Verification traps** — each one cost a real super-qa rework cycle; the `qa-sweep` skill holds the full taxonomy:
 

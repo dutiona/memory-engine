@@ -33,6 +33,10 @@ me-storage = { path = "../me-storage" }
 me-index = { path = "../me-index" }
 # L2 SQLite persistence leaves (store + connection pool), Wave 2 #816 / S2 sub-PR 2a.
 me-backend-sqlite = { path = "../me-backend-sqlite" }
+# L2 PostgreSQL persistence leaf (#633 skeleton), Wave 2 #816 / S2 sub-PR 3. Optional —
+# pulled only by `backend-postgres` — so a `backend-sqlite`-only build never compiles
+# `tokio-postgres`/`deadpool-postgres`.
+me-backend-postgres = { path = "../me-backend-postgres", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -50,12 +54,6 @@ space = { version = "0.17", optional = true }
 rand = { version = "0.8", features = ["small_rng"], optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
-# PostgreSQL backend (#633), pulled only by `backend-postgres`. `default-features =
-# false` drops tokio-postgres's TLS/`whoami` (BSL-1.0) fallback — #633 binds no data,
-# so the `with-chrono-0_4`/`with-serde_json-1` type-mapping features are deferred to
-# #634. The `vector(N)`/`pgvector` Rust crate is deferred to #635 (raw DDL needs no crate).
-tokio-postgres = { version = "0.7", default-features = false, optional = true }
-deadpool-postgres = { version = "0.14", optional = true }
 
 # `libc::O_NOFOLLOW` for the symlink-safe dump open (#296/#354/#414). Unix-only;
 # already in the dependency graph transitively, so this adds no new crate.
@@ -72,12 +70,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1", features = ["yaml", "redactions"] }
 proptest = "1"
-# Live-PG harness (#633): the gated `storage::postgres` tests spin a throwaway
-# Postgres (the `pgvector/pgvector` image, for `CREATE EXTENSION vector`). Dev-only,
-# but still license-scanned by `cargo deny` (graph all-features = true). Every PG test
-# is `#[ignore]` so `cargo test --all-features` stays green without a Docker daemon.
-testcontainers = "0.27"
-testcontainers-modules = { version = "0.15", features = ["postgres"] }
 # Force these leaf crates' `test-util` feature ON for every `cargo test` of this
 # crate, regardless of whether `--features test-util` was passed explicitly
 # (Wave 2 #816, me-backend-sqlite carve, Commit 2): `crate::test_utils` re-exports
@@ -218,11 +210,12 @@ archive = [
 # `rusqlite` stays an unconditional dependency for now.
 backend-sqlite = []
 # The PostgreSQL backend (#633): `deadpool-postgres` pool + a fresh v14 migration
-# chain + the `SchemaManager` impl. Data CRUD is #634; lexical+vector search and the
-# conformance-arm flip are #635. With the feature on, `mod storage::postgres` compiles
-# and the conformance battery's `postgres` arm is discovered-but-ignored (`PgFactory`
-# stays `todo!()` until #635).
-backend-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
+# chain + the `SchemaManager` impl, carved into `me-backend-postgres` (Wave 2 #816 /
+# S2, sub-PR 3). Data CRUD is #634; lexical+vector search and the conformance-arm flip
+# are #635. With the feature on, `me-backend-postgres` compiles in and the conformance
+# battery's `postgres` arm is discovered-but-ignored (`PgFactory` stays `todo!()`
+# until #635).
+backend-postgres = ["dep:me-backend-postgres"]
 # Exposes test-only escape hatches on the storage port (e.g.
 # `SchemaManager::raw_exec`) for cross-crate tests — notably the #632 conformance
 # suite, where every backend must provide the seam for the failure-injection
@@ -235,12 +228,16 @@ backend-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
 # now lives there, and its `raw_exec` is itself `#[cfg(feature = "test-util")]` — without
 # this forward, enabling `test-util` on the facade alone does not satisfy the trait for
 # `SqliteBackend` (E0046: `raw_exec` not implemented) because Cargo features are
-# per-crate, not implicitly transitive.
+# per-crate, not implicitly transitive. Also forwards (weak dep — `me-backend-postgres`
+# is optional) to `me-backend-postgres/test-util` for the same reason on the PG side:
+# `impl SchemaManager for PgBackend`'s `raw_exec` needs it, and the live-PG suite
+# itself is gated `cfg(all(test, feature = "test-util"))`.
 test-util = [
     "me-storage/test-util",
     "me-types/test-util",
     "me-traits/test-util",
     "me-backend-sqlite/test-util",
+    "me-backend-postgres?/test-util",
 ]
 
 [lints.rust]

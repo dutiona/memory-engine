@@ -4,11 +4,14 @@
 //!
 //! The Memory layer records exactly one `active` row — the degenerate single-space case
 //! of KB's multi-space registry. This module owns the `embedding_spaces` table DDL (in
-//! `store::schema`), the [`SpaceStatus`] ⇄ TEXT mapping, the [`EmbeddingSpace`] row type,
-//! and the row CRUD. The single-active *policy* (write-once, the #614 mismatch check, the
-//! dimension guard) lives one layer up in the [`store::embedding_meta`](super::embedding_meta)
-//! facade, which delegates here; call sites speak only [`EmbeddingFingerprint`] and never
-//! see the table or these types.
+//! `store::schema`) and the row CRUD over the [`EmbeddingSpace`] row type / the
+//! [`SpaceStatus`] ⇄ TEXT mapping. Both DTOs relocated to `me-types` (Wave 2 #816 / S2,
+//! sub-PR 3) — pure data with no backend coupling, needed by `me-backend-postgres` too —
+//! and are re-exported here so `crate::store::embedding_spaces::{EmbeddingSpace,
+//! SpaceStatus}` keeps resolving unchanged for every existing caller. The single-active
+//! *policy* (write-once, the #614 mismatch check, the dimension guard) lives one layer up
+//! in the [`store::embedding_meta`](super::embedding_meta) facade, which delegates here;
+//! call sites speak only [`EmbeddingFingerprint`] and never see the table or these types.
 //!
 //! The exactly-one-active invariant is **structural**: a partial unique index
 //! `UNIQUE(status) WHERE status = 'active'` (mirrors KB's `idx_embed_spaces_one_active`).
@@ -24,94 +27,15 @@
 //!   `active` row to `deprecated` in the SAME transaction as activating `name`, so the
 //!   partial unique index never transiently sees two actives; MUST invoke the #624 HNSW
 //!   rebuild hook before the new space serves reads.
-//! - Promoting [`SpaceStatus`] / [`EmbeddingSpace`] to public `types.rs` types — **#689**,
-//!   when a multi-space API is actually exposed to consumers.
 
 use me_types::error::StorageError;
 use rusqlite::Connection;
 
-use me_types::error::{MemoryError, MigrationError, Result};
+use me_types::error::{MemoryError, Result};
 use me_types::types::EmbeddingFingerprint;
-
-/// Lifecycle status of an embedding space in the registry (#622).
-///
-/// Mirrors the Knowledge layer's `embed_spaces.status` enum. Exactly one space is
-/// [`Active`](SpaceStatus::Active) at any time, enforced structurally by the
-/// `idx_embedding_spaces_one_active` partial unique index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SpaceStatus {
-    /// The live space. Reads and writes target it. Exactly one exists.
-    Active,
-    /// A shadow space being backfilled (#623). Not yet readable; never returned by the
-    /// single-active facade.
-    Populating,
-    /// A retired space kept for rollback/audit (#689). Not read.
-    Deprecated,
-}
-
-impl SpaceStatus {
-    /// On-disk TEXT spelling. MUST match the table's `CHECK(status IN …)` list.
-    #[must_use]
-    pub const fn as_sql(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Populating => "populating",
-            Self::Deprecated => "deprecated",
-        }
-    }
-
-    /// Parse the on-disk TEXT spelling. A value outside the `CHECK` list is corrupt DB
-    /// state — a hard error, never a silent default.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Migration(MigrationError::Incompatible)` for any unrecognized
-    /// status string.
-    pub fn from_sql(s: &str) -> Result<Self> {
-        match s {
-            "active" => Ok(Self::Active),
-            "populating" => Ok(Self::Populating),
-            "deprecated" => Ok(Self::Deprecated),
-            other => Err(MigrationError::Incompatible(format!(
-                "corrupt embedding_spaces.status: {other:?}"
-            ))
-            .into()),
-        }
-    }
-}
-
-/// One row of the embedding-space registry (#622).
-///
-/// Wraps the canonical [`EmbeddingFingerprint`] identity tuple (by composition, so the
-/// #614 full-tuple `Eq` contract and the normative serde key-set are preserved) with the
-/// layer-internal lifecycle fields. The Memory layer records exactly one `Active` row
-/// named [`DEFAULT_NAME`](EmbeddingSpace::DEFAULT_NAME).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EmbeddingSpace {
-    /// Unique space identifier (PK). The degenerate single space is `DEFAULT_NAME`.
-    pub name: String,
-    /// The canonical identity tuple — the cross-layer-parity fields (ADR 0015).
-    pub fingerprint: EmbeddingFingerprint,
-    /// Lifecycle status.
-    pub status: SpaceStatus,
-}
-
-impl EmbeddingSpace {
-    /// Name of the degenerate single space created by the v12→v13 migration and by the
-    /// first embedding write on a fresh DB.
-    pub const DEFAULT_NAME: &'static str = "default";
-
-    /// The degenerate single `active` space carrying `fingerprint`.
-    #[cfg(test)]
-    #[must_use]
-    pub fn default_active(fingerprint: EmbeddingFingerprint) -> Self {
-        Self {
-            name: Self::DEFAULT_NAME.to_string(),
-            fingerprint,
-            status: SpaceStatus::Active,
-        }
-    }
-}
+/// Re-exported for path stability: `EmbeddingSpace`/`SpaceStatus` relocated to
+/// `me-types` (Wave 2 #816 / S2, sub-PR 3) — see the module doc.
+pub use me_types::types::{EmbeddingSpace, SpaceStatus};
 
 /// Decode a `SELECT name, model, provider, dim, matryoshka_base_dim, element_type, status`
 /// row into an [`EmbeddingSpace`]. Guards the `i64 → usize` dimension reads (a negative or

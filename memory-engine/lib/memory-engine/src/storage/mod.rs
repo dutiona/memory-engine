@@ -8,16 +8,20 @@
 //! submodules and the flat trait names) so every existing `crate::storage::graph::FactGraph`
 //! and `crate::storage::FactGraph` path keeps resolving.
 //!
-//! [`SqliteBackend`] (`sqlite`) carved into [`me_backend_sqlite`] in this same sub-PR
-//! (2b): this module re-exports it too (`pub use me_backend_sqlite::sqlite;` +
-//! `pub use me_backend_sqlite::SqliteBackend;`), so `crate::storage::sqlite::*` and
-//! `crate::storage::SqliteBackend` both keep resolving unchanged. `PgBackend`
-//! (`postgres`, feature-gated) and the cross-backend `conformance` battery stay here
-//! until #634/#635. No SQL string or driver type crosses the port — that contract
-//! lives in `me-storage` (traits) / `me-backend-sqlite` (the `SQLite` impl).
+//! [`SqliteBackend`] (`sqlite`) carved into [`me_backend_sqlite`] in sub-PR 2b: this
+//! module re-exports it too (`pub use me_backend_sqlite::sqlite;` + `pub use
+//! me_backend_sqlite::SqliteBackend;`), so `crate::storage::sqlite::*` and
+//! `crate::storage::SqliteBackend` both keep resolving unchanged. `PgBackend` carved
+//! into `me_backend_postgres` in this same sub-PR (3): `pub use
+//! me_backend_postgres::PgBackend;` (behind the `backend-postgres` feature — not an
+//! intra-doc link, since the crate is an optional dependency absent from a default
+//! build) keeps `crate::storage::PgBackend` resolving — there is no
+//! `crate::storage::postgres` submodule path to preserve (nothing outside this file
+//! ever referenced one). The cross-backend `conformance` battery stays here until
+//! #634/#635. No SQL string or driver type crosses the port — that contract lives in
+//! `me-storage` (traits) / `me-backend-sqlite` / `me-backend-postgres` (the concrete
+//! impls).
 
-#[cfg(feature = "backend-postgres")]
-pub mod postgres;
 pub use me_backend_sqlite::sqlite;
 
 /// Cross-backend conformance battery (#632) — asserts the `StorageBackend` CONTRACT
@@ -48,7 +52,7 @@ pub use me_storage::{
     SessionStore, StorageBackend, TemporalFilter,
 };
 
-// --- The concrete backend impls. `PgBackend` remains in the monolith until #634/#635. ---
-pub use me_backend_sqlite::SqliteBackend;
+// --- The concrete backend impls. ---
 #[cfg(feature = "backend-postgres")]
-pub use postgres::PgBackend;
+pub use me_backend_postgres::PgBackend;
+pub use me_backend_sqlite::SqliteBackend;

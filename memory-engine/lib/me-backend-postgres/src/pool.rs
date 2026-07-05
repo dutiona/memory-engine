@@ -1,9 +1,10 @@
 //! The Postgres connection pool (#633) — `deadpool-postgres` over `tokio-postgres`.
 //!
-//! The PG analogue of `SQLite`'s [`ConnectionPool`](crate::pool::ConnectionPool), and
-//! its structural opposite: Postgres is MVCC, so there is **no** read-pool/write-mutex
-//! split and **no** write serialization — every checked-out client is a full
-//! read+write session, and `tokio-postgres` is natively async (no `spawn_blocking`).
+//! The PG analogue of `me-backend-sqlite`'s `ConnectionPool` (not a dependency of this
+//! crate), and its structural opposite: Postgres is MVCC, so there is **no**
+//! read-pool/write-mutex split and **no** write serialization — every checked-out
+//! client is a full read+write session, and `tokio-postgres` is natively async (no
+//! `spawn_blocking`).
 //!
 //! ## Read-only (two layers, defense-in-depth)
 //!
@@ -20,7 +21,7 @@ use std::str::FromStr as _;
 use deadpool_postgres::{Manager, Object, Pool};
 use tokio_postgres::{Config as PgConfig, NoTls};
 
-use crate::error::{MemoryError, Result};
+use me_types::error::{MemoryError, Result};
 
 /// A `deadpool-postgres` pool plus the frozen `embed_dim` (the `vector(N)` column
 /// width, like `SQLite`'s pool-derived dimension) and a `read_only` flag.

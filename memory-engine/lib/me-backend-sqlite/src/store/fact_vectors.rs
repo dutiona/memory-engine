@@ -342,11 +342,11 @@ mod tests {
     use super::*;
     use crate::store::deserialize_embedding;
     use crate::store::embedding_spaces::{
-        EmbeddingSpace, SpaceStatus, find_active, find_by_name, insert_active, insert_populating,
+        find_active, find_by_name, insert_active, insert_populating,
     };
     use crate::store::facts::FactStore;
     use crate::store::schema::{init_schema, open_memory};
-    use me_types::types::{EmbeddingFingerprint, FactType, NewFact};
+    use me_types::types::{EmbeddingFingerprint, EmbeddingSpace, FactType, NewFact, SpaceStatus};
 
     const DIM: usize = 4;
     const SPACE: &str = "shadow";
