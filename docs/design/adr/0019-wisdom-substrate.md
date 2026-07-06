@@ -47,7 +47,7 @@ timestamp: 2026-07-06T14:00:00Z # OKF semantics: LAST MODIFIED (see §5) — har
 schema_version: 1                  # WisdomItem schema revision (evolution = bump + linter migration)
 id: 01J9XYZ...                     # STABLE logical identity (ULID), survives moves/renames;
                                    # the path is the OKF concept ID (navigation), `id` is identity
-tier: anchor | core | prediction   # stability tier (#57, BaseLayer-derived)
+tier: anchors | core | predictions # stability tier (#57, BaseLayer-derived); value == directory name
 
 # Engine-supplied (verbatim from the gate's Allow payload — the #232 contract):
 pattern: >                         # the observed regularity this item encodes
@@ -57,7 +57,7 @@ directive: >                       # the actionable rule derived from the patter
 false_positive:                    # known misfire conditions — string OR list of strings;
   - <when NOT to apply it>         # the linter normalizes to list form
 provenance:                        # structured — NOT log.md prose (see §4)
-  fact_ids: [1234, 1301]           # ME fact IDs the pattern consolidates
+  source_fact_ids: [1234, 1301]    # ME fact IDs the pattern consolidates (matches LineageRecord vocabulary)
   store_id: "<engine instance id>" # namespaces the fact IDs (SchemaManager identity)
   kb_refs: ["<knowledge-base item refs>"]  # optional
 gate_trace:                        # ref into ME's event log — the decision that admitted this item
@@ -89,13 +89,13 @@ Tiers are the top-level directories; OKF `index.md` progressive disclosure appli
 wisdom/                       # bundle root (git repo root)
 ├── index.md                  # bundle-root index; declares okf_version: "0.1"
 ├── log.md                    # optional freeform history (OKF convention; NOT the audit trail)
-├── anchors/                  # tier: anchor — identity-stable, always-loaded candidates
+├── anchors/                  # tier: anchors — identity-stable, always-loaded candidates
 │   ├── index.md
 │   └── <topic>.md
 ├── core/                     # tier: core — established patterns, scenario-loaded
 │   ├── index.md
 │   └── <topic>/<item>.md     # subdirectories by domain as the corpus grows
-├── predictions/              # tier: prediction — provisional, must earn promotion
+├── predictions/              # tier: predictions — provisional, must earn promotion
 │   ├── index.md
 │   └── <item>.md
 └── attic/                    # retired/superseded tombstones — in HEAD, never loaded (§5)
