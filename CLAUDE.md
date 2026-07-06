@@ -8,7 +8,7 @@ Part of a **four-layer cognitive architecture** (Knowledge → Memory → Wisdom
 
 Companion repos:
 
-- **knowledge-base** (`~/dev/knowledge-base`): Python MCP server, Knowledge layer. Phase 1 ✅ → Phase 2.
+- **knowledge-base** (`~/dev/knowledge-base`): Python MCP server, Knowledge layer. Phases 0–2.5 ✅ → Phase 3 (integration: ME hooks, wisdom pipeline).
 - **autonomous-agent-project** (`~/dev/autonomous-agent-project`): Research repo, no code. Holds the four-layer thesis.
 
 ## Commands
