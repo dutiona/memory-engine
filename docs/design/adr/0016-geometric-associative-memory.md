@@ -1,6 +1,6 @@
 # ADR-0016: Geometric Associative Memory
 
-**Status:** Proposed
+**Status:** Accepted (2026-07-06; proposed 2026-06-26). Acceptance locks the architectural commitments below — the whitened derived space, the two-gate freshness contract, the operator tiering, and the rejected-alternative classes. It does **not** schedule implementation: funding remains epic-gated per #761 (E0 #763 first; E1–E5 PoC- and evidence-gated).
 **Date:** 2026-06-26
 **Scope:** Core engine — retrieval, storage, consolidation, forgetting, reconstruction
 
