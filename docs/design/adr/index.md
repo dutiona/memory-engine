@@ -23,4 +23,5 @@ Key design decisions, documented as ADRs. Each records the context, decision, an
 0016-geometric-associative-memory
 0017-cross-layer-faithful-metric-and-derived-structure-parity-policy
 0018-wave2-crate-decomposition-memoryctx
+0019-wisdom-substrate
 ```
