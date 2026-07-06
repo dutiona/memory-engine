@@ -6,4 +6,5 @@
 crate-layout
 glossary
 api
+issue-authoring-for-agents
 ```
