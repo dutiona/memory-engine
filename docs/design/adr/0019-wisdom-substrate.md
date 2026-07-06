@@ -69,7 +69,7 @@ gate_trace:                        # ref into ME's event log — the decision th
 # Harness-stamped at approval/commit time (the engine cannot know these):
 approved_by: <maintainer identity> # the mandatory human approval receipt
 promoted_at: 2026-07-06T14:00:00Z  # promotion time — distinct from OKF's timestamp (§5)
-operation: 01J9OP...               # idempotency UUID for this revision (§6)
+operation: 01J9OP...               # idempotency ULID for this revision (§6; same grammar as `id`)
 superseded_by: <stable id>         # optional; set on the OLD item when a revision replaces it
 retired_at: <ISO 8601>             # optional; set when the item moves to attic/ (§5)
 ---
@@ -102,6 +102,7 @@ wisdom/                       # bundle root (git repo root)
     └── <item>.md
 ```
 
+- **`attic/` is deliberately unindexed.** No `attic/index.md` exists, and no index or active-item body ever links into `attic/` — that construction, not any OKF mechanism, is what makes tombstones invisible to a generic OKF consumer (verified empirically, #961). It is write-discipline: the linter asserts the absence of `attic/index.md` and of inbound links, our loader never reads the directory (§7), but a third-party OKF consumer is bound by neither — anyone who adds such a link re-exposes the tombstones.
 - **Two identifiers, two jobs**: the OKF concept ID (path minus `.md`, e.g. `core/rust/verification-gates`) is for *navigation* and changes on `git mv`; the frontmatter `id` (ULID) is *logical identity* and never changes. `superseded_by` links use the stable `id` — a move (demotion) is therefore distinguishable from a replacement (supersession).
 - **Tier is stated twice** (directory + `tier:` key) deliberately: the directory drives loading and navigation; the key survives `git mv` history and lets a linter detect drift. The linter treats a mismatch as an error.
 - **Tier moves are gate-guarded revisions**: promotion (`predictions/` → `core/`) or demotion is a `git mv` + frontmatter update committed through the same gate path as admission, with a fresh `gate_trace`.
@@ -135,12 +136,12 @@ policy: <policy name>
 The mutual reference required by #955 deliverable 4 is a **three-node chain**, because a literal cycle is impossible (each artifact needs the other's ID first):
 
 1. the **gate-evaluation event** is appended to ME's log when `WisdomPolicy::evaluate` returns `Allow` (it exists before any commit);
-2. the **commit body cites that event ID and the operation UUID** (above);
-3. after the commit, the harness appends a **mirror event** to ME's log — the **authoritative link**, keyed by gate event ID + operation UUID, whose payload carries: repository remote, commit SHA + parent SHA, stable item `id`, operation kind (promote/revise/move/retire), `approved_by`, and the `payload_digest` the approval covered.
+2. the **commit body cites that event ID and the operation ULID** (above);
+3. after the commit, the harness appends a **mirror event** to ME's log — the **authoritative link**, keyed by gate event ID + operation ULID, whose payload carries: repository remote, commit SHA + parent SHA, stable item `id`, operation kind (promote/revise/move/retire), `approved_by`, and the `payload_digest` the approval covered.
 
-Either direction is then walkable: event→commit via the mirror event, commit→event via the message. Identity lives in the **stable keys** (item `id`, gate event ID, operation UUID); the commit SHA is a *locator*, so even a hypothetical history accident degrades the chain to "re-locate" rather than "identity lost" (§1 forbids rewrites outright). The mirror event is an additive event kind following the same envelope pattern as the injection log sketched on #247 (payload-versioned via `UpcasterRegistry`, no schema fork).
+Either direction is then walkable: event→commit via the mirror event, commit→event via the message. Identity lives in the **stable keys** (item `id`, gate event ID, operation ULID); the commit SHA is a *locator*, so even a hypothetical history accident degrades the chain to "re-locate" rather than "identity lost" (§1 forbids rewrites outright). The mirror event is an additive event kind following the same envelope pattern as the injection log sketched on #247 (payload-versioned via `UpcasterRegistry`, no schema fork).
 
-**Crash/retry semantics** (the gap between steps 2 and 3): the operation UUID is minted at approval time and stamped in both the commit trailer and the mirror event, making mirroring **idempotent**. The corpus linter's reconciliation pass walks recent commits and re-emits any missing mirror event from the commit trailer (dedup by operation UUID); a gate event with neither commit nor mirror after reconciliation is a **stranded approval** — surfaced to the maintainer, never silently re-promoted. The full state machine is #955 deliverable 4's implementation concern; this ADR fixes the invariants it must satisfy.
+**Crash/retry semantics** (the gap between steps 2 and 3): the operation ULID is minted at approval time and stamped in both the commit trailer and the mirror event, making mirroring **idempotent**. The corpus linter's reconciliation pass walks recent commits and re-emits any missing mirror event from the commit trailer (dedup by operation ULID); a gate event with neither commit nor mirror after reconciliation is a **stranded approval** — surfaced to the maintainer, never silently re-promoted. The full state machine is #955 deliverable 4's implementation concern; this ADR fixes the invariants it must satisfy.
 
 ### 7. Loader boundary (deliverable 5, scoped here only as an interface)
 
