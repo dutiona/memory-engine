@@ -1,0 +1,28 @@
+[package]
+name = "me-forget"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Forget primitive: Ebbinghaus decay + multi-signal importance pruning (Wave 2 #816 / S3, sub-PR 2)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal crate: never published, so it uses bare path-deps and is exempt
+# from cargo-deny's published-crate wildcard rule (plan §D.1).
+publish = false
+
+[dependencies]
+me-types = { path = "../me-types" }
+me-storage = { path = "../me-storage" }
+me-index = { path = "../me-index" }
+parking_lot = "0.12"
+chrono = "0.4"
+
+[dev-dependencies]
+# Backend harness (SqliteFactory::make) — the reason me-test-support was carved first.
+me-test-support = { path = "../me-test-support" }
+proptest = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1.0"
+
+[lints]
+workspace = true

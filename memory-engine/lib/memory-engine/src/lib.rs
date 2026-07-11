@@ -125,7 +125,10 @@ pub use me_types::types; // relocated to me-types (Wave 2 #816); see `error` abo
 #[cfg(feature = "archive")]
 pub(crate) mod archive;
 pub(crate) mod consolidation;
-pub(crate) mod forgetting;
+// `forgetting` is relocated to the L3 `me-forget` crate (Wave 2 #816 / S3, sub-PR
+// 2). The re-export preserves `pub(crate)` visibility and every internal
+// `crate::forgetting::*` path (`ForgetPolicy`, `PruneStats`, `prune`).
+pub(crate) use me_forget as forgetting;
 // `graph` + `scope` are relocated to the L2 `me-index` crate (Wave 2 #816 / S2): the
 // backend-free in-memory projections (`MemoryGraph`, `ScopeTree`). The re-export
 // preserves `crate::graph::*` / `crate::scope::*` for every internal call site.
