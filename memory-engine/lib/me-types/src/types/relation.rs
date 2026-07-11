@@ -331,8 +331,8 @@ mod tests {
     #[test]
     fn partial_eq_reflexive_for_str_lhs() {
         // PartialEq<RelationType> for &str
-        assert!("co_session" == RelationType::CoSession);
-        assert!("supersedes" == RelationType::Supersedes);
+        assert_eq!("co_session", RelationType::CoSession);
+        assert_eq!("supersedes", RelationType::Supersedes);
         assert!("other" != RelationType::CoSession);
     }
 
