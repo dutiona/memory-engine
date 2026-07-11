@@ -17,6 +17,10 @@ me-storage = { path = "../me-storage" }
 me-index = { path = "../me-index" }
 chrono = "0.4"
 parking_lot = "0.12"
+# `serde_json::json!({})` — the empty-metadata default in the moved bodies
+# (not in the spec's Cargo.toml template; added because the extracted code
+# calls it directly, same as the facade's own `serde_json` dependency).
+serde_json = "1.0"
 # `spawn_blocking` (embedding + classifier calls off the async executor) needs
 # only the `rt` feature — matching the facade's own runtime feature set (not
 # `rt-multi-thread`, which is unnecessary here and only pulled in as a
