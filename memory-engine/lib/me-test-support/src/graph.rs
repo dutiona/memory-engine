@@ -8,11 +8,12 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 
+use me_storage::{FactFilter, MetadataPredicate, TemporalFilter};
+use me_types::error::{ConflictError, MemoryError};
+use me_types::types::{FactType, NewEdge, NewFact};
+
 use super::factory::ConformanceBackend;
 use super::fixtures::{DIM, new_event, new_fact, seed_facts};
-use crate::error::{ConflictError, MemoryError};
-use crate::storage::{FactFilter, MetadataPredicate, TemporalFilter};
-use crate::types::{FactType, NewEdge, NewFact};
 
 /// Parse a fixed UTC instant for the bi-temporal bodies (deterministic, no `now()`).
 fn instant(s: &str) -> DateTime<Utc> {

@@ -1,9 +1,10 @@
 //! `EventLog` contract bodies.
 
+use me_types::error::MemoryError;
+use me_types::types::{EventFilter, EventType, NewEvent};
+
 use super::factory::ConformanceBackend;
 use super::fixtures::{new_event, new_fact, seed_facts};
-use crate::error::MemoryError;
-use crate::types::{EventFilter, EventType, NewEvent};
 
 /// insert → get round-trips the event.
 pub async fn insert_get_round_trip<F: ConformanceBackend>(f: &F) {
