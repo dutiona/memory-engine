@@ -10,6 +10,7 @@ members = [
     "memory-engine/lib/me-test-support",
     "memory-engine/lib/me-forget",
     "memory-engine/lib/me-resolve",
+    "memory-engine/lib/me-ingest",
     "memory-engine/lib/memory-engine",
     "memory-engine/lib/embed",
     "memory-engine/bin/cli",
