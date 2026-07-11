@@ -31,11 +31,15 @@ me-storage = { path = "../me-storage" }
 me-backend-sqlite = { path = "../me-backend-sqlite" }
 me-backend-postgres = { path = "../me-backend-postgres", optional = true }
 async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
+# `Utc::now()` in the fixtures; the DTOs' `DateTime` serde impls are enabled by me-types,
+# so this crate needs no `serde` feature of its own here.
+chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "sync"] }
+# NOTE: tokio is a DEV-dependency only — the always-compiled `fixtures`/`factory` are plain
+# `async fn` (no `tokio::` types or runtime at compile time); the runtime is needed solely by
+# the battery's `#[tokio::test]` macro, which lives under `[dev-dependencies]` below.
 
 [dev-dependencies]
 # `#[tokio::test]` for the battery's own emitted async tests.
