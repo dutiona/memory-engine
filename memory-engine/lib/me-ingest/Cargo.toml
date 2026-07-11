@@ -1,0 +1,27 @@
+[package]
+name = "me-ingest"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Ingest primitive: event-log append + fact derivation over MemoryCtx (Wave 2 #816 / S4, sub-PR 1)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal crate: never published, so it uses bare path-deps and is exempt
+# from cargo-deny's published-crate wildcard rule (plan §D.1).
+publish = false
+
+[dependencies]
+me-types = { path = "../me-types" }
+me-traits = { path = "../me-traits" }
+me-storage = { path = "../me-storage" }
+me-index = { path = "../me-index" }
+chrono = "0.4"
+parking_lot = "0.12"
+# `spawn_blocking` (embedding + classifier calls off the async executor) needs
+# only the `rt` feature — matching the facade's own runtime feature set (not
+# `rt-multi-thread`, which is unnecessary here and only pulled in as a
+# dev-dependency by sibling primitive crates for their test harness).
+tokio = { version = "1", features = ["rt"] }
+
+[lints]
+workspace = true
