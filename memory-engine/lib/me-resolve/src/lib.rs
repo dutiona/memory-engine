@@ -42,15 +42,31 @@ pub async fn resolve_conflict(
     now: DateTime<Utc>,
 ) -> Result<ConflictResolution> {
     ctx.ensure_open()?;
+    // The candidate fact is persisted verbatim on an Add/Update decision, so
+    // it is a consumer ingest path and must respect the same size bound as
+    // `add_fact` (issue #572 / L10).
     me_types::limits::check_new_fact(new_fact)?;
 
+    // Read the old fact through the port (was `FactStore::get` inside the old
+    // free-function transaction).
     let old_fact = ctx.storage.get_fact(old_id).await?;
+
+    // Build a temporary Fact from NewFact for the arbiter (it needs both as Fact).
     let new_as_fact = Fact::from_new_for_arbiter(new_fact);
+
+    // CONSUMER TRAIT — the main loop drives this; left exactly as-is (rule 5).
     let decision = arbiter.arbitrate(&old_fact, &new_as_fact)?;
 
+    // The arbiter's decision (consumer trait) is made above. The DB writes it
+    // implies now run in ONE transaction below the seam via
+    // `resolve_conflict_atomic` — restoring the all-or-nothing semantics the
+    // cutover's per-call port decomposition had lost (a mid-sequence failure could
+    // otherwise leave the old fact expired+invalidated with no inserted successor =
+    // silent data loss). The in-memory graph is mirrored only AFTER the commit.
     let relation = match decision {
         CrudDecision::Add => CONFLICT_SUPPLEMENTS_RELATION,
         CrudDecision::Update => CONFLICT_CONTRADICTS_RELATION,
+        // Delete/Noop create no edge; the relation string is unused by the port.
         CrudDecision::Delete | CrudDecision::Noop => "",
     };
 
