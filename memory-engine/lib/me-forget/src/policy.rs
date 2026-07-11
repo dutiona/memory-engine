@@ -3,13 +3,14 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
-use super::types::ForgetPolicy;
-use crate::error::Result;
-use crate::graph::MemoryGraph;
-use crate::storage::StorageBackend;
-use crate::store::facts::FactScoringRow;
-use crate::types::{Fact, FactType};
+use me_index::graph::MemoryGraph;
+use me_storage::StorageBackend;
+use me_types::error::Result;
+use me_types::types::FactScoringRow;
 use me_types::types::forgetting::PruneStats;
+use me_types::types::{Fact, FactType};
+
+use super::types::ForgetPolicy;
 
 /// Argument to `ln()` for access-frequency normalization: 100 + 1.
 /// Gives `ln(101)` as the divisor so that 100 accesses produce a full score of 1.0.
@@ -150,7 +151,7 @@ pub fn compute_importance(
 ///
 /// Loads the lightweight active-scoring projection through the port, scores every
 /// fact against the in-memory graph degree, expires the sub-threshold unpinned /
-/// non-exempt set atomically below the seam ([`StorageBackend::prune_atomic`]), then
+/// non-exempt set atomically below the seam ([`me_storage::FactGraph::prune_atomic`]), then
 /// reconciles the in-memory graph. Pinned facts and decay-exempt fact types are
 /// unforgettable — they still get a materialized score but bypass the expiry filter.
 ///
@@ -250,14 +251,10 @@ pub async fn prune(
 mod tests {
     use super::*;
     use chrono::Duration;
+    use me_test_support::factory::ConformanceBackend;
+    use me_types::types::FactType;
     use proptest::prelude::*;
     use std::collections::HashMap;
-
-    use crate::pool::ConnectionPool;
-    use crate::storage::StorageBackend;
-    use crate::storage::sqlite::SqliteBackend;
-    use crate::store::upcaster::UpcasterRegistry;
-    use crate::types::FactType;
 
     #[tokio::test]
     async fn decay_at_zero_is_one() {
@@ -383,17 +380,13 @@ mod tests {
 
     #[tokio::test]
     async fn prune_expires_low_importance_facts() {
-        use crate::types::NewFact;
+        use me_types::types::NewFact;
 
         let now = Utc::now();
         let old_time = now - Duration::days(100);
         let embed_dim = 4;
 
-        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
-            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
-            std::sync::Arc::new(UpcasterRegistry::new()),
-        ));
-        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+        let storage = me_test_support::factory::SqliteFactory.make().await;
 
         // Insert 3 facts directly with varying importance and recency.
 
@@ -486,17 +479,13 @@ mod tests {
 
     #[tokio::test]
     async fn prune_skips_pinned_facts() {
-        use crate::types::NewFact;
+        use me_types::types::NewFact;
 
         let now = Utc::now();
         let old_time = now - Duration::days(200);
         let embed_dim = 4;
 
-        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
-            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
-            std::sync::Arc::new(UpcasterRegistry::new()),
-        ));
-        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+        let storage = me_test_support::factory::SqliteFactory.make().await;
 
         // Pinned fact with low importance and old age — would normally be pruned
         storage
@@ -560,16 +549,12 @@ mod tests {
 
     #[tokio::test]
     async fn prune_materializes_importance_scores() {
-        use crate::types::NewFact;
+        use me_types::types::NewFact;
 
         let now = Utc::now();
         let embed_dim = 4;
 
-        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
-            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
-            std::sync::Arc::new(UpcasterRegistry::new()),
-        ));
-        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+        let storage = me_test_support::factory::SqliteFactory.make().await;
 
         storage
             .insert_fact(&NewFact {
@@ -638,9 +623,9 @@ mod tests {
         fact_type: FactType,
         hash: &str,
         now: DateTime<Utc>,
-    ) -> crate::types::NewFact {
+    ) -> me_types::types::NewFact {
         let old_time = now - Duration::days(200);
-        crate::types::NewFact {
+        me_types::types::NewFact {
             content: format!("neglected {fact_type}"),
             content_hash: hash.into(),
             embedding: vec![0.1; 4],
@@ -662,13 +647,8 @@ mod tests {
     #[tokio::test]
     async fn prune_exempts_knowledge_shaped_types_by_default() {
         let now = Utc::now();
-        let embed_dim = 4;
 
-        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
-            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
-            std::sync::Arc::new(UpcasterRegistry::new()),
-        ));
-        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+        let storage = me_test_support::factory::SqliteFactory.make().await;
 
         // Identical neglect across the three types; only Episodic may decay away.
         storage
@@ -747,13 +727,8 @@ mod tests {
     #[tokio::test]
     async fn explicit_half_life_override_wins_over_exemption() {
         let now = Utc::now();
-        let embed_dim = 4;
 
-        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
-            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
-            std::sync::Arc::new(UpcasterRegistry::new()),
-        ));
-        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+        let storage = me_test_support::factory::SqliteFactory.make().await;
         storage
             .insert_fact(&neglected_fact(FactType::Semantic, "ks", now))
             .await
@@ -813,18 +788,14 @@ mod tests {
                   block; this is a single-threaded test with no contention"
     )]
     async fn prune_cascades_edges_and_reconciles_graph() {
-        use crate::graph::EdgeData;
-        use crate::types::{NewEdge, NewFact};
+        use me_index::graph::EdgeData;
+        use me_types::types::{NewEdge, NewFact};
 
         let now = Utc::now();
         let old_time = now - Duration::days(200);
         let embed_dim = 4;
 
-        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
-            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
-            std::sync::Arc::new(UpcasterRegistry::new()),
-        ));
-        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+        let storage = me_test_support::factory::SqliteFactory.make().await;
 
         // Seed a fact with the shared embed dim + scope. Built fresh per call so
         // each fact can vary its type/importance/recency.
@@ -994,13 +965,8 @@ mod tests {
     #[tokio::test]
     async fn prune_empty_store_returns_zero_stats() {
         let now = Utc::now();
-        let embed_dim = 4;
 
-        let backend = std::sync::Arc::new(SqliteBackend::from_pool(
-            std::sync::Arc::new(ConnectionPool::open_memory(embed_dim).unwrap()),
-            std::sync::Arc::new(UpcasterRegistry::new()),
-        ));
-        let storage: std::sync::Arc<dyn StorageBackend> = backend.clone();
+        let storage = me_test_support::factory::SqliteFactory.make().await;
 
         // Insert nothing — the store is empty.
         let graph = parking_lot::RwLock::new(MemoryGraph::new());

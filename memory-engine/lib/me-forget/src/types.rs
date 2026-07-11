@@ -5,10 +5,11 @@
 //! because it isn't a trait — `traits.rs` declares the consumer behaviour
 //! contracts, while this is the concrete forgetting-layer type it configures.
 //! The output type `PruneStats` (pure data) has moved to `me-types` (Wave 2
-//! #816 E.4b Phase B); re-exported from `forgetting::mod` as
+//! #816 E.4b Phase B); re-exported from this crate's root (`me-forget`, Wave
+//! 2 #816 / S3) as `me_forget::PruneStats`, and from the facade as
 //! `crate::forgetting::PruneStats`.
 
-use crate::error::Result;
+use me_types::error::Result;
 
 /// Policy for forgetting/pruning stale facts.
 ///
@@ -39,7 +40,7 @@ pub struct ForgetPolicy {
     pub half_life_days: f64,
     /// Per-`FactType` half-life overrides. E.g., Episodic=30, Procedural=365.
     /// An explicit entry here wins over `decay_exempt_types`.
-    pub half_life_overrides: std::collections::HashMap<crate::types::FactType, f64>,
+    pub half_life_overrides: std::collections::HashMap<me_types::types::FactType, f64>,
     /// Fact types exempt from decay-driven forgetting altogether.
     ///
     /// Content predicate: a type belongs here iff its facts' truth is
@@ -51,7 +52,7 @@ pub struct ForgetPolicy {
     /// are time-indexed experience records and decay by design.
     ///
     /// Default: `{Semantic, Procedural}`.
-    pub decay_exempt_types: std::collections::HashSet<crate::types::FactType>,
+    pub decay_exempt_types: std::collections::HashSet<me_types::types::FactType>,
     /// Threshold below which facts are expired (default: 0.1).
     pub min_importance: f64,
     /// Weight for recency signal (Ebbinghaus decay). Default: 0.3.
@@ -70,8 +71,8 @@ impl Default for ForgetPolicy {
             half_life_days: 69.0,
             half_life_overrides: std::collections::HashMap::new(),
             decay_exempt_types: [
-                crate::types::FactType::Semantic,
-                crate::types::FactType::Procedural,
+                me_types::types::FactType::Semantic,
+                me_types::types::FactType::Procedural,
             ]
             .into_iter()
             .collect(),
@@ -91,7 +92,7 @@ impl ForgetPolicy {
     /// `half_life_overrides` entry — an explicit override wins, re-enabling
     /// finite-half-life decay for that type.
     #[must_use]
-    pub fn is_decay_exempt(&self, fact_type: &crate::types::FactType) -> bool {
+    pub fn is_decay_exempt(&self, fact_type: &me_types::types::FactType) -> bool {
         self.decay_exempt_types.contains(fact_type)
             && !self.half_life_overrides.contains_key(fact_type)
     }
@@ -102,7 +103,7 @@ impl ForgetPolicy {
     ///
     /// Returns `MemoryError::Conflict` if any parameter is out of range.
     pub fn validate(&self) -> Result<()> {
-        use crate::error::{ConflictError, MemoryError};
+        use me_types::error::{ConflictError, MemoryError};
 
         if !self.half_life_days.is_finite() || self.half_life_days <= 0.0 {
             return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
@@ -145,7 +146,7 @@ impl ForgetPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::FactType;
+    use me_types::types::FactType;
 
     // --- ForgetPolicy::default() ---
 

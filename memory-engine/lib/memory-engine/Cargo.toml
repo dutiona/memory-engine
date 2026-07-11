@@ -37,6 +37,9 @@ me-backend-sqlite = { path = "../me-backend-sqlite" }
 # pulled only by `backend-postgres` — so a `backend-sqlite`-only build never compiles
 # `tokio-postgres`/`deadpool-postgres`.
 me-backend-postgres = { path = "../me-backend-postgres", optional = true }
+# L3 Forget primitive: Ebbinghaus decay + multi-signal importance pruning (Wave 2
+# #816 / S3, sub-PR 2). The facade re-exports it as `crate::forgetting`.
+me-forget = { path = "../me-forget" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
