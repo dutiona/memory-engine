@@ -12,69 +12,25 @@ const DEFAULT_LIMIT: usize = 50;
 /// An empty query returns all temporally-valid active facts sorted by `importance_score`.
 /// Future-dated facts (`t_valid > now`) are excluded by default (scheduling model invariant).
 ///
+/// This is the `me-query`-internal builder type; a `MemoryEngine`-driven end-to-end
+/// example (constructing an engine, adding a fact, and executing a query against it)
+/// lives on the facade's re-export at `memory_engine::MemoryQuery`, where the engine
+/// and its consumer traits are in scope.
+///
 /// # Examples
 ///
 /// ```
-/// use memory_engine::{
-///     AddFactRequest, EmbeddingFingerprint, EmbeddingProvider, FactType, MemoryEngine, MemoryError,
-///     MemoryQuery,
-/// };
+/// use me_query::MemoryQuery;
 ///
-/// // Deterministic, dependency-free embedder (see the crate-level example).
-/// struct HashEmbedder {
-///     dim: usize,
-/// }
-/// impl EmbeddingProvider for HashEmbedder {
-///     fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
-///         let mut v = vec![0.0_f32; self.dim];
-///         for &b in text.as_bytes() {
-///             v[b as usize % self.dim] += 1.0;
-///         }
-///         Ok(v)
-///     }
-///     fn fingerprint(&self) -> EmbeddingFingerprint {
-///         EmbeddingFingerprint::new("mock", "test", self.dim)
-///     }
-/// }
+/// let query = MemoryQuery::new()
+///     .scope_subtree("user:michael")
+///     .limit(20)
+///     .pinned_only();
 ///
-/// // The engine API is async (#631); a consumer binary uses `#[tokio::main]`.
-/// tokio::runtime::Runtime::new().unwrap().block_on(async {
-///     let dim = 64;
-///     let engine = MemoryEngine::builder(dim).build()?;
-///     let embedder = HashEmbedder { dim };
-///     // A deep, hierarchical scope: the fact lives under `user:michael/project:demo`.
-///     // `add_fact` auto-creates every missing segment (`user:michael`, then
-///     // `project:demo`) in both the database and the in-memory scope tree.
-///     engine.add_fact(
-///         &AddFactRequest {
-///             content: "deployment issue in the demo project".into(),
-///             fact_type: FactType::Episodic,
-///             source_event_id: None,
-///             scope: Some("user:michael/project:demo".into()),
-///             opts: None,
-///         },
-///         std::sync::Arc::new(embedder),
-///         None,
-///     ).await?;
-///
-///     // Scoped retrieval over a *subtree*: every fact rooted at the `user:michael`
-///     // ancestor (which includes the deeper `project:demo` child), capped at 20
-///     // results. An empty query (no `text`/`embedding`) returns every
-///     // temporally-valid fact in scope, sorted by importance.
-///     let response = engine.execute_query(
-///         &MemoryQuery::new()
-///             .scope_subtree("user:michael")
-///             .limit(20),
-///     ).await?;
-///     assert_eq!(response.results.len(), 1);
-///     assert_eq!(response.results[0].fact.content, "deployment issue in the demo project");
-///
-///     // All pinned facts (none were pinned, so this is empty).
-///     let pinned = engine.execute_query(&MemoryQuery::new().pinned_only()).await?;
-///     assert!(pinned.results.is_empty());
-///     Ok::<(), MemoryError>(())
-/// })
-/// .unwrap();
+/// assert!(query.scope.is_some());
+/// assert_eq!(query.limit, Some(20));
+/// assert!(query.pinned_only);
+/// assert!(!query.has_search()); // no text/embedding set
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct MemoryQuery {

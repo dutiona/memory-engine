@@ -41,14 +41,8 @@ me-backend-sqlite = { path = "../me-backend-sqlite" }
 # `[dev-dependencies] me-types = { ..., features = ["test-util"] }` forward.
 me-types = { path = "../me-types", features = ["test-util"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-# `MemoryQuery`'s rustdoc example (moved verbatim from the facade's `search/query.rs`)
-# demonstrates the type through its intended public path, `memory_engine::MemoryQuery`
-# — a dev-only cycle back to the facade. Cargo permits dependency cycles through
-# dev-dependencies (they are not part of the crate's own build graph, only its test/
-# doctest targets), so this does not make `me-query`'s library artifact depend on the
-# facade.
-memory-engine = { path = "../memory-engine" }
 proptest = "1"
+# The `proptest_temporal::make_fact` fixture's `metadata` field.
 serde_json = "1.0"
 
 [lints]
