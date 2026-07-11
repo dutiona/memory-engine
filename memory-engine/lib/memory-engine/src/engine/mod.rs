@@ -11,8 +11,8 @@ use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::scope::ScopeTree;
 use crate::search::strategy::SearchConfig;
-use crate::storage::StorageBackend;
 use crate::storage::sqlite::SqliteBackend;
+use crate::storage::{MemoryCtx, StorageBackend};
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, Reranker};
 use crate::types::search::{MatchType, SearchResult};
@@ -708,6 +708,16 @@ impl MemoryEngine {
     #[cfg(test)]
     pub(crate) fn storage(&self) -> &Arc<dyn StorageBackend> {
         &self.storage
+    }
+
+    /// Build the universal capability handle L3 primitive free functions receive (Wave 2 §B).
+    pub(crate) fn mem_ctx(&self) -> MemoryCtx<'_> {
+        MemoryCtx {
+            storage: &self.storage,
+            embed_dim: self.embed_dim,
+            read_only: self.read_only,
+            reopen_required: &self.reopen_required,
+        }
     }
 
     // --- Public API: Scope management ---

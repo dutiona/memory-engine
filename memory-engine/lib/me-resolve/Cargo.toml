@@ -1,0 +1,22 @@
+[package]
+name = "me-resolve"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Resolve primitive: bi-temporal arbiter-driven conflict resolution (Wave 2 #816 / S3, sub-PR 3)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal crate: never published, so it uses bare path-deps and is exempt
+# from cargo-deny's published-crate wildcard rule (plan §D.1).
+publish = false
+
+[dependencies]
+me-types = { path = "../me-types" }
+me-traits = { path = "../me-traits" }
+me-storage = { path = "../me-storage" }
+me-index = { path = "../me-index" }
+chrono = "0.4"
+parking_lot = "0.12"
+
+[lints]
+workspace = true

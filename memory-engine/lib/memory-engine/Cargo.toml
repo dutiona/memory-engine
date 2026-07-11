@@ -40,6 +40,9 @@ me-backend-postgres = { path = "../me-backend-postgres", optional = true }
 # L3 Forget primitive: Ebbinghaus decay + multi-signal importance pruning (Wave 2
 # #816 / S3, sub-PR 2). The facade re-exports it as `crate::forgetting`.
 me-forget = { path = "../me-forget" }
+# L3 Resolve primitive: bi-temporal arbiter-driven conflict resolution (Wave 2
+# #816 / S3, sub-PR 3). `MemoryEngine::resolve_conflict` delegates to it directly.
+me-resolve = { path = "../me-resolve" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
