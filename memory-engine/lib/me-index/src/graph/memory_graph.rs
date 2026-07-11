@@ -515,7 +515,7 @@ mod tests {
 
         g.remove_edge_by_id(10);
         assert_eq!(g.edge_count(), 1);
-        assert!(g.neighbors(1) == vec![3]);
+        assert_eq!(g.neighbors(1), vec![3]);
     }
 
     #[test]
