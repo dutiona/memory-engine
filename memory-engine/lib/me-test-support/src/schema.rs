@@ -1,10 +1,11 @@
 //! `SchemaManager` lifecycle + embedding-fingerprint identity contracts.
 
+use me_storage::LexicalRanker;
+use me_types::error::MemoryError;
+use me_types::types::EmbeddingFingerprint;
+
 use super::factory::ConformanceBackend;
 use super::fixtures::{DIM, fingerprint};
-use crate::error::MemoryError;
-use crate::storage::LexicalRanker;
-use crate::types::EmbeddingFingerprint;
 
 /// `schema_version() >= 1` and `migrate()` is idempotent at HEAD.
 pub async fn schema_version_and_migrate_idempotent<F: ConformanceBackend>(f: &F) {

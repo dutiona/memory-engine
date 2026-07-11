@@ -1,0 +1,61 @@
+[package]
+name = "me-test-support"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Shared test harness + cross-backend storage conformance battery for the memory-engine workspace (Wave 2 #816 / S3, sub-PR 1)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal dev-harness crate: never published (bare path-deps, exempt from
+# cargo-deny's published-crate wildcard rule).
+#
+# `test-util` is an OPT-IN feature here (NOT enabled unconditionally in `[dependencies]`):
+# because this crate is a `[workspace] members` entry, a bare `cargo build --workspace`
+# compiles it, and Cargo unifies features across the ONE shared build of each dep — so an
+# unconditional `me-storage/test-util` would force `SchemaManager::raw_exec` on globally,
+# making it a *required* trait method even for `me-backend-postgres` (whose `raw_exec` impl
+# is behind its OWN `test-util`, off in a default build) → E0046. Instead the battery — the
+# only code needing the `raw_exec` crash-injection seam — is gated on
+# `#[cfg(all(test, feature = "test-util"))]` (exactly the facade's original pattern), so a
+# default `--workspace` build compiles this crate WITHOUT `test-util` and stays clean; CI's
+# `--all-features` turns `test-util` on and runs the battery. The pub `fixtures`/`factory`
+# harness (minus the test-util-gated `break_facts_table`) compiles WITHOUT `test-util`, so
+# downstream dev-dep consumers (me-forget/me-resolve) get `SqliteFactory::make()` + fixtures
+# with no feature flag.
+publish = false
+
+[dependencies]
+me-types = { path = "../me-types" }
+me-traits = { path = "../me-traits" }
+me-storage = { path = "../me-storage" }
+me-backend-sqlite = { path = "../me-backend-sqlite" }
+me-backend-postgres = { path = "../me-backend-postgres", optional = true }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+# `#[tokio::test]` for the battery's own emitted async tests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[features]
+# The `raw_exec` crash-injection seam + the whole conformance battery. Forwards to every
+# backend dep's own `test-util` (weak `?` forward for the optional PG dep, so enabling
+# `test-util` alone never drags in `me-backend-postgres`). Mirrors the facade's forward.
+test-util = [
+    "me-types/test-util",
+    "me-storage/test-util",
+    "me-backend-sqlite/test-util",
+    "me-backend-postgres?/test-util",
+]
+# Gates the `cold` behavior module + the `cold_behaviors_into!` suites + factory's
+# `make_with_cold` (mirrors the facade's `archive` forwarding chain exactly).
+archive = ["me-types/archive", "me-storage/archive", "me-backend-sqlite/archive"]
+# Compiles in the (inert, #[ignore]-d) PgFactory + postgres suites.
+backend-postgres = ["dep:me-backend-postgres"]
+
+[lints]
+workspace = true

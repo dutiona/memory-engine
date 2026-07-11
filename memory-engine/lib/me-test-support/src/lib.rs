@@ -1,11 +1,11 @@
 //! Cross-backend storage conformance battery (#632).
 //!
-//! Asserts the [`StorageBackend`](crate::storage::StorageBackend) trait CONTRACT
+//! Asserts the [`StorageBackend`](me_storage::StorageBackend) trait CONTRACT
 //! (behavior, not SQL) directly against `Arc<dyn StorageBackend>` /
 //! `Arc<dyn ColdStorage>` — storage-PORT level, BELOW the engine facade.
 //!
-//! **Not** the engine-facade `tests/eval/conformance/` (which drives
-//! [`MemoryEngine`](crate::MemoryEngine) via `eval_engine()`): that suite pins
+//! **Not** the engine-facade `tests/eval/conformance/` (which drives the
+//! `memory-engine` facade's `MemoryEngine` via `eval_engine()`): that suite pins
 //! engine behavior; this one pins the *port* contract so every backend proves the
 //! same semantics. Do not conflate them.
 //!
@@ -23,26 +23,37 @@
 //!
 //! Lexical/vector score & order parity (tokenizers/rankers differ), HNSW dispatch,
 //! `convert.rs` filter→SQL translation, and the `capabilities()` tier VALUES stay in
-//! `src/storage/sqlite/*.rs`. This battery asserts only what the contract guarantees
-//! identically across backends.
+//! `me-backend-sqlite`'s own `src/sqlite/*.rs`. This battery asserts only what the
+//! contract guarantees identically across backends.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod factory;
+pub mod fixtures;
+
+// --- The behavior battery: me-test-support's OWN tests. ---
+#[cfg(all(test, feature = "test-util"))]
 mod atomic;
-mod consolidation;
-mod event;
-mod factory;
-mod fixtures;
-mod graph;
-mod read_only;
-mod schema;
-mod search;
-mod session;
-
-#[cfg(feature = "archive")]
+#[cfg(all(test, feature = "test-util", feature = "archive"))]
 mod cold;
+#[cfg(all(test, feature = "test-util"))]
+mod consolidation;
+#[cfg(all(test, feature = "test-util"))]
+mod event;
+#[cfg(all(test, feature = "test-util"))]
+mod graph;
+#[cfg(all(test, feature = "test-util"))]
+mod read_only;
+#[cfg(all(test, feature = "test-util"))]
+mod schema;
+#[cfg(all(test, feature = "test-util"))]
+mod search;
+#[cfg(all(test, feature = "test-util"))]
+mod session;
 
 /// Emit one `#[tokio::test]` per `name => body`, recursively. The shared attribute
 /// (e.g. `#[ignore]` for the inert PG arm) rides as a `[ … ]` token group so it can
 /// be stamped onto every emitted test.
+#[cfg(all(test, feature = "test-util"))]
 macro_rules! suite_items {
     ($factory:expr, [$(#[$attr:meta])*]) => {};
     ($factory:expr, [$(#[$attr:meta])*] $name:ident => $body:path $(, $($rest:tt)*)?) => {
@@ -55,6 +66,7 @@ macro_rules! suite_items {
 
 /// The ONE canonical behavior registry, referenced by every backend's `mod` block.
 /// Each `name => path` is one cross-backend contract test.
+#[cfg(all(test, feature = "test-util"))]
 macro_rules! all_behaviors_into {
     ($factory:expr, [$(#[$attr:meta])*]) => {
         suite_items!($factory, [$(#[$attr])*]
@@ -112,7 +124,7 @@ macro_rules! all_behaviors_into {
 
 /// The `ColdStorage` registry — a SEPARATE, `archive`-gated suite (its bodies
 /// reference `Arc<dyn ColdStorage>`, so they cannot appear in the default-build suite).
-#[cfg(feature = "archive")]
+#[cfg(all(test, feature = "test-util", feature = "archive"))]
 macro_rules! cold_behaviors_into {
     ($factory:expr, [$(#[$attr:meta])*]) => {
         suite_items!($factory, [$(#[$attr])*]
@@ -127,24 +139,30 @@ macro_rules! cold_behaviors_into {
 // One mod block per backend. Adding a backend = one block; #635 deletes the
 // `[#[ignore = …]]` token to turn the postgres arm on (once `PgBackend` is a full
 // `StorageBackend` — #633 added only its `SchemaManager` + pool + migrations).
+#[cfg(all(test, feature = "test-util"))]
 mod sqlite {
     use super::*;
     all_behaviors_into!(factory::SqliteFactory, []);
 }
 
-#[cfg(feature = "backend-postgres")]
+#[cfg(all(test, feature = "test-util", feature = "backend-postgres"))]
 mod postgres {
     use super::*;
     all_behaviors_into!(factory::PgFactory, [#[ignore = "#635: PgBackend is not a full StorageBackend until #634 CRUD + #635 SearchIndex"]]);
 }
 
-#[cfg(feature = "archive")]
+#[cfg(all(test, feature = "test-util", feature = "archive"))]
 mod sqlite_cold {
     use super::*;
     cold_behaviors_into!(factory::SqliteFactory, []);
 }
 
-#[cfg(all(feature = "backend-postgres", feature = "archive"))]
+#[cfg(all(
+    test,
+    feature = "test-util",
+    feature = "backend-postgres",
+    feature = "archive"
+))]
 mod postgres_cold {
     use super::*;
     cold_behaviors_into!(factory::PgFactory, [#[ignore = "#635: PgBackend is not a full StorageBackend until #634 CRUD + #635 SearchIndex"]]);

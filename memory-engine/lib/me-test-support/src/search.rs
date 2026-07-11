@@ -4,10 +4,11 @@
 //! wrong-dim→error, expired-count, and positive *membership*). Score/order *parity*
 //! is backend-native and stays per-backend golden in `src/storage/sqlite/`.
 
+use me_storage::FactFilter;
+use me_types::error::MemoryError;
+
 use super::factory::ConformanceBackend;
 use super::fixtures::{DIM, new_fact, seed_facts};
-use crate::error::MemoryError;
-use crate::storage::FactFilter;
 
 /// A malformed lexical query yields an empty result, NOT an error (the FTS-syntax
 /// swallow). A backend that errors here breaks the contract.

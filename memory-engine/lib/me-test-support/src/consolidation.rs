@@ -1,9 +1,10 @@
 //! `ConsolidationStore` (summaries + lineage) contract bodies.
 
+use me_types::error::MemoryError;
+use me_types::types::{ConsolidationLevel, NewLineageRecord, PromotionProvenance};
+
 use super::factory::ConformanceBackend;
 use super::fixtures::{new_fact, new_summary, seed_facts};
-use crate::error::MemoryError;
-use crate::types::{ConsolidationLevel, NewLineageRecord, PromotionProvenance};
 
 /// Summary insert → get → list-by-level → delete-by-level.
 pub async fn summary_insert_list_get_delete_by_level<F: ConformanceBackend>(f: &F) {

@@ -7,6 +7,7 @@ members = [
     "memory-engine/lib/me-index",
     "memory-engine/lib/me-backend-sqlite",
     "memory-engine/lib/me-backend-postgres",
+    "memory-engine/lib/me-test-support",
     "memory-engine/lib/memory-engine",
     "memory-engine/lib/embed",
     "memory-engine/bin/cli",

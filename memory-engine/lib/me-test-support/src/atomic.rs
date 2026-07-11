@@ -11,10 +11,11 @@
 
 use chrono::Utc;
 
+use me_types::error::MemoryError;
+use me_types::types::{EmbeddingFingerprint, FactType, NewFact};
+
 use super::factory::ConformanceBackend;
 use super::fixtures::{DIM, fingerprint, new_fact, seed_facts, snapshot};
-use crate::error::MemoryError;
-use crate::types::{EmbeddingFingerprint, FactType, NewFact};
 
 /// A fact whose embedding length deliberately disagrees with `DIM` (the dim injector).
 fn wrong_dim_fact(content: &str) -> NewFact {
@@ -107,7 +108,7 @@ pub async fn insert_facts_batch_atomic_rollback<F: ConformanceBackend>(f: &F) {
 /// leave `old` expired with no successor (the exact data-loss class the cutover hit).
 /// A non-conforming backend fails this by leaving `old.t_expired = Some(_)`.
 pub async fn resolve_conflict_atomic_rollback_leaves_old_active<F: ConformanceBackend>(f: &F) {
-    use crate::traits::CrudDecision;
+    use me_traits::CrudDecision;
     let be = f.make().await;
     let old_id = seed_facts(&be, &[new_fact("old fact")]).await[0];
     let before = snapshot(&be).await;
@@ -181,10 +182,10 @@ pub async fn prune_atomic_rollback<F: ConformanceBackend>(f: &F) {
 /// Injected by dropping `config` so the final `set_config(last_dream_cycle_at)` at the
 /// END of the transaction faults, AFTER all deltas have run.
 pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
-    use crate::types::cycle_report::{
+    use me_types::types::cycle_report::{
         CycleDelta, CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
     };
-    use crate::types::{Outcome, PromotionProvenance};
+    use me_types::types::{Outcome, PromotionProvenance};
     let be = f.make().await;
     let ids = seed_facts(&be, &[new_fact("victim"), new_fact("promotable")]).await;
     let (fact_id, promotable) = (ids[0], ids[1]);
@@ -233,7 +234,7 @@ pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
             processed_ids: vec![fact_id, promotable],
         },
     };
-    let registry = crate::store::upcaster::UpcasterRegistry::new();
+    let registry = me_storage::UpcasterRegistry::new();
     let err = be
         .apply_cycle_deltas_atomic(&report, DIM, &registry)
         .await
@@ -263,7 +264,7 @@ pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
         f.name()
     );
     let events = be
-        .list_events(&crate::types::EventFilter::default())
+        .list_events(&me_types::types::EventFilter::default())
         .await
         .expect("list_events");
     assert!(

@@ -1,8 +1,9 @@
 //! `SessionStore` contract bodies.
 
+use me_types::types::ActivityStatus;
+
 use super::factory::ConformanceBackend;
 use super::fixtures::{checkpoint, new_activity, new_fact, seed_facts};
-use crate::types::ActivityStatus;
 
 /// Activity insert → get / count / list, and a second identical insert within the
 /// dedup window deduplicates (same id, count unchanged).

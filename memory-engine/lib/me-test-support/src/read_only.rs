@@ -1,8 +1,9 @@
 //! Cross-cutting read-only-rejection contract.
 
+use me_types::error::MemoryError;
+
 use super::factory::ConformanceBackend;
 use super::fixtures::{checkpoint, new_event, new_fact, new_summary};
-use crate::error::MemoryError;
 
 /// A write of EACH trait family is rejected with `ReadOnly`; a representative read
 /// still succeeds. A non-conforming backend fails this by accepting any write or

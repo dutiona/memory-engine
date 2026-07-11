@@ -7,8 +7,8 @@
 //! (#633 added `PgBackend`'s `SchemaManager` + pool + migrations, but `PgBackend` is
 //! not a full `StorageBackend` until #634+#635, so `PgFactory::make()` stays `todo!()`.)
 //!
-//! This is the **only** module in `storage::conformance` permitted to name a
-//! concrete backend type (`SqliteBackend`, `ConnectionPool`, `UpcasterRegistry`).
+//! This is the **only** module in this crate permitted to name a concrete backend
+//! type (`SqliteBackend`, `ConnectionPool`, `UpcasterRegistry`).
 //! Every behavior body seeds and asserts through `Arc<dyn StorageBackend>` /
 //! `Arc<dyn ColdStorage>` only (the anti-coupling gate, T14), so the same body runs
 //! unchanged against any backend.
@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use me_backend_sqlite::SqliteBackend;
 #[cfg(feature = "archive")]
-use crate::storage::ColdStorage;
-use crate::storage::{SqliteBackend, StorageBackend};
+use me_storage::ColdStorage;
+use me_storage::StorageBackend;
 
 use super::fixtures::DIM;
 
@@ -32,7 +33,7 @@ pub trait ConformanceBackend: Send + Sync + 'static {
 
     /// A backend whose writes are rejected with [`MemoryError::ReadOnly`], reads OK.
     ///
-    /// [`MemoryError::ReadOnly`]: crate::error::MemoryError::ReadOnly
+    /// [`MemoryError::ReadOnly`]: me_types::error::MemoryError::ReadOnly
     async fn make_read_only(&self) -> Arc<dyn StorageBackend>;
 
     /// A writable backend that ALSO exposes cold storage. The two handles MUST point
@@ -49,10 +50,18 @@ pub trait ConformanceBackend: Send + Sync + 'static {
     /// constraints) overrides THIS ONE method — keeping crash-injection out of the
     /// behavior bodies so #635 never edits a body.
     ///
+    /// `test-util`-gated: `raw_exec` is itself gated on the port's `test-util` feature
+    /// (a cross-crate crash-injection escape hatch that cannot ride `cfg(test)`), and
+    /// this crate forwards `test-util` only as an opt-in feature — so this method exists
+    /// exactly when the `#[cfg(all(test, feature = "test-util"))]` battery that calls it
+    /// (the atomic-rollback bodies) is compiled. A default `--workspace` build compiles
+    /// neither, keeping `raw_exec` off the required-trait-item set globally.
+    ///
     /// # Errors
     ///
     /// Returns whatever the backend's `raw_exec` returns on a SQL/backend failure.
-    async fn break_facts_table(&self, be: &Arc<dyn StorageBackend>) -> crate::error::Result<()> {
+    #[cfg(feature = "test-util")]
+    async fn break_facts_table(&self, be: &Arc<dyn StorageBackend>) -> me_types::error::Result<()> {
         be.raw_exec("DROP TABLE facts").await
     }
 
@@ -69,10 +78,11 @@ impl ConformanceBackend for SqliteFactory {
         // Mirrors the oracle helper `src/storage/sqlite/mod.rs:476` (`memory_backend`).
         // `open_memory` runs the migration chain at open, so HEAD is reached without
         // a separate `.migrate()` call.
-        let pool = crate::pool::ConnectionPool::open_memory(DIM).expect("open in-memory pool");
+        let pool =
+            me_backend_sqlite::pool::ConnectionPool::open_memory(DIM).expect("open in-memory pool");
         Arc::new(SqliteBackend::from_pool(
             Arc::new(pool),
-            Arc::new(crate::store::upcaster::UpcasterRegistry::new()),
+            Arc::new(me_storage::UpcasterRegistry::new()),
         ))
     }
 
@@ -82,7 +92,7 @@ impl ConformanceBackend for SqliteFactory {
         // (`TempDir::keep`) so the file outlives this fn — a read-only test
         // opens→asserts→exits and the OS reaps it at process end. This avoids
         // threading a teardown guard through the macro and polluting the trait.
-        use crate::pool::ConnectionPool;
+        use me_backend_sqlite::pool::ConnectionPool;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("conformance-ro.db");
         {
@@ -95,7 +105,7 @@ impl ConformanceBackend for SqliteFactory {
         let _kept = dir.keep();
         Arc::new(SqliteBackend::from_pool(
             Arc::new(ro),
-            Arc::new(crate::store::upcaster::UpcasterRegistry::new()),
+            Arc::new(me_storage::UpcasterRegistry::new()),
         ))
     }
 
@@ -103,10 +113,11 @@ impl ConformanceBackend for SqliteFactory {
     async fn make_with_cold(&self) -> (Arc<dyn StorageBackend>, Arc<dyn ColdStorage>) {
         // One Arc<SqliteBackend> unsized twice → both handles share state
         // (`SqliteBackend` impls both the `StorageBackend` blanket and `ColdStorage`).
-        let pool = crate::pool::ConnectionPool::open_memory(DIM).expect("open in-memory pool");
+        let pool =
+            me_backend_sqlite::pool::ConnectionPool::open_memory(DIM).expect("open in-memory pool");
         let be = Arc::new(SqliteBackend::from_pool(
             Arc::new(pool),
-            Arc::new(crate::store::upcaster::UpcasterRegistry::new()),
+            Arc::new(me_storage::UpcasterRegistry::new()),
         ));
         let cold: Arc<dyn ColdStorage> = be.clone();
         let storage: Arc<dyn StorageBackend> = be;
@@ -118,9 +129,11 @@ impl ConformanceBackend for SqliteFactory {
     }
 }
 
-/// The inert Postgres factory (#635 fills the `todo!()`s and deletes the `#[ignore]`,
-/// once `PgBackend` implements all six bounded traits and is a full `StorageBackend`;
-/// #633 added only its `SchemaManager` + pool + migrations).
+/// The inert Postgres factory.
+///
+/// #635 fills the `todo!()`s and deletes the `#[ignore]`, once `PgBackend` implements
+/// all six bounded traits and is a full `StorageBackend`; #633 added only its
+/// `SchemaManager` + pool + migrations.
 ///
 /// Compiles under `--features backend-postgres` (the bodies typecheck via the never
 /// type); never runs, because the `postgres` suite's emitted tests are `#[ignore]`d

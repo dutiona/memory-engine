@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use crate::storage::StorageBackend;
-use crate::types::{
+use me_storage::StorageBackend;
+use me_types::types::{
     ConsolidationLevel, EmbeddingFingerprint, EventFilter, EventType, FactType,
     LineageSnapshotEntry, NewActivity, NewEvent, NewFact, NewSummary, OutcomeClass,
     SessionCheckpoint,
@@ -20,6 +20,7 @@ use crate::types::{
 pub const DIM: usize = 4;
 
 /// A minimal active fact via the public builder (scope = root).
+#[must_use]
 pub fn new_fact(content: &str) -> NewFact {
     NewFact::builder(content, vec![0.1_f32; DIM], FactType::Episodic)
         .scope_id(1)
@@ -27,11 +28,13 @@ pub fn new_fact(content: &str) -> NewFact {
 }
 
 /// The conformance embedding identity.
+#[must_use]
 pub fn fingerprint() -> EmbeddingFingerprint {
     EmbeddingFingerprint::new("conformance-model", "test", DIM)
 }
 
 /// A minimal interaction event tagged with `session_id` (root scope).
+#[must_use]
 pub fn new_event(session_id: &str) -> NewEvent {
     NewEvent {
         timestamp: Utc::now(),
@@ -47,6 +50,7 @@ pub fn new_event(session_id: &str) -> NewEvent {
 }
 
 /// A cluster-level summary (root scope).
+#[must_use]
 pub fn new_summary(content: &str) -> NewSummary {
     NewSummary {
         content: content.into(),
@@ -59,6 +63,7 @@ pub fn new_summary(content: &str) -> NewSummary {
 }
 
 /// A session activity (root scope).
+#[must_use]
 pub fn new_activity(session_id: &str, tool: &str) -> NewActivity {
     NewActivity {
         session_id: session_id.to_owned(),
@@ -73,6 +78,7 @@ pub fn new_activity(session_id: &str, tool: &str) -> NewActivity {
 }
 
 /// A session checkpoint (root scope path).
+#[must_use]
 pub fn checkpoint(session_id: &str) -> SessionCheckpoint {
     SessionCheckpoint {
         session_id: session_id.to_owned(),
@@ -91,6 +97,12 @@ pub fn checkpoint(session_id: &str) -> SessionCheckpoint {
 /// `insert_fact` (unlike `insert_fact_atomic`) does not record it. The `schema`
 /// fingerprint-contract bodies deliberately do NOT use this helper: they need a
 /// fresh `make()` with no stamped identity to assert the absent→record→stored path.
+///
+/// # Panics
+///
+/// Panics if establishing the embedding fingerprint or any `insert_fact` fails — a
+/// test-only invariant (the backend is a fresh in-memory store), so a fault is a bug
+/// in the harness, not a runtime condition to recover from.
 pub async fn seed_facts(be: &Arc<dyn StorageBackend>, facts: &[NewFact]) -> Vec<i64> {
     be.record_embedding_fingerprint_if_absent(&fingerprint(), DIM)
         .await
@@ -154,6 +166,12 @@ fn ser_rows<T: serde::Serialize>(rows: &[T]) -> Vec<String> {
 }
 
 /// Capture the full store state via PORT READS ONLY.
+///
+/// # Panics
+///
+/// Panics if any port read (facts/edges/summaries/scopes/events/lineage/fingerprint/
+/// config) or a row serialization fails — a test-only invariant, so a fault is a
+/// harness bug, not a recoverable runtime condition.
 pub async fn snapshot(be: &Arc<dyn StorageBackend>) -> StoreSnapshot {
     let facts = ser_rows(&be.list_all_facts().await.expect("list_all_facts"));
     let edges = ser_rows(&be.list_all_edges().await.expect("list_all_edges"));

@@ -17,23 +17,13 @@
 //! intra-doc link, since the crate is an optional dependency absent from a default
 //! build) keeps `crate::storage::PgBackend` resolving — there is no
 //! `crate::storage::postgres` submodule path to preserve (nothing outside this file
-//! ever referenced one). The cross-backend `conformance` battery stays here until
-//! #634/#635. No SQL string or driver type crosses the port — that contract lives in
-//! `me-storage` (traits) / `me-backend-sqlite` / `me-backend-postgres` (the concrete
-//! impls).
+//! ever referenced one). The cross-backend conformance battery moved to the
+//! `me-test-support` crate (Wave 2 #816 / S3, sub-PR 1) — it dev-deps this crate's
+//! ports directly and no longer lives under this module. No SQL string or driver
+//! type crosses the port — that contract lives in `me-storage` (traits) /
+//! `me-backend-sqlite` / `me-backend-postgres` (the concrete impls).
 
 pub use me_backend_sqlite::sqlite;
-
-/// Cross-backend conformance battery (#632) — asserts the `StorageBackend` CONTRACT
-/// against `Arc<dyn StorageBackend>` directly. Test-only; see its module docs.
-///
-/// Gated on `test-util` (not bare `test`) because it drives the `SchemaManager::raw_exec`
-/// failure-injection seam, which — since the #816 split moved the trait into `me-storage`
-/// — is only present when the `test-util` feature is on (a cross-crate escape hatch cannot
-/// ride `cfg(test)`). CI's `--all-features` test job runs it; bare `cargo test` no longer
-/// does (run `cargo test --features test-util` locally to exercise it).
-#[cfg(all(test, feature = "test-util"))]
-mod conformance;
 
 // --- The port surface, re-exported from the me-storage crate. ---
 // Submodule re-exports so `crate::storage::<portmod>::Trait` module paths still resolve.
