@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use rusqlite::Connection;
 
-use crate::error::{MemoryError, MigrationError, RerankerError, Result};
+use crate::error::{MemoryError, MigrationError, Result};
 use crate::graph::MemoryGraph;
 use crate::pool::ConnectionPool;
 use crate::scope::ScopeTree;
@@ -15,8 +15,13 @@ use crate::storage::sqlite::SqliteBackend;
 use crate::storage::{MemoryCtx, StorageBackend};
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, Reranker};
-use crate::types::search::{MatchType, SearchResult};
 use crate::types::{ConsolidationLevel, EmbeddingFingerprint, Fact};
+// `MatchType`/`SearchResult` are no longer used by this module's own (moved-to-
+// `me-query`) production code, but `engine/tests.rs`'s `use super::*;` still needs
+// them in scope — cfg(test)-gated to avoid an unused-import warning in the plain
+// (non-test) build, mirroring `engine/ingest.rs`'s own `#[cfg(test)] use chrono::Utc;`.
+#[cfg(test)]
+use crate::types::search::{MatchType, SearchResult};
 
 mod activity;
 pub(crate) mod activity_filter;
@@ -778,45 +783,6 @@ impl MemoryEngine {
 
     // --- Private helpers ---
 
-    /// Validate reranker output indices and scores.
-    ///
-    /// Checks four invariants:
-    /// 1. Output length does not exceed input length
-    /// 2. Every index is within `0..num_candidates`
-    /// 3. No duplicate indices
-    /// 4. All scores are finite (not NaN or Inf)
-    fn validate_reranker_output(num_candidates: usize, output: &[(usize, f64)]) -> Result<()> {
-        use std::collections::HashSet;
-
-        if output.len() > num_candidates {
-            return Err(RerankerError::OutputTooLong {
-                output_len: output.len(),
-                input_len: num_candidates,
-            }
-            .into());
-        }
-
-        let mut seen = HashSet::with_capacity(output.len());
-
-        for &(idx, score) in output {
-            if idx >= num_candidates {
-                return Err(RerankerError::OutOfBoundsIndex {
-                    index: idx,
-                    num_candidates,
-                }
-                .into());
-            }
-            if !seen.insert(idx) {
-                return Err(RerankerError::DuplicateIndex { index: idx }.into());
-            }
-            if !score.is_finite() {
-                return Err(RerankerError::NonFiniteScore { score, index: idx }.into());
-            }
-        }
-
-        Ok(())
-    }
-
     /// Resolve scope IDs from an optional scope path.
     /// Returns [`root_id`] when scope is None, or ancestor IDs when scope exists.
     fn resolve_scope_ids(&self, scope: Option<&str>) -> Result<Vec<i64>> {
@@ -856,38 +822,6 @@ fn apply_surfaced_stamps<'a>(
     }
 }
 
-/// Check if a fact's validity window passes the temporal cutoff.
-/// A fact passes if it's valid at the cutoff instant:
-/// `(t_valid IS NULL OR t_valid <= cutoff) AND (t_invalid IS NULL OR t_invalid > cutoff)`
-fn passes_temporal_cutoff(fact: &Fact, cutoff: DateTime<Utc>) -> bool {
-    if let Some(t_valid) = fact.t_valid
-        && t_valid > cutoff
-    {
-        return false;
-    }
-    if let Some(t_invalid) = fact.t_invalid
-        && t_invalid <= cutoff
-    {
-        return false;
-    }
-    true
-}
-
-/// Check if a fact's `[t_valid, t_invalid)` interval overlaps `[start, end)`.
-fn fact_overlaps_period(fact: &Fact, start: DateTime<Utc>, end: DateTime<Utc>) -> bool {
-    // (t_valid IS NULL OR t_valid < end) AND (t_invalid IS NULL OR t_invalid > start)
-    fact.t_valid.is_none_or(|tv| tv < end) && fact.t_invalid.is_none_or(|ti| ti > start)
-}
-
-/// Wrap a `Fact` into a `SearchResult` with `MatchType::ImportanceRank`.
-const fn fact_to_search_result(fact: Fact) -> SearchResult {
-    SearchResult {
-        score: fact.importance_score,
-        match_type: MatchType::ImportanceRank,
-        fact,
-    }
-}
-
 impl Drop for MemoryEngine {
     fn drop(&mut self) {
         // The sidecar flush is now async ([`close`]) and touches the port — it
@@ -900,176 +834,6 @@ impl Drop for MemoryEngine {
                 "MemoryEngine dropped without close()/flush_snapshot(): sidecar \
                  snapshot not flushed; it will be rebuilt from the database on next open"
             );
-        }
-    }
-}
-
-/// Property-based coverage for the pure bi-temporal filter helpers (#450).
-///
-/// `passes_temporal_cutoff` and `fact_overlaps_period` encode interval
-/// containment / overlap algebra — exactly the place `<` vs `<=` off-by-one
-/// errors hide and example tests routinely miss. These proptests pin the
-/// helpers to their algebraic spec and to monotonicity laws. Placed at the
-/// end of the file so no non-test items follow a `#[cfg(test)]` module
-/// (`clippy::items_after_test_module`).
-#[cfg(test)]
-mod proptest_temporal {
-    use chrono::{DateTime, Utc};
-    use proptest::prelude::*;
-
-    use super::{fact_overlaps_period, passes_temporal_cutoff};
-    use crate::types::{Fact, FactType};
-
-    // kept: returns `Fact` (not `NewFact`), takes t_valid/t_invalid — bi-temporal
-    // test fixture; semantics differ entirely from test_utils::new_fact*.
-    /// Build a `Fact` carrying only the valid-time fields the helpers read;
-    /// every other field is an inert placeholder.
-    fn make_fact(t_valid: Option<DateTime<Utc>>, t_invalid: Option<DateTime<Utc>>) -> Fact {
-        Fact {
-            id: 1,
-            content: String::new(),
-            content_hash: String::new(),
-            embedding: vec![],
-            fact_type: FactType::Semantic,
-            t_created: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
-            t_expired: None,
-            t_valid,
-            t_invalid,
-            source_event_id: None,
-            base_importance: 0.5,
-            access_count: 0,
-            last_accessed: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
-            metadata: serde_json::Value::Null,
-            scope_id: 1,
-            is_pinned: false,
-            importance_score: 0.0,
-            surfaced_at: None,
-        }
-    }
-
-    prop_compose! {
-        /// Timestamps as whole seconds in a wide but always-valid range, so
-        /// `from_timestamp` never returns `None`.
-        fn arb_ts()(s in 0i64..=4_000_000_000) -> DateTime<Utc> {
-            DateTime::<Utc>::from_timestamp(s, 0).unwrap()
-        }
-    }
-
-    /// Reference spec for `passes_temporal_cutoff`, written independently of the
-    /// implementation so the proptest is a genuine cross-check, not a tautology.
-    fn spec_passes(
-        t_valid: Option<DateTime<Utc>>,
-        t_invalid: Option<DateTime<Utc>>,
-        cutoff: DateTime<Utc>,
-    ) -> bool {
-        let valid_ok = t_valid.is_none_or(|tv| tv <= cutoff);
-        let invalid_ok = t_invalid.is_none_or(|ti| ti > cutoff);
-        valid_ok && invalid_ok
-    }
-
-    /// Reference spec for `fact_overlaps_period`.
-    fn spec_overlaps(
-        t_valid: Option<DateTime<Utc>>,
-        t_invalid: Option<DateTime<Utc>>,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> bool {
-        t_valid.is_none_or(|tv| tv < end) && t_invalid.is_none_or(|ti| ti > start)
-    }
-
-    proptest! {
-        /// The helper agrees with its independent spec for all inputs (catches
-        /// any `<`/`<=`/`>`/`>=` off-by-one regression).
-        #[test]
-        fn cutoff_matches_spec(
-            t_valid in proptest::option::of(arb_ts()),
-            t_invalid in proptest::option::of(arb_ts()),
-            cutoff in arb_ts(),
-        ) {
-            let fact = make_fact(t_valid, t_invalid);
-            prop_assert_eq!(
-                passes_temporal_cutoff(&fact, cutoff),
-                spec_passes(t_valid, t_invalid, cutoff)
-            );
-        }
-
-        /// With `t_invalid` unbounded, passing is monotone in `cutoff`: once a
-        /// fact is valid at `cutoff` it stays valid at every later instant.
-        #[test]
-        fn cutoff_monotone_when_open_ended(
-            t_valid in proptest::option::of(arb_ts()),
-            cutoff in arb_ts(),
-            delta in 0i64..=1_000_000,
-        ) {
-            let fact = make_fact(t_valid, None);
-            let later = DateTime::<Utc>::from_timestamp(cutoff.timestamp() + delta, 0).unwrap();
-            if passes_temporal_cutoff(&fact, cutoff) {
-                prop_assert!(passes_temporal_cutoff(&fact, later));
-            }
-        }
-
-        /// A fact whose validity starts strictly after `cutoff` never passes.
-        #[test]
-        fn cutoff_rejects_future_t_valid(
-            cutoff in arb_ts(),
-            delta in 1i64..=1_000_000,
-            t_invalid in proptest::option::of(arb_ts()),
-        ) {
-            let t_valid = DateTime::<Utc>::from_timestamp(cutoff.timestamp() + delta, 0).unwrap();
-            let fact = make_fact(Some(t_valid), t_invalid);
-            prop_assert!(!passes_temporal_cutoff(&fact, cutoff));
-        }
-
-        /// The helper agrees with its independent spec for all inputs.
-        #[test]
-        fn overlap_matches_spec(
-            t_valid in proptest::option::of(arb_ts()),
-            t_invalid in proptest::option::of(arb_ts()),
-            a in arb_ts(),
-            b in arb_ts(),
-        ) {
-            // Normalize to a non-empty half-open window [start, end).
-            let (start, end) = if a < b { (a, b) } else { (b, a) };
-            prop_assume!(start < end);
-            let fact = make_fact(t_valid, t_invalid);
-            prop_assert_eq!(
-                fact_overlaps_period(&fact, start, end),
-                spec_overlaps(t_valid, t_invalid, start, end)
-            );
-        }
-
-        /// Overlap is monotone under window widening: if a fact overlaps
-        /// `[start, end)` it overlaps any superset window `[start', end')` with
-        /// `start' <= start` and `end' >= end`.
-        #[test]
-        fn overlap_monotone_under_widening(
-            t_valid in proptest::option::of(arb_ts()),
-            t_invalid in proptest::option::of(arb_ts()),
-            a in arb_ts(),
-            b in arb_ts(),
-            grow_left in 0i64..=1_000_000,
-            grow_right in 0i64..=1_000_000,
-        ) {
-            let (start, end) = if a < b { (a, b) } else { (b, a) };
-            prop_assume!(start < end);
-            let fact = make_fact(t_valid, t_invalid);
-            if fact_overlaps_period(&fact, start, end) {
-                let wider_start =
-                    DateTime::<Utc>::from_timestamp(start.timestamp() - grow_left, 0).unwrap();
-                let wider_end =
-                    DateTime::<Utc>::from_timestamp(end.timestamp() + grow_right, 0).unwrap();
-                prop_assert!(fact_overlaps_period(&fact, wider_start, wider_end));
-            }
-        }
-
-        /// A fact unbounded on both valid-time ends overlaps every non-empty
-        /// window.
-        #[test]
-        fn unbounded_fact_overlaps_everything(a in arb_ts(), b in arb_ts()) {
-            let (start, end) = if a < b { (a, b) } else { (b, a) };
-            prop_assume!(start < end);
-            let fact = make_fact(None, None);
-            prop_assert!(fact_overlaps_period(&fact, start, end));
         }
     }
 }

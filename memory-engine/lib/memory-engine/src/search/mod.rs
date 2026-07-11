@@ -3,16 +3,25 @@
 //! `ann`/`filter_sql`/`fts`/`strategy`/`vector` (the FTS5/vector search cores
 //! `SqliteBackend` drives) carved into [`me_backend_sqlite`] (Wave 2 #816 / S2,
 //! sub-PR 2b) along with `storage::sqlite` (their only consumer beyond `hybrid`/
-//! `query`, moved in the same commit). `fts`/`strategy`/`vector` are re-exported below
-//! (mirroring the 2a `store`/`pool` seam) so `hybrid`/`query` (staying) and the crate's
-//! public API keep resolving unchanged; `ann`/`filter_sql` and the `FilterSql`/
-//! `fts_count_expired`/`fts_search_filtered`/`vector_search_filtered` flat re-exports
-//! are NOT re-exported here — their only callers (`storage::sqlite::{search_index,
-//! convert}`) moved to `me-backend-sqlite` too, so nothing in the facade reaches them
-//! anymore (production or test).
-pub(crate) use me_backend_sqlite::search::{fts, strategy, vector};
-pub(crate) mod hybrid;
-pub(crate) mod query;
+//! `query`, moved in the same commit). `hybrid`/`query` (the RRF merge + port-driven
+//! hybrid search + the `MemoryQuery` builder) carved into [`me_query`] in turn
+//! (Wave 2 #816 / S4, sub-PR 2); the facade's `engine/query.rs` now calls
+//! `me_query::execute::{query, execute_query}` directly rather than routing through a
+//! `crate::search::hybrid` re-export, so only `query` (still reached as
+//! `crate::search::query::MemoryQuery` by `engine/archive.rs`/`engine/tests.rs`/
+//! `archive/search.rs`) is re-exported below; `hybrid` has no facade call site left
+//! and is dropped. `ann`/`filter_sql` and the `FilterSql`/`fts_count_expired`/
+//! `fts_search_filtered`/`vector_search_filtered` flat re-exports are NOT re-exported
+//! here — their only callers (`storage::sqlite::{search_index, convert}`) moved to
+//! `me-backend-sqlite` too, so nothing in the facade reaches them anymore (production
+//! or test). `fts` itself is re-exported only under `cfg(fuzzing)` (Wave 2 #816 / S4,
+//! sub-PR 2): its last non-fuzz consumer was the sync `hybrid_search` twin deleted in
+//! the `me-query` carve, so a normal build no longer reaches it — only `lib.rs`'s
+//! `fuzz_seam::fuzz_fts_query` still does.
+#[cfg(fuzzing)]
+pub(crate) use me_backend_sqlite::search::fts;
+pub(crate) use me_backend_sqlite::search::{strategy, vector};
+pub(crate) use me_query::query;
 
 // --- Genuinely-public surface (re-exported at the crate root by `lib.rs`) ---
 //

@@ -21,6 +21,14 @@ parking_lot = "0.12"
 # runtime feature set (not `rt-multi-thread`, which sibling crates only pull in as a
 # dev-dependency for their test harness).
 tokio = { version = "1", features = ["rt"] }
+# `assemble_results`'s failed-to-load-fact warning (moved verbatim from the facade).
+tracing = "0.1"
+
+[features]
+# `MemoryQuery::include_archives` (moved from the facade's `search/query.rs`) is
+# `#[cfg(feature = "archive")]`-gated; forward so `--all-features` compiles it. No
+# other moved item touches an archive-gated field.
+archive = ["me-types/archive"]
 
 [dev-dependencies]
 # Backend harness for the re-pointed behavior tests (XR-4d) — they exercise the

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 
-use crate::types::search::SearchMode;
-use crate::types::{FactType, ScopeQuery};
+use me_types::types::search::SearchMode;
+use me_types::types::{FactType, ScopeQuery};
 
 /// Default limit for queries when not explicitly set.
 const DEFAULT_LIMIT: usize = 50;
