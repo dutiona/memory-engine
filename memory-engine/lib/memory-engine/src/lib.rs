@@ -254,7 +254,6 @@ pub use resume::{ResumeConfig, ResumeContext};
 pub use search::MemoryQuery;
 pub use search::{
     MatchType, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
-    VectorSearchStrategy,
 };
 pub use store::UpcasterRegistry;
 pub use store::schema::CURRENT_SCHEMA_VERSION;

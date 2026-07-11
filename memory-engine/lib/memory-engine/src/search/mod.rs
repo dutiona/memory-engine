@@ -17,7 +17,11 @@
 //! or test). `fts` itself is re-exported only under `cfg(fuzzing)` (Wave 2 #816 / S4,
 //! sub-PR 2): its last non-fuzz consumer was the sync `hybrid_search` twin deleted in
 //! the `me-query` carve, so a normal build no longer reaches it — only `lib.rs`'s
-//! `fuzz_seam::fuzz_fts_query` still does.
+//! `fuzz_seam::fuzz_fts_query` still does. `VectorSearchStrategy` is NOT re-exported
+//! (Wave 2 #816 / S4, sub-PR 2, API-break #2 superseded — see ADR-0018): it is now a
+//! `me-backend-sqlite`-internal dispatch trait (`HnswStrategy` vs `BruteForce`) that
+//! never crosses the port boundary, and the facade has zero remaining consumers of it
+//! (verified: `grep -rn VectorSearchStrategy src` matches only this note).
 #[cfg(fuzzing)]
 pub(crate) use me_backend_sqlite::search::fts;
 pub(crate) use me_backend_sqlite::search::{strategy, vector};
@@ -32,7 +36,6 @@ pub use crate::types::search::{
     MatchType, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
 };
 pub use query::MemoryQuery;
-pub use strategy::VectorSearchStrategy;
 
 // `SearchConfig` and `cosine_similarity` are not part of the engine's facade
 // API, but the top-level benches/tests (which compile as separate crates and
