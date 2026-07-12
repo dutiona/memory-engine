@@ -14,7 +14,10 @@
 //! re-exported here. `new_event`'s only facade call site
 //! (`storage::sqlite::event_log`) moved to `me-backend-sqlite` too (Wave 2 #816 /
 //! S2, sub-PR 2b's `storage::sqlite` carve), repathed to `me_types::test_util::new_event`
-//! directly there, so it is not re-exported here either.
+//! directly there, so it is not re-exported here either. `new_fact`/`new_fact_with_type`'s
+//! last facade call sites were the `search/hybrid.rs` behavior tests, moved (re-pointed)
+//! to `me-query` in the Wave 2 #816 / S4, sub-PR 2 query carve — `me-query` reaches
+//! `me_types::test_util` directly as its own dev-dependency, so they are dropped here.
 
 pub use me_traits::test_util::MockEmbedder;
-pub use me_types::test_util::{new_fact, new_fact_hashed, new_fact_with_type};
+pub use me_types::test_util::new_fact_hashed;

@@ -75,8 +75,24 @@ build on these boundaries have the durable _why_.
    move alone leaves that cycle); `CycleCtx` is a `me-traits` capability trait enumerating
    the exact read-set the shipped `DefaultDreamCycle`/`LlmDreamCycle` use, and
    `me-consolidate`'s `CycleContext` _implements_ it. Landed in **S1** (keystone).
-   (b) **`VectorSearchStrategy::search`** taking a storage port (`&dyn SearchIndex`)
-   instead of `&Connection` — deferred to **S4** (still `&Connection` after S1).
+   (b) **`VectorSearchStrategy` un-exported from the facade's public surface**
+   (**superseded**, S4 — #925 sub-PR 2 / the `me-query` carve; supersedes the
+   originally-planned signature break, `search(&Connection, …)` →
+   `search(&dyn SearchIndex, …)`, recorded here through S1–S3 while `search(&Connection,
+   …)` remained unchanged). The signature break proved infeasible: `HnswStrategy::search`
+   does its one-batched-query-per-widening-attempt candidate rescoring (#288/#362)
+   directly against a raw `Connection`; the async `SearchIndex` port's filter-based API
+   cannot express that shape, and `SqliteBackend::vector_search`'s own `SearchIndex` impl
+   invokes `HnswStrategy::search` from inside a `spawn_blocking` closure holding only the
+   raw connection — no `&dyn SearchIndex` is reachable there without a nested-runtime
+   hazard. Separately, the break's premise dissolved once `hybrid`/`query` moved to
+   `me-query` (S4): `VectorSearchStrategy` no longer crosses the port boundary at all — it
+   is purely a `me-backend-sqlite`-internal HNSW-vs-brute-force dispatch trait, with zero
+   facade or downstream (cli/mcp/embed) consumers (verified by full-workspace grep).
+   Resolution: `VectorSearchStrategy::search(&Connection, …)` stays unchanged inside
+   `me-backend-sqlite`; the facade instead **removes the public re-export**
+   (`memory_engine::VectorSearchStrategy` / `memory_engine::search::VectorSearchStrategy`)
+   — the actual, visible break `cargo public-api` records for S4.
    (c) **`MemoryError::Database` variant removed** (#926, at **S2**-start) — the SQLite
    driver's `rusqlite::Error` no longer appears in the L0 public error enum; backend driver
    errors now surface via `MemoryError::Storage(StorageError::Backend(String))`, mapped at
