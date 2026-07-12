@@ -5,8 +5,10 @@
 //! forgetting layer's scoring logic happens to sit. `PruneStats` is two
 //! `usize` counters. `ForgetPolicy` is `#[derive(Debug, Clone)]` over
 //! scalar/collection fields plus two inherent methods (`is_decay_exempt`,
-//! `validate`) whose bodies touch nothing beyond [`crate::error::Result`] and
-//! [`crate::types::FactType`] — both already L0. Neither type has an L3
+//! `validate`) whose bodies touch nothing beyond [`crate::error`]
+//! (`Result` / [`MemoryError`](crate::error::MemoryError) /
+//! [`ConflictError`](crate::error::ConflictError)) and
+//! [`crate::types::FactType`] — all already L0. Neither type has an L3
 //! dependency, so neither is barred from L0; they are colocated here because
 //! they are the input/output pair of the same operation.
 //! `compute_importance` (the forgetting layer's scoring logic, `me-forget`,
