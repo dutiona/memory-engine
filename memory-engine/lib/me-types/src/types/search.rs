@@ -1,8 +1,8 @@
 //! Search/query result vocabulary — the DTOs the retrieval surface speaks.
 //!
 //! Pure data types (no `rusqlite`, no search logic): the query input
-//! (`SearchQuery`), the fluent query builder (`MemoryQuery`, re-exported from
-//! [`super::memory_query`] — Wave 2 #816 / S4, sub-PR 3a), the result
+//! (`SearchQuery`), the fluent query builder (`MemoryQuery`, re-exported from a
+//! private sibling module — Wave 2 #816 / S4, sub-PR 3a), the result
 //! (`SearchResult`/`MatchType`), the response (`QueryResponse`/`QueryDiagnostics`),
 //! the `SearchMode` selector, and the `RRF_K` fusion constant. Homed in `me-types`
 //! (Wave 2 #816) so the consumer traits (`Reranker` returns `Vec<SearchResult>`),
@@ -15,11 +15,11 @@ use crate::types::{Fact, FactType};
 
 /// The fluent query-builder DTO.
 ///
-/// Lives in its own file ([`super::memory_query`]) for size hygiene; re-exported
-/// here so it sits alongside its sibling search vocabulary at the single canonical
-/// path `me_types::types::search::MemoryQuery` (Wave 2 #816 / S4, sub-PR 3a —
-/// relocated from `me-query` to kill an illegal L3-to-L3 sibling edge from the
-/// forthcoming `me-archive` crate).
+/// Lives in its own (private) sibling file for size hygiene; re-exported here so
+/// it sits alongside its sibling search vocabulary at the single canonical path
+/// `me_types::types::search::MemoryQuery` (Wave 2 #816 / S4, sub-PR 3a — relocated
+/// from `me-query` to kill an illegal L3-to-L3 sibling edge from the forthcoming
+/// `me-archive` crate).
 pub use super::memory_query::MemoryQuery;
 
 /// How to combine search sources.

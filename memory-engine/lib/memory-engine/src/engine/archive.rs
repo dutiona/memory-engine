@@ -341,7 +341,13 @@ impl MemoryEngine {
         if entries.is_empty() {
             return Ok(None);
         }
-        let result = crate::archive::search::search_archives(&archive_dir, &entries, query, limit)?;
+        let result = crate::archive::search::search_archives(
+            &archive_dir,
+            &entries,
+            query,
+            limit,
+            CURRENT_SCHEMA_VERSION,
+        )?;
         Ok(Some(result))
     }
 

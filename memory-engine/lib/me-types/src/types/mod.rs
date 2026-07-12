@@ -15,10 +15,11 @@ mod facts;
 pub mod forgetting;
 /// Inspection statistics + dump-format DTOs.
 pub mod inspect;
-/// [`MemoryQuery`](memory_query::MemoryQuery) — relocated from `me-query` (Wave 2 #816 / S4, sub-PR 3a).
+/// `MemoryQuery` — relocated from `me-query` (Wave 2 #816 / S4, sub-PR 3a).
 ///
-/// Private: re-exported as the single canonical path `types::search::MemoryQuery`
-/// from [`search`] rather than flat/duplicated here.
+/// Private: re-exported as the single canonical path [`crate::types::search::MemoryQuery`]
+/// rather than flat/duplicated here (this module itself is private, so it cannot carry a
+/// resolvable public intra-doc link back to its own contents).
 mod memory_query;
 mod provenance;
 mod relation;
