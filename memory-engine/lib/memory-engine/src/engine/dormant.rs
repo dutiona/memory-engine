@@ -1,6 +1,6 @@
 use crate::error::{MemoryError, Result};
-use crate::search::vector::cosine_similarity;
 use crate::types::Fact;
+use me_types::math::cosine_similarity;
 
 use super::MemoryEngine;
 

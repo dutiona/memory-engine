@@ -12,9 +12,9 @@ use std::time::Instant;
 use crate::archive::pak::read_pak;
 use crate::archive::types::ArchiveManifestEntry;
 use crate::error::Result;
-use crate::search::query::MemoryQuery;
-use crate::search::vector::cosine_similarity;
+use crate::search::MemoryQuery;
 use crate::types::search::{MatchType, SearchResult};
+use me_types::math::cosine_similarity;
 
 /// Summary result from scanning archives.
 pub struct ArchiveSearchResult {
@@ -127,6 +127,10 @@ const fn entry_is_prunable(_entry: &ArchiveManifestEntry, _query: &MemoryQuery) 
 /// Returns `MemoryError::Archive` on I/O or decompression failure.
 /// Returns `MemoryError::Serialization` if a `.pak` file's JSON is corrupt or
 /// truncated (surfaced by `read_pak` during decompression and deserialization).
+///
+/// Each `.pak` is opened via [`read_pak`], whose schema gate checks `me-types`'
+/// backend-independent `ARCHIVE_SCHEMA_VERSION` — the same constant the write side
+/// stamps. No backend schema version is involved (Wave 2 #816 / S4, sub-PR 3a).
 pub fn search_archives(
     archive_dir: &Path,
     manifest_entries: &[ArchiveManifestEntry],
@@ -271,9 +275,9 @@ mod tests {
     use super::*;
     use crate::archive::pak::write_pak_and_hash;
     use crate::archive::types::{ArchivePak, CURRENT_PAK_VERSION};
-    use crate::store::schema::CURRENT_SCHEMA_VERSION;
     use crate::types::{Fact, FactType};
     use chrono::Utc;
+    use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
 
     /// Build a minimal `Fact` for archive-search fixtures.
     ///
@@ -308,7 +312,7 @@ mod tests {
     fn pak_with(facts: Vec<Fact>) -> ArchivePak {
         ArchivePak {
             pak_version: CURRENT_PAK_VERSION,
-            engine_schema_version: CURRENT_SCHEMA_VERSION,
+            engine_schema_version: ARCHIVE_SCHEMA_VERSION,
             embed_dim: facts.first().map_or(0, |f| f.embedding.len()),
             created_at: Utc::now(),
             facts,

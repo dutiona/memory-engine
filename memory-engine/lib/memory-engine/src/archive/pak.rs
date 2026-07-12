@@ -3,9 +3,10 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
+use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
+
 use crate::archive::types::{ArchivePak, CURRENT_PAK_VERSION};
 use crate::error::{ArchiveError, Result};
-use crate::store::schema::CURRENT_SCHEMA_VERSION;
 
 /// Maximum decompressed `.pak` size (4 GiB) — prevents decompression bombs.
 const MAX_PAK_DECOMPRESSED_SIZE: u64 = 4 * 1024 * 1024 * 1024;
@@ -102,10 +103,24 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 ///   newer than this build supports (forward-incompatible).
 /// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::SchemaVersionUnsupported`] — the archive's
-///   `engine_schema_version` is newer than this build supports.
+///   `engine_schema_version` is newer than [`ARCHIVE_SCHEMA_VERSION`].
 ///
 /// Older `pak_version` / `engine_schema_version` values are accepted
 /// (backward-compatible read); only newer ones are rejected.
+///
+/// # Which version is checked
+///
+/// The gate compares against [`ARCHIVE_SCHEMA_VERSION`] — the **backend-independent**
+/// logical content-schema version of the `.pak` format (L0, `me-types`). The *same*
+/// constant is stamped on write (`engine/archive.rs`'s `build_pak`), so the write and
+/// read sides are symmetric **by construction** and cannot drift apart.
+///
+/// It is deliberately **not** a backend's schema version. A `.pak` is a portable blob of
+/// `me-types` DTOs, so "can I read this pak?" is a question about DTO shape, not about
+/// any backend's migration history — and the backends' counters are not comparable
+/// (`SQLite` is at 14, Postgres independently at 1). Sourcing the check from a concrete
+/// backend would also put an L3→backend edge on the archive primitive.
+/// (Wave 2 #816 / S4, sub-PR 3a.)
 pub fn read_pak(path: &Path) -> Result<ArchivePak> {
     read_pak_capped(path, MAX_PAK_DECOMPRESSED_SIZE)
 }
@@ -156,10 +171,10 @@ fn read_pak_capped(path: &Path, cap: u64) -> Result<ArchivePak> {
         }
         .into());
     }
-    if pak.engine_schema_version > CURRENT_SCHEMA_VERSION {
+    if pak.engine_schema_version > ARCHIVE_SCHEMA_VERSION {
         return Err(ArchiveError::SchemaVersionUnsupported {
             found: pak.engine_schema_version,
-            supported: CURRENT_SCHEMA_VERSION,
+            supported: ARCHIVE_SCHEMA_VERSION,
         }
         .into());
     }
@@ -271,12 +286,11 @@ mod tests {
 
     #[test]
     fn read_pak_rejects_future_pak_version() {
-        use crate::store::schema::CURRENT_SCHEMA_VERSION;
         let dir = tempfile::tempdir().unwrap();
         let pak_path = dir.path().join("future_pak.pak");
         let mut pak = empty_pak();
         pak.pak_version = CURRENT_PAK_VERSION + 1;
-        pak.engine_schema_version = CURRENT_SCHEMA_VERSION;
+        pak.engine_schema_version = ARCHIVE_SCHEMA_VERSION;
         write_pak(&pak, &pak_path).unwrap();
 
         let err = read_pak(&pak_path).unwrap_err();
@@ -301,19 +315,18 @@ mod tests {
 
     #[test]
     fn read_pak_rejects_future_schema_version() {
-        use crate::store::schema::CURRENT_SCHEMA_VERSION;
         let dir = tempfile::tempdir().unwrap();
         let pak_path = dir.path().join("future_schema.pak");
         let mut pak = empty_pak();
-        pak.engine_schema_version = CURRENT_SCHEMA_VERSION + 1;
+        pak.engine_schema_version = ARCHIVE_SCHEMA_VERSION + 1;
         write_pak(&pak, &pak_path).unwrap();
 
         let err = read_pak(&pak_path).unwrap_err();
         let display = err.to_string();
         match err {
             MemoryError::Archive(ArchiveError::SchemaVersionUnsupported { found, supported }) => {
-                assert_eq!(found, CURRENT_SCHEMA_VERSION + 1);
-                assert_eq!(supported, CURRENT_SCHEMA_VERSION);
+                assert_eq!(found, ARCHIVE_SCHEMA_VERSION + 1);
+                assert_eq!(supported, ARCHIVE_SCHEMA_VERSION);
             }
             other => panic!("expected Archive(SchemaVersionUnsupported), got {other:?}"),
         }
@@ -330,13 +343,12 @@ mod tests {
 
     #[test]
     fn read_pak_accepts_current_and_older_versions() {
-        use crate::store::schema::CURRENT_SCHEMA_VERSION;
         let dir = tempfile::tempdir().unwrap();
 
         // Current versions read OK.
         let current_path = dir.path().join("current.pak");
         let mut current = empty_pak();
-        current.engine_schema_version = CURRENT_SCHEMA_VERSION;
+        current.engine_schema_version = ARCHIVE_SCHEMA_VERSION;
         write_pak(&current, &current_path).unwrap();
         assert!(
             read_pak(&current_path).is_ok(),
@@ -344,11 +356,11 @@ mod tests {
         );
 
         // Older schema version reads OK (backward-compat). empty_pak() already
-        // stamps engine_schema_version = 7 (< CURRENT_SCHEMA_VERSION = 9).
+        // stamps engine_schema_version = 7 (< ARCHIVE_SCHEMA_VERSION = 14).
         let older_path = dir.path().join("older.pak");
         let older = empty_pak();
         assert!(
-            older.engine_schema_version < CURRENT_SCHEMA_VERSION,
+            older.engine_schema_version < ARCHIVE_SCHEMA_VERSION,
             "fixture must use an older schema version to exercise backward-compat"
         );
         write_pak(&older, &older_path).unwrap();

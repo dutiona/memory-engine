@@ -20,6 +20,11 @@
 
 pub mod error;
 pub mod limits;
+/// Pure math primitives (`cosine_similarity`), shared across the workspace.
+///
+/// Wave 2 #816 / S4, sub-PR 3a — relocated from `me-backend-sqlite` so a
+/// primitive doesn't force a dependency on a concrete storage backend.
+pub mod math;
 /// Shared test-only factory helpers (`new_fact`/`new_event` family).
 ///
 /// Gated behind the `test-util` feature (Wave 2 #816, Commit 2 of the

@@ -23,6 +23,15 @@ pub use backup::backup_before_migration;
 pub use config::{get_config, list_config, set_config};
 
 /// Current schema version. Bump when adding migrations.
+///
+/// This is **`SQLite`'s physical migration counter** and nothing else. It is *not*
+/// comparable to another backend's (Postgres numbers its own migrations independently,
+/// `CURRENT_PG_SCHEMA_VERSION` = 1), and it is **not** the version stamped into a `.pak`
+/// archive — that is `me_types::types::archive::ARCHIVE_SCHEMA_VERSION`, a
+/// backend-independent *content*-schema version. Bumping this constant does **not** bump
+/// the archive one; if a migration also changes the shape of the `Fact`/`Edge` DTOs a
+/// `.pak` serializes, `ARCHIVE_SCHEMA_VERSION` must be bumped too (the `ArchivePak`
+/// serde-shape test in `archive/types.rs` reddens to remind you). (Wave 2 #816 / S4.)
 pub const CURRENT_SCHEMA_VERSION: u32 = 14;
 
 /// Storage epoch — coarse-grained compatibility gate.

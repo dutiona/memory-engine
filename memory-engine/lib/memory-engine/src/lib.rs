@@ -182,8 +182,9 @@ pub use resume::{ResumeConfig, ResumeContext};
 /// End-to-end example: build an engine, add a fact, and retrieve it with
 /// [`MemoryQuery`]'s fluent builder.
 ///
-/// `me-query` (where `MemoryQuery` is defined) has no dependency on this facade
-/// crate — its own doctest is a minimal, builder-only example. This richer,
+/// `MemoryQuery` is defined in `me-types` (L0) — shared query vocabulary consumed by
+/// several primitives — and neither it nor `me-query` depends on this facade crate, so
+/// their own doctests are minimal, builder-only examples. This richer,
 /// `MemoryEngine`-driven example lives here instead, where the engine and its
 /// consumer traits are naturally in scope.
 ///
@@ -324,6 +325,9 @@ pub use engine::cycle::{
 ///   fn` inside the `#[cfg(feature = "archive")] pub(crate) mod archive`, so it is
 ///   unreachable from the fuzz crate without this seam (#421); the entry is therefore
 ///   `archive`-gated to match the module. Every input yields `Ok`/`Err`, never a panic.
+///   Its `.pak` schema gate checks `me_types`'s backend-independent
+///   `ARCHIVE_SCHEMA_VERSION` (Wave 2 #816 / S4, sub-PR 3a) — the same constant the
+///   write side stamps — so the signature is unchanged and this stays a bare `pub use`.
 ///
 /// This module compiles to nothing on a normal build, so it adds no public API
 /// to the shipped crate.

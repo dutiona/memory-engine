@@ -7,10 +7,10 @@ use rusqlite::Connection;
 
 #[cfg(test)]
 use crate::error::Result;
-use crate::search::vector::cosine_similarity;
 #[cfg(test)]
 use crate::store::facts::FactStore;
 use crate::types::Fact;
+use me_types::math::cosine_similarity;
 
 /// Floating-point tolerance for the dedup similarity comparison.
 ///

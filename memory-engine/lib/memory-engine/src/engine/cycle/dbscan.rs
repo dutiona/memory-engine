@@ -8,8 +8,8 @@
 //! cluster's seed set is expanded in discovery order, so the same input always yields
 //! the same clusters.
 
-use crate::search::vector::cosine_similarity;
 use crate::types::FactId;
+use me_types::math::cosine_similarity;
 
 /// Upper bound on points fed to DBSCAN in one call. Above this the O(N²) pairwise
 /// cosine neighbour scan is skipped with a warning. Set well below the consolidation

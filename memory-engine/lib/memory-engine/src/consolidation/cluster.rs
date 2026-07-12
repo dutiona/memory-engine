@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 use crate::error::Result;
-use crate::search::vector::cosine_similarity;
+use me_types::math::cosine_similarity;
 // Used by this file's own `#[cfg(test)]` module (via `use super::*`) to verify writes
 // `apply_clusters` (now in me-backend-sqlite) made — not by any production fn here.
 #[cfg(test)]
