@@ -50,6 +50,11 @@ me-ingest = { path = "../me-ingest" }
 # L3 Query primitive: hybrid FTS5 + vector + RRF retrieval (Wave 2 #816 / S4,
 # sub-PR 2). `MemoryEngine::{query, execute_query}` delegate to it directly.
 me-query = { path = "../me-query" }
+# L3 Archive primitive: `.pak` cold-storage compaction (Wave 2 #816 / S4, sub-PR 3b).
+# `MemoryEngine::{archive, list_archives, verify_archives, search_archives_fallback}`
+# delegate to it directly. Optional — the `archive` feature enables it (the crate
+# IS the feature, re-exported at `crate::archive`).
+me-archive = { path = "../me-archive", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -199,19 +204,23 @@ ann = ["dep:hnsw", "dep:space", "dep:rand", "me-backend-sqlite/ann"]
 # compile in lockstep with the facade's own feature.
 compress-gzip = ["dep:flate2", "me-backend-sqlite/compress-gzip"]
 compress-zstd = ["dep:zstd", "me-backend-sqlite/compress-zstd"]
-# Forwards to `me-types/archive` so `QueryDiagnostics`'s `#[cfg(feature = "archive")]`
+# `dep:me-archive` pulls in the L3 archive primitive crate (Wave 2 #816 / S4,
+# sub-PR 3b) — the crate IS the feature, re-exported at `crate::archive`. Forwards
+# to `me-types/archive` so `QueryDiagnostics`'s `#[cfg(feature = "archive")]`
 # fields (types::search, now in me-types) compile in step with the facade (plan §D.2).
 # Also forwards to `me-index/archive` (Wave 2 #816 / S2) so `MemoryGraph::remove_node`
 # — `#[cfg(any(feature = "archive", test))]`-gated in me-index, called by
-# `engine/archive.rs`'s own `#[cfg(feature = "archive")]` prune path — is compiled in
-# lockstep with the facade's `archive` feature. Also forwards to
-# `me-backend-sqlite/archive` (Wave 2 #816 / S2, sub-PR 2a) so
-# `store/archive_manifest.rs` compiles in lockstep too. (`me-query/archive` was
-# dropped in Wave 2 #816 / S4, sub-PR 3a: it forwarded only for `MemoryQuery`'s
-# `#[cfg(feature = "archive")]` field, and `MemoryQuery` relocated to `me-types`
-# — already forwarded via `me-types/archive` above — so `me-query` itself no
-# longer has anything the feature needs to gate.)
+# `me-archive`'s `manage::archive` prune path — is compiled in lockstep with the
+# facade's `archive` feature. Also forwards to `me-backend-sqlite/archive` (Wave 2
+# #816 / S2, sub-PR 2a) so `store/archive_manifest.rs` compiles in lockstep too, and
+# to `me-storage/archive` (gates the `ColdStorage` port trait `me-archive`'s
+# orchestration layer consumes). (`me-query/archive` was dropped in Wave 2 #816 / S4,
+# sub-PR 3a: it forwarded only for `MemoryQuery`'s `#[cfg(feature = "archive")]`
+# field, and `MemoryQuery` relocated to `me-types` — already forwarded via
+# `me-types/archive` above — so `me-query` itself no longer has anything the
+# feature needs to gate.)
 archive = [
+    "dep:me-archive",
     "compress-zstd",
     "me-types/archive",
     "me-storage/archive",

@@ -122,8 +122,14 @@ pub use me_traits as traits;
 pub use me_types::types; // relocated to me-types (Wave 2 #816); see `error` above
 
 // === Internal modules (implementation details) ===
+// `archive` carved into the `me-archive` crate (Wave 2 #816 / S4, sub-PR 3b): the pure
+// `.pak` primitive (`pak`/`search`/`types`) plus the `MemoryEngine::{archive,
+// list_archives, verify_archives, search_archives_fallback}` orchestration free
+// functions the engine delegates to. The re-export preserves `crate::archive::*` for
+// every internal call site, matching the `pool`/`store`/`graph`/`scope`/`forgetting`
+// carve convention.
 #[cfg(feature = "archive")]
-pub(crate) mod archive;
+pub(crate) use me_archive as archive;
 pub(crate) mod consolidation;
 // `forgetting` is relocated to the L3 `me-forget` crate (Wave 2 #816 / S3, sub-PR
 // 2). The re-export preserves `pub(crate)` visibility and every internal
