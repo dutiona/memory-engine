@@ -130,7 +130,6 @@ pub use me_types::types; // relocated to me-types (Wave 2 #816); see `error` abo
 // carve convention.
 #[cfg(feature = "archive")]
 pub(crate) use me_archive as archive;
-pub(crate) mod consolidation;
 // `forgetting` is relocated to the L3 `me-forget` crate (Wave 2 #816 / S3, sub-PR
 // 2). The re-export preserves `pub(crate)` visibility and every internal
 // `crate::forgetting::*` path (`ForgetPolicy`, `PruneStats`, `prune`).
