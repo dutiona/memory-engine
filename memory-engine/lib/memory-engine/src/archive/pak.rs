@@ -3,6 +3,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
+use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
+
 use crate::archive::types::{ArchivePak, CURRENT_PAK_VERSION};
 use crate::error::{ArchiveError, Result};
 
@@ -101,24 +103,26 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 ///   newer than this build supports (forward-incompatible).
 /// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::SchemaVersionUnsupported`] — the archive's
-///   `engine_schema_version` is newer than `supported_schema_version`.
+///   `engine_schema_version` is newer than [`ARCHIVE_SCHEMA_VERSION`].
 ///
 /// Older `pak_version` / `engine_schema_version` values are accepted
 /// (backward-compatible read); only newer ones are rejected.
 ///
-/// # `supported_schema_version`
+/// # Which version is checked
 ///
-/// The `.pak` records the schema version of *the store it was archived from*
-/// (`ArchivePak::engine_schema_version`), so the compat check belongs to
-/// whoever knows the active backend's schema version — this function takes it
-/// as a parameter rather than reaching for a concrete backend's constant
-/// (Wave 2 #816 / S4, sub-PR 3a). This is not DAG-appeasement: post-#634/#635 a
-/// Postgres-backed engine passes *its own* schema version here, where a
-/// hard-wired constant would have silently checked against `SQLite`'s instead.
-/// The facade's public `read_pak` wrapper (`lib.rs`) supplies
-/// `store::schema::CURRENT_SCHEMA_VERSION` for today's `SQLite`-only build.
-pub fn read_pak(path: &Path, supported_schema_version: u32) -> Result<ArchivePak> {
-    read_pak_capped(path, MAX_PAK_DECOMPRESSED_SIZE, supported_schema_version)
+/// The gate compares against [`ARCHIVE_SCHEMA_VERSION`] — the **backend-independent**
+/// logical content-schema version of the `.pak` format (L0, `me-types`). The *same*
+/// constant is stamped on write (`engine/archive.rs`'s `build_pak`), so the write and
+/// read sides are symmetric **by construction** and cannot drift apart.
+///
+/// It is deliberately **not** a backend's schema version. A `.pak` is a portable blob of
+/// `me-types` DTOs, so "can I read this pak?" is a question about DTO shape, not about
+/// any backend's migration history — and the backends' counters are not comparable
+/// (`SQLite` is at 14, Postgres independently at 1). Sourcing the check from a concrete
+/// backend would also put an L3→backend edge on the archive primitive.
+/// (Wave 2 #816 / S4, sub-PR 3a.)
+pub fn read_pak(path: &Path) -> Result<ArchivePak> {
+    read_pak_capped(path, MAX_PAK_DECOMPRESSED_SIZE)
 }
 
 /// Cap-parameterized core of [`read_pak`].
@@ -126,7 +130,7 @@ pub fn read_pak(path: &Path, supported_schema_version: u32) -> Result<ArchivePak
 /// Splitting the byte cap out as a parameter lets the cap-firing path be tested
 /// with a tiny limit instead of a real 4 GiB payload (#299). [`read_pak`] is the
 /// only non-test caller and always passes [`MAX_PAK_DECOMPRESSED_SIZE`].
-fn read_pak_capped(path: &Path, cap: u64, supported_schema_version: u32) -> Result<ArchivePak> {
+fn read_pak_capped(path: &Path, cap: u64) -> Result<ArchivePak> {
     let file = fs::File::open(path).map_err(|e| {
         ArchiveError::Io(format!("failed to open pak file {}: {e}", path.display()))
     })?;
@@ -167,10 +171,10 @@ fn read_pak_capped(path: &Path, cap: u64, supported_schema_version: u32) -> Resu
         }
         .into());
     }
-    if pak.engine_schema_version > supported_schema_version {
+    if pak.engine_schema_version > ARCHIVE_SCHEMA_VERSION {
         return Err(ArchiveError::SchemaVersionUnsupported {
             found: pak.engine_schema_version,
-            supported: supported_schema_version,
+            supported: ARCHIVE_SCHEMA_VERSION,
         }
         .into());
     }
@@ -217,7 +221,6 @@ mod tests {
     use super::*;
     use crate::archive::types::CURRENT_PAK_VERSION;
     use crate::error::MemoryError;
-    use crate::store::schema::CURRENT_SCHEMA_VERSION;
     use chrono::Utc;
 
     /// Write an `ArchivePak` as zstd-compressed JSON (test convenience wrapper).
@@ -245,7 +248,7 @@ mod tests {
         let pak_path = dir.path().join("test.pak");
         write_pak(&empty_pak(), &pak_path).unwrap();
         assert!(pak_path.exists());
-        let restored = read_pak(&pak_path, CURRENT_SCHEMA_VERSION).unwrap();
+        let restored = read_pak(&pak_path).unwrap();
         assert_eq!(restored.pak_version, CURRENT_PAK_VERSION);
         assert_eq!(restored.embed_dim, 3);
         assert!(restored.facts.is_empty());
@@ -287,10 +290,10 @@ mod tests {
         let pak_path = dir.path().join("future_pak.pak");
         let mut pak = empty_pak();
         pak.pak_version = CURRENT_PAK_VERSION + 1;
-        pak.engine_schema_version = CURRENT_SCHEMA_VERSION;
+        pak.engine_schema_version = ARCHIVE_SCHEMA_VERSION;
         write_pak(&pak, &pak_path).unwrap();
 
-        let err = read_pak(&pak_path, CURRENT_SCHEMA_VERSION).unwrap_err();
+        let err = read_pak(&pak_path).unwrap_err();
         let display = err.to_string();
         match err {
             MemoryError::Archive(ArchiveError::PakVersionUnsupported { found, supported }) => {
@@ -315,15 +318,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pak_path = dir.path().join("future_schema.pak");
         let mut pak = empty_pak();
-        pak.engine_schema_version = CURRENT_SCHEMA_VERSION + 1;
+        pak.engine_schema_version = ARCHIVE_SCHEMA_VERSION + 1;
         write_pak(&pak, &pak_path).unwrap();
 
-        let err = read_pak(&pak_path, CURRENT_SCHEMA_VERSION).unwrap_err();
+        let err = read_pak(&pak_path).unwrap_err();
         let display = err.to_string();
         match err {
             MemoryError::Archive(ArchiveError::SchemaVersionUnsupported { found, supported }) => {
-                assert_eq!(found, CURRENT_SCHEMA_VERSION + 1);
-                assert_eq!(supported, CURRENT_SCHEMA_VERSION);
+                assert_eq!(found, ARCHIVE_SCHEMA_VERSION + 1);
+                assert_eq!(supported, ARCHIVE_SCHEMA_VERSION);
             }
             other => panic!("expected Archive(SchemaVersionUnsupported), got {other:?}"),
         }
@@ -345,24 +348,24 @@ mod tests {
         // Current versions read OK.
         let current_path = dir.path().join("current.pak");
         let mut current = empty_pak();
-        current.engine_schema_version = CURRENT_SCHEMA_VERSION;
+        current.engine_schema_version = ARCHIVE_SCHEMA_VERSION;
         write_pak(&current, &current_path).unwrap();
         assert!(
-            read_pak(&current_path, CURRENT_SCHEMA_VERSION).is_ok(),
+            read_pak(&current_path).is_ok(),
             "current versions must read"
         );
 
         // Older schema version reads OK (backward-compat). empty_pak() already
-        // stamps engine_schema_version = 7 (< CURRENT_SCHEMA_VERSION = 9).
+        // stamps engine_schema_version = 7 (< ARCHIVE_SCHEMA_VERSION = 9).
         let older_path = dir.path().join("older.pak");
         let older = empty_pak();
         assert!(
-            older.engine_schema_version < CURRENT_SCHEMA_VERSION,
+            older.engine_schema_version < ARCHIVE_SCHEMA_VERSION,
             "fixture must use an older schema version to exercise backward-compat"
         );
         write_pak(&older, &older_path).unwrap();
         assert!(
-            read_pak(&older_path, CURRENT_SCHEMA_VERSION).is_ok(),
+            read_pak(&older_path).is_ok(),
             "older versions must still read (backward-compat)"
         );
     }
@@ -373,7 +376,7 @@ mod tests {
     fn read_pak_nonexistent_path_errors_io() {
         let dir = tempfile::tempdir().unwrap();
         let ghost = dir.path().join("ghost.pak");
-        let err = read_pak(&ghost, CURRENT_SCHEMA_VERSION).unwrap_err();
+        let err = read_pak(&ghost).unwrap_err();
         let display = err.to_string();
         match err {
             MemoryError::Archive(ArchiveError::Io(msg)) => {
@@ -395,7 +398,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("garbage.pak");
         std::fs::write(&p, b"this is plainly not a zstd stream").unwrap();
-        let err = read_pak(&p, CURRENT_SCHEMA_VERSION).unwrap_err();
+        let err = read_pak(&p).unwrap_err();
         // `zstd::Decoder::new` does NOT eagerly validate the frame header — the
         // bad magic surfaces *lazily* on the first read, inside
         // `serde_json::from_reader`, which wraps the decoder I/O error as a serde
@@ -420,7 +423,7 @@ mod tests {
         enc.write_all(b"this is not json").unwrap();
         enc.finish().unwrap();
 
-        let err = read_pak(&p, CURRENT_SCHEMA_VERSION).unwrap_err();
+        let err = read_pak(&p).unwrap_err();
         assert!(
             matches!(err, MemoryError::Serialization(_)),
             "expected Serialization for invalid JSON, got {err:?}"
@@ -439,7 +442,7 @@ mod tests {
         write_pak(&empty_pak(), &p).unwrap();
 
         // empty_pak()'s JSON is well over 1 byte, so a 1-byte cap trips reliably.
-        let err = read_pak_capped(&p, 1, CURRENT_SCHEMA_VERSION).unwrap_err();
+        let err = read_pak_capped(&p, 1).unwrap_err();
         match err {
             MemoryError::Archive(ArchiveError::PakTooLarge { cap }) => {
                 assert_eq!(cap, 1, "PakTooLarge must carry the cap that was exceeded");
@@ -450,7 +453,7 @@ mod tests {
         // Sanity: the SAME file reads fine under the real (4 GiB) cap, so the error
         // above is purely the cap firing — not a corrupt fixture.
         assert!(
-            read_pak(&p, CURRENT_SCHEMA_VERSION).is_ok(),
+            read_pak(&p).is_ok(),
             "fixture must read fine under the production cap"
         );
     }
@@ -480,7 +483,7 @@ mod tests {
         // A cap set to EXACTLY the decompressed length must read successfully —
         // the inclusive contract. This is the assertion that FAILS under the
         // pre-fix `take(decoder, cap)` (it would trip the bomb guard at limit 0).
-        let restored = read_pak_capped(&p, decompressed_len, CURRENT_SCHEMA_VERSION)
+        let restored = read_pak_capped(&p, decompressed_len)
             .expect("a pak whose size equals the cap must read (inclusive cap)");
         assert_eq!(restored.pak_version, CURRENT_PAK_VERSION);
     }
@@ -509,7 +512,7 @@ mod tests {
 
         // cap = len - 1 means the payload is exactly one byte over the cap.
         let cap = decompressed_len - 1;
-        let err = read_pak_capped(&p, cap, CURRENT_SCHEMA_VERSION).unwrap_err();
+        let err = read_pak_capped(&p, cap).unwrap_err();
         match err {
             MemoryError::Archive(ArchiveError::PakTooLarge { cap: reported }) => {
                 assert_eq!(reported, cap, "PakTooLarge must carry the exceeded cap");

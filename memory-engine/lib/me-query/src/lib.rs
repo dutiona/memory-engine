@@ -18,4 +18,9 @@ pub mod hybrid;
 
 pub use execute::{QueryExecution, execute_query};
 pub use hybrid::{port_hybrid_search, rrf_merge};
+/// Compatibility alias. `MemoryQuery` now lives in `me-types` (L0) — it is shared query
+/// vocabulary, consumed by more than one primitive (`me-archive` searches `.pak`s against
+/// it), so keeping it here would have forced an illegal L3→L3 edge. Re-exported so
+/// `me_query::MemoryQuery` keeps resolving for existing callers; new code should prefer
+/// the canonical `me_types::types::search::MemoryQuery`.
 pub use me_types::types::search::MemoryQuery;

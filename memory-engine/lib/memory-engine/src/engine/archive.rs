@@ -14,8 +14,8 @@ use crate::archive::types::{
     CURRENT_PAK_VERSION,
 };
 use crate::error::{ArchiveError, MemoryError, Result};
-use crate::store::schema::CURRENT_SCHEMA_VERSION;
 use crate::types::{Edge, Fact};
+use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
 
 use super::MemoryEngine;
 
@@ -200,7 +200,7 @@ impl MemoryEngine {
     fn build_pak(&self, facts: &[Fact], edges: &[Edge]) -> ArchivePak {
         ArchivePak {
             pak_version: CURRENT_PAK_VERSION,
-            engine_schema_version: CURRENT_SCHEMA_VERSION,
+            engine_schema_version: ARCHIVE_SCHEMA_VERSION,
             embed_dim: self.embed_dim,
             created_at: Utc::now(),
             facts: facts.to_vec(),
@@ -341,13 +341,7 @@ impl MemoryEngine {
         if entries.is_empty() {
             return Ok(None);
         }
-        let result = crate::archive::search::search_archives(
-            &archive_dir,
-            &entries,
-            query,
-            limit,
-            CURRENT_SCHEMA_VERSION,
-        )?;
+        let result = crate::archive::search::search_archives(&archive_dir, &entries, query, limit)?;
         Ok(Some(result))
     }
 
@@ -802,6 +796,53 @@ mod tests {
              through to the I/O (file-not-found) path"
         );
         assert_eq!(result.pak_path, evil_path);
+    }
+
+    /// Write/read schema-version **symmetry** (Wave 2 #816 / S4, sub-PR 3a).
+    ///
+    /// The `.pak` schema gate is a *split* guard: `build_pak` **stamps** a version, and
+    /// `read_pak` **rejects** anything newer than the version it supports. Those two
+    /// halves must be sourced from the SAME constant, or they are free to drift apart.
+    ///
+    /// They very nearly did. The stamp used to come from `me-backend-sqlite`'s
+    /// `CURRENT_SCHEMA_VERSION` (= 14) while the read gate was being parameterized "so a
+    /// Postgres engine can pass its own version" — but Postgres numbers its migrations
+    /// independently (`CURRENT_PG_SCHEMA_VERSION` = 1). A PG-backed engine would then
+    /// stamp 14, check against 1, and refuse to read the pak *it had just written*; the
+    /// archive fallback swallows that error as best-effort (`tracing::warn!`), so every
+    /// archived fact would silently vanish from every query. Both sides now read
+    /// `me_types`' backend-independent `ARCHIVE_SCHEMA_VERSION`.
+    ///
+    /// This test pins the invariant directly: **what the write side stamps is exactly
+    /// what the read side accepts.**
+    #[tokio::test]
+    async fn pak_write_stamp_matches_read_gate() {
+        use crate::archive::pak::read_pak;
+
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.path().join("symmetry.db"))
+            .build()
+            .unwrap();
+
+        // The WRITE side: whatever `build_pak` stamps.
+        let pak = engine.build_pak(&[], &[]);
+        assert_eq!(
+            pak.engine_schema_version, ARCHIVE_SCHEMA_VERSION,
+            "build_pak must stamp the backend-independent ARCHIVE_SCHEMA_VERSION, not a \
+             backend's migration counter"
+        );
+
+        // The READ side must accept it. If the two halves ever diverge (e.g. one is
+        // re-pointed at a backend constant), `read_pak` returns SchemaVersionUnsupported
+        // and this fails — instead of silently dropping archived facts at runtime.
+        let path = dir.path().join("symmetry.pak");
+        write_pak_and_hash(&pak, &path).unwrap();
+        let restored = read_pak(&path).expect(
+            "the read gate must accept a pak the write side just stamped — a failure here \
+             means the write stamp and the read gate no longer share one constant",
+        );
+        assert_eq!(restored.engine_schema_version, ARCHIVE_SCHEMA_VERSION);
     }
 
     /// #117 regression (Wave 2 #816 / S4 sub-PR 2): a *provided-but-missing* scope must

@@ -29,7 +29,7 @@
 //! (verified: `grep -rn VectorSearchStrategy src` matches only this note).
 #[cfg(fuzzing)]
 pub(crate) use me_backend_sqlite::search::fts;
-pub(crate) use me_backend_sqlite::search::{strategy, vector};
+pub(crate) use me_backend_sqlite::search::strategy;
 
 // --- Genuinely-public surface (re-exported at the crate root by `lib.rs`) ---
 //
@@ -44,5 +44,5 @@ pub use crate::types::search::{
 // API, but the top-level benches/tests (which compile as separate crates and
 // therefore cannot see `pub(crate)`) consume them via `memory_engine::search::*`.
 // They are kept `pub` for those out-of-crate consumers only.
+pub use me_types::math::cosine_similarity;
 pub use strategy::SearchConfig;
-pub use vector::cosine_similarity;

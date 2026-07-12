@@ -182,8 +182,9 @@ pub use resume::{ResumeConfig, ResumeContext};
 /// End-to-end example: build an engine, add a fact, and retrieve it with
 /// [`MemoryQuery`]'s fluent builder.
 ///
-/// `me-query` (where `MemoryQuery` is defined) has no dependency on this facade
-/// crate — its own doctest is a minimal, builder-only example. This richer,
+/// `MemoryQuery` is defined in `me-types` (L0) — shared query vocabulary consumed by
+/// several primitives — and neither it nor `me-query` depends on this facade crate, so
+/// their own doctests are minimal, builder-only examples. This richer,
 /// `MemoryEngine`-driven example lives here instead, where the engine and its
 /// consumer traits are naturally in scope.
 ///
@@ -324,11 +325,9 @@ pub use engine::cycle::{
 ///   fn` inside the `#[cfg(feature = "archive")] pub(crate) mod archive`, so it is
 ///   unreachable from the fuzz crate without this seam (#421); the entry is therefore
 ///   `archive`-gated to match the module. Every input yields `Ok`/`Err`, never a panic.
-///   `archive::pak::read_pak` itself takes a `supported_schema_version` parameter
-///   (Wave 2 #816 / S4, sub-PR 3a — the compat check is backend-specific, not a
-///   shared L0 concern), so this seam re-exposes a thin wrapper of the pre-existing
-///   single-argument signature that injects `store::schema::CURRENT_SCHEMA_VERSION`
-///   (the facade's own backend), rather than a bare `pub use`.
+///   Its `.pak` schema gate checks `me_types`'s backend-independent
+///   `ARCHIVE_SCHEMA_VERSION` (Wave 2 #816 / S4, sub-PR 3a) — the same constant the
+///   write side stamps — so the signature is unchanged and this stays a bare `pub use`.
 ///
 /// This module compiles to nothing on a normal build, so it adds no public API
 /// to the shipped crate.
@@ -336,11 +335,7 @@ pub use engine::cycle::{
 #[doc(hidden)]
 pub mod fuzz_seam {
     #[cfg(feature = "archive")]
-    pub fn read_pak(
-        path: &std::path::Path,
-    ) -> crate::error::Result<crate::archive::types::ArchivePak> {
-        crate::archive::pak::read_pak(path, crate::store::schema::CURRENT_SCHEMA_VERSION)
-    }
+    pub use crate::archive::pak::read_pak;
     pub use crate::bootstrap::parse::{parse_content_blocks, parse_session_file};
     pub use crate::inspect::restore::read_snapshot;
     pub use crate::search::fts::fuzz_fts_query;

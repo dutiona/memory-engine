@@ -13,8 +13,8 @@ use crate::archive::pak::read_pak;
 use crate::archive::types::ArchiveManifestEntry;
 use crate::error::Result;
 use crate::search::MemoryQuery;
-use crate::search::vector::cosine_similarity;
 use crate::types::search::{MatchType, SearchResult};
+use me_types::math::cosine_similarity;
 
 /// Summary result from scanning archives.
 pub struct ArchiveSearchResult {
@@ -136,7 +136,6 @@ pub fn search_archives(
     manifest_entries: &[ArchiveManifestEntry],
     query: &MemoryQuery,
     limit: usize,
-    supported_schema_version: u32,
 ) -> Result<ArchiveSearchResult> {
     let start = Instant::now();
     // Bounded min-heap: never holds more than `limit` matches at once. The
@@ -166,7 +165,7 @@ pub fn search_archives(
             continue;
         }
 
-        let pak = read_pak(&pak_path, supported_schema_version)?;
+        let pak = read_pak(&pak_path)?;
         paks_scanned += 1;
 
         for fact in &pak.facts {
@@ -276,9 +275,9 @@ mod tests {
     use super::*;
     use crate::archive::pak::write_pak_and_hash;
     use crate::archive::types::{ArchivePak, CURRENT_PAK_VERSION};
-    use crate::store::schema::CURRENT_SCHEMA_VERSION;
     use crate::types::{Fact, FactType};
     use chrono::Utc;
+    use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
 
     /// Build a minimal `Fact` for archive-search fixtures.
     ///
@@ -313,7 +312,7 @@ mod tests {
     fn pak_with(facts: Vec<Fact>) -> ArchivePak {
         ArchivePak {
             pak_version: CURRENT_PAK_VERSION,
-            engine_schema_version: CURRENT_SCHEMA_VERSION,
+            engine_schema_version: ARCHIVE_SCHEMA_VERSION,
             embed_dim: facts.first().map_or(0, |f| f.embedding.len()),
             created_at: Utc::now(),
             facts,
@@ -368,8 +367,7 @@ mod tests {
         let entry = write_entry(dir.path(), "a.pak", &pak);
 
         let query = MemoryQuery::new().text("brown");
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
 
         assert_eq!(out.paks_scanned, 1);
         assert_eq!(out.results.len(), 1);
@@ -390,8 +388,7 @@ mod tests {
         let entry = write_entry(dir.path(), "vec.pak", &pak);
 
         let query = MemoryQuery::new().embedding(vec![1.0, 0.0]);
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
 
         // Orthogonal fact has cos == 0.0 which is not > 0.0, so it does not match.
         assert_eq!(out.results.len(), 1);
@@ -408,8 +405,7 @@ mod tests {
         // Query embedding has a different length than the fact embedding, so the
         // vector branch is skipped; with no text either, nothing matches.
         let query = MemoryQuery::new().embedding(vec![1.0, 0.0, 0.0]);
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
 
         assert!(out.results.is_empty());
     }
@@ -428,8 +424,7 @@ mod tests {
         let query = MemoryQuery::new()
             .text("matching")
             .embedding(vec![1.0, 0.0]);
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
 
         assert_eq!(out.results.len(), 1);
         // 1.0 (text) + 1.0 (cosine) == 2.0.
@@ -448,8 +443,7 @@ mod tests {
         let entry = write_entry(dir.path(), "all.pak", &pak);
 
         let query = MemoryQuery::new();
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
 
         assert_eq!(out.results.len(), 2);
         assert!(out.results.iter().all(|r| (r.score - 1.0).abs() < 1e-6));
@@ -468,8 +462,7 @@ mod tests {
         let entry = write_entry(dir.path(), "types.pak", &pak);
 
         let query = MemoryQuery::new().fact_type(FactType::Semantic);
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
 
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].fact.id, 2);
@@ -512,8 +505,7 @@ mod tests {
         };
 
         let query = MemoryQuery::new();
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
 
         assert_eq!(out.paks_scanned, 0, "traversal entry must not be read");
         assert!(out.results.is_empty());
@@ -546,14 +538,7 @@ mod tests {
         };
 
         let query = MemoryQuery::new();
-        let out = search_archives(
-            dir.path(),
-            &[present, absent],
-            &query,
-            10,
-            CURRENT_SCHEMA_VERSION,
-        )
-        .expect("search");
+        let out = search_archives(dir.path(), &[present, absent], &query, 10).expect("search");
 
         assert_eq!(out.paks_scanned, 1, "only the present pak is read");
         assert_eq!(out.results.len(), 1);
@@ -577,8 +562,7 @@ mod tests {
         );
 
         let query = MemoryQuery::new().text("apple");
-        let out = search_archives(dir.path(), &[e1, e2], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[e1, e2], &query, 10).expect("search");
 
         assert_eq!(out.paks_scanned, 2);
         assert_eq!(out.results.len(), 2);
@@ -606,21 +590,14 @@ mod tests {
         let query = MemoryQuery::new().embedding(vec![1.0, 0.0]);
 
         // Full set: descending by score.
-        let full = search_archives(
-            dir.path(),
-            std::slice::from_ref(&entry),
-            &query,
-            10,
-            CURRENT_SCHEMA_VERSION,
-        )
-        .expect("search");
+        let full =
+            search_archives(dir.path(), std::slice::from_ref(&entry), &query, 10).expect("search");
         assert_eq!(full.results.len(), 3);
         let order: Vec<i64> = full.results.iter().map(|r| r.fact.id).collect();
         assert_eq!(order, vec![1, 3, 2], "descending by cosine score");
 
         // limit < candidates: keep the top-2 highest-scored only.
-        let capped = search_archives(dir.path(), &[entry], &query, 2, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let capped = search_archives(dir.path(), &[entry], &query, 2).expect("search");
         assert_eq!(capped.results.len(), 2);
         let capped_ids: Vec<i64> = capped.results.iter().map(|r| r.fact.id).collect();
         assert_eq!(capped_ids, vec![1, 3], "top-2 by score retained");
@@ -636,8 +613,7 @@ mod tests {
         );
 
         let query = MemoryQuery::new();
-        let out = search_archives(dir.path(), &[entry], &query, 0, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 0).expect("search");
 
         assert!(out.results.is_empty());
         // The pak is still scanned even when limit == 0.
@@ -670,8 +646,7 @@ mod tests {
         );
 
         let query = MemoryQuery::new().text("apple");
-        let out = search_archives(dir.path(), &[e1, e2], &query, 2, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[e1, e2], &query, 2).expect("search");
 
         assert_eq!(out.paks_scanned, 2);
         // Six candidates, but only `limit` retained.
@@ -720,8 +695,7 @@ mod tests {
         );
         assert!(!entry_is_prunable(&entry, &query));
 
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
         assert_eq!(out.paks_scanned, 1);
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].fact.id, 42);
@@ -760,8 +734,7 @@ mod tests {
         // axis against a valid-time window is unsound — the fact must survive.
         assert!(!entry_is_prunable(&entry, &query));
 
-        let out = search_archives(dir.path(), &[entry], &query, 10, CURRENT_SCHEMA_VERSION)
-            .expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
         assert_eq!(
             out.paks_scanned, 1,
             "the pak must still be read, not pruned"
