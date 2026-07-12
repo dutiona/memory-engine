@@ -172,18 +172,21 @@ pub async fn list_archives(cold: &dyn ColdStorage) -> Result<Vec<ArchiveManifest
 ///
 /// Checks each manifest entry's blake3 hash against the actual file.
 ///
-/// # Errors
+/// Takes the manifest `entries` rather than a [`ColdStorage`] handle, so the caller reads
+/// the manifest *before* resolving `archive_dir` — preserving the pre-carve order, in which
+/// a failing manifest read surfaced its storage error ahead of the not-file-backed error
+/// (Wave 2 #816 / S4, sub-PR 3b). It also makes this a **pure** function: verification is
+/// filesystem + hashing only, and needs no port.
 ///
-/// Returns `MemoryError::Storage` on SQL failure.
-/// I/O errors for individual `.pak` files are reported per-entry, not propagated.
-pub async fn verify_archives(
-    cold: &dyn ColdStorage,
+/// I/O errors for individual `.pak` files are reported per-entry, not propagated — so this
+/// is infallible and returns the results directly.
+#[must_use]
+pub fn verify_archives(
+    entries: &[ArchiveManifestEntry],
     archive_dir: &Path,
-) -> Result<Vec<ArchiveVerifyResult>> {
-    let entries = list_archives(cold).await?;
-
+) -> Vec<ArchiveVerifyResult> {
     let mut results = Vec::with_capacity(entries.len());
-    for entry in &entries {
+    for entry in entries {
         // Path-traversal guard (#292): reject any manifest path that could
         // escape `archive_dir` (`..` or an absolute anchor) BEFORE any
         // filesystem access. The old `pak_path.starts_with(&archive_dir)`
@@ -213,7 +216,7 @@ pub async fn verify_archives(
         };
         results.push(result);
     }
-    Ok(results)
+    results
 }
 
 /// Search all archived `.pak` files for facts matching `query`.

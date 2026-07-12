@@ -100,17 +100,13 @@ impl MemoryEngine {
     /// Returns `MemoryError::Storage` on SQL failure.
     /// I/O errors for individual `.pak` files are reported per-entry, not propagated.
     ///
-    /// # Guard order (deliberate, disclosed change — Wave 2 #816 / S4, sub-PR 3b)
-    ///
-    /// The carve resolves `archive_dir` *before* reading the manifest; pre-carve, the
-    /// manifest was listed first. This is a fail-fast improvement, and the two orders can
-    /// only diverge for an **in-memory** engine whose manifest read *also* fails — where
-    /// this now reports `ArchiveError::NotFileBacked` (the actual, dominant problem) rather
-    /// than the storage error. On a healthy in-memory engine both orders yield
-    /// `NotFileBacked`. Recorded here because the carve is otherwise behaviour-identical.
     pub async fn verify_archives(&self) -> Result<Vec<ArchiveVerifyResult>> {
+        // Read the manifest BEFORE resolving the archive dir, preserving base's error
+        // precedence: on an in-memory engine whose manifest read also fails, the storage
+        // error surfaces (as pre-carve), not `NotFileBacked`.
+        let entries = self.list_archives().await?;
         let archive_dir = self.archive_dir()?;
-        crate::archive::verify_archives(self.cold.as_ref(), &archive_dir).await
+        Ok(crate::archive::verify_archives(&entries, &archive_dir))
     }
 
     /// Search all archived `.pak` files for facts matching `query`.
