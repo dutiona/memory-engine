@@ -1,16 +1,16 @@
 use chrono::{DateTime, Utc};
 // `Connection`/`Result`/`FactStore` are production-unused here since `apply_dedup`
-// moved to me-backend-sqlite (sub-PR 2b) — needed only by this file's own
-// `#[cfg(test)]` `local_dedup` helper and the test module below (via `use super::*`).
+// lives in me-backend-sqlite — needed only by this file's own `#[cfg(test)]`
+// `local_dedup` helper and the test module below (via `use super::*`).
 #[cfg(test)]
 use rusqlite::Connection;
 
 #[cfg(test)]
-use crate::error::Result;
+use me_backend_sqlite::store::facts::FactStore;
 #[cfg(test)]
-use crate::store::facts::FactStore;
-use crate::types::Fact;
+use me_types::error::Result;
 use me_types::math::cosine_similarity;
+use me_types::types::Fact;
 
 /// Floating-point tolerance for the dedup similarity comparison.
 ///
@@ -24,7 +24,7 @@ const DEDUP_SIMILARITY_EPSILON: f32 = 1e-6;
 /// Outcome of the single-connection [`local_dedup`] wrapper.
 ///
 /// Retained as the return shape exercised by this module's unit tests (hence
-/// `#[cfg(test)]`): the production path is [`compute_dedup`] → [`apply_dedup`], which
+/// `#[cfg(test)]`): the production path is [`compute_dedup`] → `apply_dedup`, which
 /// carries the skip state in [`DedupComputed::skipped`] instead. This enum still encodes
 /// the #272 contract — the skip is in the type, never an in-band `usize::MAX` count.
 #[cfg(test)]
@@ -47,9 +47,8 @@ enum DedupOutcome {
     },
 }
 
-/// `Expiry` and `DedupComputed` moved to `me-types` (Wave 2 #816 E.4b Phase B) as pure
-/// data; re-exported here so `dedup::{Expiry, DedupComputed}` keep resolving at their
-/// original in-crate path.
+/// `Expiry` and `DedupComputed` live in `me-types` as pure data; re-exported here so
+/// `dedup::{Expiry, DedupComputed}` keep resolving at their original in-crate path.
 pub(super) use me_types::types::consolidation::{DedupComputed, Expiry};
 
 /// Compute the local-dedup plan **without touching the store** (#409).
@@ -59,7 +58,7 @@ pub(super) use me_types::types::consolidation::{DedupComputed, Expiry};
 /// by expiring the lower-importance fact ([`choose_expiry`]); the survivor inherits the
 /// chain-wide maximum `importance_score` (#264, tracked in a running-max map so a stale
 /// in-memory score is never read). Returns the expirations and inherited scores as data
-/// for [`apply_dedup`] to write — no IO happens here, so it is safe to run while the
+/// for `apply_dedup` to write — no IO happens here, so it is safe to run while the
 /// engine holds no lock.
 ///
 /// When `active_facts.len()` exceeds `max_facts` the O(N·M) pass is skipped
@@ -101,7 +100,7 @@ pub(super) fn compute_dedup(
     // `active_facts` slice is never mutated, so within a multi-duplicate chain a
     // survivor's in-memory score goes stale once an earlier merge inherited a higher
     // value. This map is the live source of truth; its final state is the set of
-    // score writes [`apply_dedup`] later applies.
+    // score writes `apply_dedup` later applies.
     let mut running_scores: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
 
     for &new_fact in &new_facts {
@@ -169,22 +168,23 @@ pub(super) fn compute_dedup(
     }
 }
 
-/// Apply a computed dedup plan inside the caller's write context (#409) — relocated to
-/// `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b) along with [`apply_plan`](super::apply_plan),
-/// its only production caller (which now calls the backend crate's own copy directly,
-/// not this re-export). Re-exported here so this file's own `#[cfg(test)]`-only
-/// [`local_dedup`] wrapper (composing [`compute_dedup`] + `apply_dedup` for this module's
-/// unit tests) keeps resolving unchanged. See the backend crate's
+/// Apply a computed dedup plan inside the caller's write context (#409) — lives in
+/// `me-backend-sqlite` along with `apply_plan` (`pipeline::apply_plan`), its only
+/// production caller (which calls the backend crate's own copy directly through the
+/// `StorageBackend` port, not through this crate). Re-exported here so this file's own
+/// `#[cfg(test)]`-only [`local_dedup`] wrapper (composing [`compute_dedup`] + `apply_dedup`
+/// for this module's unit tests) keeps resolving unchanged. See the backend crate's
 /// `consolidation::dedup::apply_dedup` for the full concurrency/#409 doc.
 #[cfg(test)]
 pub(super) use me_backend_sqlite::consolidation::apply_dedup;
 
 /// Local deduplication pass — compute + apply on a single connection.
 ///
-/// A thin wrapper over [`compute_dedup`] + [`apply_dedup`], kept as the per-pass entry
-/// point exercised by this module's unit tests (hence `#[cfg(test)]`). The engine no
-/// longer calls this: it runs [`compute_dedup`] lock-free and defers the writes to a
-/// single final transaction (#409). The behavior is identical.
+/// A thin wrapper over [`compute_dedup`] + `apply_dedup`, kept as the per-pass entry
+/// point exercised by this module's unit tests (hence `#[cfg(test)]`). The crate's
+/// production orchestration no longer calls this: it runs [`compute_dedup`] lock-free
+/// and defers the writes to a single final transaction (#409). The behavior is
+/// identical.
 ///
 /// `active_facts` is the current active set, loaded once by the caller and shared with
 /// the cluster pass (#389). A `threshold` of 1.0 merges only exact duplicates.
@@ -284,8 +284,8 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    use crate::store::schema::{init_schema, open_memory};
-    use crate::types::{FactType, NewFact};
+    use me_backend_sqlite::store::schema::{init_schema, open_memory};
+    use me_types::types::{FactType, NewFact};
 
     /// A cap so large the safety check never fires — for tests not exercising the
     /// over-cap skip path. (`usize::MAX` is now just a big number, no longer the

@@ -5562,6 +5562,27 @@ mod snapshot_integration {
                 .await,
             Err(MemoryError::EmbeddingReopenRequired { new_dim: 8 })
         ));
+        // `consolidate` too (Wave 2 #816 / S4, sub-PR 4). Its fence check is enforced in
+        // exactly ONE place — `me_consolidate::consolidate`'s opening `ctx.ensure_open()?`
+        // — because the facade delegate is a bare one-line forward with no pre-flight of
+        // its own. Before this assertion, deleting that line left the entire suite green:
+        // a fenced handle would have consolidated against the *stale* `embed_dim`, writing
+        // summaries whose embeddings disagree with the store's live dimension. The carve is
+        // precisely the event that makes an untested guard evaporate, so it is pinned here.
+        assert!(
+            matches!(
+                engine
+                    .consolidate(
+                        std::sync::Arc::new(MockGen) as std::sync::Arc<dyn SummaryGenerator>,
+                        embedder.clone(),
+                        &ConsolidationConfig::default(),
+                    )
+                    .await,
+                Err(MemoryError::EmbeddingReopenRequired { new_dim: 8 })
+            ),
+            "a fenced handle must refuse to consolidate — the #742 fence is enforced solely \
+             by me_consolidate::consolidate's ctx.ensure_open()"
+        );
 
         // Dimension-independent accessors are NOT fenced.
         assert_eq!(engine.embed_dim(), DIM);

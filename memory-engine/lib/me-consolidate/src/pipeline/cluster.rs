@@ -1,17 +1,17 @@
-// `Connection` is production-unused here since `apply_clusters` moved to
-// me-backend-sqlite (sub-PR 2b) — needed only by this file's own `#[cfg(test)]`
+// `Connection` is production-unused here since `apply_clusters` lives in
+// me-backend-sqlite — needed only by this file's own `#[cfg(test)]`
 // `cluster_fusion` helper and the test module below (via `use super::*`).
 #[cfg(test)]
 use rusqlite::Connection;
 
-use crate::error::Result;
+use me_types::error::Result;
 use me_types::math::cosine_similarity;
 // Used by this file's own `#[cfg(test)]` module (via `use super::*`) to verify writes
-// `apply_clusters` (now in me-backend-sqlite) made — not by any production fn here.
+// `apply_clusters` (in me-backend-sqlite) made — not by any production fn here.
 #[cfg(test)]
-use crate::store::summaries::SummaryStore;
-use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
-use crate::types::{ConsolidationLevel, Fact, NewSummary};
+use me_backend_sqlite::store::summaries::SummaryStore;
+use me_traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
+use me_types::types::{ConsolidationLevel, Fact, NewSummary};
 
 /// Parameters for the cluster-fusion pass, bundled so the [`compute_clusters`] and
 /// apply halves share one descriptor — and so each fits under clippy's argument limit
@@ -45,7 +45,7 @@ pub(super) struct ClusterComputed {
 /// Greedy single-linkage clustering at `params.cluster_threshold` (cosine; lower than
 /// the dedup threshold so clustering is looser than dedup), then the consumer
 /// `summarize`/`embed` IO for each cluster ≥ `params.min_cluster_size`. Returns the
-/// summaries as data for [`apply_clusters`] to write — no store IO happens here, so it
+/// summaries as data for `apply_clusters` to write — no store IO happens here, so it
 /// is safe to run while the engine holds no lock.
 ///
 /// `facts` is the post-dedup active set, borrowed (no clone — #679/#389). The safety
@@ -125,24 +125,23 @@ pub(super) fn compute_clusters(
     })
 }
 
-/// Apply computed cluster summaries inside the caller's write context (#409) — relocated
-/// to `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b) along with
-/// [`apply_plan`](super::apply_plan), its only production caller (which now calls the
-/// backend crate's own copy directly, not this re-export). Re-exported here so this
-/// file's own `#[cfg(test)]`-only [`cluster_fusion`] wrapper (composing
-/// [`compute_clusters`] + `apply_clusters` for this module's unit tests) keeps resolving
-/// unchanged.
+/// Apply computed cluster summaries inside the caller's write context (#409) — lives
+/// in `me-backend-sqlite` along with `apply_plan` (`pipeline::apply_plan`), its only
+/// production caller (which calls the backend crate's own copy directly through the
+/// `StorageBackend` port, not through this crate). Re-exported here so this file's own
+/// `#[cfg(test)]`-only [`cluster_fusion`] wrapper (composing [`compute_clusters`] +
+/// `apply_clusters` for this module's unit tests) keeps resolving unchanged.
 #[cfg(test)]
 pub(super) use me_backend_sqlite::consolidation::apply_clusters;
 
 /// Cluster fusion pass — compute + apply on a single connection.
 ///
-/// Thin wrapper over [`compute_clusters`] + [`apply_clusters`], kept as the per-pass
+/// Thin wrapper over [`compute_clusters`] + `apply_clusters`, kept as the per-pass
 /// entry point exercised by this module's unit tests (hence `#[cfg(test)]`). Returns the
-/// number of clusters created. The engine no longer calls this — it runs
-/// [`compute_clusters`] lock-free and applies the writes inside the final transaction
-/// (#409) — but the behavior is identical: existing summaries are cleared and rebuilt
-/// only when the pass runs (never over the cap).
+/// number of clusters created. The crate's production orchestration no longer calls
+/// this — it runs [`compute_clusters`] lock-free and applies the writes inside the
+/// final transaction (#409) — but the behavior is identical: existing summaries are
+/// cleared and rebuilt only when the pass runs (never over the cap).
 #[cfg(test)]
 fn cluster_fusion(
     conn: &Connection,
@@ -203,9 +202,10 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    use crate::store::facts::FactStore;
-    use crate::store::schema::{init_schema, open_memory};
-    use crate::types::{FactType, NewFact};
+    use me_backend_sqlite::store::facts::FactStore;
+    use me_backend_sqlite::store::schema::{init_schema, open_memory};
+    use me_traits::test_util::MockEmbedder;
+    use me_types::types::{FactType, NewFact};
 
     /// Load the active facts and run `cluster_fusion` over borrowed references —
     /// the orchestrator now owns the single load (#389), so tests mirror that here.
@@ -279,7 +279,7 @@ mod tests {
         insert_fact(&conn, dim, "c2c", vec![0.03, 0.97, 0.0, 0.0]);
 
         let mock_gen = MockGenerator;
-        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
+        let mock_embed = MockEmbedder::new(dim);
         let clusters = cluster(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
         assert_eq!(clusters, 2);
 
@@ -300,7 +300,7 @@ mod tests {
         insert_fact(&conn, dim, "b", vec![0.99, 0.01, 0.0, 0.0]);
 
         let mock_gen = MockGenerator;
-        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
+        let mock_embed = MockEmbedder::new(dim);
         let clusters = cluster(&conn, &mock_gen, &mock_embed, dim, 3, 0.85).unwrap();
         assert_eq!(clusters, 0);
     }
@@ -316,7 +316,7 @@ mod tests {
         insert_fact(&conn, dim, "gamma", vec![0.98, 0.02, 0.0, 0.0]);
 
         let mock_gen = MockGenerator;
-        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
+        let mock_embed = MockEmbedder::new(dim);
         cluster(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
 
         let summaries = SummaryStore::new(&conn, dim)
@@ -338,7 +338,7 @@ mod tests {
         insert_fact(&conn, dim, "z", vec![0.98, 0.02, 0.0, 0.0]);
 
         let mock_gen = MockGenerator;
-        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
+        let mock_embed = MockEmbedder::new(dim);
 
         // Run twice — should have exactly the same result
         cluster(&conn, &mock_gen, &mock_embed, dim, 2, 0.85).unwrap();
@@ -369,7 +369,7 @@ mod tests {
         let made = cluster(
             &loose,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(dim),
+            &MockEmbedder::new(dim),
             dim,
             2,
             0.85,
@@ -385,7 +385,7 @@ mod tests {
         let made = cluster(
             &strict,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(dim),
+            &MockEmbedder::new(dim),
             dim,
             2,
             0.95,
@@ -528,15 +528,7 @@ mod tests {
     }
 
     fn single_cluster_scope(conn: &Connection, dim: usize) -> i64 {
-        cluster(
-            conn,
-            &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(dim),
-            dim,
-            2,
-            0.85,
-        )
-        .unwrap();
+        cluster(conn, &MockGenerator, &MockEmbedder::new(dim), dim, 2, 0.85).unwrap();
         let summaries = SummaryStore::new(conn, dim)
             .list_by_level(&ConsolidationLevel::Cluster)
             .unwrap();

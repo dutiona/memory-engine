@@ -13,6 +13,7 @@ members = [
     "memory-engine/lib/me-ingest",
     "memory-engine/lib/me-query",
     "memory-engine/lib/me-archive",
+    "memory-engine/lib/me-consolidate",
     "memory-engine/lib/memory-engine",
     "memory-engine/lib/embed",
     "memory-engine/bin/cli",

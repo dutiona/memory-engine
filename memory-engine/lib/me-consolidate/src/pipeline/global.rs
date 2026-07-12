@@ -1,24 +1,24 @@
-// `Connection` is production-unused here since `apply_global` moved to
-// me-backend-sqlite (sub-PR 2b) — needed only by this file's own `#[cfg(test)]`
+// `Connection` is production-unused here since `apply_global` lives in
+// me-backend-sqlite — needed only by this file's own `#[cfg(test)]`
 // `global_integration` helper.
 #[cfg(test)]
 use rusqlite::Connection;
 
-use crate::error::Result;
+use me_types::error::Result;
 // Test-only for the same reason as `Connection` above: `global_integration` and this
 // file's own test module (via `use super::*`) are the only remaining callers.
 #[cfg(test)]
-use crate::store::summaries::SummaryStore;
-use crate::traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
-use crate::types::{ConsolidationLevel, NewSummary};
+use me_backend_sqlite::store::summaries::SummaryStore;
+use me_traits::{EmbeddingProvider, SummarizableContent, SummaryGenerator};
+use me_types::types::{ConsolidationLevel, NewSummary};
 
 /// Compute the global summary from the **in-memory** cluster summaries, touching no
 /// store (#409). Returns `None` when there are no cluster summaries to integrate.
 ///
-/// The engine passes the cluster summaries it just computed this run (#409: not a store
-/// re-read), so the consumer `summarize`/`embed` IO here runs lock-free. Semantically
-/// identical to re-reading them: the global summary aggregates exactly the clusters this
-/// run produced.
+/// The crate's production orchestration passes the cluster summaries it just computed
+/// this run (#409: not a store re-read), so the consumer `summarize`/`embed` IO here
+/// runs lock-free. Semantically identical to re-reading them: the global summary
+/// aggregates exactly the clusters this run produced.
 ///
 /// # Errors
 ///
@@ -69,25 +69,24 @@ pub(super) fn compute_global(
     }))
 }
 
-/// Apply the computed global summary inside the caller's write context (#409) —
-/// relocated to `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b) along with
-/// [`apply_plan`](super::apply_plan), its only production caller (which now calls the
-/// backend crate's own copy directly, not this re-export). Re-exported here so this
-/// file's own `#[cfg(test)]`-only [`global_integration`] wrapper (composing
-/// [`compute_global`] + `apply_global` for this module's unit tests) keeps resolving
-/// unchanged.
+/// Apply the computed global summary inside the caller's write context (#409) — lives
+/// in `me-backend-sqlite` along with `apply_plan` (`pipeline::apply_plan`), its only
+/// production caller (which calls the backend crate's own copy directly through the
+/// `StorageBackend` port, not through this crate). Re-exported here so this file's own
+/// `#[cfg(test)]`-only [`global_integration`] wrapper (composing [`compute_global`] +
+/// `apply_global` for this module's unit tests) keeps resolving unchanged.
 #[cfg(test)]
 pub(super) use me_backend_sqlite::consolidation::apply_global;
 
 /// Global integration pass — compute + apply on a single connection.
 ///
-/// Thin wrapper over [`compute_global`] + [`apply_global`], kept as the per-pass entry
+/// Thin wrapper over [`compute_global`] + `apply_global`, kept as the per-pass entry
 /// point exercised by this module's unit tests (hence `#[cfg(test)]`). Reads the current
 /// cluster summaries from the store, summarizes them, and applies the result. Returns 1
-/// if a global summary was created, 0 if no clusters exist. The engine no longer calls
-/// this — it runs [`compute_global`] over the in-memory cluster summaries it just
-/// produced and applies inside the final transaction (#409) — but the behavior is
-/// identical.
+/// if a global summary was created, 0 if no clusters exist. The crate's production
+/// orchestration no longer calls this — it runs [`compute_global`] over the in-memory
+/// cluster summaries it just produced and applies inside the final transaction (#409) —
+/// but the behavior is identical.
 #[cfg(test)]
 fn global_integration(
     conn: &Connection,
@@ -120,7 +119,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    use crate::store::schema::{init_schema, open_memory};
+    use me_backend_sqlite::store::schema::{init_schema, open_memory};
+    use me_traits::test_util::MockEmbedder;
 
     /// Mock generator that concatenates cluster-summary contents.
     struct MockGenerator;
@@ -153,7 +153,7 @@ mod tests {
         }
 
         let mock_gen = MockGenerator;
-        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
+        let mock_embed = MockEmbedder::new(dim);
         let count =
             global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();
         assert_eq!(count, 1);
@@ -175,7 +175,7 @@ mod tests {
         let dim = 4;
 
         let mock_gen = MockGenerator;
-        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
+        let mock_embed = MockEmbedder::new(dim);
         let count =
             global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();
         assert_eq!(count, 0);
@@ -200,7 +200,7 @@ mod tests {
             .unwrap();
 
         let mock_gen = MockGenerator;
-        let mock_embed = crate::test_utils::MockEmbedder::new(dim);
+        let mock_embed = MockEmbedder::new(dim);
 
         // Run twice
         global_integration(&conn, &mock_gen, &mock_embed, dim, chrono::Utc::now()).unwrap();

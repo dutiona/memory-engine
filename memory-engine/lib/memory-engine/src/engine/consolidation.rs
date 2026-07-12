@@ -1,10 +1,19 @@
+//! Consolidation delegate for [`MemoryEngine`].
+//!
+//! Extracted into the [`me_consolidate`] crate (Wave 2 #816 / S4, sub-PR 4 — the final
+//! S4 sub-PR, closes #940). `MemoryEngine::consolidate` resolves this engine's
+//! `MemoryCtx` + in-memory graph, then delegates to `me_consolidate::consolidate`.
+//! Base's pre-carve `consolidate` called only `self.ensure_open()` (the #742
+//! read-fence) — no explicit read-only pre-check — so the delegate stays a one-line
+//! forward with no pre-flight of its own; see `me_consolidate::consolidate`'s own doc
+//! for why `ReadOnly` is caught below the seam instead.
+
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::graph::MemoryGraph;
 use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
 
-use super::{MemoryEngine, spawn_join_err};
+use super::MemoryEngine;
 
 impl MemoryEngine {
     /// Run three-pass consolidation: local dedup, cluster fusion, global integration.
@@ -44,45 +53,6 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        self.ensure_open()?;
-        // Phase 1 — READ: snapshot the active set + watermark below the seam.
-        let snapshot = self
-            .storage
-            .load_consolidation_snapshot(config.clone())
-            .await?;
-
-        // Phase 2 — COMPUTE (no lock): dedup decision + cluster/global summaries,
-        // including the consumer `summarize`/`embed` IO. Offloaded to the blocking
-        // pool so the (possibly blocking HTTP) consumer calls never park the async
-        // executor (#409) — and a `reqwest::blocking` provider stays nested-runtime-safe.
-        let plan = {
-            let config = config.clone();
-            let embed_dim = self.embed_dim;
-            tokio::task::spawn_blocking(move || {
-                crate::consolidation::compute_plan(
-                    &snapshot,
-                    &*generator,
-                    &*embedder,
-                    embed_dim,
-                    &config,
-                )
-            })
-            .await
-            .map_err(spawn_join_err)??
-        };
-
-        // Phase 3 — WRITE: apply atomically below the seam. `apply_plan` returns the
-        // ids it *actually* expired (a concurrent writer may have pre-empted some in
-        // the read→compute gap) and fires the HNSW `notify_expire` internally (Stage
-        // B), so the engine rebuilds its in-memory graph off the real change set only.
-        let (stats, expired_ids) = self.storage.apply_plan(plan).await?;
-        if !expired_ids.is_empty() {
-            // Rebuild the in-memory graph from the active edge set (port read first,
-            // then take the write guard — no guard held across `.await`).
-            let edges = self.storage.list_active_edges().await?;
-            *self.graph.write() = MemoryGraph::from_active_edges(&edges);
-        }
-
-        Ok(stats)
+        me_consolidate::consolidate(self.mem_ctx(), &self.graph, generator, embedder, config).await
     }
 }

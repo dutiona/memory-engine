@@ -14,45 +14,43 @@
 //!    a write failure rolls the whole transaction back.
 //!
 //! A single-connection `consolidate` entry composes all three on one connection for the
-//! unit tests; the engine calls the phases separately so it can drop the lock between the
-//! read and the compute.
+//! unit tests; the crate's own [`crate::consolidate`] free function calls the phases
+//! separately so it can drop the lock between the read and the compute.
 //!
 //! [`load_snapshot`]/[`apply_plan`] (phases 1 and 3 — the halves that touch a
-//! `rusqlite::Connection`) relocated to `me-backend-sqlite` in the Wave 2 #816 / S2
-//! backend carve (sub-PR 2b), along with `dedup`/`cluster`/`global`'s own SQL-touching
-//! `apply_*` callees; this module re-exports all of them
-//! (`pub(crate) use me_backend_sqlite::consolidation::{load_snapshot,
-//! load_snapshot_capped, apply_plan};`, similarly in `dedup`/`cluster`/`global`), so
-//! every path here (`crate::consolidation::{load_snapshot, apply_plan}`,
-//! `crate::consolidation::dedup::apply_dedup`, …) and this module's own
-//! `consolidate`/`consolidate_with_caps` test helpers keep resolving unchanged. Phase 2
-//! ([`compute_plan`], pure business logic over `&dyn SummaryGenerator`/
-//! `&dyn EmbeddingProvider`, no `Connection`) stays here.
+//! `rusqlite::Connection`) live in `me-backend-sqlite`, moved there in the pre-carve
+//! facade's Wave 2 #816 / S2 backend split (sub-PR 2b), along with `dedup`/`cluster`/
+//! `global`'s own SQL-touching `apply_*` callees; this module re-exports all of them
+//! under `#[cfg(test)]` (`pub(crate) use me_backend_sqlite::consolidation::{load_snapshot,
+//! load_snapshot_capped, apply_plan};`, similarly in `dedup`/`cluster`/`global`), so this
+//! module's own `consolidate`/`consolidate_with_caps` test helpers — the only remaining
+//! callers post-carve (the crate's production orchestration in `lib.rs` calls
+//! `ctx.storage.{load_consolidation_snapshot, apply_plan}` directly through the port) —
+//! keep resolving unchanged. Phase 2 ([`compute_plan`], pure business logic over
+//! `&dyn SummaryGenerator`/`&dyn EmbeddingProvider`, no `Connection`) stays here.
 
 mod cluster;
 mod dedup;
 mod global;
 
 // `DateTime`/`Utc`/`Connection`/`get_config`/`set_config` are production-unused here
-// since `load_snapshot`/`load_snapshot_capped`/`apply_plan` moved to me-backend-sqlite
-// (sub-PR 2b) — they're needed only by this file's own `#[cfg(test)]` `consolidate`/
+// since `load_snapshot`/`load_snapshot_capped`/`apply_plan` live in me-backend-sqlite —
+// they're needed only by this file's own `#[cfg(test)]` `consolidate`/
 // `consolidate_with_caps` helpers and the test module below (via `use super::*`).
 #[cfg(test)]
 use chrono::{DateTime, Utc};
 #[cfg(test)]
 use rusqlite::Connection;
 
-use crate::error::Result;
-#[cfg(test)]
-use crate::store::schema::{get_config, set_config};
-use crate::traits::{
-    ConsolidationConfig, EmbeddingProvider, SummarizableContent, SummaryGenerator,
-};
+use me_traits::{ConsolidationConfig, EmbeddingProvider, SummarizableContent, SummaryGenerator};
 // Same reason as above: `ConsolidationStats` is only the return type of
-// `apply_plan`/`consolidate`/`consolidate_with_caps`, all moved or test-only now.
+// `apply_plan`/`consolidate`/`consolidate_with_caps`, all backend-side or test-only now.
 #[cfg(test)]
-use crate::traits::ConsolidationStats;
-use crate::types::Fact;
+use me_traits::ConsolidationStats;
+#[cfg(test)]
+use me_types::error::MemoryError;
+use me_types::error::Result;
+use me_types::types::Fact;
 
 /// Safety cap for the O(N·M) dedup pass (`compute_dedup`). Beyond this many active facts
 /// the pass is **skipped and the consolidation watermark is NOT advanced**, so the
@@ -60,8 +58,8 @@ use crate::types::Fact;
 /// (`DedupComputed::skipped`).
 ///
 /// Duplicated (same value) in `me_backend_sqlite::consolidation` for
-/// [`load_snapshot`]'s own default — that half moved below the seam in sub-PR 2b and
-/// needs its own copy of the cap it short-circuits on.
+/// [`load_snapshot`]'s own default — that half lives below the seam and needs its own
+/// copy of the cap it short-circuits on.
 const MAX_FACTS_FOR_DEDUP: usize = 50_000;
 
 /// Safety cap for the O(N²) cluster pass (`compute_clusters`). Beyond this many active facts
@@ -95,7 +93,7 @@ fn summarize_and_embed(
     let text = generator.summarize(items)?;
     let embedding = embedder.embed(&text)?;
     if embedding.len() != embed_dim {
-        return Err(crate::error::MemoryError::EmbeddingDimension {
+        return Err(me_types::error::MemoryError::EmbeddingDimension {
             expected: embed_dim,
             actual: embedding.len(),
         });
@@ -104,24 +102,24 @@ fn summarize_and_embed(
 }
 
 /// `Snapshot` and `ConsolidationPlan` — the read-phase snapshot and the fully-computed
-/// plan — moved to `me-types` (Wave 2 #816 E.4b Phase B) as pure data; re-exported here
-/// so `crate::consolidation::{Snapshot, ConsolidationPlan}` keep resolving.
+/// plan — live in `me-types` as pure data; re-exported here so
+/// `pipeline::{Snapshot, ConsolidationPlan}` keep resolving.
 pub use me_types::types::consolidation::{ConsolidationPlan, Snapshot};
 
 /// The cap-injecting core, re-exported separately: only this file's own `#[cfg(test)]`
 /// `consolidate_with_caps` helper calls it directly (production goes through
 /// [`load_snapshot`]'s own default caps).
 #[cfg(test)]
-pub use me_backend_sqlite::consolidation::load_snapshot_capped;
+use me_backend_sqlite::consolidation::load_snapshot_capped;
 /// Phase 1 ([`load_snapshot`]) and phase 3 ([`apply_plan`]) — the halves of this pipeline
-/// that touch a `rusqlite::Connection` — relocated to `me-backend-sqlite` (Wave 2 #816 /
-/// S2, sub-PR 2b) along with `sqlite::consolidation`'s `impl ConsolidationStore for
-/// SqliteBackend`, their only production caller (which now calls the backend crate's own
-/// copy directly, not this re-export, since it moved there too in the same sub-PR). Kept
-/// `#[cfg(test)]`: this file's own `consolidate`/`consolidate_with_caps` helpers and the
-/// `apply_plan_*` concurrency tests below still call these two directly.
+/// that touch a `rusqlite::Connection` — live in `me-backend-sqlite` along with
+/// `sqlite::consolidation`'s `impl ConsolidationStore for SqliteBackend`, their only
+/// production caller (which calls the backend crate's own copy directly through the
+/// `StorageBackend` port, not through this crate). Kept `#[cfg(test)]`: this file's own
+/// `consolidate`/`consolidate_with_caps` helpers and the `apply_plan_*` concurrency
+/// tests below still call these two directly.
 #[cfg(test)]
-pub use me_backend_sqlite::consolidation::{apply_plan, load_snapshot};
+use me_backend_sqlite::consolidation::{apply_plan, load_snapshot};
 
 /// Phase 2 — compute the plan **without any lock or store access** (engine: production
 /// caps). The consumer `summarize`/`embed` IO happens here, off the write lock (#409).
@@ -234,9 +232,9 @@ fn compute_plan_capped(
 }
 
 /// Orchestrate all 3 consolidation passes on a single connection (load → compute →
-/// apply). The convenience entry for non-engine callers and the unit tests; the engine
-/// instead calls the three phases separately so it can drop its write lock across the
-/// lock-free [`compute_plan`] (#409).
+/// apply). The convenience entry for non-engine callers and the unit tests; the crate's
+/// production orchestration (`crate::consolidate`) instead calls the phases separately
+/// so it can drop its write lock across the lock-free [`compute_plan`] (#409).
 ///
 /// Reads `last_consolidated_at` to scope dedup and updates it after a successful run.
 /// `generator` produces the summary text; `embedder` projects it into the fact vector
@@ -304,10 +302,11 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
 
-    use crate::store::facts::FactStore;
-    use crate::store::schema::{init_schema, open_memory};
-    use crate::store::summaries::SummaryStore;
-    use crate::types::{ConsolidationLevel, FactType, NewFact, NewSummary};
+    use me_backend_sqlite::store::facts::FactStore;
+    use me_backend_sqlite::store::schema::{get_config, init_schema, open_memory, set_config};
+    use me_backend_sqlite::store::summaries::SummaryStore;
+    use me_traits::test_util::MockEmbedder;
+    use me_types::types::{ConsolidationLevel, FactType, NewFact, NewSummary};
 
     const DIM: usize = 4;
 
@@ -326,7 +325,7 @@ mod tests {
 
     impl SummaryGenerator for FailingGenerator {
         fn summarize(&self, _items: &[SummarizableContent<'_>]) -> Result<String> {
-            Err(crate::error::MemoryError::Internal("summarize boom".into()))
+            Err(MemoryError::Internal("summarize boom".into()))
         }
     }
 
@@ -370,7 +369,7 @@ mod tests {
         let (stats, expired) = consolidate(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -404,20 +403,14 @@ mod tests {
         // `dedup_threshold` is valid but `min_cluster_size` is not, so the error
         // must come from validation rather than a pass. If validation did NOT run
         // first, the valid threshold would have expired one near-duplicate.
-        // `ConsolidationConfig` is `#[non_exhaustive]` and now lives in the `me-traits`
-        // crate, so it can no longer be struct-literal'd here — build it via the builder.
+        // `ConsolidationConfig` is `#[non_exhaustive]` and lives in the `me-traits`
+        // crate, so it cannot be struct-literal'd here — build it via the builder.
         let bad = ConsolidationConfig::builder()
             .dedup_threshold(0.90)
             .min_cluster_size(0)
             .build();
-        let err = consolidate(
-            &conn,
-            &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
-            DIM,
-            &bad,
-        )
-        .unwrap_err();
+        let err =
+            consolidate(&conn, &MockGenerator, &MockEmbedder::new(DIM), DIM, &bad).unwrap_err();
         assert!(
             err.to_string().contains("min_cluster_size"),
             "error should name the offending parameter, got: {err}"
@@ -449,7 +442,7 @@ mod tests {
         let (stats, expired) = consolidate(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -491,7 +484,7 @@ mod tests {
         let (stats, _) = consolidate(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -501,14 +494,18 @@ mod tests {
         assert_eq!(stats.global_summaries, 0);
 
         assert!(
-            crate::store::embedding_meta::load(&conn).unwrap().is_none(),
+            me_backend_sqlite::store::embedding_meta::load(&conn)
+                .unwrap()
+                .is_none(),
             "a vector-less consolidation must not stamp the embedding identity"
         );
 
         // The harm averted: a later real first writer with a DIFFERENT embedder now
         // wins, instead of inheriting the no-op run's identity under #614 enforcement.
-        let other = crate::types::EmbeddingFingerprint::new("other-model", "other-provider", DIM);
-        let recorded = crate::store::embedding_meta::record_if_absent(&conn, &other, DIM).unwrap();
+        let other =
+            me_types::types::EmbeddingFingerprint::new("other-model", "other-provider", DIM);
+        let recorded =
+            me_backend_sqlite::store::embedding_meta::record_if_absent(&conn, &other, DIM).unwrap();
         assert_eq!(
             recorded, other,
             "the first real writer wins after a no-op consolidation"
@@ -530,7 +527,7 @@ mod tests {
         let (stats, _) = consolidate(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -541,8 +538,8 @@ mod tests {
         );
 
         assert_eq!(
-            crate::store::embedding_meta::load(&conn).unwrap(),
-            Some(crate::test_utils::MockEmbedder::new(DIM).fingerprint()),
+            me_backend_sqlite::store::embedding_meta::load(&conn).unwrap(),
+            Some(MockEmbedder::new(DIM).fingerprint()),
             "a summary-writing consolidation records the embedder's fingerprint"
         );
     }
@@ -560,7 +557,7 @@ mod tests {
         consolidate(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -595,7 +592,7 @@ mod tests {
         let (stats, expired) = consolidate(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -620,13 +617,13 @@ mod tests {
         let err = consolidate(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
         .expect_err("a malformed watermark must surface as an error");
         assert!(
-            matches!(err, crate::error::MemoryError::Migration(_)),
+            matches!(err, MemoryError::Migration(_)),
             "expected Migration error, got {err:?}"
         );
     }
@@ -652,13 +649,13 @@ mod tests {
         let err = consolidate(
             &conn,
             &FailingGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
         .expect_err("a failing pass must abort consolidation");
         assert!(
-            matches!(err, crate::error::MemoryError::Internal(_)),
+            matches!(err, MemoryError::Internal(_)),
             "expected Internal error from the generator, got {err:?}"
         );
 
@@ -699,7 +696,7 @@ mod tests {
         let (stats, expired) = consolidate(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
         )
@@ -736,7 +733,7 @@ mod tests {
         let (stats, expired) = consolidate_with_caps(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
             1,
@@ -798,7 +795,7 @@ mod tests {
         let (stats, expired) = consolidate_with_caps(
             &conn,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &ConsolidationConfig::default(),
             1,
@@ -841,7 +838,7 @@ mod tests {
         let plan = compute_plan(
             &snapshot,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &config,
         )
@@ -888,7 +885,7 @@ mod tests {
         let plan = compute_plan(
             &snapshot,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &config,
         )
@@ -953,7 +950,7 @@ mod tests {
         let plan = compute_plan(
             &snapshot,
             &MockGenerator,
-            &crate::test_utils::MockEmbedder::new(DIM),
+            &MockEmbedder::new(DIM),
             DIM,
             &config,
         )
