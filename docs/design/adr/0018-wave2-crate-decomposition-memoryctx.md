@@ -71,10 +71,28 @@ build on these boundaries have the durable _why_.
 
 8. **Three deliberate, gated public-API breaks** (`cargo public-api` in the per-slice gate,
    this ADR the record): (a) **`DreamCycle::run(&dyn CycleCtx)`** replacing
-   `&CycleContext` — necessary so `me-traits` does not depend on `me-consolidate` (the DTO
-   move alone leaves that cycle); `CycleCtx` is a `me-traits` capability trait enumerating
-   the exact read-set the shipped `DefaultDreamCycle`/`LlmDreamCycle` use, and
-   `me-consolidate`'s `CycleContext` _implements_ it. Landed in **S1** (keystone).
+   `&CycleContext` — necessary so that `me-traits` (L0.5) does not have to **name the type
+   that owns the cycle's read-set**; `CycleCtx` is a `me-traits` capability trait
+   enumerating the exact read-set the shipped `DefaultDreamCycle`/`LlmDreamCycle` use, and
+   `CycleContext` _implements_ it. Landed in **S1** (keystone).
+
+   > **Amended at S4 sub-PR 4** (the `me-consolidate` carve). This clause originally read
+   > "necessary so `me-traits` does not depend on **`me-consolidate`** … and
+   > **`me-consolidate`'s** `CycleContext` implements it", on the assumption that
+   > `CycleContext` would land in `me-consolidate`. **It did not.** `CycleContext` (and
+   > `DreamContext`, which it wraps) remain in the **facade** (L4): `DreamContext` holds
+   > `engine: &'a MemoryEngine`, so relocating the cycle/cognitive layer into any L3 crate
+   > would create an **L3 → L4 back-edge**. `me-consolidate` was therefore carved as the
+   > **Consolidate primitive only** (the 3-pass dedup → cluster → global pipeline), which is
+   > what the five-primitive architecture actually names; the Phase-5 dream-cycle layer is a
+   > *consumer* of primitives, not one of them. Carving it needs `DreamContext` inverted into
+   > a capability trait too — a further public-API break, tracked with its design in **#981**.
+   >
+   > **The S1 break stands, and is now *more* necessary, not less:** had `DreamCycle::run`
+   > kept `&CycleContext`, `me-traits` would today have to name a **facade** type — an
+   > L0.5 → L4 back-edge, strictly worse than the L0.5 → L3 edge the break was originally
+   > justified against. Only the *stated reason* needed generalizing: the trait must not name
+   > whichever crate owns the cycle's read-set, wherever that crate turns out to sit.
    (b) **`VectorSearchStrategy` un-exported from the facade's public surface**
    (**superseded**, S4 — #925 sub-PR 2 / the `me-query` carve; supersedes the
    originally-planned signature break, `search(&Connection, …)` →

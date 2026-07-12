@@ -13,7 +13,10 @@
 //!   `consolidate_with_caps` test wrappers that compose the pure `compute_*` functions
 //!   with the backend's `apply_*`, are `#[cfg(test)]`-gated and reach
 //!   `me-backend-sqlite` through a `[dev-dependencies]` edge only — not a production
-//!   one (verified by this crate's own `cargo tree --edges normal` gate).
+//!   one. This is **compiler-enforced**, not a convention: dev-dependencies are not
+//!   linked into the lib target, so un-`cfg(test)`-ing any `me_backend_sqlite` import
+//!   here fails `cargo build -p me-consolidate` outright. (`cargo tree -p me-consolidate
+//!   --edges normal` shows the same thing, but that is a manual check, not a CI gate.)
 //! - **The orchestration** ([`consolidate`], this file) — `MemoryEngine::consolidate`'s
 //!   body, extracted as a free function over [`MemoryCtx`] + the in-memory graph. See
 //!   its own doc for the full read → compute → write contract (#409).
@@ -79,8 +82,15 @@ fn spawn_join_err(e: tokio::task::JoinError) -> MemoryError {
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::ReadOnly` if the engine was opened read-only. Propagates
-/// errors from any consolidation pass, the `SummaryGenerator`, or the
+/// Returns `MemoryError::EmbeddingReopenRequired` if the handle is fenced (#742) — this
+/// is the **first** check, and this function is its sole enforcement point (the facade
+/// delegate has no pre-flight of its own).
+///
+/// Returns `MemoryError::ReadOnly` if the engine was opened read-only — surfaced *below
+/// the seam*, when the write phase reaches the pool's `try_write()` guard, not as a
+/// pre-flight (see the note at the fence check).
+///
+/// Propagates errors from any consolidation pass, the `SummaryGenerator`, or the
 /// `EmbeddingProvider`.
 pub async fn consolidate(
     ctx: MemoryCtx<'_>,
@@ -89,12 +99,16 @@ pub async fn consolidate(
     embedder: Arc<dyn EmbeddingProvider>,
     config: &ConsolidationConfig,
 ) -> Result<ConsolidationStats> {
-    // Defence-in-depth floor, matching every other carved primitive (`me-query`,
-    // `me-ingest`, `me-resolve`, `me-archive` all open with this). The facade delegate
-    // performs the identical check first, so no input's outcome or error order
-    // changes — but this is a `pub`, *destructive* primitive (it expires facts and
-    // writes summaries), and after the carve it is reachable by callers other than the
-    // delegate.
+    // The #742 reopen-fence check, matching every other carved primitive (`me-query`,
+    // `me-ingest`, `me-resolve`, `me-archive` all open with this).
+    //
+    // ⚠️ This is the **sole** enforcement point of the fence for `consolidate`. Unlike
+    // `me-archive` — whose facade delegate keeps its own pre-flight, because the
+    // file-backed check must run before `archive_dir` can even be resolved — this
+    // primitive's facade delegate (`engine/consolidation.rs`) is a bare one-line forward
+    // with NO pre-flight of its own. So this is not belt-and-braces: drop this line and
+    // the fence is simply gone. Base enforced it inside `MemoryEngine::consolidate`; the
+    // carve moved it here, and here is where it lives now.
     //
     // Base's pre-carve `MemoryEngine::consolidate` called ONLY `self.ensure_open()`
     // (the #742 read-fence) — never an explicit read-only pre-check. `ReadOnly` is
