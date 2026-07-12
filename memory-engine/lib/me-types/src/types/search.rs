@@ -13,11 +13,13 @@ use chrono::{DateTime, Utc};
 
 use crate::types::{Fact, FactType};
 
-/// The fluent query-builder DTO. Lives in its own file ([`super::memory_query`])
-/// for size hygiene; re-exported here so it sits alongside its sibling search
-/// vocabulary at the single canonical path `me_types::types::search::MemoryQuery`
-/// (Wave 2 #816 / S4, sub-PR 3a — relocated from `me-query` to kill an illegal
-/// L3-to-L3 sibling edge from the forthcoming `me-archive` crate).
+/// The fluent query-builder DTO.
+///
+/// Lives in its own file ([`super::memory_query`]) for size hygiene; re-exported
+/// here so it sits alongside its sibling search vocabulary at the single canonical
+/// path `me_types::types::search::MemoryQuery` (Wave 2 #816 / S4, sub-PR 3a —
+/// relocated from `me-query` to kill an illegal L3-to-L3 sibling edge from the
+/// forthcoming `me-archive` crate).
 pub use super::memory_query::MemoryQuery;
 
 /// How to combine search sources.
