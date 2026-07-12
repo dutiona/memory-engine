@@ -11,7 +11,7 @@ pub mod consolidation;
 pub mod cycle_report;
 mod events;
 mod facts;
-/// Forgetting/prune output (`PruneStats`).
+/// Forgetting/prune policy (`ForgetPolicy`) and output (`PruneStats`).
 pub mod forgetting;
 /// Inspection statistics + dump-format DTOs.
 pub mod inspect;
