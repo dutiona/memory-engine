@@ -815,6 +815,21 @@ mod tests {
     ///
     /// This test pins the invariant directly: **what the write side stamps is exactly
     /// what the read side accepts.**
+    ///
+    /// # What it cannot catch (do not over-trust it)
+    ///
+    /// Both assertions compare *values*, and `ARCHIVE_SCHEMA_VERSION` and `SQLite`'s
+    /// `CURRENT_SCHEMA_VERSION` currently hold the **same** value (14 — see
+    /// `ARCHIVE_SCHEMA_VERSION`'s docs for why they must coincide today). So re-pointing
+    /// the write stamp back at the backend constant is *value-invisible* and this test
+    /// would still pass. It becomes a live tripwire only once the two diverge (i.e. when
+    /// `SQLite` reaches v15: the stamp would then exceed the gate and the `expect` below
+    /// fires). It is therefore a **delayed** guard, not an immediate one.
+    ///
+    /// The genuinely structural guard arrives with sub-PR 3b: once `build_pak` moves into
+    /// `me-archive` — a crate with no dependency on `me-backend-sqlite` — the backend
+    /// constant becomes *unnameable* from either half, and the coupling is enforced by the
+    /// crate boundary rather than by this assertion.
     #[tokio::test]
     async fn pak_write_stamp_matches_read_gate() {
         use crate::archive::pak::read_pak;

@@ -15,7 +15,7 @@
 //! re-exported directly from `crate::types::search` below rather than through a
 //! `query` submodule; internal callers (`engine/archive.rs`/`engine/query.rs`/
 //! `engine/tests.rs`/`archive/search.rs`) reach it as `crate::search::MemoryQuery`.
-//! `ann`/`filter_sql` and the `FilterSql`/`fts_count_expired`/
+//! `ann`/`filter_sql`/`vector` and the `FilterSql`/`fts_count_expired`/
 //! `fts_search_filtered`/`vector_search_filtered` flat re-exports are NOT re-exported
 //! here — their only callers (`storage::sqlite::{search_index, convert}`) moved to
 //! `me-backend-sqlite` too, so nothing in the facade reaches them anymore (production

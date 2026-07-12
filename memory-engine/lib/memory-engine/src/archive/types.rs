@@ -26,8 +26,15 @@ pub const CURRENT_PAK_VERSION: u32 = 2;
 pub struct ArchivePak {
     /// On-disk format version; checked on read against [`CURRENT_PAK_VERSION`].
     pub pak_version: u32,
-    /// Schema version of the engine that wrote this pak; used for forward-compatibility
-    /// checks on read.
+    /// **Content**-schema version of this pak — `me_types`' backend-independent
+    /// `ARCHIVE_SCHEMA_VERSION`, stamped on write and checked on read
+    /// (forward-compatibility: a pak from a *newer* content schema is rejected).
+    ///
+    /// Despite the field's historical name, this is **not** the writing engine's backend
+    /// schema version. A `.pak` is a portable `zstd` + JSON blob of `me-types` DTOs, so
+    /// its compat gate is about DTO shape, not any backend's migration counter (which are
+    /// not even comparable across backends). The name is retained because renaming it
+    /// would break the on-disk format. (Wave 2 #816 / S4, sub-PR 3a.)
     pub engine_schema_version: u32,
     /// Embedding dimension of the facts stored in this pak. Must match the engine's
     /// configured `embed_dim` before any vectors are compared.
@@ -111,6 +118,149 @@ mod tests {
         let diff = now - policy.expired_before;
         assert_eq!(diff.num_days(), 30);
         assert_eq!(policy.min_facts, 100);
+    }
+
+    /// Fully-populated `ArchivePak` for the serde-shape guard below.
+    ///
+    /// Both DTO literals enumerate **every** field explicitly — deliberately no
+    /// `..Default::default()`. That is the enforcement mechanism: adding a field to `Fact`
+    /// or `Edge` makes this stop compiling (E0063), so nobody can change a `.pak`'s
+    /// serialized shape without being confronted with the question the guard asks.
+    fn shape_fixture_pak() -> ArchivePak {
+        use crate::types::{Edge, Fact};
+
+        let now = Utc::now();
+        ArchivePak {
+            pak_version: CURRENT_PAK_VERSION,
+            engine_schema_version: 7,
+            embed_dim: 3,
+            created_at: now,
+            facts: vec![Fact {
+                id: 1,
+                content: "shape".into(),
+                content_hash: "h".into(),
+                embedding: vec![0.0; 3],
+                fact_type: FactType::Semantic,
+                t_created: now,
+                t_expired: None,
+                t_valid: None,
+                t_invalid: None,
+                source_event_id: None,
+                base_importance: 0.5,
+                importance_score: 0.5,
+                access_count: 0,
+                last_accessed: now,
+                metadata: serde_json::json!({}),
+                scope_id: 1,
+                is_pinned: false,
+                surfaced_at: None,
+            }],
+            edges: vec![Edge {
+                id: 1,
+                source_fact_id: 1,
+                target_fact_id: 2,
+                relation_type: "related".into(),
+                weight: 1.0,
+                t_created: now,
+                t_expired: None,
+                scope_id: 1,
+            }],
+        }
+    }
+
+    /// Golden serde-shape guard for the `.pak` payload (Wave 2 #816 / S4, sub-PR 3a).
+    ///
+    /// # Why this test exists
+    ///
+    /// `ARCHIVE_SCHEMA_VERSION` (the version stamped into every `.pak` and checked on
+    /// read) is a **content**-schema version: it must be bumped whenever the serialized
+    /// shape of a pak's DTOs changes. Nothing in the type system enforces that, and the
+    /// failure is **silent**: `Fact` does not `deny_unknown_fields` and several of its
+    /// fields are `#[serde(default)]`, so a newer build that adds a field would write
+    /// paks still stamped with the old version, and an older build would accept them
+    /// (`stamp <= supported`) while quietly dropping the new field.
+    ///
+    /// Previously the stamp was inherited from `SQLite`'s `CURRENT_SCHEMA_VERSION`, so
+    /// *any* migration moved it — over-approximating, but it made the guard automatic.
+    /// Decoupling the archive from a backend counter (the right call — a `.pak` is a
+    /// portable DTO blob, not a backend artifact) removed that automatic bump. This test
+    /// puts the enforcement back into the **structure** instead of relying on a
+    /// maintainer remembering: change a serialized field name in `ArchivePak`, `Fact`, or
+    /// `Edge`, and this reddens.
+    ///
+    /// If it fails, that is the question being asked: **does this shape change break
+    /// older readers?** If yes, bump `ARCHIVE_SCHEMA_VERSION`. If no (e.g. a purely
+    /// additive `#[serde(default)]` field older readers can ignore), update the expected
+    /// key set below and say why in the commit message.
+    #[test]
+    fn archive_pak_serde_shape_is_pinned() {
+        let value = serde_json::to_value(shape_fixture_pak()).expect("pak serializes");
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v
+                .as_object()
+                .expect("object")
+                .keys()
+                .map(ToString::to_string)
+                .collect();
+            k.sort();
+            k
+        };
+
+        assert_eq!(
+            keys(&value),
+            vec![
+                "created_at",
+                "edges",
+                "embed_dim",
+                "engine_schema_version",
+                "facts",
+                "pak_version",
+            ],
+            "ArchivePak's serialized shape changed — bump ARCHIVE_SCHEMA_VERSION if this \
+             breaks older readers, or update this expectation and justify the compat"
+        );
+        assert_eq!(
+            keys(&value["facts"][0]),
+            vec![
+                "access_count",
+                "base_importance",
+                "content",
+                "content_hash",
+                "embedding",
+                "fact_type",
+                "id",
+                "importance_score",
+                "is_pinned",
+                "last_accessed",
+                "metadata",
+                "scope_id",
+                "source_event_id",
+                "surfaced_at",
+                "t_created",
+                "t_expired",
+                "t_invalid",
+                "t_valid",
+            ],
+            "Fact's serialized shape changed — a .pak embeds Fact verbatim. Bump \
+             ARCHIVE_SCHEMA_VERSION if older readers cannot consume this, or update this \
+             expectation and justify the compat"
+        );
+        assert_eq!(
+            keys(&value["edges"][0]),
+            vec![
+                "id",
+                "relation_type",
+                "scope_id",
+                "source_fact_id",
+                "t_created",
+                "t_expired",
+                "target_fact_id",
+                "weight",
+            ],
+            "Edge's serialized shape changed — a .pak embeds Edge verbatim. Bump \
+             ARCHIVE_SCHEMA_VERSION if older readers cannot consume this, or update this \
+             expectation and justify the compat"
+        );
     }
 
     #[test]

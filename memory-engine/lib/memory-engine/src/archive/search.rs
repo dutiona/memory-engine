@@ -128,9 +128,9 @@ const fn entry_is_prunable(_entry: &ArchiveManifestEntry, _query: &MemoryQuery) 
 /// Returns `MemoryError::Serialization` if a `.pak` file's JSON is corrupt or
 /// truncated (surfaced by `read_pak` during decompression and deserialization).
 ///
-/// `supported_schema_version` is threaded through to [`read_pak`] for its
-/// backend-schema compat check (Wave 2 #816 / S4, sub-PR 3a) — the caller
-/// supplies the active backend's current schema version.
+/// Each `.pak` is opened via [`read_pak`], whose schema gate checks `me-types`'
+/// backend-independent `ARCHIVE_SCHEMA_VERSION` — the same constant the write side
+/// stamps. No backend schema version is involved (Wave 2 #816 / S4, sub-PR 3a).
 pub fn search_archives(
     archive_dir: &Path,
     manifest_entries: &[ArchiveManifestEntry],

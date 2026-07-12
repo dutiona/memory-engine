@@ -356,7 +356,7 @@ mod tests {
         );
 
         // Older schema version reads OK (backward-compat). empty_pak() already
-        // stamps engine_schema_version = 7 (< ARCHIVE_SCHEMA_VERSION = 9).
+        // stamps engine_schema_version = 7 (< ARCHIVE_SCHEMA_VERSION = 14).
         let older_path = dir.path().join("older.pak");
         let older = empty_pak();
         assert!(
