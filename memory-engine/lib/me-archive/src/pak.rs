@@ -5,14 +5,21 @@ use std::path::Path;
 
 use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
 
-use crate::archive::types::{ArchivePak, CURRENT_PAK_VERSION};
-use crate::error::{ArchiveError, Result};
+use crate::types::{ArchivePak, CURRENT_PAK_VERSION};
+use me_types::error::{ArchiveError, Result};
 
 /// Maximum decompressed `.pak` size (4 GiB) — prevents decompression bombs.
 const MAX_PAK_DECOMPRESSED_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Write a `.pak` file and return its blake3 hash.
 /// Hash is computed during write (no TOCTOU). Atomic write via tmp+rename.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::Io`] if the temp file cannot be created, the write/rename
+/// fails, or the parent directory does not exist. Returns [`ArchiveError::Codec`] if
+/// the zstd encoder cannot be created or finalized. Any I/O error propagates through
+/// `serde_json::to_writer` as [`MemoryError::Serialization`](me_types::error::MemoryError::Serialization).
 pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
     let tmp_path = path.with_extension("pak.tmp");
 
@@ -66,23 +73,23 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 }
 
 /// Read and decompress a `.pak` file. Caps the decompressed stream at
-/// [`MAX_PAK_DECOMPRESSED_SIZE`] (4 GiB) to defend against decompression bombs
+/// `MAX_PAK_DECOMPRESSED_SIZE` (4 GiB) to defend against decompression bombs
 /// (CWE-409).
 ///
 /// # Errors
 ///
-/// Returns a [`MemoryError`](crate::error::MemoryError) in these cases:
+/// Returns a [`MemoryError`](me_types::error::MemoryError) in these cases:
 ///
-/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+/// - [`MemoryError::Archive`](me_types::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::Io`] — the file cannot be opened (e.g. it does not exist or
 ///   is unreadable).
-/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+/// - [`MemoryError::Archive`](me_types::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::Codec`] — a zstd framing error detected *eagerly* at
 ///   `Decoder::new` (e.g. the bytes are not a zstd stream at all, so the frame
 ///   header is rejected up front). Note that zstd validates the *body*
 ///   incrementally: a corrupt or truncated stream whose header parses is usually
 ///   not caught here — it surfaces mid-read as `Serialization` (see below).
-/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+/// - [`MemoryError::Archive`](me_types::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::PakTooLarge`] — the decompressed stream exceeds the 4 GiB
 ///   cap (a possible decompression bomb, CWE-409). Reported as a *distinct*
 ///   variant so callers can tell a "too large" trip apart from an ordinary
@@ -90,7 +97,7 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 ///   too-large pak from corruption in general: a corrupt stream that happens to
 ///   decompress past the cap is reported here, while one that fails earlier
 ///   surfaces as `Serialization`.
-/// - [`MemoryError::Serialization`](crate::error::MemoryError::Serialization) —
+/// - [`MemoryError::Serialization`](me_types::error::MemoryError::Serialization) —
 ///   either the decompressed bytes are not valid JSON for an [`ArchivePak`]
 ///   (including a stale v1 layout missing the renamed `base_importance` field),
 ///   **or** the zstd stream is corrupt/truncated in a way zstd only detects
@@ -98,10 +105,10 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 ///   corruption is wrapped by `serde_json` and bubbles up as `Serialization`,
 ///   not as [`Codec`](ArchiveError::Codec) — so this variant is *not* a reliable
 ///   "bad JSON vs. corrupt stream" discriminator.
-/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+/// - [`MemoryError::Archive`](me_types::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::PakVersionUnsupported`] — the archive's `pak_version` is
 ///   newer than this build supports (forward-incompatible).
-/// - [`MemoryError::Archive`](crate::error::MemoryError::Archive) wrapping
+/// - [`MemoryError::Archive`](me_types::error::MemoryError::Archive) wrapping
 ///   [`ArchiveError::SchemaVersionUnsupported`] — the archive's
 ///   `engine_schema_version` is newer than [`ARCHIVE_SCHEMA_VERSION`].
 ///
@@ -112,15 +119,16 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 ///
 /// The gate compares against [`ARCHIVE_SCHEMA_VERSION`] — the **backend-independent**
 /// logical content-schema version of the `.pak` format (L0, `me-types`). The *same*
-/// constant is stamped on write (`engine/archive.rs`'s `build_pak`), so the write and
-/// read sides are symmetric **by construction** and cannot drift apart.
+/// constant is stamped on write (this crate's `manage::build_pak`),
+/// so the write and read sides are symmetric **by construction** and cannot drift apart.
 ///
 /// It is deliberately **not** a backend's schema version. A `.pak` is a portable blob of
 /// `me-types` DTOs, so "can I read this pak?" is a question about DTO shape, not about
 /// any backend's migration history — and the backends' counters are not comparable
 /// (`SQLite` is at 14, Postgres independently at 1). Sourcing the check from a concrete
-/// backend would also put an L3→backend edge on the archive primitive.
-/// (Wave 2 #816 / S4, sub-PR 3a.)
+/// backend would also put an L3→backend edge on the archive primitive — impossible here
+/// by construction, since this crate (`me-archive`) has no dependency on any
+/// `me-backend-*` crate (Wave 2 #816 / S4, sub-PR 3b).
 pub fn read_pak(path: &Path) -> Result<ArchivePak> {
     read_pak_capped(path, MAX_PAK_DECOMPRESSED_SIZE)
 }
@@ -183,6 +191,10 @@ fn read_pak_capped(path: &Path, cap: u64) -> Result<ArchivePak> {
 }
 
 /// Compute blake3 hash of a file (streaming, not `fs::read`).
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::Io`] if the file cannot be opened or read.
 pub fn hash_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .map_err(|e| ArchiveError::Io(format!("failed to read pak file for hashing: {e}")))?;
@@ -193,6 +205,11 @@ pub fn hash_file(path: &Path) -> Result<String> {
 }
 
 /// Verify a `.pak` file's blake3 hash matches expected.
+///
+/// # Errors
+///
+/// Returns [`ArchiveError::Io`] if the file cannot be opened or read (propagated from
+/// [`hash_file`]).
 pub fn verify_pak(path: &Path, expected_hash: &str) -> Result<bool> {
     let actual = hash_file(path)?;
     Ok(actual == expected_hash)
@@ -219,14 +236,14 @@ impl<W: Write> Write for HashingWriter<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::types::CURRENT_PAK_VERSION;
-    use crate::error::MemoryError;
+    use crate::types::CURRENT_PAK_VERSION;
     use chrono::Utc;
+    use me_types::error::MemoryError;
 
     /// Write an `ArchivePak` as zstd-compressed JSON (test convenience wrapper).
     ///
     /// Thin wrapper over [`write_pak_and_hash`] for callers that don't need the hash.
-    fn write_pak(pak: &ArchivePak, path: &std::path::Path) -> crate::error::Result<()> {
+    fn write_pak(pak: &ArchivePak, path: &std::path::Path) -> me_types::error::Result<()> {
         write_pak_and_hash(pak, path)?;
         Ok(())
     }

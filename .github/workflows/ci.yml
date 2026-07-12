@@ -60,6 +60,18 @@ jobs:
         run: cargo build --workspace
       - name: cargo build (all features)
         run: cargo build --workspace --all-features
+      # Facade-alone resolutions. NOT redundant with the --workspace builds above: since
+      # Wave 2 #816 / S4, `me-archive` is an unconditional workspace member that depends on
+      # `me-types`/`me-storage`/`me-index` with `features = ["archive"]`. Cargo unifies
+      # features across a `--workspace` build, so those three crates now compile with
+      # `archive` ON in EVERY workspace job — including the "default features" one. Without
+      # the checks below, **no CI job would compile them archive-OFF**, which is precisely
+      # the configuration a downstream consumer of `memory-engine` resolves to by default.
+      # `-p` narrows the graph to the facade, excluding `me-archive` and restoring that gate.
+      - name: cargo check (facade alone, default features — the true archive-OFF gate)
+        run: cargo check -p memory-engine
+      - name: cargo check (facade alone, no default features)
+        run: cargo check -p memory-engine --no-default-features --features backend-sqlite
 
   test:
     name: Test

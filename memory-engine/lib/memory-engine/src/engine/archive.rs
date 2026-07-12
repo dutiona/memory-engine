@@ -1,21 +1,23 @@
-//! Archival compression orchestration for [`MemoryEngine`].
+//! Archival compression delegates for [`MemoryEngine`].
 //!
-//! Moves expired, non-pinned facts into `.pak` files (zstd + blake3),
-//! records a manifest row, hard-deletes from `SQLite`, and rebuilds the
-//! in-memory graph cache from the committed DB — all in a crash-safe sequence.
+//! Extracted into the [`me_archive`] crate (Wave 2 #816 / S4, sub-PR 3b; re-exported
+//! here as `crate::archive`, matching the `pool`/`store`/`graph`/`scope`/`forgetting`
+//! carve convention). Each public method below resolves this engine's `MemoryCtx` +
+//! cold-storage handle + in-memory graph + archive directory, then delegates to the
+//! corresponding `me_archive` free function. `archive()`'s pre-flight checks
+//! (`ensure_open`, the read-only fail-fast, and the file-backed check) stay here rather
+//! than moving into `me_archive::archive`: the file-backed check must run *before*
+//! `archive_dir` can even be resolved, and `MemoryCtx` carries no path state — so
+//! preserving the original's exact check order and error messages requires this
+//! delegate to own the whole pre-flight sequence (see `me_archive::manage`'s module
+//! docs for the mirror of this note).
 
 use std::path::PathBuf;
 
-use chrono::Utc;
-
-use crate::archive::pak::{hash_file, verify_pak, write_pak_and_hash};
 use crate::archive::types::{
-    ArchiveManifestEntry, ArchivePak, ArchivePolicy, ArchiveStats, ArchiveVerifyResult,
-    CURRENT_PAK_VERSION,
+    ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVerifyResult,
 };
 use crate::error::{ArchiveError, MemoryError, Result};
-use crate::types::{Edge, Fact};
-use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
 
 use super::MemoryEngine;
 
@@ -70,73 +72,14 @@ impl MemoryEngine {
 
         let archive_dir = self.archive_dir()?;
 
-        let (candidate_facts, candidate_edges) = self
-            .storage
-            .select_archive_candidates(policy.expired_before)
-            .await?;
-
-        if candidate_facts.len() < policy.min_facts {
-            return Ok(None);
-        }
-
-        let fact_ids: Vec<i64> = candidate_facts.iter().map(|f| f.id).collect();
-
-        let pak = self.build_pak(&candidate_facts, &candidate_edges);
-        let (pak_path, pak_size_bytes, blake3_hash) = Self::write_pak_to_disk(&archive_dir, &pak)?;
-        let pak_filename = pak_path
-            .file_name()
-            .expect("pak_path has a filename")
-            .to_string_lossy()
-            .to_string();
-
-        // The `.pak` is already on disk. If the commit (manifest insert +
-        // hard-delete tx) fails, the file would be an orphan with no manifest
-        // row — a permanent disk leak that `verify_archives()` could never
-        // reconcile (CWE-459). Remove it on error, mirroring the cleanup the
-        // restore path uses for its half-written DB file.
-        self.commit_archive(
-            &pak_filename,
-            &candidate_facts,
-            &candidate_edges,
-            &fact_ids,
-            pak_size_bytes,
-            &blake3_hash,
+        crate::archive::archive(
+            self.mem_ctx(),
+            self.cold.as_ref(),
+            &self.graph,
+            &archive_dir,
+            policy,
         )
         .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&pak_path);
-        })?;
-
-        // Prune the archived facts from the in-memory graph cache (#332).
-        //
-        // The in-memory graph is a *derived cache* of the active edge set; the
-        // DB (committed atomically above) is the source of truth. The whole
-        // prune runs under one graph write guard with no `.await` inside, so it
-        // is atomic with respect to any concurrent graph mutator — there is no
-        // off-lock read and therefore no lost-update window. The removal is O(N)
-        // in the number of archived facts rather than O(|E|) for a full reload.
-        //
-        // `MemoryGraph::remove_node` is loop-safe (#833): petgraph's swap-remove
-        // relocates the former last node into the freed slot, and `remove_node`
-        // re-indexes `node_map` for that displaced node, so surviving nodes keep
-        // resolving correctly across every iteration. If the process is killed
-        // mid-prune, the cache self-heals — the next `open` rebuilds it from the
-        // committed DB via `MemoryGraph::load_from_db`.
-        {
-            let mut graph = self.graph.write();
-            for &fid in &fact_ids {
-                graph.remove_edges_by_fact(fid);
-                graph.remove_node(fid);
-            }
-        }
-
-        Ok(Some(ArchiveStats {
-            facts_archived: candidate_facts.len(),
-            edges_archived: candidate_edges.len(),
-            pak_path,
-            pak_size_bytes,
-            blake3_hash,
-        }))
     }
 
     /// List all archive manifest entries.
@@ -145,7 +88,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Storage` on SQL failure.
     pub async fn list_archives(&self) -> Result<Vec<ArchiveManifestEntry>> {
-        self.cold.list_archive_manifest().await
+        crate::archive::list_archives(self.cold.as_ref()).await
     }
 
     /// Verify integrity of all archived `.pak` files.
@@ -156,168 +99,14 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Storage` on SQL failure.
     /// I/O errors for individual `.pak` files are reported per-entry, not propagated.
+    ///
     pub async fn verify_archives(&self) -> Result<Vec<ArchiveVerifyResult>> {
+        // Read the manifest BEFORE resolving the archive dir, preserving base's error
+        // precedence: on an in-memory engine whose manifest read also fails, the storage
+        // error surfaces (as pre-carve), not `NotFileBacked`.
         let entries = self.list_archives().await?;
         let archive_dir = self.archive_dir()?;
-
-        let mut results = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            // Path-traversal guard (#292): reject any manifest path that could
-            // escape `archive_dir` (`..` or an absolute anchor) BEFORE any
-            // filesystem access. The old `pak_path.starts_with(&archive_dir)`
-            // check was purely lexical and did not resolve `..`, so a tampered
-            // or restored DB row like `../outside/x.pak` slipped through. Reuse
-            // the shared containment check that already guards the sibling
-            // `search_archives` (single source of truth for the rule).
-            if !crate::archive::search::is_within_archive_dir(&entry.pak_path) {
-                results.push(ArchiveVerifyResult {
-                    manifest_id: entry.id,
-                    pak_path: entry.pak_path.clone(),
-                    ok: false,
-                    error: Some("path traversal detected".to_string()),
-                });
-                continue;
-            }
-            let pak_path = archive_dir.join(&entry.pak_path);
-            let result = if pak_path.exists() {
-                Self::verify_single_archive(entry, &pak_path)
-            } else {
-                ArchiveVerifyResult {
-                    manifest_id: entry.id,
-                    pak_path: entry.pak_path.clone(),
-                    ok: false,
-                    error: Some(format!("file not found: {}", pak_path.display())),
-                }
-            };
-            results.push(result);
-        }
-        Ok(results)
-    }
-
-    // --- Private helpers ---
-
-    /// Build the `.pak` payload.
-    fn build_pak(&self, facts: &[Fact], edges: &[Edge]) -> ArchivePak {
-        ArchivePak {
-            pak_version: CURRENT_PAK_VERSION,
-            engine_schema_version: ARCHIVE_SCHEMA_VERSION,
-            embed_dim: self.embed_dim,
-            created_at: Utc::now(),
-            facts: facts.to_vec(),
-            edges: edges.to_vec(),
-        }
-    }
-
-    /// Write the `.pak` file and return (path, size, hash).
-    fn write_pak_to_disk(
-        archive_dir: &std::path::Path,
-        pak: &ArchivePak,
-    ) -> Result<(PathBuf, u64, String)> {
-        std::fs::create_dir_all(archive_dir).map_err(|e| {
-            ArchiveError::Io(format!(
-                "failed to create archive dir {}: {e}",
-                archive_dir.display()
-            ))
-        })?;
-
-        let now = Utc::now();
-        let nanos = now.timestamp_subsec_nanos();
-        let pak_filename = format!("archive-{}-{nanos:08x}.pak", now.format("%Y%m%d%H%M%S"));
-        let pak_path = archive_dir.join(&pak_filename);
-
-        let blake3_hash = write_pak_and_hash(pak, &pak_path)?;
-        // `write_pak_and_hash` has now renamed the `.pak` into place, so it
-        // physically exists. Any failure from here on must remove it, or it
-        // becomes an orphan with no manifest row (CWE-459) — the same guarantee
-        // `commit_archive`'s cleanup gives for the downstream commit step. The
-        // stat below is the only such fallible step before this fn returns.
-        let pak_size_bytes = std::fs::metadata(&pak_path)
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&pak_path);
-                ArchiveError::Io(format!(
-                    "failed to stat pak file {}: {e}",
-                    pak_path.display()
-                ))
-            })?
-            .len();
-
-        Ok((pak_path, pak_size_bytes, blake3_hash))
-    }
-
-    /// Commit the database side of an archive operation below the seam: manifest
-    /// insert + hard-delete edges + hard-delete facts, in one atomic transaction
-    /// ([`ColdStorage::commit_archive_atomic`]). The `.pak` file I/O stays
-    /// engine-side; on `Err` the caller removes the already-written `.pak`.
-    #[allow(clippy::cast_possible_wrap)]
-    async fn commit_archive(
-        &self,
-        pak_filename: &str,
-        facts: &[Fact],
-        edges: &[Edge],
-        fact_ids: &[i64],
-        pak_size_bytes: u64,
-        blake3_hash: &str,
-    ) -> Result<()> {
-        let fact_id_min = facts.iter().map(|f| f.id).min().unwrap_or(0);
-        let fact_id_max = facts.iter().map(|f| f.id).max().unwrap_or(0);
-        let t_created_min = facts
-            .iter()
-            .map(|f| f.t_created)
-            .min()
-            .unwrap_or_else(Utc::now);
-        let t_created_max = facts
-            .iter()
-            .map(|f| f.t_created)
-            .max()
-            .unwrap_or_else(Utc::now);
-
-        self.cold
-            .commit_archive_atomic(
-                pak_filename,
-                facts.len() as i64,
-                edges.len() as i64,
-                fact_id_min,
-                fact_id_max,
-                t_created_min,
-                t_created_max,
-                pak_size_bytes as i64,
-                blake3_hash,
-                fact_ids,
-            )
-            .await
-    }
-
-    /// Verify a single `.pak` file against its manifest hash.
-    fn verify_single_archive(
-        entry: &ArchiveManifestEntry,
-        pak_path: &std::path::Path,
-    ) -> ArchiveVerifyResult {
-        match verify_pak(pak_path, &entry.blake3_hash) {
-            Ok(true) => ArchiveVerifyResult {
-                manifest_id: entry.id,
-                pak_path: entry.pak_path.clone(),
-                ok: true,
-                error: None,
-            },
-            Ok(false) => {
-                let actual = hash_file(pak_path).unwrap_or_default();
-                ArchiveVerifyResult {
-                    manifest_id: entry.id,
-                    pak_path: entry.pak_path.clone(),
-                    ok: false,
-                    error: Some(format!(
-                        "hash mismatch: expected {}, got {actual}",
-                        entry.blake3_hash
-                    )),
-                }
-            }
-            Err(e) => ArchiveVerifyResult {
-                manifest_id: entry.id,
-                pak_path: entry.pak_path.clone(),
-                ok: false,
-                error: Some(format!("verification error: {e}")),
-            },
-        }
+        Ok(crate::archive::verify_archives(&entries, &archive_dir))
     }
 
     /// Search all archived `.pak` files for facts matching `query`.
@@ -337,12 +126,8 @@ impl MemoryEngine {
         let Ok(archive_dir) = self.archive_dir() else {
             return Ok(None);
         };
-        let entries = self.cold.list_archive_manifest().await?;
-        if entries.is_empty() {
-            return Ok(None);
-        }
-        let result = crate::archive::search::search_archives(&archive_dir, &entries, query, limit)?;
-        Ok(Some(result))
+        crate::archive::search_archives_fallback(self.cold.as_ref(), &archive_dir, query, limit)
+            .await
     }
 
     /// Resolve the archive directory (sibling of DB file + `/archives/`).
@@ -366,6 +151,7 @@ impl MemoryEngine {
 mod tests {
     use super::*;
     use chrono::Duration;
+    use chrono::Utc;
 
     use crate::graph::MemoryGraph;
     use crate::types::{FactType, NewEdge, NewFact};
@@ -741,8 +527,8 @@ mod tests {
     /// `pak_path.starts_with(&archive_dir)` check let `..` through (it does not
     /// resolve `..`), so the row was handed to the I/O path instead of being
     /// flagged. The shared [`is_within_archive_dir`] containment check
-    /// (`archive/search.rs`, widened to `pub(crate)` for exactly this reuse)
-    /// rejects it before any filesystem access.
+    /// (`me_archive::search`, `pub` for exactly this cross-crate reuse) rejects
+    /// it before any filesystem access.
     // Uses the `raw_exec` failure-injection seam (test-util-gated since #816 A1), so this
     // test compiles only with `test-util` on — matching the sibling `commit_fails` test.
     #[cfg(feature = "test-util")]
@@ -796,68 +582,6 @@ mod tests {
              through to the I/O (file-not-found) path"
         );
         assert_eq!(result.pak_path, evil_path);
-    }
-
-    /// Write/read schema-version **symmetry** (Wave 2 #816 / S4, sub-PR 3a).
-    ///
-    /// The `.pak` schema gate is a *split* guard: `build_pak` **stamps** a version, and
-    /// `read_pak` **rejects** anything newer than the version it supports. Those two
-    /// halves must be sourced from the SAME constant, or they are free to drift apart.
-    ///
-    /// They very nearly did. The stamp used to come from `me-backend-sqlite`'s
-    /// `CURRENT_SCHEMA_VERSION` (= 14) while the read gate was being parameterized "so a
-    /// Postgres engine can pass its own version" — but Postgres numbers its migrations
-    /// independently (`CURRENT_PG_SCHEMA_VERSION` = 1). A PG-backed engine would then
-    /// stamp 14, check against 1, and refuse to read the pak *it had just written*; the
-    /// archive fallback swallows that error as best-effort (`tracing::warn!`), so every
-    /// archived fact would silently vanish from every query. Both sides now read
-    /// `me_types`' backend-independent `ARCHIVE_SCHEMA_VERSION`.
-    ///
-    /// This test pins the invariant directly: **what the write side stamps is exactly
-    /// what the read side accepts.**
-    ///
-    /// # What it cannot catch (do not over-trust it)
-    ///
-    /// Both assertions compare *values*, and `ARCHIVE_SCHEMA_VERSION` and `SQLite`'s
-    /// `CURRENT_SCHEMA_VERSION` currently hold the **same** value (14 — see
-    /// `ARCHIVE_SCHEMA_VERSION`'s docs for why they must coincide today). So re-pointing
-    /// the write stamp back at the backend constant is *value-invisible* and this test
-    /// would still pass. It becomes a live tripwire only once the two diverge (i.e. when
-    /// `SQLite` reaches v15: the stamp would then exceed the gate and the `expect` below
-    /// fires). It is therefore a **delayed** guard, not an immediate one.
-    ///
-    /// The genuinely structural guard arrives with sub-PR 3b: once `build_pak` moves into
-    /// `me-archive` — a crate with no dependency on `me-backend-sqlite` — the backend
-    /// constant becomes *unnameable* from either half, and the coupling is enforced by the
-    /// crate boundary rather than by this assertion.
-    #[tokio::test]
-    async fn pak_write_stamp_matches_read_gate() {
-        use crate::archive::pak::read_pak;
-
-        let dir = tempfile::tempdir().unwrap();
-        let engine = MemoryEngine::builder(DIM)
-            .path(dir.path().join("symmetry.db"))
-            .build()
-            .unwrap();
-
-        // The WRITE side: whatever `build_pak` stamps.
-        let pak = engine.build_pak(&[], &[]);
-        assert_eq!(
-            pak.engine_schema_version, ARCHIVE_SCHEMA_VERSION,
-            "build_pak must stamp the backend-independent ARCHIVE_SCHEMA_VERSION, not a \
-             backend's migration counter"
-        );
-
-        // The READ side must accept it. If the two halves ever diverge (e.g. one is
-        // re-pointed at a backend constant), `read_pak` returns SchemaVersionUnsupported
-        // and this fails — instead of silently dropping archived facts at runtime.
-        let path = dir.path().join("symmetry.pak");
-        write_pak_and_hash(&pak, &path).unwrap();
-        let restored = read_pak(&path).expect(
-            "the read gate must accept a pak the write side just stamped — a failure here \
-             means the write stamp and the read gate no longer share one constant",
-        );
-        assert_eq!(restored.engine_schema_version, ARCHIVE_SCHEMA_VERSION);
     }
 
     /// #117 regression (Wave 2 #816 / S4 sub-PR 2): a *provided-but-missing* scope must

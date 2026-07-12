@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::types::{Edge, Fact};
+use me_types::types::{Edge, Fact};
 
 /// Current on-disk format version written into every new `.pak` file.
 ///
@@ -93,8 +93,9 @@ pub struct ArchiveStats {
 }
 
 /// `ArchiveManifestEntry` moved to `me-types` (Wave 2 #816 E.4b Phase B) as pure data
-/// (gated behind `me-types`'s `archive` feature); re-exported from `archive::mod` so
-/// `crate::archive::ArchiveManifestEntry` keeps resolving.
+/// (gated behind `me-types`'s `archive` feature); re-exported from `me-archive`'s crate
+/// root so `me_archive::ArchiveManifestEntry` (and, via the facade's `me_archive as
+/// archive` alias, `crate::archive::ArchiveManifestEntry`) keeps resolving.
 pub use me_types::types::archive::ArchiveManifestEntry;
 
 /// Result of verifying a `.pak` file's integrity.
@@ -109,7 +110,7 @@ pub struct ArchiveVerifyResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::FactType;
+    use me_types::types::FactType;
 
     #[test]
     fn archive_policy_default_has_30_day_cutoff() {
@@ -127,7 +128,7 @@ mod tests {
     /// or `Edge` makes this stop compiling (E0063), so nobody can change a `.pak`'s
     /// serialized shape without being confronted with the question the guard asks.
     fn shape_fixture_pak() -> ArchivePak {
-        use crate::types::{Edge, Fact};
+        use me_types::types::{Edge, Fact};
 
         let now = Utc::now();
         ArchivePak {
@@ -479,7 +480,7 @@ mod tests {
                     id,
                     source_fact_id,
                     target_fact_id,
-                    relation_type: crate::types::RelationType::from(relation_type_str.as_str()),
+                    relation_type: me_types::types::RelationType::from(relation_type_str.as_str()),
                     weight,
                     t_created: ts_from_secs(t_created_s),
                     t_expired: t_expired_s.map(ts_from_secs),

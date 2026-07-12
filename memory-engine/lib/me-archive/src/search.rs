@@ -9,18 +9,21 @@ use std::collections::BinaryHeap;
 use std::path::{Component, Path};
 use std::time::Instant;
 
-use crate::archive::pak::read_pak;
-use crate::archive::types::ArchiveManifestEntry;
-use crate::error::Result;
-use crate::search::MemoryQuery;
-use crate::types::search::{MatchType, SearchResult};
+use crate::pak::read_pak;
+use crate::types::ArchiveManifestEntry;
+use me_types::error::Result;
 use me_types::math::cosine_similarity;
+use me_types::types::search::{MatchType, MemoryQuery, SearchResult};
 
 /// Summary result from scanning archives.
+///
+/// `pub` (not `pub(crate)`): the facade (`memory-engine`) consumes this from a
+/// separate crate now (Wave 2 #816 / S4, sub-PR 3b) — its `execute_query`
+/// archive-fallback post-step reads `results`/`paks_scanned`/`search_ms` directly.
 pub struct ArchiveSearchResult {
-    pub(crate) results: Vec<SearchResult>,
-    pub(crate) paks_scanned: usize,
-    pub(crate) search_ms: u64,
+    pub results: Vec<SearchResult>,
+    pub paks_scanned: usize,
+    pub search_ms: u64,
 }
 
 /// A [`SearchResult`] ordered so a [`BinaryHeap`] behaves as a **min-heap** on
@@ -76,15 +79,13 @@ impl Ord for MinScored {
 /// for not-yet-existing files), and is purely lexical — no `canonicalize`, no
 /// TOCTOU window.
 ///
-/// Exposed `pub(crate)` as the **shared archive path-containment guard**: the
-/// sibling `verify_archives` (engine/archive.rs) has the same lexical-prefix
-/// weakness and reuses this helper rather than re-deriving the check (#292).
-// `archive::search` is a private module, so `redundant_pub_crate` (nursery) sees
-// the `pub(crate)` as redundant. It is not: the widened visibility is the point —
-// it lets the sibling `engine::archive` module import this guard (#292). Suppress
-// the lint rather than narrow back to `fn`.
-#[allow(clippy::redundant_pub_crate)]
-pub(crate) fn is_within_archive_dir(pak_path: &str) -> bool {
+/// `pub` (not `pub(crate)`): the **shared archive path-containment guard** — the
+/// sibling `verify_archives` (`crate::manage`) reuses this helper rather than
+/// re-deriving the check (#292), and the facade's retained regression test
+/// (`engine/archive.rs`) exercises it directly across the crate boundary (Wave 2
+/// #816 / S4, sub-PR 3b).
+#[must_use]
+pub fn is_within_archive_dir(pak_path: &str) -> bool {
     Path::new(pak_path)
         .components()
         .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
@@ -119,7 +120,7 @@ const fn entry_is_prunable(_entry: &ArchiveManifestEntry, _query: &MemoryQuery) 
 /// Paks are decompressed one at a time and only the top-`limit` matches (by
 /// score) are retained in a bounded min-heap, so peak memory is `O(limit)`
 /// matching facts rather than `O(total matches)` (#342). Manifest entries are
-/// pruned via [`entry_is_prunable`] before reading where the prune is provably
+/// pruned via `entry_is_prunable` before reading where the prune is provably
 /// sound (#387). Results are returned sorted descending by score.
 ///
 /// # Errors
@@ -233,7 +234,7 @@ pub fn search_archives(
 /// Consider `fact` at `score` for retention in the bounded min-heap, keeping at
 /// most `limit` elements.
 ///
-/// The [`Fact`](crate::types::Fact) is **cloned only when the candidate is
+/// The [`Fact`](me_types::types::Fact) is **cloned only when the candidate is
 /// actually retained** — a candidate below the current minimum (with a full heap)
 /// is rejected before any clone. This is the memory bound #342 asks for: at most
 /// `limit` cloned facts ever co-exist, versus the old `O(total matches)` clones
@@ -244,7 +245,7 @@ pub fn search_archives(
 /// sort-then-truncate (#342).
 fn push_bounded(
     heap: &mut BinaryHeap<MinScored>,
-    fact: &crate::types::Fact,
+    fact: &me_types::types::Fact,
     score: f64,
     limit: usize,
 ) {
@@ -262,7 +263,7 @@ fn push_bounded(
 }
 
 /// Build a retained [`SearchResult`] (clones the fact — see [`push_bounded`]).
-fn make_result(fact: &crate::types::Fact, score: f64) -> SearchResult {
+fn make_result(fact: &me_types::types::Fact, score: f64) -> SearchResult {
     SearchResult {
         fact: fact.clone(),
         score,
@@ -273,11 +274,11 @@ fn make_result(fact: &crate::types::Fact, score: f64) -> SearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::pak::write_pak_and_hash;
-    use crate::archive::types::{ArchivePak, CURRENT_PAK_VERSION};
-    use crate::types::{Fact, FactType};
+    use crate::pak::write_pak_and_hash;
+    use crate::types::{ArchivePak, CURRENT_PAK_VERSION};
     use chrono::Utc;
     use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
+    use me_types::types::{Fact, FactType};
 
     /// Build a minimal `Fact` for archive-search fixtures.
     ///
