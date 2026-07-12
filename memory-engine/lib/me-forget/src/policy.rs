@@ -10,7 +10,7 @@ use me_types::types::FactScoringRow;
 use me_types::types::forgetting::PruneStats;
 use me_types::types::{Fact, FactType};
 
-use super::types::ForgetPolicy;
+use crate::ForgetPolicy;
 
 /// Argument to `ln()` for access-frequency normalization: 100 + 1.
 /// Gives `ln(101)` as the divisor so that 100 accesses produce a full score of 1.0.

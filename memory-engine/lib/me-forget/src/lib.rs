@@ -4,8 +4,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod policy;
-mod types;
 
-pub use me_types::types::forgetting::PruneStats;
+pub use me_types::types::forgetting::{ForgetPolicy, PruneStats};
 pub use policy::prune;
-pub use types::ForgetPolicy;
