@@ -1,0 +1,58 @@
+[package]
+name = "me-consolidate"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Consolidate primitive: 3-pass dedup/cluster/global summarization over MemoryCtx (Wave 2 #816 / S4, sub-PR 4)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dutiona/memory-engine"
+# Workspace-internal crate: never published, so it uses bare path-deps and is exempt
+# from cargo-deny's published-crate wildcard rule (plan §D.1).
+publish = false
+
+[dependencies]
+me-types = { path = "../me-types" }
+me-traits = { path = "../me-traits" } # ConsolidationConfig/Stats + SummaryGenerator/EmbeddingProvider vocab
+me-storage = { path = "../me-storage" } # StorageBackend port + MemoryCtx
+# `MemoryGraph::from_active_edges` — the post-apply in-memory graph rebuild the
+# extracted `consolidate` free fn performs when the plan expired anything (mirrors
+# the facade's pre-carve `engine/consolidation.rs` exactly).
+me-index = { path = "../me-index" }
+chrono = "0.4"
+# `RwLock<MemoryGraph>` — the graph handle `consolidate` takes as an explicit
+# parameter (`MemoryCtx` carries no graph state), mirroring `me-archive`/`me-resolve`.
+parking_lot = "0.12"
+# `spawn_blocking` for the consumer `summarize`/`embed` IO offload in `consolidate`
+# (#409) — matches `me-query`'s own runtime feature set.
+tokio = { version = "1", features = ["rt"] }
+# `compute_dedup`'s over-cap skip warning and `compute_clusters`'s over-cap skip
+# warning (moved verbatim from the facade).
+tracing = "0.1"
+
+[dev-dependencies]
+# The `#[cfg(test)]` integration wrappers (`consolidate`, `consolidate_with_caps`,
+# `local_dedup`, `cluster_fusion`, `global_integration`) travel with their files —
+# they compose the pure `compute_*` functions with the backend's `apply_*` +
+# `load_snapshot*` over a raw `rusqlite::Connection`, plus the module's own unit
+# tests reach `store::{facts,summaries,schema,embedding_meta}` directly. A dev-dep
+# is not a production edge (mirrors `me-query`'s own dev-dependency on this crate).
+me-backend-sqlite = { path = "../me-backend-sqlite" }
+# `MockEmbedder` (`me_traits::test_util`), used by every moved test that exercises
+# the cluster/global summarize+embed path.
+me-traits = { path = "../me-traits", features = ["test-util"] }
+# The moved tests construct/drive raw connections directly (`open_memory()`
+# returns a `rusqlite::Connection`) and one helper (`cluster.rs::create_scope`)
+# uses `rusqlite::params!` directly.
+rusqlite = "0.34"
+# Test fixtures hash fact content for `content_hash` (mirrors the facade's own
+# normal dependency, here test-only since no production path in this crate
+# touches content hashing).
+blake3 = "1"
+# `NewFact`/`NewSummary` test fixtures' `metadata: serde_json::json!({})` field.
+serde_json = "1.0"
+# `#[test] proptest! { … }` coverage for `choose_expiry` (dedup) and
+# `greedy_cluster` (cluster).
+proptest = "1"
+
+[lints]
+workspace = true
