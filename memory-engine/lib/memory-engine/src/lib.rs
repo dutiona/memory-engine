@@ -382,6 +382,17 @@ mod tests {
         let _ = std::mem::size_of::<crate::ConsolidationProposal>();
         let _ = std::mem::size_of::<crate::MergeGroup>();
 
+        // The forget/prune pair is ALSO reachable through the blanket
+        // `pub use me_types::types;` re-export. `PruneStats` always was;
+        // `ForgetPolicy` became so in S5 when it was hoisted L3 -> L0 to join it
+        // (#985). That is an *additive* surface, and it is pinned here on purpose:
+        // `cargo public-api` canonicalizes a type to one definition site, so it
+        // CANNOT see a path becoming newly writable. Only a compile-time probe like
+        // this one can. Whatever ratchet #941 installs must reason about reachable
+        // paths, not item counts.
+        let _ = std::mem::size_of::<crate::types::forgetting::ForgetPolicy>();
+        let _ = std::mem::size_of::<crate::types::forgetting::PruneStats>();
+
         // core types
         let _ = std::mem::size_of::<crate::FactType>();
         let _ = std::mem::size_of::<crate::Fact>();
