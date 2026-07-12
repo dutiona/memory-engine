@@ -7,9 +7,19 @@
 //! via `search_archives_fallback`) that `MemoryCtx` does not expose and that `me-query`
 //! has no dependency to reach (archive stays a facade concern). `execute_search_path`
 //! here ends where the original's archive block began; the facade's `execute_query`
-//! delegate applies that block as a post-step over the returned [`QueryResponse`],
-//! gated on the same `query.has_search() && query.include_archives` condition the
-//! original enforced structurally (by only reaching the block through the search path).
+//! delegate applies that block as a post-step over the [`QueryResponse`] carried by
+//! [`QueryExecution::Executed`].
+//!
+//! The original enforced **two** guards on that block by its *position* inside
+//! `execute_search_path`: it ran only when (a) the query carried a search term
+//! (`has_search()`), and (b) scope resolution had **not** early-returned on a
+//! provided-but-missing scope (#117 — a missing scope yields no results, never an
+//! unscoped search). The carve re-expresses (a) as an explicit
+//! `query.has_search() && query.include_archives` check in the facade, and (b) via
+//! [`QueryExecution`]: a scope-miss returns [`QueryExecution::ScopeMissing`], on which
+//! the facade returns empty and skips the fallback. Without (b) the archive search —
+//! which is itself unscoped (it never filters on `query.scope`) — would leak
+//! cross-scope archived facts on a scope-miss, silently breaking the #117 contract.
 //!
 //! The four bi-temporal/reranker helper functions (`validate_reranker_output`,
 //! `passes_temporal_cutoff`, `fact_overlaps_period`, `fact_to_search_result`) lived in
@@ -209,6 +219,30 @@ pub async fn query(
     Ok(results)
 }
 
+/// Outcome of [`execute_query`], distinguishing a #117 scope-miss from an executed query.
+///
+/// A *provided-but-missing* scope must yield no results — and, critically, callers must
+/// **not** fall back to any *unscoped* augmentation (e.g. the facade's archive search),
+/// which would leak cross-scope facts. In the pre-carve engine this was enforced
+/// *structurally*: the scope-miss early-return preceded `execute_search_path`, inside which
+/// the archive block lived, so a scope-miss made the archive path unreachable. Splitting the
+/// query body (`me-query`) from the archive augmentation (facade) dissolved that structural
+/// guard, so the outcome is now carried explicitly in a type the caller cannot ignore
+/// (Wave 2 #816 / S4 — regression caught in sub-PR 2 review).
+///
+/// The [`ScopeMissing`](QueryExecution::ScopeMissing) variant deliberately carries **no**
+/// [`QueryResponse`]: a caller physically cannot reach a response to augment on the
+/// scope-miss path, which is what makes the #117 contract un-bypassable at the type level.
+#[derive(Debug)]
+pub enum QueryExecution {
+    /// A scope was provided but does not exist (#117). No results; the caller returns an
+    /// empty response and MUST skip any unscoped augmentation such as the archive fallback.
+    ScopeMissing,
+    /// The query executed (unscoped, or a scope that resolved). Carries the response, which
+    /// the caller MAY augment (e.g. with archived facts).
+    Executed(QueryResponse),
+}
+
 /// Execute a composed query using the [`MemoryQuery`] builder.
 ///
 /// Routes to hybrid search (FTS + vector) when text/embedding is present,
@@ -216,9 +250,11 @@ pub async fn query(
 /// All code paths enforce the temporal safety invariant: future-dated facts
 /// (`t_valid > now`) are excluded unless overridden by `valid_at` or `period`.
 ///
-/// Does not apply the archive-fallback augmentation (`MemoryQuery::include_archives`) —
-/// that stays a facade-only post-step over the returned [`QueryResponse`]; see the
-/// module docs.
+/// Returns a [`QueryExecution`]: [`Executed`](QueryExecution::Executed) with the response
+/// on a normal run, or [`ScopeMissing`](QueryExecution::ScopeMissing) when a scope was
+/// provided but does not exist (#117). Does not apply the archive-fallback augmentation
+/// (`MemoryQuery::include_archives`) — that stays a facade-only post-step over the
+/// [`Executed`](QueryExecution::Executed) response; see the module docs.
 ///
 /// # Errors
 ///
@@ -232,19 +268,17 @@ pub async fn execute_query(
     ctx: MemoryCtx<'_>,
     scope_tree: &RwLock<ScopeTree>,
     query: &MemoryQuery,
-) -> Result<QueryResponse> {
+) -> Result<QueryExecution> {
     ctx.ensure_open()?;
     // --- Validation ---
     validate_memory_query(query)?;
 
     // --- Resolve scope ---
-    // A provided-but-missing scope yields no results rather than an
-    // unscoped search (#117).
+    // A provided-but-missing scope yields no results rather than an unscoped search
+    // (#117), AND — because the caller's archive fallback is itself unscoped — that
+    // fallback must be suppressed too. Signalled via `QueryExecution::ScopeMissing`.
     let Some(scope_ids) = resolve_query_scope_ids(scope_tree, query.scope.as_ref()) else {
-        return Ok(QueryResponse {
-            results: vec![],
-            diagnostics: QueryDiagnostics::default(),
-        });
+        return Ok(QueryExecution::ScopeMissing);
     };
 
     // --- Compute effective temporal cutoff ---
@@ -260,11 +294,12 @@ pub async fn execute_query(
 
     let limit = query.effective_limit();
 
-    if query.has_search() {
-        execute_search_path(ctx, query, scope_ids.as_deref(), effective_cutoff, limit).await
+    let response = if query.has_search() {
+        execute_search_path(ctx, query, scope_ids.as_deref(), effective_cutoff, limit).await?
     } else {
-        execute_store_path(ctx, query, scope_ids.as_deref(), effective_cutoff, limit).await
-    }
+        execute_store_path(ctx, query, scope_ids.as_deref(), effective_cutoff, limit).await?
+    };
+    Ok(QueryExecution::Executed(response))
 }
 
 /// Validate a `MemoryQuery` for conflicting or incomplete options.

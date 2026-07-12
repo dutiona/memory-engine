@@ -14,6 +14,6 @@ pub mod query;
 // collide with the `query` module (holding `MemoryQuery`) at the crate root, exactly
 // the naming tension the facade's original `search::query`/`engine::query` module
 // split existed to avoid. Callers reach it as `me_query::execute::query(...)`.
-pub use execute::execute_query;
+pub use execute::{QueryExecution, execute_query};
 pub use hybrid::{port_hybrid_search, rrf_merge};
 pub use query::MemoryQuery;

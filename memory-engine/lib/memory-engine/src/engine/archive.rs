@@ -797,4 +797,83 @@ mod tests {
         );
         assert_eq!(result.pak_path, evil_path);
     }
+
+    /// #117 regression (Wave 2 #816 / S4 sub-PR 2): a *provided-but-missing* scope must
+    /// yield no results, and the unscoped archive fallback MUST be suppressed on that
+    /// scope-miss — otherwise it leaks archived facts from *all* scopes. Before the
+    /// `me-query` carve this was guaranteed structurally (the scope-miss early-return
+    /// preceded `execute_search_path`, where the archive block lived); the carve split
+    /// those two facts across the crate boundary, and this test pins the
+    /// `QueryExecution::ScopeMissing` guard that restores the behaviour.
+    ///
+    /// The positive control (an *unscoped* query returns the archived fact) proves the
+    /// archive fallback is live and text-matchable, so the scope-miss assertion below
+    /// cannot pass vacuously (the "verification theater" trap).
+    #[tokio::test]
+    async fn scope_miss_suppresses_unscoped_archive_fallback() {
+        use crate::search::query::MemoryQuery;
+
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.path().join("scope_archive.db"))
+            .build()
+            .unwrap();
+
+        // Insert expired, non-pinned facts (scope_id = 1, the root) carrying a distinctive
+        // token, then archive them so they live only in the cold `.pak` + manifest.
+        let expired_at = Utc::now() - Duration::hours(1);
+        for i in 0..5 {
+            engine
+                .storage()
+                .insert_fact(&make_expired_fact(
+                    &format!("archivable-token fact {i}"),
+                    expired_at,
+                ))
+                .await
+                .unwrap();
+        }
+        let stats = engine
+            .archive(&ArchivePolicy {
+                expired_before: Utc::now() + Duration::hours(1),
+                min_facts: 1,
+            })
+            .await
+            .unwrap();
+        assert!(
+            stats.is_some(),
+            "archival must have written a pak + manifest"
+        );
+        assert!(
+            !engine.list_archives().await.unwrap().is_empty(),
+            "manifest must be populated for the archive fallback to have anything to scan"
+        );
+
+        // Positive control: an UNSCOPED query (scope resolves to `Some(None)`) with the
+        // archive fallback opted in returns the archived facts — proving the fallback is
+        // live and the token is matchable, so the scope-miss assertion is not vacuous.
+        let unscoped = MemoryQuery::new()
+            .text("archivable-token")
+            .include_archives();
+        let hit = engine.execute_query(&unscoped).await.unwrap();
+        assert!(
+            !hit.results.is_empty(),
+            "unscoped archive fallback must surface the archived facts (control)"
+        );
+
+        // Regression: the SAME query against a provided-but-missing scope must return
+        // empty — the #117 scope-miss guard suppresses the unscoped archive fallback
+        // (which itself never filters on `query.scope`). Before the fix this leaked the
+        // cross-scope archived facts.
+        let scoped_miss = MemoryQuery::new()
+            .text("archivable-token")
+            .scope_exact("does:not:exist")
+            .include_archives();
+        let missed = engine.execute_query(&scoped_miss).await.unwrap();
+        assert!(
+            missed.results.is_empty(),
+            "a provided-but-missing scope must yield no results — the unscoped archive \
+             fallback must be suppressed on a scope-miss (#117), got {} result(s)",
+            missed.results.len()
+        );
+    }
 }
