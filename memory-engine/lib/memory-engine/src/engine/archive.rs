@@ -99,6 +99,15 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::Storage` on SQL failure.
     /// I/O errors for individual `.pak` files are reported per-entry, not propagated.
+    ///
+    /// # Guard order (deliberate, disclosed change — Wave 2 #816 / S4, sub-PR 3b)
+    ///
+    /// The carve resolves `archive_dir` *before* reading the manifest; pre-carve, the
+    /// manifest was listed first. This is a fail-fast improvement, and the two orders can
+    /// only diverge for an **in-memory** engine whose manifest read *also* fails — where
+    /// this now reports `ArchiveError::NotFileBacked` (the actual, dominant problem) rather
+    /// than the storage error. On a healthy in-memory engine both orders yield
+    /// `NotFileBacked`. Recorded here because the carve is otherwise behaviour-identical.
     pub async fn verify_archives(&self) -> Result<Vec<ArchiveVerifyResult>> {
         let archive_dir = self.archive_dir()?;
         crate::archive::verify_archives(self.cold.as_ref(), &archive_dir).await
@@ -577,66 +586,6 @@ mod tests {
              through to the I/O (file-not-found) path"
         );
         assert_eq!(result.pak_path, evil_path);
-    }
-
-    /// Write/read schema-version **symmetry** (Wave 2 #816 / S4).
-    ///
-    /// The `.pak` schema gate is a *split* guard: [`me_archive::build_pak`] **stamps** a
-    /// version, and `me_archive::pak::read_pak` **rejects** anything newer than the
-    /// version it supports. Those two halves must be sourced from the SAME constant, or
-    /// they are free to drift apart.
-    ///
-    /// They very nearly did (sub-PR 3a's history): the stamp used to come from
-    /// `me-backend-sqlite`'s `CURRENT_SCHEMA_VERSION` (= 14) while the read gate was
-    /// being parameterized "so a Postgres engine can pass its own version" — but
-    /// Postgres numbers its migrations independently (`CURRENT_PG_SCHEMA_VERSION` = 1).
-    /// A PG-backed engine would then stamp 14, check against 1, and refuse to read the
-    /// pak *it had just written*; the archive fallback swallows that error as
-    /// best-effort (`tracing::warn!`), so every archived fact would silently vanish from
-    /// every query. Both sides now read `me_types`' backend-independent
-    /// `ARCHIVE_SCHEMA_VERSION`.
-    ///
-    /// This test pins the invariant directly: **what the write side stamps is exactly
-    /// what the read side accepts.**
-    ///
-    /// # Belt and suspenders
-    ///
-    /// As of sub-PR 3b, this is no longer the *only* guard: [`me_archive::build_pak`]
-    /// lives in a crate (`me-archive`) with **no** dependency on any `me-backend-*`
-    /// crate, so a backend's schema-version constant is *unnameable* from either half —
-    /// the coupling this test pins is now enforced structurally by the crate boundary
-    /// (verified by a `cargo tree -p me-archive | grep me-backend` CI-adjacent gate),
-    /// not merely by convention. This test stays as a cheap runtime pin of the *value*
-    /// both sides agree on, complementing (not replacing) that structural guarantee.
-    #[tokio::test]
-    async fn pak_write_stamp_matches_read_gate() {
-        use crate::archive::pak::{read_pak, write_pak_and_hash};
-        use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
-
-        let dir = tempfile::tempdir().unwrap();
-        let engine = MemoryEngine::builder(DIM)
-            .path(dir.path().join("symmetry.db"))
-            .build()
-            .unwrap();
-
-        // The WRITE side: whatever `build_pak` stamps.
-        let pak = me_archive::build_pak(engine.embed_dim(), &[], &[]);
-        assert_eq!(
-            pak.engine_schema_version, ARCHIVE_SCHEMA_VERSION,
-            "build_pak must stamp the backend-independent ARCHIVE_SCHEMA_VERSION, not a \
-             backend's migration counter"
-        );
-
-        // The READ side must accept it. If the two halves ever diverge (e.g. one is
-        // re-pointed at a backend constant), `read_pak` returns SchemaVersionUnsupported
-        // and this fails — instead of silently dropping archived facts at runtime.
-        let path = dir.path().join("symmetry.pak");
-        write_pak_and_hash(&pak, &path).unwrap();
-        let restored = read_pak(&path).expect(
-            "the read gate must accept a pak the write side just stamped — a failure here \
-             means the write stamp and the read gate no longer share one constant",
-        );
-        assert_eq!(restored.engine_schema_version, ARCHIVE_SCHEMA_VERSION);
     }
 
     /// #117 regression (Wave 2 #816 / S4 sub-PR 2): a *provided-but-missing* scope must

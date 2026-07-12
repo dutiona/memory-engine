@@ -119,7 +119,7 @@ pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
 ///
 /// The gate compares against [`ARCHIVE_SCHEMA_VERSION`] — the **backend-independent**
 /// logical content-schema version of the `.pak` format (L0, `me-types`). The *same*
-/// constant is stamped on write (this crate's [`manage::build_pak`](crate::manage::build_pak)),
+/// constant is stamped on write (this crate's `manage::build_pak`),
 /// so the write and read sides are symmetric **by construction** and cannot drift apart.
 ///
 /// It is deliberately **not** a backend's schema version. A `.pak` is a portable blob of

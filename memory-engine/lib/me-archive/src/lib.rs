@@ -17,11 +17,11 @@
 //!
 //! # The structural prize
 //!
-//! [`manage::build_pak`] (the `.pak` write stamp) used to live in the facade,
+//! `manage::build_pak` (the `.pak` write stamp) used to live in the facade,
 //! where `me-backend-sqlite`'s `CURRENT_SCHEMA_VERSION` was *nameable*. Now that
 //! it lives here — a crate with **no** dependency on any `me-backend-*` crate — a
 //! backend's schema-version constant is *unnameable* from either half of the
-//! `.pak` write/read schema guard ([`manage::build_pak`] stamps,
+//! `.pak` write/read schema guard (`manage::build_pak` stamps,
 //! [`pak::read_pak`] checks). The write/read symmetry sub-PR 3a established by
 //! convention (both read `me_types::types::archive::ARCHIVE_SCHEMA_VERSION`) is
 //! now compiler-enforced: there is no `me-backend-*` edge in this crate's
@@ -34,5 +34,5 @@ pub mod pak;
 pub mod search;
 pub mod types;
 
-pub use manage::{archive, build_pak, list_archives, search_archives_fallback, verify_archives};
+pub use manage::{archive, list_archives, search_archives_fallback, verify_archives};
 pub use types::{ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVerifyResult};

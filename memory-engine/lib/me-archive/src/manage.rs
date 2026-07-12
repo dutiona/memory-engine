@@ -72,6 +72,23 @@ pub async fn archive(
     archive_dir: &Path,
     policy: &ArchivePolicy,
 ) -> Result<Option<ArchiveStats>> {
+    // Defence-in-depth floor, matching every other carved primitive (`me-query`,
+    // `me-ingest`, `me-resolve` all open with this). The facade delegate performs the
+    // identical check first, so no input's outcome or error order changes — but this is a
+    // `pub`, *destructive* primitive (it writes a `.pak` and hard-deletes facts/edges), and
+    // after the carve it is reachable by callers other than the delegate.
+    //
+    // The #742 reopen fence in particular has no backend-level enforcement: a fenced
+    // handle (post different-dim reconstruction) would otherwise stamp `ctx.embed_dim` —
+    // the *stale* dimension — into a `.pak` whose facts carry D'-width embeddings, giving
+    // a pak whose declared dim disagrees with its own vectors. Archive search then silently
+    // drops embedding scoring for it: permanent, silent cold-storage corruption.
+    //
+    // (Read-only is *also* caught below the seam — `block_write` → `try_write()` →
+    // `MemoryError::ReadOnly` — so `ctx.ensure_writable()` is not added here; that gate is
+    // tracked systemically across all write primitives in #972.)
+    ctx.ensure_open()?;
+
     let (candidate_facts, candidate_edges) = ctx
         .storage
         .select_archive_candidates(policy.expired_before)
@@ -233,7 +250,7 @@ pub async fn search_archives_fallback(
 /// write side of the `.pak` schema-version symmetry guard (Wave 2 #816 / S4, sub-PR 3b
 /// — see the module docs' "structural prize").
 #[must_use]
-pub fn build_pak(embed_dim: usize, facts: &[Fact], edges: &[Edge]) -> ArchivePak {
+pub(crate) fn build_pak(embed_dim: usize, facts: &[Fact], edges: &[Edge]) -> ArchivePak {
     ArchivePak {
         pak_version: CURRENT_PAK_VERSION,
         engine_schema_version: ARCHIVE_SCHEMA_VERSION,
@@ -346,5 +363,55 @@ fn verify_single_archive(entry: &ArchiveManifestEntry, pak_path: &Path) -> Archi
             ok: false,
             error: Some(format!("verification error: {e}")),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pak::{read_pak, write_pak_and_hash};
+
+    /// Write/read schema-version **symmetry** (Wave 2 #816 / S4, sub-PR 3a; relocated here
+    /// in 3b, where it belongs).
+    ///
+    /// The `.pak` schema gate is a *split* guard: [`build_pak`] **stamps** a version and
+    /// [`read_pak`] **rejects** anything newer than the version it supports. The two halves
+    /// must source the SAME constant or they are free to drift apart.
+    ///
+    /// They very nearly did. The stamp used to come from `me-backend-sqlite`'s
+    /// `CURRENT_SCHEMA_VERSION` (= 14) while the read gate was being parameterized "so a
+    /// Postgres engine can pass its own version" — but Postgres numbers its migrations
+    /// independently (`CURRENT_PG_SCHEMA_VERSION` = 1). A PG-backed engine would then stamp
+    /// 14, check against 1, and refuse to read the pak *it had just written*; the archive
+    /// fallback swallows that error as best-effort, so every archived fact would silently
+    /// vanish from every query.
+    ///
+    /// Since sub-PR 3b this is enforced **structurally**: `me-archive` has no dependency on
+    /// any `me-backend-*` crate, so neither half can even *name* a backend constant. This
+    /// test remains as the executable statement of the invariant — and it now lives beside
+    /// the code it constrains, needing no engine at all (it previously stood up a whole
+    /// `SQLite` engine just to read back its `embed_dim`).
+    #[test]
+    fn pak_write_stamp_matches_read_gate() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // The WRITE side: whatever `build_pak` stamps.
+        let pak = build_pak(8, &[], &[]);
+        assert_eq!(
+            pak.engine_schema_version, ARCHIVE_SCHEMA_VERSION,
+            "build_pak must stamp the backend-independent ARCHIVE_SCHEMA_VERSION, not a \
+             backend's migration counter"
+        );
+
+        // The READ side must accept it. If the halves ever diverge, `read_pak` returns
+        // SchemaVersionUnsupported and this fails — instead of silently dropping archived
+        // facts at runtime.
+        let path = dir.path().join("symmetry.pak");
+        write_pak_and_hash(&pak, &path).unwrap();
+        let restored = read_pak(&path).expect(
+            "the read gate must accept a pak the write side just stamped — a failure here \
+             means the write stamp and the read gate no longer share one constant",
+        );
+        assert_eq!(restored.engine_schema_version, ARCHIVE_SCHEMA_VERSION);
     }
 }

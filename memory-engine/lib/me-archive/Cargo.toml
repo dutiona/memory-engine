@@ -11,6 +11,20 @@ repository = "https://github.com/dutiona/memory-engine"
 publish = false
 
 [dependencies]
+# ⚠️ WORKSPACE FEATURE UNIFICATION. This crate is the first workspace member to enable a
+# sibling's optional feature *unconditionally* (every other crate declares its own optional
+# `archive` feature and forwards). That is correct here — me-archive IS the archive
+# primitive and cannot compile without these — but it has a non-obvious consequence: since
+# me-archive is an unconditional `[workspace] members` entry, Cargo unifies features across
+# a `--workspace` build, so me-types/me-storage/me-index compile with `archive` ON in EVERY
+# workspace job, including `cargo build --workspace` (default features).
+#
+# Left alone, that would mean NO CI job compiles those three crates archive-OFF — the very
+# configuration a downstream consumer of `memory-engine` gets by default. The CI Build job
+# therefore also runs facade-alone `cargo check -p memory-engine` (default and
+# no-default-features), which narrows the graph to exclude me-archive and restores the
+# archive-OFF gate. Do not delete those steps as "redundant with --workspace" — they are not.
+#
 # `archive` forwards to `me_types::types::archive` (ArchiveManifestEntry,
 # ARCHIVE_SCHEMA_VERSION) — the module is itself feature-gated in me-types.
 me-types = { path = "../me-types", features = ["archive"] }
