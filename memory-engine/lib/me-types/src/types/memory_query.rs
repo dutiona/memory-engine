@@ -1,7 +1,21 @@
+//! [`MemoryQuery`] — the fluent query-builder DTO.
+//!
+//! Relocated here from `me-query` (Wave 2 #816 / S4, sub-PR 3a): it is pure data
+//! + builder logic (only `chrono` + sibling `me-types` vocabulary — zero
+//! `me-query`-internal dependencies), so it belongs beside its sibling search DTOs
+//! (`SearchQuery`, `SearchResult`, `QueryResponse`, …) in `types::search` rather
+//! than in the L3 retrieval crate. This is the prerequisite that lets the
+//! forthcoming `me-archive` crate (an L3 leaf) depend on `MemoryQuery` without
+//! creating an illegal L3-to-L3 sibling edge onto `me-query`.
+//!
+//! Kept as its own module (rather than folded directly into `search.rs`) purely
+//! for file-size hygiene; re-exported from [`super::search`] as the single public
+//! path `me_types::types::search::MemoryQuery`.
+
 use chrono::{DateTime, Utc};
 
-use me_types::types::search::SearchMode;
-use me_types::types::{FactType, ScopeQuery};
+use crate::types::search::SearchMode;
+use crate::types::{FactType, ScopeQuery};
 
 /// Default limit for queries when not explicitly set.
 const DEFAULT_LIMIT: usize = 50;
@@ -12,7 +26,7 @@ const DEFAULT_LIMIT: usize = 50;
 /// An empty query returns all temporally-valid active facts sorted by `importance_score`.
 /// Future-dated facts (`t_valid > now`) are excluded by default (scheduling model invariant).
 ///
-/// This is the `me-query`-internal builder type; a `MemoryEngine`-driven end-to-end
+/// This is the pure data + builder type; a `MemoryEngine`-driven end-to-end
 /// example (constructing an engine, adding a fact, and executing a query against it)
 /// lives on the facade's re-export at `memory_engine::MemoryQuery`, where the engine
 /// and its consumer traits are in scope.
@@ -20,7 +34,7 @@ const DEFAULT_LIMIT: usize = 50;
 /// # Examples
 ///
 /// ```
-/// use me_query::MemoryQuery;
+/// use me_types::types::search::MemoryQuery;
 ///
 /// let query = MemoryQuery::new()
 ///     .scope_subtree("user:michael")

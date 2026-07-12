@@ -39,11 +39,10 @@ use me_types::error::{ConflictError, MemoryError, RerankerError, Result};
 use me_types::types::Fact;
 use me_types::types::ScopeQuery;
 use me_types::types::search::{
-    MatchType, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
+    MatchType, MemoryQuery, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
 };
 
 use crate::hybrid::port_hybrid_search;
-use crate::query::MemoryQuery;
 
 /// Map a `tokio::task::spawn_blocking` join failure (a panic or cancellation in the
 /// offloaded reranker call) to a `MemoryError`. Private copy of the facade's

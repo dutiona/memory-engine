@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::search::query::MemoryQuery;
+use crate::search::MemoryQuery;
 use crate::types::search::{QueryDiagnostics, QueryResponse, SearchQuery, SearchResult};
 
 use super::MemoryEngine;

@@ -12,7 +12,7 @@ use std::time::Instant;
 use crate::archive::pak::read_pak;
 use crate::archive::types::ArchiveManifestEntry;
 use crate::error::Result;
-use crate::search::query::MemoryQuery;
+use crate::search::MemoryQuery;
 use crate::search::vector::cosine_similarity;
 use crate::types::search::{MatchType, SearchResult};
 

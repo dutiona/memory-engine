@@ -331,7 +331,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::Archive` on `.pak` I/O or decompression failure.
     pub(crate) async fn search_archives_fallback(
         &self,
-        query: &crate::search::query::MemoryQuery,
+        query: &crate::search::MemoryQuery,
         limit: usize,
     ) -> Result<Option<crate::archive::search::ArchiveSearchResult>> {
         let Ok(archive_dir) = self.archive_dir() else {
@@ -811,7 +811,7 @@ mod tests {
     /// cannot pass vacuously (the "verification theater" trap).
     #[tokio::test]
     async fn scope_miss_suppresses_unscoped_archive_fallback() {
-        use crate::search::query::MemoryQuery;
+        use crate::search::MemoryQuery;
 
         let dir = tempfile::tempdir().unwrap();
         let engine = MemoryEngine::builder(DIM)

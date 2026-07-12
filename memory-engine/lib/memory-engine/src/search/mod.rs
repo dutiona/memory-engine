@@ -7,10 +7,15 @@
 //! hybrid search + the `MemoryQuery` builder) carved into [`me_query`] in turn
 //! (Wave 2 #816 / S4, sub-PR 2); the facade's `engine/query.rs` now calls
 //! `me_query::execute::{query, execute_query}` directly rather than routing through a
-//! `crate::search::hybrid` re-export, so only `query` (still reached as
-//! `crate::search::query::MemoryQuery` by `engine/archive.rs`/`engine/tests.rs`/
-//! `archive/search.rs`) is re-exported below; `hybrid` has no facade call site left
-//! and is dropped. `ann`/`filter_sql` and the `FilterSql`/`fts_count_expired`/
+//! `crate::search::hybrid` re-export, so `hybrid` has no facade call site left and is
+//! dropped. `query` (the module holding `MemoryQuery`) is dropped too, one layer
+//! further down (Wave 2 #816 / S4, sub-PR 3a): `MemoryQuery` relocated from `me-query`
+//! to `me-types` (a pure data + builder DTO with zero `me-query`-internal
+//! dependencies, sitting beside its sibling search vocabulary), so it is now
+//! re-exported directly from `crate::types::search` below rather than through a
+//! `query` submodule; internal callers (`engine/archive.rs`/`engine/query.rs`/
+//! `engine/tests.rs`/`archive/search.rs`) reach it as `crate::search::MemoryQuery`.
+//! `ann`/`filter_sql` and the `FilterSql`/`fts_count_expired`/
 //! `fts_search_filtered`/`vector_search_filtered` flat re-exports are NOT re-exported
 //! here — their only callers (`storage::sqlite::{search_index, convert}`) moved to
 //! `me-backend-sqlite` too, so nothing in the facade reaches them anymore (production
@@ -25,7 +30,6 @@
 #[cfg(fuzzing)]
 pub(crate) use me_backend_sqlite::search::fts;
 pub(crate) use me_backend_sqlite::search::{strategy, vector};
-pub(crate) use me_query::query;
 
 // --- Genuinely-public surface (re-exported at the crate root by `lib.rs`) ---
 //
@@ -33,9 +37,8 @@ pub(crate) use me_query::query;
 // below is an impl-internal helper kept `pub(crate)` so it stays reachable from
 // other engine modules without leaking onto the public API (#365).
 pub use crate::types::search::{
-    MatchType, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
+    MatchType, MemoryQuery, QueryDiagnostics, QueryResponse, SearchMode, SearchQuery, SearchResult,
 };
-pub use query::MemoryQuery;
 
 // `SearchConfig` and `cosine_similarity` are not part of the engine's facade
 // API, but the top-level benches/tests (which compile as separate crates and

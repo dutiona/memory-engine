@@ -48,8 +48,7 @@ me-resolve = { path = "../me-resolve" }
 # add_facts_batch, add_facts_batch_partial}` delegate to it directly.
 me-ingest = { path = "../me-ingest" }
 # L3 Query primitive: hybrid FTS5 + vector + RRF retrieval (Wave 2 #816 / S4,
-# sub-PR 2). `MemoryEngine::{query, execute_query}` delegate to it directly; the
-# facade's `search` module also re-exports its `hybrid`/`query` submodules.
+# sub-PR 2). `MemoryEngine::{query, execute_query}` delegate to it directly.
 me-query = { path = "../me-query" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -207,14 +206,17 @@ compress-zstd = ["dep:zstd", "me-backend-sqlite/compress-zstd"]
 # `engine/archive.rs`'s own `#[cfg(feature = "archive")]` prune path — is compiled in
 # lockstep with the facade's `archive` feature. Also forwards to
 # `me-backend-sqlite/archive` (Wave 2 #816 / S2, sub-PR 2a) so
-# `store/archive_manifest.rs` compiles in lockstep too.
+# `store/archive_manifest.rs` compiles in lockstep too. (`me-query/archive` was
+# dropped in Wave 2 #816 / S4, sub-PR 3a: it forwarded only for `MemoryQuery`'s
+# `#[cfg(feature = "archive")]` field, and `MemoryQuery` relocated to `me-types`
+# — already forwarded via `me-types/archive` above — so `me-query` itself no
+# longer has anything the feature needs to gate.)
 archive = [
     "compress-zstd",
     "me-types/archive",
     "me-storage/archive",
     "me-index/archive",
     "me-backend-sqlite/archive",
-    "me-query/archive",
 ]
 # The default in-process SQLite backend. NOTE (#633): this is a *marker* feature — it
 # does NOT yet gate `mod sqlite` or `rusqlite`. The engine open path hardcodes

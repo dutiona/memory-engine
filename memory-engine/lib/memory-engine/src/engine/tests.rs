@@ -2,7 +2,7 @@ use super::*;
 use crate::forgetting::ForgetPolicy;
 use crate::graph::MemoryGraph;
 use crate::resume::context::ResumeConfig;
-use crate::search::query::MemoryQuery;
+use crate::search::MemoryQuery;
 use crate::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, PersistenceClassifier,
     SummarizableContent, SummaryGenerator,
