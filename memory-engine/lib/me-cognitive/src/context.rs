@@ -82,12 +82,10 @@ impl<'a> CycleContext<'a> {
 /// [`CycleCtx`](me_traits::CycleCtx) read surface the
 /// [`DreamCycle`](me_traits::DreamCycle) contract names — the seam (Wave 2 #816) that
 /// keeps the trait layer free of any engine/consolidation type.
-///
-/// **Interim shape (Wave 2 #816 / S5, sub-PR 2 of 3):** `list_undreamt_in_period` /
-/// `outcome_counts_batch` are still implemented here explicitly, duplicating the
-/// `DreamCtx` impl below — `CycleCtx` does not yet declare `DreamCtx` as a supertrait
-/// (a follow-up commit in this same PR flips that and deletes this duplication; see
-/// `me-traits`'s own doc for why the duplication existed in the first place).
+/// `list_undreamt_in_period` / `outcome_counts_batch` are **not** implemented here:
+/// they resolve by inheritance from the `DreamCtx` supertrait, straight through to
+/// the held `dream` reference (`&dyn DreamCtx` auto-derefs to itself — no forwarding
+/// impl needed).
 #[async_trait::async_trait]
 impl me_traits::CycleCtx for CycleContext<'_> {
     fn time_window(&self) -> TimeWindow {
@@ -100,17 +98,6 @@ impl me_traits::CycleCtx for CycleContext<'_> {
 
     fn prior_reports(&self) -> &[CycleMetadata] {
         &self.prior_reports
-    }
-
-    async fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>> {
-        self.dream.list_undreamt_in_period(window).await
-    }
-
-    async fn outcome_counts_batch(
-        &self,
-        fact_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, me_types::types::OutcomeCounts>> {
-        self.dream.outcome_counts_batch(fact_ids).await
     }
 }
 

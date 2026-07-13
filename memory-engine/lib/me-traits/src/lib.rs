@@ -456,24 +456,18 @@ pub trait DreamCtx: Send + Sync {
 ///
 /// `DreamCycle::run` is **planning**, not writing: it reads the time window and prior
 /// state and returns a delta-based [`CycleReport`] for the caller to apply. `CycleCtx`
-/// is exactly the read surface those impls use. It is implemented by the engine's
-/// concrete `CycleContext`; abstracting it behind
-/// this trait is what lets the `DreamCycle` contract name no engine/consolidation type
-/// (Wave 2 #816 — the trait layer stays a leaf over the data layer). The write
-/// capabilities (consolidate / forget / promote) run later, in the engine's apply path,
-/// not through this handle.
-///
-/// `Send + Sync` (like every sibling consumer trait, #631/#386): a `&dyn CycleCtx` is
-/// borrowed across `.await` inside the `Send` cycle future.
-///
-/// **Interim shape (Wave 2 #816 / S5, sub-PR 2 of 3):** this still duplicates
-/// [`DreamCtx::list_undreamt_in_period`]/[`DreamCtx::outcome_counts_batch`] rather than
-/// inheriting them via a supertrait — the very duplication [`DreamCtx`]'s own doc
-/// explains and that a follow-up commit in this same PR removes, once `me-cognitive`'s
-/// `CycleContext` implements `DreamCtx` directly (this commit keeps every intermediate
-/// state buildable).
+/// adds the retrieve-before-reflect surface (the window, prior wisdom, prior cycle
+/// metadata) on top of the [`DreamCtx`] supertrait, which supplies the engine
+/// capability bag — including `list_undreamt_in_period` / `outcome_counts_batch`,
+/// **inherited**, not duplicated (see [`DreamCtx`]'s own doc for why that duplication
+/// existed and was removed in Wave 2 #816 / S5). It is implemented by the engine's
+/// concrete `CycleContext`; abstracting it behind this trait is what lets the
+/// `DreamCycle` contract name no engine/consolidation type (Wave 2 #816 — the trait
+/// layer stays a leaf over the data layer). The write capabilities the supertrait
+/// exposes (consolidate / forget / promote) are available here too, but the shipped
+/// cycles run them later, through the engine's apply path — not through this handle.
 #[async_trait]
-pub trait CycleCtx: Send + Sync {
+pub trait CycleCtx: DreamCtx {
     /// The window of facts this cycle was asked to process.
     fn time_window(&self) -> TimeWindow;
 
@@ -484,27 +478,6 @@ pub trait CycleCtx: Send + Sync {
     /// Metadata of recent prior cycles (newest last), for cycle-id sequencing and
     /// drift detection against existing wisdom.
     fn prior_reports(&self) -> &[CycleMetadata];
-
-    /// The cycle's input set: facts in `window` not already processed by a prior cycle
-    /// (the `dream_cycle` marker excludes them).
-    ///
-    /// # Errors
-    ///
-    /// Returns a store error if the read fails.
-    async fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>>;
-
-    /// Aggregated outcome counts for many facts in a single query (batch rescoring).
-    /// Facts with no recorded outcomes (or unknown ids) are absent from the map;
-    /// callers treat a missing key as
-    /// [`OutcomeCounts::default`](me_types::types::OutcomeCounts).
-    ///
-    /// # Errors
-    ///
-    /// Returns a store error if the query fails.
-    async fn outcome_counts_batch(
-        &self,
-        fact_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, OutcomeCounts>>;
 }
 
 /// Periodic batch processing: consolidation, pattern detection, promotion.
