@@ -6,9 +6,12 @@
 //! in Wave 2 #816 / S5 (closes #981) — see that crate's root doc for the full history
 //! (ADR 0014 decision #3 → S1 regression → S5 restoration). What stays here:
 //!
-//! - **`impl DreamCtx for MemoryEngine`** — the 9 capability delegates. `MemoryEngine`
-//!   is the (only) implementor of [`me_traits::DreamCtx`]; a trait impl for a type
-//!   belongs where the type is defined, so this cannot move.
+//! - **`EngineDreamCtx`** — a *private* borrow-newtype over `&MemoryEngine` carrying the
+//!   9 capability delegates of [`me_traits::DreamCtx`]. Deliberately **not**
+//!   `impl DreamCtx for MemoryEngine`: five of the trait's method names collide with
+//!   inherent `MemoryEngine` methods, and a direct impl would silently turn any future
+//!   rename of one into unbounded recursion. See the type's own doc — the newtype makes
+//!   that failure *unrepresentable* rather than merely discouraged.
 //! - **`promote_with_lineage`** — caches newly-resolved scope ids into the engine's
 //!   in-memory `ScopeTree`, an engine-owned cache `MemoryCtx` does not carry (ADR 0018
 //!   decision #3: `scope_tree` is a loose per-primitive parameter, not universal).
@@ -57,18 +60,54 @@ pub use crate::types::Insight;
 /// spelling differs. The two names that do **not** collide (`promote` →
 /// `promote_with_lineage`, `outcome_counts_batch` → `get_outcome_counts_batch`) are
 /// qualified anyway, for uniformity.
+/// The engine's [`DreamCtx`] adapter — a private borrow-newtype over `&MemoryEngine`.
+///
+/// # Why this is a newtype and **not** `impl DreamCtx for MemoryEngine`
+///
+/// Five of `DreamCtx`'s nine methods share a name with an inherent `MemoryEngine`
+/// method (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget`). Had
+/// `MemoryEngine` implemented `DreamCtx` directly, each impl body would have to call
+/// the same-named inherent method on `self` — and Rust resolves inherent-before-trait,
+/// so it works *only for as long as the inherent method keeps its name*. Rename or
+/// remove one, and the call silently re-resolves to **the trait method being defined**:
+/// unbounded recursion, stack overflow, in the **consumer's** process.
+///
+/// That failure is invisible to every gate this repo has. Verified empirically:
+/// `rustc`'s `unconditional_recursion` lint **does not fire through `#[async_trait]`**
+/// (the recursive call sits inside the desugared `Box::pin(async move { … })`, not in
+/// the fn's own CFG), so the workspace's `-D warnings` gate compiles it clean. No
+/// qualification syntax helps either — `Self::query(self, q)` and `self.query(q)` share
+/// the *same* resolution order; qualifying is cosmetic, not protective.
+///
+/// So the invariant is made **structural instead of conventional**: `MemoryEngine` does
+/// not implement `DreamCtx` at all. Inside the impl below, `self.0` is a plain
+/// `&MemoryEngine` with **no `DreamCtx` impl in scope for it**, so `self.0.query(q)` can
+/// only ever resolve to the inherent method. Rename that method and this stops compiling
+/// (`E0599: no method named 'query'`) — a hard error at the exact call site, not a
+/// silent runtime catastrophe. Recursion here is not discouraged; it is unrepresentable.
+///
+/// (This is, in effect, the old `pub` `DreamContext` restored to its proper form: its
+/// *narrowing* job was always correct — what was wrong was that it was public,
+/// unreachable, and stranded at L4. As a private adapter implementing an L0.5 trait, it
+/// is exactly what it should have been.)
+// NB: `pub` (not `pub(crate)`) only to satisfy `clippy::redundant_pub_crate` — the
+// enclosing `engine::cognitive` module is private and this type is never re-exported
+// from `lib.rs`, so it is **not** part of the public API. The `reexports_are_accessible`
+// probe + the S5-3 reachable-path ratchet (#941) are what actually hold that line.
+pub struct EngineDreamCtx<'a>(pub(crate) &'a MemoryEngine);
+
 #[async_trait::async_trait]
-impl DreamCtx for MemoryEngine {
+impl DreamCtx for EngineDreamCtx<'_> {
     async fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        Self::query(self, query).await
+        self.0.query(query).await
     }
 
     async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
-        Self::list_active_facts(self, limit).await
+        self.0.list_active_facts(limit).await
     }
 
     async fn get_fact(&self, id: i64) -> Result<Fact> {
-        Self::get_fact(self, id).await
+        self.0.get_fact(id).await
     }
 
     async fn consolidate(
@@ -77,40 +116,38 @@ impl DreamCtx for MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        Self::consolidate(self, generator, embedder, config).await
+        self.0.consolidate(generator, embedder, config).await
     }
 
     async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        Self::forget(self, policy).await
+        self.0.forget(policy).await
     }
 
     async fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult> {
-        Self::promote_with_lineage(self, req).await
+        self.0.promote_with_lineage(req).await
     }
 
     async fn list_undreamt_in_period(
         &self,
         window: crate::cognitive::TimeWindow,
     ) -> Result<Vec<Fact>> {
-        // No same-named inherent `MemoryEngine` method exists (unlike the six above),
-        // so this reaches the storage port directly — mirroring the pre-carve
-        // `DreamContext::list_undreamt_in_period` body exactly. Fully-qualifying
-        // would have nothing to disambiguate; this is simply never a `self.<same
-        // name>` call in the first place.
-        self.storage
+        // Mirrors the pre-carve `DreamContext::list_undreamt_in_period` body exactly:
+        // there is no inherent `MemoryEngine` method of this name to delegate to.
+        self.0
+            .storage
             .list_undreamt_facts_in_period(window.start, window.end, &[], None)
             .await
     }
 
     async fn outcome_counts(&self, fact_id: i64) -> Result<OutcomeCounts> {
-        Self::get_outcome_counts(self, fact_id).await
+        self.0.get_outcome_counts(fact_id).await
     }
 
     async fn outcome_counts_batch(
         &self,
         fact_ids: &[i64],
     ) -> Result<std::collections::HashMap<i64, OutcomeCounts>> {
-        Self::get_outcome_counts_batch(self, fact_ids).await
+        self.0.get_outcome_counts_batch(fact_ids).await
     }
 }
 
@@ -192,7 +229,7 @@ impl MemoryEngine {
         &self,
         cycle: &dyn DreamCycle,
     ) -> Result<crate::cognitive::CycleReport> {
-        crate::cognitive::run_dream_cycle(self.mem_ctx(), self, cycle).await
+        crate::cognitive::run_dream_cycle(self.mem_ctx(), &EngineDreamCtx(self), cycle).await
     }
 
     /// Run a `DreamCycle` **only if the caller has not written facts since the last
@@ -230,7 +267,8 @@ impl MemoryEngine {
         &self,
         cycle: &dyn DreamCycle,
     ) -> Result<crate::cognitive::CycleOutcome> {
-        crate::cognitive::run_dream_cycle_guarded(self.mem_ctx(), self, cycle).await
+        crate::cognitive::run_dream_cycle_guarded(self.mem_ctx(), &EngineDreamCtx(self), cycle)
+            .await
     }
 
     /// Validate and apply a [`CycleReport`](crate::cognitive::CycleReport) atomically.
@@ -398,6 +436,90 @@ mod tests {
                 },
             })
         }
+    }
+
+    /// A cycle that exercises the **restored capability bag** through `&dyn CycleCtx`.
+    ///
+    /// This is the regression test for the S1 defect (#981). ADR-0014 decision #3 gave a
+    /// `DreamCycle` the engine capability bag; S1 re-typed `run` to `&dyn CycleCtx` and
+    /// silently severed it, leaving 7 of 9 methods unreachable — and **no test noticed**,
+    /// because none had ever called them through the contract. Restoring the bag without a
+    /// test that consumes it would repeat exactly that mistake.
+    ///
+    /// Every call below goes through the `CycleCtx: DreamCtx` supertrait — i.e. through the
+    /// path a real consumer's cycle takes. It also proves the `EngineDreamCtx` adapter does
+    /// not recurse: a same-name resolution bug would blow the stack here, not return data.
+    struct CapabilityProbeCycle {
+        seen_active: std::sync::atomic::AtomicUsize,
+        seen_fact_id: std::sync::atomic::AtomicI64,
+        reached_outcome_counts: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl DreamCycle for CapabilityProbeCycle {
+        async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {
+            use std::sync::atomic::Ordering;
+
+            // --- inherited from DreamCtx via the supertrait (unreachable before #981) ---
+            let active = ctx.list_active_facts(None).await?;
+            self.seen_active.store(active.len(), Ordering::SeqCst);
+
+            if let Some(first) = active.first() {
+                let fetched = ctx.get_fact(first.id).await?;
+                self.seen_fact_id.store(fetched.id, Ordering::SeqCst);
+
+                // A fresh fact carries no outcome signals; what matters is that the call
+                // resolves through the trait and *returns* — rather than blowing the stack.
+                let _counts = ctx.outcome_counts(first.id).await?;
+                self.reached_outcome_counts.store(true, Ordering::SeqCst);
+            }
+
+            Ok(CycleReport {
+                deltas: vec![],
+                identity: IdentityOutput::empty(),
+                metadata: CycleMetadata {
+                    cycle_id: 0,
+                    ran_at: Utc::now(),
+                    time_window: ctx.time_window(),
+                    facts_selected: 0,
+                    method_version: "capability-probe".into(),
+                    processed_ids: vec![],
+                },
+            })
+        }
+    }
+
+    /// #981 regression: a `DreamCycle` can reach the engine capability bag through
+    /// `&dyn CycleCtx`. This is the contract ADR-0014 decision #3 promised and S1 broke.
+    #[tokio::test]
+    async fn cycle_can_reach_the_capability_bag_through_cyclectx() {
+        use std::sync::atomic::Ordering;
+
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let ids = add_source_facts(&engine, &[1, 2]).await;
+        assert!(!ids.is_empty(), "fixture must insert at least one fact");
+
+        let probe = CapabilityProbeCycle {
+            seen_active: std::sync::atomic::AtomicUsize::new(0),
+            seen_fact_id: std::sync::atomic::AtomicI64::new(0),
+            reached_outcome_counts: std::sync::atomic::AtomicBool::new(false),
+        };
+        engine.run_dream_cycle(&probe).await.unwrap();
+
+        // The cycle actually saw the store through the trait — not an empty stub.
+        assert_eq!(
+            probe.seen_active.load(Ordering::SeqCst),
+            ids.len(),
+            "list_active_facts must reach the real store through DreamCtx"
+        );
+        assert!(
+            ids.contains(&probe.seen_fact_id.load(Ordering::SeqCst)),
+            "get_fact must return a real fact through DreamCtx"
+        );
+        assert!(
+            probe.reached_outcome_counts.load(Ordering::SeqCst),
+            "outcome_counts must have been reached through DreamCtx"
+        );
     }
 
     fn stub_provenance() -> PromotionProvenance {
