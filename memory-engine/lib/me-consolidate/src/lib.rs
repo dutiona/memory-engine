@@ -23,12 +23,16 @@
 //!
 //! # Scope (a maintainer decision — do not extend without re-reading #940)
 //!
-//! The Phase-5 cognitive/dream layer (`engine/cognitive.rs`, `engine/cycle/*`) stays in
-//! the facade. `DreamContext` holds `engine: &'a MemoryEngine` (and `CycleContext`
-//! wraps it), so moving them would force this crate to name `MemoryEngine` — an
-//! illegal L3→L4 back-edge. Carving them needs a public API break (inverting the
-//! public `DreamContext` into a `me-traits` capability trait) that is deliberately out
-//! of scope here.
+//! At S4, this crate deliberately excluded the Phase-5 cognitive/dream layer
+//! (`engine/cognitive.rs`, `engine/cycle/*`): `DreamContext` held `engine: &'a
+//! MemoryEngine` (and `CycleContext` wrapped it), so moving that layer here would have
+//! forced this crate to name `MemoryEngine` — an illegal L3→L4 back-edge. **That
+//! blocker is resolved as of Wave 2 #816 / S5 (#981):** `DreamContext` is deleted,
+//! its capability bag inverted into the `me-traits::DreamCtx` trait, and the
+//! dream-cycle layer carved into its own sibling L3 crate, `me-cognitive` — not into
+//! this one. This crate's own scope (the 3-pass dedup → cluster → global pipeline
+//! only) is unchanged by that move; the note above is kept as history, not as a
+//! still-open blocker.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod pipeline;

@@ -2,9 +2,10 @@
 //!
 //! [`DefaultDreamCycle`] is **pure** and **deterministic**: it reads the cycle's
 //! window and emits a [`CycleReport`] of proposed deltas, never writing to the store
-//! (the engine applies the report). Because it makes no LLM call and uses a stable
-//! iteration order, it is itself immune to context collapse — the delta vocabulary's
-//! collapse-resistance (R7) is for *consumer* implementations.
+//! (the caller applies the report via [`apply_cycle_report`](crate::apply_cycle_report)).
+//! Because it makes no LLM call and uses a stable iteration order, it is itself
+//! immune to context collapse — the delta vocabulary's collapse-resistance (R7) is
+//! for *consumer* implementations.
 //!
 //! Pipeline:
 //! 1. **Select** un-dream-cycled facts in the window.
@@ -15,9 +16,9 @@
 //!    becomes a [`CycleDelta::AdjustScore`]; a fact with a strong, consistently
 //!    negative signal is [`CycleDelta::Quarantine`]d out of retrieval.
 //!
-//! Consolidation (the existing 3-pass `consolidate()`) is intentionally **not** run
+//! Consolidation (the engine's 3-pass `consolidate()`) is intentionally **not** run
 //! here: it mutates the store, which would break this producer's purity and
-//! determinism. Operators schedule `MemoryEngine::consolidate` as a separate step.
+//! determinism. Operators schedule consolidation as a separate step.
 //! Identity computation (ANCHORS/CORE/PREDICTIONS) is #57; this emits
 //! [`IdentityOutput::empty`]. Abstract pattern extraction / synthesized `AddFact`
 //! (R9), hierarchical composition (R13), and content-based correction detection are
@@ -26,12 +27,12 @@
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 
-use crate::error::Result;
-use crate::traits::{CycleCtx, DreamCycle};
-use crate::types::{DreamCycleConfig, Fact, FactId, FactType, PromotionProvenance};
+use me_traits::{CycleCtx, DreamCycle};
+use me_types::error::Result;
+use me_types::types::cycle_report::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
+use me_types::types::{DreamCycleConfig, Fact, FactId, FactType, PromotionProvenance};
 
-use super::dbscan::dbscan;
-use super::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
+use crate::dbscan::dbscan;
 
 /// DBSCAN neighbourhood radius in cosine *distance* (cos similarity ≥ 0.85).
 /// The per-`FactType` `DreamCycleConfig` ratios are retention ratios, NOT distances,
@@ -46,48 +47,17 @@ const METHOD_VERSION: &str = "dbscan-v1";
 
 /// The shipped pure-Rust DBSCAN dream cycle.
 ///
-/// # Example
+/// A full, runnable end-to-end example (add facts → run this cycle → apply the
+/// report) needs the `MemoryEngine` facade — the `MemoryEngine: DreamCtx` implementor
+/// — which this L3 crate cannot depend on (that back-edge is exactly what the Wave 2
+/// #816 / S5 carve removes). See `memory_engine::MemoryEngine::run_dream_cycle`'s own
+/// doc (in the facade crate) for the runnable version of this sketch.
 ///
-/// ```
-/// use memory_engine::{
-///     AddFactRequest, DefaultDreamCycle, EmbeddingFingerprint, EmbeddingProvider, FactType,
-///     MemoryEngine, MemoryError,
-/// };
-///
-/// // A trivial embedder (the consumer normally injects a real one).
-/// struct Embed;
-/// impl EmbeddingProvider for Embed {
-///     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
-///         Ok(vec![1.0, 0.0])
-///     }
-///     fn fingerprint(&self) -> EmbeddingFingerprint {
-///         EmbeddingFingerprint::new("mock", "test", 2)
-///     }
-/// }
-///
-/// // The engine API is async (#631); a consumer binary uses `#[tokio::main]`.
-/// tokio::runtime::Runtime::new().unwrap().block_on(async {
-///     let engine = MemoryEngine::builder(2).build()?;
-///     let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(Embed);
-///     for i in 0..3 {
-///         let req = AddFactRequest {
-///             content: format!("recurring pattern {i}"),
-///             fact_type: FactType::Semantic,
-///             source_event_id: None,
-///             scope: None,
-///             opts: None,
-///         };
-///         engine.add_fact(&req, embedder.clone(), None).await?;
-///     }
-///
-///     // Produce an unapplied report (the review gate), then apply it atomically.
-///     let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults()).await?;
-///     assert_eq!(report.metadata.facts_selected, 3);
-///     let applied = engine.apply_cycle_report(&report).await?;
-///     assert_eq!(applied.promoted, 1); // the three-fact cluster promotes one representative
-///     Ok::<(), MemoryError>(())
-/// })
-/// .unwrap();
+/// ```ignore
+/// let engine = MemoryEngine::builder(2).build()?;
+/// // ... add facts via `engine.add_fact(...)` ...
+/// let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults()).await?;
+/// let applied = engine.apply_cycle_report(&report).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct DefaultDreamCycle {
@@ -167,6 +137,10 @@ fn cluster_provenance(cluster: &[FactId], by_id: &HashMap<FactId, &Fact>) -> Pro
     }
 }
 
+// NOTE — the recursion trap (see crate-root doc): unlike `impl DreamCtx for
+// MemoryEngine` (facade), this impl calls `ctx.*` where `ctx: &dyn CycleCtx` is a
+// PARAMETER, not `self`, so there is no same-name inherent-vs-trait ambiguity here at
+// all. Nothing below needs (or would benefit from) fully-qualified syntax.
 #[async_trait::async_trait]
 impl DreamCycle for DefaultDreamCycle {
     async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {
@@ -272,43 +246,22 @@ impl DreamCycle for DefaultDreamCycle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::MemoryEngine;
-    use crate::traits::EmbeddingProvider;
-    use crate::types::{AddFactOptions, AddFactRequest, FactType, Outcome};
+    use crate::cognitive::run_dream_cycle;
+    use crate::test_support::TestEngine;
+    use me_types::types::Outcome;
 
     const DIM: usize = 4;
 
-    async fn add(engine: &MemoryEngine, content: &str, ft: FactType, importance: f64) -> i64 {
-        let req = AddFactRequest {
-            content: content.into(),
-            fact_type: ft,
-            source_event_id: None,
-            scope: None,
-            opts: Some(AddFactOptions {
-                base_importance: Some(importance),
-                ..Default::default()
-            }),
-        };
-        engine
-            .add_fact(
-                &req,
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap()
-    }
-
     #[tokio::test]
     async fn dense_cluster_yields_a_promote_delta() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let engine = TestEngine::new(DIM).await;
         // Three identical-embedding Semantic facts → one DBSCAN cluster of 3.
         for i in 0..3 {
-            add(&engine, &format!("pattern {i}"), FactType::Semantic, 0.8).await;
+            engine
+                .add_typed(&format!("pattern {i}"), FactType::Semantic, 0.8)
+                .await;
         }
-        let report = engine
-            .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+        let report = run_dream_cycle(engine.ctx(), &engine, &DefaultDreamCycle::with_defaults())
             .await
             .unwrap();
         let promotes = report
@@ -326,12 +279,11 @@ mod tests {
 
     #[tokio::test]
     async fn negative_outcomes_rescore_down() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let id = add(&engine, "lone fact", FactType::Episodic, 0.5).await;
-        engine.record_outcome(id, Outcome::Negative).await.unwrap();
-        engine.record_outcome(id, Outcome::Negative).await.unwrap();
-        let report = engine
-            .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+        let engine = TestEngine::new(DIM).await;
+        let id = engine.add_typed("lone fact", FactType::Episodic, 0.5).await;
+        engine.record_outcome(id, Outcome::Negative).await;
+        engine.record_outcome(id, Outcome::Negative).await;
+        let report = run_dream_cycle(engine.ctx(), &engine, &DefaultDreamCycle::with_defaults())
             .await
             .unwrap();
         // single fact → no cluster (min_pts=3) → only the rescore delta.
@@ -343,13 +295,12 @@ mod tests {
 
     #[tokio::test]
     async fn consistent_negative_outcomes_quarantine() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
-        let id = add(&engine, "bad fact", FactType::Episodic, 0.5).await;
+        let engine = TestEngine::new(DIM).await;
+        let id = engine.add_typed("bad fact", FactType::Episodic, 0.5).await;
         for _ in 0..3 {
-            engine.record_outcome(id, Outcome::Negative).await.unwrap();
+            engine.record_outcome(id, Outcome::Negative).await;
         }
-        let report = engine
-            .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+        let report = run_dream_cycle(engine.ctx(), &engine, &DefaultDreamCycle::with_defaults())
             .await
             .unwrap();
         assert!(report.deltas.iter().any(|d| matches!(
@@ -360,16 +311,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_is_deterministic_on_deltas() {
-        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let engine = TestEngine::new(DIM).await;
         for i in 0..3 {
-            add(&engine, &format!("p {i}"), FactType::Semantic, 0.8).await;
+            engine
+                .add_typed(&format!("p {i}"), FactType::Semantic, 0.8)
+                .await;
         }
-        let a = engine
-            .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+        let a = run_dream_cycle(engine.ctx(), &engine, &DefaultDreamCycle::with_defaults())
             .await
             .unwrap();
-        let b = engine
-            .run_dream_cycle(&DefaultDreamCycle::with_defaults())
+        let b = run_dream_cycle(engine.ctx(), &engine, &DefaultDreamCycle::with_defaults())
             .await
             .unwrap();
         assert_eq!(

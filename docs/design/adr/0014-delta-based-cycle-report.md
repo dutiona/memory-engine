@@ -76,7 +76,42 @@ metadata }`. `CycleDelta` is a typed, bounded vocabulary — `AddFact`, `AdjustS
   separately. Single-transaction cycle + content-based correction detection + abstract
   pattern extraction (R9/R13) are deferred to #578; identity computation to #57.
 
+## Amendment (Wave 2 #816, S5)
+
+Decision #3 preserved the capability bag (`DreamContext`) **by composition**:
+`CycleContext` wrapped it, and `CycleContext::dream()` was the accessor. Wave 2's S1
+sub-slice re-typed `DreamCycle::run` from a concrete `&CycleContext` to `&dyn CycleCtx`
+(ADR 0018 decision #8a) — necessary so `me-traits` (L0.5) would not have to name the
+facade type that owned the cycle's read-set. That re-type had a side effect nobody
+recorded at the time: it made `DreamContext` **unreachable**. `DreamContext::new` was
+`pub(crate)`, `CycleContext::dream()` was the only accessor, and a `&dyn CycleCtx`
+trait object cannot be downcast to the concrete `CycleContext` behind it. S1 copied
+only the two methods the shipped `DefaultDreamCycle`/`LlmDreamCycle` happened to call
+(`list_undreamt_in_period`, `outcome_counts_batch`) directly onto `CycleCtx`, and the
+other seven `DreamContext` methods (`query`, `list_active_facts`, `get_fact`,
+`consolidate`, `forget`, `promote`, plus the duplicated `list_undreamt_in_period`)
+were left with zero call sites — `pub`, compiling, and dead. **S1 should have amended
+this ADR to record that regression, and did not.** A green build never caught it:
+`dead_code` does not fire on `pub` items, and no test exercised the stranded methods
+(they were an enabler for open work — #578, #231, #554/#627 — not yet-consumed).
+
+S5 (closes #981) restores the contract, layer-cleanly instead of re-wrapping it: the
+capability bag is promoted into the `me-traits` trait layer itself, as
+`DreamCtx` — a `#[async_trait]` trait carrying the same nine methods `DreamContext`
+had. `CycleCtx` gains `DreamCtx` as a **supertrait**, inheriting
+`list_undreamt_in_period`/`outcome_counts_batch` instead of re-declaring them (S1's
+duplication is removed). `MemoryEngine` is the only implementor, in the facade;
+`me-traits` still names no engine type. The `DreamContext` struct is deleted — a trait
+object supersedes it natively, with no downcast needed — and `CycleContext` now holds
+`&dyn DreamCtx` directly. The `ctx.dream()` indirection is **flattened**: a consumer
+calls `ctx.query(...)` / `ctx.promote(...)` directly on the `&dyn CycleCtx` it is
+handed, one level shallower than before. This same move let the dream-cycle subsystem
+be carved out of the facade into its own crate (`me-cognitive`) — the L3 → L4
+back-edge `DreamContext: &'a MemoryEngine` had been the blocker (see ADR 0018 decision
+#8a's own amendment, and #981).
+
 ## References
 
 - ACE (arXiv:2510.04618), DC (arXiv:2504.07952).
 - Implementation plan: archived in [memory-engine#49](https://github.com/dutiona/memory-engine/issues/49).
+- S5 restoration: [memory-engine#981](https://github.com/dutiona/memory-engine/issues/981).

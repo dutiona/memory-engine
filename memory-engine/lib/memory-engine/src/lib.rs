@@ -130,6 +130,14 @@ pub use me_types::types; // relocated to me-types (Wave 2 #816); see `error` abo
 // carve convention.
 #[cfg(feature = "archive")]
 pub(crate) use me_archive as archive;
+// `cognitive` is relocated to the L3 `me-cognitive` crate (Wave 2 #816 / S5, sub-PR 2,
+// closes #981): the dream-cycle subsystem (`CycleContext`, `DefaultDreamCycle`,
+// `LlmDreamCycle`, `apply_cycle_report`, `run_dream_cycle`/`run_dream_cycle_guarded`).
+// The re-export preserves `crate::cognitive::*` for `engine::cognitive`'s internal
+// call sites; `impl DreamCtx for MemoryEngine` and its four thin delegates stay in
+// `engine::cognitive` (a *different*, facade-internal module of the same name — see
+// that file's own doc).
+pub(crate) use me_cognitive as cognitive;
 // `forgetting` is relocated to the L3 `me-forget` crate (Wave 2 #816 / S3, sub-PR
 // 2). The re-export preserves `pub(crate)` visibility and every internal
 // `crate::forgetting::*` path (`ForgetPolicy`, `PruneStats`, `prune`).
@@ -176,8 +184,8 @@ pub use forgetting::{ForgetPolicy, PruneStats};
 pub use inspect::types as inspect_types;
 pub use me_traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
-    CycleCtx, DeltaProposer, DreamCycle, EmbeddingProvider, InsightStream, PersistenceClassifier,
-    Reranker, SummarizableContent, SummaryGenerator,
+    CycleCtx, DeltaProposer, DreamCtx, DreamCycle, EmbeddingProvider, InsightStream,
+    PersistenceClassifier, Reranker, SummarizableContent, SummaryGenerator,
 };
 pub use me_types::error::{
     ArchiveError, ConflictError, CycleError, MemoryError, MigrationError, RerankerError, Result,
@@ -290,12 +298,16 @@ pub use storage::{
     TemporalFilter,
 };
 
-// Phase 5a cognitive pipeline re-exports
-pub use engine::cognitive::{DreamContext, INSIGHT_MARKER_KEY};
-pub use engine::cycle::{
+// Phase 5a cognitive pipeline re-exports. Carved into `me-cognitive` (Wave 2 #816 /
+// S5, closes #981); re-exported via the `cognitive` alias (`crate::cognitive` = the
+// `me_cognitive` crate) so this list is unchanged in shape from the pre-carve
+// `engine::cognitive`/`engine::cycle` re-export, minus `DreamContext` (deleted — its
+// capabilities live on the `DreamCtx` trait now, re-exported above) plus
+// `INSIGHT_MARKER_KEY` folded into the same list.
+pub use cognitive::{
     ApplyResult, CycleAnomaly, CycleContext, CycleDelta, CycleMetadata, CycleOutcome, CycleReport,
-    DefaultDreamCycle, IMPORTANCE_STEP, IdentityOutput, LlmDreamCycle, MAX_ADJUSTMENT, SkipReason,
-    TimeWindow,
+    DefaultDreamCycle, IMPORTANCE_STEP, INSIGHT_MARKER_KEY, IdentityOutput, LlmDreamCycle,
+    MAX_ADJUSTMENT, SkipReason, TimeWindow,
 };
 
 /// Fuzz-only seam (`--cfg fuzzing`, set only by `cargo fuzz`).
@@ -363,6 +375,11 @@ mod tests {
         fn _accepts_insight_stream(_: &dyn crate::InsightStream) {}
         fn _accepts_dream_cycle(_: &dyn crate::DreamCycle) {}
         fn _accepts_delta_proposer(_: &dyn crate::DeltaProposer) {}
+        // `DreamCtx` restores ADR 0014 decision #3's capability bag to the trait layer
+        // (Wave 2 #816 / S5, closes #981) — the `DreamContext` struct it replaces was
+        // never itself probed here (see the PR that closes #981 for why), so this is a
+        // net-new probe, not a replacement of a prior line.
+        fn _accepts_dream_ctx(_: &dyn crate::DreamCtx) {}
         // storage port umbrella (bounded traits stay at `crate::storage::*`)
         fn _accepts_storage_backend(_: &dyn crate::StorageBackend) {}
         // `Result` alias is part of the hand-enumerated `error` re-export.
