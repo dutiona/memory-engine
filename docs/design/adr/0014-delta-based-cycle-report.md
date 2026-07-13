@@ -100,10 +100,27 @@ capability bag is promoted into the `me-traits` trait layer itself, as
 `DreamCtx` — a `#[async_trait]` trait carrying the same nine methods `DreamContext`
 had. `CycleCtx` gains `DreamCtx` as a **supertrait**, inheriting
 `list_undreamt_in_period`/`outcome_counts_batch` instead of re-declaring them (S1's
-duplication is removed). `MemoryEngine` is the only implementor, in the facade;
-`me-traits` still names no engine type. The `DreamContext` struct is deleted — a trait
-object supersedes it natively, with no downcast needed — and `CycleContext` now holds
-`&dyn DreamCtx` directly. The `ctx.dream()` indirection is **flattened**: a consumer
+duplication is removed). `me-traits` still names no engine type. The public
+`DreamContext` struct is deleted — a trait object supersedes it natively, with no
+downcast needed — and `CycleContext` now holds `&dyn DreamCtx` directly.
+
+The sole implementor is **`EngineDreamCtx`**, a *private* borrow-newtype over
+`&MemoryEngine` in the facade — deliberately **not** `impl DreamCtx for MemoryEngine`.
+Five of the trait's nine method names (`query`, `list_active_facts`, `get_fact`,
+`consolidate`, `forget`) collide with inherent `MemoryEngine` methods. A direct impl
+would have to call the same-named inherent method on `self`; Rust resolves
+inherent-before-trait, so that holds only while the inherent method keeps its name.
+Rename one and the call silently re-resolves to **the trait method being defined**:
+unbounded recursion, stack overflow, in the _consumer's_ process. Qualifying the call
+does not help — `Self::query(self, q)` has the **same** resolution order as
+`self.query(q)`. And nothing here would have caught it: `rustc`'s
+`unconditional_recursion` lint does **not** fire through `#[async_trait]` (the recursive
+call sits inside the desugared `Box::pin(async move { … })`, not the function's own
+CFG), so even `-D warnings` compiles it clean. Routing the impl through a newtype whose
+inner type has **no `DreamCtx` impl in scope** makes the mis-resolution impossible to
+express: a rename becomes `E0599` at the call site. The invariant is compiler-enforced
+rather than conventional — which, in this codebase, is the difference between a rule and
+a guarantee. The `ctx.dream()` indirection is **flattened**: a consumer
 calls `ctx.query(...)` / `ctx.promote(...)` directly on the `&dyn CycleCtx` it is
 handed, one level shallower than before. This same move let the dream-cycle subsystem
 be carved out of the facade into its own crate (`me-cognitive`) — the L3 → L4
