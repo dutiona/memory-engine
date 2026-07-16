@@ -47,13 +47,17 @@ const METHOD_VERSION: &str = "dbscan-v1";
 
 /// The shipped pure-Rust DBSCAN dream cycle.
 ///
-/// A full, runnable end-to-end example (add facts → run this cycle → apply the
-/// report) needs the `MemoryEngine` facade — the `MemoryEngine: DreamCtx` implementor
-/// — which this L3 crate cannot depend on (that back-edge is exactly what the Wave 2
-/// #816 / S5 carve removes). See `memory_engine::MemoryEngine::run_dream_cycle`'s own
-/// doc (in the facade crate) for the runnable version of this sketch.
+/// A full, runnable end-to-end example (add facts → run this cycle → apply the report)
+/// needs the `MemoryEngine` facade, which this L3 crate cannot depend on — that
+/// back-edge is exactly what the Wave 2 #816 / S5 carve removes. The runnable version
+/// lives on `memory_engine::MemoryEngine::run_dream_cycle` in the facade crate, where
+/// it is a real, executed doctest.
 ///
-/// ```ignore
+/// The shape, for orientation only (deliberately a `text` block, **not** an `ignore`d
+/// doctest: an `ignore`d doctest never runs, so it is coverage fiction — and it still
+/// occupies a `--list` entry, which would silently corrupt the anti-#903 count):
+///
+/// ```text
 /// let engine = MemoryEngine::builder(2).build()?;
 /// // ... add facts via `engine.add_fact(...)` ...
 /// let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults()).await?;

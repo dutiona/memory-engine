@@ -37,30 +37,10 @@ use crate::types::{Fact, NewFact, OutcomeCounts, PromoteRequest, PromotionResult
 pub use crate::traits::{DreamCycle, InsightStream};
 pub use crate::types::Insight;
 
-/// `MemoryEngine`'s `DreamCtx` implementation — the capability bag restored to the
-/// trait layer by Wave 2 #816 / S5 (closes #981; see [`me_cognitive`]'s crate doc for
-/// the full ADR 0014 → S1-regression → S5-restoration history).
-///
-/// # ⚠️ The recursion trap
-///
-/// **Seven of these nine method names collide with existing inherent `MemoryEngine`
-/// methods** (`query`, `consolidate`, `forget`, `get_fact`, `list_active_facts`,
-/// `outcome_counts`, and — nominally, though `MemoryEngine` carries no inherent of
-/// that exact name today — `list_undreamt_in_period`). Inside this `impl` block,
-/// writing `self.query(q).await` resolves to the **inherent** method today (Rust
-/// prefers inherent over trait) — correct *now*, but becomes **silent infinite
-/// recursion → stack overflow** the instant that inherent method is ever renamed or
-/// removed. Every body below therefore uses a **fully-qualified**
-/// `Self::query(self, q).await` so the compiler can never re-resolve it to this trait
-/// method — verified empirically that `Self::` resolves identically to the literal
-/// type name here (`Self` is the concrete `MemoryEngine`, not the trait; the
-/// inherent-over-trait priority applies the same to either spelling). `Self::`, not
-/// `MemoryEngine::`, is required by `clippy::use_self` (part of the workspace's
-/// `-D warnings` pedantic gate) — both are equally safe against the trap; only the
-/// spelling differs. The two names that do **not** collide (`promote` →
-/// `promote_with_lineage`, `outcome_counts_batch` → `get_outcome_counts_batch`) are
-/// qualified anyway, for uniformity.
 /// The engine's [`DreamCtx`] adapter — a private borrow-newtype over `&MemoryEngine`.
+///
+/// The capability bag restored to the trait layer by Wave 2 #816 / S5 (closes #981); see
+/// [`me_cognitive`]'s crate doc for the ADR 0014 → S1-regression → S5-restoration history.
 ///
 /// # Why this is a newtype and **not** `impl DreamCtx for MemoryEngine`
 ///

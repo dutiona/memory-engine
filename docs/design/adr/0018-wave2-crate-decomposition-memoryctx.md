@@ -133,7 +133,10 @@ build on these boundaries have the durable _why_.
    crate X."** Stating it as a crate name (`me-consolidate` in (a)'s original text, or
    any specific L3 crate here) was exactly the #982 lesson — a rationale naming a
    crate is brittle to the plan moving under it; one naming a property survives.
-   `MemoryEngine` is the only implementor, in the facade. This break is what unblocks
+   The engine's implementation lives in the facade, carried by the private
+   `EngineDreamCtx(&MemoryEngine)` newtype rather than `impl DreamCtx for MemoryEngine`
+   (the newtype is what makes an inherent-method rename `E0599` instead of a silent
+   stack overflow — ADR 0014's S5 amendment). This break is what unblocks
    carving the dream-cycle subsystem itself into `me-cognitive` (L3): `DreamContext`
    holding `engine: &'a MemoryEngine` had been the L3 → L4 back-edge blocking it since
    S4 (see the `me-consolidate` scope note, superseded by this PR). `§M`'s "public API

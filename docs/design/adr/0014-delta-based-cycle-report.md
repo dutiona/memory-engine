@@ -89,8 +89,9 @@ trait object cannot be downcast to the concrete `CycleContext` behind it. S1 cop
 only the two methods the shipped `DefaultDreamCycle`/`LlmDreamCycle` happened to call
 (`list_undreamt_in_period`, `outcome_counts_batch`) directly onto `CycleCtx`, and the
 other seven `DreamContext` methods (`query`, `list_active_facts`, `get_fact`,
-`consolidate`, `forget`, `promote`, plus the duplicated `list_undreamt_in_period`)
-were left with zero call sites — `pub`, compiling, and dead. **S1 should have amended
+`consolidate`, `forget`, `promote`, `outcome_counts`) were left with zero call sites —
+`pub`, compiling, and dead. (The duplicated pair kept its call sites, but only via
+`CycleCtx`; `DreamContext`'s own copies of them were equally unreachable.) **S1 should have amended
 this ADR to record that regression, and did not.** A green build never caught it:
 `dead_code` does not fire on `pub` items, and no test exercised the stranded methods
 (they were an enabler for open work — #578, #231, #554/#627 — not yet-consumed).

@@ -364,7 +364,24 @@ pub trait InsightStream: Send + Sync {
 /// S5 restores the contract properly: the bag is promoted **into the trait layer**
 /// itself, so a `&dyn DreamCtx` — or, via the [`CycleCtx`] supertrait, a `&dyn
 /// CycleCtx` — carries the full capability set natively, no downcast and no engine
-/// type in `me-traits`. `MemoryEngine` is the (only) implementor.
+/// type in `me-traits`.
+///
+/// There are exactly two implementors: `EngineDreamCtx`, a **private borrow-newtype**
+/// over `&MemoryEngine` in the facade, and `CycleContext` in `me-cognitive`, which
+/// forwards to a held `&dyn DreamCtx`.
+///
+/// # ⚠️ Before you add a third
+///
+/// **Do not `impl DreamCtx for T` when `T` has inherent methods sharing these names**
+/// (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget` all collide on
+/// `MemoryEngine`). Rust resolves inherent-before-trait, so such an impl works only
+/// until the inherent method is renamed — after which the call silently re-resolves to
+/// the trait method being defined: unbounded recursion, stack overflow, in the
+/// **consumer's** process. Qualifying (`Self::query(self, q)`) does **not** help — same
+/// resolution order — and `unconditional_recursion` does **not** fire through
+/// `#[async_trait]`, so `-D warnings` stays green. Route the impl through a newtype
+/// whose inner type has no `DreamCtx` impl in scope; a rename is then `E0599`. See
+/// `EngineDreamCtx`'s doc and ADR 0014's Wave 2 / S5 amendment.
 ///
 /// `Send + Sync` (like every sibling consumer trait, #631/#386): a `&dyn DreamCtx` is
 /// borrowed across `.await` inside a `Send` future.

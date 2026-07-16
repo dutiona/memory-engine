@@ -53,28 +53,47 @@
 //! - [`run_dream_cycle`] / [`run_dream_cycle_guarded`] — the produce/apply-split
 //!   orchestration, now free functions over `MemoryCtx` + `&dyn DreamCtx`.
 //!
-//! `impl DreamCtx for MemoryEngine` (the 9 capability delegates) stays in the
-//! facade — it is the (only) implementor, and implementing a trait for a type you
-//! don't own's dual (a type this crate doesn't own) is exactly the kind of edge this
-//! decomposition avoids. `promote_with_lineage` similarly stays: it caches newly
-//! resolved scope ids into the engine's in-memory `ScopeTree`, an engine-owned cache
-//! this crate's `MemoryCtx` does not carry (ADR 0018 decision #3 — `scope_tree` is a
-//! loose per-primitive parameter, not part of the universal ctx).
+//! The engine's own `DreamCtx` implementation stays in the facade — it is carried by a
+//! private `EngineDreamCtx(&MemoryEngine)` newtype there, **not** by
+//! `impl DreamCtx for MemoryEngine` (see the trap below for why). `promote_with_lineage`
+//! similarly stays: it caches newly resolved scope ids into the engine's in-memory
+//! `ScopeTree`, an engine-owned cache this crate's `MemoryCtx` does not carry (ADR 0018
+//! decision #3 — `scope_tree` is a loose per-primitive parameter, not part of the
+//! universal ctx).
 //!
-//! ## The recursion trap (read before touching `impl DreamCtx for MemoryEngine`)
+//! ## ⚠️ The recursion trap (read before writing ANY new `DreamCtx` implementor)
 //!
-//! That impl lives in the facade, not here — but the hazard is worth restating for
-//! anyone extending this crate's `DreamCtx`/`CycleCtx` implementors: **seven of
-//! `DreamCtx`'s nine method names collide with existing inherent `MemoryEngine`
-//! methods** (`query`, `consolidate`, `forget`, `get_fact`, `list_active_facts`,
-//! `outcome_counts`, and — nominally, though no inherent of that name exists today —
-//! `list_undreamt_in_period`). Inside `impl DreamCtx for MemoryEngine`, `self.query(q)`
-//! resolves to the *inherent* method today (Rust prefers inherent over trait) — correct
-//! now, but silent infinite recursion the moment that inherent method is ever renamed.
-//! Every body in that impl uses a fully-qualified `MemoryEngine::query(self, q).await`
-//! instead. This crate's own `CycleContext: DreamCtx` forwarding impl does **not** carry
-//! this hazard — it forwards to a *different* value (`self.dream`, a held `&dyn
-//! DreamCtx`), never to `self` under the same name.
+//! **Never `impl DreamCtx for T` when `T` has inherent methods sharing those names.**
+//!
+//! Five of `DreamCtx`'s nine method names collide with inherent `MemoryEngine` methods
+//! (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget`). In such an impl
+//! the body must call the same-named inherent method on `self`; Rust resolves
+//! inherent-before-trait, so it works — **only while that inherent method keeps its
+//! name**. Rename it and the call silently re-resolves to *the trait method being
+//! defined*: unbounded recursion, stack overflow, in the **consumer's** process.
+//!
+//! Two things make it lethal rather than theoretical, both verified empirically:
+//!
+//! - **Qualification does NOT protect.** `Self::query(self, q)` and
+//!   `MemoryEngine::query(self, q)` have the **same resolution order** as `self.query(q)`.
+//!   Qualifying is cosmetic. (An earlier draft of this crate's docs recommended exactly
+//!   that — it was wrong.)
+//! - **`rustc`'s `unconditional_recursion` lint does NOT fire through `#[async_trait]`**
+//!   — the recursive call lands inside the desugared `Box::pin(async move { … })`, not
+//!   the function's own CFG. It compiles clean even under `-D warnings`.
+//!
+//! So no gate in this repo catches it. **The rule is structural, not stylistic:** route
+//! the impl through a newtype whose inner type has *no* `DreamCtx` impl in scope, so only
+//! the inherent method can ever match and a rename becomes `E0599` at the call site. That
+//! is what `EngineDreamCtx` is for.
+//!
+//! There are exactly **two** `DreamCtx` implementors, and neither can recurse:
+//!
+//! - **`EngineDreamCtx`** (facade, private) — the newtype above.
+//! - **[`CycleContext`]** (this crate) — safe **by construction**, not by the newtype
+//!   rule: it has no inherent method sharing a `DreamCtx` name, and every body forwards
+//!   to a *different value* (`self.dream`, a held `&dyn DreamCtx`), never to `self` under
+//!   the same name.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod apply;
