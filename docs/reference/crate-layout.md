@@ -101,7 +101,11 @@ gate (ADR 0018 decision #8; see that decision for the full, amended history of e
   out to be `me-cognitive` (S5), not `me-consolidate` as originally assumed;
   `CycleContext` _implements_ the `CycleCtx` read-set trait wherever it lands.
 - **`VectorSearchStrategy::search(&dyn SearchIndex)`** (replacing `&Connection`) —
-  **deferred to S4**. Still `&Connection` today.
+  **never happened; superseded in S4** (ADR 0018 §8b). The `me-query` carve resolved the
+  problem by *un-exporting* `VectorSearchStrategy` from the facade instead: it no longer
+  crosses the port boundary at all, so its signature stopped being public API and the
+  planned break became moot. It lives on as a `me-backend-sqlite`-internal HNSW-vs-brute-force
+  dispatch trait (`me-backend-sqlite/src/search/strategy.rs`). See the `me-query` row above.
 - **`DreamContext` deleted; `DreamCtx` trait added** (S5, #981) — the ADR 0014 decision
   #3 capability bag is inverted into a `me-traits` trait (`CycleCtx: DreamCtx`
   supertrait), unblocking the `me-cognitive` carve. See the `me-cognitive` row above and
