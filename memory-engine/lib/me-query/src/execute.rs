@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
 use me_index::ScopeTree;
-use me_storage::MemoryCtx;
+use me_storage::{MemoryCtx, spawn_join_err};
 use me_traits::Reranker;
 use me_types::error::{ConflictError, MemoryError, RerankerError, Result};
 use me_types::types::Fact;
@@ -43,18 +43,6 @@ use me_types::types::search::{
 };
 
 use crate::hybrid::port_hybrid_search;
-
-/// Map a `tokio::task::spawn_blocking` join failure (a panic or cancellation in the
-/// offloaded reranker call) to a `MemoryError`. Private copy of the facade's
-/// `engine::spawn_join_err` (`pub(super)`, used by other engine modules too — not
-/// moved), mirroring `me-ingest`'s own copy.
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "used as map_err(spawn_join_err) fn pointer"
-)]
-fn spawn_join_err(e: tokio::task::JoinError) -> MemoryError {
-    MemoryError::Internal(format!("offloaded task failed: {e}"))
-}
 
 /// Resolve a query's optional scope into concrete scope IDs.
 ///

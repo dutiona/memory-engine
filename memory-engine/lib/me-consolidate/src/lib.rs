@@ -42,21 +42,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use me_index::MemoryGraph;
-use me_storage::MemoryCtx;
+use me_storage::{MemoryCtx, spawn_join_err};
 use me_traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
-use me_types::error::{MemoryError, Result};
-
-/// Map a `tokio::task::spawn_blocking` join failure (a panic or cancellation in the
-/// offloaded consumer `summarize`/`embed` call) to a `MemoryError`. Private copy of the
-/// facade's `engine::spawn_join_err` (`pub(super)`, used by other engine modules too —
-/// not moved), mirroring every other carved primitive's own copy.
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "used as map_err(spawn_join_err) fn pointer"
-)]
-fn spawn_join_err(e: tokio::task::JoinError) -> MemoryError {
-    MemoryError::Internal(format!("offloaded task failed: {e}"))
-}
+use me_types::error::Result;
 
 /// Run three-pass consolidation: local dedup, cluster fusion, global integration.
 ///

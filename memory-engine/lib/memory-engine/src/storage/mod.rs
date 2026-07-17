@@ -30,8 +30,8 @@ pub use me_backend_sqlite::sqlite;
 #[cfg(feature = "archive")]
 pub use me_storage::cold_storage;
 pub use me_storage::{
-    backend, capabilities, consolidation, ctx, event_log, filter, graph, schema, search_index,
-    session,
+    backend, capabilities, consolidation, ctx, event_log, filter, graph, offload, schema,
+    search_index, session,
 };
 // Flat trait/type re-exports so `crate::storage::Trait` paths still resolve.
 #[cfg(feature = "archive")]
@@ -39,7 +39,7 @@ pub use me_storage::ColdStorage;
 pub use me_storage::{
     BackendCapabilities, BootstrapIngestOutcome, ConsolidationStore, EventLog, FactFilter,
     FactGraph, LexicalRanker, MemoryCtx, MetadataPredicate, SchemaManager, SearchIndex,
-    SessionStore, StorageBackend, TemporalFilter,
+    SessionStore, StorageBackend, TemporalFilter, spawn_join_err,
 };
 
 // --- The concrete backend impls. ---

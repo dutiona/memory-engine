@@ -19,6 +19,11 @@ me-traits = { path = "../me-traits" }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1.0"
+# `rt` only — for `tokio::task::JoinError`, which `spawn_join_err` maps. This port
+# defines the offload contract (every consumer reaches storage via `spawn_blocking`),
+# so it owns the error mapping too. No runtime is started here; tokio is already a
+# non-optional workspace dependency (#702), so this adds a manifest line, not a build.
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 # The relocated `UpcasterRegistry` proptests (`proptest_chain`) live with it here.
