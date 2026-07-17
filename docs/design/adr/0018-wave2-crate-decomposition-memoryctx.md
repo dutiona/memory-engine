@@ -206,14 +206,30 @@ and Wave 2 deliberately broke the API **four** times anyway (point 8 (a)–(d)).
 that Wave 2 changed nothing is not a check we can pass, because Wave 2 changed things on
 purpose.
 
-**Why not freeze anyway.** Nothing outside this workspace consumes `memory-engine` yet.
-So the two things a freeze buys are both worth ~zero today:
+**Why not freeze anyway.** No **published/external** consumer of `memory-engine` exists
+yet. So the two things a freeze buys are both worth little today:
 
-- **Removals** break consumers → there are none. (And the in-workspace consumers — cli,
-  mcp, embed — break at *compile* time, loudly, in the same `--workspace` run.)
+- **Removals** break consumers → there is no external one. The in-workspace consumers —
+  cli, mcp, embed — break at *compile* time, loudly, in the same `--workspace` run.
 - **Additions** widen the surface silently → real, but it is *maintenance debt*, not
   breakage: you accidentally commit to supporting something (#986 added
   `memory_engine::types::forgetting::ForgetPolicy` and nothing noticed).
+
+> ⚠️ **One in-repo consumer is NOT covered by that `--workspace` run, and the earlier
+> draft of this amendment wrongly implied it was.** `fuzz/` is **deliberately detached**
+> (an empty `[workspace]` table, so `cargo build --workspace --all-features` never
+> compiles it — it needs nightly + the libFuzzer sanitizer runtime), yet it depends on
+> `memory-engine`, `memory-engine-embed`, and `memory-engine-mcp` **by path** and names
+> facade API types directly (`memory_engine::{ActivityFilterConfig, MemoryEngine}`,
+> `memory_engine::{Edge, Event, Fact}`, `memory_engine::fuzz_seam::*`).
+>
+> So a facade removal **can** break a real in-repository Rust consumer with **no gate
+> detecting it** — `cargo +nightly fuzz build` is the only thing that would, and it is
+> not in the gate matrix. That is a genuine hole, and it is a hole *today*, independent
+> of any freeze. It does not overturn the deferral (fuzz is in-repo, ours to fix, and a
+> break is discoverable and repairable in the same PR — unlike a downstream consumer we
+> cannot touch), but the claim needed narrowing rather than defending. Tracked in **#993**.
+> Surfaced by Codex in the #992 review; the original wording was mine and it was wrong.
 
 Meanwhile the cost is immediate and recurring: every *intentional* break — Phase 5 (#567),
 DreamCycle vNext (#578), the geometric-memory epic (#761) — would mean re-baselining a
@@ -231,9 +247,19 @@ The value is real *then*, and the design below is build-not-research by that poi
    under `cargo test --workspace --all-features` — already in the gate matrix, zero
    snapshot to maintain. It catches removal, **not** addition; that asymmetry is now a
    deliberate, recorded choice rather than an unnoticed gap.
-2. **The audit passed** (#941): the facade is ~9.9k production lines (57% of the crate is
-   test code); `bootstrap`/`inspect` stay by design; every `engine/*` file is planned, a
-   thin delegate, or `graph_load.rs` (documented backend→projection glue).
+2. **The audit passed** (#941): the facade is **~8.1k production lines — 65% of the crate
+   is test code**. `bootstrap` (~3.0k) and `inspect` (~1.7k) stay by design, leaving ~3.4k
+   of orchestration. Every `engine/*` file is planned, a thin delegate (verified by *prod*
+   lines: `archive` is 149 for 3 methods, `ingest` 157 for 5 — their bulk is tests), or
+   `graph_load.rs` (documented backend→projection glue).
+
+   > The classification counts **module-level `#[cfg(test)]` gating**, not just an in-file
+   > marker: `engine/{tests,equivalence}.rs` are declared `#[cfg(test)] mod …;` in
+   > `engine/mod.rs:59-64`, so those files are test-only *in their entirety*. An earlier
+   > draft of this amendment said ~9.9k / 57% — a per-file lexical scan that missed that
+   > gating and counted `tests.rs`'s first 1,615 lines as production. Corrected here; the
+   > conclusion strengthens rather than weakens (the facade is *thinner* than claimed).
+   > Caught by Codex in the #992 review.
 3. **The ratchet design is proved and parked**, so the later build is engineering:
    - ❌ `cargo public-api` **cannot** do it — it canonicalizes a type to one definition
      site and counts *items*; a re-exported module renders as **one opaque line**. It is

@@ -53,25 +53,67 @@ pub fn spawn_join_err(e: JoinError) -> MemoryError {
 mod tests {
     use super::*;
 
-    /// A panic inside the offloaded closure surfaces as `Internal`, not as a lost error.
+    /// A panic inside the offloaded closure surfaces as `Internal`, carrying the **exact**
+    /// formatted message.
+    ///
+    /// Asserted against the full `format!` output rather than a prefix: a prefix check
+    /// stays green under a mutation that drops or garbles the `JoinError`'s own text
+    /// (e.g. `Internal("offloaded task failed: wrong")`), which is precisely the detail
+    /// that makes the error diagnosable. Building the expectation from the *same*
+    /// `JoinError` the mapper receives keeps the test honest without hard-coding tokio's
+    /// wording, which is not ours to pin.
     #[tokio::test]
-    async fn panic_in_offloaded_task_maps_to_internal() {
+    async fn panic_in_offloaded_task_maps_to_internal_with_the_exact_message() {
         let joined = tokio::task::spawn_blocking(|| panic!("boom")).await;
-        let err = spawn_join_err(joined.expect_err("the task panicked, so join must fail"));
-        match err {
+        let join_err = joined.expect_err("the task panicked, so join must fail");
+        let expected = format!("offloaded task failed: {join_err}");
+
+        match spawn_join_err(join_err) {
+            MemoryError::Internal(msg) => assert_eq!(msg, expected),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    /// A **cancelled** task is the other way a join fails, and it must map the same way —
+    /// not silently produce a different variant.
+    #[tokio::test]
+    async fn cancelled_task_also_maps_to_internal() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        handle.abort();
+        let join_err = handle.await.expect_err("an aborted task must fail to join");
+        assert!(
+            join_err.is_cancelled(),
+            "precondition: this is the cancel path"
+        );
+
+        match spawn_join_err(join_err) {
             MemoryError::Internal(msg) => assert!(
-                msg.starts_with("offloaded task failed:"),
-                "message must name the offload as the failure: {msg}"
+                msg.starts_with("offloaded task failed: "),
+                "cancellation must be reported as an offload failure: {msg}"
             ),
             other => panic!("expected Internal, got {other:?}"),
         }
     }
 
-    /// The happy path does not route through here at all — a closure's own `Ok` is
-    /// returned untouched. Pins that `spawn_join_err` is only the *join*-failure path.
+    /// The mapper is **only** the join-failure path: a closure's own `Err` propagates
+    /// unchanged and never reaches `spawn_join_err`.
+    ///
+    /// This is what stops the mapper from swallowing a real store error into a generic
+    /// `Internal` — the distinction the module doc claims and nothing else tested.
     #[tokio::test]
-    async fn successful_offload_never_produces_a_join_error() {
-        let joined = tokio::task::spawn_blocking(|| 42).await;
-        assert_eq!(joined.expect("a non-panicking task joins cleanly"), 42);
+    async fn a_closures_own_error_propagates_untouched() {
+        let joined: Result<Result<(), MemoryError>, _> =
+            tokio::task::spawn_blocking(|| Err(MemoryError::NotFound("fact 7".into()))).await;
+
+        let inner = joined
+            .map_err(spawn_join_err)
+            .expect("the task did not panic, so the join itself succeeds");
+
+        match inner {
+            Err(MemoryError::NotFound(what)) => assert_eq!(what, "fact 7"),
+            other => panic!("the closure's own error must survive verbatim, got {other:?}"),
+        }
     }
 }
