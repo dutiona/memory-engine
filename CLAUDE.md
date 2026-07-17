@@ -66,7 +66,28 @@ gh run watch <run-id>                       # follow it
 
 CI went manual to conserve GitHub-hosted runner minutes; a **self-hosted runner** is the intended long-term fix, after which the trigger reverts to `push: [main]` + `pull_request` (a one-line change). Until then, treat a PR with no CI run as **unverified by machine** — the only evidence it works is the matrix above, run by you, unpiped.
 
-The workspace contains **10 crates**: the Wave 2 (#816) core decomposition is S1+S2 done — `me-types` (L0 data + error vocabulary, incl. the embedding-space registry DTOs), `me-traits` (L0.5 consumer/contract traits), `me-storage` (L1 persistence port + `MemoryCtx` + `UpcasterRegistry`), `me-index` (L2 backend-free `MemoryGraph`/`ScopeTree` projections), `me-backend-sqlite` (L2 `SqliteBackend`: store + pool + search + snapshot I/O), and `me-backend-postgres` (L2 `PgBackend` skeleton, #633, optional behind `backend-postgres`) are now carved out as separate acyclic leaves; the `memory-engine` facade re-exports them (public API unchanged) and still holds the L3 primitives as modules (they carve into `me-{ingest,query,consolidate,forget,resolve,archive}` in slices S3–S6 — see ADR 0018 / #925). Plus `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`, which consume the facade's public API. `--workspace` is mandatory — a change to error variants, type definitions, or trait signatures can break the consumers silently if only one crate is checked.
+The workspace contains **18 crates** — the Wave 2 (#816) decomposition is **done** (S1–S5): a strictly acyclic layered DAG where every dependency points **downward**, enforced by `cargo` itself.
+
+```
+L0    me-types            data + error vocabulary (incl. the embedding-space registry DTOs,
+                          and the ForgetPolicy/PruneStats pair)
+L0.5  me-traits           consumer/contract traits: EmbeddingProvider, SummaryGenerator,
+                          ConflictArbiter, PersistenceClassifier, Reranker, DreamCycle,
+                          DreamCtx (the capability bag), CycleCtx: DreamCtx, DeltaProposer
+L1    me-storage          persistence PORT: StorageBackend trait family + MemoryCtx +
+                          UpcasterRegistry + spawn_join_err (the offload contract)
+L2    me-index            backend-free MemoryGraph / ScopeTree projections
+      me-backend-sqlite   SqliteBackend: store + pool + search + snapshot I/O
+      me-backend-postgres PgBackend skeleton (#633, optional behind `backend-postgres`)
+L3    me-ingest  me-query  me-consolidate  me-forget  me-resolve
+      me-archive (feat `archive`)          me-cognitive (dream cycle, #981)
+L4    memory-engine       the facade: MemoryEngine + builder + bootstrap + inspect +
+                          reconstruct + resume + the re-export surface
+```
+
+Plus `me-test-support` (dev-only, cross-crate test doubles) and the three consumers of the facade's public API: `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`.
+
+An L3 primitive depends on the **port** (`me-storage`), never on a concrete backend — the facade selects the backend. `--workspace` is mandatory: a change to error variants, type definitions, or trait signatures can break the consumers silently if only one crate is checked. Full module map: `docs/reference/crate-layout.md`; the design + its API breaks: ADR 0018.
 
 **Verification traps** — each one cost a real super-qa rework cycle; the `qa-sweep` skill holds the full taxonomy:
 
