@@ -1,164 +1,138 @@
+//! `MemoryEngine`'s Phase-5a cognitive-pipeline surface.
+//!
+//! The dream-cycle *subsystem* (`CycleContext`, `DefaultDreamCycle`, `LlmDreamCycle`,
+//! `apply_cycle_report`'s validate-then-apply body, the `run_dream_cycle`/
+//! `run_dream_cycle_guarded` orchestration) was carved into the [`me_cognitive`] crate
+//! in Wave 2 #816 / S5 (closes #981) — see that crate's root doc for the full history
+//! (ADR 0014 decision #3 → S1 regression → S5 restoration). What stays here:
+//!
+//! - **`EngineDreamCtx`** — a *private* borrow-newtype over `&MemoryEngine` carrying the
+//!   9 capability delegates of [`me_traits::DreamCtx`]. Deliberately **not**
+//!   `impl DreamCtx for MemoryEngine`: five of the trait's method names collide with
+//!   inherent `MemoryEngine` methods, and a direct impl would silently turn any future
+//!   rename of one into unbounded recursion. See the type's own doc — the newtype makes
+//!   that failure *unrepresentable* rather than merely discouraged.
+//! - **`promote_with_lineage`** — caches newly-resolved scope ids into the engine's
+//!   in-memory `ScopeTree`, an engine-owned cache `MemoryCtx` does not carry (ADR 0018
+//!   decision #3: `scope_tree` is a loose per-primitive parameter, not universal).
+//! - **Four thin delegates** (`record_insight`, `run_dream_cycle`,
+//!   `run_dream_cycle_guarded`, `apply_cycle_report`) forwarding to
+//!   [`me_cognitive`] via the `crate::cognitive` alias (the `pool`/`store`/`graph`/
+//!   `scope`/`archive`/`forgetting` convention).
+
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 use crate::engine::MemoryEngine;
-use crate::engine::cycle::{
-    CycleContext, CycleMetadata, CycleOutcome, CycleReport, SkipReason, TimeWindow,
-};
-use crate::error::{MemoryError, MigrationError, Result};
+use crate::error::{MemoryError, Result};
 use crate::forgetting::{ForgetPolicy, PruneStats};
-use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
+use crate::traits::{
+    ConsolidationConfig, ConsolidationStats, DreamCtx, EmbeddingProvider, SummaryGenerator,
+};
 use crate::types::search::{SearchQuery, SearchResult};
-use crate::types::{Fact, NewFact, PromoteRequest, PromotionResult};
+use crate::types::{Fact, NewFact, OutcomeCounts, PromoteRequest, PromotionResult};
 
-// Re-import trait types used in public API signatures
+// Re-import trait/type names used in public API signatures — unchanged re-exports.
 pub use crate::traits::{DreamCycle, InsightStream};
 pub use crate::types::Insight;
 
-/// Config key for the #209 caller-write cursor: the highest `facts.id` of a
-/// caller-written fact observed at the last guarded cycle decision. A config value,
-/// not schema (no migration). See [`MemoryEngine::run_dream_cycle_guarded`].
-const CALLER_WRITE_CURSOR: &str = "last_caller_write_fact_id";
-
-/// Top-level `metadata` key marking a fact captured via the pre-compaction insight flush.
+/// The engine's [`DreamCtx`] adapter — a private borrow-newtype over `&MemoryEngine`.
 ///
-/// Written by the MCP `memory_flush_insights` tool and read by
-/// [`MemoryEngine::list_recent_insights`](crate::MemoryEngine::list_recent_insights).
-/// Defined once here so the writer (MCP crate) and the reader (core) share a single
-/// literal and cannot drift. The stamped value is an object (e.g.
-/// `{"flushed_at": <rfc3339>}`); readers match on key *presence with a non-null value*.
-pub const INSIGHT_MARKER_KEY: &str = "insight";
-
-/// Capability-restricted handle passed to [`DreamCycle::run`].
+/// The capability bag restored to the trait layer by Wave 2 #816 / S5 (closes #981); see
+/// [`me_cognitive`]'s crate doc for the ADR 0014 → S1-regression → S5-restoration history.
 ///
-/// Exposes only the operations a `DreamCycle` consumer needs:
-/// - **Read**: query, list facts, get statistics
-/// - **Engine-internal batch ops**: consolidation, forgetting (delegated through
-///   existing engine methods with their own lock protocol)
-/// - **Promotion**: the only new write path — atomic fact + lineage insertion
+/// # Why this is a newtype and **not** `impl DreamCtx for MemoryEngine`
 ///
-/// This prevents consumers from calling arbitrary engine mutations (which could
-/// deadlock by re-acquiring write locks) while still giving access to the
-/// pipeline operations the synthesis requires.
-pub struct DreamContext<'a> {
-    engine: &'a MemoryEngine,
-}
+/// Five of `DreamCtx`'s nine methods share a name with an inherent `MemoryEngine`
+/// method (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget`). Had
+/// `MemoryEngine` implemented `DreamCtx` directly, each impl body would have to call
+/// the same-named inherent method on `self` — and Rust resolves inherent-before-trait,
+/// so it works *only for as long as the inherent method keeps its name*. Rename or
+/// remove one, and the call silently re-resolves to **the trait method being defined**:
+/// unbounded recursion, stack overflow, in the **consumer's** process.
+///
+/// That failure is invisible to every gate this repo has. Verified empirically:
+/// `rustc`'s `unconditional_recursion` lint **does not fire through `#[async_trait]`**
+/// (the recursive call sits inside the desugared `Box::pin(async move { … })`, not in
+/// the fn's own CFG), so the workspace's `-D warnings` gate compiles it clean. No
+/// qualification syntax helps either — `Self::query(self, q)` and `self.query(q)` share
+/// the *same* resolution order; qualifying is cosmetic, not protective.
+///
+/// So the invariant is made **structural instead of conventional**: `MemoryEngine` does
+/// not implement `DreamCtx` at all. Inside the impl below, `self.0` is a plain
+/// `&MemoryEngine` with **no `DreamCtx` impl in scope for it**, so `self.0.query(q)` can
+/// only ever resolve to the inherent method. Rename that method and this stops compiling
+/// (`E0599: no method named 'query'`) — a hard error at the exact call site, not a
+/// silent runtime catastrophe. Recursion here is not discouraged; it is unrepresentable.
+///
+/// (This is, in effect, the old `pub` `DreamContext` restored to its proper form: its
+/// *narrowing* job was always correct — what was wrong was that it was public,
+/// unreachable, and stranded at L4. As a private adapter implementing an L0.5 trait, it
+/// is exactly what it should have been.)
+// NB on visibility, which is deliberate in both halves:
+//   * the TYPE is `pub` only to satisfy `clippy::redundant_pub_crate` — the enclosing
+//     `engine::cognitive` module is private and this type is never re-exported from
+//     `lib.rs`, so it is **not** part of the public API. The `reexports_are_accessible`
+//     probe + the S5-3 reachable-path ratchet (#941) are what actually hold that line.
+//   * the FIELD is private (not `pub(crate)`): only this module may construct the
+//     adapter. That is not mere hygiene — this newtype is the *single controlled seam*
+//     through which the engine offers `DreamCtx`, so keeping construction here is the
+//     same defence the newtype exists to provide, one level in.
+pub struct EngineDreamCtx<'a>(&'a MemoryEngine);
 
-impl<'a> DreamContext<'a> {
-    pub(crate) const fn new(engine: &'a MemoryEngine) -> Self {
-        Self { engine }
+#[async_trait::async_trait]
+impl DreamCtx for EngineDreamCtx<'_> {
+    async fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        self.0.query(query).await
     }
 
-    /// Run a hybrid query (FTS5 + vector + graph, RRF merge).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails.
-    pub async fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        self.engine.query(query).await
+    async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
+        self.0.list_active_facts(limit).await
     }
 
-    /// List all active (non-expired) facts, optionally limited.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the store read fails.
-    pub async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>> {
-        self.engine.list_active_facts(limit).await
+    async fn get_fact(&self, id: i64) -> Result<Fact> {
+        self.0.get_fact(id).await
     }
 
-    /// Retrieve a single fact by ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::NotFound` if no fact with this ID exists.
-    pub async fn get_fact(&self, id: i64) -> Result<Fact> {
-        self.engine.get_fact(id).await
-    }
-
-    /// Run engine-internal consolidation (dedup → cluster → global summaries).
-    ///
-    /// Delegates to `MemoryEngine::consolidate()`, which manages its own locks.
-    /// `generator` produces the summary text; `embedder` projects it into the
-    /// fact vector space (issue #116). Both are `Arc<dyn _>` so the engine can
-    /// offload the (possibly blocking) consumer calls off the async executor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if consolidation fails.
-    pub async fn consolidate(
+    async fn consolidate(
         &self,
         generator: Arc<dyn SummaryGenerator>,
         embedder: Arc<dyn EmbeddingProvider>,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        self.engine.consolidate(generator, embedder, config).await
+        self.0.consolidate(generator, embedder, config).await
     }
 
-    /// Run Ebbinghaus decay + pruning on stale facts.
-    ///
-    /// Delegates to `MemoryEngine::forget()`, which manages its own locks.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the forget operation fails.
-    pub async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        self.engine.forget(policy).await
+    async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
+        self.0.forget(policy).await
     }
 
-    /// Atomically promote a fact to wisdom with lineage tracking.
-    ///
-    /// Inserts the promoted fact and its lineage record in a single `SQLite`
-    /// transaction below the seam. The provenance envelope is serialized into the
-    /// fact's metadata under the `"promotion_provenance"` key.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the promotion fails (dimension mismatch, DB error, etc.).
-    pub async fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult> {
-        self.engine.promote_with_lineage(req).await
+    async fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult> {
+        self.0.promote_with_lineage(req).await
     }
 
-    /// List active facts in `window` that have not yet been dream-cycled.
-    ///
-    /// This is a cycle's input-selection query: the metadata `dream_cycle` marker
-    /// excludes facts a previous cycle already processed (idempotency). Root scope,
-    /// all fact types.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the store read fails.
-    pub async fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>> {
-        self.engine
+    async fn list_undreamt_in_period(
+        &self,
+        window: crate::cognitive::TimeWindow,
+    ) -> Result<Vec<Fact>> {
+        // Mirrors the pre-carve `DreamContext::list_undreamt_in_period` body exactly:
+        // there is no inherent `MemoryEngine` method of this name to delegate to.
+        self.0
             .storage
             .list_undreamt_facts_in_period(window.start, window.end, &[], None)
             .await
     }
 
-    /// Aggregated outcome counts for a fact (for importance rescoring).
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::NotFound` if the fact does not exist, or a store error.
-    pub async fn outcome_counts(&self, fact_id: i64) -> Result<crate::types::OutcomeCounts> {
-        self.engine.get_outcome_counts(fact_id).await
+    async fn outcome_counts(&self, fact_id: i64) -> Result<OutcomeCounts> {
+        self.0.get_outcome_counts(fact_id).await
     }
 
-    /// Aggregated outcome counts for many facts in a single query (batch rescoring).
-    ///
-    /// The batch form of [`Self::outcome_counts`] — one `GROUP BY` scan instead of
-    /// one query per fact. Facts with no outcomes (or unknown ids) are absent from
-    /// the map; callers treat a missing key as [`OutcomeCounts::default`](crate::types::OutcomeCounts).
-    ///
-    /// # Errors
-    ///
-    /// Returns a store error if the query fails.
-    pub async fn outcome_counts_batch(
+    async fn outcome_counts_batch(
         &self,
         fact_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, crate::types::OutcomeCounts>> {
-        self.engine.get_outcome_counts_batch(fact_ids).await
+    ) -> Result<std::collections::HashMap<i64, OutcomeCounts>> {
+        self.0.get_outcome_counts_batch(fact_ids).await
     }
 }
 
@@ -178,10 +152,11 @@ impl MemoryEngine {
         stream.record(insight)
     }
 
-    /// Run a `DreamCycle`, returning the **unapplied** delta-based [`CycleReport`].
+    /// Run a `DreamCycle`, returning the **unapplied** delta-based [`CycleReport`](crate::cognitive::CycleReport).
     ///
-    /// Builds a retrieve-before-reflect [`CycleContext`] (prior wisdom + recent
-    /// cycle history + the default `[last_dream_cycle_at, now)` window), delegates
+    /// Builds a retrieve-before-reflect [`CycleContext`](crate::cognitive::CycleContext)
+    /// (prior wisdom + recent cycle history + the default `[last_dream_cycle_at, now)`
+    /// window), delegates
     /// to `cycle.run()`, and returns its report. The report is **not** applied —
     /// the caller inspects it (the human review gate) and applies it via
     /// [`Self::apply_cycle_report`]. Verifies write access up front since applying
@@ -191,14 +166,55 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
     /// Returns an error if context construction or the cycle's `run()` fails.
-    pub async fn run_dream_cycle(&self, cycle: &dyn DreamCycle) -> Result<CycleReport> {
-        self.ensure_open()?;
-        // Verify write access up front (apply happens separately).
-        if self.read_only {
-            return Err(MemoryError::ReadOnly);
-        }
-        let cycle_ctx = self.build_cycle_context().await?;
-        cycle.run(&cycle_ctx).await
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use memory_engine::{
+    ///     AddFactRequest, DefaultDreamCycle, EmbeddingFingerprint, EmbeddingProvider, FactType,
+    ///     MemoryEngine, MemoryError,
+    /// };
+    ///
+    /// // A trivial embedder (the consumer normally injects a real one).
+    /// struct Embed;
+    /// impl EmbeddingProvider for Embed {
+    ///     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
+    ///         Ok(vec![1.0, 0.0])
+    ///     }
+    ///     fn fingerprint(&self) -> EmbeddingFingerprint {
+    ///         EmbeddingFingerprint::new("mock", "test", 2)
+    ///     }
+    /// }
+    ///
+    /// // The engine API is async (#631); a consumer binary uses `#[tokio::main]`.
+    /// tokio::runtime::Runtime::new().unwrap().block_on(async {
+    ///     let engine = MemoryEngine::builder(2).build()?;
+    ///     let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(Embed);
+    ///     for i in 0..3 {
+    ///         let req = AddFactRequest {
+    ///             content: format!("recurring pattern {i}"),
+    ///             fact_type: FactType::Semantic,
+    ///             source_event_id: None,
+    ///             scope: None,
+    ///             opts: None,
+    ///         };
+    ///         engine.add_fact(&req, embedder.clone(), None).await?;
+    ///     }
+    ///
+    ///     // Produce an unapplied report (the review gate), then apply it atomically.
+    ///     let report = engine.run_dream_cycle(&DefaultDreamCycle::with_defaults()).await?;
+    ///     assert_eq!(report.metadata.facts_selected, 3);
+    ///     let applied = engine.apply_cycle_report(&report).await?;
+    ///     assert_eq!(applied.promoted, 1); // the three-fact cluster promotes one representative
+    ///     Ok::<(), MemoryError>(())
+    /// })
+    /// .unwrap();
+    /// ```
+    pub async fn run_dream_cycle(
+        &self,
+        cycle: &dyn DreamCycle,
+    ) -> Result<crate::cognitive::CycleReport> {
+        crate::cognitive::run_dream_cycle(self.mem_ctx(), &EngineDreamCtx(self), cycle).await
     }
 
     /// Run a `DreamCycle` **only if the caller has not written facts since the last
@@ -210,13 +226,15 @@ impl MemoryEngine {
     /// `last_caller_write_fact_id`:
     ///
     /// - **New caller writes** (`max > cursor`): advance the cursor to `max` and return
-    ///   [`CycleOutcome::Skipped`] — the cycle stands down this invocation; the facts
-    ///   stay un-dream-cycled for a later quiet run (deferral, not drop). Only the cursor
-    ///   moves — never `last_dream_cycle_at` or the cycle history.
+    ///   [`CycleOutcome::Skipped`](crate::cognitive::CycleOutcome::Skipped) — the cycle
+    ///   stands down this invocation; the facts stay un-dream-cycled for a later quiet
+    ///   run (deferral, not drop). Only the cursor moves — never `last_dream_cycle_at`
+    ///   or the cycle history.
     /// - **No new caller writes** (`max <= cursor`, or no caller facts at all): delegate
-    ///   to [`Self::run_dream_cycle`] and wrap the report as [`CycleOutcome::Ran`]. A real
-    ///   run does not advance the cursor; the `dream_cycle` marker (invariant M) is what
-    ///   removes processed facts from the signal, so a quiet re-run runs again only when
+    ///   to [`Self::run_dream_cycle`] and wrap the report as
+    ///   [`CycleOutcome::Ran`](crate::cognitive::CycleOutcome::Ran). A real run does not
+    ///   advance the cursor; the `dream_cycle` marker (invariant M) is what removes
+    ///   processed facts from the signal, so a quiet re-run runs again only when
     ///   genuinely new caller writes arrive.
     ///
     /// **Concurrency:** the cursor read+advance is atomic w.r.t. other writers (the
@@ -230,95 +248,45 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only, or a store/cycle error.
     #[must_use = "the CycleOutcome carries the skip/run decision — a dropped Skipped silently loses the deferral"]
-    pub async fn run_dream_cycle_guarded(&self, cycle: &dyn DreamCycle) -> Result<CycleOutcome> {
-        self.ensure_open()?;
-        // Cursor read + max-id read + (skip-only) advance via the port. These are
-        // separate port calls rather than one lock-held critical section: per the
-        // deferral contract this is benign — a caller write landing between the reads
-        // is attributed to the *next* invocation (never lost, never double-processed),
-        // and concurrent guarded calls are idempotent via the marker + watermark. True
-        // mutual exclusion is #207.
-        let cursor =
-            Self::parse_caller_write_cursor(self.storage.get_config(CALLER_WRITE_CURSOR).await?)?;
-        // `None` (empty / fully-excluded table) ⇒ no caller writes ⇒ run.
-        let max = self.storage.max_caller_written_fact_id().await?;
-        let decision = match max {
-            Some(max_id) if max_id > cursor => {
-                self.storage
-                    .set_config(CALLER_WRITE_CURSOR, &max_id.to_string())
-                    .await?;
-                Some(SkipReason::CallerWroteFacts {
-                    since_fact_id: cursor,
-                    new_max_fact_id: max_id,
-                })
-            }
-            _ => None,
-        };
-
-        // No new caller writes — run.
-        if let Some(reason) = decision {
-            return Ok(CycleOutcome::Skipped(reason));
-        }
-        let report = self.run_dream_cycle(cycle).await?;
-        // Defend invariant M against a buggy consumer `DreamCycle` (the shipped
-        // DefaultDreamCycle complies): a report that selected facts but left
-        // `processed_ids` empty would leave those facts unmarked → the guarded cycle
-        // defers forever. Reject loudly rather than silently livelock. A legitimately
-        // quiet window (facts_selected == 0) is fine.
-        if report.metadata.facts_selected > 0 && report.metadata.processed_ids.is_empty() {
-            return Err(MemoryError::Cycle(
-                crate::error::CycleError::MalformedReport {
-                    facts_selected: report.metadata.facts_selected,
-                },
-            ));
-        }
-        Ok(CycleOutcome::Ran(report))
+    pub async fn run_dream_cycle_guarded(
+        &self,
+        cycle: &dyn DreamCycle,
+    ) -> Result<crate::cognitive::CycleOutcome> {
+        crate::cognitive::run_dream_cycle_guarded(self.mem_ctx(), &EngineDreamCtx(self), cycle)
+            .await
     }
 
-    /// Parse the #209 caller-write cursor (`last_caller_write_fact_id`) from its
-    /// config string; absent ⇒ `0`. A config key, not schema — no migration.
-    fn parse_caller_write_cursor(raw: Option<String>) -> Result<i64> {
-        raw.map_or(Ok(0), |s| {
-            s.parse::<i64>().map_err(|e| {
-                MemoryError::Migration(MigrationError::Incompatible(format!(
-                    "invalid {CALLER_WRITE_CURSOR}: {e}"
-                )))
-            })
-        })
-    }
-
-    /// Build the retrieve-before-reflect context for a cycle: prior wisdom (active
-    /// pinned facts), the recent cycle-metadata history, and the default time
-    /// window `[last_dream_cycle_at, now)`.
-    async fn build_cycle_context(&self) -> Result<CycleContext<'_>> {
-        let now = Utc::now();
-        // Prior wisdom = ALL active pinned facts (port read). The dream cycle
-        // genuinely wants the full pinned set as prior wisdom, so it passes
-        // `usize::MAX` (no cap) — the #395 cap is a resume-tier concern only.
-        let prior_wisdom = self.storage.list_pinned_facts(&[], None).await?;
-        // Watermark: the default window start.
-        let start = match self.storage.get_config("last_dream_cycle_at").await? {
-            Some(s) => DateTime::parse_from_rfc3339(&s)
-                .map_err(|e| {
-                    MemoryError::Migration(MigrationError::Incompatible(format!(
-                        "invalid last_dream_cycle_at: {e}"
-                    )))
-                })?
-                .with_timezone(&Utc),
-            None => DateTime::from_timestamp(0, 0).expect("unix epoch is a valid timestamp"),
-        };
-        // Recent cycle-metadata history ring.
-        let prior_reports = match self.storage.get_config("dream_cycle_history").await? {
-            Some(s) => serde_json::from_str::<Vec<CycleMetadata>>(&s)?,
-            None => Vec::new(),
-        };
-        let time_window = TimeWindow { start, end: now };
-        Ok(CycleContext::new(
-            DreamContext::new(self),
-            prior_wisdom,
-            prior_reports,
-            time_window,
-        ))
+    /// Validate and apply a [`CycleReport`](crate::cognitive::CycleReport) atomically.
+    ///
+    /// The full validation + delta dispatch + dream-marking + watermark/history update
+    /// is one transaction below the seam
+    /// ([`ConsolidationStore::apply_cycle_deltas_atomic`](crate::storage::ConsolidationStore::apply_cycle_deltas_atomic)),
+    /// which also fires the post-commit HNSW notify (Stage B). If any delta fails
+    /// validation the store is left **unchanged**. The engine consumes only the returned
+    /// supersede edges, mirroring them into its in-memory graph.
+    ///
+    /// Concurrency note: this is single-fire safe (a sequential re-run is a near no-op
+    /// via the marker + watermark). Mutual exclusion against a concurrent writer is out
+    /// of scope here — see #207 / #209.
+    ///
+    /// # Errors
+    ///
+    /// - [`MemoryError::ReadOnly`] if the engine is read-only.
+    /// - [`MemoryError::Cycle`](crate::error::MemoryError::Cycle) if any delta fails validation.
+    /// - [`MemoryError::EmbeddingDimension`] if an
+    ///   `AddFact`/`Promote`/`Synthesize` embedding does not match the engine dimension.
+    /// - [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend failure.
+    pub async fn apply_cycle_report(
+        &self,
+        report: &crate::cognitive::CycleReport,
+    ) -> Result<crate::cognitive::ApplyResult> {
+        crate::cognitive::apply_cycle_report(
+            self.mem_ctx(),
+            &self.graph,
+            &self.upcaster_registry,
+            report,
+        )
+        .await
     }
 
     /// Atomic promotion: insert promoted fact + lineage record in one savepoint.
@@ -400,8 +368,11 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cognitive::{
+        CALLER_WRITE_CURSOR, CycleDelta, CycleMetadata, CycleOutcome, CycleReport, IdentityOutput,
+        SkipReason, TimeWindow,
+    };
     use crate::engine::MemoryEngine;
-    use crate::engine::cycle::{CycleMetadata, CycleReport, IdentityOutput};
     use crate::error::MemoryError;
     use crate::traits::CycleCtx;
     use crate::types::{FactType, Insight, PromoteRequest, PromotionProvenance};
@@ -450,6 +421,90 @@ mod tests {
                 },
             })
         }
+    }
+
+    /// A cycle that exercises the **restored capability bag** through `&dyn CycleCtx`.
+    ///
+    /// This is the regression test for the S1 defect (#981). ADR-0014 decision #3 gave a
+    /// `DreamCycle` the engine capability bag; S1 re-typed `run` to `&dyn CycleCtx` and
+    /// silently severed it, leaving 7 of 9 methods unreachable — and **no test noticed**,
+    /// because none had ever called them through the contract. Restoring the bag without a
+    /// test that consumes it would repeat exactly that mistake.
+    ///
+    /// Every call below goes through the `CycleCtx: DreamCtx` supertrait — i.e. through the
+    /// path a real consumer's cycle takes. It also proves the `EngineDreamCtx` adapter does
+    /// not recurse: a same-name resolution bug would blow the stack here, not return data.
+    struct CapabilityProbeCycle {
+        seen_active: std::sync::atomic::AtomicUsize,
+        seen_fact_id: std::sync::atomic::AtomicI64,
+        reached_outcome_counts: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl DreamCycle for CapabilityProbeCycle {
+        async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {
+            use std::sync::atomic::Ordering;
+
+            // --- inherited from DreamCtx via the supertrait (unreachable before #981) ---
+            let active = ctx.list_active_facts(None).await?;
+            self.seen_active.store(active.len(), Ordering::SeqCst);
+
+            if let Some(first) = active.first() {
+                let fetched = ctx.get_fact(first.id).await?;
+                self.seen_fact_id.store(fetched.id, Ordering::SeqCst);
+
+                // A fresh fact carries no outcome signals; what matters is that the call
+                // resolves through the trait and *returns* — rather than blowing the stack.
+                let _counts = ctx.outcome_counts(first.id).await?;
+                self.reached_outcome_counts.store(true, Ordering::SeqCst);
+            }
+
+            Ok(CycleReport {
+                deltas: vec![],
+                identity: IdentityOutput::empty(),
+                metadata: CycleMetadata {
+                    cycle_id: 0,
+                    ran_at: Utc::now(),
+                    time_window: ctx.time_window(),
+                    facts_selected: 0,
+                    method_version: "capability-probe".into(),
+                    processed_ids: vec![],
+                },
+            })
+        }
+    }
+
+    /// #981 regression: a `DreamCycle` can reach the engine capability bag through
+    /// `&dyn CycleCtx`. This is the contract ADR-0014 decision #3 promised and S1 broke.
+    #[tokio::test]
+    async fn cycle_can_reach_the_capability_bag_through_cyclectx() {
+        use std::sync::atomic::Ordering;
+
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let ids = add_source_facts(&engine, &[1, 2]).await;
+        assert!(!ids.is_empty(), "fixture must insert at least one fact");
+
+        let probe = CapabilityProbeCycle {
+            seen_active: std::sync::atomic::AtomicUsize::new(0),
+            seen_fact_id: std::sync::atomic::AtomicI64::new(0),
+            reached_outcome_counts: std::sync::atomic::AtomicBool::new(false),
+        };
+        engine.run_dream_cycle(&probe).await.unwrap();
+
+        // The cycle actually saw the store through the trait — not an empty stub.
+        assert_eq!(
+            probe.seen_active.load(Ordering::SeqCst),
+            ids.len(),
+            "list_active_facts must reach the real store through DreamCtx"
+        );
+        assert!(
+            ids.contains(&probe.seen_fact_id.load(Ordering::SeqCst)),
+            "get_fact must return a real fact through DreamCtx"
+        );
+        assert!(
+            probe.reached_outcome_counts.load(Ordering::SeqCst),
+            "outcome_counts must have been reached through DreamCtx"
+        );
     }
 
     fn stub_provenance() -> PromotionProvenance {
@@ -797,5 +852,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ids, source_ids);
+    }
+
+    /// Moved from the (now-carved) `me-cognitive::apply` test suite: this proves
+    /// `apply_cycle_report`'s `Quarantine` delta interacts correctly with
+    /// `explain_fact` — a facade-only module (`engine::inspect`), so this
+    /// cross-module assertion cannot live in `me-cognitive` itself.
+    #[tokio::test]
+    async fn quarantine_is_distinguishable_from_forgetting_in_explain_fact() {
+        use crate::inspect::{ExpiredReason, FactState};
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        engine
+            .storage()
+            .store_embedding_fingerprint(&crate::types::EmbeddingFingerprint::new(
+                "mock", "test", 4,
+            ))
+            .await
+            .unwrap();
+        let id = add_source_facts(&engine, &[0]).await[0];
+        let report = CycleReport {
+            deltas: vec![CycleDelta::Quarantine {
+                fact_id: id,
+                reason: "explicit correction".into(),
+            }],
+            identity: IdentityOutput::empty(),
+            metadata: CycleMetadata {
+                cycle_id: 1,
+                ran_at: Utc::now(),
+                time_window: TimeWindow {
+                    start: Utc::now(),
+                    end: Utc::now(),
+                },
+                facts_selected: 1,
+                method_version: "test".into(),
+                processed_ids: vec![id],
+            },
+        };
+        engine.apply_cycle_report(&report).await.unwrap();
+        let explanation = engine.explain_fact(id).await.unwrap();
+        assert_eq!(
+            explanation.state,
+            FactState::Expired {
+                reason: ExpiredReason::Quarantined
+            },
+            "explain_fact must report a quarantined fact as Quarantined, not Unknown/Forgotten"
+        );
     }
 }

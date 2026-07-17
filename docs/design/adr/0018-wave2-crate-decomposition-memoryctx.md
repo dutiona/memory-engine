@@ -69,7 +69,7 @@ build on these boundaries have the durable _why_.
    `memory-engine-embed` publish. The publishable crates carry **versioned** path-deps on
    their internal deps (cargo-deny's wildcard rule does not exempt public crates).
 
-8. **Three deliberate, gated public-API breaks** (`cargo public-api` in the per-slice gate,
+8. **Four deliberate, gated public-API breaks** (`cargo public-api` in the per-slice gate,
    this ADR the record): (a) **`DreamCycle::run(&dyn CycleCtx)`** replacing
    `&CycleContext` — necessary so that `me-traits` (L0.5) does not have to **name the type
    that owns the cycle's read-set**; `CycleCtx` is a `me-traits` capability trait
@@ -120,8 +120,27 @@ build on these boundaries have the durable _why_.
    drop `rusqlite` entirely (unblocking #633's `dep:rusqlite` gating). `#[non_exhaustive]`
    on `MemoryError` softens the impact — only explicit `Database(_)` arms break, not
    exhaustiveness. The `storage::sqlite::map_seam_err` boundary remap is deleted (subsumed:
-   the guarantee moves from a runtime match to compiler-enforced source-mapping). `§M`'s
-   "public API unchanged" is amended to "unchanged **except** these three, gated".
+   the guarantee moves from a runtime match to compiler-enforced source-mapping).
+   (d) **`DreamContext` deleted; `DreamCtx` trait added** (S5, #981 — the third, and
+   final, break in the (a)/(b) DreamCycle-contract lineage). ADR 0014 decision #3's
+   capability bag (`DreamContext`, wrapped by `CycleContext`) is inverted into a
+   `me-traits` trait, `DreamCtx`, with `CycleCtx: DreamCtx` as a supertrait (see ADR
+   0014's own amendment for the full history — S1's break at (a) had silently
+   stranded seven of `DreamContext`'s nine methods as unreachable dead code, which
+   this restores). The justification generalizes the same way (a)'s did: **the
+   property that matters is "the capability bag must be reachable through a trait
+   object with no downcast and no engine type in `me-traits`," not "the bag lives in
+   crate X."** Stating it as a crate name (`me-consolidate` in (a)'s original text, or
+   any specific L3 crate here) was exactly the #982 lesson — a rationale naming a
+   crate is brittle to the plan moving under it; one naming a property survives.
+   The engine's implementation lives in the facade, carried by the private
+   `EngineDreamCtx(&MemoryEngine)` newtype rather than `impl DreamCtx for MemoryEngine`
+   (the newtype is what makes an inherent-method rename `E0599` instead of a silent
+   stack overflow — ADR 0014's S5 amendment). This break is what unblocks
+   carving the dream-cycle subsystem itself into `me-cognitive` (L3): `DreamContext`
+   holding `engine: &'a MemoryEngine` had been the L3 → L4 back-edge blocking it since
+   S4 (see the `me-consolidate` scope note, superseded by this PR). `§M`'s "public API
+   unchanged" is amended to "unchanged **except** these four, gated".
 
 ## Consequences
 

@@ -95,7 +95,7 @@ impl DreamCycleConfig {
 /// Carries a precomputed embedding so the engine does not need an
 /// `crate::traits::EmbeddingProvider` at promotion time — the `DreamCycle`
 /// consumer owns its embedder and computes the embedding before calling
-/// `DreamContext::promote`.
+/// `DreamCtx::promote`.
 #[derive(Debug, Clone)]
 pub struct PromoteRequest {
     /// The promoted fact text.

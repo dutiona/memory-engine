@@ -8,8 +8,8 @@
 //! cluster's seed set is expanded in discovery order, so the same input always yields
 //! the same clusters.
 
-use crate::types::FactId;
 use me_types::math::cosine_similarity;
+use me_types::types::FactId;
 
 /// Upper bound on points fed to DBSCAN in one call. Above this the O(N²) pairwise
 /// cosine neighbour scan is skipped with a warning. Set well below the consolidation
@@ -30,7 +30,7 @@ const NOISE: i32 = -1;
 ///
 /// Returns an empty vec for an empty input, `min_pts == 0`, or an input larger than
 /// [`MAX_DBSCAN_POINTS`].
-pub(super) fn dbscan(points: &[(FactId, &[f32])], eps: f32, min_pts: usize) -> Vec<Vec<FactId>> {
+pub fn dbscan(points: &[(FactId, &[f32])], eps: f32, min_pts: usize) -> Vec<Vec<FactId>> {
     let n = points.len();
     if n == 0 || min_pts == 0 {
         return Vec::new();

@@ -5,20 +5,26 @@
 //! The consumer/contract traits the engine delegates all LLM/network work to
 //! (`EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`,
 //! `PersistenceClassifier`, `Reranker`, `DreamCycle`, `DeltaProposer`,
-//! `InsightStream`), plus the read-only `CycleCtx` handle and the non-DTO companion
-//! types. Depends only on `me-types` — a thin leaf over the data layer.
+//! `InsightStream`), plus the read-only `DreamCtx`/`CycleCtx` capability handles and
+//! the non-DTO companion types. Depends only on `me-types` — a thin leaf over the
+//! data layer.
 
 // Panic-safety gate (#725): `unwrap_used = "deny"` (workspace lints) forbids
 // `.unwrap()` in production paths. This crate's own `#[cfg(test)]` tests are exempt.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use me_types::error::Result;
 use me_types::types::cycle_report::{CycleMetadata, CycleReport, TimeWindow};
-use me_types::types::search::SearchResult;
+use me_types::types::forgetting::{ForgetPolicy, PruneStats};
+use me_types::types::search::{SearchQuery, SearchResult};
 use me_types::types::{
     ClassifierInput, ConsolidationProposal, EmbeddingFingerprint, Fact, OutcomeCounts,
+    PromoteRequest, PromotionResult,
 };
 
 /// Shared `EmbeddingProvider` test double (`MockEmbedder`).
@@ -337,21 +343,148 @@ pub trait InsightStream: Send + Sync {
     fn record(&self, insight: me_types::types::Insight) -> Result<()>;
 }
 
+/// The engine capability bag handed to a [`DreamCycle`] (via [`CycleCtx`]'s supertrait).
+///
+/// More broadly, this is the "narrowed `MemoryEngine`" surface: read, engine-internal
+/// batch ops (consolidate/forget), and the one new write path (promotion).
+///
+/// # History (ADR 0014 decision #3, restored — Wave 2 #816, S5, closes #981)
+///
+/// ADR 0014 deliberately preserved this capability bag **by composition**:
+/// `CycleContext` wrapped a concrete `DreamContext` struct (`engine: &'a
+/// MemoryEngine`), and `CycleContext::dream()` exposed it. S1 (#816) re-typed
+/// `DreamCycle::run` from `&CycleContext` to `&dyn CycleCtx` — necessary so `me-traits`
+/// (L0.5) never names the facade type that owns the cycle's read-set — but that made
+/// `DreamContext` **unreachable**: its constructor was `pub(crate)`, its sole accessor
+/// was `CycleContext::dream()`, and a `&dyn CycleCtx` cannot be downcast. Seven of its
+/// nine methods (everything except the two `CycleCtx` happened to duplicate) went from
+/// "capability bag" to "dead code with zero call sites" — a regression no ADR amendment
+/// recorded and no green build could catch (`dead_code` does not fire on `pub` items).
+///
+/// S5 restores the contract properly: the bag is promoted **into the trait layer**
+/// itself, so a `&dyn DreamCtx` — or, via the [`CycleCtx`] supertrait, a `&dyn
+/// CycleCtx` — carries the full capability set natively, no downcast and no engine
+/// type in `me-traits`.
+///
+/// There are exactly two implementors: `EngineDreamCtx`, a **private borrow-newtype**
+/// over `&MemoryEngine` in the facade, and `CycleContext` in `me-cognitive`, which
+/// forwards to a held `&dyn DreamCtx`.
+///
+/// # ⚠️ Before you add a third
+///
+/// **Do not `impl DreamCtx for T` when `T` has inherent methods sharing these names**
+/// (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget` all collide on
+/// `MemoryEngine`). Rust resolves inherent-before-trait, so such an impl works only
+/// until the inherent method is renamed — after which the call silently re-resolves to
+/// the trait method being defined: unbounded recursion, stack overflow, in the
+/// **consumer's** process. Qualifying (`Self::query(self, q)`) does **not** help — same
+/// resolution order — and `unconditional_recursion` does **not** fire through
+/// `#[async_trait]`, so `-D warnings` stays green. Route the impl through a newtype
+/// whose inner type has no `DreamCtx` impl in scope; a rename is then `E0599`. See
+/// `EngineDreamCtx`'s doc and ADR 0014's Wave 2 / S5 amendment.
+///
+/// `Send + Sync` (like every sibling consumer trait, #631/#386): a `&dyn DreamCtx` is
+/// borrowed across `.await` inside a `Send` future.
+#[async_trait]
+pub trait DreamCtx: Send + Sync {
+    /// Run a hybrid query (FTS5 + vector + graph, RRF merge).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    async fn query(&self, query: &SearchQuery) -> Result<Vec<SearchResult>>;
+
+    /// List all active (non-expired) facts, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store read fails.
+    async fn list_active_facts(&self, limit: Option<usize>) -> Result<Vec<Fact>>;
+
+    /// Retrieve a single fact by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if no fact with this ID exists.
+    async fn get_fact(&self, id: i64) -> Result<Fact>;
+
+    /// Run engine-internal consolidation (dedup → cluster → global summaries).
+    ///
+    /// `generator` produces the summary text; `embedder` projects it into the fact
+    /// vector space (issue #116). Both are `Arc<dyn _>` so the implementor can offload
+    /// the (possibly blocking) consumer calls off the async executor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if consolidation fails.
+    async fn consolidate(
+        &self,
+        generator: Arc<dyn SummaryGenerator>,
+        embedder: Arc<dyn EmbeddingProvider>,
+        config: &ConsolidationConfig,
+    ) -> Result<ConsolidationStats>;
+
+    /// Run Ebbinghaus decay + pruning on stale facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the forget operation fails.
+    async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats>;
+
+    /// Atomically promote a fact to wisdom with lineage tracking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the promotion fails (dimension mismatch, DB error, etc.).
+    async fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult>;
+
+    /// List active facts in `window` that have not yet been dream-cycled.
+    ///
+    /// This is a cycle's input-selection query: the metadata `dream_cycle` marker
+    /// excludes facts a previous cycle already processed (idempotency). Root scope,
+    /// all fact types.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store read fails.
+    async fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>>;
+
+    /// Aggregated outcome counts for a fact (for importance rescoring).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if the fact does not exist, or a store error.
+    async fn outcome_counts(&self, fact_id: i64) -> Result<OutcomeCounts>;
+
+    /// Aggregated outcome counts for many facts in a single query (batch rescoring).
+    ///
+    /// The batch form of [`Self::outcome_counts`] — one `GROUP BY` scan instead of one
+    /// query per fact. Facts with no outcomes (or unknown ids) are absent from the map;
+    /// callers treat a missing key as
+    /// [`OutcomeCounts::default`](me_types::types::OutcomeCounts).
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the query fails.
+    async fn outcome_counts_batch(&self, fact_ids: &[i64]) -> Result<HashMap<i64, OutcomeCounts>>;
+}
+
 /// The read-capability handle a [`DreamCycle`] receives during [`run`](DreamCycle::run).
 ///
 /// `DreamCycle::run` is **planning**, not writing: it reads the time window and prior
 /// state and returns a delta-based [`CycleReport`] for the caller to apply. `CycleCtx`
-/// is exactly the read surface those impls use. It is implemented by the engine's
-/// concrete `CycleContext`; abstracting it behind
-/// this trait is what lets the `DreamCycle` contract name no engine/consolidation type
-/// (Wave 2 #816 — the trait layer stays a leaf over the data layer). The write
-/// capabilities (consolidate / forget / promote) run later, in the engine's apply path,
-/// not through this handle.
-///
-/// `Send + Sync` (like every sibling consumer trait, #631/#386): a `&dyn CycleCtx` is
-/// borrowed across `.await` inside the `Send` cycle future.
+/// adds the retrieve-before-reflect surface (the window, prior wisdom, prior cycle
+/// metadata) on top of the [`DreamCtx`] supertrait, which supplies the engine
+/// capability bag — including `list_undreamt_in_period` / `outcome_counts_batch`,
+/// **inherited**, not duplicated (see [`DreamCtx`]'s own doc for why that duplication
+/// existed and was removed in Wave 2 #816 / S5). It is implemented by the engine's
+/// concrete `CycleContext`; abstracting it behind this trait is what lets the
+/// `DreamCycle` contract name no engine/consolidation type (Wave 2 #816 — the trait
+/// layer stays a leaf over the data layer). The write capabilities the supertrait
+/// exposes (consolidate / forget / promote) are available here too, but the shipped
+/// cycles run them later, through the engine's apply path — not through this handle.
 #[async_trait]
-pub trait CycleCtx: Send + Sync {
+pub trait CycleCtx: DreamCtx {
     /// The window of facts this cycle was asked to process.
     fn time_window(&self) -> TimeWindow;
 
@@ -362,27 +495,6 @@ pub trait CycleCtx: Send + Sync {
     /// Metadata of recent prior cycles (newest last), for cycle-id sequencing and
     /// drift detection against existing wisdom.
     fn prior_reports(&self) -> &[CycleMetadata];
-
-    /// The cycle's input set: facts in `window` not already processed by a prior cycle
-    /// (the `dream_cycle` marker excludes them).
-    ///
-    /// # Errors
-    ///
-    /// Returns a store error if the read fails.
-    async fn list_undreamt_in_period(&self, window: TimeWindow) -> Result<Vec<Fact>>;
-
-    /// Aggregated outcome counts for many facts in a single query (batch rescoring).
-    /// Facts with no recorded outcomes (or unknown ids) are absent from the map;
-    /// callers treat a missing key as
-    /// [`OutcomeCounts::default`](me_types::types::OutcomeCounts).
-    ///
-    /// # Errors
-    ///
-    /// Returns a store error if the query fails.
-    async fn outcome_counts_batch(
-        &self,
-        fact_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, OutcomeCounts>>;
 }
 
 /// Periodic batch processing: consolidation, pattern detection, promotion.

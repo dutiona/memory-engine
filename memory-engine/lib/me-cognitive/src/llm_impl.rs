@@ -23,12 +23,22 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use crate::engine::spawn_join_err;
-use crate::error::Result;
-use crate::traits::{CycleCtx, DeltaProposer, DreamCycle, EmbeddingProvider};
-use crate::types::{Fact, FactId, FactType, NewFact};
+use me_traits::{CycleCtx, DeltaProposer, DreamCycle, EmbeddingProvider};
+use me_types::error::Result;
+use me_types::types::cycle_report::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
+use me_types::types::{Fact, FactId, FactType, NewFact};
 
-use super::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
+/// Map a `tokio::task::spawn_blocking` join failure (a panic or cancellation in the
+/// offloaded consumer `propose`/`embed` call) to a `MemoryError`. Private copy of the
+/// facade's `engine::spawn_join_err` (`pub(super)`, used by other engine modules too —
+/// not moved), mirroring every other carved primitive's own copy.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used as map_err(spawn_join_err) fn pointer"
+)]
+fn spawn_join_err(e: tokio::task::JoinError) -> me_types::error::MemoryError {
+    me_types::error::MemoryError::Internal(format!("offloaded task failed: {e}"))
+}
 
 /// `method_version` stamped into every report this backend produces.
 const METHOD_VERSION: &str = "llm-proposer-v1";
@@ -45,13 +55,18 @@ const METHOD_VERSION: &str = "llm-proposer-v1";
 /// # Injecting the backend
 ///
 /// The proposer and embedder are consumer-supplied; the engine never embeds or calls
-/// an LLM on their behalf. Wire them in, then hand the cycle to
-/// [`run_dream_cycle_guarded`](crate::MemoryEngine::run_dream_cycle_guarded):
+/// an LLM on their behalf. Construct the backend against the `me-traits`/`me-types`
+/// vocabulary directly (this L3 crate cannot depend on the facade, see the crate-root
+/// doc); hand `&backend` to the facade's `MemoryEngine::run_dream_cycle_guarded` (see
+/// that method's own doc for the full run → apply example):
 ///
 /// ```
-/// use memory_engine::{DeltaProposer, EmbeddingProvider, LlmDreamCycle};
-/// use memory_engine::error::Result;
-/// use memory_engine::types::{ConsolidationProposal, Fact};
+/// use std::sync::Arc;
+///
+/// use me_cognitive::LlmDreamCycle;
+/// use me_traits::{DeltaProposer, EmbeddingProvider};
+/// use me_types::error::Result;
+/// use me_types::types::{ConsolidationProposal, EmbeddingFingerprint, Fact};
 ///
 /// struct MyProposer; // e.g. memory-engine-embed's HttpDeltaProposer
 /// impl DeltaProposer for MyProposer {
@@ -61,13 +76,14 @@ const METHOD_VERSION: &str = "llm-proposer-v1";
 /// }
 /// struct MyEmbedder;
 /// impl EmbeddingProvider for MyEmbedder {
-///     fn embed(&self, _text: &str) -> Result<Vec<f32>> { Ok(vec![0.0; 8]) }
-///     fn fingerprint(&self) -> memory_engine::types::EmbeddingFingerprint {
-///         memory_engine::types::EmbeddingFingerprint::new("my-model", "my-provider", 8)
+///     fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+///         Ok(vec![0.0; 8])
+///     }
+///     fn fingerprint(&self) -> EmbeddingFingerprint {
+///         EmbeddingFingerprint::new("my-model", "my-provider", 8)
 ///     }
 /// }
 ///
-/// use std::sync::Arc;
 /// let proposer: Arc<dyn DeltaProposer> = Arc::new(MyProposer);
 /// let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MyEmbedder);
 /// let backend = LlmDreamCycle::new(proposer, embedder);
@@ -87,6 +103,9 @@ impl LlmDreamCycle {
     }
 }
 
+// NOTE — the recursion trap (see crate-root doc) does not reach here: this impl calls
+// `ctx.*`, where `ctx: &dyn CycleCtx` is a PARAMETER, not `self`. There is no same-name
+// inherent-vs-trait ambiguity to resolve at all.
 #[async_trait::async_trait]
 impl DreamCycle for LlmDreamCycle {
     async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {
@@ -199,9 +218,11 @@ impl DreamCycle for LlmDreamCycle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::MemoryEngine;
-    use crate::error::MemoryError;
-    use crate::types::{AddFactRequest, ConsolidationProposal, MergeGroup};
+    use crate::cognitive::run_dream_cycle;
+    use crate::test_support::TestEngine;
+    use me_traits::test_util::MockEmbedder;
+    use me_types::error::MemoryError;
+    use me_types::types::{ConsolidationProposal, MergeGroup};
 
     const DIM: usize = 4;
 
@@ -217,35 +238,16 @@ mod tests {
         }
     }
 
-    fn engine() -> MemoryEngine {
-        MemoryEngine::builder(DIM).build().unwrap()
-    }
-
-    async fn add(engine: &MemoryEngine, content: &str) -> FactId {
-        add_scoped(engine, content, None).await
-    }
-
-    async fn add_scoped(engine: &MemoryEngine, content: &str, scope: Option<&str>) -> FactId {
-        let req = AddFactRequest {
-            content: content.into(),
-            fact_type: FactType::Semantic,
-            source_event_id: None,
-            scope: scope.map(str::to_owned),
-            opts: None,
-        };
+    async fn engine() -> TestEngine {
+        let engine = TestEngine::new(DIM).await;
+        // Stamp the embedding identity so `apply_cycle_report` accepts the
+        // pre-computed-vector `Synthesize` deltas `LlmDreamCycle::run` emits (#613).
+        engine.stamp_identity().await;
         engine
-            .add_fact(
-                &req,
-                std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                    as std::sync::Arc<dyn EmbeddingProvider>,
-                None,
-            )
-            .await
-            .unwrap()
     }
 
-    async fn scope_of(engine: &MemoryEngine, id: FactId) -> i64 {
-        engine.storage().get_fact(id).await.unwrap().scope_id
+    async fn add(engine: &TestEngine, content: &str) -> FactId {
+        engine.add_scoped(content, None).await
     }
 
     fn merge(source_ids: Vec<FactId>, summary: &str) -> MergeGroup {
@@ -271,7 +273,7 @@ mod tests {
     /// #209 guard cannot livelock on an un-marked leftover.
     #[tokio::test]
     async fn run_emits_synthesize_with_full_window_processed_ids() {
-        let engine = engine();
+        let engine = engine().await;
         let s1 = add(&engine, "fact one").await;
         let s2 = add(&engine, "fact two").await;
         let s3 = add(&engine, "unmerged fact").await;
@@ -279,12 +281,11 @@ mod tests {
             merges: vec![merge(vec![s1, s2], "merged one+two")],
         };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>,
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM, 0.1)) as Arc<dyn EmbeddingProvider>,
         );
 
-        let report = engine.run_dream_cycle(&llm).await.unwrap();
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
 
         assert_eq!(synth_sources(&report), vec![vec![s1, s2]]);
         let mut processed = report.metadata.processed_ids.clone();
@@ -301,7 +302,7 @@ mod tests {
     /// lineage, and invariant M holds — no active unmarked fact looks like a caller write.
     #[tokio::test]
     async fn run_then_apply_creates_edges_lineage_and_holds_invariant_m() {
-        let engine = engine();
+        let engine = engine().await;
         let s1 = add(&engine, "fact one").await;
         let s2 = add(&engine, "fact two").await;
         let _s3 = add(&engine, "unmerged but processed").await;
@@ -309,29 +310,35 @@ mod tests {
             merges: vec![merge(vec![s1, s2], "merged")],
         };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>,
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM, 0.1)) as Arc<dyn EmbeddingProvider>,
         );
 
-        let report = engine.run_dream_cycle(&llm).await.unwrap();
-        let res = engine.apply_cycle_report(&report).await.unwrap();
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
+        let res = crate::apply::apply_cycle_report(
+            engine.ctx(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &report,
+        )
+        .await
+        .unwrap();
         assert_eq!(res.synthesized, 1);
         let synth = res.synthesized_fact_ids[0];
 
         let edges = engine
-            .storage()
+            .storage
             .list_active_edges_by_source(synth)
             .await
             .unwrap();
         let (lineage, _p) = engine
-            .storage()
+            .storage
             .get_lineage_by_wisdom_fact(synth)
             .await
             .unwrap();
         let lineage_sources = lineage.source_fact_ids;
-        let e1 = engine.storage().get_fact(s1).await.unwrap();
-        let e2 = engine.storage().get_fact(s2).await.unwrap();
+        let e1 = engine.storage.get_fact(s1).await.unwrap();
+        let e2 = engine.storage.get_fact(s2).await.unwrap();
         for src in [s1, s2] {
             assert!(
                 edges
@@ -342,7 +349,7 @@ mod tests {
         assert_eq!(lineage_sources, vec![s1, s2]);
         assert!(e1.t_expired.is_some() && e2.t_expired.is_some());
 
-        let max_caller = engine.storage().max_caller_written_fact_id().await.unwrap();
+        let max_caller = engine.storage.max_caller_written_fact_id().await.unwrap();
         assert_eq!(
             max_caller, None,
             "invariant M: nothing looks like a caller write"
@@ -353,42 +360,54 @@ mod tests {
     /// `validate_report` (which would reject the whole report as `UnknownFact`).
     #[tokio::test]
     async fn run_clamps_out_of_window_source_ids() {
-        let engine = engine();
+        let engine = engine().await;
         let s1 = add(&engine, "in window").await;
         let proposer = FakeProposer {
             merges: vec![merge(vec![s1, 999_999], "merged with a ghost")],
         };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>,
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM, 0.1)) as Arc<dyn EmbeddingProvider>,
         );
 
-        let report = engine.run_dream_cycle(&llm).await.unwrap();
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
         assert_eq!(synth_sources(&report), vec![vec![s1]], "ghost id dropped");
         // And it applies (the clamped single source is valid).
-        engine.apply_cycle_report(&report).await.unwrap();
+        crate::apply::apply_cycle_report(
+            engine.ctx(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &report,
+        )
+        .await
+        .unwrap();
     }
 
     /// A group whose sources are ALL outside the window collapses to nothing — the group
     /// is skipped rather than emitted as an empty (and invalid) Synthesize.
     #[tokio::test]
     async fn run_skips_group_with_no_in_window_sources() {
-        let engine = engine();
+        let engine = engine().await;
         let s1 = add(&engine, "in window").await;
         let proposer = FakeProposer {
             merges: vec![merge(vec![888_888, 999_999], "all ghosts")],
         };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>,
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM, 0.1)) as Arc<dyn EmbeddingProvider>,
         );
 
-        let report = engine.run_dream_cycle(&llm).await.unwrap();
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
         assert!(synth_sources(&report).is_empty(), "all-ghost group skipped");
         // The real window fact is still processed (dream-marked) on apply — no livelock.
-        let res = engine.apply_cycle_report(&report).await.unwrap();
+        let res = crate::apply::apply_cycle_report(
+            engine.ctx(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &report,
+        )
+        .await
+        .unwrap();
         assert_eq!(res.synthesized, 0);
         assert!(report.metadata.processed_ids.contains(&s1));
     }
@@ -397,19 +416,25 @@ mod tests {
     /// still dream-marks the window.
     #[tokio::test]
     async fn run_empty_proposal_is_noop_but_marks_window() {
-        let engine = engine();
+        let engine = engine().await;
         let s1 = add(&engine, "lonely fact").await;
         let proposer = FakeProposer { merges: vec![] };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>,
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM, 0.1)) as Arc<dyn EmbeddingProvider>,
         );
 
-        let report = engine.run_dream_cycle(&llm).await.unwrap();
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
         assert!(synth_sources(&report).is_empty());
-        engine.apply_cycle_report(&report).await.unwrap();
-        let max_caller = engine.storage().max_caller_written_fact_id().await.unwrap();
+        crate::apply::apply_cycle_report(
+            engine.ctx(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &report,
+        )
+        .await
+        .unwrap();
+        let max_caller = engine.storage.max_caller_written_fact_id().await.unwrap();
         assert_eq!(max_caller, None, "the window fact {s1} was dream-marked");
     }
 
@@ -417,43 +442,55 @@ mod tests {
     /// a mismatch surfaces at apply time (parity with `AddFact`).
     #[tokio::test]
     async fn embed_dim_mismatch_surfaces_at_apply() {
-        let engine = engine();
+        let engine = engine().await;
         let s1 = add(&engine, "a").await;
         let s2 = add(&engine, "b").await;
         let proposer = FakeProposer {
             merges: vec![merge(vec![s1, s2], "merged")],
         };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM + 4, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>, // wrong dimension
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM + 4, 0.1)) as Arc<dyn EmbeddingProvider>, // wrong dimension
         );
 
-        let report = engine.run_dream_cycle(&llm).await.unwrap(); // run itself can't know engine dim
-        let err = engine.apply_cycle_report(&report).await.unwrap_err();
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap(); // run itself can't know engine dim
+        let err = crate::apply::apply_cycle_report(
+            engine.ctx(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &report,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, MemoryError::EmbeddingDimension { .. }));
     }
 
     /// `cycle_id` mirrors `DefaultDreamCycle`: `max(prior_reports.cycle_id) + 1`.
     #[tokio::test]
     async fn cycle_id_increments_via_prior_reports() {
-        let engine = engine();
+        let engine = engine().await;
         let s1 = add(&engine, "a").await;
         let s2 = add(&engine, "b").await;
         let proposer = FakeProposer {
             merges: vec![merge(vec![s1, s2], "merged")],
         };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>,
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM, 0.1)) as Arc<dyn EmbeddingProvider>,
         );
 
-        let first = engine.run_dream_cycle(&llm).await.unwrap();
+        let first = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
         assert_eq!(first.metadata.cycle_id, 0);
-        engine.apply_cycle_report(&first).await.unwrap();
+        crate::apply::apply_cycle_report(
+            engine.ctx(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &first,
+        )
+        .await
+        .unwrap();
 
-        let second = engine.run_dream_cycle(&llm).await.unwrap();
+        let second = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
         assert_eq!(
             second.metadata.cycle_id, 1,
             "cycle_id advances off prior_reports"
@@ -466,7 +503,7 @@ mod tests {
     /// BLOCKER, flagged by both reviewers). Cross-group dedup claims each source once.
     #[tokio::test]
     async fn run_dedups_sources_across_merge_groups() {
-        let engine = engine();
+        let engine = engine().await;
         let s1 = add(&engine, "a").await;
         let s2 = add(&engine, "b").await;
         let s3 = add(&engine, "c").await;
@@ -474,16 +511,22 @@ mod tests {
             merges: vec![merge(vec![s1, s2], "g1"), merge(vec![s2, s3], "g2")],
         };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>,
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM, 0.1)) as Arc<dyn EmbeddingProvider>,
         );
 
-        let report = engine.run_dream_cycle(&llm).await.unwrap();
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
         // s2 is claimed by g1; g2 keeps only s3.
         assert_eq!(synth_sources(&report), vec![vec![s1, s2], vec![s3]]);
         // The report applies cleanly — no AlreadyExpired rollback.
-        let res = engine.apply_cycle_report(&report).await.unwrap();
+        let res = crate::apply::apply_cycle_report(
+            engine.ctx(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &report,
+        )
+        .await
+        .unwrap();
         assert_eq!(res.synthesized, 2);
     }
 
@@ -493,12 +536,12 @@ mod tests {
     /// (no cross-scope merge). (#641 HIGH.)
     #[tokio::test]
     async fn run_inherits_source_scope_and_skips_cross_scope_groups() {
-        let engine = engine();
-        let root1 = add_scoped(&engine, "root a", None).await;
-        let root2 = add_scoped(&engine, "root b", None).await;
-        let child1 = add_scoped(&engine, "child a", Some("proj")).await;
-        let child2 = add_scoped(&engine, "child b", Some("proj")).await;
-        let child_scope = scope_of(&engine, child1).await;
+        let engine = engine().await;
+        let root1 = engine.add_scoped("root a", None).await;
+        let root2 = engine.add_scoped("root b", None).await;
+        let child1 = engine.add_scoped("child a", Some("proj")).await;
+        let child2 = engine.add_scoped("child b", Some("proj")).await;
+        let child_scope = engine.storage.get_fact(child1).await.unwrap().scope_id;
         assert_ne!(child_scope, 1, "child facts are in a non-root scope");
 
         let proposer = FakeProposer {
@@ -509,26 +552,42 @@ mod tests {
             ],
         };
         let llm = LlmDreamCycle::new(
-            std::sync::Arc::new(proposer) as std::sync::Arc<dyn DeltaProposer>,
-            std::sync::Arc::new(crate::test_utils::MockEmbedder::constant(DIM, 0.1))
-                as std::sync::Arc<dyn EmbeddingProvider>,
+            Arc::new(proposer) as Arc<dyn DeltaProposer>,
+            Arc::new(MockEmbedder::constant(DIM, 0.1)) as Arc<dyn EmbeddingProvider>,
         );
 
-        let report = engine.run_dream_cycle(&llm).await.unwrap();
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
         assert_eq!(
             synth_sources(&report),
             vec![vec![child1, child2], vec![root1, root2]],
             "cross-scope group dropped; same-scope groups kept"
         );
-        let res = engine.apply_cycle_report(&report).await.unwrap();
+        let res = crate::apply::apply_cycle_report(
+            engine.ctx(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &report,
+        )
+        .await
+        .unwrap();
         assert_eq!(res.synthesized_fact_ids.len(), 2);
         assert_eq!(
-            scope_of(&engine, res.synthesized_fact_ids[0]).await,
+            engine
+                .storage
+                .get_fact(res.synthesized_fact_ids[0])
+                .await
+                .unwrap()
+                .scope_id,
             child_scope,
             "child synthetic stays in the child scope"
         );
         assert_eq!(
-            scope_of(&engine, res.synthesized_fact_ids[1]).await,
+            engine
+                .storage
+                .get_fact(res.synthesized_fact_ids[1])
+                .await
+                .unwrap()
+                .scope_id,
             1,
             "root synthetic stays at root"
         );

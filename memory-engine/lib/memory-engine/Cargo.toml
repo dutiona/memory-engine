@@ -59,6 +59,13 @@ me-archive = { path = "../me-archive", optional = true }
 # `MemoryCtx` (Wave 2 #816 / S4, sub-PR 4 — the final S4 sub-PR, closes #940).
 # `MemoryEngine::consolidate` delegates to it directly.
 me-consolidate = { path = "../me-consolidate" }
+# L3 Cognitive primitive: Phase 5a `DreamCycle` orchestration (produce/apply split)
+# over `MemoryCtx` + the `DreamCtx` capability trait (Wave 2 #816 / S5, sub-PR 2,
+# closes #981). The facade re-exports it as `crate::cognitive` (the `pool`/`store`/
+# `graph`/`scope`/`archive`/`forgetting` alias convention); `impl DreamCtx for
+# MemoryEngine` and the four thin delegates it needs stay in
+# `engine/cognitive.rs`.
+me-cognitive = { path = "../me-cognitive" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

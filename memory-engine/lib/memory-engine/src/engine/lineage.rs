@@ -10,8 +10,9 @@ impl MemoryEngine {
     /// transaction; exposing it publicly let a consumer write lineage in a
     /// separate transaction from the wisdom-fact insert (interruptible between
     /// the two) — undermining the atomicity guarantee that
-    /// [`DreamContext::promote`](crate::engine::cognitive::DreamContext::promote)
-    /// documents. The only sanctioned way to create a wisdom fact + lineage is
+    /// [`MemoryEngine::promote_with_lineage`](crate::engine::MemoryEngine::promote_with_lineage)
+    /// documents (the body `DreamCtx::promote` delegates to, Wave 2 #816 / S5). The
+    /// only sanctioned way to create a wisdom fact + lineage is
     /// that atomic path (fact insert + lineage insert in one savepoint); this
     /// primitive stays `pub(crate)` for it and for tests. The insert still
     /// rejects a missing or expired `wisdom_fact_id` (see [`LineageStore::insert`]).

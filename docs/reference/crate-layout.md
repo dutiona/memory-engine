@@ -28,6 +28,7 @@ graph TD
         ingest["me-ingest"]
         query["me-query"]
         consolidate["me-consolidate"]
+        cognitive["me-cognitive"]
         forget["me-forget"]
         resolve["me-resolve"]
         archive["me-archive"]
@@ -47,8 +48,8 @@ graph TD
         types["me-types"]
     end
 
-    facade --> ingest & query & consolidate & forget & resolve & archive
-    ingest & query & consolidate & forget & resolve & archive --> sqlite & postgres & index
+    facade --> ingest & query & consolidate & cognitive & forget & resolve & archive
+    ingest & query & consolidate & cognitive & forget & resolve & archive --> sqlite & postgres & index
     sqlite & postgres & index --> storage
     storage --> traits
     traits --> types
@@ -63,7 +64,7 @@ A 14th crate, **`me-test-support`**, is dev-only (`publish = false`, in
 
 ## Target crates
 
-Thirteen crates in the strict DAG, plus the dev-only `me-test-support`. The `memory-engine`
+Fourteen crates in the strict DAG, plus the dev-only `me-test-support`. The `memory-engine`
 facade re-exports the extracted crates so the public four-layer seam
 (`types` / `error` / `traits` / `storage`) is unchanged.
 
@@ -78,7 +79,8 @@ facade re-exports the extracted crates so the public four-layer seam
 | `me-index`               | L2    | ✅ **DONE**                                         | Backend-agnostic in-memory projections: the `MemoryGraph` and `ScopeTree` caches. Trait-free, mockable; the #763 freshness registry wants this home.                                                                                                                       | `graph/`, `scope/`                                                         |
 | `me-ingest`              | L3    | ✅ **DONE** (S4)                                    | The **Ingest** primitive: append-only event log writes.                                                                                                                                                                                                                    | `engine::ingest`                                                           |
 | `me-query`               | L3    | ✅ **DONE** (S4)                                    | The **Query** primitive: hybrid FTS5 + vector + graph retrieval, RRF merge. Carried the `VectorSearchStrategy` break — resolved as an **un-export**, not the originally-planned signature change (see ADR 0018 §8b).                                                        | `search/`, `engine::query`                                                 |
-| `me-consolidate`         | L3    | ✅ **DONE** (S4)                                    | The **Consolidate** primitive: the 3-pass dedup → cluster → global pipeline. ⚠️ **NOT** the dream-cycle layer — `engine::cycle`/`engine::cognitive` stay in the **facade**, because `DreamContext` holds `&MemoryEngine` (an L3→L4 back-edge). Carving them needs `DreamContext` inverted into a capability trait → **#981**. | `consolidation/`, `engine::consolidation`                                  |
+| `me-consolidate`         | L3    | ✅ **DONE** (S4)                                    | The **Consolidate** primitive: the 3-pass dedup → cluster → global pipeline. At S4 this deliberately excluded the dream-cycle layer (`DreamContext` held `&MemoryEngine`, an L3→L4 back-edge); **S5's `me-cognitive` carve (below) resolves that** by inverting the bag into a trait, so the two are siblings now, not one waiting on the other. | `consolidation/`, `engine::consolidation`                                  |
+| `me-cognitive`           | L3    | ✅ **DONE** (S5, #981)                              | The **Cognitive/dream-cycle** primitive (Phase 5a): `DreamCycle` produce/apply orchestration (`run_dream_cycle`/`run_dream_cycle_guarded`/`apply_cycle_report`), `CycleContext`, `DefaultDreamCycle`, `LlmDreamCycle`, and the pure DBSCAN core. Depends on `me-traits`'s new `DreamCtx` capability trait (the ADR 0014 decision #3 bag, restored). The engine's implementation stays in the facade, carried by the private `EngineDreamCtx(&MemoryEngine)` newtype — **not** `impl DreamCtx for MemoryEngine`, which would make an inherent-method rename a silent stack overflow (ADR 0014's S5 amendment). | `engine::cycle`, `engine::cognitive` (orchestration half)                  |
 | `me-forget`              | L3    | ✅ **DONE** (S3)                                    | The **Forget** primitive: Ebbinghaus decay + multi-signal importance scoring.                                                                                                                                                                                              | `forgetting/`, `engine::forgetting`                                        |
 | `me-resolve`             | L3    | ✅ **DONE** (S3)                                    | The **Resolve** primitive: bi-temporal conflict arbitration.                                                                                                                                                                                                               | `engine::conflict`                                                         |
 | `me-archive`             | L3    | ✅ **DONE** (S4)                                    | The **Archive** primitive: cold-storage `.pak` snapshots (feature-gated). Owning `build_pak` here makes the `.pak` schema guard compiler-enforced: no backend edge exists, so neither half can name a backend's schema constant.                                            | `archive/`, `engine::archive`                                              |
@@ -91,14 +93,23 @@ facade re-exports the extracted crates so the public four-layer seam
 
 ### Deliberate, gated public-API breaks
 
-Two signature breaks are intentional and guarded by `cargo public-api` in the per-slice
-gate (ADR 0018 decision #8):
+Three signature breaks are intentional and guarded by `cargo public-api` in the per-slice
+gate (ADR 0018 decision #8; see that decision for the full, amended history of each):
 
 - **`DreamCycle::run(&dyn CycleCtx)`** (replacing `&CycleContext`) — **landed in S1**. It
-  lets `me-traits` avoid depending on `me-consolidate`; `me-consolidate`'s `CycleContext`
-  _implements_ the `CycleCtx` read-set trait.
+  lets `me-traits` avoid naming whichever crate owns the cycle's read-set — that turned
+  out to be `me-cognitive` (S5), not `me-consolidate` as originally assumed;
+  `CycleContext` _implements_ the `CycleCtx` read-set trait wherever it lands.
 - **`VectorSearchStrategy::search(&dyn SearchIndex)`** (replacing `&Connection`) —
-  **deferred to S4**. Still `&Connection` today.
+  **never happened; superseded in S4** (ADR 0018 §8b). The `me-query` carve resolved the
+  problem by *un-exporting* `VectorSearchStrategy` from the facade instead: it no longer
+  crosses the port boundary at all, so its signature stopped being public API and the
+  planned break became moot. It lives on as a `me-backend-sqlite`-internal HNSW-vs-brute-force
+  dispatch trait (`me-backend-sqlite/src/search/strategy.rs`). See the `me-query` row above.
+- **`DreamContext` deleted; `DreamCtx` trait added** (S5, #981) — the ADR 0014 decision
+  #3 capability bag is inverted into a `me-traits` trait (`CycleCtx: DreamCtx`
+  supertrait), unblocking the `me-cognitive` carve. See the `me-cognitive` row above and
+  ADR 0018 decision #8(d).
 
 ## Facade-internal modules (until S3–S5)
 
@@ -114,8 +125,8 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
 `engine`
 : Facade over all memory primitives. Defines `MemoryEngine` (the main entry point) and `EngineConfig`. The engine is async-native: its DB-touching methods are `async fn` that `.await` an `Arc<dyn StorageBackend>` port, so thread safety and blocking-IO offload live in the backend (`spawn_blocking`); the in-memory caches the engine still owns stay `RwLock`-protected. `engine::conflict` holds the bi-temporal `MemoryEngine::resolve_conflict` (delegated to the consumer `ConflictArbiter`) → **me-resolve**. `engine::query` → **me-query**; `engine::ingest` → **me-ingest**; `engine::forgetting` → **me-forget**; `engine::archive` → **me-archive**. `MemoryCtx` and its `ensure_open`/`ensure_writable` gates were relocated **out** of `engine::mod` into `me-storage` in S1.
 
-`engine::cycle`
-: Phase-5a dream-cycle subsystem (#49) → **stays in the facade** (⚠️ this was originally slated for me-consolidate; it is **not** carved). `CycleContext` wraps `DreamContext`, which holds `engine: &'a MemoryEngine`, so relocating this subsystem into any L3 crate would create an **L3 → L4 back-edge to the facade**. Carving it requires inverting `DreamContext` into a `me-traits` capability trait — the same move S1 made for `DreamCycle::run(&dyn CycleCtx)` — which is a further public-API break, tracked with its design in **#981**. The Phase-5 dream layer is a *consumer* of the five primitives, not one of them, which is why S4 carved only the Consolidate pipeline. `report` — the delta-based `CycleReport` vocabulary (`CycleDelta`, `IdentityOutput`, `CycleMetadata`, `ApplyResult`, `IMPORTANCE_STEP`); the report DTOs were relocated to `me-types` in S1. `context` — `CycleContext`, the retrieve-before-reflect wrapper around `DreamContext`; it _implements_ `me-traits`'s `CycleCtx`. `apply` — `MemoryEngine::apply_cycle_report`, the validate-all-then-apply-all transactional delta applier. `dbscan` — a pure deterministic DBSCAN clustering core. `default_impl` — `DefaultDreamCycle`, the shipped pure-Rust producer. See `docs/advanced/dream-cycle.md` and ADR 0014.
+`engine::cognitive` (Phase-5a dream-cycle subsystem, #49)
+: `engine::cycle` (the former `CycleContext`/`DefaultDreamCycle`/`LlmDreamCycle`/`apply_cycle_report`/`dbscan` module tree) and the orchestration half of `engine::cognitive` → **me-cognitive** (S5, #981). What stays in the facade's (now much smaller) `engine::cognitive`: `EngineDreamCtx` — a **private borrow-newtype** over `&MemoryEngine` carrying the 9 capability delegates of the `DreamCtx` trait that replaced `DreamContext`. It is deliberately **not** `impl DreamCtx for MemoryEngine`: five of the trait's names collide with inherent engine methods, and Rust's inherent-before-trait resolution would turn any future rename into a silent stack overflow (qualification does not help; `unconditional_recursion` does not fire through `#[async_trait]`). The newtype makes that `E0599` instead — see ADR 0014's S5 amendment. Also staying: `promote_with_lineage` (needs the engine-owned `ScopeTree` cache, a loose parameter `MemoryCtx` does not carry), and four thin delegates (`record_insight`, `run_dream_cycle`, `run_dream_cycle_guarded`, `apply_cycle_report`). See `docs/advanced/dream-cycle.md` and ADR 0014 (+ its Wave 2 #816 / S5 amendment) for the design, and ADR 0018 decision #8(d) for the break.
 
 `storage/`
 : The persistence **port** — carved into the `me-storage` crate (L1). This facade module **re-exports** the port (both the submodules and the flat trait names) so every existing `crate::storage::graph::FactGraph` and `crate::storage::FactGraph` path keeps resolving, plus the concrete backend impls: `SqliteBackend` (from **me-backend-sqlite**) and `PgBackend` (from **me-backend-postgres**, `backend-postgres` feature, #633). What still lives here physically: the `#[cfg(test)]` cross-backend **`storage/conformance/`** battery (#632) that encodes the trait _contract_ once and runs it against every backend via a `ConformanceBackend` factory (`SqliteBackend` always; `PgBackend` inert/`#[ignore]`d until #635).

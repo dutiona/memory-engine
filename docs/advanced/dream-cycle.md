@@ -101,13 +101,19 @@ exclusion is #207 (distributed lock) / #209.
 
 ## Retrieve-before-reflect: `CycleContext`
 
-`DreamCycle::run` receives a `CycleContext` that wraps the capability bag
-(`ctx.dream()` → query / consolidate / promote / `list_undreamt_in_period` /
-`outcome_counts`) and adds the retrieved prior state:
+`DreamCycle::run` receives a `&dyn CycleCtx` — implemented by `CycleContext`, which
+carries the capability bag directly (query / consolidate / forget / promote /
+`list_undreamt_in_period` / `outcome_counts*`, via the `DreamCtx` supertrait — Wave 2
+#816 / S5, #981) and adds the retrieved prior state:
 
 - `prior_wisdom()` — active pinned wisdom facts (avoid re-deriving promoted patterns);
 - `prior_reports()` — recent `CycleMetadata` (a bounded config-backed history);
 - `time_window()` — the `[last_dream_cycle_at, now)` window to process.
+
+A cycle implementation calls the capability bag directly on its `&dyn CycleCtx` — e.g.
+`ctx.query(...)` / `ctx.promote(...)` — with no indirection. (Before S5 this went
+through a `ctx.dream()` accessor onto a wrapped `DreamContext` struct; that struct is
+gone, and the flattening is a strict ergonomic improvement, not just a refactor.)
 
 ## The default implementation
 
