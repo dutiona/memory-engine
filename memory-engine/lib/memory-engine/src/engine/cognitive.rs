@@ -70,11 +70,16 @@ pub use crate::types::Insight;
 /// *narrowing* job was always correct — what was wrong was that it was public,
 /// unreachable, and stranded at L4. As a private adapter implementing an L0.5 trait, it
 /// is exactly what it should have been.)
-// NB: `pub` (not `pub(crate)`) only to satisfy `clippy::redundant_pub_crate` — the
-// enclosing `engine::cognitive` module is private and this type is never re-exported
-// from `lib.rs`, so it is **not** part of the public API. The `reexports_are_accessible`
-// probe + the S5-3 reachable-path ratchet (#941) are what actually hold that line.
-pub struct EngineDreamCtx<'a>(pub(crate) &'a MemoryEngine);
+// NB on visibility, which is deliberate in both halves:
+//   * the TYPE is `pub` only to satisfy `clippy::redundant_pub_crate` — the enclosing
+//     `engine::cognitive` module is private and this type is never re-exported from
+//     `lib.rs`, so it is **not** part of the public API. The `reexports_are_accessible`
+//     probe + the S5-3 reachable-path ratchet (#941) are what actually hold that line.
+//   * the FIELD is private (not `pub(crate)`): only this module may construct the
+//     adapter. That is not mere hygiene — this newtype is the *single controlled seam*
+//     through which the engine offers `DreamCtx`, so keeping construction here is the
+//     same defence the newtype exists to provide, one level in.
+pub struct EngineDreamCtx<'a>(&'a MemoryEngine);
 
 #[async_trait::async_trait]
 impl DreamCtx for EngineDreamCtx<'_> {
