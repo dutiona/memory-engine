@@ -38,7 +38,7 @@ uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
 
 Feature flags: `backend-sqlite` (default; the in-process SQLite backend — a #633 marker today, since `rusqlite` is still unconditional), `backend-postgres` (the #633 `PgBackend`: `deadpool-postgres` pool + fresh v14 migration chain + `SchemaManager`), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`, `test-util` (cross-crate test-only port hooks). At least one backend feature must be enabled (a `compile_error!` in `lib.rs` enforces it). `tokio` is a **non-optional** dependency — the engine is async-native, so there is no `async` feature to toggle (#702). The `backend-postgres` live tests are `#[ignore]`-by-default (they need a Docker/Postgres testcontainer) and also require `test-util` (they drive the `raw_exec` failure-injection seam, which is `test-util`-gated since #816): `cargo test -p memory-engine --features backend-postgres,test-util -- --ignored`.
 
-**Verification gate — this is the CI contract** (`.github/workflows/ci.yml`); run it before every commit, especially when touching `error.rs`, `types/`, `traits.rs`, `lib.rs`, or any public API. These are the _exact_ commands CI runs — a local pass that diverges from them (weaker features, narrower scope, piped output) is a **false pass**:
+**Verification gate — YOU are the runner** (#989). ⚠️ **CI is `workflow_dispatch`-only — it does NOT run on push or PR.** So this matrix is not a redundant pre-check with CI as the backstop; **it is the primary verification, and nothing runs automatically to catch you skipping it.** Run it before every commit, especially when touching `error.rs`, `types/`, `traits.rs`, `lib.rs`, or any public API. `.github/workflows/ci.yml` runs these same commands *when dispatched* — a local pass that diverges (weaker features, narrower scope, piped output) is a **false pass**, and now an *undetected* one:
 
 ```bash
 cargo fmt --all --check                                                # Format
@@ -52,7 +52,17 @@ cargo doc --no-deps -p memory-engine --all-features                    # Docs, a
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
-CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
+The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code.
+
+**Dispatching CI** (it will not run itself):
+
+```bash
+gh workflow run ci.yml --ref <branch>       # dispatch
+gh run list --workflow=ci.yml --limit 1     # find the run
+gh run watch <run-id>                       # follow it
+```
+
+CI went manual to conserve GitHub-hosted runner minutes; a **self-hosted runner** is the intended long-term fix, after which the trigger reverts to `push: [main]` + `pull_request` (a one-line change). Until then, treat a PR with no CI run as **unverified by machine** — the only evidence it works is the matrix above, run by you, unpiped.
 
 The workspace contains **10 crates**: the Wave 2 (#816) core decomposition is S1+S2 done — `me-types` (L0 data + error vocabulary, incl. the embedding-space registry DTOs), `me-traits` (L0.5 consumer/contract traits), `me-storage` (L1 persistence port + `MemoryCtx` + `UpcasterRegistry`), `me-index` (L2 backend-free `MemoryGraph`/`ScopeTree` projections), `me-backend-sqlite` (L2 `SqliteBackend`: store + pool + search + snapshot I/O), and `me-backend-postgres` (L2 `PgBackend` skeleton, #633, optional behind `backend-postgres`) are now carved out as separate acyclic leaves; the `memory-engine` facade re-exports them (public API unchanged) and still holds the L3 primitives as modules (they carve into `me-{ingest,query,consolidate,forget,resolve,archive}` in slices S3–S6 — see ADR 0018 / #925). Plus `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`, which consume the facade's public API. `--workspace` is mandatory — a change to error variants, type definitions, or trait signatures can break the consumers silently if only one crate is checked.
 

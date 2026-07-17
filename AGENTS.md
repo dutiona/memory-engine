@@ -18,7 +18,7 @@ No external services needed — SQLite is bundled via `rusqlite`.
 
 ## Verify
 
-These are the **exact** commands CI runs (`.github/workflows/ci.yml`). A local pass that diverges from them — weaker features, narrower scope, or piped output — is a **false pass**:
+⚠️ **CI is `workflow_dispatch`-only — it does NOT run on push or PR** (#989). This matrix is therefore the **primary** verification, not a pre-check with CI as a backstop: nothing runs automatically to catch you skipping it. `.github/workflows/ci.yml` runs these same commands *when dispatched* (`gh workflow run ci.yml --ref <branch>`). A local pass that diverges from them — weaker features, narrower scope, or piped output — is a **false pass**, and now an *undetected* one. Treat a PR with no CI run as **unverified by machine**:
 
 ```bash
 cargo fmt --all --check                                                # Format
@@ -32,7 +32,7 @@ cargo doc --no-deps -p memory-engine --all-features                    # Docs, a
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
-Run all of them after every change. Do not skip any, and do not substitute a weaker variant. CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
+Run all of them after every change. Do not skip any, and do not substitute a weaker variant — with CI on manual dispatch, there is no second chance to catch it. The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code.
 
 **Critical:** The workspace contains **4 crates** — `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. Changes to `error.rs`, `types/`, `traits.rs`, or any public API in the core crate can break the CLI, MCP, and embed crates silently if only the root crate is checked. Always use `--workspace`.
 

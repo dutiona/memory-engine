@@ -1,9 +1,22 @@
 name: CI
 
+# MANUAL DISPATCH ONLY (#989). CI does **not** run on push or pull_request — it runs
+# when someone asks it to:
+#
+#     gh workflow run ci.yml --ref <branch>          # dispatch
+#     gh run list --workflow=ci.yml --limit 1        # find it
+#     gh run watch <run-id>                          # follow it
+#
+# Why: GitHub-hosted runner minutes. A self-hosted runner is the intended long-term fix,
+# after which this reverts to `push: [main]` + `pull_request` — a one-line change.
+#
+# ⚠️ CONSEQUENCE, and it is not small: the local gate matrix in CLAUDE.md / AGENTS.md /
+# GEMINI.md is no longer a redundant pre-check with CI as the backstop. **It is now the
+# primary verification.** Nothing runs automatically to catch a matrix that was skipped,
+# run with narrower features, or piped (which masks the exit code — trap #1 = false green).
+# Those files say so explicitly; keep them in sync if this trigger changes.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   fmt:

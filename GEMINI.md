@@ -20,7 +20,7 @@ cargo bench                           # Criterion benchmarks
 cargo doc --no-deps --open            # API reference
 ```
 
-**Verification gate — the CI contract** (`.github/workflows/ci.yml`); run before every commit. These are the _exact_ commands CI runs. A local pass that diverges — weaker features, narrower scope, or **piped output** — is a **false pass**:
+**Verification gate — YOU are the runner** (#989). ⚠️ **CI is `workflow_dispatch`-only — it does NOT run on push or PR**, so this matrix is the **primary** verification, not a pre-check with CI as a backstop: nothing runs automatically to catch you skipping it. Run it before every commit. `.github/workflows/ci.yml` runs these same commands *when dispatched* (`gh workflow run ci.yml --ref <branch>`). A local pass that diverges — weaker features, narrower scope, or **piped output** — is a **false pass**, and now an *undetected* one. Treat a PR with no CI run as **unverified by machine**:
 
 ```bash
 cargo fmt --all --check                                                # Format
@@ -34,7 +34,7 @@ cargo doc --no-deps -p memory-engine --all-features                    # Docs, a
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
-CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
+The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code. Dispatch CI with `gh workflow run ci.yml --ref <branch>`; it will not run itself.
 
 The workspace contains **4 crates**: `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. Changes to `error.rs`, `types/`, `traits.rs`, or any public API in the core crate can silently break the CLI, MCP, and embed crates if only the root crate is checked. Always use `--workspace`.
 
