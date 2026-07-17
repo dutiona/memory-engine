@@ -29,9 +29,16 @@ pub use me_backend_sqlite::sqlite;
 // Submodule re-exports so `crate::storage::<portmod>::Trait` module paths still resolve.
 #[cfg(feature = "archive")]
 pub use me_storage::cold_storage;
+// NB: `me_storage::offload` is deliberately NOT re-exported. `spawn_join_err` is an
+// internal helper (map a `spawn_blocking` JoinError to a `MemoryError`); this module is
+// `pub`, so re-exporting it here would make `memory_engine::storage::offload::…` a public
+// path — an API promise we do not want to make about a private detail. The facade's own
+// call sites import `me_storage::spawn_join_err` directly instead. Verified by compile
+// probe: neither `memory_engine::storage::spawn_join_err` nor
+// `memory_engine::storage::offload::spawn_join_err` resolves for a consumer.
 pub use me_storage::{
-    backend, capabilities, consolidation, ctx, event_log, filter, graph, offload, schema,
-    search_index, session,
+    backend, capabilities, consolidation, ctx, event_log, filter, graph, schema, search_index,
+    session,
 };
 // Flat trait/type re-exports so `crate::storage::Trait` paths still resolve.
 #[cfg(feature = "archive")]
@@ -39,7 +46,7 @@ pub use me_storage::ColdStorage;
 pub use me_storage::{
     BackendCapabilities, BootstrapIngestOutcome, ConsolidationStore, EventLog, FactFilter,
     FactGraph, LexicalRanker, MemoryCtx, MetadataPredicate, SchemaManager, SearchIndex,
-    SessionStore, StorageBackend, TemporalFilter, spawn_join_err,
+    SessionStore, StorageBackend, TemporalFilter,
 };
 
 // --- The concrete backend impls. ---

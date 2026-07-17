@@ -12,7 +12,12 @@ use crate::pool::ConnectionPool;
 use crate::scope::ScopeTree;
 use crate::search::strategy::SearchConfig;
 use crate::storage::sqlite::SqliteBackend;
-use crate::storage::{MemoryCtx, StorageBackend, spawn_join_err};
+// `spawn_join_err` comes straight from the me-storage crate, NOT via `crate::storage`:
+// that module is `pub`, so routing it through the re-export shim would publish an internal
+// helper as `memory_engine::storage::spawn_join_err`. See the note in `storage/mod.rs`.
+use me_storage::spawn_join_err;
+
+use crate::storage::{MemoryCtx, StorageBackend};
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, Reranker};
 use crate::types::{ConsolidationLevel, EmbeddingFingerprint, Fact};
