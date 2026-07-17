@@ -134,7 +134,7 @@ pub(crate) use me_archive as archive;
 // closes #981): the dream-cycle subsystem (`CycleContext`, `DefaultDreamCycle`,
 // `LlmDreamCycle`, `apply_cycle_report`, `run_dream_cycle`/`run_dream_cycle_guarded`).
 // The re-export preserves `crate::cognitive::*` for `engine::cognitive`'s internal
-// call sites; `impl DreamCtx for MemoryEngine` and its four thin delegates stay in
+// call sites; the `EngineDreamCtx` adapter and its four thin delegates stay in
 // `engine::cognitive` (a *different*, facade-internal module of the same name — see
 // that file's own doc).
 pub(crate) use me_cognitive as cognitive;

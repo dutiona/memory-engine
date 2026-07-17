@@ -8,7 +8,7 @@
 //! plus the loose parameters (`graph`, `reopen_required`, `upcaster_registry`) the
 //! orchestration free functions take explicitly, and it implements
 //! [`me_traits::DreamCtx`] by delegating to that backend — mirroring the facade's own
-//! `impl DreamCtx for MemoryEngine` (see `memory-engine/src/engine/cognitive.rs`) at
+//! `EngineDreamCtx` adapter (see `memory-engine/src/engine/cognitive.rs`) at
 //! test-double fidelity.
 //!
 //! Only the methods the moved test suites actually exercise

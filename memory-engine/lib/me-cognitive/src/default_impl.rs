@@ -141,10 +141,9 @@ fn cluster_provenance(cluster: &[FactId], by_id: &HashMap<FactId, &Fact>) -> Pro
     }
 }
 
-// NOTE — the recursion trap (see crate-root doc): unlike `impl DreamCtx for
-// MemoryEngine` (facade), this impl calls `ctx.*` where `ctx: &dyn CycleCtx` is a
-// PARAMETER, not `self`, so there is no same-name inherent-vs-trait ambiguity here at
-// all. Nothing below needs (or would benefit from) fully-qualified syntax.
+// NOTE — the recursion trap (see crate-root doc) does not reach here: this impl calls
+// `ctx.*`, where `ctx: &dyn CycleCtx` is a PARAMETER, not `self`. There is no same-name
+// inherent-vs-trait ambiguity to resolve at all.
 #[async_trait::async_trait]
 impl DreamCycle for DefaultDreamCycle {
     async fn run(&self, ctx: &dyn CycleCtx) -> Result<CycleReport> {

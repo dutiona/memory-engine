@@ -103,11 +103,14 @@ impl me_traits::CycleCtx for CycleContext<'_> {
 
 /// `CycleContext` also implements `DreamCtx` directly — by forwarding every method to
 /// the held `dream` reference — so it satisfies the [`CycleCtx`](me_traits::CycleCtx)
-/// supertrait bound. This is the one place the "fully-qualify to dodge the recursion
-/// trap" rule does **not** apply: `self.dream` is a *different* value from `self`, so
-/// `self.dream.query(query)` is an ordinary, non-recursive delegation (contrast
-/// `impl DreamCtx for MemoryEngine` in the facade, where `self` names the same value
-/// twice and an unqualified same-name call would self-recurse).
+/// supertrait bound.
+///
+/// This impl is **safe by construction**, and it is worth saying why explicitly, because
+/// the crate-root doc forbids the general shape (see "The recursion trap"): `CycleContext`
+/// has no inherent method sharing a `DreamCtx` name, and every body forwards to a
+/// *different value* — `self.dream`, a held `&dyn DreamCtx` — never to `self` under the
+/// same name. So `self.dream.query(query)` is an ordinary delegation with nothing to
+/// re-resolve. It needs no newtype, because there is no collision for one to break.
 #[async_trait::async_trait]
 impl me_traits::DreamCtx for CycleContext<'_> {
     async fn query(
