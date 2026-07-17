@@ -12,6 +12,11 @@ use crate::pool::ConnectionPool;
 use crate::scope::ScopeTree;
 use crate::search::strategy::SearchConfig;
 use crate::storage::sqlite::SqliteBackend;
+// `spawn_join_err` comes straight from the me-storage crate, NOT via `crate::storage`:
+// that module is `pub`, so routing it through the re-export shim would publish an internal
+// helper as `memory_engine::storage::spawn_join_err`. See the note in `storage/mod.rs`.
+use me_storage::spawn_join_err;
+
 use crate::storage::{MemoryCtx, StorageBackend};
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, Reranker};
@@ -796,17 +801,6 @@ impl MemoryEngine {
             None => Ok(vec![ScopeTree::root_id()]),
         }
     }
-}
-
-/// Map a `tokio::task::spawn_blocking` join failure (a panic or cancellation in an
-/// offloaded consumer-trait call — embed/rerank/summarize/classify/propose) to a
-/// `MemoryError`. Shared by every engine module that offloads a sync consumer trait.
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "used as map_err(spawn_join_err) fn pointer"
-)]
-pub(super) fn spawn_join_err(e: tokio::task::JoinError) -> MemoryError {
-    MemoryError::Internal(format!("offloaded task failed: {e}"))
 }
 
 /// Apply DB-authoritative `surfaced_at` timestamps to in-memory facts.

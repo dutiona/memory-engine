@@ -10,23 +10,11 @@ use chrono::Utc;
 use parking_lot::RwLock;
 
 use me_index::ScopeTree;
-use me_storage::MemoryCtx;
+use me_storage::{MemoryCtx, spawn_join_err};
 use me_traits::{EmbeddingProvider, PersistenceClassifier};
 use me_types::error::{ConflictError, MemoryError, Result};
 use me_types::limits::{check_json_size, check_str_size};
 use me_types::types::{AddFactRequest, ClassifierInput, EmbeddingFingerprint, NewEvent, NewFact};
-
-/// Map a `tokio::task::spawn_blocking` join failure (a panic or cancellation in an
-/// offloaded consumer-trait call — embed/classify) to a `MemoryError`. Private copy of
-/// the facade's `engine::spawn_join_err` (`pub(super)`, used by other engine modules
-/// too — not moved).
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "used as map_err(spawn_join_err) fn pointer"
-)]
-fn spawn_join_err(e: tokio::task::JoinError) -> MemoryError {
-    MemoryError::Internal(format!("offloaded task failed: {e}"))
-}
 
 // --- Public API: Ingest ---
 

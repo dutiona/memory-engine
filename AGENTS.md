@@ -44,7 +44,21 @@ gh run list --workflow=ci.yml --limit 1     # find the run
 gh run watch <run-id>                       # follow it
 ```
 
-**Critical:** The workspace contains **4 crates** — `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. Changes to `error.rs`, `types/`, `traits.rs`, or any public API in the core crate can break the CLI, MCP, and embed crates silently if only the root crate is checked. Always use `--workspace`.
+**Critical:** The workspace contains **18 crates** — the Wave 2 (#816) decomposition is done (S1–S5): a strictly acyclic layered DAG, every dependency pointing **downward**, enforced by `cargo`.
+
+```
+L0    me-types            data + error vocabulary
+L0.5  me-traits           consumer/contract traits (EmbeddingProvider, DreamCtx, CycleCtx, …)
+L1    me-storage          persistence PORT: StorageBackend family + MemoryCtx + spawn_join_err
+L2    me-index            backend-free MemoryGraph / ScopeTree projections
+      me-backend-sqlite / me-backend-postgres
+L3    me-ingest  me-query  me-consolidate  me-forget  me-resolve  me-archive  me-cognitive
+L4    memory-engine       the facade (MemoryEngine + builder + bootstrap + inspect + re-exports)
+```
+
+Plus `me-test-support` (dev-only) and the three facade consumers: `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`.
+
+An L3 primitive depends on the **port**, never a concrete backend — the facade selects it. Changes to `me-types`' error/type vocabulary, `me-traits`' signatures, or the facade's public API can break the CLI, MCP, and embed crates silently if only one crate is checked. **Always use `--workspace`.** Module map: `docs/reference/crate-layout.md`.
 
 **Verification traps** (each cost a real rework cycle):
 

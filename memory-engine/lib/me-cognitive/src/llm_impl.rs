@@ -23,22 +23,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
+use me_storage::spawn_join_err;
 use me_traits::{CycleCtx, DeltaProposer, DreamCycle, EmbeddingProvider};
 use me_types::error::Result;
 use me_types::types::cycle_report::{CycleDelta, CycleMetadata, CycleReport, IdentityOutput};
 use me_types::types::{Fact, FactId, FactType, NewFact};
-
-/// Map a `tokio::task::spawn_blocking` join failure (a panic or cancellation in the
-/// offloaded consumer `propose`/`embed` call) to a `MemoryError`. Private copy of the
-/// facade's `engine::spawn_join_err` (`pub(super)`, used by other engine modules too —
-/// not moved), mirroring every other carved primitive's own copy.
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "used as map_err(spawn_join_err) fn pointer"
-)]
-fn spawn_join_err(e: tokio::task::JoinError) -> me_types::error::MemoryError {
-    me_types::error::MemoryError::Internal(format!("offloaded task failed: {e}"))
-}
 
 /// `method_version` stamped into every report this backend produces.
 const METHOD_VERSION: &str = "llm-proposer-v1";

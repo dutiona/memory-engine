@@ -193,6 +193,93 @@ build on these boundaries have the durable _why_.
   trait), guarded by `reexports_are_accessible` + cli/mcp/embed builds like the rest of the
   carve — not a consumer-facing break, so point 8's "unchanged except three" still holds.
 
+## Amendment (S5, #941): the re-export **freeze is deferred**, deliberately
+
+§F planned S5 as "facade shrink + **re-export freeze**". The shrink landed. The freeze
+does **not**, and this records why — the premise it was written under expired.
+
+**What the freeze was for.** §F's own verify step gives it away: *"public-API set-diff …
+proves the facade exports the same names as pre-Wave-2."* It was a **refactor-safety
+check** — *we are splitting one crate into eighteen; prove we did not leak an API change*
+— not a stability promise to consumers. That job is now over: the decomposition is done,
+and Wave 2 deliberately broke the API **four** times anyway (point 8 (a)–(d)). A check
+that Wave 2 changed nothing is not a check we can pass, because Wave 2 changed things on
+purpose.
+
+**Why not freeze anyway.** No **published/external** consumer of `memory-engine` exists
+yet. So the two things a freeze buys are both worth little today:
+
+- **Removals** break consumers → there is no external one. The in-workspace consumers —
+  cli, mcp, embed — break at *compile* time, loudly, in the same `--workspace` run.
+- **Additions** widen the surface silently → real, but it is *maintenance debt*, not
+  breakage: you accidentally commit to supporting something (#986 added
+  `memory_engine::types::forgetting::ForgetPolicy` and nothing noticed).
+
+> ⚠️ **One in-repo consumer is NOT covered by that `--workspace` run, and the earlier
+> draft of this amendment wrongly implied it was.** `fuzz/` is **deliberately detached**
+> (an empty `[workspace]` table, so `cargo build --workspace --all-features` never
+> compiles it — it needs nightly + the libFuzzer sanitizer runtime), yet it depends on
+> `memory-engine`, `memory-engine-embed`, and `memory-engine-mcp` **by path** and names
+> facade API types directly (`memory_engine::{ActivityFilterConfig, MemoryEngine}`,
+> `memory_engine::{Edge, Event, Fact}`, `memory_engine::fuzz_seam::*`).
+>
+> So a facade removal **can** break a real in-repository Rust consumer with **no gate
+> detecting it** — `cargo +nightly fuzz build` is the only thing that would, and it is
+> not in the gate matrix. That is a genuine hole, and it is a hole *today*, independent
+> of any freeze. It does not overturn the deferral (fuzz is in-repo, ours to fix, and a
+> break is discoverable and repairable in the same PR — unlike a downstream consumer we
+> cannot touch), but the claim needed narrowing rather than defending. Tracked in **#993**.
+> Surfaced by Codex in the #992 review; the original wording was mine and it was wrong.
+
+Meanwhile the cost is immediate and recurring: every *intentional* break — Phase 5 (#567),
+DreamCycle vNext (#578), the geometric-memory epic (#761) — would mean re-baselining a
+snapshot for no protection. **A gate with friction and no upside gets disabled**, which is
+exactly the failure mode point (c) below already documents for `cargo public-api`. Freezing
+an API you are still deliberately breaking, for consumers who do not exist, is ceremony.
+
+**When to freeze:** at the **first external consumer, or v1.0** — whichever comes first.
+The value is real *then*, and the design below is build-not-research by that point.
+
+### What ships instead, and what stays known
+
+1. **`reexports_are_accessible` stays** (`memory-engine/src/lib.rs`). It is a compile-time
+   probe naming each public path, so an *accidental removal* during a refactor is `E0433`
+   under `cargo test --workspace --all-features` — already in the gate matrix, zero
+   snapshot to maintain. It catches removal, **not** addition; that asymmetry is now a
+   deliberate, recorded choice rather than an unnoticed gap.
+2. **The audit passed** (#941): the facade is **~8.1k production lines — 65% of the crate
+   is test code**. `bootstrap` (~3.0k) and `inspect` (~1.7k) stay by design, leaving ~3.4k
+   of orchestration. Every `engine/*` file is planned, a thin delegate (verified by *prod*
+   lines: `archive` is 149 for 3 methods, `ingest` 157 for 5 — their bulk is tests), or
+   `graph_load.rs` (documented backend→projection glue).
+
+   > The classification counts **module-level `#[cfg(test)]` gating**, not just an in-file
+   > marker: `engine/{tests,equivalence}.rs` are declared `#[cfg(test)] mod …;` in
+   > `engine/mod.rs:59-64`, so those files are test-only *in their entirety*. An earlier
+   > draft of this amendment said ~9.9k / 57% — a per-file lexical scan that missed that
+   > gating and counted `tests.rs`'s first 1,615 lines as production. Corrected here; the
+   > conclusion strengthens rather than weakens (the facade is *thinner* than claimed).
+   > Caught by Codex in the #992 review.
+3. **The ratchet design is proved and parked**, so the later build is engineering:
+   - ❌ `cargo public-api` **cannot** do it — it canonicalizes a type to one definition
+     site and counts *items*; a re-exported module renders as **one opaque line**. It is
+     blind to a path becoming writable **and** false-positives on every relocation.
+   - ❌ Single-crate **rustdoc JSON cannot either** — measured: the facade's
+     `pub use me_types::types;` appears as `{"source":"me_types::types","id":1821}` whose
+     target is **not in the local index**, only a `paths` stub
+     (`{crate_id: 41, path: ["me_types","types"]}`). Walking it materialises 211 paths and
+     `types::forgetting::*` is **empty**. Same wall, one level down.
+   - ✅ **Stitching per-crate dumps works** — verified end-to-end: dump rustdoc JSON for
+     each workspace crate, then graft the target crate's subtree under the re-export
+     prefix. `me_types::types::forgetting` → `['ForgetPolicy','PruneStats']`, so
+     `memory_engine::types::forgetting::ForgetPolicy` **is** materialisable. Snapshot that
+     set, diff it, fail on additions *and* removals, and land intentional changes by
+     committing the updated snapshot in the same PR.
+   - **Cost to accept when the time comes:** 18 rustdoc dumps + a stitcher following `use`
+     edges across crate ids, on **nightly** (`--output-format json` is unstable and its
+     schema shifts between releases — a standing tax), and it cannot live inside
+     `cargo test` on stable; it wants a `just` target.
+
 ## References
 
 - Design + implementation plan (3-lens synthesis + Codex/agy/subagent review), verbatim:
