@@ -20,7 +20,7 @@ cargo bench                           # Criterion benchmarks
 cargo doc --no-deps --open            # API reference
 ```
 
-**Verification gate — the CI contract** (`.github/workflows/ci.yml`); run before every commit. These are the _exact_ commands CI runs. A local pass that diverges — weaker features, narrower scope, or **piped output** — is a **false pass**:
+**Verification gate — YOU are the runner** (#989). ⚠️ **CI is `workflow_dispatch`-only — it does NOT run on push or PR**, so this matrix is the **primary** verification, not a pre-check with CI as a backstop: nothing runs automatically to catch you skipping it. Run it before every commit. `.github/workflows/ci.yml` runs these same commands *when dispatched* (`gh workflow run ci.yml --ref <branch>`). A local pass that diverges — weaker features, narrower scope, or **piped output** — is a **false pass**, and now an *undetected* one. Treat a PR with no CI run as **unverified by machine**:
 
 ```bash
 cargo fmt --all --check                                                # Format
@@ -28,13 +28,23 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy 
 cargo build --workspace                                                # Build (default features)
 cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test — --all-features is mandatory, or ann/archive/eval tests never run
+cargo check -p memory-engine                                           # Facade-alone, default features — the TRUE archive-OFF gate (#978)
+cargo check -p memory-engine --no-default-features --features backend-sqlite  # Facade-alone, no-default
 export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 ```
 
-CI also runs an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it if you touch let-chains or edition-sensitive code.
+The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code.
+
+**Dispatching and monitoring CI** (it will not run itself):
+
+```bash
+gh workflow run ci.yml --ref <branch>       # dispatch
+gh run list --workflow=ci.yml --limit 1     # find the run
+gh run watch <run-id>                       # follow it
+```
 
 The workspace contains **4 crates**: `memory-engine` (core lib), `memory-engine-cli`, `memory-engine-mcp`, `memory-engine-embed`. Changes to `error.rs`, `types/`, `traits.rs`, or any public API in the core crate can silently break the CLI, MCP, and embed crates if only the root crate is checked. Always use `--workspace`.
 
