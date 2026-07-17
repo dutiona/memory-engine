@@ -46,6 +46,8 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy 
 cargo build --workspace                                                # Build (default features)
 cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test — NB: --all-features, or ann/archive/eval tests never run
+cargo check -p memory-engine                                           # Facade-alone, default features — the TRUE archive-OFF gate (#978)
+cargo check -p memory-engine --no-default-features --features backend-sqlite  # Facade-alone, no-default
 export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only; #915 widens to --workspace)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
