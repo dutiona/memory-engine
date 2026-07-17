@@ -78,9 +78,12 @@ mod tests {
     /// not silently produce a different variant.
     #[tokio::test]
     async fn cancelled_task_also_maps_to_internal() {
-        let handle = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        });
+        // `std::future::pending()` rather than `tokio::time::sleep`: a never-resolving
+        // future needs no tokio `time` feature, so this crate's manifest stays honest
+        // about what it actually requires. (`cargo test --workspace --all-features`
+        // would have lent us `time` via feature unification and hidden the gap —
+        // exactly the #978 trap.)
+        let handle = tokio::spawn(std::future::pending::<()>());
         handle.abort();
         let join_err = handle.await.expect_err("an aborted task must fail to join");
         assert!(
