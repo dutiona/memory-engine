@@ -1,13 +1,20 @@
 # Crate Layout
 
-Where things live in the `memory-engine` **workspace**. Wave 2 (#816) is decomposing the
-former single core crate into an acyclic DAG of per-concern crates; **S1 and S2 are
-done** (`me-types`, `me-traits`, `me-storage` — the L0–L1 leaves — plus
-`me-backend-sqlite`, `me-backend-postgres`, `me-index` — the L2 backends + projections
-— are all carved out as real crates), and the remaining slices S3–S6 carve the L3
-primitives out of the `memory-engine` facade. This page is the "where does X live _now_"
-reference: the target crate DAG, a per-crate DONE/PENDING table, and the module map of
-what still lives inside the facade until later slices.
+Where things live in the `memory-engine` **workspace**. Wave 2 (#816) **decomposed** the
+former single core crate into an acyclic DAG of per-concern crates. **S1–S5 are done** —
+all **18 crates** exist:
+
+- **L0** `me-types` · **L0.5** `me-traits` · **L1** `me-storage` (the port)
+- **L2** `me-index`, `me-backend-sqlite`, `me-backend-postgres`
+- **L3** `me-ingest`, `me-query`, `me-consolidate`, `me-forget`, `me-resolve`,
+  `me-archive`, `me-cognitive`
+- **L4** `memory-engine` (the facade)
+- plus `me-test-support` (dev-only) and three facade consumers: `memory-engine-cli`,
+  `memory-engine-mcp`, `memory-engine-embed`
+
+Only **S6** (#942 — the `dylib` ship-mode spike + legibility tooling) remains. This page is
+the "where does X live _now_" reference: the crate DAG, a per-crate table, and the module
+map of what lives inside the facade.
 
 The locked structural decisions are in
 [ADR 0018](../design/adr/0018-wave2-crate-decomposition-memoryctx.md).
@@ -49,18 +56,29 @@ graph TD
     end
 
     facade --> ingest & query & consolidate & cognitive & forget & resolve & archive
-    ingest & query & consolidate & cognitive & forget & resolve & archive --> sqlite & postgres & index
-    sqlite & postgres & index --> storage
+    facade --> sqlite & postgres
+    ingest & query & consolidate & cognitive & forget & resolve & archive --> storage & index
+    sqlite & postgres --> storage
     storage --> traits
-    traits --> types
     storage --> types
+    traits --> types
     index --> types
 ```
 
-`me-index` (L2) depends on `{me-storage, me-types}` only — **not** `me-traits` — so the
-graph/scope projections stay backend-free, trait-free, and mockable (ADR 0018 decision #4).
-A 14th crate, **`me-test-support`**, is dev-only (`publish = false`, in
-`[dev-dependencies]` everywhere) and does not inflate the shipped graph.
+**The invariant this diagram encodes** — read it before changing any edge: an **L3
+primitive depends on the _port_ (`me-storage`), never on a concrete backend.** The
+**facade** is the only crate that selects a backend. That is what makes the backends
+swappable (epic #628) and the primitives testable without one. `cargo` enforces it:
+`cargo tree -p <L3 crate> --edges normal` must show no `me-backend-*`.
+
+`me-index` (L2) depends on **`me-types` only** — not `me-storage`, not `me-traits` — so
+the graph/scope projections stay backend-free, *storage*-free, trait-free, and mockable
+(ADR 0018 decision #4). The conn-based bulk loaders that hydrate them live facade-side in
+`engine/graph_load.rs`, precisely to keep that property. (Verified: `me-index/Cargo.toml`
+lists `me-types` + `petgraph` and nothing else.)
+
+**`me-test-support`** is dev-only (`publish = false`, in `[dev-dependencies]` everywhere)
+and does not inflate the shipped graph.
 
 ## Target crates
 
