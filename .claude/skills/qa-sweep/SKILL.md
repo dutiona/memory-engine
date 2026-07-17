@@ -16,10 +16,13 @@ Pairs with the global `super-qa`, `finish-pr`, and `address-issue` skills (those
 
 ---
 
-## 0. The authoritative gate (the CI contract)
+## 0. The authoritative gate (YOU run it — #989)
 
-CI (`.github/workflows/ci.yml`) is the single source of truth. Run the **exact** commands below;
-a local pass that diverges (weaker features, narrower scope, piped output) is a **false pass**.
+⚠️ **CI is `workflow_dispatch`-only. It does NOT run on push or PR.** So the commands below are
+not a pre-check with CI as the backstop — **they are the gate**, and nothing runs automatically to
+catch a sweep that skipped them. Run the **exact** commands; a local pass that diverges (weaker
+features, narrower scope, piped output — trap #1 masks the exit code) is a **false pass**, and now
+an *undetected* one. Treat a PR with no dispatched run as **unverified by machine**.
 
 ```bash
 cargo fmt --all --check                                                # Format
@@ -27,14 +30,30 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy 
 cargo build --workspace                                                # Build (default features)
 cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test
+cargo check -p memory-engine                                           # Facade-alone, default — the TRUE archive-OFF gate (#978)
+cargo check -p memory-engine --no-default-features --features backend-sqlite  # Facade-alone, no-default
 export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only; #915 widens to --workspace)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain
 ```
 
-MSRV is **1.88** (let-chains). The MSRV CI job builds `--workspace --tests --examples` on exactly
-1.88, default _and_ all-features — a dev-dep needing newer Rust fails it.
+The two facade-alone `cargo check`s are **not optional padding**: the `--workspace` builds cannot
+cover them, because feature unification turns `archive` on for the whole workspace. They are the
+only thing that compiles the configuration downstream consumers get by default — added in #978
+after exactly that coverage vanished silently.
+
+**Dispatching and monitoring CI** (it will not run itself):
+
+```bash
+gh workflow run ci.yml --ref <branch>       # dispatch
+gh run list --workflow=ci.yml --limit 1     # find the run
+gh run watch <run-id>                       # follow it
+```
+
+MSRV is **1.88** (let-chains). The workflow's MSRV job builds `--workspace --tests --examples` on
+exactly 1.88, default _and_ all-features — a dev-dep needing newer Rust fails it. Reproduce it
+locally if you touch let-chains or edition-sensitive code; it will not run on its own either.
 
 ---
 
