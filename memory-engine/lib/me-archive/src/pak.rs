@@ -20,7 +20,7 @@ const MAX_PAK_DECOMPRESSED_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 /// fails, or the parent directory does not exist. Returns [`ArchiveError::Codec`] if
 /// the zstd encoder cannot be created or finalized. Any I/O error propagates through
 /// `serde_json::to_writer` as [`MemoryError::Serialization`](me_types::error::MemoryError::Serialization).
-pub fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
+pub(crate) fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String> {
     let tmp_path = path.with_extension("pak.tmp");
 
     // O_EXCL: atomic creation — fails if the tmp file already exists, preventing
@@ -195,24 +195,13 @@ fn read_pak_capped(path: &Path, cap: u64) -> Result<ArchivePak> {
 /// # Errors
 ///
 /// Returns [`ArchiveError::Io`] if the file cannot be opened or read.
-pub fn hash_file(path: &Path) -> Result<String> {
+pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .map_err(|e| ArchiveError::Io(format!("failed to read pak file for hashing: {e}")))?;
     let mut hasher = blake3::Hasher::new();
     std::io::copy(&mut file, &mut hasher)
         .map_err(|e| ArchiveError::Io(format!("failed to hash pak file: {e}")))?;
     Ok(hasher.finalize().to_hex().to_string())
-}
-
-/// Verify a `.pak` file's blake3 hash matches expected.
-///
-/// # Errors
-///
-/// Returns [`ArchiveError::Io`] if the file cannot be opened or read (propagated from
-/// [`hash_file`]).
-pub fn verify_pak(path: &Path, expected_hash: &str) -> Result<bool> {
-    let actual = hash_file(path)?;
-    Ok(actual == expected_hash)
 }
 
 /// Hashes bytes as they pass through to the inner writer.
@@ -272,13 +261,15 @@ mod tests {
     }
 
     #[test]
-    fn hash_and_verify() {
+    fn hash_file_is_stable() {
         let dir = tempfile::tempdir().unwrap();
         let pak_path = dir.path().join("test.pak");
         write_pak(&empty_pak(), &pak_path).unwrap();
         let hash = hash_file(&pak_path).unwrap();
-        assert!(verify_pak(&pak_path, &hash).unwrap());
-        assert!(!verify_pak(&pak_path, "wrong_hash").unwrap());
+        // Deterministic across reads — the property `verify_single_archive` relies on for
+        // its inline `hash == expected` compare (the `verify_pak` wrapper was removed, #979).
+        assert_eq!(hash_file(&pak_path).unwrap(), hash);
+        assert_ne!(hash, "wrong_hash");
     }
 
     #[test]
