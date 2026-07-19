@@ -96,6 +96,29 @@ jobs:
       - name: cargo test (all features)
         run: cargo test --workspace --all-features
 
+  fuzz:
+    name: Fuzz build (#993)
+    runs-on: ubuntu-latest
+    # The detached `fuzz/` workspace (empty `[workspace]`) consumes the facade public API
+    # by path, but NO `--workspace` job compiles it — it needs nightly + the libFuzzer
+    # sanitizer runtime. This is the only gate that catches a facade API removal/rename
+    # breaking a real in-repo consumer. Mirrors `cargo +nightly fuzz build` in the local
+    # gate matrix (CLAUDE.md / AGENTS.md / GEMINI.md / qa-sweep). See #993.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      # The detached `fuzz/` workspace builds into `fuzz/target`, which rust-cache's default
+      # (`. -> target`) does NOT cover — cache it explicitly. Caveat: `@nightly` moves daily and
+      # rust-cache keys on the rustc commit, so this warms repeated dispatches on the SAME
+      # nightly, not across days — still worth it given the #989 runner-minute motive.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: cargo +nightly fuzz build
+        run: cargo +nightly fuzz build
+
   cargo-deny:
     name: Supply-chain (cargo-deny)
     runs-on: ubuntu-latest
