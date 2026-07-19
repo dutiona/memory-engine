@@ -39,21 +39,23 @@ linkmap:
     # it for this one rustc invocation (the facade's real crate-type is untouched). Use a
     # dedicated target-dir so this throwaway staticlib build does NOT invalidate the normal
     # release artifacts `just symbols` shares.
-    nsl=$(cargo rustc -p memory-engine --release --quiet --lib --crate-type staticlib \
-        --target-dir target/linkmap-nsl -- --print native-static-libs 2>&1 || true)
-    if echo "$nsl" | grep -qi 'native-static-libs:'; then
-        echo "$nsl" | grep -i 'native-static-libs:'
-    elif echo "$nsl" | grep -qiE 'error(\[|:)'; then
-        echo "  (staticlib probe failed to compile — rerun verbose: cargo rustc -p memory-engine --release --lib --crate-type staticlib -- --print native-static-libs)"
+    # Branch on cargo's real exit status (not a diagnostic-regex heuristic) so a genuine
+    # staticlib compile failure is never misreported as "no native libs"; match with a
+    # here-string, never `echo "$nsl" | grep`, which can take SIGPIPE on a large payload.
+    if nsl=$(cargo rustc -p memory-engine --release --quiet --lib --crate-type staticlib \
+        --target-dir target/linkmap-nsl -- --print native-static-libs 2>&1); then
+        grep -i 'native-static-libs:' <<<"$nsl" \
+            || echo "  (staticlib built, but rustc emitted no native-static-libs line)"
     else
-        echo "  (rustc reported none; run \`ldd target/release/memory-engine-cli\` for runtime shared libs)"
+        echo "  (staticlib probe failed to compile — rerun verbose: cargo rustc -p memory-engine --release --lib --crate-type staticlib -- --print native-static-libs)"
     fi
 
-# The shipped symbol surface: the *dynamic* symbols the release binaries export for
-# dynamic linking (`nm -D`, Linux/ELF-specific). A fat static bin exports almost nothing
-# dynamically — that near-empty list IS the signal that it is self-contained. The `dylib`
-# ship mode that would make this surface explode into the ABI is deferred (#994); today
-# these are the default fat static bins.
+# The shipped symbol surface: the *dynamic* symbols the release binaries EXPORT
+# (`nm -D --defined-only`, Linux/ELF-specific). A leaf executable exports almost nothing —
+# but a near-empty list means "provides no dynamic symbols", NOT "self-contained": the bins
+# still dynamically link system libs (libssl / libc / … — see `ldd`) while statically
+# linking the Rust crate graph. This exported surface only gets interesting for the deferred
+# `dylib` ship mode (#994), where the facade's ABI would show up here.
 
 # Report exported dynamic symbols of the release cli + mcp binaries.
 symbols:
@@ -63,6 +65,12 @@ symbols:
     for art in target/release/memory-engine-cli target/release/memory-engine-mcp; do
         name=$(basename "$art")
         if [ ! -e "$art" ]; then printf '── %s: (not built) ──\n' "$name"; continue; fi
+        # `nm -D` is Linux/ELF-specific; on a Mach-O/BSD `nm` it errors, which under
+        # `set -euo pipefail` would hard-crash the recipe. Guard so it degrades gracefully.
+        if ! nm -D --defined-only "$art" >/dev/null 2>&1; then
+            printf '── %s: dynamic-symbol listing unsupported here (needs Linux/ELF `nm -D`) ──\n' "$name"
+            continue
+        fi
         count=$(nm -D --defined-only "$art" 2>/dev/null | wc -l | tr -d ' ')
         printf '── %s: %s exported dynamic symbols ──\n' "$name" "$count"
         nm -D --defined-only "$art" 2>/dev/null | awk '{print "   " $NF}' | sort | head -30 || true

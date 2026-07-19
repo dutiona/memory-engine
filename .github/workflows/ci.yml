@@ -108,8 +108,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       # The detached `fuzz/` workspace builds into `fuzz/target`, which rust-cache's default
-      # (`. -> target`) does NOT cover — cache it explicitly so this nightly build is not cold
-      # on every dispatch (the #989 runner-minute motive that made CI manual).
+      # (`. -> target`) does NOT cover — cache it explicitly. Caveat: `@nightly` moves daily and
+      # rust-cache keys on the rustc commit, so this warms repeated dispatches on the SAME
+      # nightly, not across days — still worth it given the #989 runner-minute motive.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "fuzz -> target"
