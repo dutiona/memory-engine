@@ -36,7 +36,10 @@ export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intr
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only; #915 widens to --workspace)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain
+cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
 ```
+
+The last line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — a removal or rename can break it silently. Needs nightly + cargo-fuzz (`just fuzz-build` wraps it); incremental (a seconds-long no-op when the facade is unchanged).
 
 The two facade-alone `cargo check`s are **not optional padding**: the `--workspace` builds cannot
 cover them, because feature unification turns `archive` on for the whole workspace. They are the

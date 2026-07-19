@@ -223,12 +223,15 @@ yet. So the two things a freeze buys are both worth little today:
 > facade API types directly (`memory_engine::{ActivityFilterConfig, MemoryEngine}`,
 > `memory_engine::{Edge, Event, Fact}`, `memory_engine::fuzz_seam::*`).
 >
-> So a facade removal **can** break a real in-repository Rust consumer with **no gate
-> detecting it** — `cargo +nightly fuzz build` is the only thing that would, and it is
-> not in the gate matrix. That is a genuine hole, and it is a hole *today*, independent
-> of any freeze. It does not overturn the deferral (fuzz is in-repo, ours to fix, and a
+> So a facade removal **can** break a real in-repository Rust consumer that the
+> `--workspace` run never compiles, and **until #993 no gate detected it** —
+> `cargo +nightly fuzz build` is the only thing that would. That was a genuine hole,
+> independent of any freeze, and **#993 closed it**: the gate matrix (CLAUDE.md /
+> AGENTS.md / GEMINI.md / qa-sweep) and a dedicated `fuzz` CI job now
+> run `cargo +nightly fuzz build` (wrapped as `just fuzz-build`). It does not overturn the
+> deferral (fuzz is in-repo, ours to fix, and a
 > break is discoverable and repairable in the same PR — unlike a downstream consumer we
-> cannot touch), but the claim needed narrowing rather than defending. Tracked in **#993**.
+> cannot touch), but the claim needed narrowing rather than defending. Resolved in **#993**.
 > Surfaced by Codex in the #992 review; the original wording was mine and it was wrong.
 
 Meanwhile the cost is immediate and recurring: every *intentional* break — Phase 5 (#567),

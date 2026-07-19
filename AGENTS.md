@@ -32,9 +32,10 @@ export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intr
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
+cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
 ```
 
-Run all of them after every change. Do not skip any, and do not substitute a weaker variant — with CI on manual dispatch, there is no second chance to catch it. The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code.
+Run all of them after every change. Do not skip any, and do not substitute a weaker variant — with CI on manual dispatch, there is no second chance to catch it. The last line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — so a removal or rename can break it silently. It needs nightly + cargo-fuzz (`just fuzz-build` wraps it) and is incremental (a seconds-long no-op when the facade is unchanged). The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code.
 
 **Dispatching and monitoring CI** (it will not run itself):
 

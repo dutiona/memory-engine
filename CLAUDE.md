@@ -34,6 +34,7 @@ cargo fmt --check                     # format check
 cargo bench                           # Criterion benchmarks
 cargo doc --no-deps --open            # API reference
 uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
+just --list                           # dev task runner (install: cargo install just) — linkmap / symbols / fuzz-build
 ```
 
 Feature flags: `backend-sqlite` (default; the in-process SQLite backend — a #633 marker today, since `rusqlite` is still unconditional), `backend-postgres` (the #633 `PgBackend`: `deadpool-postgres` pool + fresh v14 migration chain + `SchemaManager`), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`, `test-util` (cross-crate test-only port hooks). At least one backend feature must be enabled (a `compile_error!` in `lib.rs` enforces it). `tokio` is a **non-optional** dependency — the engine is async-native, so there is no `async` feature to toggle (#702). The `backend-postgres` live tests are `#[ignore]`-by-default (they need a Docker/Postgres testcontainer) and also require `test-util` (they drive the `raw_exec` failure-injection seam, which is `test-util`-gated since #816): `cargo test -p memory-engine --features backend-postgres,test-util -- --ignored`.
@@ -52,7 +53,10 @@ export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intr
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only; #915 widens to --workspace)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
+cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
 ```
+
+The last line is the **facade-API gate** (#993): the `fuzz/` crate is a *deliberately detached* workspace (empty `[workspace]`, nightly + libFuzzer), so **no `--workspace` command compiles it** — yet it consumes `memory-engine` / `-embed` / `-mcp` public API by path. A facade removal or rename can therefore break a real in-repo consumer with nothing else noticing. It needs `nightly` + `cargo-fuzz` (`rustup toolchain install nightly; cargo install cargo-fuzz --locked`), and it is *incremental* — a seconds-long no-op when the facade is unchanged, a ~2-min rebuild exactly when it changed. `just fuzz-build` is the equivalent one-word wrapper.
 
 The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code.
 
