@@ -526,16 +526,13 @@ mod tests {
     /// untrusted-blob surface this guard defends. The old lexical
     /// `pak_path.starts_with(&archive_dir)` check let `..` through (it does not
     /// resolve `..`), so the row was handed to the I/O path instead of being
-    /// flagged. The shared [`is_within_archive_dir`] containment check
-    /// (`me_archive::search`, `pub` for exactly this cross-crate reuse) rejects
-    /// it before any filesystem access.
+    /// flagged. me-archive's `is_within_archive_dir` containment check (crate-internal;
+    /// its own unit tests cover the traversal cases) rejects it before any filesystem access.
     // Uses the `raw_exec` failure-injection seam (test-util-gated since #816 A1), so this
     // test compiles only with `test-util` on — matching the sibling `commit_fails` test.
     #[cfg(feature = "test-util")]
     #[tokio::test]
     async fn verify_archives_rejects_path_traversal_manifest_entry() {
-        use crate::archive::search::is_within_archive_dir;
-
         let dir = tempfile::tempdir().unwrap();
         let engine = MemoryEngine::builder(DIM)
             .path(dir.path().join("traversal.db"))
@@ -544,13 +541,9 @@ mod tests {
 
         // A traversal path the legitimate write path can never produce. It is
         // crafted relative to `<db_parent>/archives`, so `archive_dir.join(..)`
-        // would resolve outside the archive directory entirely.
+        // would resolve outside the archive directory entirely. (me-archive's own
+        // `is_within_archive_dir` unit tests cover that this shape is rejected.)
         let evil_path = "../outside/escape.pak";
-        // Sanity: the shared guard considers this unsafe (the property under test).
-        assert!(
-            !is_within_archive_dir(evil_path),
-            "test fixture must be a path the containment guard rejects"
-        );
 
         // Inject the malicious manifest row directly — `commit_archive_atomic`
         // always generates a safe filename, so the only way to exercise the

@@ -252,6 +252,9 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use me_test_support::factory::ConformanceBackend;
+    // Seed embeddings at the SAME dim the SqliteFactory pool is provisioned with, so a
+    // future change to `DIM` can't silently desync the seed length from the pool (#969).
+    use me_test_support::fixtures::DIM;
     use me_types::types::FactType;
     use proptest::prelude::*;
     use std::collections::HashMap;
@@ -284,7 +287,7 @@ mod tests {
             id: 1,
             content: "important".into(),
             content_hash: "h1".into(),
-            embedding: vec![0.1; 4],
+            embedding: vec![0.1; DIM],
             fact_type: FactType::Semantic,
             t_created: now,
             t_expired: None,
@@ -306,7 +309,7 @@ mod tests {
             id: 2,
             content: "neglected".into(),
             content_hash: "h2".into(),
-            embedding: vec![0.2; 4],
+            embedding: vec![0.2; DIM],
             fact_type: FactType::Episodic,
             t_created: now - Duration::days(180),
             t_expired: None,
@@ -347,7 +350,7 @@ mod tests {
             id: 1,
             content: "test".into(),
             content_hash: "h".into(),
-            embedding: vec![0.1; 4],
+            embedding: vec![0.1; DIM],
             fact_type: FactType::Episodic,
             t_created: now - Duration::days(60),
             t_expired: None,
@@ -384,7 +387,7 @@ mod tests {
 
         let now = Utc::now();
         let old_time = now - Duration::days(100);
-        let embed_dim = 4;
+        let embed_dim = DIM;
 
         let storage = me_test_support::factory::SqliteFactory.make().await;
 
@@ -483,7 +486,7 @@ mod tests {
 
         let now = Utc::now();
         let old_time = now - Duration::days(200);
-        let embed_dim = 4;
+        let embed_dim = DIM;
 
         let storage = me_test_support::factory::SqliteFactory.make().await;
 
@@ -552,7 +555,7 @@ mod tests {
         use me_types::types::NewFact;
 
         let now = Utc::now();
-        let embed_dim = 4;
+        let embed_dim = DIM;
 
         let storage = me_test_support::factory::SqliteFactory.make().await;
 
@@ -628,7 +631,7 @@ mod tests {
         me_types::types::NewFact {
             content: format!("neglected {fact_type}"),
             content_hash: hash.into(),
-            embedding: vec![0.1; 4],
+            embedding: vec![0.1; DIM],
             fact_type,
             t_created: old_time,
             t_expired: None,
@@ -697,7 +700,7 @@ mod tests {
             id: 1,
             content: "knowledge".into(),
             content_hash: "h".into(),
-            embedding: vec![0.1; 4],
+            embedding: vec![0.1; DIM],
             fact_type: FactType::Semantic,
             t_created: now - Duration::days(500),
             t_expired: None,
@@ -793,7 +796,7 @@ mod tests {
 
         let now = Utc::now();
         let old_time = now - Duration::days(200);
-        let embed_dim = 4;
+        let embed_dim = DIM;
 
         let storage = me_test_support::factory::SqliteFactory.make().await;
 
@@ -1001,7 +1004,7 @@ mod tests {
             id: 1,
             content: "from the future".into(),
             content_hash: "hfut".into(),
-            embedding: vec![0.1; 4],
+            embedding: vec![0.1; DIM],
             fact_type: FactType::Episodic,
             t_created: now,
             t_expired: None,
@@ -1104,7 +1107,7 @@ mod tests {
                 id: 1,
                 content: "prop".into(),
                 content_hash: "hp".into(),
-                embedding: vec![0.1; 4],
+                embedding: vec![0.1; DIM],
                 fact_type: FactType::Episodic,
                 t_created: now,
                 t_expired: None,

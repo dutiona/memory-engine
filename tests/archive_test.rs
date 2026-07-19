@@ -279,8 +279,8 @@ async fn verify_archives_detects_missing_pak() {
 /// `ok == false` with a "hash mismatch" error. Flips a single byte in place so
 /// the file size is unchanged — this proves the integrity check is a content
 /// hash, not a length/existence check. Mutation check: if `verify_single_archive`
-/// ignored `verify_pak`'s `Ok(false)` arm (or compared lengths instead of
-/// hashes), the same-length corrupted file would pass and these asserts fail.
+/// compared lengths instead of hashing (or skipped its mismatch arm), the
+/// same-length corrupted file would pass and these asserts fail.
 #[tokio::test]
 async fn verify_archives_detects_tampered_pak() {
     let dir = tempfile::tempdir().unwrap();

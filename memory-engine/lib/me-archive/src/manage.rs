@@ -27,7 +27,7 @@ use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
 use me_types::types::search::MemoryQuery;
 use me_types::types::{Edge, Fact};
 
-use crate::pak::{hash_file, verify_pak, write_pak_and_hash};
+use crate::pak::{hash_file, write_pak_and_hash};
 use crate::search::{ArchiveSearchResult, is_within_archive_dir, search_archives};
 use crate::types::{
     ArchiveManifestEntry, ArchivePak, ArchivePolicy, ArchiveStats, ArchiveVerifyResult,
@@ -340,26 +340,27 @@ async fn commit_archive(
 }
 
 /// Verify a single `.pak` file against its manifest hash.
+///
+/// Hashes the file exactly once: a `.pak` can be up to the 4 GiB read cap, so the previous
+/// `verify_pak` (bool) + `hash_file` (for the message) sequence read + blake3'd it twice on
+/// the mismatch arm — a full second pass spent only to format an error string (#980).
 fn verify_single_archive(entry: &ArchiveManifestEntry, pak_path: &Path) -> ArchiveVerifyResult {
-    match verify_pak(pak_path, &entry.blake3_hash) {
-        Ok(true) => ArchiveVerifyResult {
+    match hash_file(pak_path) {
+        Ok(actual) if actual == entry.blake3_hash => ArchiveVerifyResult {
             manifest_id: entry.id,
             pak_path: entry.pak_path.clone(),
             ok: true,
             error: None,
         },
-        Ok(false) => {
-            let actual = hash_file(pak_path).unwrap_or_default();
-            ArchiveVerifyResult {
-                manifest_id: entry.id,
-                pak_path: entry.pak_path.clone(),
-                ok: false,
-                error: Some(format!(
-                    "hash mismatch: expected {}, got {actual}",
-                    entry.blake3_hash
-                )),
-            }
-        }
+        Ok(actual) => ArchiveVerifyResult {
+            manifest_id: entry.id,
+            pak_path: entry.pak_path.clone(),
+            ok: false,
+            error: Some(format!(
+                "hash mismatch: expected {}, got {actual}",
+                entry.blake3_hash
+            )),
+        },
         Err(e) => ArchiveVerifyResult {
             manifest_id: entry.id,
             pak_path: entry.pak_path.clone(),

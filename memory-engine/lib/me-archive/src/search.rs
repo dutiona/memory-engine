@@ -79,13 +79,12 @@ impl Ord for MinScored {
 /// for not-yet-existing files), and is purely lexical — no `canonicalize`, no
 /// TOCTOU window.
 ///
-/// `pub` (not `pub(crate)`): the **shared archive path-containment guard** — the
-/// sibling `verify_archives` (`crate::manage`) reuses this helper rather than
-/// re-deriving the check (#292), and the facade's retained regression test
-/// (`engine/archive.rs`) exercises it directly across the crate boundary (Wave 2
-/// #816 / S4, sub-PR 3b).
+/// The **shared archive path-containment guard**: `crate::manage`'s `verify_archives`
+/// reuses this helper rather than re-deriving the check (#292). `pub(crate)` — an
+/// implementation detail of me-archive, covered by this module's own traversal unit
+/// tests (the facade tests `verify_archives` end-to-end, not this helper directly; #979).
 #[must_use]
-pub fn is_within_archive_dir(pak_path: &str) -> bool {
+pub(crate) fn is_within_archive_dir(pak_path: &str) -> bool {
     Path::new(pak_path)
         .components()
         .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
@@ -132,7 +131,7 @@ const fn entry_is_prunable(_entry: &ArchiveManifestEntry, _query: &MemoryQuery) 
 /// Each `.pak` is opened via [`read_pak`], whose schema gate checks `me-types`'
 /// backend-independent `ARCHIVE_SCHEMA_VERSION` — the same constant the write side
 /// stamps. No backend schema version is involved (Wave 2 #816 / S4, sub-PR 3a).
-pub fn search_archives(
+pub(crate) fn search_archives(
     archive_dir: &Path,
     manifest_entries: &[ArchiveManifestEntry],
     query: &MemoryQuery,
