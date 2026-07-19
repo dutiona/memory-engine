@@ -5,8 +5,8 @@
 //! NOT a [`StorageBackend`](crate::StorageBackend) supertrait bound, so
 //! the umbrella's type stays stable across feature sets. Only the manifest CRUD is
 //! on the trait; the `.pak` file mechanics (`write_pak_and_hash` / `read_pak` /
-//! `hash_file` / `verify_pak`) stay as feature-gated free functions in
-//! `archive/pak.rs` — filesystem/codec plumbing, not a port concern.
+//! `hash_file`) stay as feature-gated free functions in `archive/pak.rs` —
+//! filesystem/codec plumbing, not a port concern.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
