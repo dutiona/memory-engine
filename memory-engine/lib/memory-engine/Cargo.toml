@@ -185,6 +185,13 @@ path = "../../../tests/roundtrip_test.rs"
 name = "all_features_store"
 path = "../../../tests/all_features_store.rs"
 
+# #991: assert the docs' gate matrix (CLAUDE/AGENTS/GEMINI.md) is a superset of ci.yml's
+# cargo gates. Runs inside `cargo test --workspace --all-features`, the guard inside the
+# thing it guards. Not under a crate dir, so it needs explicit registration (autotests off).
+[[test]]
+name = "gate_matrix_parity"
+path = "../../../tests/gate_matrix_parity.rs"
+
 # --- examples (top-level ../../../examples/) ---
 [[example]]
 name = "basic_roundtrip"
