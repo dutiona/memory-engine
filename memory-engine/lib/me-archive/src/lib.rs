@@ -31,9 +31,8 @@
 
 pub mod manage;
 pub mod pak;
-mod search;
+pub mod search;
 pub mod types;
 
 pub use manage::{archive, list_archives, search_archives_fallback, verify_archives};
-pub use search::ArchiveSearchResult;
 pub use types::{ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVerifyResult};

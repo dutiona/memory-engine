@@ -122,7 +122,7 @@ impl MemoryEngine {
         &self,
         query: &crate::search::MemoryQuery,
         limit: usize,
-    ) -> Result<Option<crate::archive::ArchiveSearchResult>> {
+    ) -> Result<Option<crate::archive::search::ArchiveSearchResult>> {
         let Ok(archive_dir) = self.archive_dir() else {
             return Ok(None);
         };
