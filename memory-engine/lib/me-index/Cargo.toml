@@ -12,11 +12,20 @@ publish = false
 
 [dependencies]
 me-types = { path = "../me-types" }
+# The persistence PORT (L1) — for `cache_scope_chain`, which hydrates the `ScopeTree`
+# projection from a leaf's persisted scope ancestry via `StorageBackend::get_scope`
+# (#973). This is the port TRAIT, not a concrete backend, so me-index stays
+# backend-agnostic (DIP); the L2→L1 edge is acyclic (me-storage depends only on
+# me-types + me-traits). Revisits the S2 "me-index is storage-free" carve decision:
+# the duplication it forced (a copy of the hydration walk in me-ingest AND the facade)
+# is the debt this collapses.
+me-storage = { path = "../me-storage" }
 # No `[workspace.dependencies]` table exists in the root manifest (only
 # `[workspace.package]` / `[workspace.lints]`), so third-party deps are bare
 # versions here too, matching `me-storage`'s convention (its `chrono`/`serde_json`
 # are plain `version = "..."`, not `workspace = true`) rather than the facade-style
 # `workspace = true` the plan sketch assumed.
+parking_lot = "0.12"
 petgraph = "0.7"
 
 [dev-dependencies]
