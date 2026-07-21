@@ -1,6 +1,5 @@
 ---
 source: memory-engine/lib/me-backend-sqlite/src/store/schema/tests.rs
-assertion_line: 1526
 expression: schema
 ---
 -- index: idx_activities_dedup

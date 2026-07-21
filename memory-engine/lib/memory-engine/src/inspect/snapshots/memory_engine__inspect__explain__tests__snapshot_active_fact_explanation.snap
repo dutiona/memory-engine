@@ -1,6 +1,5 @@
 ---
 source: src/inspect/explain.rs
-assertion_line: 419
 expression: explanation
 ---
 fact_id: 1
