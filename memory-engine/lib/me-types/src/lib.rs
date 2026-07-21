@@ -10,7 +10,9 @@
 //!   snapshot / cycle-report / search-result sidecar vocabularies).
 //! - [`error`] — the [`MemoryError`](error::MemoryError) umbrella, the typed
 //!   sub-enums, and the crate [`Result`](error::Result) alias.
-//! - [`limits`] — size caps enforced during (de)serialization.
+//! - [`limits`] — the workspace-internal resource bounds: ingest payload size caps
+//!   enforced during (de)serialization, plus the consolidation dedup/cluster
+//!   complexity caps (#983).
 
 // Panic-safety gate (#725): `unwrap_used = "deny"` (workspace lints) forbids
 // `.unwrap()` in production paths, where a panic aborts the *consumer's* process.

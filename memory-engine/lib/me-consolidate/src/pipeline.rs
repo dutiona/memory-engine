@@ -51,29 +51,10 @@ use me_traits::ConsolidationStats;
 use me_types::error::MemoryError;
 use me_types::error::Result;
 use me_types::types::Fact;
-
-/// Safety cap for the O(N·M) dedup pass (`compute_dedup`). Beyond this many active facts
-/// the pass is **skipped and the consolidation watermark is NOT advanced**, so the
-/// skipped facts are retried on a later run once the corpus shrinks
-/// (`DedupComputed::skipped`).
-///
-/// Duplicated (same value) in `me_backend_sqlite::consolidation` for
-/// [`load_snapshot`]'s own default — that half lives below the seam and needs its own
-/// copy of the cap it short-circuits on.
-const MAX_FACTS_FOR_DEDUP: usize = 50_000;
-
-/// Safety cap for the O(N²) cluster pass (`compute_clusters`). Beyond this many active facts
-/// clustering is **silently skipped, preserving any existing cluster summaries**
-/// (the cap is checked before they would be deleted).
-///
-/// Deliberate policy difference from [`MAX_FACTS_FOR_DEDUP`]: a dedup skip blocks
-/// the watermark so the deferred work is retried, whereas a cluster skip is a
-/// no-op that simply keeps the prior summaries until the corpus is tractable
-/// again. The two caps share a value today but are named and documented
-/// separately so the policies cannot drift silently (#345). Duplicated in
-/// `me_backend_sqlite::consolidation` for the same reason as
-/// [`MAX_FACTS_FOR_DEDUP`].
-const MAX_FACTS_FOR_CLUSTERING: usize = 50_000;
+// The dedup/cluster safety caps are single-sourced in L0 `me_types::limits` (#983) so
+// this compute half and the below-the-seam load half (`me-backend-sqlite`) cannot drift
+// apart. `limits` (not `types::consolidation`) keeps them off the facade's public API.
+use me_types::limits::{MAX_FACTS_FOR_CLUSTERING, MAX_FACTS_FOR_DEDUP};
 
 /// Summarize a slice of items and embed the resulting summary text, validating
 /// the embedding dimension. Shared by cluster fusion and global integration so
