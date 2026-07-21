@@ -8,12 +8,13 @@
 //! `archive_dir()` helper stay facade concerns — the facade resolves the archive
 //! directory, a sibling of the DB file, and passes it in as `archive_dir: &Path`).
 //!
-//! [`archive`]'s pre-flight checks (`ensure_open`, the read-only fail-fast, and the
-//! file-backed check) also stay in the facade's delegate rather than moving here: the
-//! file-backed check must run *before* `archive_dir` can even be resolved (it is not
-//! reachable through [`MemoryCtx`]), so preserving the original's exact check order and
-//! error messages requires the facade to own the whole pre-flight sequence, not just the
-//! path resolution. See the facade's `engine/archive.rs` for that sequence.
+//! [`archive`] now self-gates the `MemoryCtx`-reachable pre-flight — `ctx.ensure_open()`
+//! then `ctx.ensure_writable()` (#972) — so a read-only engine fails fast here, at the
+//! primitive entry, like every other write primitive. The **file-backed** check stays in
+//! the facade's delegate: it must run *before* `archive_dir` can even be resolved, and
+//! `archive_dir` is not reachable through [`MemoryCtx`], so the facade owns that half of
+//! the sequence (and keeps its own `ensure_open`/read-only checks as archive-style
+//! defence-in-depth). See the facade's `engine/archive.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -63,6 +64,8 @@ use crate::types::{
 ///
 /// # Errors
 ///
+/// Returns `MemoryError::ReadOnly` if the engine is read-only (checked first, #972 — before
+/// the candidate scan + cold-storage write).
 /// Returns `MemoryError::Archive` on I/O failure.
 /// Returns `MemoryError::Storage` on SQL failure.
 pub async fn archive(
@@ -85,9 +88,12 @@ pub async fn archive(
     // drops embedding scoring for it: permanent, silent cold-storage corruption.
     //
     // (Read-only is *also* caught below the seam — `block_write` → `try_write()` →
-    // `MemoryError::ReadOnly` — so `ctx.ensure_writable()` is not added here; that gate is
-    // tracked systemically across all write primitives in #972.)
+    // `MemoryError::ReadOnly`.)
     ctx.ensure_open()?;
+    // Fail fast on a read-only engine before the candidate scan + cold-storage write
+    // (#972, uniform across every write primitive) — same `ReadOnly` error, moved earlier
+    // before the wasted read; a deliberate, benign behavior change.
+    ctx.ensure_writable()?;
 
     let (candidate_facts, candidate_edges) = ctx
         .storage

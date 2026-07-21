@@ -27,6 +27,8 @@ const CONFLICT_EDGE_WEIGHT: f64 = 1.0;
 ///
 /// # Errors
 /// - [`me_types::error::MemoryError::EmbeddingReopenRequired`] — the handle is dim-fenced (#742).
+/// - `ReadOnly` — the engine is read-only (checked first, #972 — takes precedence over the
+///   size check and the `old_id` lookup below, both of which are skipped on a read-only engine).
 /// - Conflict/PayloadTooLarge — the candidate exceeds the size bound (`check_new_fact`).
 /// - `NotFound` — `old_id` missing or already expired (re-validated inside the atomic op; #335 TOCTOU guard).
 /// - Propagates arbiter / storage errors.
@@ -42,6 +44,15 @@ pub async fn resolve_conflict(
     now: DateTime<Utc>,
 ) -> Result<ConflictResolution> {
     ctx.ensure_open()?;
+    // Fail fast on a read-only engine, as the fundamental write-capability precondition
+    // (#972). This skips the consumer's `ConflictArbiter` (possibly network / LLM work)
+    // and the `get_fact(old_id)` read entirely — the write below the seam would otherwise
+    // reject with `ReadOnly` only after those side-effects fired. Deliberate precedence
+    // change: on a read-only engine `ReadOnly` now takes precedence over `check_new_fact`'s
+    // size bound and over the `old_id` lookup — an oversized candidate or a missing/expired
+    // `old_id` reports `ReadOnly` rather than `Conflict`/`NotFound`, since neither can be
+    // resolved against a store you cannot write.
+    ctx.ensure_writable()?;
     // The candidate fact is persisted verbatim on an Add/Update decision, so
     // it is a consumer ingest path and must respect the same size bound as
     // `add_fact` (issue #572 / L10).

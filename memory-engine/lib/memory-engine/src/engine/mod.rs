@@ -556,6 +556,15 @@ impl MemoryEngine {
     /// Returns `MemoryError::Storage` if the fingerprint read or sidecar write
     /// fails.
     pub async fn flush_snapshot(&self) -> Result<bool> {
+        // A read-only engine made no in-memory writes, so its graph/scope already match
+        // the DB — there is nothing to persist. No-op on `close()` here (like the fenced
+        // case below), rather than erroring the way a bare `ensure_writable()` would: a
+        // read-only engine must still close cleanly (#972). The other facade writes fail
+        // fast; this lifecycle method is the deliberate exception.
+        if self.read_only {
+            self.closed.store(true, Ordering::Release);
+            return Ok(false);
+        }
         // Fenced by a different-dim reconstruction → no sidecar (see doc above).
         if self.reopen_required.load(Ordering::Acquire) != 0 {
             self.closed.store(true, Ordering::Release);
@@ -658,6 +667,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Storage` on write failure.
     pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.ensure_writable()?;
         self.storage.set_config(key, value).await
     }
 
@@ -692,6 +702,25 @@ impl MemoryEngine {
             0 => Ok(()),
             new_dim => Err(MemoryError::EmbeddingReopenRequired { new_dim }),
         }
+    }
+
+    /// The fail-fast write gate for the facade's own write methods (#972).
+    ///
+    /// The L3 primitives self-gate with [`MemoryCtx::ensure_writable`]; this is the
+    /// facade-level equivalent for the write methods that delegate straight to
+    /// `self.storage` (bypassing the primitives) — `pin_fact`, `set_config`,
+    /// `ensure_scope_path`, `record_*`, etc. Called at their entry so a read-only engine
+    /// rejects with `ReadOnly` before any read or write, instead of late at the
+    /// below-seam `try_write()`. Same `read_only` flag the port pool reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::ReadOnly`] if the engine was opened read-only.
+    const fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(MemoryError::ReadOnly);
+        }
+        Ok(())
     }
 
     /// Test-only: arm the reconstruction dimension fence directly, so the read-safety
@@ -742,6 +771,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Storage` on insert failure.
     pub async fn ensure_scope_path(&self, path: &str) -> Result<i64> {
+        self.ensure_writable()?;
         let id = self.storage.ensure_scope_path(path).await?;
         self.cache_scope_chain(id).await?;
         Ok(id)

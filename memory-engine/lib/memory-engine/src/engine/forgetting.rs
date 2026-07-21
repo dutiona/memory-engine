@@ -38,6 +38,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Storage` if the update fails.
     pub async fn pin_fact(&self, id: i64) -> Result<()> {
+        self.ensure_writable()?;
         self.storage.set_fact_pinned(id, true).await
     }
 
@@ -48,6 +49,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Storage` if the update fails.
     pub async fn unpin_fact(&self, id: i64) -> Result<()> {
+        self.ensure_writable()?;
         self.storage.set_fact_pinned(id, false).await
     }
 }

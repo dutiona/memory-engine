@@ -26,6 +26,11 @@ use me_types::types::{AddFactRequest, ClassifierInput, EmbeddingFingerprint, New
 /// Returns `MemoryError::Storage` on insert failure.
 pub async fn ingest(ctx: MemoryCtx<'_>, event: &NewEvent) -> Result<i64> {
     ctx.ensure_open()?;
+    // Read-only rejects here — the fundamental write-capability precondition, checked
+    // before request validation, embedding, and the write (#972). On a read-only engine
+    // `ReadOnly` therefore takes precedence over payload/request validation, and even a
+    // no-op (empty batch) rejects: a write method on a read-only handle is a misuse.
+    ctx.ensure_writable()?;
     check_json_size(&event.payload, "event payload")?;
     ctx.storage.insert_event(event).await
 }
@@ -69,6 +74,11 @@ pub async fn add_fact(
     classifier: Option<Arc<dyn PersistenceClassifier>>,
 ) -> Result<i64> {
     ctx.ensure_open()?;
+    // Read-only rejects here — the fundamental write-capability precondition, checked
+    // before request validation, embedding, and the write (#972). On a read-only engine
+    // `ReadOnly` therefore takes precedence over payload/request validation, and even a
+    // no-op (empty batch) rejects: a write method on a read-only handle is a misuse.
+    ctx.ensure_writable()?;
     validate_add_fact_request(req)?;
     // Embed off the async executor (the provider call may be a blocking HTTP
     // round-trip; running it inline would park the runtime thread, and a
@@ -111,6 +121,11 @@ pub async fn add_fact_precomputed(
     classifier: Option<Arc<dyn PersistenceClassifier>>,
 ) -> Result<i64> {
     ctx.ensure_open()?;
+    // Read-only rejects here — the fundamental write-capability precondition, checked
+    // before request validation, embedding, and the write (#972). On a read-only engine
+    // `ReadOnly` therefore takes precedence over payload/request validation, and even a
+    // no-op (empty batch) rejects: a write method on a read-only handle is a misuse.
+    ctx.ensure_writable()?;
     validate_add_fact_request(req)?;
     // The caller's declared fingerprint is treated exactly like a live
     // provider's: the atomic insert records-if-absent (and #614-rejects a
@@ -254,6 +269,11 @@ pub async fn add_facts_batch(
     classifier: Option<Arc<dyn PersistenceClassifier>>,
 ) -> Result<Vec<i64>> {
     ctx.ensure_open()?;
+    // Read-only rejects here — the fundamental write-capability precondition, checked
+    // before request validation, embedding, and the write (#972). On a read-only engine
+    // `ReadOnly` therefore takes precedence over payload/request validation, and even a
+    // no-op (empty batch) rejects: a write method on a read-only handle is a misuse.
+    ctx.ensure_writable()?;
     if entries.is_empty() {
         return Ok(Vec::new());
     }
@@ -297,6 +317,11 @@ pub async fn add_facts_batch_partial(
     classifier: Option<Arc<dyn PersistenceClassifier>>,
 ) -> Result<Vec<std::result::Result<i64, MemoryError>>> {
     ctx.ensure_open()?;
+    // Read-only rejects here — the fundamental write-capability precondition, checked
+    // before request validation, embedding, and the write (#972). On a read-only engine
+    // `ReadOnly` therefore takes precedence over payload/request validation, and even a
+    // no-op (empty batch) rejects: a write method on a read-only handle is a misuse.
+    ctx.ensure_writable()?;
     if entries.is_empty() {
         return Ok(Vec::new());
     }

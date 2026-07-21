@@ -24,6 +24,7 @@ impl MemoryEngine {
     /// - [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly) if the engine is read-only.
     /// - [`MemoryError::Storage`](crate::MemoryError::Storage) on insert failure.
     pub async fn record_outcome(&self, fact_id: i64, outcome: Outcome) -> Result<i64> {
+        self.ensure_writable()?; // #972: fail fast before the get_fact read + the event write
         // Validate fact exists via the port — propagate DB errors as-is,
         // only remap NotFound for a clearer message.
         self.storage.get_fact(fact_id).await.map(|_| ())?;

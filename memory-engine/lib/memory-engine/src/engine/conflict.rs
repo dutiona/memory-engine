@@ -30,7 +30,10 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// - [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) — the
-    ///   engine was opened in read-only mode.
+    ///   engine was opened in read-only mode. Checked **first** (#972, the fundamental
+    ///   write-capability precondition), so on a read-only engine it takes precedence
+    ///   over every error below — a read-only conflict resolution reports `ReadOnly`
+    ///   regardless of the candidate's size or whether `old_id` exists.
     /// - [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) wrapping
     ///   [`ConflictError::PayloadTooLarge`](crate::error::ConflictError::PayloadTooLarge)
     ///   — the candidate `new_fact` exceeds the size bound enforced by
@@ -41,8 +44,9 @@ impl MemoryEngine {
     ///   transaction*: `Update`/`Delete` change zero rows under their
     ///   `t_expired IS NULL` expiry, and `Add` re-validates `old_id` is still
     ///   active before creating its edge (the #335 read→write TOCTOU guard). A
-    ///   missing `old_id` is rejected at lookup. All cases are indistinguishable to
-    ///   the caller (each yields `NotFound`).
+    ///   missing `old_id` is rejected at lookup. On a writable engine all cases are
+    ///   indistinguishable to the caller (each yields `NotFound`); on a read-only engine
+    ///   `ReadOnly` takes precedence (the lookup is skipped — see above).
     /// - Propagates any error returned by the [`ConflictArbiter`] or the
     ///   underlying database operations.
     ///

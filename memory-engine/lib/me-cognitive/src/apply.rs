@@ -44,6 +44,12 @@ pub async fn apply_cycle_report(
     report: &CycleReport,
 ) -> Result<ApplyResult> {
     ctx.ensure_open()?;
+    // Fail fast on a read-only engine before validating + applying the deltas (#972,
+    // uniform across every write primitive). This is the apply path `run_dream_cycle`
+    // defers the write to; the `# Errors` contract above already promises `ReadOnly`.
+    // Same error the below-seam `apply_cycle_deltas_atomic` → `try_write()` returns,
+    // moved earlier before the read-only snapshot.
+    ctx.ensure_writable()?;
     let (result, supersede_edges, _expired_ids, _to_index) = ctx
         .storage
         .apply_cycle_deltas_atomic(report, ctx.embed_dim, upcaster_registry)
@@ -127,6 +133,32 @@ mod tests {
             report,
         )
         .await
+    }
+
+    /// Regression witness for the #972 fail-fast read-only gate on the apply path.
+    ///
+    /// `apply_cycle_report` is the write that `run_dream_cycle` defers to. A `read_only`
+    /// handle must reject it with `ReadOnly` *before* validating/applying deltas. The
+    /// backend is genuinely writable — only `MemoryCtx.read_only` is set — so without the
+    /// `ctx.ensure_writable()?` gate an empty report would apply and return `Ok` (the
+    /// below-seam `try_write()` only trips on a truly read-only pool). Mutation-witness:
+    /// delete the gate and this fails.
+    #[tokio::test]
+    async fn apply_cycle_report_read_only_fails_fast() {
+        let engine = engine().await;
+        let empty = report(vec![], vec![]);
+        let err = apply_cycle_report(
+            engine.ctx_read_only(),
+            &engine.graph,
+            &engine.upcaster_registry,
+            &empty,
+        )
+        .await
+        .expect_err("a read-only handle must reject apply_cycle_report before touching storage");
+        assert!(
+            matches!(err, MemoryError::ReadOnly),
+            "expected ReadOnly, got {err:?}"
+        );
     }
 
     #[tokio::test]
