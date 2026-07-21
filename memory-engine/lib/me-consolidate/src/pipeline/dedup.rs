@@ -8,7 +8,7 @@ use rusqlite::Connection;
 #[cfg(test)]
 use me_backend_sqlite::store::facts::FactStore;
 #[cfg(test)]
-use me_types::error::Result;
+use me_types::error::{Result, StorageError};
 use me_types::math::cosine_similarity;
 use me_types::types::Fact;
 
@@ -204,7 +204,13 @@ fn local_dedup(
             active_count: active_facts.len(),
         });
     }
-    let expired_ids = apply_dedup(conn, embed_dim, &computed, now)?.expired;
+    // Mirror the production apply path: the multi-write `apply_dedup` now requires an open
+    // transaction (#938), so open one here exactly as `apply_plan` does below the seam.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
+    let expired_ids = apply_dedup(&tx, embed_dim, &computed, now)?.expired;
+    tx.commit().map_err(StorageError::backend)?;
     Ok(DedupOutcome::Ran {
         removed: expired_ids.len(),
         expired_ids,

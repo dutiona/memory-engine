@@ -4,7 +4,7 @@
 //! `#[cfg(test)]`-only `cluster_fusion` wrapper (composing `compute_clusters` +
 //! `apply_clusters` for that file's unit tests) keeps resolving unchanged.
 
-use rusqlite::Connection;
+use rusqlite::Transaction;
 
 use me_types::error::Result;
 use me_types::types::{ConsolidationLevel, NewSummary};
@@ -21,8 +21,8 @@ use crate::store::summaries::SummaryStore;
 ///
 /// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::Serialization` on
 /// JSON serialization failure.
-pub fn apply_clusters(conn: &Connection, embed_dim: usize, summaries: &[NewSummary]) -> Result<()> {
-    let summary_store = SummaryStore::new(conn, embed_dim);
+pub fn apply_clusters(tx: &Transaction, embed_dim: usize, summaries: &[NewSummary]) -> Result<()> {
+    let summary_store = SummaryStore::new(tx, embed_dim);
     summary_store.delete_by_level(&ConsolidationLevel::Cluster)?;
     for summary in summaries {
         summary_store.insert(summary)?;

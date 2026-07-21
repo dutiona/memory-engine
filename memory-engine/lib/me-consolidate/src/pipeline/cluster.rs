@@ -5,6 +5,10 @@
 use rusqlite::Connection;
 
 use me_types::error::Result;
+// Test-only: `cluster_fusion` opens a tx (the #938 `&Transaction` apply contract) and
+// maps the open/commit errors, exactly like production `apply_plan` below the seam.
+#[cfg(test)]
+use me_types::error::StorageError;
 use me_types::math::cosine_similarity;
 // Used by this file's own `#[cfg(test)]` module (via `use super::*`) to verify writes
 // `apply_clusters` (in me-backend-sqlite) made — not by any production fn here.
@@ -152,7 +156,13 @@ fn cluster_fusion(
 ) -> Result<usize> {
     let computed = compute_clusters(facts, generator, embedder, params)?;
     if computed.ran {
-        apply_clusters(conn, params.embed_dim, &computed.summaries)?;
+        // `apply_clusters` now requires an open transaction (#938); open one here exactly
+        // as production `apply_plan` does below the seam.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(StorageError::backend)?;
+        apply_clusters(&tx, params.embed_dim, &computed.summaries)?;
+        tx.commit().map_err(StorageError::backend)?;
     }
     Ok(computed.summaries.len())
 }

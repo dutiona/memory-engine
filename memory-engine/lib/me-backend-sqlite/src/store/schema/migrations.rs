@@ -9,14 +9,14 @@
 //! `mod.rs`, which may evolve in future versions.
 
 use me_types::error::StorageError;
-use rusqlite::Connection;
+use rusqlite::Transaction;
 
 use me_types::error::{MigrationError, Result};
 
-pub(super) fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
+pub(super) fn migrate_v1_to_v2(tx: &Transaction) -> Result<()> {
     // Frozen snapshot of SCOPES_DDL at v2 — do not reference the global constant,
     // which may evolve in future schema versions.
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS scopes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             parent_id INTEGER REFERENCES scopes(id),
@@ -30,14 +30,14 @@ pub(super) fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
         INSERT OR IGNORE INTO scopes (id, parent_id, label, depth) VALUES (1, NULL, 'root', 0);",
     )
     .map_err(StorageError::backend)?;
-    conn.execute_batch(
+    tx.execute_batch(
         "ALTER TABLE facts ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE edges ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE events ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;
          ALTER TABLE summaries ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 1;",
     )
     .map_err(StorageError::backend)?;
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope_id);
          CREATE INDEX IF NOT EXISTS idx_edges_scope ON edges(scope_id);
          CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id);
@@ -49,8 +49,8 @@ pub(super) fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
 
 /// Recreate the FTS5 virtual table and its sync triggers for the v3 schema
 /// (inlined frozen snapshot), repopulating from the rebuilt facts table.
-pub(super) fn recreate_facts_fts_v3(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+pub(super) fn recreate_facts_fts_v3(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
             content,
             content='facts',
@@ -60,7 +60,7 @@ pub(super) fn recreate_facts_fts_v3(conn: &Connection) -> Result<()> {
         INSERT INTO facts_fts(rowid, content) SELECT id, content FROM facts;",
     )
     .map_err(StorageError::backend)?;
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN
             INSERT INTO facts_fts(rowid, content) VALUES (new.id, new.content);
         END;
@@ -87,9 +87,9 @@ pub(super) fn recreate_facts_fts_v3(conn: &Connection) -> Result<()> {
     clippy::too_many_lines,
     reason = "#926 mapped each rusqlite seam call via `.map_err(StorageError::backend)`, whose line-wrapping pushed this already-long migration fn a few lines over 100 — mechanical verbosity, no added logic"
 )]
-pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+pub(super) fn migrate_v2_to_v3(tx: &Transaction) -> Result<()> {
     // 1. Drop FTS triggers and virtual table (they reference facts)
-    conn.execute_batch(
+    tx.execute_batch(
         "DROP TRIGGER IF EXISTS facts_fts_ai;
          DROP TRIGGER IF EXISTS facts_fts_ad;
          DROP TRIGGER IF EXISTS facts_fts_au;
@@ -98,7 +98,7 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     .map_err(StorageError::backend)?;
 
     // 2. Rebuild events (no FK deps from other data tables)
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE TABLE events_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
@@ -116,7 +116,7 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     .map_err(StorageError::backend)?;
 
     // 3. Rebuild facts (source_event_id references events)
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE TABLE facts_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             content TEXT NOT NULL,
@@ -146,7 +146,7 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     .map_err(StorageError::backend)?;
 
     // 4. Rebuild edges (source/target_fact_id reference facts)
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE TABLE edges_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_fact_id INTEGER NOT NULL REFERENCES facts(id),
@@ -167,7 +167,7 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     .map_err(StorageError::backend)?;
 
     // 5. Rebuild summaries (no FK deps from other data tables)
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE TABLE summaries_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             content TEXT NOT NULL,
@@ -187,10 +187,10 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     .map_err(StorageError::backend)?;
 
     // 6+7. Recreate the FTS5 virtual table and its sync triggers.
-    recreate_facts_fts_v3(conn)?;
+    recreate_facts_fts_v3(tx)?;
 
     // 8. Recreate indexes (inlined for v3 — frozen snapshot)
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id) WHERE session_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_facts_expired ON facts(t_expired);
@@ -211,22 +211,22 @@ pub(super) fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
 
 /// Add Phase 3b columns: `is_pinned`, `importance_score` on facts,
 /// and event envelope fields on events.
-pub(super) fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+pub(super) fn migrate_v3_to_v4(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
         "ALTER TABLE facts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE facts ADD COLUMN importance_score REAL NOT NULL DEFAULT 0.5;",
     )
     .map_err(StorageError::backend)?;
     // Backfill: seed importance_score from base importance for existing rows
-    conn.execute("UPDATE facts SET importance_score = importance", [])
+    tx.execute("UPDATE facts SET importance_score = importance", [])
         .map_err(StorageError::backend)?;
-    conn.execute_batch(
+    tx.execute_batch(
         "ALTER TABLE events ADD COLUMN origin_node_id TEXT NOT NULL DEFAULT 'local';
          ALTER TABLE events ADD COLUMN sequence_id INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE events ADD COLUMN created_at TEXT;",
     )
     .map_err(StorageError::backend)?;
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
          CREATE INDEX IF NOT EXISTS idx_facts_importance_score ON facts(importance_score);
          CREATE INDEX IF NOT EXISTS idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
@@ -236,15 +236,15 @@ pub(super) fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
 }
 
 /// Add `event_revision` column for per-event-type envelope versioning.
-pub(super) fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
-    conn.execute_batch("ALTER TABLE events ADD COLUMN event_revision INTEGER NOT NULL DEFAULT 1;")
+pub(super) fn migrate_v4_to_v5(tx: &Transaction) -> Result<()> {
+    tx.execute_batch("ALTER TABLE events ADD COLUMN event_revision INTEGER NOT NULL DEFAULT 1;")
         .map_err(StorageError::backend)?;
     Ok(())
 }
 
 /// Add `surfaced_at` column for tracking when due facts are first returned to consumers.
-pub(super) fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
-    conn.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")
+pub(super) fn migrate_v5_to_v6(tx: &Transaction) -> Result<()> {
+    tx.execute_batch("ALTER TABLE facts ADD COLUMN surfaced_at TEXT;")
         .map_err(StorageError::backend)?;
     Ok(())
 }
@@ -254,8 +254,8 @@ pub(super) fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
 /// The table is created unconditionally (not gated on the `archive` feature)
 /// so that schema version is consistent regardless of feature flags. The Rust
 /// code that reads/writes this table is gated behind `#[cfg(feature = "archive")]`.
-pub(super) fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+pub(super) fn migrate_v6_to_v7(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS archive_manifest (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pak_path TEXT NOT NULL,
@@ -276,8 +276,8 @@ pub(super) fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+pub(super) fn migrate_v7_to_v8(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS lineage (
             lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
             wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
@@ -291,8 +291,8 @@ pub(super) fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+pub(super) fn migrate_v8_to_v9(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS activities (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id       TEXT    NOT NULL,
@@ -346,8 +346,8 @@ pub(super) fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
 /// This corrective migration unconditionally drops and recreates the index in
 /// the canonical 5-column form. `DROP INDEX IF EXISTS` makes it idempotent and
 /// safe regardless of which 4- or 5-column variant a v9 database already has.
-pub(super) fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+pub(super) fn migrate_v9_to_v10(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
         "DROP INDEX IF EXISTS idx_activities_dedup;
          CREATE INDEX idx_activities_dedup
              ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);",
@@ -362,8 +362,8 @@ pub(super) fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
 /// ordering by `t_created` (recency scans, memarch #42's horizon sweep) would
 /// otherwise full-scan the table. The fresh-init path adds the same index via
 /// `INDEXES_DDL`, so fresh and migrated databases converge.
-pub(super) fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);")
+pub(super) fn migrate_v10_to_v11(tx: &Transaction) -> Result<()> {
+    tx.execute_batch("CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);")
         .map_err(StorageError::backend)?;
     Ok(())
 }
@@ -379,8 +379,8 @@ pub(super) fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
 /// every subsequent write). The identity is re-established on the next embedding
 /// write. The `DELETE` is idempotent (a no-op on a fresh v12 DB that never had the
 /// key), and runs inside the migration framework's per-step transaction.
-pub(super) fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
-    conn.execute_batch("DELETE FROM config WHERE key = 'embed_dim';")
+pub(super) fn migrate_v11_to_v12(tx: &Transaction) -> Result<()> {
+    tx.execute_batch("DELETE FROM config WHERE key = 'embed_dim';")
         .map_err(StorageError::backend)?;
     Ok(())
 }
@@ -416,8 +416,8 @@ struct V12Fingerprint {
 /// gates the step on `version < target`.
 ///
 /// Frozen DDL snapshot — never reference the live `TABLES_DDL` constant in `mod.rs`.
-pub(super) fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+pub(super) fn migrate_v12_to_v13(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS embedding_spaces (
             name                TEXT    PRIMARY KEY,
             model               TEXT    NOT NULL,
@@ -437,11 +437,11 @@ pub(super) fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
     // Fold a present legacy identity into one active 'default' row. The table was just
     // created empty in this same step, so a plain INSERT cannot conflict (the version
     // gate makes the step run-once) — no ON CONFLICT needed.
-    if let Some(raw) = super::get_config(conn, "embedding_meta")? {
+    if let Some(raw) = super::get_config(tx, "embedding_meta")? {
         let fp: V12Fingerprint = serde_json::from_str(&raw).map_err(|e| {
             MigrationError::Incompatible(format!("corrupt embedding_meta during v12->v13: {e}"))
         })?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO embedding_spaces
                  (name, model, provider, dim, matryoshka_base_dim, element_type, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
@@ -463,7 +463,7 @@ pub(super) fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
             ],
         )
         .map_err(StorageError::backend)?;
-        conn.execute_batch("DELETE FROM config WHERE key = 'embedding_meta';")
+        tx.execute_batch("DELETE FROM config WHERE key = 'embedding_meta';")
             .map_err(StorageError::backend)?;
     }
     Ok(())
@@ -477,8 +477,8 @@ pub(super) fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
 /// read-path change. `fact_vectors` is populated only by reconstruction: the `populating`
 /// space during backfill, and the previous active space (now `deprecated`) retained after a
 /// promote for rollback. Frozen DDL snapshot — never reference the live `TABLES_DDL`.
-pub(super) fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+pub(super) fn migrate_v13_to_v14(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS fact_vectors (
             fact_id   INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
             space_id  TEXT    NOT NULL REFERENCES embedding_spaces(name) ON DELETE CASCADE,

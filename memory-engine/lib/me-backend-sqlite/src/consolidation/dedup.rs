@@ -5,7 +5,7 @@
 //! resolving unchanged.
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::Transaction;
 
 use me_types::error::{MemoryError, Result};
 use me_types::types::consolidation::DedupComputed;
@@ -47,13 +47,13 @@ use crate::store::facts::FactStore;
 /// importance update if a fact row is missing (facts are soft-deleted, so this does not
 /// fire for a merely-expired row).
 pub fn apply_dedup(
-    conn: &Connection,
+    tx: &Transaction,
     embed_dim: usize,
     computed: &DedupComputed,
     now: DateTime<Utc>,
 ) -> Result<DedupApplied> {
-    let fact_store = FactStore::new(conn, embed_dim);
-    let edge_store = EdgeStore::new(conn);
+    let fact_store = FactStore::new(tx, embed_dim);
+    let edge_store = EdgeStore::new(tx);
 
     for &(id, importance) in &computed.importance_updates {
         fact_store.update_base_importance(id, importance)?;

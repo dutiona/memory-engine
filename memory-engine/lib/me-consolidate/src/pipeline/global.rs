@@ -5,6 +5,10 @@
 use rusqlite::Connection;
 
 use me_types::error::Result;
+// Test-only: `global_integration` opens a tx (the #938 `&Transaction` apply contract) and
+// maps the open/commit errors, exactly like production `apply_plan` below the seam.
+#[cfg(test)]
+use me_types::error::StorageError;
 // Test-only for the same reason as `Connection` above: `global_integration` and this
 // file's own test module (via `use super::*`) are the only remaining callers.
 #[cfg(test)]
@@ -110,7 +114,13 @@ fn global_integration(
         })
         .collect();
     let global = compute_global(&cluster_summaries, generator, embedder, embed_dim, now)?;
-    apply_global(conn, embed_dim, global.as_ref())?;
+    // `apply_global` now requires an open transaction (#938); open one here exactly as
+    // production `apply_plan` does below the seam.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
+    apply_global(&tx, embed_dim, global.as_ref())?;
+    tx.commit().map_err(StorageError::backend)?;
     Ok(usize::from(global.is_some()))
 }
 

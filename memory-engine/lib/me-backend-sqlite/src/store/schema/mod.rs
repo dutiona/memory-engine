@@ -1,7 +1,7 @@
 use me_types::error::StorageError;
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 
 use me_types::error::{MemoryError, MigrationError, Result};
 
@@ -125,7 +125,12 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
 // --- Migration framework ---
 
-type MigrationFn = fn(&Connection) -> Result<()>;
+// Migrations run inside the per-step transaction opened by `migrate` (#938): the type is
+// `fn(&Transaction)`, not `fn(&Connection)`, so a migration physically cannot be invoked
+// against a bare auto-committing connection — the multi-statement table rebuilds must be
+// all-or-nothing. (The connection-level FK pragma toggles stay outside the tx, on
+// `&Connection`, since `PRAGMA foreign_keys` is not transactional.)
+type MigrationFn = fn(&Transaction) -> Result<()>;
 
 /// `(function, disable_foreign_keys)` — set second element to `true` for
 /// table-rebuild migrations that DROP and recreate tables with FK references.
