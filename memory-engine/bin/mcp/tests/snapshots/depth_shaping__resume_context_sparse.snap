@@ -1,6 +1,5 @@
 ---
 source: memory-engine-mcp/tests/depth_shaping.rs
-assertion_line: 372
 expression: body
 ---
 due: []

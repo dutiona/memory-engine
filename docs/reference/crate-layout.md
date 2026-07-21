@@ -1,7 +1,7 @@
 # Crate Layout
 
 Where things live in the `memory-engine` **workspace**. Wave 2 (#816) **decomposed** the
-former single core crate into an acyclic DAG of per-concern crates. **S1–S5 are done** —
+former single core crate into an acyclic DAG of per-concern crates. **S1–S6 are done** —
 all **18 crates** exist:
 
 - **L0** `me-types` · **L0.5** `me-traits` · **L1** `me-storage` (the port)
@@ -12,9 +12,10 @@ all **18 crates** exist:
 - plus `me-test-support` (dev-only) and three facade consumers: `memory-engine-cli`,
   `memory-engine-mcp`, `memory-engine-embed`
 
-Only **S6** (#942 — the `dylib` ship-mode spike + legibility tooling) remains. This page is
-the "where does X live _now_" reference: the crate DAG, a per-crate table, and the module
-map of what lives inside the facade.
+S6 (#942 legibility tooling + #993 the fuzz-crate facade-API gate) has landed; the `dylib`
+ship-mode spike was carved out to its own follow-up (#994). This page is the "where does X
+live _now_" reference: the crate DAG, a per-crate table, and the module map of what lives
+inside the facade.
 
 The locked structural decisions are in
 [ADR 0018](../design/adr/0018-wave2-crate-decomposition-memoryctx.md).
@@ -138,7 +139,7 @@ crate where ADR 0018 assigns one — where it does not, the module stays facade-
 until a later slice. (`store/`, `storage/sqlite/`, `storage/postgres/`, `graph/`, `scope/`,
 and `pool/` — the S2 scope — are **no longer facade modules**; they physically live in
 `me-backend-sqlite`, `me-backend-postgres`, and `me-index` now. See
-[the extracted crates](#the-extracted-crates-s1--s2) below.)
+[the extracted crates](#the-extracted-crates) below.)
 
 `engine`
 : Facade over all memory primitives. Defines `MemoryEngine` (the main entry point) and `EngineConfig`. The engine is async-native: its DB-touching methods are `async fn` that `.await` an `Arc<dyn StorageBackend>` port, so thread safety and blocking-IO offload live in the backend (`spawn_blocking`); the in-memory caches the engine still owns stay `RwLock`-protected. `engine::conflict` holds the bi-temporal `MemoryEngine::resolve_conflict` (delegated to the consumer `ConflictArbiter`) → **me-resolve**. `engine::query` → **me-query**; `engine::ingest` → **me-ingest**; `engine::forgetting` → **me-forget**; `engine::archive` → **me-archive**. `MemoryCtx` and its `ensure_open`/`ensure_writable` gates were relocated **out** of `engine::mod` into `me-storage` in S1.
@@ -197,9 +198,10 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
 - `inspect::dump` -- JSON snapshot serialization and SQLite `VACUUM INTO` backup.
 - `inspect::statistics` -- SQL count queries for aggregate statistics.
 
-## The extracted crates (S1 + S2)
+## The extracted crates
 
-The six L0–L2 crates that already exist as separate workspace members under
+The Wave 2 (#816) decomposition is complete (S1–S6): **18 crates** in a strictly-acyclic
+L0→L4 DAG. The L0–L2 foundation crates, as separate workspace members under
 `memory-engine/lib/`:
 
 `me-types` (L0 — `memory-engine/lib/me-types/`)
@@ -219,6 +221,36 @@ The six L0–L2 crates that already exist as separate workspace members under
 
 `me-backend-postgres` (L2 — `memory-engine/lib/me-backend-postgres/`)
 : The `PgBackend` `StorageBackend` impl (#633 skeleton): a `deadpool-postgres` pool + a fresh v14-logical migration chain (native FK constraints, `GENERATED ALWAYS AS IDENTITY` ids, a `tsvector` generated column + GIN index, `vector(N)` pgvector columns) + the `SchemaManager` lifecycle/identity/config core. Inspection and the #623 background-reconstruction methods are `MemoryError::NotImplemented` stubs; data CRUD is #634, lexical+vector search and the conformance-arm flip are #635. Depends only on `{me-types, me-storage}` — **not** `me-backend-sqlite` (no backend-to-backend edge). Optional: pulled by the facade's `backend-postgres` feature so a `backend-sqlite`-only build never compiles `tokio-postgres`/`deadpool-postgres`.
+
+The L3 primitive crates (`memory-engine/lib/`), each a free-function primitive over the
+`me-storage` **port** (never a concrete backend — the facade selects the backend). Acyclic
+siblings: no L3 crate depends on another.
+
+`me-ingest` (L3 — `memory-engine/lib/me-ingest/`)
+: The append-only event log + fact-derivation primitives (`ingest`, `add_fact`, `add_fact_precomputed`, `add_facts_batch`). Takes `MemoryCtx` + the `ScopeTree`; delegates embedding/classification to the consumer traits. Depends on `{me-types, me-traits, me-storage, me-index}`.
+
+`me-query` (L3 — `memory-engine/lib/me-query/`)
+: The hybrid retrieval primitive: FTS5 + vector + graph candidates merged by RRF (`query`, `execute_query`). Takes `MemoryCtx` + `ScopeTree`; the SQL search cores live below the seam in the backend. Depends on `{me-types, me-traits, me-storage, me-index}`.
+
+`me-consolidate` (L3 — `memory-engine/lib/me-consolidate/`)
+: The three-pass consolidation pipeline (dedup → cluster → global), lock-free compute + atomic apply (#409). The SQL-touching load/apply halves live in `me-backend-sqlite`; the pure `compute_plan` stays here. Depends on `{me-types, me-traits, me-storage, me-index}`.
+
+`me-forget` (L3 — `memory-engine/lib/me-forget/`)
+: The Ebbinghaus-decay + multi-signal-importance prune primitive (`prune`, `compute_importance`). Scores the active set against in-memory graph degree and soft-expires the sub-threshold set atomically below the seam. Depends on `{me-types, me-storage, me-index}`.
+
+`me-resolve` (L3 — `memory-engine/lib/me-resolve/`)
+: The bi-temporal conflict-arbitration primitive (`resolve_conflict`): a single-transaction CRUD dispatch over the consumer `ConflictArbiter`'s decision, mirroring the in-memory graph only after commit. Depends on `{me-types, me-traits, me-storage, me-index}`.
+
+`me-archive` (L3 — `memory-engine/lib/me-archive/`, feature `archive`)
+: The cold-storage `.pak` primitive (`archive`, `list_archives`, `search_archives_fallback`) over the feature-gated `ColdStorage` port. Depends on `{me-types, me-storage, me-index}`.
+
+`me-cognitive` (L3 — `memory-engine/lib/me-cognitive/`)
+: The Phase-5 dream cycle (#981): `run_dream_cycle` / `run_dream_cycle_guarded` over the `DreamCtx` capability bag + `CycleCtx` read-set, plus the selectable `LlmDreamCycle` backend. Depends on `{me-types, me-traits, me-storage, me-index}`.
+
+`memory-engine` (L4 — `memory-engine/lib/memory-engine/`)
+: The facade. Owns `MemoryEngine` + its builder/bootstrap/inspect/reconstruct/resume, selects the concrete backend, wires the L3 primitives together (`mem_ctx()`), and owns the re-export surface below. Depends on every crate above.
+
+Plus `me-test-support` (dev-only, `memory-engine/lib/me-test-support/`) — cross-crate test doubles + the `SqliteFactory` conformance harness — and the three consumers of the facade's public API: `memory-engine-cli` (`memory-engine/bin/cli/`), `memory-engine-mcp` (`memory-engine/bin/mcp/`), and `memory-engine-embed` (`memory-engine/lib/embed/`, the HTTP embedding provider).
 
 ## Re-exports from the facade `lib.rs`
 
