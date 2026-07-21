@@ -40,16 +40,11 @@ pub use global::apply_global;
 /// `crate::consolidation::{Snapshot, ConsolidationPlan}` keep resolving intra-crate,
 /// exactly like the facade's own re-export.
 pub use me_types::types::consolidation::{ConsolidationPlan, Snapshot};
-
-/// Safety cap for the O(N·M) dedup pass (`compute_dedup`, facade-side). Beyond this many
-/// active facts the pass is **skipped and the consolidation watermark is NOT advanced**,
-/// so the skipped facts are retried on a later run once the corpus shrinks.
-const MAX_FACTS_FOR_DEDUP: usize = 50_000;
-
-/// Safety cap for the O(N²) cluster pass (`compute_clusters`, facade-side). Beyond this
-/// many active facts clustering is **silently skipped, preserving any existing cluster
-/// summaries**.
-const MAX_FACTS_FOR_CLUSTERING: usize = 50_000;
+// The dedup/cluster safety caps `load_snapshot` short-circuits on are single-sourced
+// in L0 `me_types::limits` (#983) so this below-the-seam load half and the compute half
+// (`me-consolidate`) cannot drift apart. Kept a private `use` — these are
+// `load_snapshot`'s internal defaults, not part of this crate's re-export surface.
+use me_types::limits::{MAX_FACTS_FOR_CLUSTERING, MAX_FACTS_FOR_DEDUP};
 
 /// Phase 1 — load the read snapshot under a brief lock (engine: production caps).
 ///
