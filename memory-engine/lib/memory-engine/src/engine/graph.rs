@@ -121,13 +121,13 @@ impl MemoryEngine {
     ///
     /// # Errors
     ///
-    /// - [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) — the
+    /// - [`MemoryError::ReadOnly`] — the
     ///   engine was opened read-only (the backend rejects the write; the graph is
     ///   left untouched).
-    /// - [`MemoryError::NotFound`](crate::error::MemoryError::NotFound) — no
+    /// - [`MemoryError::NotFound`] — no
     ///   *active* edge with `edge_id` exists (unknown id, or already expired); the
     ///   write affected 0 rows, so the graph is not modified.
-    /// - [`MemoryError::Storage`](crate::error::MemoryError::Storage) on SQL
+    /// - [`MemoryError::Storage`] on SQL
     ///   failure.
     pub async fn expire_edge(&self, edge_id: i64) -> Result<()> {
         let now = Utc::now();

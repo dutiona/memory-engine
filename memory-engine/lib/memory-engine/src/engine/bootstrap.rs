@@ -210,7 +210,7 @@ impl MemoryEngine {
     /// and the (possibly blocking) embedder/extractor calls run on a blocking thread;
     /// only the atomic ingest touches the DB.
     ///
-    /// For LLM-powered extraction, provide a custom [`SessionExtractor`](crate::bootstrap::SessionExtractor).
+    /// For LLM-powered extraction, provide a custom [`SessionExtractor`].
     /// The default [`KeywordExtractor`](crate::bootstrap::KeywordExtractor) requires no LLM.
     ///
     /// # Errors

@@ -272,10 +272,10 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// - [`MemoryError::ReadOnly`] if the engine is read-only.
-    /// - [`MemoryError::Cycle`](crate::error::MemoryError::Cycle) if any delta fails validation.
+    /// - [`MemoryError::Cycle`] if any delta fails validation.
     /// - [`MemoryError::EmbeddingDimension`] if an
     ///   `AddFact`/`Promote`/`Synthesize` embedding does not match the engine dimension.
-    /// - [`MemoryError::Storage`](crate::error::MemoryError::Storage) on a backend failure.
+    /// - [`MemoryError::Storage`] on a backend failure.
     pub async fn apply_cycle_report(
         &self,
         report: &crate::cognitive::CycleReport,
