@@ -69,6 +69,18 @@ impl TestEngine {
         }
     }
 
+    /// Like [`Self::ctx`] but with `read_only: true` — for the #972 fail-fast witnesses.
+    /// The backend itself stays writable, so a primitive that skips `ctx.ensure_writable()`
+    /// would still succeed; that is what makes these tests real mutation-witnesses.
+    pub fn ctx_read_only(&self) -> MemoryCtx<'_> {
+        MemoryCtx {
+            storage: &self.storage,
+            embed_dim: self.embed_dim,
+            read_only: true,
+            reopen_required: &self.reopen_required,
+        }
+    }
+
     /// Record an embedding-space identity (#613) directly, mirroring what the
     /// facade's `add_fact` stamps as a side effect of its first live-embedder write.
     /// Needed before applying any delta that carries a **pre-computed** vector

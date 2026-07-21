@@ -43,6 +43,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::NotFound` if `scope` is `Some` but the path
     /// does not exist.
     pub async fn link_session_facts(&self, session_id: &str, scope: Option<&str>) -> Result<usize> {
+        self.ensure_writable()?; // #972: fail fast before the active-facts read + edge writes
         // Resolve scope path → subtree IDs (short-lived read lock, dropped at the
         // end of the match arm so no guard is held across the awaits below).
         let scope_ids: Vec<i64> = match scope {
@@ -130,6 +131,7 @@ impl MemoryEngine {
     /// - [`MemoryError::Storage`] on SQL
     ///   failure.
     pub async fn expire_edge(&self, edge_id: i64) -> Result<()> {
+        self.ensure_writable()?;
         let now = Utc::now();
         // DB write below the seam first. On NotFound/ReadOnly/Database the graph
         // is deliberately left untouched (no edge transitioned to expired).

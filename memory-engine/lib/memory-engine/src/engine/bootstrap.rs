@@ -226,6 +226,7 @@ impl MemoryEngine {
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
         self.ensure_open()?;
+        self.ensure_writable()?; // #972: fail fast before parsing/extraction + the per-session ingests
         let scope_id = self
             .resolve_bootstrap_scope(config.scope.as_deref())
             .await?;
@@ -259,6 +260,7 @@ impl MemoryEngine {
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
         self.ensure_open()?;
+        self.ensure_writable()?; // #972: fail fast before parsing/extraction + the per-session ingests
         let scope_id = self
             .resolve_bootstrap_scope(config.scope.as_deref())
             .await?;
@@ -342,6 +344,7 @@ impl MemoryEngine {
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<crate::bootstrap::BootstrapReport> {
         self.ensure_open()?;
+        self.ensure_writable()?; // #972: fail fast before parsing/extraction + the per-session ingests
         let scope_id = self
             .resolve_bootstrap_scope(config.scope.as_deref())
             .await?;

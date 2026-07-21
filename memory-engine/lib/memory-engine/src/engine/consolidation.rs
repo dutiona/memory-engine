@@ -3,10 +3,10 @@
 //! Extracted into the [`me_consolidate`] crate (Wave 2 #816 / S4, sub-PR 4 — the final
 //! S4 sub-PR, closes #940). `MemoryEngine::consolidate` resolves this engine's
 //! `MemoryCtx` + in-memory graph, then delegates to `me_consolidate::consolidate`.
-//! Base's pre-carve `consolidate` called only `self.ensure_open()` (the #742
-//! read-fence) — no explicit read-only pre-check — so the delegate stays a one-line
-//! forward with no pre-flight of its own; see `me_consolidate::consolidate`'s own doc
-//! for why `ReadOnly` is caught below the seam instead.
+//! The delegate stays a one-line forward with no pre-flight of its own; the primitive
+//! self-gates — `ctx.ensure_open()?` then `ctx.ensure_writable()?` (#972), so a read-only
+//! engine fails fast with `ReadOnly` before phase 1's read, not late at the below-seam
+//! `try_write()`. See `me_consolidate::consolidate`'s own doc.
 
 use std::sync::Arc;
 

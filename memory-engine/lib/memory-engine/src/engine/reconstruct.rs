@@ -118,6 +118,11 @@ impl MemoryEngine {
         new_fingerprint: &EmbeddingFingerprint,
         embedder: &Arc<dyn EmbeddingProvider>,
     ) -> Result<PromoteOutcome> {
+        // Read-only is the fundamental write-capability precondition — checked before the
+        // fingerprint misconfiguration check below, so a read-only engine reports
+        // `ReadOnly` rather than `EmbeddingDimension` (#972). reconstruct re-embeds the
+        // whole active set: it is a write.
+        self.ensure_writable()?;
         // Fail fast on a genuine misconfiguration: the declared target identity's
         // dimension must match what the provider actually produces. (A target dim
         // that differs from the engine's *current* dim is the whole point of #742

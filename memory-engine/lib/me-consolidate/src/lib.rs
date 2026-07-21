@@ -78,9 +78,9 @@ use me_types::error::Result;
 /// is the **first** check, and this function is its sole enforcement point (the facade
 /// delegate has no pre-flight of its own).
 ///
-/// Returns `MemoryError::ReadOnly` if the engine was opened read-only — surfaced *below
-/// the seam*, when the write phase reaches the pool's `try_write()` guard, not as a
-/// pre-flight (see the note at the fence check).
+/// Returns `MemoryError::ReadOnly` if the engine was opened read-only — checked as a
+/// pre-flight at entry via `ctx.ensure_writable()` (#972), before phase 1's read, rather
+/// than late at the below-seam `try_write()`.
 ///
 /// Propagates errors from any consolidation pass, the `SummaryGenerator`, or the
 /// `EmbeddingProvider`.
@@ -103,14 +103,15 @@ pub async fn consolidate(
     // carve moved it here, and here is where it lives now.
     //
     // Base's pre-carve `MemoryEngine::consolidate` called ONLY `self.ensure_open()`
-    // (the #742 read-fence) — never an explicit read-only pre-check. `ReadOnly` is
-    // caught below the seam instead (`apply_plan`'s write → `block_write` →
-    // `try_write()` → `MemoryError::ReadOnly`), so `ctx.ensure_writable()` is
-    // deliberately NOT added here either: adding it would be a behavior change (a
-    // read-only run would now fail before phase 1's read instead of during phase 3's
-    // write), not a faithful extraction. That gate is tracked systemically across all
-    // write primitives in #972.
+    // (the #742 read-fence) — `ReadOnly` was caught below the seam instead
+    // (`apply_plan`'s write → `block_write` → `try_write()` → `MemoryError::ReadOnly`).
     ctx.ensure_open()?;
+    // Fail fast on a read-only engine before phase 1's read + the consumer's
+    // summarize/embed IO (#972, uniform across every write primitive). The error is the
+    // same `ReadOnly`; this only moves it earlier, before the wasted read/IO — a
+    // deliberate, benign behavior change (previously the run reached phase 3's write
+    // before failing).
+    ctx.ensure_writable()?;
     // Phase 1 — READ: snapshot the active set + watermark below the seam.
     let snapshot = ctx
         .storage

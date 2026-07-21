@@ -4,20 +4,19 @@
 //! here as `crate::archive`, matching the `pool`/`store`/`graph`/`scope`/`forgetting`
 //! carve convention). Each public method below resolves this engine's `MemoryCtx` +
 //! cold-storage handle + in-memory graph + archive directory, then delegates to the
-//! corresponding `me_archive` free function. `archive()`'s pre-flight checks
-//! (`ensure_open`, the read-only fail-fast, and the file-backed check) stay here rather
-//! than moving into `me_archive::archive`: the file-backed check must run *before*
-//! `archive_dir` can even be resolved, and `MemoryCtx` carries no path state — so
-//! preserving the original's exact check order and error messages requires this
-//! delegate to own the whole pre-flight sequence (see `me_archive::manage`'s module
-//! docs for the mirror of this note).
+//! corresponding `me_archive` free function. The `MemoryCtx`-reachable pre-flight (the
+//! `ensure_open` fence + the read-only fail-fast) now self-gates inside
+//! `me_archive::archive` (#972); this delegate keeps its own copy as defence-in-depth and
+//! additionally owns the **file-backed** check, which must run *before* `archive_dir` can
+//! be resolved and which `MemoryCtx` carries no path state for (see `me_archive::manage`'s
+//! module docs for the mirror of this note).
 
 use std::path::PathBuf;
 
 use crate::archive::types::{
     ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVerifyResult,
 };
-use crate::error::{ArchiveError, MemoryError, Result};
+use crate::error::{ArchiveError, Result};
 
 use super::MemoryEngine;
 
@@ -58,10 +57,10 @@ impl MemoryEngine {
         self.ensure_open()?;
         // Fail fast on read-only engines before any filesystem I/O — the atomic
         // commit below the seam checks this too, but we want to avoid writing an
-        // orphan .pak file that would never be committed.
-        if self.read_only {
-            return Err(MemoryError::ReadOnly);
-        }
+        // orphan .pak file that would never be committed. Uses the shared
+        // `ensure_writable()` helper (#972) for consistency with every other
+        // facade write method, rather than an ad-hoc `read_only` check.
+        self.ensure_writable()?;
 
         if !self.is_file_backed() {
             return Err(ArchiveError::NotFileBacked(

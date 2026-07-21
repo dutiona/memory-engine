@@ -45,6 +45,7 @@ impl MemoryEngine {
         embedder: Option<Arc<dyn EmbeddingProvider>>,
         filter_config: &ActivityFilterConfig,
     ) -> Result<RecordActivityResult> {
+        self.ensure_writable()?; // #972: fail fast before filtering/embedding + the activity write
         // Step 1: Filter decision (no locks needed).
         let decision = apply_filter(
             &req.tool_name,
@@ -168,6 +169,7 @@ impl MemoryEngine {
         summary: Option<&str>,
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
+        self.ensure_writable()?; // #972: fail fast before the activity read + the checkpoint write
         // Find last activity_id for this session. `list_activities_by_session`
         // orders by `last_seen DESC`, so the first row of a 1-row page is the
         // most-recent activity — same row the old raw SQL `ORDER BY last_seen

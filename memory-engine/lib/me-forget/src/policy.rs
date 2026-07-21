@@ -166,8 +166,9 @@ pub fn compute_importance(
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Conflict` if the policy fails validation, or
-/// `MemoryError::Storage` on a backend failure.
+/// Returns `MemoryError::ReadOnly` if the engine is read-only (checked first, #972 — takes
+/// precedence over the policy validation below), `MemoryError::Conflict` if the policy fails
+/// validation, or `MemoryError::Storage` on a backend failure.
 ///
 /// # Example
 ///
@@ -198,12 +199,17 @@ pub async fn prune(
     // cycle). `prune` is a `pub` primitive reachable by callers other than the facade
     // delegate, so the fence is the primitive's own floor, not the wrapper's alone.
     // Base enforced it inside `MemoryEngine::forget` (`self.ensure_open()`), which
-    // still calls it as archive-style defence-in-depth. `ctx.ensure_writable()` is
-    // deliberately NOT added: base never pre-checked read-only either — `ReadOnly` is
-    // caught below the seam (`prune_atomic`'s write → `block_write` → `try_write()`),
-    // so adding a fail-fast here would be a behavior change, not an alignment. That
-    // gate is tracked systemically across all write primitives in #972.
+    // still calls it as archive-style defence-in-depth.
     ctx.ensure_open()?;
+    // Fail fast on a read-only engine, as the fundamental write-capability precondition
+    // (#972, uniform across every write primitive — checked before the request itself).
+    // `ReadOnly` was previously surfaced only below the seam by `prune_atomic`'s
+    // `try_write()`; checking here additionally skips the O(N) active-set scan. Deliberate
+    // precedence change: a read-only engine now rejects with `ReadOnly` *before*
+    // `policy.validate()` — an invalid policy on a read-only engine reports `ReadOnly`
+    // rather than the policy error, since no policy can be applied to a store you cannot
+    // write. Locked by `prune_read_only_fails_fast`.
+    ctx.ensure_writable()?;
     policy.validate()?;
 
     // Prune must evaluate the *entire* active set (importance is global). The
@@ -277,8 +283,10 @@ mod tests {
     /// (`prune_fenced_by_reopen_required`) with a local non-zero `AtomicUsize`.
     static NO_REOPEN: AtomicUsize = AtomicUsize::new(0);
 
-    /// Build the always-open [`MemoryCtx`] `prune` now takes (#970). `embed_dim`/
-    /// `read_only` are carried for signature uniformity — `prune` uses neither.
+    /// Build the always-open, writable [`MemoryCtx`] the happy-path `prune` tests take.
+    /// `read_only: false` matters since #972 — `prune` now checks `ctx.ensure_writable()`;
+    /// the read-only path has its own witness (`prune_read_only_fails_fast`). `embed_dim`
+    /// is still unused by `prune`, carried for signature uniformity.
     fn test_ctx(storage: &Arc<dyn StorageBackend>) -> MemoryCtx<'_> {
         MemoryCtx {
             storage,
@@ -313,6 +321,32 @@ mod tests {
         assert!(
             matches!(err, MemoryError::EmbeddingReopenRequired { new_dim } if new_dim == 384),
             "expected EmbeddingReopenRequired {{ new_dim: 384 }}, got {err:?}"
+        );
+    }
+
+    /// Regression witness for the #972 fail-fast read-only gate `prune` self-guards.
+    ///
+    /// A `read_only` handle must reject `prune` with `ReadOnly` *before* touching storage.
+    /// The backend here is genuinely writable — only the `MemoryCtx.read_only` flag is set —
+    /// so without the `ctx.ensure_writable()?` gate `prune` would run to completion and
+    /// return `Ok` (the storage-level `try_write()` fence only trips on a truly read-only
+    /// pool). That makes this a real mutation-witness: delete the gate and this test fails.
+    #[tokio::test]
+    async fn prune_read_only_fails_fast() {
+        let storage = me_test_support::factory::SqliteFactory.make().await;
+        let graph = RwLock::new(MemoryGraph::new());
+        let ctx = MemoryCtx {
+            storage: &storage,
+            embed_dim: DIM,
+            read_only: true,
+            reopen_required: &NO_REOPEN,
+        };
+        let err = prune(ctx, &graph, &ForgetPolicy::default(), Utc::now())
+            .await
+            .expect_err("a read-only handle must reject prune before touching storage");
+        assert!(
+            matches!(err, MemoryError::ReadOnly),
+            "expected ReadOnly, got {err:?}"
         );
     }
 

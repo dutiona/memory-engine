@@ -65,10 +65,10 @@ pub async fn run_dream_cycle<'a>(
     cycle: &dyn DreamCycle,
 ) -> Result<CycleReport> {
     ctx.ensure_open()?;
-    // Verify write access up front (apply happens separately).
-    if ctx.read_only {
-        return Err(MemoryError::ReadOnly);
-    }
+    // Verify write access up front — applying the returned report will write, so fail
+    // fast here rather than after the (potentially expensive) cycle run. Uniform with
+    // every other write primitive via `ctx.ensure_writable()` (#972).
+    ctx.ensure_writable()?;
     let cycle_ctx = build_cycle_context(ctx, dream).await?;
     cycle.run(&cycle_ctx).await
 }
@@ -110,6 +110,12 @@ pub async fn run_dream_cycle_guarded<'a>(
     cycle: &dyn DreamCycle,
 ) -> Result<CycleOutcome> {
     ctx.ensure_open()?;
+    // Fail fast on a read-only engine: the skip path advances the caller-write cursor
+    // (a `set_config` write). The run path returns an UNAPPLIED `CycleReport` (the caller
+    // applies it later via `apply_cycle_report`), so this gate also spares running a
+    // full cycle whose result could never be applied on a read-only engine (#972, uniform
+    // via `ctx.ensure_writable()`).
+    ctx.ensure_writable()?;
     // Cursor read + max-id read + (skip-only) advance via the port. These are
     // separate port calls rather than one lock-held critical section: per the
     // deferral contract this is benign — a caller write landing between the reads

@@ -76,6 +76,7 @@ impl MemoryEngine {
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
     pub async fn delete_lineage(&self, wisdom_fact_id: i64) -> Result<bool> {
+        self.ensure_writable()?;
         self.storage.delete_lineage(wisdom_fact_id).await
     }
 }
