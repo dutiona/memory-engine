@@ -625,28 +625,12 @@ impl MemoryEngine {
     /// though the facts are correctly persisted. [`ScopeTree::insert`] is
     /// idempotent by id, so re-inserting shared ancestors is a no-op.
     ///
-    /// The port walk (`get_scope`) is awaited up front into an owned `Vec`; the
-    /// `scope_tree` write guard is taken only afterward, so no lock is held
-    /// across `.await` (keeps the future `Send`).
+    /// Delegates to [`me_index::cache_scope_chain`] — the single home for the port
+    /// walk + `ScopeTree` hydration (#973). The port walk (`get_scope`) is awaited up
+    /// front into an owned `Vec` there; the `scope_tree` write guard is taken only
+    /// afterward, so no lock is held across `.await` (keeps the future `Send`).
     async fn cache_scope_chain(&self, leaf_id: i64) -> Result<()> {
-        let mut nodes = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut current = Some(leaf_id);
-        while let Some(node_id) = current {
-            if node_id == ScopeTree::root_id() || !seen.insert(node_id) {
-                break;
-            }
-            let node = self.storage.get_scope(node_id).await?;
-            current = node.parent_id;
-            nodes.push(node);
-        }
-        {
-            let mut tree = self.scope_tree.write();
-            for node in nodes {
-                tree.insert(node);
-            }
-        }
-        Ok(())
+        me_index::cache_scope_chain(&*self.storage, &self.scope_tree, leaf_id).await
     }
 
     // --- Public API: Config ---

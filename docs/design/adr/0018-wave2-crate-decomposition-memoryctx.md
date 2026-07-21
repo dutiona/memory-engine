@@ -51,8 +51,13 @@ build on these boundaries have the durable _why_.
 
 4. **`me-index` stays a separate L2 crate** (graph + scope projections), not folded into
    `me-backend-sqlite`: projections are backend-agnostic, and #763's freshness registry
-   - #247/#243 context work want a backend-free, trait-free, mockable home. `me-index`
-     depends on `{me-storage, me-types}` only (no `me-traits`).
+   - #247/#243 context work want a backend-agnostic, mockable home. `me-index` depends on
+     `{me-storage, me-types}` — on the `me-storage` **port trait**, never a concrete
+     backend, so it never links SQLite/PG (DIP). The port edge exists for
+     `me_index::cache_scope_chain` (#973), which hydrates the `ScopeTree` from a leaf's
+     persisted ancestry via `StorageBackend::get_scope`; it single-sources a walk that was
+     otherwise duplicated in `me-ingest` + the facade. No *direct* `me-traits` dep —
+     `me-traits` enters only transitively through `me-storage`.
 
 5. **Orphan-module homes:** `limits` → `me-types`; `upcaster` (`UpcasterRegistry`) →
    `me-storage` (event-payload versioning the port applies on read; both backends

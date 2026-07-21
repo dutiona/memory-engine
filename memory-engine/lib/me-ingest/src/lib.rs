@@ -207,7 +207,7 @@ async fn insert_fact_with_embedding(
     let scope_id = match &req.scope {
         Some(path) => {
             let id = ctx.storage.ensure_scope_path(path).await?;
-            cache_scope_chain(ctx, scope_tree, id).await?;
+            me_index::cache_scope_chain(&**ctx.storage, scope_tree, id).await?;
             id
         }
         None => 1, // root scope
@@ -542,35 +542,6 @@ async fn compute_batch_pins(
         .collect())
 }
 
-/// Cache the scope chain from `leaf_id` up to (but excluding) the root into the
-/// in-memory `scope_tree`.
-///
-/// NOTE: duplicated with the facade's `MemoryEngine::cache_scope_chain`
-/// (`engine/mod.rs`) — a shared home is decided later, with me-consolidate's
-/// needs (#973). Do not fold this back into a cross-crate call; the facade copy
-/// stays put and is used unchanged by `bootstrap.rs`/`cognitive.rs`/
-/// `ensure_scope_path`.
-async fn cache_scope_chain(
-    ctx: MemoryCtx<'_>,
-    scope_tree: &RwLock<ScopeTree>,
-    leaf_id: i64,
-) -> Result<()> {
-    let mut nodes = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut current = Some(leaf_id);
-    while let Some(node_id) = current {
-        if node_id == ScopeTree::root_id() || !seen.insert(node_id) {
-            break;
-        }
-        let node = ctx.storage.get_scope(node_id).await?;
-        current = node.parent_id;
-        nodes.push(node);
-    }
-    {
-        let mut tree = scope_tree.write();
-        for node in nodes {
-            tree.insert(node);
-        }
-    }
-    Ok(())
-}
+// `cache_scope_chain` was single-sourced into `me_index::cache_scope_chain` (#973), which
+// hydrates the `ScopeTree` from the persistence port; this crate and the facade both route
+// to it. The private copy that lived here is gone.

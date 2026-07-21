@@ -64,6 +64,7 @@ graph TD
     storage --> types
     traits --> types
     index --> types
+    index --> storage
 ```
 
 **The invariant this diagram encodes** — read it before changing any edge: an **L3
@@ -72,11 +73,17 @@ primitive depends on the _port_ (`me-storage`), never on a concrete backend.** T
 swappable (epic #628) and the primitives testable without one. `cargo` enforces it:
 `cargo tree -p <L3 crate> --edges normal` must show no `me-backend-*`.
 
-`me-index` (L2) depends on **`me-types` only** — not `me-storage`, not `me-traits` — so
-the graph/scope projections stay backend-free, *storage*-free, trait-free, and mockable
-(ADR 0018 decision #4). The conn-based bulk loaders that hydrate them live facade-side in
-`engine/graph_load.rs`, precisely to keep that property. (Verified: `me-index/Cargo.toml`
-lists `me-types` + `petgraph` and nothing else.)
+`me-index` (L2) depends on `me-types` + the `me-storage` **port** — but **not** `me-traits`
+and **not** any concrete backend, so its graph/scope projections stay backend-**agnostic**
+and mockable. The port dep was added in **#973** for `me_index::cache_scope_chain`, which
+hydrates the `ScopeTree` from a leaf's persisted ancestry via `StorageBackend::get_scope`;
+because it depends on the port *trait* (DIP), not a backend, me-index still never links
+SQLite/PG. This makes the code match ADR 0018 decision #4, which already listed the
+`me-index → me-storage` edge (ahead of the code); #973 realizes it and records the
+rationale — collapsing the hydration-walk copy that the *pre-#973 storage-free code* had
+forced into `me-ingest` **and** the facade. The `MemoryGraph` bulk loaders still live
+facade-side in `engine/graph_load.rs`. (Verified acyclic: `me-storage` depends only on
+`me-types` + `me-traits`, never on `me-index`.)
 
 **`me-test-support`** is dev-only (`publish = false`, in `[dev-dependencies]` everywhere)
 and does not inflate the shipped graph.
@@ -214,7 +221,7 @@ L0→L4 DAG. The L0–L2 foundation crates, as separate workspace members under
 : The persistence **port**. Owns the `StorageBackend` umbrella supertrait over six bounded-context traits (`FactGraph`, `EventLog`, `SearchIndex`, `ConsolidationStore`, `SessionStore`, `SchemaManager`) + the feature-gated `ColdStorage`; the closed `FactFilter`/`TemporalFilter` query vocabulary; the `BackendCapabilities`/`LexicalRanker` tier signal; `MemoryCtx` (the universal capability handle — see the [architecture overview](../design/architecture-overview.md)); and `UpcasterRegistry` (event-payload versioning the port applies on read). No SQL string or driver type appears here — backends implement the traits and map driver errors to the driver-opaque `StorageError` at the seam. Depends on `{me-types, me-traits}`.
 
 `me-index` (L2 — `memory-engine/lib/me-index/`)
-: Backend-agnostic in-memory projections: `MemoryGraph` (the `petgraph`-backed knowledge graph, ex-`graph/`) and `ScopeTree` (the hierarchical scope cache, ex-`scope/`). Trait-free and mockable — depends only on `me-types`, not `me-traits` or `me-storage` (ADR 0018 decision #4) — so the #763 freshness registry and the #247/#243 context work get a backend-free home. Rebuilt from `me-types` DTOs by the facade's `engine::graph_load` glue on engine open.
+: Backend-agnostic in-memory projections: `MemoryGraph` (the `petgraph`-backed knowledge graph, ex-`graph/`) and `ScopeTree` (the hierarchical scope cache, ex-`scope/`) — plus `cache_scope_chain`, which hydrates the `ScopeTree` from persisted scope ancestry via the storage port (#973). Depends on `me-types` + the `me-storage` **port trait** (`get_scope`) — not `me-traits`, and never a concrete backend, so it stays backend-agnostic (DIP; realizes the `me-index → me-storage` edge ADR 0018 decision #4 already listed) and the #763 freshness registry / #247/#243 context work still get a backend-free home. `MemoryGraph` is rebuilt from `me-types` DTOs by the facade's `engine::graph_load` glue on engine open.
 
 `me-backend-sqlite` (L2 — `memory-engine/lib/me-backend-sqlite/`)
 : The `SqliteBackend` `StorageBackend` impl. Owns the `ConnectionPool` (N readers + 1 writer, ex-`pool/`), the `store/` table accessors + schema migrations (ex-`store/`), the `block_read`/`block_write`/`for_each_streamed` `spawn_blocking` seam, the FTS5/vector search cores (`search::fts`/`search::vector`; the RRF merge + the `MemoryQuery` API stay in the facade until `me-query`, S4), and the sidecar `.snapshot` file I/O. Depends on `{me-types, me-traits, me-storage}`.
