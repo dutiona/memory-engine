@@ -27,7 +27,7 @@ impl MemoryEngine {
         // inside the backend's `expire_fact` (Stage B, #713), so the old engine-side
         // `notify_expire` loop is gone.
         let (stats, _pruned_ids) =
-            crate::forgetting::prune(&self.storage, &self.graph, policy, Utc::now()).await?;
+            crate::forgetting::prune(self.mem_ctx(), &self.graph, policy, Utc::now()).await?;
         Ok(stats)
     }
 

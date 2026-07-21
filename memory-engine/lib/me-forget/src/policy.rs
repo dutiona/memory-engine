@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
 use me_index::graph::MemoryGraph;
-use me_storage::StorageBackend;
+use me_storage::MemoryCtx;
 use me_types::error::Result;
 use me_types::types::FactScoringRow;
 use me_types::types::forgetting::PruneStats;
@@ -178,31 +176,41 @@ pub fn compute_importance(
 /// shows the intended call shape, not a compilable public API:
 ///
 /// ```ignore
-/// use std::sync::Arc;
 /// use chrono::Utc;
 /// use parking_lot::RwLock;
 ///
-/// let storage: Arc<dyn StorageBackend> = /* a backend */;
+/// let ctx: MemoryCtx = /* the universal capability handle (see `MemoryEngine::mem_ctx`) */;
 /// let graph = RwLock::new(MemoryGraph::new());
 /// let policy = ForgetPolicy::default();
 ///
 /// // Score every active fact and soft-expire the sub-threshold set.
-/// let (stats, expired) = prune(&storage, &graph, &policy, Utc::now()).await?;
+/// let (stats, expired) = prune(ctx, &graph, &policy, Utc::now()).await?;
 /// assert_eq!(expired.len(), stats.facts_expired);
 /// ```
 pub async fn prune(
-    storage: &Arc<dyn StorageBackend>,
+    ctx: MemoryCtx<'_>,
     graph: &RwLock<MemoryGraph>,
     policy: &ForgetPolicy,
     now: DateTime<Utc>,
 ) -> Result<(PruneStats, Vec<i64>)> {
+    // The #742 read-fence, self-guarded at the primitive entry like every other L3
+    // free function (`ingest`/`query`/`consolidate`/`resolve`/`archive`/the dream
+    // cycle). `prune` is a `pub` primitive reachable by callers other than the facade
+    // delegate, so the fence is the primitive's own floor, not the wrapper's alone.
+    // Base enforced it inside `MemoryEngine::forget` (`self.ensure_open()`), which
+    // still calls it as archive-style defence-in-depth. `ctx.ensure_writable()` is
+    // deliberately NOT added: base never pre-checked read-only either — `ReadOnly` is
+    // caught below the seam (`prune_atomic`'s write → `block_write` → `try_write()`),
+    // so adding a fail-fast here would be a behavior change, not an alignment. That
+    // gate is tracked systemically across all write primitives in #972.
+    ctx.ensure_open()?;
     policy.validate()?;
 
     // Prune must evaluate the *entire* active set (importance is global). The
     // lightweight scoring projection bounds the working set to a few scalars per
     // fact (issue #572 / L8). Awaited up front so the graph guard below is not held
     // across it.
-    let active_facts = storage.list_active_facts_scoring().await?;
+    let active_facts = ctx.storage.list_active_facts_scoring().await?;
 
     // Score every active fact against its in-memory graph degree, and pick the
     // sub-threshold unpinned/non-exempt set — all under one brief read guard with
@@ -234,7 +242,7 @@ pub async fn prune(
     // Atomic write phase below the seam: materialize all scores + expire the
     // sub-threshold set + cascade edge expiry, in one transaction. Returns the ids
     // it actually expired (the backend also fires HNSW `notify_expire`).
-    let (stats, expired) = storage.prune_atomic(&scored, &to_expire, now).await?;
+    let (stats, expired) = ctx.storage.prune_atomic(&scored, &to_expire, now).await?;
 
     // Reconcile the in-memory graph after the commit (write guard, no `.await`).
     if !expired.is_empty() {
@@ -254,10 +262,59 @@ mod tests {
     use me_test_support::factory::ConformanceBackend;
     // Seed embeddings at the SAME dim the SqliteFactory pool is provisioned with, so a
     // future change to `DIM` can't silently desync the seed length from the pool (#969).
+    use me_storage::StorageBackend;
     use me_test_support::fixtures::DIM;
+    use me_types::error::MemoryError;
     use me_types::types::FactType;
     use proptest::prelude::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    /// The reconstruction fence (#742) the happy-path tests hand to `prune`, always open.
+    /// A single shared `'static` zero serves every open-fence call-site without a per-test
+    /// local; the closed-fence path has its own test below
+    /// (`prune_fenced_by_reopen_required`) with a local non-zero `AtomicUsize`.
+    static NO_REOPEN: AtomicUsize = AtomicUsize::new(0);
+
+    /// Build the always-open [`MemoryCtx`] `prune` now takes (#970). `embed_dim`/
+    /// `read_only` are carried for signature uniformity — `prune` uses neither.
+    fn test_ctx(storage: &Arc<dyn StorageBackend>) -> MemoryCtx<'_> {
+        MemoryCtx {
+            storage,
+            embed_dim: DIM,
+            read_only: false,
+            reopen_required: &NO_REOPEN,
+        }
+    }
+
+    /// Regression witness for the #742 fence `prune` self-guards at entry (#970 review).
+    ///
+    /// A non-zero `reopen_required` must short-circuit `prune` with
+    /// `EmbeddingReopenRequired` *before* any storage access. Without this test, deleting
+    /// the `ctx.ensure_open()?` line would silently restore the direct-primitive bypass
+    /// while the whole suite stayed green (every other test uses the always-open fence,
+    /// and the facade wrapper's own guard masks the primitive's at the engine boundary).
+    #[tokio::test]
+    async fn prune_fenced_by_reopen_required() {
+        let storage = me_test_support::factory::SqliteFactory.make().await;
+        let graph = RwLock::new(MemoryGraph::new());
+        // Non-zero D′ = a different-dim reconstruction has fenced this handle.
+        let fenced = AtomicUsize::new(384);
+        let ctx = MemoryCtx {
+            storage: &storage,
+            embed_dim: DIM,
+            read_only: false,
+            reopen_required: &fenced,
+        };
+        let err = prune(ctx, &graph, &ForgetPolicy::default(), Utc::now())
+            .await
+            .expect_err("a fenced handle must reject prune before touching storage");
+        assert!(
+            matches!(err, MemoryError::EmbeddingReopenRequired { new_dim } if new_dim == 384),
+            "expected EmbeddingReopenRequired {{ new_dim: 384 }}, got {err:?}"
+        );
+    }
 
     #[tokio::test]
     async fn decay_at_zero_is_one() {
@@ -465,7 +522,9 @@ mod tests {
             ..ForgetPolicy::default()
         };
 
-        let (stats, _expired_ids) = prune(&storage, &graph, &policy, now).await.unwrap();
+        let (stats, _expired_ids) = prune(test_ctx(&storage), &graph, &policy, now)
+            .await
+            .unwrap();
         assert_eq!(stats.facts_evaluated, 3);
         // At least 1 fact should be pruned (fact 3 with low importance + old age)
         assert!(
@@ -539,7 +598,9 @@ mod tests {
             min_importance: 0.3,
             ..ForgetPolicy::default()
         };
-        let (stats, _pruned_ids) = prune(&storage, &graph, &policy, now).await.unwrap();
+        let (stats, _pruned_ids) = prune(test_ctx(&storage), &graph, &policy, now)
+            .await
+            .unwrap();
 
         assert_eq!(stats.facts_expired, 1); // only unpinned
         assert_eq!(stats.facts_evaluated, 2);
@@ -582,7 +643,9 @@ mod tests {
 
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
         let policy = ForgetPolicy::default();
-        prune(&storage, &graph, &policy, now).await.unwrap();
+        prune(test_ctx(&storage), &graph, &policy, now)
+            .await
+            .unwrap();
 
         // After prune, importance_score should be updated from default
         let fact = storage.get_fact(1).await.unwrap();
@@ -672,7 +735,9 @@ mod tests {
             min_importance: 0.3,
             ..ForgetPolicy::default()
         };
-        let (stats, expired) = prune(&storage, &graph, &policy, now).await.unwrap();
+        let (stats, expired) = prune(test_ctx(&storage), &graph, &policy, now)
+            .await
+            .unwrap();
 
         assert_eq!(stats.facts_evaluated, 3);
         assert_eq!(
@@ -746,7 +811,9 @@ mod tests {
         };
 
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
-        let (stats, _) = prune(&storage, &graph, &policy, now).await.unwrap();
+        let (stats, _) = prune(test_ctx(&storage), &graph, &policy, now)
+            .await
+            .unwrap();
         assert_eq!(
             stats.facts_expired, 1,
             "an explicit half-life override re-enables decay for an exempt type"
@@ -912,7 +979,9 @@ mod tests {
             min_importance: 0.3,
             ..ForgetPolicy::default()
         };
-        let (stats, expired) = prune(&storage, &graph, &policy, now).await.unwrap();
+        let (stats, expired) = prune(test_ctx(&storage), &graph, &policy, now)
+            .await
+            .unwrap();
 
         // Only the victim is pruned (survivor + bystander are decay-exempt Semantic).
         assert_eq!(stats.facts_evaluated, 3);
@@ -974,7 +1043,9 @@ mod tests {
         // Insert nothing — the store is empty.
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
         let policy = ForgetPolicy::default();
-        let (stats, expired) = prune(&storage, &graph, &policy, now).await.unwrap();
+        let (stats, expired) = prune(test_ctx(&storage), &graph, &policy, now)
+            .await
+            .unwrap();
 
         assert_eq!(stats.facts_evaluated, 0);
         assert_eq!(stats.facts_expired, 0);
