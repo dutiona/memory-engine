@@ -388,6 +388,12 @@ pub async fn handle_statistics(engine: &MemoryEngine) -> Result<CallToolResult, 
     ok_json(value)
 }
 
+// The per-entry validation loop is a single linear parse→validate→collect flow whose
+// per-field error arms (each malformed field → indexed `failed` entry + `continue`) read
+// worse split across helpers. It crossed the 100-line soft cap when #842 made the scalar
+// getters fallible per-entry here (explicit `match` arms instead of a `?`), matching
+// `handle_query`'s existing exemption.
+#[allow(clippy::too_many_lines)]
 pub async fn handle_flush_insights(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
@@ -429,24 +435,53 @@ pub async fn handle_flush_insights(
             continue;
         };
 
-        let Some(content) = get_str(obj, "content")? else {
-            failed.push(json!({ "index": i, "error": "missing content" }));
-            continue;
+        // #842: this is a per-entry BATCH loop with partial-failure semantics — a
+        // malformed entry lands in `failed` and its valid siblings still flush. So a
+        // getter's present-but-wrong-type error must become a `failed` entry + `continue`
+        // here, NOT `?`-propagate out and abort the whole batch (which the uniform sweep
+        // would have done). Every request-level handler keeps the `?`; only this loop
+        // catches.
+        let content = match get_str(obj, "content") {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                failed.push(json!({ "index": i, "error": "missing content" }));
+                continue;
+            }
+            Err(e) => {
+                failed.push(json!({ "index": i, "error": e.message.to_string() }));
+                continue;
+            }
         };
 
-        let fact_type = match get_str(obj, "fact_type")? {
-            Some(s) => match parse_fact_type(&s) {
+        let fact_type = match get_str(obj, "fact_type") {
+            Ok(Some(s)) => match parse_fact_type(&s) {
                 Ok(ft) => ft,
                 Err(e) => {
                     failed.push(json!({ "index": i, "error": e.to_string() }));
                     continue;
                 }
             },
-            None => FactType::Semantic,
+            Ok(None) => FactType::Semantic,
+            Err(e) => {
+                failed.push(json!({ "index": i, "error": e.message.to_string() }));
+                continue;
+            }
         };
 
-        let scope = get_str(obj, "scope")?;
-        let importance = get_f64(obj, "base_importance")?;
+        let scope = match get_str(obj, "scope") {
+            Ok(v) => v,
+            Err(e) => {
+                failed.push(json!({ "index": i, "error": e.message.to_string() }));
+                continue;
+            }
+        };
+        let importance = match get_f64(obj, "base_importance") {
+            Ok(v) => v,
+            Err(e) => {
+                failed.push(json!({ "index": i, "error": e.message.to_string() }));
+                continue;
+            }
+        };
 
         if let Some(imp) = importance
             && !(0.0..=1.0).contains(&imp)

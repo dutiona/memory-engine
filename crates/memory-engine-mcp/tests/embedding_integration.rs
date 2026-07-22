@@ -560,6 +560,61 @@ async fn flush_insights_partial_failure() {
     assert_eq!(body["failed_count"].as_u64().unwrap(), 2);
 }
 
+/// #842 regression: a present-but-WRONG-TYPE scalar in a batch entry (here a non-string
+/// `content`) must land in `failed` per-entry, NOT `?`-propagate and abort the whole batch
+/// (which would drop the valid sibling). Witness for the cross-model finding on PR #1008 —
+/// the uniform getter-fallibility sweep was wrong inside this partial-failure loop; without
+/// the per-entry catch, `dispatch` returns `invalid_params` and this test's `unwrap_ok`
+/// panics.
+#[tokio::test(flavor = "multi_thread")]
+async fn flush_insights_wrong_type_scalar_is_per_entry_failure() {
+    let server = MockServer::start().await;
+    let emb = make_embedding(DIM);
+    // Only the 1 valid insight reaches the batch embed.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "index": 0, "embedding": emb }]
+        })))
+        .mount(&server)
+        .await;
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "test-model",
+        "test-provider",
+        None,
+        None,
+    )
+    .await;
+    let body = unwrap_ok(
+        tools::dispatch(
+            "memory_flush_insights",
+            args(json!({
+                "insights": [
+                    { "content": "Good insight" },
+                    { "content": 42 } // wrong type: non-string content
+                ]
+            })),
+            &engine,
+            Some(provider),
+            None,
+            DIM,
+            &cfg(),
+        )
+        .await,
+    );
+    assert_eq!(
+        body["added"].as_u64().unwrap(),
+        1,
+        "the valid sibling must still flush"
+    );
+    assert_eq!(
+        body["failed_count"].as_u64().unwrap(),
+        1,
+        "the wrong-typed entry is a per-entry failure, not a whole-batch abort"
+    );
+}
+
 /// A present-but-non-object `metadata` is rejected per-entry into `failed` (not
 /// silently coerced to `{}`), while a sibling insight with valid metadata still flushes.
 #[tokio::test(flavor = "multi_thread")]
