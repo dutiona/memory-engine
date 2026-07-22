@@ -113,7 +113,7 @@ pub async fn handle_dump_state(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let format_str = get_str(args, "format").unwrap_or_else(|| "json".to_owned());
+    let format_str = get_str(args, "format")?.unwrap_or_else(|| "json".to_owned());
 
     let ext = match format_str.as_str() {
         "json" => "json",
@@ -123,7 +123,7 @@ pub async fn handle_dump_state(
         }
     };
 
-    let path = match get_str(args, "path") {
+    let path = match get_str(args, "path")? {
         Some(p) => validate_dump_path(&PathBuf::from(p))?,
         None => default_dump_path(&std::env::temp_dir(), ext),
     };
@@ -146,7 +146,7 @@ pub async fn handle_pin_fact(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")?
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
 
     engine.pin_fact(fact_id).await.map_err(to_mcp_error)?;
@@ -158,7 +158,7 @@ pub async fn handle_unpin_fact(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")?
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
 
     engine.unpin_fact(fact_id).await.map_err(to_mcp_error)?;

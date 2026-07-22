@@ -28,16 +28,16 @@ pub async fn handle_ingest(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let event_type_str = get_str(args, "event_type")
+    let event_type_str = get_str(args, "event_type")?
         .ok_or_else(|| ErrorData::invalid_params("missing event_type", None))?;
     let event_type = parse_event_type(&event_type_str)?;
     let payload = args.get("payload").cloned().unwrap_or_else(|| json!({}));
-    let source =
-        get_str(args, "source").ok_or_else(|| ErrorData::invalid_params("missing source", None))?;
-    let session_id = get_str(args, "session_id");
+    let source = get_str(args, "source")?
+        .ok_or_else(|| ErrorData::invalid_params("missing source", None))?;
+    let session_id = get_str(args, "session_id")?;
     let timestamp = crate::tools::parse::get_datetime(args, "timestamp")?.unwrap_or_else(Utc::now);
 
-    let scope_id = match get_str(args, "scope") {
+    let scope_id = match get_str(args, "scope")? {
         Some(path) => engine
             .ensure_scope_path(&path)
             .await
@@ -67,17 +67,17 @@ pub async fn handle_add_fact(
     embedder: Option<&Arc<HttpEmbeddingProvider>>,
     embed_dim: usize,
 ) -> Result<CallToolResult, ErrorData> {
-    let content = get_str(args, "content")
+    let content = get_str(args, "content")?
         .ok_or_else(|| ErrorData::invalid_params("missing content", None))?;
-    let fact_type = match get_str(args, "fact_type") {
+    let fact_type = match get_str(args, "fact_type")? {
         Some(s) => parse_fact_type(&s)?,
         None => FactType::Semantic,
     };
-    let source_event_id = get_i64(args, "source_event_id");
-    let scope = get_str(args, "scope");
+    let source_event_id = get_i64(args, "source_event_id")?;
+    let scope = get_str(args, "scope")?;
 
     // Validate importance range
-    let importance = get_f64(args, "base_importance");
+    let importance = get_f64(args, "base_importance")?;
     if let Some(imp) = importance
         && !(0.0..=1.0).contains(&imp)
     {
@@ -93,7 +93,7 @@ pub async fn handle_add_fact(
         return Err(ValidationError::TemporalInconsistency.into());
     }
 
-    let pinned = get_bool(args, "pinned");
+    let pinned = get_bool(args, "pinned")?;
     let metadata = args.get("metadata").cloned();
 
     // Pre-computed embedding or server-side embedding. `parse_embedding` rejects a
@@ -159,7 +159,7 @@ pub async fn handle_query(
     let mut query = memory_engine::MemoryQuery::new();
 
     // Parse and validate search mode (if explicit)
-    let explicit_mode = match get_str(args, "mode") {
+    let explicit_mode = match get_str(args, "mode")? {
         Some(s) => Some(parse_search_mode(&s)?),
         None => None,
     };
@@ -181,7 +181,7 @@ pub async fn handle_query(
             .map_err(to_mcp_error)?;
     }
 
-    if let Some(text) = get_str(args, "text") {
+    if let Some(text) = get_str(args, "text")? {
         query = query.text(text.clone());
 
         // Determine effective mode for embedding decision
@@ -237,8 +237,8 @@ pub async fn handle_query(
     }
 
     // Scope
-    if let Some(scope) = get_str(args, "scope") {
-        let scope_mode = get_str(args, "scope_mode").unwrap_or_else(|| "subtree".to_owned());
+    if let Some(scope) = get_str(args, "scope")? {
+        let scope_mode = get_str(args, "scope_mode")?.unwrap_or_else(|| "subtree".to_owned());
         query = match scope_mode.as_str() {
             "subtree" => query.scope_subtree(scope),
             "exact" => query.scope_exact(scope),
@@ -269,19 +269,19 @@ pub async fn handle_query(
         (None, None) => {}
     }
 
-    if let Some(ft) = get_str(args, "fact_type") {
+    if let Some(ft) = get_str(args, "fact_type")? {
         query = query.fact_type(parse_fact_type(&ft)?);
     }
-    if let Some(min) = get_f64(args, "min_importance") {
+    if let Some(min) = get_f64(args, "min_importance")? {
         query = query.min_importance_score(min);
     }
-    if get_bool(args, "pinned_only").unwrap_or(false) {
+    if get_bool(args, "pinned_only")?.unwrap_or(false) {
         query = query.pinned_only();
     }
     if let Some(limit) = limit {
         query = query.limit(limit);
     }
-    if get_bool(args, "include_expired_probe").unwrap_or(false) {
+    if get_bool(args, "include_expired_probe")?.unwrap_or(false) {
         query = query.include_expired_probe();
     }
 
@@ -305,11 +305,11 @@ pub async fn handle_resume_context(
     let depth_level = get_depth(args)?;
 
     let config = ResumeConfig {
-        scope_path: get_str(args, "scope"),
+        scope_path: get_str(args, "scope")?,
         now: Some(Utc::now()),
         pinned_cap: get_usize(args, "pinned_cap")?.unwrap_or(50),
         high_importance_cap: get_usize(args, "high_importance_cap")?.unwrap_or(20),
-        high_importance_min: get_f64(args, "high_importance_min").unwrap_or(0.7),
+        high_importance_min: get_f64(args, "high_importance_min")?.unwrap_or(0.7),
         due_cap: get_usize(args, "due_cap")?.unwrap_or(10),
         recent_cap: get_usize(args, "recent_cap")?.unwrap_or(10),
     };
@@ -325,7 +325,7 @@ pub async fn handle_list_due(
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let depth_level = get_depth(args)?;
-    let scope = get_str(args, "scope");
+    let scope = get_str(args, "scope")?;
 
     let facts = engine
         .list_due(Utc::now(), scope.as_deref())
@@ -344,7 +344,7 @@ pub async fn handle_next_due_time(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let scope = get_str(args, "scope");
+    let scope = get_str(args, "scope")?;
     let next = engine
         .next_due_time(scope.as_deref())
         .await
@@ -357,7 +357,7 @@ pub async fn handle_explain_fact(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")?
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
     let depth_level = get_depth(args)?;
 
@@ -371,7 +371,7 @@ pub async fn handle_get_fact(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")?
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
     let depth_level = get_depth(args)?;
 
@@ -429,12 +429,12 @@ pub async fn handle_flush_insights(
             continue;
         };
 
-        let Some(content) = get_str(obj, "content") else {
+        let Some(content) = get_str(obj, "content")? else {
             failed.push(json!({ "index": i, "error": "missing content" }));
             continue;
         };
 
-        let fact_type = match get_str(obj, "fact_type") {
+        let fact_type = match get_str(obj, "fact_type")? {
             Some(s) => match parse_fact_type(&s) {
                 Ok(ft) => ft,
                 Err(e) => {
@@ -445,8 +445,8 @@ pub async fn handle_flush_insights(
             None => FactType::Semantic,
         };
 
-        let scope = get_str(obj, "scope");
-        let importance = get_f64(obj, "base_importance");
+        let scope = get_str(obj, "scope")?;
+        let importance = get_f64(obj, "base_importance")?;
 
         if let Some(imp) = importance
             && !(0.0..=1.0).contains(&imp)

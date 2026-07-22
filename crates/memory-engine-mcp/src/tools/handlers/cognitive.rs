@@ -88,7 +88,7 @@ pub async fn handle_get_recent_insights(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let project_path = get_str(args, "project_path")
+    let project_path = get_str(args, "project_path")?
         .ok_or_else(|| ErrorData::invalid_params("missing 'project_path'", None))?;
     // The schema declares `limit` as an integer `minimum: 1`; the MCP layer does not
     // validate args against the schema, so enforce it here. A present-but-malformed
