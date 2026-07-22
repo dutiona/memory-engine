@@ -209,55 +209,55 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
 
 The Wave 2 (#816) decomposition is complete (S1–S6): **18 crates** in a strictly-acyclic
 L0→L4 DAG. The L0–L2 foundation crates, as separate workspace members under
-`memory-engine/lib/`:
+`crates/`:
 
-`me-types` (L0 — `memory-engine/lib/me-types/`)
+`me-types` (L0 — `crates/me-types/`)
 : Three module trees, relocated verbatim so the cycle-break and the crate-carve stayed independently verifiable. `types` — the domain DTOs (`Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`, insertion structs, enums, option structs) **plus** the relocated `snapshot`/`cycle-report`/search-result sidecar vocabularies, and (S2) the `EmbeddingSpace`/`SpaceStatus` embedding-space-registry DTOs (moved out of `me-backend-sqlite` so `me-backend-postgres` can share them without a backend-to-backend dependency), and the forget/prune pair `PruneStats` (S1) + `ForgetPolicy` (S5, #985) — pure data-out/config-in with no L3 deps; `ForgetPolicy` was hoisted out of `me-forget` to rejoin `PruneStats` so an L0.5 trait signature can name it (`DreamCtx::forget`, #981). `error` — `MemoryError` (`thiserror`), its typed sub-enums, and the `Result` alias. `limits` — the ingest-time payload size caps enforced during (de)serialization, plus the consolidation dedup/cluster safety caps (#983, single-sourced here so `me-consolidate` and `me-backend-sqlite` cannot drift and so they stay off the facade's public API). No internal (`me-*`) deps — the acyclic leaf.
 
-`me-traits` (L0.5 — `memory-engine/lib/me-traits/`)
+`me-traits` (L0.5 — `crates/me-traits/`)
 : The consumer-implemented capability traits the engine delegates to — `EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker` — plus the trait-adjacent policy types (`ConsolidationConfig`, `CrudDecision`, …) and the `CycleCtx` read-set trait that lets `DreamCycle::run` take `&dyn CycleCtx` without pulling in `me-consolidate`. Depends only on `me-types`. (`ForgetPolicy` is **not** here — it is a pure-data policy DTO and lives in `me-types` alongside its `PruneStats` output; see S5.)
 
-`me-storage` (L1 — `memory-engine/lib/me-storage/`)
+`me-storage` (L1 — `crates/me-storage/`)
 : The persistence **port**. Owns the `StorageBackend` umbrella supertrait over six bounded-context traits (`FactGraph`, `EventLog`, `SearchIndex`, `ConsolidationStore`, `SessionStore`, `SchemaManager`) + the feature-gated `ColdStorage`; the closed `FactFilter`/`TemporalFilter` query vocabulary; the `BackendCapabilities`/`LexicalRanker` tier signal; `MemoryCtx` (the universal capability handle — see the [architecture overview](../design/architecture-overview.md)); and `UpcasterRegistry` (event-payload versioning the port applies on read). No SQL string or driver type appears here — backends implement the traits and map driver errors to the driver-opaque `StorageError` at the seam. Depends on `{me-types, me-traits}`.
 
-`me-index` (L2 — `memory-engine/lib/me-index/`)
+`me-index` (L2 — `crates/me-index/`)
 : Backend-agnostic in-memory projections: `MemoryGraph` (the `petgraph`-backed knowledge graph, ex-`graph/`) and `ScopeTree` (the hierarchical scope cache, ex-`scope/`) — plus `cache_scope_chain`, which hydrates the `ScopeTree` from persisted scope ancestry via the storage port (#973). Depends on `me-types` + the `me-storage` **port trait** (`get_scope`) — not `me-traits`, and never a concrete backend, so it stays backend-agnostic (DIP; realizes the `me-index → me-storage` edge ADR 0018 decision #4 already listed) and the #763 freshness registry / #247/#243 context work still get a backend-free home. `MemoryGraph` is rebuilt from `me-types` DTOs by the facade's `engine::graph_load` glue on engine open.
 
-`me-backend-sqlite` (L2 — `memory-engine/lib/me-backend-sqlite/`)
+`me-backend-sqlite` (L2 — `crates/me-backend-sqlite/`)
 : The `SqliteBackend` `StorageBackend` impl. Owns the `ConnectionPool` (N readers + 1 writer, ex-`pool/`), the `store/` table accessors + schema migrations (ex-`store/`), the `block_read`/`block_write`/`for_each_streamed` `spawn_blocking` seam, the FTS5/vector search cores (`search::fts`/`search::vector`; the RRF merge + the `MemoryQuery` API stay in the facade until `me-query`, S4), and the sidecar `.snapshot` file I/O. Depends on `{me-types, me-traits, me-storage}`.
 
-`me-backend-postgres` (L2 — `memory-engine/lib/me-backend-postgres/`)
+`me-backend-postgres` (L2 — `crates/me-backend-postgres/`)
 : The `PgBackend` `StorageBackend` impl (#633 skeleton): a `deadpool-postgres` pool + a fresh v14-logical migration chain (native FK constraints, `GENERATED ALWAYS AS IDENTITY` ids, a `tsvector` generated column + GIN index, `vector(N)` pgvector columns) + the `SchemaManager` lifecycle/identity/config core. Inspection and the #623 background-reconstruction methods are `MemoryError::NotImplemented` stubs; data CRUD is #634, lexical+vector search and the conformance-arm flip are #635. Depends only on `{me-types, me-storage}` — **not** `me-backend-sqlite` (no backend-to-backend edge). Optional: pulled by the facade's `backend-postgres` feature so a `backend-sqlite`-only build never compiles `tokio-postgres`/`deadpool-postgres`.
 
-The L3 primitive crates (`memory-engine/lib/`), each a free-function primitive over the
+The L3 primitive crates (`crates/`), each a free-function primitive over the
 `me-storage` **port** (never a concrete backend — the facade selects the backend). Acyclic
 siblings: no L3 crate depends on another.
 
-`me-ingest` (L3 — `memory-engine/lib/me-ingest/`)
+`me-ingest` (L3 — `crates/me-ingest/`)
 : The append-only event log + fact-derivation primitives (`ingest`, `add_fact`, `add_fact_precomputed`, `add_facts_batch`). Takes `MemoryCtx` + the `ScopeTree`; delegates embedding/classification to the consumer traits. Depends on `{me-types, me-traits, me-storage, me-index}`.
 
-`me-query` (L3 — `memory-engine/lib/me-query/`)
+`me-query` (L3 — `crates/me-query/`)
 : The hybrid retrieval primitive: FTS5 + vector + graph candidates merged by RRF (`query`, `execute_query`). Takes `MemoryCtx` + `ScopeTree`; the SQL search cores live below the seam in the backend. Depends on `{me-types, me-traits, me-storage, me-index}`.
 
-`me-consolidate` (L3 — `memory-engine/lib/me-consolidate/`)
+`me-consolidate` (L3 — `crates/me-consolidate/`)
 : The three-pass consolidation pipeline (dedup → cluster → global), lock-free compute + atomic apply (#409). The SQL-touching load/apply halves live in `me-backend-sqlite`; the pure `compute_plan` stays here. Depends on `{me-types, me-traits, me-storage, me-index}`.
 
-`me-forget` (L3 — `memory-engine/lib/me-forget/`)
+`me-forget` (L3 — `crates/me-forget/`)
 : The Ebbinghaus-decay + multi-signal-importance prune primitive (`prune`, `compute_importance`). Scores the active set against in-memory graph degree and soft-expires the sub-threshold set atomically below the seam. Depends on `{me-types, me-storage, me-index}`.
 
-`me-resolve` (L3 — `memory-engine/lib/me-resolve/`)
+`me-resolve` (L3 — `crates/me-resolve/`)
 : The bi-temporal conflict-arbitration primitive (`resolve_conflict`): a single-transaction CRUD dispatch over the consumer `ConflictArbiter`'s decision, mirroring the in-memory graph only after commit. Depends on `{me-types, me-traits, me-storage, me-index}`.
 
-`me-archive` (L3 — `memory-engine/lib/me-archive/`, feature `archive`)
+`me-archive` (L3 — `crates/me-archive/`, feature `archive`)
 : The cold-storage `.pak` primitive (`archive`, `list_archives`, `search_archives_fallback`) over the feature-gated `ColdStorage` port. Depends on `{me-types, me-storage, me-index}`.
 
-`me-cognitive` (L3 — `memory-engine/lib/me-cognitive/`)
+`me-cognitive` (L3 — `crates/me-cognitive/`)
 : The Phase-5 dream cycle (#981): `run_dream_cycle` / `run_dream_cycle_guarded` over the `DreamCtx` capability bag + `CycleCtx` read-set, plus the selectable `LlmDreamCycle` backend. Depends on `{me-types, me-traits, me-storage, me-index}`.
 
-`memory-engine` (L4 — `memory-engine/lib/memory-engine/`)
+`memory-engine` (L4 — `crates/memory-engine/`)
 : The facade. Owns `MemoryEngine` + its builder/bootstrap/inspect/reconstruct/resume, selects the concrete backend, wires the L3 primitives together (`mem_ctx()`), and owns the re-export surface below. Depends on every crate above.
 
-Plus `me-test-support` (dev-only, `memory-engine/lib/me-test-support/`) — cross-crate test doubles + the `SqliteFactory` conformance harness — and the three consumers of the facade's public API: `memory-engine-cli` (`memory-engine/bin/cli/`), `memory-engine-mcp` (`memory-engine/bin/mcp/`), and `memory-engine-embed` (`memory-engine/lib/embed/`, the HTTP embedding provider).
+Plus `me-test-support` (dev-only, `crates/me-test-support/`) — cross-crate test doubles + the `SqliteFactory` conformance harness — and the three consumers of the facade's public API: `memory-engine-cli` (`crates/memory-engine-cli/`), `memory-engine-mcp` (`crates/memory-engine-mcp/`), and `memory-engine-embed` (`crates/memory-engine-embed/`, the HTTP embedding provider).
 
 ## Re-exports from the facade `lib.rs`
 

@@ -70,38 +70,25 @@ An L3 primitive depends on the **port**, never a concrete backend — the facade
 
 ## Project Layout
 
-The workspace is a virtual root (no root package); crates live under `memory-engine/`. Paths are **`memory-engine/lib/memory-engine/src/…`**, not `src/…` (the #814 bin/lib reorg).
+The workspace is a virtual root (no root package); the **18 crates live flat under `crates/<crate-name>/`** (dir == crate — the #997 flatten of the #814 `bin/lib` split). Paths are **`crates/memory-engine/src/…`**, not `src/…`.
 
 ```
-memory-engine/
-  lib/memory-engine/src/   # core crate (the library)
-    lib.rs                 # crate root, re-exports; backend compile_error! guard
-    engine/                # MemoryEngine facade, EngineConfig, conflict resolution (was engine.rs + conflict/)
-    types/                 # core data types (Event, Fact, Edge, Summary, enums) — split into submodules
-    traits.rs              # consumer-implemented traits (zero LLM/network deps in core)
-    error.rs               # MemoryError enum (thiserror)
-    store/                 # original SQLite stores (events, facts, edges, summaries, scopes)
-    storage/               # #628 pluggable StorageBackend: sqlite/ (live) + postgres/ (skeleton)
-    search/                # hybrid retrieval (FTS5 + vector + HNSW, RRF merge)
-    graph/                 # in-memory petgraph knowledge graph
-    consolidation/         # 3-pass pipeline (dedup, cluster, global)
-    forgetting/            # Ebbinghaus decay + multi-signal importance
-    pool/                  # ConnectionPool (N readers + 1 writer)
-    scope/                 # hierarchical scope tree
-    resume/                # 4-tier cognitive boot (pinned → importance → due → recent)
-    bootstrap/             # Claude Code JSONL session import
-    inspect/               # debugging APIs (explain, replay, dump, restore, statistics)
-    limits.rs              # resource/size guards
-  lib/embed/               # memory-engine-embed (HTTP embedding provider + HttpDeltaProposer)
-  bin/cli/                 # memory-engine-cli (inspector binary)
-  bin/mcp/                 # memory-engine-mcp (MCP server)
-tests/                     # workspace integration tests
-benches/                   # Criterion benchmarks
-examples/                  # runnable examples
-fuzz/                      # cargo-fuzz targets (detached workspace, nightly-only)
-utils/                     # scripts (github-pm tooling, hooks)
-docs/                      # Sphinx narrative documentation
+crates/
+  me-types  me-traits  me-storage                     # L0 data · L0.5 contracts · L1 persistence PORT
+  me-index  me-backend-sqlite  me-backend-postgres     # L2 backend-free projections + concrete backends
+  me-ingest me-query me-consolidate me-forget          # L3 primitives (depend on the PORT, never a backend)
+  me-resolve me-archive me-cognitive                   #   …
+  memory-engine/           # L4 facade — src/: engine/ inspect/ resume/ bootstrap/ search/ storage/ lib.rs
+  memory-engine-embed/     # HTTP embedding provider + HttpDeltaProposer
+  memory-engine-cli/       # inspector binary
+  memory-engine-mcp/       # MCP server
+  me-test-support/         # dev-only cross-crate test doubles
+tests/     # workspace integration tests    benches/  # Criterion benchmarks
+examples/  # runnable examples               fuzz/     # cargo-fuzz (detached, nightly-only)
+utils/     # scripts (github-pm, hooks)       docs/     # Sphinx narrative documentation
 ```
+
+Full module map + the strict L0→L4 layer DAG: `docs/reference/crate-layout.md`. Many domains that were once facade `src/` modules (`store/`, `graph/`, `consolidation/`, `forgetting/`, `types/`, `traits.rs`, …) are now their own crates per the Wave-2 (#816) decomposition.
 
 ## Rules
 
