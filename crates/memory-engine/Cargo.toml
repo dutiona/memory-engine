@@ -14,7 +14,7 @@ categories = ["database", "science"]
 # publish=false keeps the workspace internally consistent while the leaf boundaries are
 # still moving across S2–S6; the real publishing strategy is decided at Wave 2 completion.
 publish = false
-# Tests, benches, and examples live at the REPO TOP LEVEL — ../../../{tests,benches,
+# Tests, benches, and examples live at the REPO TOP LEVEL — ../../{tests,benches,
 # examples} — not under this crate dir, so Cargo auto-discovery finds nothing and each
 # target is attached explicitly by `path` below (the bin/lib layout reorg).
 autotests = false
@@ -110,15 +110,15 @@ me-traits = { path = "../me-traits", features = ["test-util"] }
 
 [[bench]]
 name = "search_bench"
-path = "../../../benches/search_bench.rs"
+path = "../../benches/search_bench.rs"
 harness = false
 
 [[bench]]
 name = "lifecycle_bench"
-path = "../../../benches/lifecycle_bench.rs"
+path = "../../benches/lifecycle_bench.rs"
 harness = false
 
-# --- integration tests (top-level ../../../tests/) — attached explicitly since this
+# --- integration tests (top-level ../../tests/) — attached explicitly since this
 #     crate dir has no tests/ subdir for Cargo to auto-discover ---
 # The two-tier eval harness (#16): a multi-file binary rooted at tests/eval/main.rs.
 # Cargo auto-discovered it when the repo root was a package; after the bin/lib
@@ -127,83 +127,83 @@ harness = false
 # whole conformance + quality suite silently stops building under `cargo test`.
 [[test]]
 name = "eval"
-path = "../../../tests/eval/main.rs"
+path = "../../tests/eval/main.rs"
 
 [[test]]
 name = "activity_stream_test"
-path = "../../../tests/activity_stream_test.rs"
+path = "../../tests/activity_stream_test.rs"
 
 [[test]]
 name = "ann_recall_test"
-path = "../../../tests/ann_recall_test.rs"
+path = "../../tests/ann_recall_test.rs"
 
 [[test]]
 name = "archive_test"
-path = "../../../tests/archive_test.rs"
+path = "../../tests/archive_test.rs"
 
 [[test]]
 name = "bootstrap_dryrun"
-path = "../../../tests/bootstrap_dryrun.rs"
+path = "../../tests/bootstrap_dryrun.rs"
 
 [[test]]
 name = "bootstrap_memory_dir"
-path = "../../../tests/bootstrap_memory_dir.rs"
+path = "../../tests/bootstrap_memory_dir.rs"
 
 [[test]]
 name = "bootstrap_test"
-path = "../../../tests/bootstrap_test.rs"
+path = "../../tests/bootstrap_test.rs"
 
 [[test]]
 name = "dream_cycle_test"
-path = "../../../tests/dream_cycle_test.rs"
+path = "../../tests/dream_cycle_test.rs"
 
 [[test]]
 name = "inspect_test"
-path = "../../../tests/inspect_test.rs"
+path = "../../tests/inspect_test.rs"
 
 [[test]]
 name = "phase3b_lifecycle_test"
-path = "../../../tests/phase3b_lifecycle_test.rs"
+path = "../../tests/phase3b_lifecycle_test.rs"
 
 [[test]]
 name = "read_only_test"
-path = "../../../tests/read_only_test.rs"
+path = "../../tests/read_only_test.rs"
 
 [[test]]
 name = "recent_insights_test"
-path = "../../../tests/recent_insights_test.rs"
+path = "../../tests/recent_insights_test.rs"
 
 [[test]]
 name = "restore_roundtrip_test"
-path = "../../../tests/restore_roundtrip_test.rs"
+path = "../../tests/restore_roundtrip_test.rs"
 
 [[test]]
 name = "roundtrip_test"
-path = "../../../tests/roundtrip_test.rs"
+path = "../../tests/roundtrip_test.rs"
 
 [[test]]
 name = "all_features_store"
-path = "../../../tests/all_features_store.rs"
+path = "../../tests/all_features_store.rs"
 
 # #991: assert the docs' gate matrix (CLAUDE/AGENTS/GEMINI.md) is a superset of ci.yml's
 # cargo gates. Runs inside `cargo test --workspace --all-features`, the guard inside the
 # thing it guards. Not under a crate dir, so it needs explicit registration (autotests off).
 [[test]]
 name = "gate_matrix_parity"
-path = "../../../tests/gate_matrix_parity.rs"
+path = "../../tests/gate_matrix_parity.rs"
 
-# --- examples (top-level ../../../examples/) ---
+# --- examples (top-level ../../examples/) ---
 [[example]]
 name = "basic_roundtrip"
-path = "../../../examples/basic_roundtrip.rs"
+path = "../../examples/basic_roundtrip.rs"
 
 [[example]]
 name = "bi_temporal_query"
-path = "../../../examples/bi_temporal_query.rs"
+path = "../../examples/bi_temporal_query.rs"
 
 [[example]]
 name = "custom_traits"
-path = "../../../examples/custom_traits.rs"
+path = "../../examples/custom_traits.rs"
 
 # The engine is async-native (#631): its DB-touching methods are `async fn` that
 # await an `Arc<dyn StorageBackend>`, so a tokio runtime is mandatory — `tokio` is a

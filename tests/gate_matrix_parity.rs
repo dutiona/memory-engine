@@ -18,11 +18,11 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-/// This test's crate manifest is at `<repo>/memory-engine/lib/memory-engine`; the docs and
-/// `ci.yml` it checks live at the repo root, three levels up.
+/// This test's crate manifest is at `<repo>/crates/memory-engine`; the docs and
+/// `ci.yml` it checks live at the repo root, two levels up.
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
+        .join("../..")
         .canonicalize()
         .expect("repo root resolves from CARGO_MANIFEST_DIR")
 }

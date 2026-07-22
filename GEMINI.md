@@ -71,7 +71,7 @@ Feature flags: `backend-sqlite` (default, in-process SQLite), `backend-postgres`
 
 ## Project Structure
 
-Virtual workspace (no root package); crates live under `memory-engine/`. The core library is at **`memory-engine/lib/memory-engine/src/…`**, not `src/…` (the #814 bin/lib reorg). Each module owns its domain:
+Virtual workspace (no root package); crates live under `memory-engine/`. The core library is at **`crates/memory-engine/src/…`**, not `src/…` (the #814 bin/lib reorg). Each module owns its domain:
 
 - `engine/` — `MemoryEngine` facade, `EngineConfig`, and bi-temporal conflict resolution (was `engine.rs` + `conflict/`). Async-native; DB methods `.await` an `Arc<dyn StorageBackend>`.
 - `types/` — Core data types: `Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`, enums, option structs (split into submodules).

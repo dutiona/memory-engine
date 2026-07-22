@@ -162,7 +162,7 @@ graph TD
 
 **The acyclicity invariant.** Edges point strictly **down** by layer — a crate may depend only on crates in a lower layer. This is the primary invariant of the decomposition and it is **compiler-enforced**: `cargo` rejects any re-introduced cycle at resolve time, and a CI `cargo tree` check catches a back-edge before merge. `me-index` (the graph/scope projections) depends on `{me-storage, me-types}` only — not `me-traits` — so the projections stay backend-free and mockable. Two deliberate public-API breaks are gated by `cargo public-api` (ADR 0018 decision #8): `DreamCycle::run(&dyn CycleCtx)` (landed in S1) and `VectorSearchStrategy::search(&dyn SearchIndex)` (deferred to S4).
 
-**Status today.** `me-types` (L0), `me-traits` (L0.5), and `me-storage` (L1) exist as separate workspace members under `memory-engine/lib/`. The `memory-engine` facade re-exports them (the four-layer `types` / `error` / `traits` / `storage` seam is unchanged) and still physically owns the backends and primitives as modules until they carve out in S2–S5.
+**Status today.** `me-types` (L0), `me-traits` (L0.5), and `me-storage` (L1) exist as separate workspace members under `crates/`. The `memory-engine` facade re-exports them (the four-layer `types` / `error` / `traits` / `storage` seam is unchanged) and still physically owns the backends and primitives as modules until they carve out in S2–S5.
 
 ## `MemoryCtx`
 

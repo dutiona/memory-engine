@@ -70,7 +70,7 @@ An L3 primitive depends on the **port**, never a concrete backend — the facade
 
 ## Project Layout
 
-The workspace is a virtual root (no root package); crates live under `memory-engine/`. Paths are **`memory-engine/lib/memory-engine/src/…`**, not `src/…` (the #814 bin/lib reorg).
+The workspace is a virtual root (no root package); crates live under `memory-engine/`. Paths are **`crates/memory-engine/src/…`**, not `src/…` (the #814 bin/lib reorg).
 
 ```
 memory-engine/

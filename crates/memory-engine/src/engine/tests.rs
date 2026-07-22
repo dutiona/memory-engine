@@ -661,7 +661,7 @@ async fn bootstrap_creating_facts_stamps_identity() {
     // Positive guard: a bootstrap that DOES create facts records the embedder
     // identity (atomically, inside the session savepoint).
     let engine = MemoryEngine::builder(DIM).build().unwrap();
-    let fixture = include_str!("../../../../../tests/fixtures/success_session.jsonl");
+    let fixture = include_str!("../../../../tests/fixtures/success_session.jsonl");
     let report = engine
         .bootstrap_session(
             std::io::Cursor::new(fixture),
@@ -721,7 +721,7 @@ async fn bootstrap_directory_creating_facts_stamps_identity() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("session.jsonl"),
-        include_str!("../../../../../tests/fixtures/success_session.jsonl"),
+        include_str!("../../../../tests/fixtures/success_session.jsonl"),
     )
     .unwrap();
     let report = engine
