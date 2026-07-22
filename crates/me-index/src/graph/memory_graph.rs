@@ -212,6 +212,19 @@ impl MemoryGraph {
     /// (outgoing only) and [`connected_component`](Self::connected_component) (the whole
     /// *transitive* component): this is exactly the direct neighbors — the set the inspect
     /// graph-context reports, so it matches `degree` rather than the whole component (#901).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_index::{EdgeData, MemoryGraph};
+    /// let mut g = MemoryGraph::new();
+    /// let e = |edge_id| EdgeData { edge_id, relation_type: "relates".into(), weight: 1.0 };
+    /// g.add_edge(1, 2, e(1)); // outgoing: 1 -> 2
+    /// g.add_edge(3, 1, e(2)); // incoming: 3 -> 1
+    /// let mut neighbours = g.neighbors_undirected(1);
+    /// neighbours.sort_unstable();
+    /// assert_eq!(neighbours, vec![2, 3]); // both directions, distinct, self excluded
+    /// ```
     #[must_use]
     pub fn neighbors_undirected(&self, fact_id: i64) -> Vec<i64> {
         self.node_map.get(&fact_id).map_or_else(Vec::new, |&idx| {
