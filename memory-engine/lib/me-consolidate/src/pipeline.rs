@@ -485,8 +485,14 @@ mod tests {
         // wins, instead of inheriting the no-op run's identity under #614 enforcement.
         let other =
             me_types::types::EmbeddingFingerprint::new("other-model", "other-provider", DIM);
-        let recorded =
-            me_backend_sqlite::store::embedding_meta::record_if_absent(&conn, &other, DIM).unwrap();
+        // #1000: record_if_absent takes &Transaction.
+        let recorded = {
+            let tx = conn.unchecked_transaction().unwrap();
+            let r = me_backend_sqlite::store::embedding_meta::record_if_absent(&tx, &other, DIM)
+                .unwrap();
+            tx.commit().unwrap();
+            r
+        };
         assert_eq!(
             recorded, other,
             "the first real writer wins after a no-op consolidation"

@@ -24,7 +24,7 @@
 //! the read-only counterpart used for the eager fail-fast check at consumer startup.
 //! The write-path call sites did not change when this landed.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 
 use me_types::error::{MemoryError, Result};
 use me_types::types::EmbeddingFingerprint;
@@ -52,8 +52,8 @@ pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
 ///
 /// Returns `MemoryError::Storage` on write failure or `MemoryError::Internal` if a
 /// dimension overflows `i64`.
-pub fn store(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
-    super::embedding_spaces::upsert_active_fingerprint(conn, fp)
+pub fn store(tx: &Transaction, fp: &EmbeddingFingerprint) -> Result<()> {
+    super::embedding_spaces::upsert_active_fingerprint(tx, fp)
 }
 
 /// Write-once recording of the identity on the first embedding write.
@@ -83,11 +83,16 @@ pub fn store(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
 /// recorded and `candidate.dim != expected_dim` (nothing is persisted); or any
 /// [`load`] / [`store`] error.
 pub fn record_if_absent(
-    conn: &Connection,
+    tx: &Transaction,
     candidate: &EmbeddingFingerprint,
     expected_dim: usize,
 ) -> Result<EmbeddingFingerprint> {
-    if let Some(stored) = load(conn)? {
+    // Takes `&Transaction` (#1000): the write path delegates to [`store`] →
+    // `upsert_active_fingerprint`, a multi-statement re-stamp whose atomicity the type
+    // system now enforces. The read-only present-branch also runs under the caller's tx
+    // (harmless) so both branches share one gate. `load` reads through the `Transaction`
+    // deref to `Connection`.
+    if let Some(stored) = load(tx)? {
         ensure_match(&stored, candidate)?;
         return Ok(stored);
     }
@@ -97,7 +102,7 @@ pub fn record_if_absent(
             actual: candidate.dim,
         });
     }
-    store(conn, candidate)?;
+    store(tx, candidate)?;
     Ok(candidate.clone())
 }
 
@@ -169,6 +174,32 @@ mod tests {
         let conn = open_memory().expect("open in-memory db");
         init_schema(&conn).expect("init schema");
         conn
+    }
+
+    // #1000: `store` / `record_if_absent` now take `&Transaction`. These same-named
+    // test shims (shadowing the `use super::*` glob) open a committed transaction over
+    // the test connection and delegate to the real `super::*` fns, so every assertion
+    // below reads exactly as before the conversion. On an error they leave the tx to
+    // roll back on drop (the error paths write nothing, so the "nothing persisted"
+    // assertions still hold).
+    fn store(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
+        let tx = conn.unchecked_transaction().expect("begin tx");
+        super::store(&tx, fp)?;
+        tx.commit().expect("commit");
+        Ok(())
+    }
+
+    fn record_if_absent(
+        conn: &Connection,
+        candidate: &EmbeddingFingerprint,
+        expected_dim: usize,
+    ) -> Result<EmbeddingFingerprint> {
+        let tx = conn.unchecked_transaction().expect("begin tx");
+        let out = super::record_if_absent(&tx, candidate, expected_dim);
+        if out.is_ok() {
+            tx.commit().expect("commit");
+        }
+        out
     }
 
     #[test]

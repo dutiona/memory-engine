@@ -69,18 +69,23 @@ impl SqliteBackend {
             )));
         }
 
-        // Verbatim body of ingest.rs:397-476: savepoint wrapping stamp +
-        // scope-resolve + per-fact insert.
-        conn.execute_batch("SAVEPOINT batch_insert")
+        // Wrap the stamp + scope-resolve + per-fact insert in one RAII transaction
+        // (#1000). Was a manual `SAVEPOINT batch_insert` string dance; now a
+        // `Transaction` object, matching `insert_fact`'s existing `unchecked_transaction`
+        // pattern and satisfying `record_if_absent`'s `&Transaction` contract. Rollback is
+        // by drop (no manual `ROLLBACK TO`/`RELEASE`, whose errors were previously
+        // swallowed). Safe: a `block_write` connection is fresh autocommit, never nested.
+        let tx = conn
+            .unchecked_transaction()
             .map_err(StorageError::backend)?;
 
         let result: Result<BatchInsertResult> = (|| {
             // Record the embedding identity on first write (#613), inside the
-            // savepoint so it commits atomically with the batch.
-            crate::store::embedding_meta::record_if_absent(conn, fingerprint, expected_dim)?;
+            // transaction so it commits atomically with the batch.
+            crate::store::embedding_meta::record_if_absent(&tx, fingerprint, expected_dim)?;
 
-            let scope_store = ScopeStore::new(conn);
-            let store = FactStore::new(conn, dim);
+            let scope_store = ScopeStore::new(&tx);
+            let store = FactStore::new(&tx, dim);
 
             // Resolve scopes INSIDE the savepoint so they roll back on error.
             // Deduplicate by path to avoid N redundant DB lookups.
@@ -129,13 +134,12 @@ impl SqliteBackend {
 
         match result {
             Ok(triple) => {
-                conn.execute_batch("RELEASE batch_insert")
-                    .map_err(StorageError::backend)?;
+                tx.commit().map_err(StorageError::backend)?;
                 Ok(triple)
             }
             Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK TO batch_insert");
-                let _ = conn.execute_batch("RELEASE batch_insert");
+                // `tx` rolls back on drop — no manual `ROLLBACK TO`/`RELEASE`.
+                drop(tx);
                 Err(e)
             }
         }
@@ -1063,7 +1067,13 @@ impl FactGraph for SqliteBackend {
         let skip_if_present = skip_if_present.cloned();
         let fingerprint = fingerprint.clone();
         self.block_write(move |conn| {
-            conn.execute_batch("SAVEPOINT ingest_bootstrap").map_err(StorageError::backend)?;
+            // RAII transaction (#1000) — was a manual `SAVEPOINT ingest_bootstrap` dance;
+            // now a `Transaction` object so `record_if_absent`'s `&Transaction` contract
+            // is met and rollback is by drop. Fresh autocommit conn (block_write), never
+            // nested.
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(StorageError::backend)?;
             let outcome = (|| -> Result<BootstrapIngestOutcome> {
                 // Authoritative idempotency guard, checked FIRST inside the savepoint
                 // (under the write lock): a matching event ⟹ the batch is a no-op. This
@@ -1073,7 +1083,7 @@ impl FactGraph for SqliteBackend {
                 // the trim the facade's `count_events` early-out runs on the READ pool,
                 // racing this write. Re-checking here closes that TOCTOU (#816 B1).
                 if let Some(filter) = &skip_if_present
-                    && crate::store::events::EventStore::new(conn, &upcaster).count(filter)? > 0
+                    && crate::store::events::EventStore::new(&tx, &upcaster).count(filter)? > 0
                 {
                     return Ok(BootstrapIngestOutcome::Skipped);
                 }
@@ -1082,11 +1092,11 @@ impl FactGraph for SqliteBackend {
                 // facts keep their own `source_event_id` (`None`).
                 let marker_id = match &marker {
                     Some(marker) => {
-                        Some(crate::store::events::EventStore::new(conn, &upcaster).insert(marker)?)
+                        Some(crate::store::events::EventStore::new(&tx, &upcaster).insert(marker)?)
                     }
                     None => None,
                 };
-                let fact_store = FactStore::new(conn, expected_dim);
+                let fact_store = FactStore::new(&tx, expected_dim);
                 let mut out = Vec::with_capacity(facts.len());
                 let mut any_created = false;
                 for mut fact in facts {
@@ -1100,11 +1110,11 @@ impl FactGraph for SqliteBackend {
                     out.push((id, reinforced));
                 }
                 // #643: stamp the embedding identity only once a new vector has actually
-                // been written, at the tail of the savepoint so it commits atomically
+                // been written, at the tail of the transaction so it commits atomically
                 // with the facts it describes.
                 if any_created {
                     crate::store::embedding_meta::record_if_absent(
-                        conn,
+                        &tx,
                         &fingerprint,
                         expected_dim,
                     )?;
@@ -1113,18 +1123,13 @@ impl FactGraph for SqliteBackend {
             })();
             match outcome {
                 Ok(out) => {
-                    conn.execute_batch("RELEASE ingest_bootstrap").map_err(StorageError::backend)?;
+                    tx.commit().map_err(StorageError::backend)?;
                     Ok(out)
                 }
                 Err(e) => {
-                    // ROLLBACK TO restores the savepoint but keeps it open — RELEASE it
-                    // to close it and leave the writer out of an open transaction.
-                    if let Err(rb) = conn.execute_batch("ROLLBACK TO ingest_bootstrap") {
-                        tracing::warn!(error = %rb, "savepoint ROLLBACK TO ingest_bootstrap failed");
-                    }
-                    if let Err(rel) = conn.execute_batch("RELEASE ingest_bootstrap") {
-                        tracing::warn!(error = %rel, "savepoint RELEASE ingest_bootstrap (after rollback) failed");
-                    }
+                    // `tx` rolls back on drop — no manual `ROLLBACK TO`/`RELEASE` (whose
+                    // failures were previously only logged).
+                    drop(tx);
                     Err(e)
                 }
             }
@@ -1630,7 +1635,11 @@ mod tests {
         // Oracle: stamp identity + insert via direct FactStore.
         let oracle_id = {
             let conn = pool.write();
-            embedding_meta::record_if_absent(&conn, &fp(), DIM).unwrap();
+            {
+                let tx = conn.unchecked_transaction().unwrap();
+                embedding_meta::record_if_absent(&tx, &fp(), DIM).unwrap();
+                tx.commit().unwrap();
+            }
             FactStore::new(&conn, DIM)
                 .insert(&fact("oracle", [0.2; DIM]))
                 .unwrap()
@@ -1659,7 +1668,9 @@ mod tests {
         // Pre-stamp the store with fp(), then try to insert with a mismatched one.
         {
             let conn = pool.write();
-            embedding_meta::record_if_absent(&conn, &fp(), DIM).unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            embedding_meta::record_if_absent(&tx, &fp(), DIM).unwrap();
+            tx.commit().unwrap();
         }
         let be = backend(Arc::clone(&pool));
         let err = be

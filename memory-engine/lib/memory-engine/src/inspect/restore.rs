@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 
 use crate::error::{ConflictError, MemoryError, MigrationError, Result, StorageError};
 use crate::store::events::event_type_to_str;
@@ -442,7 +442,11 @@ fn restore_edges(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
 /// Returns [`MemoryError::Migration`] on a corrupt legacy `embedding_meta` value or an
 /// unrecognized space status, and [`MemoryError::Storage`]/[`MemoryError::Internal`] on
 /// insert failure (e.g. a second active space).
-fn restore_embedding_spaces(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
+// Takes `&Transaction` (#1000): `embedding_meta::store` re-stamps the registry via the
+// multi-statement `upsert_active_fingerprint`, now tx-typed. The whole restore already
+// runs inside `restore_snapshot_into`'s transaction, so this just threads that tx's type
+// through; `insert_active` reads through the `Transaction` deref to `Connection`.
+fn restore_embedding_spaces(tx: &Transaction, snapshot: &EngineSnapshot) -> Result<()> {
     if snapshot.embedding_spaces.is_empty() {
         if let Some(raw) = snapshot.config.get("embedding_meta") {
             let fp: crate::types::EmbeddingFingerprint =
@@ -451,14 +455,14 @@ fn restore_embedding_spaces(conn: &Connection, snapshot: &EngineSnapshot) -> Res
                         "corrupt legacy embedding_meta in snapshot: {e}"
                     ))
                 })?;
-            crate::store::embedding_meta::store(conn, &fp)?;
+            crate::store::embedding_meta::store(tx, &fp)?;
         }
         return Ok(());
     }
     for s in &snapshot.embedding_spaces {
         let status = crate::store::embedding_spaces::SpaceStatus::from_sql(&s.status)?;
         crate::store::embedding_spaces::insert_active(
-            conn,
+            tx,
             &crate::store::embedding_spaces::EmbeddingSpace {
                 name: s.name.clone(),
                 fingerprint: s.fingerprint.clone(),
@@ -913,7 +917,11 @@ mod tests {
             config,
         };
 
-        restore_embedding_spaces(&conn, &snapshot).unwrap();
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            restore_embedding_spaces(&tx, &snapshot).unwrap();
+            tx.commit().unwrap();
+        }
 
         assert_eq!(
             crate::store::embedding_meta::load(&conn).unwrap(),

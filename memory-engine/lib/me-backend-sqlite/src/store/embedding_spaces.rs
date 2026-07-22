@@ -29,7 +29,7 @@
 //!   rebuild hook before the new space serves reads.
 
 use me_types::error::StorageError;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 
 use me_types::error::{MemoryError, Result};
 use me_types::types::EmbeddingFingerprint;
@@ -284,15 +284,23 @@ pub fn activate(conn: &Connection, name: &str) -> Result<()> {
 /// reads the active row by status), so re-stamping the active row in place is the
 /// correct multi-space generalization.
 ///
+/// # Transaction (#1000)
+///
+/// Takes `&Transaction`, not `&Connection`: the re-stamp is a two-statement
+/// UPDATE-or-INSERT, so the type system now enforces that it runs inside a caller's
+/// transaction rather than relying on the `block_write` write-lock + the statements'
+/// mutual exclusion for its atomicity. `Transaction` derefs to `Connection`, so the
+/// bodies are unchanged.
+///
 /// # Errors
 ///
 /// Returns `MemoryError::Storage` on write failure or `MemoryError::Internal` if a
 /// dimension overflows `i64`.
-pub fn upsert_active_fingerprint(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
+pub fn upsert_active_fingerprint(tx: &Transaction, fp: &EmbeddingFingerprint) -> Result<()> {
     let (dim, base) = dims_to_sql(fp)?;
     // Re-stamp the current active row in place (at most one exists, by the partial
     // unique index), whatever its name.
-    let updated = conn
+    let updated = tx
         .execute(
             "UPDATE embedding_spaces
             SET model = ?1, provider = ?2, dim = ?3, matryoshka_base_dim = ?4, element_type = ?5
@@ -302,7 +310,7 @@ pub fn upsert_active_fingerprint(conn: &Connection, fp: &EmbeddingFingerprint) -
         .map_err(StorageError::backend)?;
     if updated == 0 {
         // No active space yet — seed the canonical `default` active row.
-        conn.execute(
+        tx.execute(
             "INSERT INTO embedding_spaces
                  (name, model, provider, dim, matryoshka_base_dim, element_type, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
@@ -367,6 +375,17 @@ mod tests {
         let conn = open_memory().expect("open in-memory db");
         init_schema(&conn).expect("init schema");
         conn
+    }
+
+    // #1000: `upsert_active_fingerprint` now takes `&Transaction`. This same-named test
+    // shim (shadowing the `use super::*` glob) opens a committed tx over the test
+    // connection and delegates to `super::upsert_active_fingerprint`, so the call sites
+    // below are unchanged.
+    fn upsert_active_fingerprint(conn: &Connection, fp: &EmbeddingFingerprint) -> Result<()> {
+        let tx = conn.unchecked_transaction().expect("begin tx");
+        super::upsert_active_fingerprint(&tx, fp)?;
+        tx.commit().expect("commit");
+        Ok(())
     }
 
     #[test]

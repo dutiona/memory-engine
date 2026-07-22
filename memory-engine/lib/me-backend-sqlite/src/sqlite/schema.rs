@@ -19,7 +19,9 @@
 //! HNSW moves into the backend in #631).
 
 use async_trait::async_trait;
-#[cfg(feature = "test-util")]
+// Un-gated (#1000): the fingerprint-write trait methods below now open explicit
+// transactions and map their errors via `StorageError::backend` unconditionally, so this
+// import is no longer test-util-only.
 use me_types::error::StorageError;
 
 use super::SqliteBackend;
@@ -79,8 +81,18 @@ impl SchemaManager for SqliteBackend {
     // WRITE
     async fn store_embedding_fingerprint(&self, fp: &EmbeddingFingerprint) -> Result<()> {
         let fp = fp.clone();
-        self.block_write(move |c| embedding_meta::store(c, &fp))
-            .await
+        self.block_write(move |c| {
+            // #1000: `embedding_meta::store` re-stamps the active registry row via a
+            // two-statement UPDATE-or-INSERT. Run it in an explicit transaction so its
+            // atomicity is enforced by the `&Transaction` type, not merely by the
+            // block_write write-lock. Behavior-preserving: at a block_write boundary the
+            // connection is fresh autocommit, so this can never nest.
+            let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
+            embedding_meta::store(&tx, &fp)?;
+            tx.commit().map_err(StorageError::backend)?;
+            Ok(())
+        })
+        .await
     }
 
     // WRITE
@@ -90,8 +102,15 @@ impl SchemaManager for SqliteBackend {
         expected_dim: usize,
     ) -> Result<EmbeddingFingerprint> {
         let candidate = candidate.clone();
-        self.block_write(move |c| embedding_meta::record_if_absent(c, &candidate, expected_dim))
-            .await
+        self.block_write(move |c| {
+            // #1000: see `store_embedding_fingerprint` — the write path re-stamps the
+            // registry, so wrap the record-if-absent in an explicit transaction.
+            let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
+            let recorded = embedding_meta::record_if_absent(&tx, &candidate, expected_dim)?;
+            tx.commit().map_err(StorageError::backend)?;
+            Ok(recorded)
+        })
+        .await
     }
 
     // READ
