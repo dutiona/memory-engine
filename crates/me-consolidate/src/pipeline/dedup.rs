@@ -765,6 +765,59 @@ mod tests {
         );
     }
 
+    /// #895: `apply_dedup` writes the inherited `importance_score`s through a single
+    /// bulk `update_importance_scores_bulk` UPDATE instead of an N+1 per-row loop. This
+    /// exercises the bulk path with **more than one** score write in a single apply — two
+    /// mutually-dissimilar duplicate groups, each producing a distinct survivor that
+    /// inherits its loser's higher score — so `importance_score_updates` carries two
+    /// entries and both must land. A regression to a partial/mis-keyed bulk statement (or
+    /// a survivor missed by the `json_each` join) shows up as a wrong score on either
+    /// survivor.
+    #[test]
+    fn apply_dedup_bulk_updates_all_survivor_scores() {
+        let (conn, dim) = setup();
+        // Group 1 near [1,0,0,0]; A survives (higher base importance), B is the loser.
+        let a = insert_fact(&conn, dim, "A", vec![1.0, 0.0, 0.0, 0.0], 0.9);
+        let b = insert_fact(&conn, dim, "B", vec![0.99, 0.01, 0.0, 0.0], 0.3);
+        // Group 2 near [0,0,1,0] (orthogonal to group 1, so the groups never merge across);
+        // C survives (higher base importance), D is the loser.
+        let c = insert_fact(&conn, dim, "C", vec![0.0, 0.0, 1.0, 0.0], 0.9);
+        let d = insert_fact(&conn, dim, "D", vec![0.0, 0.01, 0.99, 0.0], 0.3);
+
+        // Each survivor starts LOW; its group's loser holds the higher score it must inherit.
+        let store = FactStore::new(&conn, dim);
+        store.update_importance_score(a, 0.2).unwrap();
+        store.update_importance_score(b, 0.8).unwrap(); // A inherits 0.8
+        store.update_importance_score(c, 0.1).unwrap();
+        store.update_importance_score(d, 0.7).unwrap(); // C inherits 0.7
+
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, None, Utc::now())
+            .unwrap()
+            .expect_ran();
+        assert_eq!(removed, 2, "one loser per group collapses (B, D)");
+
+        // Both survivors remain, each carrying the score bulk-written in a single UPDATE.
+        let active = store.list_active(None).unwrap();
+        assert_eq!(active.len(), 2);
+        let score_of = |id: i64| {
+            active
+                .iter()
+                .find(|f| f.id == id)
+                .unwrap_or_else(|| panic!("survivor {id} must be active"))
+                .importance_score
+        };
+        assert!(
+            (score_of(a) - 0.8).abs() < f64::EPSILON,
+            "survivor A must inherit 0.8 via the bulk write, got {}",
+            score_of(a)
+        );
+        assert!(
+            (score_of(c) - 0.7).abs() < f64::EPSILON,
+            "survivor C must inherit 0.7 via the bulk write, got {}",
+            score_of(c)
+        );
+    }
+
     #[test]
     fn empty_db_dedup_is_noop() {
         let (conn, dim) = setup();

@@ -43,9 +43,13 @@ use crate::store::facts::FactStore;
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::NotFound` from an
-/// importance update if a fact row is missing (facts are soft-deleted, so this does not
-/// fire for a merely-expired row).
+/// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::NotFound` from a
+/// **base-importance** update if a fact row is missing (facts are soft-deleted, so this
+/// does not fire for a merely-expired row). The `importance_score` writes go through the
+/// bulk `update_importance_scores_bulk` (#895): a missing id is silently skipped rather
+/// than surfaced as `NotFound` (matching the prune path), and a non-finite score — which
+/// `compute_dedup` never produces, since it only carries forward already-finite stored
+/// scores — is rejected as `MemoryError::Conflict` before any row is touched.
 pub fn apply_dedup(
     tx: &Transaction,
     embed_dim: usize,
@@ -58,9 +62,11 @@ pub fn apply_dedup(
     for &(id, importance) in &computed.importance_updates {
         fact_store.update_base_importance(id, importance)?;
     }
-    for &(id, score) in &computed.importance_score_updates {
-        fact_store.update_importance_score(id, score)?;
-    }
+    // Materialize the inherited importance scores in one bulk UPDATE (#895) instead of an
+    // N+1 per-row loop — the same swap #392 made in the prune path (`prune_atomic`). We are
+    // inside the caller's transaction, so atomicity is unchanged: the whole batch commits or
+    // rolls back together, exactly as the loop did.
+    fact_store.update_importance_scores_bulk(&computed.importance_score_updates)?;
 
     // Snapshot each distinct survivor's liveness BEFORE expiring anything, so a survivor
     // this call itself expires (it may also be a loser in a merge chain) is not confused
