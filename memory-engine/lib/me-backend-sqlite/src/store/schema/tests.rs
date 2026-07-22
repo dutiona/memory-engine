@@ -2409,7 +2409,10 @@ fn read_only_open_reads_registry() {
         let conn = open_connection(path_str).unwrap();
         init_schema(&conn).unwrap();
         migrate(&conn, None).unwrap();
-        crate::store::embedding_meta::store(&conn, &fp).unwrap();
+        // #1000: embedding_meta::store takes &Transaction.
+        let tx = conn.unchecked_transaction().unwrap();
+        crate::store::embedding_meta::store(&tx, &fp).unwrap();
+        tx.commit().unwrap();
     }
     let ro = open_connection_read_only(path_str).unwrap();
     validate_schema_version(&ro).expect("a v13 store validates read-only");

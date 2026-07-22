@@ -1053,7 +1053,11 @@ mod tests {
         // Seed one active fact and stamp the store identity.
         let fact_id: i64 = {
             let conn = pool.write();
-            embedding_meta::record_if_absent(&conn, &fp, DIM).unwrap();
+            {
+                let tx = conn.unchecked_transaction().unwrap();
+                embedding_meta::record_if_absent(&tx, &fp, DIM).unwrap();
+                tx.commit().unwrap();
+            }
             FactStore::new(&conn, DIM)
                 .insert(&NewFact {
                     content: "victim".into(),
