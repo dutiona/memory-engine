@@ -71,7 +71,7 @@ Feature flags: `backend-sqlite` (default, in-process SQLite), `backend-postgres`
 
 ## Project Structure
 
-Virtual workspace (no root package); crates live under `memory-engine/`. The core library is at **`crates/memory-engine/src/…`**, not `src/…` (the #814 bin/lib reorg). Each module owns its domain:
+Virtual workspace (no root package); the **18 crates live flat under `crates/<crate-name>/`** (dir == crate — the #997 flatten). The `memory-engine` facade is at **`crates/memory-engine/src/…`**, not `src/…`. The domains below — once modules of a monolithic core, now spread across the L0–L4 crate DAG (full map: `docs/reference/crate-layout.md`) — each own their concern:
 
 - `engine/` — `MemoryEngine` facade, `EngineConfig`, and bi-temporal conflict resolution (was `engine.rs` + `conflict/`). Async-native; DB methods `.await` an `Arc<dyn StorageBackend>`.
 - `types/` — Core data types: `Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`, enums, option structs (split into submodules).
@@ -89,7 +89,7 @@ Virtual workspace (no root package); crates live under `memory-engine/`. The cor
 - `bootstrap/` — Parse Claude Code JSONL session logs into historical facts.
 - `inspect/` — Debugging APIs: `explain_fact`, `fact_history`, `replay_events`, `dump_state`, `statistics`.
 
-Sibling crates: `lib/embed/` (`memory-engine-embed` — HTTP embedding + `HttpDeltaProposer`), `bin/cli/`, `bin/mcp/`. Workspace integration tests in `tests/`, benchmarks in `benches/`, examples in `examples/`, fuzz targets in `fuzz/` (detached, nightly).
+Sibling crates (flat under `crates/`): `crates/memory-engine-embed/` (HTTP embedding + `HttpDeltaProposer`), `crates/memory-engine-cli/`, `crates/memory-engine-mcp/`. Workspace integration tests in `tests/`, benchmarks in `benches/`, examples in `examples/`, fuzz targets in `fuzz/` (detached, nightly).
 
 ## Conventions
 
