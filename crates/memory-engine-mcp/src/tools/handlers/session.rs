@@ -21,17 +21,17 @@ pub async fn handle_record_activity(
     filter_config: &memory_engine::ActivityFilterConfig,
 ) -> Result<CallToolResult, ErrorData> {
     let tool_name =
-        get_str(args, "tool").ok_or_else(|| ErrorData::invalid_params("missing tool", None))?;
-    let session_id = get_str(args, "session_id")
+        get_str(args, "tool")?.ok_or_else(|| ErrorData::invalid_params("missing tool", None))?;
+    let session_id = get_str(args, "session_id")?
         .ok_or_else(|| ErrorData::invalid_params("missing session_id", None))?;
     let tool_args = args.get("args").cloned().unwrap_or_else(|| json!({}));
-    let result_summary = get_str(args, "result");
+    let result_summary = get_str(args, "result")?;
     let timestamp = get_datetime(args, "timestamp")?.unwrap_or_else(Utc::now);
-    let scope = get_str(args, "scope");
+    let scope = get_str(args, "scope")?;
     // `OutcomeClass::from_str` is infallible (the open `Other` arm captures any
     // value), so an arbitrary JSON string maps cleanly; `None` defers to the
     // engine's `OutcomeClass::Success` default.
-    let outcome_class = get_str(args, "outcome_class").map(|s| {
+    let outcome_class = get_str(args, "outcome_class")?.map(|s| {
         let Ok(class) = s.parse::<memory_engine::OutcomeClass>();
         class
     });
@@ -67,10 +67,10 @@ pub async fn handle_checkpoint_session(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let session_id = get_str(args, "session_id")
+    let session_id = get_str(args, "session_id")?
         .ok_or_else(|| ErrorData::invalid_params("missing session_id", None))?;
-    let scope = get_str(args, "scope");
-    let summary = get_str(args, "summary");
+    let scope = get_str(args, "scope")?;
+    let summary = get_str(args, "summary")?;
     let metadata = args.get("metadata").cloned();
 
     engine
@@ -89,7 +89,7 @@ pub async fn handle_load_context(
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
     let scope =
-        get_str(args, "scope").ok_or_else(|| ErrorData::invalid_params("missing scope", None))?;
+        get_str(args, "scope")?.ok_or_else(|| ErrorData::invalid_params("missing scope", None))?;
     let activity_limit = get_usize(args, "activity_limit")?.unwrap_or(20);
     let fact_limit = get_usize(args, "fact_limit")?.unwrap_or(10);
     let depth_level = get_depth(args)?;

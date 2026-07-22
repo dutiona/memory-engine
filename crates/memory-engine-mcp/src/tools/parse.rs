@@ -17,20 +17,51 @@ use serde_json::{Map, Value};
 use crate::depth::Depth;
 use crate::error::ValidationError;
 
-pub fn get_str(args: &Map<String, Value>, key: &str) -> Option<String> {
-    args.get(key).and_then(Value::as_str).map(String::from)
+// Each scalar getter distinguishes *absent* (`Ok(None)` — the caller may apply its
+// default) from *present-but-wrong-type* (`Err(invalid_params)`), rather than the old
+// `and_then(Value::as_*)` that collapsed both to `None` and let an untrusted caller's
+// wrong-typed value silently become the server's default (#842 — the type-mismatch twin
+// of the #339 negative-value fix). `null` is treated as absent, matching JSON's
+// "unset" idiom and the pre-#842 behavior (`as_*` returned `None` for `null`).
+
+pub fn get_str(args: &Map<String, Value>, key: &str) -> Result<Option<String>, ErrorData> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_str()
+            .map(|s| Some(s.to_owned()))
+            .ok_or_else(|| ErrorData::invalid_params(format!("{key} must be a string"), None)),
+    }
 }
 
-pub fn get_i64(args: &Map<String, Value>, key: &str) -> Option<i64> {
-    args.get(key).and_then(Value::as_i64)
+pub fn get_i64(args: &Map<String, Value>, key: &str) -> Result<Option<i64>, ErrorData> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| ErrorData::invalid_params(format!("{key} must be an integer"), None)),
+    }
 }
 
-pub fn get_f64(args: &Map<String, Value>, key: &str) -> Option<f64> {
-    args.get(key).and_then(Value::as_f64)
+pub fn get_f64(args: &Map<String, Value>, key: &str) -> Result<Option<f64>, ErrorData> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| ErrorData::invalid_params(format!("{key} must be a number"), None)),
+    }
 }
 
-pub fn get_bool(args: &Map<String, Value>, key: &str) -> Option<bool> {
-    args.get(key).and_then(Value::as_bool)
+pub fn get_bool(args: &Map<String, Value>, key: &str) -> Result<Option<bool>, ErrorData> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| ErrorData::invalid_params(format!("{key} must be a boolean"), None)),
+    }
 }
 
 /// Read an optional non-negative integer parameter.
@@ -40,7 +71,7 @@ pub fn get_bool(args: &Map<String, Value>, key: &str) -> Option<bool> {
 /// silently dropped (#339): dropping it would let the engine fall back to its
 /// own default — e.g. returning more results than an untrusted caller asked for.
 pub fn get_usize(args: &Map<String, Value>, key: &str) -> Result<Option<usize>, ErrorData> {
-    get_i64(args, key).map_or(Ok(None), |v| {
+    get_i64(args, key)?.map_or(Ok(None), |v| {
         usize::try_from(v).map(Some).map_err(|_| {
             ErrorData::invalid_params(format!("{key} must be a non-negative integer"), None)
         })
@@ -51,7 +82,7 @@ pub fn get_datetime(
     args: &Map<String, Value>,
     key: &str,
 ) -> Result<Option<DateTime<Utc>>, ErrorData> {
-    get_str(args, key).map_or(Ok(None), |s| {
+    get_str(args, key)?.map_or(Ok(None), |s| {
         s.parse::<DateTime<Utc>>()
             .map(Some)
             .map_err(|e| ErrorData::invalid_params(format!("invalid {key}: {e}"), None))
@@ -118,13 +149,13 @@ pub fn parse_declared_fingerprint(
     args: &Map<String, Value>,
     dim: usize,
 ) -> Result<EmbeddingFingerprint, ErrorData> {
-    let model = get_str(args, "model").ok_or_else(|| {
+    let model = get_str(args, "model")?.ok_or_else(|| {
         ErrorData::invalid_params(
             "a pre-computed `embedding` requires a declared `model` (the model that produced it)",
             None,
         )
     })?;
-    let provider = get_str(args, "provider").ok_or_else(|| {
+    let provider = get_str(args, "provider")?.ok_or_else(|| {
         ErrorData::invalid_params(
             "a pre-computed `embedding` requires a declared `provider` (e.g. \"tei\", \"ollama\")",
             None,
@@ -460,9 +491,9 @@ pub fn validate_dump_path(p: &std::path::Path) -> Result<PathBuf, ErrorData> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_dump_name, default_dump_path, get_datetime, get_usize, parse_consolidate_config,
-        parse_embedding, parse_event_type, parse_fact_type, parse_outcome, require_f64_if_present,
-        validate_dump_path,
+        default_dump_name, default_dump_path, get_bool, get_datetime, get_f64, get_i64, get_str,
+        get_usize, parse_consolidate_config, parse_embedding, parse_event_type, parse_fact_type,
+        parse_outcome, require_f64_if_present, validate_dump_path,
     };
     use memory_engine::types::{EventType, FactType, Outcome};
     use serde_json::json;
@@ -734,6 +765,101 @@ mod tests {
         // caller can fall back to its default.
         let v = get_usize(&cfg_args(&[]), "limit").unwrap();
         assert_eq!(v, None);
+    }
+
+    // --- #842: scalar getters reject present-but-wrong-type input ------------
+    // Each distinguishes absent/null (Ok(None) — caller may default) from a
+    // present-but-wrong-JSON-type value (Err(invalid_params)), instead of the old
+    // `and_then(as_*)` that let a wrong-typed value silently become the server default.
+
+    #[test]
+    fn get_i64_rejects_present_wrong_type() {
+        // A stringified number from an untrusted client is an ERROR, not a silent default.
+        let err = get_i64(&cfg_args(&[("n", json!("50"))]), "n").unwrap_err();
+        assert!(
+            err.message.contains("n must be an integer"),
+            "{}",
+            err.message
+        );
+        // A non-integral float is also wrong-type for an integer param.
+        assert!(get_i64(&cfg_args(&[("n", json!(1.5))]), "n").is_err());
+        // Absent, null → Ok(None); a real integer → Ok(Some).
+        assert_eq!(get_i64(&cfg_args(&[]), "n").unwrap(), None);
+        assert_eq!(
+            get_i64(&cfg_args(&[("n", json!(null))]), "n").unwrap(),
+            None
+        );
+        assert_eq!(
+            get_i64(&cfg_args(&[("n", json!(42))]), "n").unwrap(),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn get_str_rejects_present_wrong_type() {
+        let err = get_str(&cfg_args(&[("s", json!(5))]), "s").unwrap_err();
+        assert!(
+            err.message.contains("s must be a string"),
+            "{}",
+            err.message
+        );
+        assert_eq!(get_str(&cfg_args(&[]), "s").unwrap(), None);
+        assert_eq!(
+            get_str(&cfg_args(&[("s", json!(null))]), "s").unwrap(),
+            None
+        );
+        assert_eq!(
+            get_str(&cfg_args(&[("s", json!("hi"))]), "s").unwrap(),
+            Some("hi".to_owned())
+        );
+    }
+
+    #[test]
+    fn get_f64_rejects_present_wrong_type() {
+        let err = get_f64(&cfg_args(&[("w", json!("0.5"))]), "w").unwrap_err();
+        assert!(
+            err.message.contains("w must be a number"),
+            "{}",
+            err.message
+        );
+        assert_eq!(get_f64(&cfg_args(&[]), "w").unwrap(), None);
+        // A JSON integer is a valid number for an f64 param.
+        assert_eq!(
+            get_f64(&cfg_args(&[("w", json!(3))]), "w").unwrap(),
+            Some(3.0)
+        );
+        assert_eq!(
+            get_f64(&cfg_args(&[("w", json!(0.25))]), "w").unwrap(),
+            Some(0.25)
+        );
+    }
+
+    #[test]
+    fn get_bool_rejects_present_wrong_type() {
+        let err = get_bool(&cfg_args(&[("b", json!("true"))]), "b").unwrap_err();
+        assert!(
+            err.message.contains("b must be a boolean"),
+            "{}",
+            err.message
+        );
+        assert_eq!(get_bool(&cfg_args(&[]), "b").unwrap(), None);
+        assert_eq!(
+            get_bool(&cfg_args(&[("b", json!(true))]), "b").unwrap(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn get_usize_rejects_wrong_type_not_just_negative() {
+        // #842 crux: #339 fixed only the NEGATIVE case, but `get_usize` delegates to
+        // `get_i64`, so a stringified number ("50") used to slip through as `Ok(None)`
+        // and silently apply the default. Now the get_i64 type-gate rejects it first.
+        let err = get_usize(&cfg_args(&[("limit", json!("50"))]), "limit").unwrap_err();
+        assert!(
+            err.message.contains("limit must be an integer"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

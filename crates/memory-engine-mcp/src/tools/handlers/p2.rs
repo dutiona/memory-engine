@@ -37,8 +37,8 @@ pub async fn handle_replay_events(
         return Err(ErrorData::invalid_params("since must be <= until", None));
     }
 
-    let id_start = get_i64(args, "id_range_start");
-    let id_end = get_i64(args, "id_range_end");
+    let id_start = get_i64(args, "id_range_start")?;
+    let id_end = get_i64(args, "id_range_end")?;
     let id_range = match (id_start, id_end) {
         (Some(s), Some(e)) => {
             if s > e {
@@ -58,8 +58,8 @@ pub async fn handle_replay_events(
         }
     };
 
-    let session_id = get_str(args, "session_id");
-    let event_type = match get_str(args, "event_type") {
+    let session_id = get_str(args, "session_id")?;
+    let event_type = match get_str(args, "event_type")? {
         Some(s) => Some(parse_event_type(&s)?),
         None => None,
     };
@@ -74,8 +74,8 @@ pub async fn handle_replay_events(
         Some(n) => Some(n),
         None => Some(100),
     };
-    let upcast = get_bool(args, "upcast").unwrap_or(false);
-    let order = match get_str(args, "order") {
+    let upcast = get_bool(args, "upcast")?.unwrap_or(false);
+    let order = match get_str(args, "order")? {
         Some(s) => parse_replay_order(&s)?,
         None => ReplayOrder::InsertionOrder,
     };
@@ -104,7 +104,7 @@ pub async fn handle_fact_history(
     args: &serde_json::Map<String, Value>,
     engine: &MemoryEngine,
 ) -> Result<CallToolResult, ErrorData> {
-    let fact_id = get_i64(args, "fact_id")
+    let fact_id = get_i64(args, "fact_id")?
         .ok_or_else(|| ErrorData::invalid_params("missing fact_id", None))?;
     let depth_level = get_depth(args)?;
 
@@ -171,9 +171,9 @@ pub async fn handle_bootstrap_session(
         }
     };
     let config = BootstrapConfig {
-        scope: get_str(args, "scope"),
+        scope: get_str(args, "scope")?,
         max_turns: get_usize(args, "max_turns")?.unwrap_or(0),
-        skip_existing: get_bool(args, "skip_existing").unwrap_or(true),
+        skip_existing: get_bool(args, "skip_existing")?.unwrap_or(true),
         redact: true,
         denylist,
         // #293 hostile-input caps (max_session_bytes / max_entries): the MCP
