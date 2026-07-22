@@ -85,8 +85,11 @@ impl SchemaManager for SqliteBackend {
             // #1000: `embedding_meta::store` re-stamps the active registry row via a
             // two-statement UPDATE-or-INSERT. Run it in an explicit transaction so its
             // atomicity is enforced by the `&Transaction` type, not merely by the
-            // block_write write-lock. Behavior-preserving: at a block_write boundary the
-            // connection is fresh autocommit, so this can never nest.
+            // block_write write-lock. Behavior-preserving: a block_write connection is in
+            // autocommit on every normal path, so this begins a fresh top-level tx. (The
+            // sole way an outer `BEGIN` could already be open is the `test-util` `raw_exec`
+            // seam — unused by any test, and the same premise `insert_fact` already relies
+            // on with its own `unchecked_transaction`.)
             let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
             embedding_meta::store(&tx, &fp)?;
             tx.commit().map_err(StorageError::backend)?;
