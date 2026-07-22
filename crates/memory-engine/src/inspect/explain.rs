@@ -43,17 +43,20 @@ pub fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
 
 pub fn build_graph_context(graph: &crate::graph::MemoryGraph, fact_id: i64) -> GraphContext {
     let degree = graph.degree(fact_id);
-    // Use connected_component to get ALL neighbors (in + out), consistent with degree.
-    // `neighbors()` only returns outgoing, which would be inconsistent with degree.
     let has_node = graph.has_node(fact_id);
-    let mut neighbor_ids: Vec<i64> = if has_node {
-        let component = graph.connected_component(fact_id);
-        component.into_iter().filter(|&id| id != fact_id).collect()
-    } else {
-        Vec::new()
-    };
+    // Immediate (distance-1) in+out neighbors — consistent with `degree`. This was
+    // `connected_component` (the whole *transitive* component minus self), which #901
+    // flagged as inconsistent with `degree`: a fact of degree 2 sitting in a larger
+    // component reported every transitively-reachable fact as a "neighbor".
+    let mut neighbor_ids = graph.neighbors_undirected(fact_id);
     neighbor_ids.sort_unstable();
-    let component_size = neighbor_ids.len() + usize::from(has_node);
+    // `component_size` stays the separate, broader transitive-component metric (the
+    // whole weakly-connected component including the fact itself).
+    let component_size = if has_node {
+        graph.connected_component(fact_id).len()
+    } else {
+        0
+    };
     GraphContext {
         degree,
         neighbor_ids,
@@ -339,27 +342,19 @@ mod tests {
         assert_eq!(ctx.component_size, 4);
     }
 
-    /// #459 / #901: documents the CURRENT behaviour that `build_graph_context`
-    /// returns the **entire weakly-connected component**, NOT the immediate
-    /// (distance-1) neighbours — and that this is *inconsistent* with `degree`,
-    /// which counts only distance-1 in+out edges.
+    /// #901 (fix): `neighbor_ids` is the **immediate (distance-1) in+out neighbour
+    /// set**, consistent with `degree` — NOT the whole weakly-connected component.
+    /// `component_size` remains the separate, broader transitive-component metric.
     ///
-    /// The star fixture in [`build_graph_context_with_neighbors`] cannot expose
-    /// this: in a star every component member is also a distance-1 neighbour of
-    /// the centre, so component-membership and immediate-neighbourhood coincide.
-    /// Here a deliberately **transitive** chain `A(10) -> B(20) -> C(30)` queried
-    /// from `A` separates them: `C` is distance-2 from `A` (NOT an immediate
-    /// neighbour), yet it appears in `neighbor_ids` because the helper walks the
-    /// whole component. `degree(A) == 1` (only the `A->B` edge) confirms the
-    /// distance-1 vs whole-component divergence.
-    ///
-    /// This asserts reality (the whole-component behaviour) rather than hiding it.
-    /// The degree-vs-component inconsistency — and whether `neighbor_ids` should
-    /// instead be the distance-1 neighbour set to match `degree` — is a
-    /// production design decision tracked in collateral issue #901; this test must
-    /// be updated to assert the distance-1 set if/when that fix lands.
+    /// The star fixture in [`build_graph_context_with_neighbors`] cannot discriminate
+    /// this: in a star every component member is also a distance-1 neighbour, so the
+    /// two coincide. Here a deliberately **transitive** chain `A(10) -> B(20) -> C(30)`
+    /// queried from `A` separates them: `C` is distance-2 from `A`, so it must appear
+    /// in `component_size` (the transitive metric) but NOT in `neighbor_ids` (the
+    /// immediate metric). This is the regression witness for the #901 fix — before it,
+    /// `neighbor_ids` walked the whole component and wrongly included `C(30)`.
     #[test]
-    fn build_graph_context_returns_whole_component_not_immediate_neighbours() {
+    fn build_graph_context_neighbor_ids_are_immediate_not_transitive() {
         let mut graph = MemoryGraph::new();
         let edge = |edge_id| EdgeData {
             edge_id,
@@ -375,32 +370,33 @@ mod tests {
         // `degree` is distance-1 in+out: A has only the single outgoing `A->B`.
         assert_eq!(ctx.degree, 1, "A has exactly one distance-1 edge (A->B)");
 
-        // `neighbor_ids` is the WHOLE component minus A — so it INCLUDES the
-        // transitive distance-2 node C(30), proving it is not the distance-1 set.
+        // `neighbor_ids` is now the IMMEDIATE neighbour set — B(20) only. The
+        // transitive distance-2 node C(30) must NOT appear (that was the #901 bug).
         assert_eq!(
             ctx.neighbor_ids,
-            vec![20, 30],
-            "whole connected component (incl. transitive C=30), NOT immediate neighbours"
+            vec![20],
+            "immediate (distance-1) neighbours only — B(20), not transitive C(30)"
         );
-        // Non-vacuous guard: the transitive node is the load-bearing assertion —
-        // a distance-1-only implementation (matching `degree`) would omit 30.
         assert!(
-            ctx.neighbor_ids.contains(&30),
-            "transitive distance-2 node C(30) must be present under current whole-component behaviour"
+            !ctx.neighbor_ids.contains(&30),
+            "transitive distance-2 node C(30) must NOT be an immediate neighbour (#901)"
         );
 
-        // The divergence made explicit: neighbour-set size (2) exceeds degree (1).
-        assert!(
-            ctx.neighbor_ids.len() > ctx.degree,
-            "component-derived neighbour set is broader than the distance-1 degree (tracked in #901)"
-        );
-
+        // Consistency restored: the immediate neighbour set size equals `degree`
+        // (both distance-1) — the divergence #901 flagged is gone.
         assert_eq!(
-            ctx.component_size,
-            ctx.neighbor_ids.len() + 1,
-            "neighbours + the fact itself"
+            ctx.neighbor_ids.len(),
+            ctx.degree,
+            "immediate neighbour count matches the distance-1 degree (#901 fixed)"
         );
-        assert_eq!(ctx.component_size, 3);
+
+        // `component_size` stays the broader transitive metric: A + B + C = 3, and it
+        // is genuinely larger than the immediate neighbourhood (`neighbor_ids` + self).
+        assert_eq!(ctx.component_size, 3, "whole transitive component A,B,C");
+        assert!(
+            ctx.component_size > ctx.neighbor_ids.len() + 1,
+            "component_size (transitive) is broader than the immediate neighbourhood"
+        );
     }
 
     /// #459: a node present in the graph but with no edges has degree 0, no

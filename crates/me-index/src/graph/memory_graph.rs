@@ -203,6 +203,42 @@ impl MemoryGraph {
         })
     }
 
+    /// Immediate (distance-1) neighbors of a fact — distinct fact ids reachable by a
+    /// single edge in EITHER direction (in or out), excluding the fact itself.
+    ///
+    /// This is the undirected 1-hop neighborhood, consistent with [`degree`](Self::degree)'s
+    /// in+out counting (modulo multi-edges / self-loops, which inflate the edge-count
+    /// degree but collapse to distinct nodes here). Contrast [`neighbors`](Self::neighbors)
+    /// (outgoing only) and [`connected_component`](Self::connected_component) (the whole
+    /// *transitive* component): this is exactly the direct neighbors — the set the inspect
+    /// graph-context reports, so it matches `degree` rather than the whole component (#901).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_index::{EdgeData, MemoryGraph};
+    /// let mut g = MemoryGraph::new();
+    /// let e = |edge_id| EdgeData { edge_id, relation_type: "relates".into(), weight: 1.0 };
+    /// g.add_edge(1, 2, e(1)); // outgoing: 1 -> 2
+    /// g.add_edge(3, 1, e(2)); // incoming: 3 -> 1
+    /// let mut neighbours = g.neighbors_undirected(1);
+    /// neighbours.sort_unstable();
+    /// assert_eq!(neighbours, vec![2, 3]); // both directions, distinct, self excluded
+    /// ```
+    #[must_use]
+    pub fn neighbors_undirected(&self, fact_id: i64) -> Vec<i64> {
+        self.node_map.get(&fact_id).map_or_else(Vec::new, |&idx| {
+            let mut seen = HashSet::new();
+            self.graph
+                .neighbors_directed(idx, Direction::Outgoing)
+                .chain(self.graph.neighbors_directed(idx, Direction::Incoming))
+                .map(|ni| self.graph[ni])
+                // Exclude self-loops and dedup a neighbor linked in both directions.
+                .filter(|&id| id != fact_id && seen.insert(id))
+                .collect()
+        })
+    }
+
     /// Total degree (in + out) for importance scoring.
     #[must_use]
     pub fn degree(&self, fact_id: i64) -> usize {
@@ -484,6 +520,40 @@ mod tests {
         assert_eq!(g.degree(4), 1);
         // unknown node
         assert_eq!(g.degree(99), 0);
+    }
+
+    /// #901: `neighbors_undirected` is the distinct immediate (distance-1) in+out
+    /// neighbour set — the basis of the inspect graph-context's `neighbor_ids`. It
+    /// must dedup a bidirectionally-linked neighbour and exclude self-loops, unlike
+    /// `neighbors` (outgoing only) and `connected_component` (whole transitive component).
+    #[test]
+    fn neighbors_undirected_is_immediate_in_plus_out_deduped() {
+        let mut g = MemoryGraph::new();
+        g.add_edge(1, 2, make_edge_data(1, "a")); // out
+        g.add_edge(1, 3, make_edge_data(2, "b")); // out
+        g.add_edge(4, 1, make_edge_data(3, "c")); // in
+        // Bidirectional link to 5 — must appear EXACTLY ONCE (dedup across directions).
+        g.add_edge(1, 5, make_edge_data(4, "d"));
+        g.add_edge(5, 1, make_edge_data(5, "e"));
+        // Self-loop — must be excluded from node 1's own neighbourhood.
+        g.add_edge(1, 1, make_edge_data(6, "self"));
+
+        let mut n = g.neighbors_undirected(1);
+        n.sort_unstable();
+        assert_eq!(
+            n,
+            vec![2, 3, 4, 5],
+            "distinct immediate in+out neighbours; 5 counted once, self excluded"
+        );
+
+        // A node reached only via an incoming edge still sees its source.
+        assert_eq!(
+            g.neighbors_undirected(2),
+            vec![1],
+            "2's only neighbour is 1 (via the incoming 1->2 edge)"
+        );
+        // Absent node → empty.
+        assert!(g.neighbors_undirected(99).is_empty());
     }
 
     #[test]
