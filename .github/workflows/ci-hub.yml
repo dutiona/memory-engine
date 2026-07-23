@@ -93,7 +93,7 @@ jobs:
   code-review:
     needs: parse
     if: ${{ needs.parse.outputs.run == 'true' && needs.parse.outputs.kind == 'code' }}
-    uses: dutiona/ci-hub/.github/workflows/review.yml@b6c1ad1206a2e74d32fca6674b0b3e86acff4d90
+    uses: dutiona/ci-hub/.github/workflows/review.yml@c97559c398ad0f4803d48b952a557ec992b7b940
     with:
       pr_number: ${{ fromJSON(needs.parse.outputs.pr) }}
       reviewers: ${{ needs.parse.outputs.reviewers }}
@@ -101,7 +101,7 @@ jobs:
   plan-review:
     needs: parse
     if: ${{ needs.parse.outputs.run == 'true' && needs.parse.outputs.kind == 'plan' }}
-    uses: dutiona/ci-hub/.github/workflows/plan-review.yml@b6c1ad1206a2e74d32fca6674b0b3e86acff4d90
+    uses: dutiona/ci-hub/.github/workflows/plan-review.yml@c97559c398ad0f4803d48b952a557ec992b7b940
     with:
       pr_number: ${{ fromJSON(needs.parse.outputs.pr) }}
       reviewers: ${{ needs.parse.outputs.reviewers }}
