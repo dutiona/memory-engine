@@ -72,5 +72,11 @@ podman build --pull=newer -t memory-engine:<tag> .
 - The runtime is Debian slim with CA certificates, the `sqlite3` CLI and `curl`.
 - The image runs as the non-root user `memory-engine`, UID and GID `10001`, in `/var/lib/memory-engine`, with
   `memory-engine-mcp` as its entry point. Run the CLI with `--entrypoint memory-engine-cli`.
+- The entry point serves MCP over HTTP and needs `MEMORY_MCP_LISTEN` (`0.0.0.0:<port>` inside a container, so a
+  published port reaches it) and `MEMORY_MCP_TOKEN_FILE`
+  ([MCP server reference](../reference/mcp-server.md#transport-and-authentication)).
+- Every route requires a machine token, so a health probe expects 401:
+  `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/mcp` prints `401`.
+- `podman stop` sends SIGTERM: the server drains its tool calls, flushes its snapshot and exits 0.
 
 How the image is deployed (volumes, ports, secrets) is outside this repository.
