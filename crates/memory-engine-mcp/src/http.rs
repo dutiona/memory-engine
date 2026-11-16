@@ -4,7 +4,7 @@
 //! The layer answers 401 before rmcp runs, so an unauthenticated caller learns nothing
 //! about the Host check (403) or the method check (405), and an unknown path is a 401 too.
 
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::sync::Arc;
 
 use axum::Router;
@@ -22,6 +22,9 @@ use crate::server::MemoryMcpServer;
 
 /// How long a stop waits for open connections before it stops waiting for them.
 const CONNECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a stop that gave up on connections still lets finished calls send their reply.
+const RESPONSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Serve MCP on `listener` until `shutdown` resolves, then flush the sidecar snapshot.
 ///
@@ -45,20 +48,25 @@ pub async fn serve(
         .with_graceful_shutdown(async move {
             shutdown.await;
             let _ = stopping.send(());
-        });
+        })
+        .into_future();
+    tokio::pin!(serving);
     // hyper has no read timeout here, so a peer that sends half a request would hold the
     // graceful shutdown open for good. Connections get a grace period; calls already
     // started are still waited for below, whatever their connection does.
-    tokio::select! {
-        result = serving => result?,
+    let all_closed = tokio::select! {
+        result = &mut serving => { result?; true }
         () = async {
             if stopped.await.is_ok() {
                 tokio::time::sleep(CONNECTION_GRACE).await;
             } else {
                 std::future::pending::<()>().await;
             }
-        } => tracing::warn!("connections still open {CONNECTION_GRACE:?} after shutdown; closing"),
-    }
+        } => {
+            tracing::warn!("connections still open {CONNECTION_GRACE:?} after shutdown; no longer waiting for them");
+            false
+        }
+    };
     // axum returns once connections close, but rmcp runs each call in its own task, so a
     // call whose client hung up may still be writing: wait for every call to finish. A
     // flush beside a write could pair the new DB fingerprint with old projections. The
@@ -69,6 +77,11 @@ pub async fn serve(
     // open rebuilds the projections from it.
     if let Err(e) = engine.flush_snapshot().await {
         tracing::warn!("failed to flush sidecar snapshot on shutdown: {e}");
+    }
+    // A call that outlasted the grace has committed by now; let its response reach the
+    // client before the process exits, or the client sees a reset and may retry it.
+    if !all_closed {
+        let _ = tokio::time::timeout(RESPONSE_GRACE, &mut serving).await;
     }
     Ok(())
 }
