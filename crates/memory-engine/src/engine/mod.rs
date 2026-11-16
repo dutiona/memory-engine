@@ -535,8 +535,11 @@ impl MemoryEngine {
     ///
     /// Unlike [`close`](Self::close) this needs no `&mut`, so a **shared owner**
     /// (`Arc<MemoryEngine>`, e.g. the long-lived MCP server that cannot unwrap the
-    /// `Arc` to get `&mut`) can persist the sidecar on shutdown — or periodically.
-    /// Idempotent and safe to call repeatedly.
+    /// `Arc` to get `&mut`) can persist the sidecar on shutdown. Idempotent.
+    ///
+    /// No write may be in flight: the projections are captured before the DB
+    /// fingerprint is read, so a write committed in between yields a sidecar whose
+    /// fingerprint validates on the next open while its projections miss that write.
     ///
     /// No-op for in-memory or read-only engines (`Ok(false)`). `Ok(true)` when a
     /// snapshot was written.
