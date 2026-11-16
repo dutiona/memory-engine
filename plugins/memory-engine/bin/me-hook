@@ -160,6 +160,24 @@ record_endpoint() {
 	rm -f "$O/tmp/$$.endpoint" "$O/endpoint"
 }
 
+# count_outbox: Q and P := the queued and parked events, before this hook's own event is published.
+count_outbox() {
+	Q=0
+	P=0
+	for _e in "$O"/[0-9]*; do [ -d "$_e" ] && Q=$((Q + 1)); done
+	for _e in "$O"/rejected/[0-9]*; do [ -d "$_e" ] && P=$((P + 1)); done
+}
+
+# no_token_line: ADR-0020 §10's client-made state, as the hook output's systemMessage, from a fixed template.
+no_token_line() {
+	[ -e "$TOKEN" ] && return 0
+	if [ "$Q" -eq 0 ] && [ "$P" -eq 0 ]; then
+		printf '{"systemMessage":"memory: no token file"}\n'
+	else
+		printf '{"systemMessage":"memory: no token file; outbox %d queued, %d parked"}\n' "$Q" "$P"
+	fi
+}
+
 abandon() {
 	rm -rf "$O/tmp/$$"
 	exit 0
@@ -209,7 +227,9 @@ capture() {
 		printf 'ME-Client-Version: %s\n' "$ME_VERSION"
 		fact_lines
 	} >"$_t/headers" || abandon
+	[ "$SUB" = session-start ] && count_outbox
 	mv "$_t" "$O/$_id" || abandon
+	[ "$SUB" = session-start ] && no_token_line
 	# The stable copy the watcher runs; best effort, after publication, so that it never costs the event.
 	{ cat "$0" >"$O/tmp/$$.me-hook" && mv "$O/tmp/$$.me-hook" "$S/bin/me-hook"; } ||
 		{ heal && cat "$0" >"$O/tmp/$$.me-hook" && mv "$O/tmp/$$.me-hook" "$S/bin/me-hook"; } ||
