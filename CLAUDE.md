@@ -35,6 +35,7 @@ cargo bench                           # Criterion benchmarks
 cargo doc --no-deps --open            # API reference
 uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
 just --list                           # dev task runner (install: cargo install just) — linkmap / symbols / fuzz-build
+sh plugins/memory-engine/tests/run.sh # the Claude Code plugin's shell suite (its full gate: AGENTS.md, plugins/memory-engine/README.md)
 ```
 
 Feature flags: `backend-sqlite` (default; the in-process SQLite backend — a #633 marker today, since `rusqlite` is still unconditional), `backend-postgres` (the #633 `PgBackend`: `deadpool-postgres` pool + fresh v14 migration chain + `SchemaManager`), `ann` (HNSW vector search), `archive` (cold storage .pak files), `compress-gzip`, `compress-zstd`, `test-util` (cross-crate test-only port hooks). At least one backend feature must be enabled (a `compile_error!` in `lib.rs` enforces it). `tokio` is a **non-optional** dependency — the engine is async-native, so there is no `async` feature to toggle (#702). The `backend-postgres` live tests are `#[ignore]`-by-default (they need a Docker/Postgres testcontainer) and also require `test-util` (they drive the `raw_exec` failure-injection seam, which is `test-util`-gated since #816): `cargo test -p memory-engine --features backend-postgres,test-util -- --ignored`.

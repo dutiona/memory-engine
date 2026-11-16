@@ -37,6 +37,15 @@ cargo +nightly fuzz build                                              # Fuzz ga
 
 Run all of them after every change. Do not skip any, and do not substitute a weaker variant — with CI on manual dispatch, there is no second chance to catch it. The last line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — so a removal or rename can break it silently. It needs nightly + cargo-fuzz (`just fuzz-build` wraps it) and is incremental (a seconds-long no-op when the facade is unchanged). The workflow also carries an **MSRV** job — `cargo +1.89 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you change a dependency or edition-sensitive code.
 
+**The Claude Code plugin** (`plugins/memory-engine/`, listed by `.claude-plugin/marketplace.json`) is POSIX `sh`, outside the cargo matrix, with its own gate:
+
+```bash
+claude plugin validate --strict plugins/memory-engine && claude plugin validate --strict .
+sh plugins/memory-engine/tests/run.sh                    # under dash, and under macOS /bin/sh (bash 3.2) on a macOS host over ssh
+python3 -I plugins/memory-engine/tests/latency.py        # a capture hook's p95, budget 50 ms
+ME_TEST_CLAUDE_TOKEN_FILE=<file> sh plugins/memory-engine/tests/real-claude.sh   # real claude -p, scratch HOME
+```
+
 **Dispatching and monitoring CI** (it will not run itself):
 
 ```bash
@@ -86,6 +95,7 @@ crates/
 tests/     # workspace integration tests    benches/  # Criterion benchmarks
 examples/  # runnable examples               fuzz/     # cargo-fuzz (detached, nightly-only)
 utils/     # scripts (github-pm, hooks)       docs/     # Sphinx narrative documentation
+plugins/memory-engine/  # the Claude Code plugin (POSIX sh helper + hooks), listed by .claude-plugin/marketplace.json
 ```
 
 Full module map + the strict L0→L4 layer DAG: `docs/reference/crate-layout.md`. Many domains that were once facade `src/` modules (`store/`, `graph/`, `consolidation/`, `forgetting/`, `types/`, `traits.rs`, …) are now their own crates per the Wave-2 (#816) decomposition.

@@ -151,6 +151,8 @@ memory-engine = { git = "https://github.com/dutiona/memory-engine", features = [
 
 To run the MCP server as a container, see [Server image](docs/getting-started/installation.md#server-image).
 
+To capture Claude Code sessions into a memory-engine server, install the [Claude Code plugin](plugins/memory-engine/README.md): `/plugin install memory-engine --marketplace dutiona/memory-engine`.
+
 ## Workspace Crates
 
 | Crate               | Purpose                                          |
