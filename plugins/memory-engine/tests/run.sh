@@ -243,7 +243,7 @@ t_order() {
 t_seq_taken() {
 	e=$(date +%s)
 	mkdir -p "$O/seq" "$O/tmp" "$O/rejected"
-	for d in 0 1 2 3; do mkdir "$O/seq/$((e + d)).0"; done
+	for d in 0 1 2 3; do : >"$O/seq/$((e + d)).0"; done
 	hook capture <"$C/in"
 	id=$(events)
 	case $id in *-000001-*) ;; *) fail "want seq 000001, got $id" ;; esac
@@ -257,7 +257,7 @@ import os, sys
 o, e = sys.argv[1], int(sys.argv[2])
 for d in range(4):
     for n in range(1000):
-        os.mkdir("%s/seq/%d.%d" % (o, e + d, n))
+        open("%s/seq/%d.%d" % (o, e + d, n), "w").close()
 ' "$O" "$e"
 	hook capture <"$C/in"
 	eq "$(count)" 0 "events queued with every seq taken"
@@ -306,6 +306,19 @@ t_tree_heals() {
 		[ -d "$d" ] || fail "$d was not recreated"
 	done
 	eq "$(count)" 3 "events"
+}
+
+t_seq_concurrent() {
+	i=0
+	while [ "$i" -lt 30 ]; do
+		PATH=$RB /bin/sh "$HB" capture "$URL" "" <"$C/in" >/dev/null 2>&1 &
+		i=$((i + 1))
+	done
+	wait
+	settle
+	eq "$(count)" 30 "events"
+	dups=$(events | cut -d- -f1,2 | sort | uniq -d)
+	[ -z "$dups" ] || fail "seqs reserved twice in one second: $dups"
 }
 
 t_body_write_fail() {
@@ -781,7 +794,7 @@ t_no_curl() {
 
 CASES=${CASES:-"
 registration version
-body_identical envelope order seq_taken seq_bound pid_reuse id_collision rejected_collision tree_heals
+body_identical envelope order seq_taken seq_bound seq_concurrent pid_reuse id_collision rejected_collision tree_heals
 body_write_fail endpoint side_duties_fail silent modes
 facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
 newline dev_root no_git facts_unborn facts_layouts

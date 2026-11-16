@@ -8,14 +8,16 @@
 # starts while another one runs.
 PATH=/usr/bin:/bin
 D=${FAKE_CURL_DIR:?}
+# Numbering and the overlap marker use exclusive creates (noclobber): uutils mkdir is not exclusive under concurrency.
 mkdir -p "$D/calls"
 k=1
-while ! mkdir "$D/calls/$k" 2>/dev/null; do
+while ! (set -C && : >"$D/calls/$k.n") 2>/dev/null; do
 	k=$((k + 1))
 done
 C=$D/calls/$k
+mkdir "$C"
 printf '%s\n' "$$" >"$C/pid"
-if mkdir "$D/running" 2>/dev/null; then owner=1; else : >"$D/overlap"; fi
+if (set -C && : >"$D/running") 2>/dev/null; then owner=1; else : >"$D/overlap"; fi
 for a; do printf '%s\n' "$a"; done >"$C/argv"
 prev=
 for a; do
@@ -50,5 +52,5 @@ block)
 *) code=$line ;;
 esac
 printf '%s' "$code"
-[ -n "${owner-}" ] && rmdir "$D/running"
+[ -n "${owner-}" ] && rm -f "$D/running"
 exit "$rc"

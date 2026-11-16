@@ -170,7 +170,13 @@ capture() {
 	_healed=
 	while :; do
 		[ "$_n" -lt 1000 ] || abandon
-		if mkdir "$O/seq/$_ep.$_n"; then
+		# The reservation is an exclusive create (noclobber is O_EXCL), not mkdir: uutils mkdir, the default on
+		# Ubuntu 26.04, can report success to two concurrent callers for one directory.
+		set -C
+		printf '%s\n' "$$" >"$O/seq/$_ep.$_n"
+		_ok=$?
+		set +C
+		if [ "$_ok" -eq 0 ]; then
 			_s=000000$_n
 			_seq=${_s#"${_s%??????}"}
 			_id=$_ep-$_seq-$$
