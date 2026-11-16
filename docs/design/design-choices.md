@@ -143,7 +143,7 @@ A `KnowledgeBaseConnector` trait that lets the engine reference external knowled
 **What:** A `read_only` flag (set via the file-backed builder's `.read_only(true)` setter, or `EngineConfig::new(p, dim).with_read_only(true)`) that, when set:
 
 1. Validates schema version and epoch compatibility without writing
-2. Opens all connections with `PRAGMA query_only = ON` (including the internal slot used for cache loading)
+2. Opens all connections with `SQLITE_OPEN_READ_ONLY` (including the internal slot used for cache loading)
 3. Guards all write methods with `MemoryError::ReadOnly` at the Rust level
 
 **Why:** Identified during PR #99 (CLI inspector) code review. The standard `open()` path always creates a writable connection pool and may run schema migrations. For operator tools (CLI inspect, MCP read-only queries, monitoring dashboards) that only need to read facts and statistics, this is undesirable:
@@ -158,7 +158,9 @@ This mirrors a common pattern in database tooling: `psql` vs `pg_dump --read-onl
 
 1. **File existence guard:** `open_read_only` rejects nonexistent paths before SQLite can create an empty file (which would be a write side effect)
 2. **Schema validation without mutation:** `validate_schema_version()` checks epoch and version compatibility using only SELECT queries — no DDL, no config writes
-3. **SQLite-level enforcement:** All connections have `PRAGMA query_only = ON`, so even if a code path bypasses the Rust guard, SQLite rejects the write
+3. **SQLite-level enforcement:** All connections are opened with `SQLITE_OPEN_READ_ONLY`, so even if a code path bypasses the Rust guard, SQLite rejects the write
 4. **Rust-level enforcement:** `pool.try_write()` checks the `read_only` flag and returns `MemoryError::ReadOnly` before acquiring the mutex
+
+**WAL requirement:** a database switches to WAL mode on its first read-write open (#1040), and SQLite creates a missing `-wal` and `-shm` even for a read-only connection. A read-only open of a WAL database therefore needs a writable directory unless both sidecars already exist (a running server or an earlier read-only open leaves them): in a directory the process cannot write it fails with "attempt to write a readonly database" (on a read-only mount SQLite reports "unable to open database file" instead), and in a writable one it leaves both sidecars behind. Opening with `immutable=1` would avoid that, but is unsafe while a writer is live.
 
 **Trade-off:** `list_due()` and `resume_context()` have write side effects (stamping `surfaced_at`). In read-only mode, these return `ReadOnly` if unsurfaced facts exist. CLI tools should use `list_active_facts()` for inspection. A future follow-up (#93) may add a read-only variant that skips stamping.

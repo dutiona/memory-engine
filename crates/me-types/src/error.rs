@@ -34,9 +34,10 @@ pub enum ConflictError {
     ScopeLabel(String),
 
     /// A restore/open operation was asked to create a database at a path that
-    /// already exists. The target must not exist so an existing store is never
-    /// silently overwritten.
-    #[error("target database path already exists")]
+    /// already exists, or (for `restore_sqlite`) whose `-wal`, `-shm` or `-journal`
+    /// sidecar does. The target must not exist so an existing store is never
+    /// silently overwritten, and a leftover sidecar is never replayed onto it.
+    #[error("target database path, or its -wal/-shm/-journal sidecar, already exists")]
     TargetExists,
 
     /// A restore was attempted into a database that already contains data.
@@ -289,8 +290,9 @@ pub enum MigrationError {
 
     /// The database or snapshot is in a state this build cannot open or migrate
     /// — a corrupt/unparseable config value, an uninitialized database, a
-    /// snapshot from a newer schema, post-rebuild foreign-key violations, or a
-    /// non-file path opened read-only. The string carries the specific cause.
+    /// snapshot from a newer schema, post-rebuild foreign-key violations, a
+    /// non-file path opened read-only, or a `restore_sqlite` backup with a non-empty
+    /// `-wal` or `-journal`. The string carries the specific cause.
     #[error("{0}")]
     Incompatible(String),
 }
@@ -879,7 +881,7 @@ mod tests {
         let err = MemoryError::Conflict(ConflictError::TargetExists);
         assert_eq!(
             err.to_string(),
-            "conflict: target database path already exists"
+            "conflict: target database path, or its -wal/-shm/-journal sidecar, already exists"
         );
     }
 

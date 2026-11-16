@@ -251,7 +251,8 @@ let engine = MemoryEngine::restore_sqlite(Path::new("backup.db"), &config)?;
 
 **Constraints:**
 
-- Target path (`config.path`) must not already exist.
+- Target path (`config.path`) must not already exist. For `restore_sqlite`, neither may its
+  `-wal`, `-shm` or `-journal` sidecar: SQLite would replay a leftover one onto the restored file.
 - `config.embed_dim` is validated against the snapshot — mismatches are rejected.
 - `restore_sqlite` only accepts clean `VACUUM INTO` backups produced by `dump_state`.
   Copying a live WAL-mode database is unsafe.

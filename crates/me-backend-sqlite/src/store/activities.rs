@@ -306,12 +306,12 @@ mod tests {
         assert_eq!(fetched.status, ActivityStatus::Recorded);
     }
 
-    /// #485 regression guard: [`crate::test_util::setup_memory_db`] MUST enable
-    /// `PRAGMA foreign_keys`. With enforcement OFF (the original bug — raw
-    /// `Connection::open_in_memory`), an activity whose `scope_id` references a
-    /// non-existent scope inserts silently; with it ON, the FK constraint
-    /// (`activities.scope_id REFERENCES scopes(id)`) rejects it. This is the
-    /// mutation-proof check — it fails loudly if the harness ever loses the pragma.
+    /// #485 regression guard: the store setup must run with FK enforcement ON. With
+    /// it OFF, an activity whose `scope_id` references a non-existent scope inserts
+    /// silently; with it ON, the FK constraint (`activities.scope_id REFERENCES
+    /// scopes(id)`) rejects it. This pins the *effective* setting: under the bundled
+    /// build (`SQLITE_DEFAULT_FOREIGN_KEYS=1`) it cannot detect a lost pragma line, but it
+    /// fails on a non-bundled build that loses it (#1050).
     #[test]
     fn insert_with_dangling_scope_fk_is_rejected() {
         let conn = setup();

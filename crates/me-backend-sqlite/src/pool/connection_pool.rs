@@ -408,7 +408,8 @@ impl ConnectionPool {
             .into());
         }
 
-        // Open with SQLITE_OPEN_READ_ONLY — no file creation, no WAL mutation
+        // SQLITE_OPEN_READ_ONLY never creates or writes the database file (its WAL
+        // sidecars are another matter: see `open_connection_read_only`).
         let path_str = path.to_string_lossy();
         let conn = open_connection_read_only(&path_str)?;
         validate_schema_version(&conn)?;
@@ -766,6 +767,42 @@ mod tests {
         let v = get_config(&r, "schema_version").unwrap();
         drop(r);
         assert!(v.is_some());
+    }
+
+    fn pragma_int(conn: &Connection, name: &str) -> i64 {
+        conn.pragma_query_value(None, name, |r| r.get(0)).unwrap()
+    }
+
+    /// #1040: the connection pragmas must take effect, read back on every connection the
+    /// public constructors hand out.
+    #[test]
+    fn pool_connections_apply_pragmas() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = ConnectionPool::open(&db_path, 4, 2, None).unwrap();
+        let w = pool.write();
+        let r1 = pool.read().unwrap();
+        let r2 = pool.read().unwrap();
+        for conn in [&*w, &*r1, &*r2] {
+            let journal: String = conn
+                .pragma_query_value(None, "journal_mode", |r| r.get(0))
+                .unwrap();
+            assert_eq!(journal, "wal");
+            assert_eq!(pragma_int(conn, "synchronous"), 1, "synchronous = NORMAL");
+            assert_eq!(pragma_int(conn, "foreign_keys"), 1);
+            assert_eq!(pragma_int(conn, "busy_timeout"), 5000);
+        }
+        drop((w, r1, r2));
+        drop(pool);
+
+        let pool = ConnectionPool::open_read_only(&db_path, 4, 2).unwrap();
+        let w = pool.write();
+        let r1 = pool.read().unwrap();
+        let r2 = pool.read().unwrap();
+        for conn in [&*w, &*r1, &*r2] {
+            assert_eq!(pragma_int(conn, "foreign_keys"), 1);
+            assert_eq!(pragma_int(conn, "busy_timeout"), 5000);
+        }
     }
 
     #[test]
