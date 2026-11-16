@@ -790,6 +790,227 @@ t_no_curl() {
 	eq "$(count)" 1 "events without curl"
 }
 
+# ---------------------------------------------------------------- item 6: one flusher, stale locks, pruning
+
+live_pid() {
+	sleep 300 </dev/null >/dev/null 2>&1 &
+	printf '%s\n' "$!" >>"$C/live.pids"
+	LIVE=$!
+}
+
+dead_pid() {
+	sh -c 'exit 0' &
+	DEAD=$!
+	wait "$DEAD"
+}
+
+# mklock PID STAMP [DIR]: a whole lock of another flusher.
+mklock() {
+	mkdir -p "${3-$O/lock}"
+	printf '%s %s\n' "$1" "$2" >"${3-$O/lock}/owner"
+}
+
+kill_live() {
+	[ -f "$C/live.pids" ] && kill $(cat "$C/live.pids") 2>/dev/null
+	return 0
+}
+
+t_lock_live() {
+	queue A
+	token
+	live_pid
+	for st in $(date +%s) $(($(date +%s) - 3599)); do
+		mklock "$LIVE" "$st"
+		cp "$O/lock/owner" "$C/owner.before"
+		flush_fg
+		eq "$(calls)" 0 "calls with a live lock (stamp $st)"
+		cmp "$C/owner.before" "$O/lock/owner" || fail "a live lock's record changed"
+	done
+	kill_live
+}
+
+t_lock_dead() {
+	queue A
+	token
+	dead_pid
+	mklock "$DEAD" "$(date +%s)"
+	flush_fg
+	eq "$(count) $(calls)" "0 1" "after a dead flusher's lock"
+	[ ! -e "$O/lock" ] || fail "lock left behind"
+}
+
+t_lock_age() {
+	queue A
+	token
+	live_pid
+	mklock "$LIVE" $(($(date +%s) - 3601))
+	flush_fg
+	eq "$(count) $(calls)" "0 1" "after an hour-old lock"
+	kill_live
+}
+
+t_lock_unreadable() {
+	token
+	live_pid
+	for kind in empty missing malformed; do
+		queue A
+		mkdir -p "$O/lock"
+		case $kind in
+		empty) : >"$O/lock/owner" ;;
+		missing) rm -f "$O/lock/owner" ;;
+		malformed) printf '%s x\n' "$LIVE" >"$O/lock/owner" ;;
+		esac
+		flush_fg
+		eq "$(count)" 0 "queue after a $kind owner record"
+	done
+	kill_live
+}
+
+t_lock_stamp() {
+	queue A
+	token
+	live_pid
+	mklock "$LIVE" $(($(date +%s) - 7200))
+	printf '%s\n' "$(date +%s)" >"$O/lock/$LIVE.stamp"
+	flush_fg
+	eq "$(calls)" 0 "a renewed live lock is not stale"
+	kill_live
+}
+
+t_lock_killed() {
+	queue A
+	token
+	printf 'block\n' >"$FAKE_CURL_DIR/plan"
+	PATH=$RB /bin/sh "$HB" flush </dev/null >/dev/null 2>&1 &
+	f=$!
+	i=0
+	while [ ! -s "$FAKE_CURL_DIR/calls/1/pid" ]; do
+		i=$((i + 1))
+		[ "$i" -lt 100 ] || fail "the flusher made no call"
+		sleep 0.1
+	done
+	kill -9 "$f" "$(cat "$FAKE_CURL_DIR/calls/1/pid")" 2>/dev/null
+	wait "$f" 2>/dev/null
+	[ -d "$O/lock" ] || fail "the killed flusher left no lock"
+	printf '204\n' >"$FAKE_CURL_DIR/plan"
+	flush_fg
+	eq "$(count) $(calls)" "0 2" "after a killed flusher"
+}
+
+t_lock_broken_stops() {
+	queue A B C
+	token
+	printf 'printf "1 1\\n" >"%s/lock/owner"\n' "$O" >"$FAKE_CURL_DIR/oncall.1"
+	flush_fg
+	eq "$(calls)" 1 "calls after the lock was taken over"
+}
+
+t_lock_steal() {
+	queue A B
+	token
+	dead_pid
+	mklock "$DEAD" "$(date +%s)"
+	live_pid
+	wrap mv 'case "$1" in */outbox/lock) case "$2" in *.stale) rm -rf "$1"; mkdir -p "$1.x"; printf "'"$LIVE"' 1\n" >"$1.x/owner"; /bin/mv "$1.x" "$1" ;; esac ;; esac'
+	flush_fg
+	eq "$(count) $(calls)" "0 2" "the breaker delivers"
+	! grep -q "^$LIVE " "$O/lock/owner" 2>/dev/null || fail "X still holds a lock"
+	kill_live
+}
+
+t_renew_race() {
+	queue A B C
+	token
+	live_pid
+	wrap mv 'case "$1" in *.stamp) l=${2%/*}; [ -e "'"$C"'/swapped" ] || { : >"'"$C"'/swapped"; rm -rf "$l"; mkdir -p "$l.y"; printf "'"$LIVE"' 9999999999\n" >"$l.y/owner"; /bin/mv "$l.y" "$l"; /bin/cp "$l/owner" "'"$C"'/y.owner"; } ;; esac'
+	flush_fg
+	cmp "$C/y.owner" "$O/lock/owner" || fail "Y's record changed"
+	eq "$(calls)" 1 "requests by the displaced flusher"
+	kill_live
+}
+
+t_release_race() {
+	queue A
+	token
+	live_pid
+	wrap rm 'case "$2" in */outbox/lock) [ -e "'"$C"'/swapped" ] || { : >"'"$C"'/swapped"; /bin/rm -rf "$2"; mkdir -p "$2"; printf "'"$LIVE"' 9999999999\n" >"$2/owner"; } ;; esac'
+	flush_fg
+	eq "$(count) $(calls)" "0 1" "first flush"
+	[ ! -e "$O/lock" ] || fail "lock left"
+	kill_live
+	rm -f "$RB/rm"
+	ln -s "$(command -v rm)" "$RB/rm"
+	rm -f "$TOKF"
+	queue B
+	token
+	flush_fg
+	eq "$(count)" 0 "a later flush delivers what remains"
+}
+
+t_second_look() {
+	queue A
+	token
+	cp -R "$O/$(events)" "$C/proto"
+	wrap rm 'case "$2" in */outbox/lock) [ -e "'"$C"'/published" ] || { : >"'"$C"'/published"; /bin/cp -R "'"$C"'/proto" "'"$O"'/9999999999-000000-1"; } ;; esac'
+	flush_fg
+	eq "$(count) $(calls)" "0 2" "an event published during the release"
+}
+
+t_no_second_look() {
+	queue A
+	token
+	cp -R "$O/$(events)" "$C/proto"
+	printf '503\n' >"$FAKE_CURL_DIR/plan"
+	printf 'cp -R "%s/proto" "%s/9999999999-000000-1"\n' "$C" "$O" >"$FAKE_CURL_DIR/oncall.1"
+	flush_fg
+	eq "$(count) $(calls)" "2 1" "after a retry"
+}
+
+t_simultaneous() {
+	token
+	i=0
+	while [ "$i" -lt 20 ]; do
+		printf 'body %s' "$i" >"$C/in.$i"
+		PATH=$RB /bin/sh "$HB" capture "$URL" "" <"$C/in.$i" >/dev/null 2>&1 &
+		i=$((i + 1))
+	done
+	wait
+	settle
+	eq "$(count)" 0 "queue"
+	[ ! -e "$FAKE_CURL_DIR/overlap" ] || fail "two requests overlapped"
+	py '
+import collections, glob, os, sys
+ids, bodies = collections.Counter(), set()
+for c in [d for d in glob.glob(os.path.join(sys.argv[1], "calls", "*")) if os.path.isdir(d)]:
+    h = dict(l.split(": ", 1) for l in open(os.path.join(c, "headers")).read().splitlines())
+    ids[h["ME-Event-Id"]] += 1
+    bodies.add(open(os.path.join(c, "body")).read())
+assert len(ids) == 20 and set(ids.values()) == {1}, ids
+assert bodies == {"body %d" % i for i in range(20)}, bodies
+seqs = collections.Counter(i.rsplit("-", 1)[0] for i in ids)
+assert set(seqs.values()) == {1}, seqs
+' "$FAKE_CURL_DIR" || fail "not each event exactly once"
+	set -- "$O"/tmp/* "$O"/lock
+	for f; do [ ! -e "$f" ] || fail "left behind: $f"; done
+}
+
+t_prune() {
+	queue A
+	token
+	live_pid
+	mkdir -p "$O/tmp/99999999" "$O/tmp/$LIVE"
+	: >"$O/tmp/99999999.me-hook"
+	now=$(date +%s)
+	: >"$O/seq/$((now - 7200)).0"
+	: >"$O/seq/$((now - 10)).0"
+	flush_fg
+	[ ! -e "$O/tmp/99999999" ] && [ ! -e "$O/tmp/99999999.me-hook" ] || fail "a dead writer's tmp entry stayed"
+	[ -d "$O/tmp/$LIVE" ] || fail "a live writer's tmp entry went"
+	[ ! -e "$O/seq/$((now - 7200)).0" ] || fail "an old reservation stayed"
+	[ -e "$O/seq/$((now - 10)).0" ] || fail "a recent reservation went"
+	kill_live
+}
+
 # ---------------------------------------------------------------- runner
 
 CASES=${CASES:-"
@@ -800,6 +1021,8 @@ facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd fa
 newline dev_root no_git facts_unborn facts_layouts
 status_classes curl_exit queue_while_failing no_token token_channel token_forms endpoint_update_fail
 endpoint_changed_mid_flush parked_kept park_heals detached real_curl redirect proxy_bypassed no_curl
+lock_live lock_dead lock_age lock_unreadable lock_stamp lock_killed lock_broken_stops lock_steal renew_race
+release_race second_look no_second_look simultaneous prune
 "}
 
 N=0
@@ -820,6 +1043,7 @@ for name in $CASES; do
 	fi
 	for f in "$C"/stub*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done
 	pkill -f "$C/plugin/bin/me-hook" 2>/dev/null
+	[ -f "$C/live.pids" ] && kill $(cat "$C/live.pids") 2>/dev/null
 done
 printf '# %d ok, %d not ok\n' "$OK" "$BAD"
 [ "$BAD" -eq 0 ]

@@ -219,17 +219,68 @@ lock_check() {
 	read_line "$O/lock/owner" && [ "$RL" = "$REC" ]
 }
 
-# lock_take: hold O/lock, published whole with this flusher's record by one rename.
-lock_take() {
-	now || return 1
-	REC="$$ $NOW"
+# lock_publish: try once to publish O/lock whole, with this flusher's record, by one rename.
+lock_publish() {
 	rm -rf "$O/tmp/$$.lock"
 	{ mkdir "$O/tmp/$$.lock" || { heal && mkdir "$O/tmp/$$.lock"; }; } || return 1
 	printf '%s\n' "$REC" >"$O/tmp/$$.lock/owner" || return 1
-	mv "$O/tmp/$$.lock" "$O/lock" 2>/dev/null
+	mv "$O/tmp/$$.lock" "$O/lock"
 	lock_check && return 0
+	# The rename failed, or moved our directory inside a lock that exists.
 	rm -rf "$O/tmp/$$.lock" "$O/lock/$$.lock"
 	return 1
+}
+
+# lock_stale: the lock's record is not two numbers, its flusher is gone, or its newest stamp is over an hour old.
+# A lock is always published with its whole record, so a record that cannot be read has no live writer.
+lock_stale() {
+	read_line "$O/lock/owner" || return 0
+	_pid=${RL%% *}
+	_st=${RL#* }
+	case $_pid in '' | *[!0-9]*) return 0 ;; esac
+	case $_st in '' | *[!0-9]*) return 0 ;; esac
+	kill -0 "$_pid" || return 0
+	if read_line "$O/lock/$_pid.stamp"; then
+		case $RL in '' | *[!0-9]*) ;; *) [ "$RL" -gt "$_st" ] && _st=$RL ;; esac
+	fi
+	[ $((NOW - _st)) -gt 3600 ]
+}
+
+# lock_take: hold O/lock, breaking it once when it is stale.
+lock_take() {
+	now || return 1
+	REC="$$ $NOW"
+	lock_publish && return 0
+	lock_stale || return 1
+	# One rename: of several breakers of one lock, exactly one succeeds.
+	rm -rf "$O/tmp/$$.stale"
+	mv "$O/lock" "$O/tmp/$$.stale" && rm -rf "$O/tmp/$$.stale"
+	lock_publish
+}
+
+# lock_renew: stamp this flusher's own file; a lock replaced since the check gets a stamp nobody reads as its own.
+lock_renew() {
+	now && printf '%s\n' "$NOW" >"$O/tmp/$$.stamp" && mv "$O/tmp/$$.stamp" "$O/lock/$$.stamp"
+}
+
+# prune: what dead writers left in tmp/, and seq reservations older than an hour.
+prune() {
+	set --
+	for _e in "$O"/tmp/*; do
+		[ -e "$_e" ] || continue
+		_p=${_e##*/}
+		_p=${_p%%.*}
+		case $_p in '' | *[!0-9]*) continue ;; esac
+		[ "$_p" = "$$" ] && continue
+		kill -0 "$_p" || set -- "$@" "$_e"
+	done
+	for _e in "$O"/seq/*; do
+		_p=${_e##*/}
+		_p=${_p%%.*}
+		case $_p in '' | *[!0-9]*) continue ;; esac
+		[ $((NOW - _p)) -gt 3600 ] && set -- "$@" "$_e"
+	done
+	[ $# -eq 0 ] || rm -rf -- "$@"
 }
 
 lock_release() {
@@ -248,6 +299,7 @@ drain() {
 		[ -d "$_ev" ] || continue
 		lock_check || return 1
 		read_line "$O/endpoint" && [ "$RL" = "$URL" ] || return 1
+		lock_renew
 		send "$_ev"
 		case $CODE in
 		204) rm -rf "$_ev" ;;
@@ -271,6 +323,7 @@ flush() {
 	[ -d "$O" ] || exit 0
 	while :; do
 		lock_take || exit 0
+		prune
 		if read_line "$O/endpoint" && URL=$RL && read_line "$TOKEN" && TOK=$RL && drain; then
 			lock_release
 		else
