@@ -138,8 +138,9 @@ Recall is a deterministic procedure *(settled here)*:
 2. **Candidate Homes** = {context Home, `user`}. Recall's `project` argument replaces the context Home for that call
    with the project whose Locator key equals the value byte for byte. The key form is ADR-0020's, as `recall` reports
    it: a remote key, or a machine-qualified path key such as `laptop:x`, so a key names at most one project. The swap
-   never reaches a bucket. Another machine's path-keyed project is read only when named this way, never
-   automatically *(owner)*. A value that is not the key of a known project (ADR-0020 §8: a project is known once an
+   never reaches a bucket. While another machine's path key resolves to a different project,
+   that project is read only when named this way, never automatically *(owner)*; once a confirmed `add` joins the
+   two keys they name one project (§8). A value that is not the key of a known project (ADR-0020 §8: a project is known once an
    event or a memory was filed under it) is a typed error, never a `user`-only read. Without the argument, a
    session whose own project is not minted yet (§8: only writes mint) reads `user` only, because that project holds
    nothing yet.
