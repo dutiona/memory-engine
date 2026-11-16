@@ -10,8 +10,8 @@
 # `vulnerability`/`unmaintained` lint-level field — `ignore` is the only knob.
 
 [graph]
-# Check the full feature matrix (async, ann, archive, compress-gzip, compress-zstd),
-# mirroring CI's `--all-features` gates so a vuln behind a feature flag cannot hide.
+# Check every workspace feature, mirroring CI's `--all-features` gates, so a vuln behind
+# a feature flag cannot hide.
 all-features = true
 
 # --- Security advisories (RustSec) — the #418 gate ---------------------------------
@@ -64,9 +64,9 @@ confidence-threshold = 0.8
 
 # --- Duplicate / banned crates — the #492 visibility -------------------------------
 [bans]
-# Duplicate transitive versions (currently getrandom, hashbrown, r-efi) are surfaced
-# as warnings, not failures: they are pulled by third-party crates and are not
-# fixable from this workspace. `warn` keeps them visible without blocking CI.
+# Duplicate transitive versions are surfaced as warnings, not failures: they are pulled
+# by third-party crates and are not fixable from this workspace. `warn` keeps them
+# visible without blocking CI.
 multiple-versions = "warn"
 # Reject `version = "*"` requirements — they defeat reproducible, auditable builds.
 wildcards = "deny"
