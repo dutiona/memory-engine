@@ -2,7 +2,7 @@
 name = "memory-engine-cli"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version.workspace = true
 description = "CLI inspector for memory-engine — operator tool for querying, inspecting, and managing agent memory"
 license = "MIT OR Apache-2.0"
 # Binary application, not a published library: `publish = false` states that intent and
@@ -23,10 +23,10 @@ serde_json = "1.0"
 anyhow = "1"
 tabled = "0.20"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 # Direct runtime dep for the Stage E cutover (`#[tokio::main]`/`block_on` at the
-# command boundary). Already present transitively via memory-engine's default
-# `async`; named here so the cutover can use it directly. (#631 Stage D)
+# command boundary). Already present transitively via memory-engine, where tokio
+# is non-optional (#702); named here so the cutover can use it directly. (#631 Stage D)
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]

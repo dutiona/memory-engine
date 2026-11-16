@@ -24,12 +24,12 @@ members = [
 # scratch git worktrees. Neither is a member here.
 exclude = [".worktrees", "fuzz"]
 
-# Workspace MSRV — the single source of truth the CI "verify rust-version" job greps
-# from this root manifest (`grep '^rust-version' Cargo.toml`). Members keep their own
-# `rust-version = "1.88"`; this also lets future crates inherit via
-# `rust-version.workspace = true`.
+# Workspace MSRV — the single source of truth: every member inherits it
+# (`rust-version.workspace = true`) and the CI "verify rust-version" job greps it from
+# here (`grep '^rust-version' Cargo.toml`). Only the detached `fuzz/` workspace repeats it.
+# 1.89 is rusqlite 0.41+'s `rust-version`, taken for RUSTSEC-2026-0459.
 [workspace.package]
-rust-version = "1.88"
+rust-version = "1.89"
 
 # Shared lint policy (Wave 2 #816): the decomposition creates many internal crates,
 # so the panic-safety (#725) + `unsafe_code = "forbid"` gates live here once and each

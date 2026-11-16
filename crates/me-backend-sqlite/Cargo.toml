@@ -19,7 +19,7 @@ me-storage = { path = "../me-storage" }
 # consumer-facing config/stats types they take/return still live in `me-traits`.
 me-traits = { path = "../me-traits" }
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 blake3 = "1"
@@ -65,11 +65,11 @@ insta = { version = "1", features = ["yaml", "redactions"] }
 # sub-PR 2b) needs the macro + a runtime; feature-unifies with the `[dependencies]`
 # `tokio` entry above into one crate-wide feature set.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-# `trace`: additive, zero-runtime-cost rusqlite feature (compiles in `Connection::trace`);
+# `trace`: additive, zero-runtime-cost rusqlite feature (compiles in `Connection::trace_v2`);
 # used ONLY by the ANN batched-fetch round-trip count test (#288/#362, search::ann). Cargo
 # feature-unifies this dev entry into the test build only, so the shipped library never
-# enables `trace`. Mirrors the facade's own dev-dependency exactly.
-rusqlite = { version = "0.34", features = ["trace"] }
+# enables `trace`.
+rusqlite = { version = "0.43", features = ["trace"] }
 
 [features]
 # Gates `store/archive_manifest.rs` (the `.pak` manifest table) and (sub-PR 2b)

@@ -4,7 +4,7 @@
 
 ## What This Is
 
-Embedded Rust library (edition 2024, **Rust 1.88+** — the workspace uses let-chains) providing durable long-term memory for AI agents. Single facade type `MemoryEngine` (async-native; DB methods are `async fn` over an `Arc<dyn StorageBackend>` — `tokio` is non-optional) with 5 primitives: Ingest, Query, Consolidate, Forget, Resolve. Zero LLM/network dependencies — consumers implement traits (`EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker`).
+Embedded Rust library (edition 2024, **Rust 1.89+** — the MSRV; the root `Cargo.toml` records what sets it) providing durable long-term memory for AI agents. Single facade type `MemoryEngine` (async-native; DB methods are `async fn` over an `Arc<dyn StorageBackend>` — `tokio` is non-optional) with 5 primitives: Ingest, Query, Consolidate, Forget, Resolve. Zero LLM/network dependencies — consumers implement traits (`EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker`).
 
 Part of a four-layer cognitive architecture. Companion repos: `knowledge-base` (Python MCP server, Knowledge layer), `autonomous-agent-project` (research, no code).
 
@@ -35,7 +35,7 @@ cargo deny check                                                       # Supply-
 cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
 ```
 
-Run all of them after every change. Do not skip any, and do not substitute a weaker variant — with CI on manual dispatch, there is no second chance to catch it. The last line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — so a removal or rename can break it silently. It needs nightly + cargo-fuzz (`just fuzz-build` wraps it) and is incremental (a seconds-long no-op when the facade is unchanged). The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code.
+Run all of them after every change. Do not skip any, and do not substitute a weaker variant — with CI on manual dispatch, there is no second chance to catch it. The last line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — so a removal or rename can break it silently. It needs nightly + cargo-fuzz (`just fuzz-build` wraps it) and is incremental (a seconds-long no-op when the facade is unchanged). The workflow also carries an **MSRV** job — `cargo +1.89 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you change a dependency or edition-sensitive code.
 
 **Dispatching and monitoring CI** (it will not run itself):
 

@@ -54,9 +54,10 @@ gh run list --workflow=ci.yml --limit 1     # find the run
 gh run watch <run-id>                       # follow it
 ```
 
-MSRV is **1.88** (let-chains). The workflow's MSRV job builds `--workspace --tests --examples` on
-exactly 1.88, default _and_ all-features — a dev-dep needing newer Rust fails it. Reproduce it
-locally if you touch let-chains or edition-sensitive code; it will not run on its own either.
+MSRV is **1.89** (the root `Cargo.toml` records what sets it). The workflow's MSRV job builds
+`--workspace --tests --examples` on exactly that version, default _and_ all-features — a dependency
+or dev-dep needing newer Rust fails it. Reproduce it locally if you change a dependency or
+edition-sensitive code; it will not run on its own either.
 
 ---
 

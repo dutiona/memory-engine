@@ -10,20 +10,35 @@
 # `vulnerability`/`unmaintained` lint-level field — `ignore` is the only knob.
 
 [graph]
-# Check the full feature matrix (async, ann, archive, compress-gzip, compress-zstd),
-# mirroring CI's `--all-features` gates so a vuln behind a feature flag cannot hide.
+# Check every workspace feature, mirroring CI's `--all-features` gates, so a vuln behind
+# a feature flag cannot hide.
 all-features = true
 
 # --- Security advisories (RustSec) — the #418 gate ---------------------------------
 [advisories]
-# Policy: action every advisory; never silently suppress. The single tracked exception
-# below is an *unmaintained* notice (not a vulnerability) and carries a removal issue.
+# Policy: action every advisory; never silently suppress. Each exception below carries its
+# reason and a removal issue. An *unmaintained* notice may be ignored; a vulnerability only
+# while its code is not compiled, a premise a `[[bans.features]]` entry enforces.
 # RUSTSEC-2026-0009 (time 0.3.45 DoS) was *fixed* — time bumped to 0.3.47, which
 # requires Rust 1.88, so the workspace MSRV was raised accordingly — not ignored.
-# RUSTSEC-2026-0173: proc-macro-error2 is unmaintained (not a vuln), pulled via
-# tabled_derive <- tabled in memory-engine-cli. Documented exception; to be removed
-# once tabled is upgraded/replaced. Tracking: #815.
-ignore = ["RUSTSEC-2026-0173"]
+# RUSTSEC-2026-0459 (bundled SQLite before 3.54.0) was *fixed* — rusqlite bumped to
+# 0.43 (SQLite 3.54.1), which requires Rust 1.89, so the MSRV was raised again — not ignored.
+ignore = [
+    # RUSTSEC-2026-0173: proc-macro-error2 is unmaintained (not a vuln), pulled via
+    # tabled_derive <- tabled in memory-engine-cli. Documented exception; to be removed
+    # once tabled is upgraded/replaced. Tracking: #815.
+    "RUSTSEC-2026-0173",
+    # RUSTSEC-2026-0462: rmcp 1.8's streamable-HTTP *client* is vulnerable (fixed only in
+    # 3.9.0, a major bump). memory-engine-mcp builds rmcp server-only (server +
+    # transport-io), so the client is not compiled; the rmcp entry under [bans] keeps it
+    # that way. Documented exception; removal tracked by #1035.
+    "RUSTSEC-2026-0462",
+    # RUSTSEC-2026-0440: astral-tokio-tar is unmaintained (not a vuln), pulled via
+    # testcontainers, a dev-dependency of me-backend-postgres only (the live-PG test
+    # harness). No testcontainers release drops it yet: testcontainers/testcontainers-rs#1006
+    # is open. Documented exception; removal tracked by #1036.
+    "RUSTSEC-2026-0440",
+]
 
 # --- License compliance ------------------------------------------------------------
 [licenses]
@@ -49,9 +64,9 @@ confidence-threshold = 0.8
 
 # --- Duplicate / banned crates — the #492 visibility -------------------------------
 [bans]
-# Duplicate transitive versions (currently getrandom, hashbrown, r-efi) are surfaced
-# as warnings, not failures: they are pulled by third-party crates and are not
-# fixable from this workspace. `warn` keeps them visible without blocking CI.
+# Duplicate transitive versions are surfaced as warnings, not failures: they are pulled
+# by third-party crates and are not fixable from this workspace. `warn` keeps them
+# visible without blocking CI.
 multiple-versions = "warn"
 # Reject `version = "*"` requirements — they defeat reproducible, auditable builds.
 wildcards = "deny"
@@ -61,6 +76,13 @@ wildcards = "deny"
 # first-party path deps are now flagged. Allow wildcard *paths* (first-party only)
 # while still denying real `*` version reqs on crates.io dependencies.
 allow-wildcard-paths = true
+
+# Keeps the RUSTSEC-2026-0462 exception honest; every client variant enables
+# transport-streamable-http-client. Remove together with that ignore under #1035, or it
+# blocks a legitimate client feature after rmcp 3.9+.
+[[bans.features]]
+crate = "rmcp"
+deny = ["client", "transport-streamable-http-client"]
 
 # --- Source registries -------------------------------------------------------------
 [sources]

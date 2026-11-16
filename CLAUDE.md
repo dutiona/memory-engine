@@ -58,7 +58,7 @@ cargo +nightly fuzz build                                              # Fuzz ga
 
 The last line is the **facade-API gate** (#993): the `fuzz/` crate is a *deliberately detached* workspace (empty `[workspace]`, nightly + libFuzzer), so **no `--workspace` command compiles it** — yet it consumes `memory-engine` / `-embed` / `-mcp` public API by path. A facade removal or rename can therefore break a real in-repo consumer with nothing else noticing. It needs `nightly` + `cargo-fuzz` (`rustup toolchain install nightly; cargo install cargo-fuzz --locked`), and it is *incremental* — a seconds-long no-op when the facade is unchanged, a ~2-min rebuild exactly when it changed. `just fuzz-build` is the equivalent one-word wrapper.
 
-The workflow also carries an **MSRV** job — `cargo +1.88 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you touch let-chains or edition-sensitive code.
+The workflow also carries an **MSRV** job — `cargo +1.89 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you change a dependency or edition-sensitive code.
 
 **Dispatching CI** (it will not run itself):
 
@@ -104,7 +104,7 @@ An L3 primitive depends on the **port** (`me-storage`), never on a concrete back
 
 A repo-local **PreToolUse hook** (`utils/scripts/hooks/cargo-gate-guard.sh`) mechanically blocks trap #1; wire it via `.claude/settings.json` (gitignored, so local-only — see the script header for the one-line wiring). The committed `.md` files remain the guardrail that reaches every agent on a fresh clone.
 
-**Supply-chain gate** — `deny.toml` at the repo root configures [`cargo-deny`](https://embarkstudios.github.io/cargo-deny/) and runs as the `cargo-deny` CI job. It fails on RustSec security advisories (against the full all-features graph) and on disallowed licenses or non-crates.io sources; duplicate transitive versions are surfaced as non-blocking warnings. Install locally with `cargo install cargo-deny --locked`. Note: the MSRV is **Rust 1.88**, required by the workspace's own use of **let-chains** (a 1.88 language feature). It was originally raised from 1.85 to take `time` 0.3.47 (RUSTSEC-2026-0009); that dependency has since been dropped (rusqlite narrowed to `bundled`), but the let-chain usage keeps the floor at 1.88.
+**Supply-chain gate** — `deny.toml` at the repo root configures [`cargo-deny`](https://embarkstudios.github.io/cargo-deny/) and runs as the `cargo-deny` CI job. It fails on RustSec security advisories (minus the documented exceptions in `deny.toml`; against the full all-features graph) and on disallowed licenses or non-crates.io sources; duplicate transitive versions are surfaced as non-blocking warnings. Install locally with `cargo install cargo-deny --locked`. Note: the MSRV is **Rust 1.89**; the root `Cargo.toml` records what sets it.
 
 ## Architecture
 

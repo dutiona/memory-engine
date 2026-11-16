@@ -1,7 +1,7 @@
 # memory-engine
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
 
 Embedded memory engine for autonomous AI agents.
 
@@ -140,13 +140,6 @@ Add to your `Cargo.toml`:
 memory-engine = { git = "https://github.com/dutiona/memory-engine" }
 ```
 
-For async support:
-
-```toml
-[dependencies]
-memory-engine = { git = "https://github.com/dutiona/memory-engine", features = ["async"] }
-```
-
 For HNSW approximate nearest neighbor search:
 
 ```toml
@@ -154,7 +147,7 @@ For HNSW approximate nearest neighbor search:
 memory-engine = { git = "https://github.com/dutiona/memory-engine", features = ["ann"] }
 ```
 
-**Requirements:** Rust 1.88+ (edition 2024). No external services needed.
+**Requirements:** Rust 1.89+ (edition 2024). No external services needed.
 
 ## Workspace Crates
 

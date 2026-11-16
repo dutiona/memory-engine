@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- **Rust 1.88+** (edition 2024)
+- **Rust 1.89+** (edition 2024)
 - No external services — SQLite is bundled via `rusqlite`
 
 ## Add to Cargo.toml
@@ -15,17 +15,15 @@ memory-engine = { git = "https://github.com/dutiona/memory-engine" }
 ### Async support
 
 `MemoryEngine` is async-native: its DB-touching methods are `async fn` and are
-awaited inside a tokio runtime (`#[tokio::main]` or `Runtime::block_on`). The
-`async` feature provides that runtime and is **on by default** (`default = ["async"]`),
-so the snippet above already enables it — no opt-in needed.
+awaited inside a tokio runtime (`#[tokio::main]` or `Runtime::block_on`).
+`tokio` is a non-optional dependency, so there is no feature to enable.
 
-If you disable default features, you **must** re-add `async`, or the engine won't
-build its runtime expectations:
+If you disable default features, re-enable a storage backend (at least one is
+required):
 
 ```toml
 [dependencies]
-# default-features = false drops async — re-add it explicitly
-memory-engine = { git = "https://github.com/dutiona/memory-engine", default-features = false, features = ["async"] }
+memory-engine = { git = "https://github.com/dutiona/memory-engine", default-features = false, features = ["backend-sqlite"] }
 ```
 
 ### ANN (Approximate Nearest Neighbor)
