@@ -128,7 +128,7 @@ Read these docs when working on the relevant area:
 | Architecture + threading model                                                           | `docs/design/architecture-overview.md`   |
 | Design rationale + trade-offs                                                            | `docs/design/design-choices.md`          |
 | Research basis (15 papers)                                                               | `docs/design/research-basis.md`          |
-| ADRs (9 decisions)                                                                       | `docs/design/adr/`                       |
+| ADRs                                                                                     | `docs/design/adr/`                       |
 | Phase history + research→design narrative (⚠️ frozen — live status → GitHub Projects #6) | `docs/ROADMAP.md`                        |
 | Bi-temporal semantics                                                                    | `docs/advanced/bi-temporal-semantics.md` |
 | Consolidation pipeline                                                                   | `docs/advanced/consolidation.md`         |
