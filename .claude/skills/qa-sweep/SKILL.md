@@ -25,9 +25,9 @@ features, narrower scope, piped output — trap #1 masks the exit code) is a **f
 an *undetected* one. Treat a PR with no dispatched run as **unverified by machine**.
 
 ```bash
+cargo build --workspace --locked                                       # Build (default features) on the committed lock — first, before any command could rewrite it
 cargo fmt --all --check                                                # Format
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
-cargo build --workspace                                                # Build (default features)
 cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test
 cargo check -p memory-engine                                           # Facade-alone, default — the TRUE archive-OFF gate (#978)
