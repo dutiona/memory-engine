@@ -261,7 +261,8 @@ The server derives the key from the facts the client sends and, for a path key, 
 - **The key is the normalized `upstream` remote, else the normalized `origin`, else a path key, else nothing.** Preferring `upstream` keeps a fork and its upstream on one key.
 - **Normalizing** drops the scheme, the userinfo, the port, a trailing `/` and `.git`, lowercases the host, and reads `host:path` as `host/path`. The ssh and https forms of a remote give the same key, for example `github.com/example/project`.
 - A local-path or `file:` remote is ignored: it names a place on one machine, not a shared repository.
-- **Path key.** `@<machine>/<path>`, where `<path>` is the project root's path relative to the machine's dev root: for example `@laptop/notes/2026`. The root must sit strictly below the dev root, at a `/` boundary, with no `.` or `..` segment. A root equal to the dev root gives no key. Paths are POSIX only. A remote key starts with its host, so it never starts with `@`, and a path key never equals a remote key.
+- **Path key.** `<machine>:<path>`, where `<machine>` is the machine's name (§4) and `<path>` is the project root's path relative to the machine's dev root: for example `laptop:notes/2026`. The root must sit strictly below the dev root, at a `/` boundary, with no `.` or `..` segment. A root equal to the dev root gives no key. Paths are POSIX only.
+- **A path key never equals a remote key.** A path key starts with a machine name, whose first character is a letter or a digit, then a `:`, and no `/` comes before that `:`. A remote key holds a `:` in two places only, because normalizing drops the port and turns the `:` of `host:path` into `/`: in the repository path, which follows the first `/`, and inside a bracketed IPv6 host, and a key with such a host starts with `[`.
 - **A path key belongs to one machine, and nothing joins two keys (owner's decision).** The same relative path on two machines gives two keys, hence two projects. The server cannot tell one project kept on two machines from two unrelated directories of the same name, so it fails closed: a missed join keeps memories apart, and a wrong one would mix the memories of two projects. Joining two keys is an alias that a human confirms. An agent may propose one; no rule of this ADR applies one. The alias model is ADR-0021's. A remote key names the remote repository and holds no machine name and no local path, so every machine derives the same one.
 
 #### Scopes
@@ -274,7 +275,7 @@ ADR-0007 splits a scope path on `/`. A key used as is would therefore nest: proj
 | User | `user:<user>` |
 | No project | `unscoped:<machine>`, a top-level node |
 
-- `<label>` is the key with every byte outside `A-Z a-z 0-9 - . _ ~` percent-encoded in uppercase hex. The key above becomes `project:github.com%2Fexample%2Fproject`, and the path key `@laptop/notes/2026` becomes `project:%40laptop%2Fnotes%2F2026`: one node per machine.
+- `<label>` is the key with every byte outside `A-Z a-z 0-9 - . _ ~` percent-encoded in uppercase hex. The key above becomes `project:github.com%2Fexample%2Fproject`, and the path key `laptop:notes/2026` becomes `project:laptop%3Anotes%2F2026`: one node per machine.
 - `<user>` is a server setting.
 - When the segment `project:<label>` exceeds 256 bytes, the scope tree's limit, there is no key.
 - No query rooted at the user can reach an `unscoped` bucket.
