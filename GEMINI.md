@@ -23,9 +23,9 @@ cargo doc --no-deps --open            # API reference
 **Verification gate — YOU are the runner** (#989). ⚠️ **CI is `workflow_dispatch`-only — it does NOT run on push or PR**, so this matrix is the **primary** verification, not a pre-check with CI as a backstop: nothing runs automatically to catch you skipping it. Run it before every commit. `.github/workflows/ci.yml` runs these same commands *when dispatched* (`gh workflow run ci.yml --ref <branch>`). A local pass that diverges — weaker features, narrower scope, or **piped output** — is a **false pass**, and now an *undetected* one. Treat a PR with no CI run as **unverified by machine**:
 
 ```bash
+cargo build --workspace --locked                                       # Build (default features) on the committed lock — first, before any command could rewrite it
 cargo fmt --all --check                                                # Format
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
-cargo build --workspace                                                # Build (default features)
 cargo build --workspace --all-features                                 # Build (all features)
 cargo test  --workspace --all-features                                 # Test — --all-features is mandatory, or ann/archive/eval tests never run
 cargo check -p memory-engine                                           # Facade-alone, default features — the TRUE archive-OFF gate (#978)

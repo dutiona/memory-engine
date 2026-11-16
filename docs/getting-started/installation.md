@@ -52,3 +52,25 @@ cargo test
 ```
 
 All tests run against in-memory SQLite databases — no setup required.
+
+## Server image
+
+The repository's `Containerfile` builds a self-contained image of the MCP server (`memory-engine-mcp`) and the
+operator CLI (`memory-engine-cli`). Build it with Podman from a checkout of a release tag:
+
+```bash
+podman build --pull=newer -t memory-engine:<tag> .
+```
+
+- `--pull=newer` refreshes the floating base images (`rust:1-slim-trixie`, `debian:trixie-slim`). Podman's default
+  (`missing`) keeps the first copy it pulled, so later tags would build on a stale toolchain and ship stale OpenSSL,
+  `curl` and CA certificates.
+- The release build runs with `--locked` from the committed `Cargo.lock`; a lock that no longer matches the
+  manifests fails the build.
+- The build context is an allowlist (`.containerignore`): only `Cargo.toml`, `Cargo.lock` and `crates/`. Docker
+  ignores `.containerignore` and would send the whole tree, so build with Podman (or Buildah).
+- The runtime is Debian slim with CA certificates, the `sqlite3` CLI and `curl`.
+- The image runs as the non-root user `memory-engine`, UID and GID `10001`, in `/var/lib/memory-engine`, with
+  `memory-engine-mcp` as its entry point. Run the CLI with `--entrypoint memory-engine-cli`.
+
+How the image is deployed (volumes, ports, secrets) is outside this repository.

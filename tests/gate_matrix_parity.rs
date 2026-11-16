@@ -2,10 +2,10 @@
 //! `.github/workflows/ci.yml` runs.
 //!
 //! CI is now `workflow_dispatch`-only (#989), so the matrix in `CLAUDE.md` / `AGENTS.md` /
-//! `GEMINI.md` *is* the verification, not a convenience mirror of CI. An incomplete matrix
-//! is an unenforced gate — exactly the drift #990 found by hand (two `cargo check` gates CI
-//! ran that the docs never listed). This guard runs inside `cargo test --workspace
-//! --all-features` (itself a matrix line), so it can't be skipped by anyone who runs the
+//! `GEMINI.md` / the qa-sweep skill *is* the verification, not a convenience mirror of CI.
+//! An incomplete matrix is an unenforced gate — exactly the drift #990 found by hand (two
+//! `cargo check` gates CI ran that the docs never listed). This guard runs inside `cargo test
+//! --workspace --all-features` (itself a matrix line), so it can't be skipped by anyone who runs the
 //! gate at all — unlike a CI-based checker, which is useless while CI is manual.
 //!
 //! The CI side is parsed as a YAML *subset* rather than line-scraped, because a guard with
@@ -142,7 +142,12 @@ fn docs_gate_matrix_is_a_superset_of_ci() {
         "parsed zero cargo gate commands from ci.yml — the parser broke, not the docs"
     );
 
-    for doc_name in ["CLAUDE.md", "AGENTS.md", "GEMINI.md"] {
+    for doc_name in [
+        "CLAUDE.md",
+        "AGENTS.md",
+        "GEMINI.md",
+        ".claude/skills/qa-sweep/SKILL.md",
+    ] {
         let doc = std::fs::read_to_string(root.join(doc_name))
             .unwrap_or_else(|e| panic!("read {doc_name}: {e}"));
         let doc_cmds = doc_matrix_commands(&doc, doc_name);

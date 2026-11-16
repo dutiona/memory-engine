@@ -1,0 +1,11 @@
+# Allowlist: the image build reads only the workspace manifest, its lock and the crates.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+**/target
+**/.worktrees
+**/.env
+**/.env.*
+# The redaction denylist holds real secret literals; it must never enter an image.
+**/.secrets-denylist
