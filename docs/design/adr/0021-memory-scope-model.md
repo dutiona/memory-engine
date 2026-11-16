@@ -137,8 +137,10 @@ Recall is a deterministic procedure *(settled here)*:
 2. **Candidate Homes** = {context Home, `user`}. Recall's `project` argument replaces the context Home for that call
    with the project whose Locator key equals the value byte for byte. The key form is ADR-0020's, as `recall` reports
    it: a remote key, or a machine-qualified path key such as `laptop:x`, so a key names at most one project. The swap
-   never reaches a bucket. A value that matches no project is a typed error. A project not minted yet (§8: only
-   writes mint) contributes nothing, so that read is `user` only.
+   never reaches a bucket. A value that is not the key of a known project (ADR-0020 §8: a project is known once an
+   event or a memory was filed under it) is a typed error, never a `user`-only read. Without the argument, a
+   session whose own project is not minted yet (§8: only writes mint) reads `user` only, because that project holds
+   nothing yet.
 3. **Every channel generates candidates inside the visible set**: full-text search, vector search with its widening,
    graph expansion over the visible subgraph only (no hop through a hidden node), every bootstrap tier, and the
    archive fallback.
@@ -360,7 +362,9 @@ History is re-filed from the ADR-0001 log without re-capture *(defaulted, for re
   facts are consumer-derived).
 - **The Capture context of each memory kind**: a server-derived memory from its lifecycle event; a `remember` or a
   `set_level` from its call record, which keeps the request's decoded project facts and machine (ADR-0020 §8) and,
-  once it exists, its lane; any other fact through `source_event_id`; a derived memory through its
+  once it exists, its lane. The call record MUST be part of the ADR-0001 log (an appended event, or a record the log
+  replays with the same guarantees), so replaying the log alone re-files remembered facts and level changes; a call
+  table kept beside the log would not satisfy this; any other fact through `source_event_id`; a derived memory through its
   `source_fact_ids`; an edge through its ends. Events are read through the schema-evolution upcaster
   ([schema evolution policy](../schema-evolution-policy.md)); no upcaster invents a field.
 - **Procedure.**
@@ -431,7 +435,7 @@ L2.
 | C2 | a `user` write | read in P, in Q and by keyless sessions | shared |
 | C3 | a keyless write on `laptop` | Home `unscoped:laptop`; read by keyless laptop sessions; never by a project session, through `project`, or on `mac` | shared |
 | C4 | an empty selector | no match | shared |
-| C5 | an unknown key in `project`; a bare `x` when only `laptop:x` exists | a typed error, both | shared |
+| C5 | an unknown key in `project`; a bare `x` when only `laptop:x` exists; the well-formed key of a project not yet minted; no `project` argument from a session whose own project is not yet minted | a typed error for the first three; a `user`-only read for the last | shared |
 | C6 | `project: Q` from a session in P | Q's memories and `user`; nothing of P | shared |
 | C7 | a legacy root row; a co-session edge between two visible memories | the row is never read by recall, the context block or a by-ID operation; the edge is visible | shared |
 | C8 | a descriptive tag on a memory | never widens its visibility | shared |
