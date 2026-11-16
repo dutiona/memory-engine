@@ -1,6 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::error::{ConflictError, MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, MigrationError, Result};
 use crate::pool::ConnectionPool;
 use crate::store::upcaster::UpcasterRegistry;
 
@@ -98,7 +98,8 @@ impl MemoryEngine {
     /// Copying a live WAL-mode database is unsafe (the WAL sidecar may be missing).
     ///
     /// Neither `config.path` nor its `-wal`, `-shm` or `-journal` sidecar may already
-    /// exist. The backup's `embed_dim` is validated against `config.embed_dim`.
+    /// exist, and the backup may have no non-empty `-wal` or `-journal` of its own. The
+    /// backup's `embed_dim` is validated against `config.embed_dim`.
     ///
     /// # Errors
     ///
@@ -106,15 +107,15 @@ impl MemoryEngine {
     /// already exists.
     /// Returns `MemoryError::NotFound` if the backup path is not an existing
     /// regular file (missing, or a directory / other non-file).
+    /// Returns `MemoryError::Migration` if the backup has a non-empty `-wal` or
+    /// `-journal`.
     /// Returns `MemoryError::EmbeddingDimension` on dimension mismatch.
     pub fn restore_sqlite(backup_path: &Path, config: &EngineConfig) -> Result<Self> {
         // SQLite replays a leftover `-wal` or `-journal` onto whatever file sits at the
         // path, so a stale sidecar would corrupt the copied backup (#1040).
-        let has_sidecar = ["-wal", "-shm", "-journal"].iter().any(|suffix| {
-            let mut sidecar = config.path.clone().into_os_string();
-            sidecar.push(suffix);
-            Path::new(&sidecar).exists()
-        });
+        let has_sidecar = ["-wal", "-shm", "-journal"]
+            .iter()
+            .any(|suffix| sidecar(&config.path, suffix).exists());
         if config.path.exists() || has_sidecar {
             return Err(MemoryError::Conflict(ConflictError::TargetExists));
         }
@@ -127,6 +128,18 @@ impl MemoryEngine {
                 "backup file is not a regular file: {}",
                 backup_path.display()
             )));
+        }
+        // A backup's own non-empty `-wal` or `-journal` holds pages its main file lacks:
+        // copying the main file alone would silently drop the newest commits (#1040).
+        for suffix in ["-wal", "-journal"] {
+            if std::fs::metadata(sidecar(backup_path, suffix)).is_ok_and(|m| m.len() > 0) {
+                return Err(MigrationError::Incompatible(format!(
+                    "backup {} has a non-empty {suffix}: it is not a clean \
+                     dump_state(DumpFormat::Sqlite) backup",
+                    backup_path.display()
+                ))
+                .into());
+            }
         }
 
         std::fs::copy(backup_path, &config.path)?;
@@ -168,4 +181,11 @@ impl MemoryEngine {
             let _ = std::fs::remove_file(&config.path);
         })
     }
+}
+
+/// `db` with `suffix` appended to its file name (`memory.db` -> `memory.db-wal`).
+fn sidecar(db: &Path, suffix: &str) -> PathBuf {
+    let mut path = db.as_os_str().to_owned();
+    path.push(suffix);
+    PathBuf::from(path)
 }

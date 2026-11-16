@@ -190,6 +190,35 @@ async fn restore_sqlite_fails_if_target_sidecar_exists() {
     }
 }
 
+/// #1040: a backup with a non-empty `-wal` or a `-journal` holds commits its main file lacks,
+/// so restoring the main file alone would silently drop them.
+#[tokio::test]
+async fn restore_sqlite_refuses_backup_with_journal_sidecar() {
+    let engine = make_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backup_path = dir.path().join("backup.db");
+    engine
+        .dump_state(&DumpFormat::Sqlite(backup_path.clone()))
+        .await
+        .unwrap();
+
+    for suffix in ["-wal", "-journal"] {
+        let sidecar = dir.path().join(format!("backup.db{suffix}"));
+        std::fs::write(&sidecar, "pending").unwrap();
+        let target_path = dir.path().join("restored.db");
+        let config = EngineConfig::new(target_path.clone(), DIM);
+        let err = MemoryEngine::restore_sqlite(&backup_path, &config).unwrap_err();
+        assert!(err.to_string().contains(suffix), "{suffix}: got {err}");
+        assert!(!target_path.exists(), "{suffix}: nothing may be copied");
+        std::fs::remove_file(&sidecar).unwrap();
+    }
+
+    // An empty `-wal` (what a read-only open leaves) holds no commits.
+    std::fs::write(dir.path().join("backup.db-wal"), "").unwrap();
+    let config = EngineConfig::new(dir.path().join("restored.db"), DIM);
+    MemoryEngine::restore_sqlite(&backup_path, &config).unwrap();
+}
+
 /// #1040: a probe failure must not leave the target's WAL sidecars behind, or the next
 /// restore to the same path is refused.
 #[tokio::test]
