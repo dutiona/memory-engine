@@ -68,7 +68,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # `trace`: additive, zero-runtime-cost rusqlite feature (compiles in `Connection::trace`);
 # used ONLY by the ANN batched-fetch round-trip count test (#288/#362, search::ann). Cargo
 # feature-unifies this dev entry into the test build only, so the shipped library never
-# enables `trace`. Mirrors the facade's own dev-dependency exactly.
+# enables `trace`.
 rusqlite = { version = "0.34", features = ["trace"] }
 
 [features]
