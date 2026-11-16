@@ -111,7 +111,7 @@ Read only when working on the relevant area:
 | Architecture + threading                          | `docs/design/architecture-overview.md`   |
 | Design rationale + trade-offs                     | `docs/design/design-choices.md`          |
 | Research basis (15 papers)                        | `docs/design/research-basis.md`          |
-| ADRs (9 decisions)                                | `docs/design/adr/`                       |
+| ADRs                                              | `docs/design/adr/`                       |
 | Phase history (frozen; live status → Projects #6) | `docs/ROADMAP.md`                        |
 | Phase 5 design (cognitive)                        | `docs/advanced/dream-cycle.md`           |
 | Bi-temporal semantics                             | `docs/advanced/bi-temporal-semantics.md` |
