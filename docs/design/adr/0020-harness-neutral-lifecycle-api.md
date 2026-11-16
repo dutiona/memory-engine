@@ -26,7 +26,7 @@ What survives of ME-D6 is its warning against abstractions with one user. Only C
 
 ### Sources
 
-Facts about Claude Code come from its hooks reference, <https://code.claude.com/docs/en/hooks>, read on 2026-11-16 with Claude Code 2.1.325 installed. Three facts were observed on that version in a headless session with a probe plugin, because the documentation does not settle them; §3 names them.
+Facts about Claude Code come from its hooks reference, <https://code.claude.com/docs/en/hooks>, read on 2026-11-16 with Claude Code 2.1.325 installed. A few facts were observed on that version in a headless session with a probe plugin, because the documentation does not settle them; each is marked "observed" where it is used (§3, §12, Alternatives considered).
 
 ## Decision
 
@@ -41,10 +41,10 @@ Four layers, each with one job:
 | Adapter | server crate, one per harness | Turn one harness body into one neutral record; render the context in the harness's own output format |
 | Core | engine crate | Apply neutral records: store, order, segment, project, recall |
 
-- **Native in, native out.** The request body is the harness's hook input, byte-for-byte. The context response is the harness's own hook-output JSON, rendered by its adapter. Only the headers are neutral. A client therefore never parses or builds JSON.
-- **The core holds no tool name and no harness field name.** That is the layering `crates/memory-engine-mcp/src/activity_policy.rs` was written for, and a review can grep for it.
+- **Native in, native out.** The request body is the harness's hook input, byte-for-byte. The context response is the harness's own hook output, rendered by its adapter. Only the headers are neutral. A client therefore never parses JSON and never escapes a string into JSON.
+- **The core knows no tool by name and no harness field by name.** A tool's name is data the core stores, never a condition in its code. That is the layering `crates/memory-engine-mcp/src/activity_policy.rs` was written for, and a review can grep for it.
 - **One adapter per harness, chosen by a `match` on `ME-Harness`.** There is no adapter trait until a second adapter exists.
-- **§2 to §10 are harness-neutral.** A second harness adds a sibling of §11 and §12 and edits nothing above them. If it would need to, the boundary is wrong and this ADR is amended first.
+- **§2 to §10 are harness-neutral.** A second harness adds a sibling of §11 and §12 and edits nothing above them. If it would need to, the boundary is wrong and this ADR is amended first. Where §3 and §10 show a Claude Code value, they say so and point to §11 or §12.
 
 ### 2. Neutral core
 
@@ -66,7 +66,7 @@ A neutral record has:
 | `POST /lifecycle/context` | Read the context for the lifecycle event in the body. Today it serves a session start only |
 
 - The read is a POST because it carries the hook input as its body.
-- **Requesting the context is a read, separate from recording the event** (owner's decision). The context route never records the event; the event arrives through the client's queue. The only thing the read writes is its recall-log entry (§9), keyed by the machine and the event ID; the first read wins.
+- **Requesting the context is a read, separate from recording the event** (owner's decision). The context route never records the event; the event arrives through the client's queue. The only thing the read writes is its recall-log entry (§9), keyed by the machine and the event ID; the first read wins. A second read for the same event gets a fresh block and writes nothing.
 - Both routes sit behind the same Bearer layer as the MCP route (#1018). No route is unauthenticated.
 - There is no version in the path and no version header. A later incompatible envelope adds an `ME-Envelope-Version` header, and its absence means this ADR's envelope. A version in the path would be wrong: queued events outlive a plugin upgrade, so a version has to travel with the event.
 - The backfill upload is a third authenticated route. Its path, limits and statuses belong to #1026; this ADR only requires the same Bearer layer and the same redaction.
@@ -82,11 +82,11 @@ A neutral record has:
 | `ME-Client-Version` | yes | The plugin's version, `[0-9A-Za-z.+-]{1,64}` |
 | `ME-Project-Root` | no | The main working tree's root for a git checkout, so that linked worktrees share it; otherwise the session's project directory |
 | `ME-Project-Dev-Root` | no | The machine's dev root, from the plugin's configuration |
-| `ME-Project-Upstream-Url` | no | The `upstream` remote's URL, with the user part removed |
-| `ME-Project-Origin-Url` | no | The `origin` remote's URL, with the user part removed |
+| `ME-Project-Upstream-Url` | no | The `upstream` remote's URL as `git remote get-url` prints it, with the user part removed |
+| `ME-Project-Origin-Url` | no | The `origin` remote's URL, read the same way |
 | `ME-Project-Branch` | no | The checked-out branch of the project directory; absent when detached. Provenance only |
-| `ME-Outbox-Queued` | context read only | Events waiting in the client's queue, the read's own event excluded |
-| `ME-Outbox-Parked` | context read only | Events in the client's `outbox/rejected/` |
+| `ME-Outbox-Queued` | no, context read only | 1 to 6 decimal digits: the events waiting in the client's queue, the read's own event excluded |
+| `ME-Outbox-Parked` | no, context read only | 1 to 6 decimal digits: the events in the client's `outbox/rejected/` |
 | `ME-Event-Outcome` | response, on every 204 | `stored`, `duplicate` or `quarantined` |
 
 - **The time format** is what `date -u +%Y-%m-%dT%H:%M:%SZ` prints on both GNU and BSD. BSD `date` has no `%N`, so a client timestamp has second resolution and `ME-Event-Seq` breaks ties.
@@ -94,6 +94,8 @@ A neutral record has:
 - **No header names the machine.** Identity comes from the token (§4).
 - **A fact that does not exist has no header**: no such remote, not a git tree, a detached head.
 - **`ME-Event-Outcome`** makes "stored once" and "quarantined" observable at the HTTP seam the tests drive. A client ignores it.
+- **The two outbox counts are optional.** An absent or malformed count is read as zero; it never fails the read.
+- **`git remote get-url`** is the one way to read a remote: it applies the user's URL rewrites, so every channel sends the same URL for one checkout.
 - **Limits.** Each header value is at most 4,096 bytes. The server reads the body as raw bytes and ignores `Content-Type`.
 
 #### Encoding of the project facts
@@ -103,24 +105,14 @@ The five `ME-Project-*` values are percent-encoded on both channels, the hooks (
 - A client must encode every byte outside printable ASCII (0x21 to 0x7E), and each of `%`, `"` and `\`, as `%HH`. It may encode any other byte.
 - The server decodes every `%HH`, in either hex case. Decoding is canonical, so two clients that encode differently still give one key. Encoded values need no JSON escaping, and a line break cannot inject a header.
 - Encoding needs only the shell: one character at a time by parameter expansion under `LC_ALL=C`, then the `printf` builtin. This was measured on dash, bash and busybox sh.
-- **A bad fact is dropped, not the event.** Facts are optional. A fact that does not decode to valid UTF-8, holds a control character or exceeds its limit is ignored and flagged in the event's provenance; the event is stored and filed without it. Rejecting the event instead would park every event of a project whose path is legal but odd, and a replay would fail the same way.
-- **A project directory whose path holds a line break yields no project fact, on either channel.** The one exception is the forged delimiter described under "The MCP channel" below.
+- **A bad fact is dropped, not the event.** Facts are optional. A fact is ignored, and flagged in the event's provenance, when it holds a raw byte outside 0x21 to 0x7E, holds a `%` that two hex digits do not follow, does not decode to valid UTF-8, decodes to a control character, or exceeds its limit; the event is stored and filed without it. Rejecting the event instead would park every event of a project whose path is legal but odd, and a replay would fail the same way.
+- **A project directory whose path holds a line break yields no project fact, on either channel.** The one exception is the forged delimiter of the Claude Code MCP helper (§12).
 - **Userinfo never leaves the machine.** Before it queues an event, the client removes everything up to and including the last `@` in front of the host, in both forms a remote takes: `scheme://user:secret@host/path` (a bare token before the `@` included) and `user@host:path`. The server strips again before it stores or logs anything. Stored facts never hold userinfo.
-- **The dev root is plain ASCII.** It is sent as configured, and it must be an absolute path of printable ASCII without space, `"`, `%` or `\`, so that its encoded form is itself. The server ignores any other value, on both channels alike. The reason is the MCP channel: there the dev root travels in a static header, which nothing can encode. A static header was observed to send a non-ASCII character as one Latin-1 byte, not as UTF-8.
+- **The dev root is plain ASCII.** It is sent as configured, and it must be an absolute path of printable ASCII without space, `"`, `%` or `\`, so that its encoded form is itself. The server ignores any other value, on both channels alike. The reason is Claude Code's MCP channel (§12): a plugin's helper cannot read the plugin's configuration, so there the dev root travels in a static header, which nothing can encode. A static header was observed to send a non-ASCII character as one Latin-1 byte, not as UTF-8.
 
 #### The MCP channel
 
-The plugin's `headersHelper` prints `Authorization`, `ME-Harness`, `ME-Client-Version` and the encoded project facts, under the same names as on the event route. Both channels derive the project facts from `CLAUDE_PROJECT_DIR`, never from the helper's working directory. The hook input's `cwd` is kept only as provenance. `CLAUDE_PROJECT_DIR` does not move when the model runs `cd` or enters a worktree, so both channels keep one project for the whole session.
-
-The project directory reaches the helper as data, on its standard input. The helper command has the form `exec <helper> <<'DELIMITER'`, and the body of that here-document is the `${CLAUDE_PROJECT_DIR}` substitution. Observed on Claude Code 2.1.325:
-
-- `CLAUDE_PROJECT_DIR` is not in a plugin helper's environment;
-- the substitution is textual, so a path that holds a `'` breaks a quoted argument, and the helper never runs;
-- the here-document delivers a path with a space, a non-ASCII character and a `'` intact.
-
-The helper accepts exactly one line that names an existing directory; otherwise it sends no project fact.
-
-**One accepted residual.** A directory whose name holds a line break followed by the delimiter line ends the here-document early. It cannot run code: with `exec`, the shell is replaced before it reads another line (checked on dash, bash, busybox sh and zsh). It can cut the path short, so that session's MCP calls are filed under the shortened path, which can be another project's. Putting such a directory beside a project needs write access to the dev root, which already allows far more. The owner accepted this residual. The alternative that was not taken is under "Alternatives considered".
+A harness can also give the model its tools over MCP. Those requests carry the same project facts, under the same header names and with the same encoding, so that one project has one key on both channels. How the Claude Code plugin does it is in §12.
 
 #### Statuses
 
@@ -134,7 +126,7 @@ The helper accepts exactly one line that names an existing directory; otherwise 
 | 408 | The body stalls: no byte for 60 s | retries |
 | 409 | The key exists with another body | parks the event |
 | 413 | The body exceeds 16 MiB (16,777,216 bytes) | parks the event |
-| 422 | The server cannot apply this event: an unknown harness, an unknown hook event, no session ID, a failure while applying it; or a context read for a kind other than a session start | parks the event |
+| 422 | The server cannot apply this event: an unknown `ME-Harness`, an event its adapter cannot map (for Claude Code: an unknown `hook_event_name`, no `session_id`), any failure while applying it, an unexpected error included; or a context read whose body is not a session start | parks the event |
 | 429 | Never sent today | retries |
 | 5xx | A fault that does not depend on the event: storage unavailable or busy, shutting down | retries |
 | anything else | Never sent by these routes: a wrong URL, an older server, an intermediary. That covers 404, 405, any other 4xx, any 3xx and any other 2xx | holds everything and reports it |
@@ -143,13 +135,16 @@ The helper accepts exactly one line that names an existing directory; otherwise 
 - **Why a wrong endpoint holds.** A 404 means the request never reached the lifecycle API, so nothing was judged about the event. Parking on it would empty the queue into `outbox/rejected/` one event at a time and need a manual replay; holding delivers by itself once the cause is fixed. A 422 is the API's judgement on one event, so that event parks and the queue goes on.
 - **Why only a 204 removes.** A 200 from something that is not this server must not delete an event.
 - **16 MiB** is well above the largest hook input expected (a tool call that writes a large file) and bounds what one request holds in memory.
-- **No event-specific fault ever gets a 5xx.** A retry stops the queue (§5), so an event that fails every time must not hold every later one. A 5xx always means "the same request will work later".
+- **No event-specific fault ever gets a 5xx.** A retry stops the queue (§12), so an event that fails every time must not hold every later one. An error the server cannot classify while it applies one event is answered 422, never left to become a 500. A 5xx always means "the same request will work later".
 - **409** turns an event-ID collision into a parked event. Without it, a reused ID would be acknowledged as a duplicate and deleted.
-- **The client never follows a redirect.** On the context route it prints a body only when the status is 200 and the type is `application/json`, because a session-start hook's plain output goes into the model's context.
+- **Order of the checks.** The server checks the envelope (400), then the size (413), then that it knows the harness (422), then the key (a duplicate, or 409), then parses the body (quarantine), then maps and applies it (422). A second upload of a quarantined body is therefore a `duplicate`, and a reused ID with a body that does not parse is a 409, never a quarantine.
+- **To hold** is to stop the flush and leave every event queued. The user learns of it at the next session start, from the status line (§10); a capture hook itself prints nothing.
+- **On the context route no answer moves or removes a queued event.** The "client" column above is the event route's. On the context route the client prints the body of a 200 whose media type is `application/json`, with or without parameters, and otherwise prints its fallback line (§10): `token rejected` for a 401 or a 403, `unreachable` when there is no answer, `error` and the status for anything else. A session-start hook's plain output goes into the model's context, so nothing else is ever printed.
+- **The client never follows a redirect.**
 
 #### Quarantine
 
-A well-formed envelope whose body is not UTF-8, not JSON, or not a JSON object is quarantined and answered 204, so it never loops in a queue. A quarantine record is metadata only: the machine, the event ID, the client time as sent, the time of receipt, the harness, the byte size, the SHA-256 of the body, and the parse error as a class with its line and column. It never holds the raw body, and never the parser's message, which can quote the body: parsing failed before redaction or stubbing could run.
+A well-formed envelope from a known harness whose body its adapter cannot parse (for Claude Code: not UTF-8, not JSON, or not a JSON object) is quarantined and answered 204, so it never loops in a queue. A quarantine record is metadata only: the machine, the event ID, the client time as sent, the time of receipt, the harness, the byte size, the SHA-256 of the body, and the parse error as a class with its line and column. It never holds the raw body, and never the parser's message, which can quote the body: parsing failed before redaction or stubbing could run.
 
 Valid JSON that the adapter cannot map is not quarantined. It gets a 422 and parks, so the event stays whole on the client and can be replayed after a server upgrade. For the same reason the server is deployed before the plugin.
 
@@ -216,15 +211,17 @@ All comparisons below use the order key, so two events in one second compare by 
 4. **Idle sweep.** When the server has received no event of a session for 30 minutes, it ends `L` at its last event. This is the only rule that reads the server's clock, and it compares it with the server's own times of receipt.
 5. **Derived work runs once per ended segment.** In this epic that is one checkpoint (the segment's bounds, how it ended, counts per kind, and the fact made from its last main-agent final message) and the uptake rows of §9. A segment with no main-agent prompt and no main-agent stop gets neither. Consolidation is off (§8).
 
+One segment's life. A later event never reopens it; it opens the next segment.
+
 ```{mermaid}
 stateDiagram-v2
-    [*] --> Open: first event of the session
+    [*] --> Open: an event opens the segment
     Open --> Open: an event joins
     Open --> Ended: session end
-    Open --> Ended: no event for 30 minutes
-    Open --> Ended: a boundary session start arrives
-    Ended --> Open: a later event opens a new segment
+    Open --> Ended: idle sweep
+    Open --> Ended: an event opens the next segment
     Ended --> Ended: a late event is stored
+    Ended --> [*]
 ```
 
 - A session start with source `compact`, and every subagent event, are not boundaries by their kind. They follow rules 1 and 2 like any other event.
@@ -238,14 +235,14 @@ stateDiagram-v2
 
 > Kept in full, after redaction: prompts, the agent's final messages, compaction summaries. Truncated to 512 characters, after redaction: tool inputs and tool results. The promise: known secret formats are redacted, and events that touch sensitive files become stubs. Arbitrary secrets such as unprefixed passwords are not guaranteed to be caught.
 
-Some activity is not captured at all, and the promise says nothing about it: a tool call rejected or cancelled before it runs, possibly a running tool the user cancels, and a turn the user interrupts (§11).
+Some activity is not captured at all, and the promise says nothing about it: a tool call rejected or cancelled before it runs, a tool call whose capture hook the user cancels, and a turn the user interrupts (§11).
 
 #### Rules
 
 - **Order of steps.** Read the call ID (§8), redact, then truncate. Truncating first could cut a secret below its pattern.
 - **The cap is 512 bytes.** Tool input, tool result and tool error are each cut to 512 bytes of UTF-8, back to a character boundary. That is at most 512 characters, and it is what `truncate()` in `crates/memory-engine/src/engine/activity.rs` already does.
 - **A sensitive-path stub** keeps the tool, the path, the outcome and the time, plus the event's provenance. The path is the matched path only; for a shell command, the matched token and never the command. Nothing of the input, the result or the error is kept.
-- **What becomes recallable.** A main-agent `stop` with outcome `completed` and a non-empty final message, and a main-agent `compact`, each become one Episodic fact under the session's project (or the machine's bucket, §7). Full-text search finds it at once; vector search finds it once it is embedded (#1021). A stop that a hook then continues still counts: it was a final message. The fact is valid from the event's client time, or from its receipt if that is earlier, so that a fast client clock cannot schedule a memory in the future (ADR-0003).
+- **What becomes recallable.** A main-agent `stop` with outcome `completed` and a non-empty final message, and a main-agent `compact`, each become one Episodic fact under the event's project (or the machine's bucket, §7). Full-text search finds it at once; vector search finds it once it is embedded (#1021). A stop that a hook then continues still counts: it was a final message. The fact is valid from the event's client time, or from its receipt if that is earlier, so that a fast client clock cannot schedule a memory in the future (ADR-0003).
 - **What stays in the event log only.** Prompts, tool events, subagent final messages and stops with outcome `api_error`. Facts the model remembers itself are stored as before.
 - **The embedding drain is rate-limited and yields to interactive queries.** The rate is set from the embedder's measured throughput (#1021).
 
@@ -283,9 +280,10 @@ ADR-0007 splits a scope path on `/`. A key used as is would therefore nest: proj
 
 #### Writes and reads (owner's decision)
 
+- **"The session's project" is always the project of the request at hand.** The key is derived from the facts that event or that MCP request carries. It is never looked up from what an earlier event of the session said, so nothing depends on the session start having arrived.
 - **Writes** go to the session's project. They go to user level only when the agent asks for it explicitly (§8).
 - **No key derived:** the memory goes to that machine's `unscoped` bucket, which is never injected into a project.
-- **Reads.** `recall` and the context block read the session's project and the user level, exactly. A session with no key reads its machine's bucket and the user level. Another project is reachable only through `recall`'s `project` argument, which never reaches a bucket. Nothing reads the root scope.
+- **Reads.** `recall` and the context block read the session's project and the user level, exactly. A session with no key reads its machine's bucket and the user level. Another project is reachable only through `recall`'s `project` argument. It swaps the project: the read is then the named project and the user level, not the session's own project, and it never reaches a bucket. Nothing reads the root scope.
 
 Every event keeps its decoded facts, userinfo removed, so ADR-0021 can re-file history without capturing it again.
 
@@ -337,10 +335,10 @@ forget(id: integer, reason: string)
 set_level(id: integer, level: "project" | "user")
 ```
 
-- **`recall`** returns up to 10 results. Each carries the fact ID, its kind (remembered, final message or compaction summary), its scope (a project key, `user` or `unscoped`), its date and its machine. An answer built from full-text search alone says so. `project` names another project by its key. There is no limit argument and no mode: a fixed size keeps the recall log comparable.
+- **`recall`** returns up to 10 results. Each carries the fact ID, its kind (remembered, final message or compaction summary), its scope (a project key, `user` or `unscoped`), its date and its machine. An answer built from full-text search alone says so. `project` names another project by its key and is read in place of the session's own (§7). There is no limit argument and no mode: a fixed size keeps the recall log comparable.
 - **`remember`** stores a Semantic fact, at `project` level by default. It answers with the fact ID, where the memory went and who sees it, for example: `stored 412 in project github.com/example/project, visible to all agents`. When a server-side heuristic finds the placement doubtful (content that reads user-wide filed under a project, or the reverse), it adds one hint line that names `set_level`. It never refuses and never moves the memory itself. The heuristic's rules are not part of this contract.
 - **`forget`** retracts a fact (owner's decision): "this fact won't come up again". It ends the fact's validity in the bi-temporal model. The fact leaves recall. A tombstone stops it from coming back through promotion or re-import. The fact row and the raw events stay, and an admin can reverse it. It answers `forgotten`, `already forgotten` or `not found`.
-- **`set_level`** changes only a memory's level. `project` means the calling session's project, or its machine's bucket. It never moves a fact between two projects. It answers with the same receipt as `remember`, and reports a fact already at that level as unchanged. The move is an event, so it is auditable, and calling it again undoes it.
+- **`set_level`** changes only a memory's level. `project` means the calling session's project, or its machine's bucket. It never moves a fact between two projects in one call. It answers with the same receipt as `remember`, and reports a fact already at that level as unchanged. The move is an event that records the scope the fact left, so it is auditable, and the opposite call from the same project undoes it. User level is shared: a fact raised to it from one project can be brought down into another by a session of that other project.
 - **Write authority.** `forget` and `set_level` act only on a fact in the session's own project (or bucket) or at user level. A fact of another project, even one `recall` returned through its `project` argument, answers `not found`, which does not reveal that it exists.
 - **Pruning and deletion are never the agent's.**
 
@@ -370,8 +368,8 @@ A follow-up turns them on in the server, never as tools: after a segment ends, f
 
 Per-prompt recall stays off. Whether to switch it on is decided later, on data that cannot be collected after the fact. The server therefore logs these records from the first session. Each is redacted like every other write.
 
-- **Injection**, one per context read. The session start's machine and event ID, the session ID, the start source, the project key, the server time and the duration. The retrieval settings as run: the mode, the cause of a degraded read, the ADR-0015 embedding space, the caps and the fusion parameters. The candidates, each with its fact ID, rank and scores. The injected items, each with its fact ID, position and size. The block's size and the status line.
-- **Model recall**, one per `recall` call. The call record of §8, the redacted query, the `project` argument, the scope read, the retrieval settings, the results with their ranks and scores, and whether the answer was degraded. The session ID is filled in when the call is linked.
+- **Injection**, one per context read. The session start's machine and event ID, the session ID, the start source, the project key, the server time and the duration. The retrieval settings as run: the mode, the cause of a degraded read, the ADR-0015 embedding space, the caps and the fusion parameters. The candidates, each with its fact ID, its rank, its score per retrieval signal and its fused score. The injected items, each with its fact ID, position and size. The block's size and the status line.
+- **Model recall**, one per `recall` call. The call record of §8, the redacted query, the `project` argument, the scope read, the retrieval settings, the results with their ranks, per-signal scores and fused scores, and whether the answer was degraded. The session ID is filled in when the call is linked.
 - **Uptake**, written when a segment ends. One row per main-agent completed stop of the segment, naming the session's injection whose session start has the greatest order key below the stop's, among the injections the server holds then. A late completed stop gets its row when it is applied. A row is never rewritten, and it names no injection when none is held.
 
 An uptake row is a link, with no score. Final messages and injected items are kept in full, so the follow-up can score uptake with the method it validates.
@@ -386,13 +384,13 @@ An injection records what the server served, not what the session saw. Normally 
 |---|---|---|
 | Recall embed time limit | 500 ms, for `recall` and for the context build | Full-text search, flagged as degraded |
 | SessionStart server budget | 1,000 ms from request to response | The status line alone, `degraded (context timed out)` |
-| Hook client timeout | `curl --connect-timeout 1 --max-time 2.5` on the context read | The client's fallback line |
+| Client timeout on the context read | 2.5 s in all, 1 s to connect. For the Claude Code client: `curl --connect-timeout 1 --max-time 2.5` | The client's fallback line |
 
 500 ms is about four times the embedder's measured 95th percentile under load. 1,000 ms leaves the full-text fallback room. 2.5 s adds connection setup over a slow link, and a machine that cannot reach the server gives up after one second.
 
 #### Output
 
-The context route returns the finished hook-output JSON, which the client prints as it is:
+The context route returns the harness's finished hook output, rendered by its adapter, which the client prints as it is. For Claude Code it is this JSON object:
 
 ```json
 {
@@ -426,13 +424,13 @@ age   = N ( "m" / "h" / "d" )
 - The waiting part appears when the embedding queue is not empty. `OK` never takes it.
 - Degraded means that this read fell back to full-text search, or that the embedding queue is paused. It never means merely that items wait.
 - `age` uses the largest whole unit.
-- **The last four states are made by the client**, when it has no answer to print. It prints a JSON object with `systemMessage` only. It picks one of four fixed templates and substitutes integers only (the status, the counts), so it never has to escape a string.
+- **The last four states are made by the client**, when it has no answer to print (§3). The Claude Code client prints a JSON object with `systemMessage` only. It picks one of four fixed templates and substitutes integers only (the status, the counts), so it never has to escape a string.
 
 ### 11. Claude Code adapter
 
 #### Hook mapping
 
-The actor is `subagent` when the hook is `SubagentStart` or `SubagentStop`, or when the hook input carries an agent ID; otherwise `main`. Claude Code's internal agents fire `SubagentStop` too, and this rule keeps their messages out of recall.
+The actor is `subagent` when the hook is `SubagentStart` or `SubagentStop`, or when the hook input carries `agent_id`; otherwise `main`. Claude Code's internal agents fire `SubagentStop` too, and this rule keeps their messages out of recall.
 
 | Hook | Kind | Outcome and content |
 |---|---|---|
@@ -440,7 +438,7 @@ The actor is `subagent` when the hook is `SubagentStart` or `SubagentStop`, or w
 | `UserPromptSubmit` | `prompt` | The prompt, in full |
 | `SubagentStart` | `prompt` | A subagent turn starts; no text |
 | `PostToolUse` | `tool_use` | `success`; excerpts of the input and the result |
-| `PostToolUseFailure` | `tool_use` | `failure`, or `interrupted` when the hook says so; an excerpt of the error |
+| `PostToolUseFailure` | `tool_use` | `failure`, or `interrupted` when its `is_interrupt` field is true; an excerpt of its `error` |
 | `Stop` | `stop` | `completed`; the final message, in full; recallable when the actor is main |
 | `StopFailure` | `stop` | `api_error`; never recallable, because its message is the error text |
 | `SubagentStop` | `stop` | `completed`; the final message, in the event log only |
@@ -449,7 +447,7 @@ The actor is `subagent` when the hook is `SubagentStart` or `SubagentStop`, or w
 
 `PostToolUseFailure` is captured so that a failed tool call keeps its outcome.
 
-The outcome records which hook fired. The reference does not say whether a running tool the user cancels fires `PostToolUse`; it says only that `PostToolUseFailure` does not fire then. If no hook fires, the call is not captured.
+The outcome records which hook fired. When the user interrupts a running tool, the reference describes two cases: the tool finishes and `PostToolUse` runs with ten seconds to complete, or the hooks are cancelled at once. `PostToolUseFailure` does not fire for a cancelled tool. A call whose capture hook was cancelled is not captured.
 
 #### Hooks that are not captured
 
@@ -469,15 +467,29 @@ Only what both sides rely on. The rest belongs to #1019.
 
 - **Utilities.** POSIX `sh`, `mkdir`, `mv`, `rm`, `cat`, `date`, `git` and `curl`, plus the shell's own builtins. The client never parses JSON.
 - **Outbox.** `~/.local/state/memory-engine/outbox/`, with directories at mode 0700 and files at 0600: queued bodies are not redacted, and `outbox/rejected/` is kept. An event is the hook input as its body and a header file, published by rename. It leaves the outbox only after a 204.
-- **The token** is read from its file at send time. It is never in a queued or parked file, so a rotated token needs no requeue. It never reaches a command line either: `curl` reads the `Authorization` header from its standard input.
+- **The token** is read from its file at send time. It is never in a queued or parked file, so a rotated token needs no requeue. It never reaches a command line either: `curl` reads the `Authorization` header from its standard input. It is never in the plugin's configuration.
 - **Seq and event ID.** With the body already on disk, the client takes the time, then reserves `mkdir <outbox>/seq/<epoch>.<n>` from n = 0 upward: the first success is the seq. The loop is bounded. The event ID is `<epoch>-<seq as 6 digits>-<pid>`, so file names sort in order-key order under a plain glob. One `date` call gives the epoch and the header time, so the two cannot straddle a second.
-- **A capture hook never blocks the session.** Every captured hook is synchronous and only writes to the outbox, then starts a detached flush. An asynchronous hook would be killed when a non-interactive run ends, before its write lands. On any failure the hook exits 0 and prints nothing. Its registration carries a 5 s timeout; SessionEnd keeps Claude Code's 1.5 s budget, which the timeout of a plugin-provided hook does not raise.
+- **A capture hook never blocks the session.** Every captured hook is synchronous and only writes to the outbox, then starts a detached flush. An asynchronous hook would be killed when a non-interactive run ends, before its write lands. A capture hook prints nothing and, on any failure, exits 0. The session-start hook is the one exception: after it has queued its event it also makes the context read below and prints its result. Its registration carries a 5 s timeout; SessionEnd keeps Claude Code's 1.5 s budget, which the timeout of a plugin-provided hook does not raise.
 - **One flusher.** A flush runs under the outbox's `mkdir` lock, and a second flush that finds it held exits. The lock records the flusher's PID and a time stamp the flusher renews before each request. It is broken only when that process is gone, when the stamp is older than one hour, or when neither can be read. With these utilities that test is best effort, which §5 makes safe.
 - **Flush order.** Oldest first by order key, one request at a time, with the reactions of §3. A park moves the event to `outbox/rejected/` and the flush goes on. A retry or a hold ends the flush at once; the next flush, started by the next hook or by the watcher, begins again from that event.
 - **No lost wakeup.** A hook publishes its event before it tries the lock. A flush that ends because the queue is empty releases the lock, then looks once more, and starts again if an event is there. A flush that ended on a retry or a hold does not look again.
 - **Transfer limits.** A flush bounds stalls, not total time (`--connect-timeout`, `--speed-limit`, `--speed-time`), so a 16 MiB event on a slow link still gets through; the speed limit is set so that it does within the lock's hour. The detached flush redirects its input and output; otherwise Claude Code waits up to 10 s for the hook.
 - **The watcher** is a per-machine timer that runs the flush with no session open (dutiona/my-dotfiles#1911), so an offline machine's events arrive later without another session.
 - **The context read.** The session-start hook counts the queue, enqueues its own event, starts the flush, then posts the same body and header file plus the counts, and prints as §3 and §10 say.
+
+#### The MCP channel
+
+The plugin's `headersHelper` prints `Authorization`, `ME-Harness`, `ME-Client-Version` and the four encoded facts it derives from the project directory (the root, the two remotes, the branch), under the same names as on the event route. The dev root is the fifth fact and travels in a static header (§3). Both channels derive the project facts from `CLAUDE_PROJECT_DIR`, never from the helper's working directory. The hook input's `cwd` is kept only as provenance. `CLAUDE_PROJECT_DIR` does not move when the model runs `cd` or enters a worktree, so both channels keep one project for the whole session.
+
+The project directory reaches the helper as data, on its standard input. The helper command has the form `exec <helper> <<'DELIMITER'`, and the body of that here-document is the `${CLAUDE_PROJECT_DIR}` substitution. Observed on Claude Code 2.1.325:
+
+- `CLAUDE_PROJECT_DIR` is not in a plugin helper's environment;
+- the substitution is textual, so a path that holds a `'` breaks a quoted argument, and the helper never runs;
+- the here-document delivers a path with a space, a non-ASCII character and a `'` intact.
+
+The helper accepts exactly one line that names an existing directory; otherwise it sends no project fact.
+
+**One accepted residual.** A directory whose name holds a line break followed by the delimiter line ends the here-document early. It cannot run code: with `exec`, the shell is replaced before it reads another line (checked on dash, bash, busybox sh and zsh). It can cut the path short, so that session's MCP calls are filed under the shortened path, which can be another project's. Putting such a directory beside a project needs write access to the dev root, which already allows far more. The owner accepted this residual. The alternative that was not taken is under "Alternatives considered".
 
 ## Consequences
 
@@ -499,7 +511,7 @@ Only what both sides rely on. The rest belongs to #1019.
 - Nothing is distilled or deduplicated across sessions while the derived jobs are off.
 - Untrusted text can reach a final message, become a memory and come back in every later block. That is why the context block frames its items as recalled claims with their provenance, not as instructions (#1027).
 - The stores start empty. Nothing filed at the root scope, or under a scope path that does not follow §7, is read.
-- The MCP channel carries the accepted residual of §3.
+- The MCP channel carries the accepted residual of §12.
 
 ### Revisit when
 
@@ -519,7 +531,7 @@ Only what both sides rely on. The rest belongs to #1019.
 - **202 Accepted.** It invites acknowledging before the commit.
 - **The dev root read from a file the hooks write.** It would lift the ASCII restriction, but it races the first connection after an install.
 - **The project directory as a quoted argument of the helper.** It breaks on a path that holds a quote.
-- **A session-ID header on the MCP channel**, with a server check of each call's project against its session. It would close the residual of §3 on today's Claude Code: the session ID was observed in a plugin helper's environment on 2.1.325. It rests on a variable that is not documented for a helper, and it costs a header and a server check.
+- **A session-ID header on the MCP channel**, with a server check of each call's project against its session. It would close the residual of §12 on today's Claude Code, provided the server also refuses a call for which it holds no session-start root. The session ID was observed in a plugin helper's environment on 2.1.325; that it equals the hook input's session ID was not checked. It rests on a variable that is not documented for a helper, and it costs a header and a server check.
 
 ## References
 
