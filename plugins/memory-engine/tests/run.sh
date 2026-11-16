@@ -478,7 +478,7 @@ git@example.com:o/r.git|example.com:o/r.git
 /srv/git/r.git|/srv/git/r.git
 https://example.com/o/r@v2|https://example.com/o/r@v2
 EOF
-	! grep -rq -e secret -e tok123 "$S" || fail "userinfo reached the state root"
+	! grep -rq -e user:secret -e tok123@ "$S" || fail "userinfo reached the state root"
 }
 
 t_encoding() {
@@ -1011,6 +1011,96 @@ t_prune() {
 	kill_live
 }
 
+# ---------------------------------------------------------------- item 7: stable copy, no-environment flush
+
+t_stable_copy() {
+	hook capture <"$C/in"
+	settle
+	cmp "$HB" "$S/bin/me-hook" || fail "the stable copy differs from the helper"
+	out=$(find "$S/bin/me-hook" ! -perm 600)
+	[ -z "$out" ] || fail "the stable copy is not 0600"
+	printf '# changed\n' >>"$HB"
+	hook capture <"$C/in"
+	settle
+	cmp "$HB" "$S/bin/me-hook" || fail "the stable copy was not refreshed"
+	i=0
+	while [ "$i" -lt 20 ]; do
+		PATH=$RB /bin/sh "$HB" capture "$URL" "" <"$C/in" >/dev/null 2>&1 &
+		i=$((i + 1))
+	done
+	wait
+	settle
+	cmp "$HB" "$S/bin/me-hook" || fail "the stable copy is not whole after simultaneous hooks"
+	set -- "$O"/tmp/*.me-hook
+	[ ! -e "$1" ] || fail "a temporary copy is left: $*"
+}
+
+t_stable_copy_fails() {
+	hook capture <"$C/in"
+	settle
+	chmod 500 "$S/bin"
+	hook capture <"$C/in"
+	chmod 700 "$S/bin"
+	settle
+	eq "$(count)" 2 "events with a read-only bin/"
+	rm -rf "$S/bin"
+	hook capture <"$C/in"
+	settle
+	[ -f "$S/bin/me-hook" ] || fail "bin/ was not recreated"
+}
+
+watcher_setup() {
+	rm "$RB/curl"
+	ln -s "$(command -v curl)" "$RB/curl"
+	port=$(stub_start stub)
+	URL=http://127.0.0.1:$port
+	printf 503 >"$C/stub/status"
+	token
+	hook capture <"$C/in"
+	settle
+	id=$(events)
+	cp -R "$O/$id" "$C/queued"
+	printf 204 >"$C/stub/status"
+}
+
+watcher_check() {
+	eq "$(count)" 0 "queue after the watcher's flush"
+	n=$(stub_lines stub)
+	eq "$(sed -n "${n}p" "$C/stub/log" | cut -d' ' -f2-)" "204 $id" "the watcher's request"
+	cmp "$C/queued/body" "$C/stub/req/$n.body" || fail "body differs"
+	grep -q "^Authorization: Bearer $TOKV" "$C/stub/req/$n.headers" || fail "no Authorization"
+}
+
+t_watcher_env_i() {
+	watcher_setup
+	(cd "$HOME" && env -i /bin/sh "$S/bin/me-hook" flush) || fail "the watcher's flush exited $?"
+	watcher_check
+}
+
+t_watcher_no_plugin() {
+	watcher_setup
+	rm -rf "$C/plugin"
+	(cd "$HOME" && env -i /bin/sh "$S/bin/me-hook" flush) || fail "the watcher's flush exited $?"
+	watcher_check
+}
+
+t_watcher_path() {
+	watcher_setup
+	printf '#!/bin/sh\n: >"%s/planted"\n' "$C" >"$HOME/curl"
+	chmod 755 "$HOME/curl"
+	(cd "$HOME" && env -i /bin/sh "$S/bin/me-hook" flush) || fail "the watcher's flush exited $?"
+	[ ! -e "$C/planted" ] || fail "a curl in the working directory ran"
+	watcher_check
+}
+
+t_no_root() {
+	env -i /bin/sh "$HB" flush >"$C/out" 2>"$C/err"
+	eq "$?" 1 "flush without a state root"
+	eq "$(wc -l <"$C/err" | tr -d ' ')" 1 "stderr lines"
+	env -i /bin/sh "$HB" capture "$URL" "" <"$C/in" >"$C/out" 2>&1 || fail "capture without HOME exited $?"
+	[ ! -s "$C/out" ] || fail "capture without HOME printed"
+}
+
 # ---------------------------------------------------------------- runner
 
 CASES=${CASES:-"
@@ -1023,6 +1113,7 @@ status_classes curl_exit queue_while_failing no_token token_channel token_forms 
 endpoint_changed_mid_flush parked_kept park_heals detached real_curl redirect proxy_bypassed no_curl
 lock_live lock_dead lock_age lock_unreadable lock_stamp lock_killed lock_broken_stops lock_steal renew_race
 release_race second_look no_second_look simultaneous prune
+stable_copy stable_copy_fails watcher_env_i watcher_no_plugin watcher_path no_root
 "}
 
 N=0

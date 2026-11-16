@@ -9,8 +9,20 @@ ME_VERSION=0.1.0
 NL='
 '
 
-H=${HOME-}
-S=$H/.local/state/memory-engine
+case $0 in
+*/.local/state/memory-engine/bin/me-hook)
+	# The stable copy, which the watcher runs as `env -i /bin/sh <path> flush`: everything follows from its path, and
+	# PATH is fixed, because the shell's default PATH under env -i ends in . on macOS.
+	S=${0%/bin/me-hook}
+	H=${S%/.local/state/memory-engine}
+	PATH=/usr/bin:/bin
+	export PATH
+	;;
+*)
+	H=${HOME-}
+	S=$H/.local/state/memory-engine
+	;;
+esac
 O=$S/outbox
 TOKEN=$H/.config/memory-engine/secrets/token
 
@@ -198,6 +210,10 @@ capture() {
 		fact_lines
 	} >"$_t/headers" || abandon
 	mv "$_t" "$O/$_id" || abandon
+	# The stable copy the watcher runs; best effort, after publication, so that it never costs the event.
+	{ cat "$0" >"$O/tmp/$$.me-hook" && mv "$O/tmp/$$.me-hook" "$S/bin/me-hook"; } ||
+		{ heal && cat "$0" >"$O/tmp/$$.me-hook" && mv "$O/tmp/$$.me-hook" "$S/bin/me-hook"; } ||
+		rm -f "$O/tmp/$$.me-hook"
 	# A new process, not a subshell, so that the flusher's $$ is its own pid.
 	/bin/sh "$0" flush </dev/null >/dev/null 2>&1 &
 	exit 0
