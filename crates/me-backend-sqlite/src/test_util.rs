@@ -6,9 +6,10 @@
 //! # FK-pragma guarantee
 //!
 //! [`setup_memory_db`] opens the connection through [`crate::store::schema::open_memory`],
-//! which applies all pragmas including `PRAGMA foreign_keys = ON`. Raw
-//! `Connection::open_in_memory()` skips this pragma and silently masks FK
-//! violations; every store-level test setup must use this helper instead (#485).
+//! which applies all pragmas including `PRAGMA foreign_keys = ON`, the setting the
+//! engine runs with. The bundled SQLite build also defaults foreign keys on
+//! (`SQLITE_DEFAULT_FOREIGN_KEYS=1`), but a raw `Connection::open_in_memory()` loses
+//! that on any other build; every store-level test setup uses this helper (#485).
 use rusqlite::Connection;
 
 use crate::store::schema::{init_schema, open_memory};
@@ -17,7 +18,7 @@ use crate::store::schema::{init_schema, open_memory};
 /// `foreign_keys = ON`) and the latest schema applied.
 ///
 /// Use this in every store-level `fn setup() -> Connection` instead of
-/// `Connection::open_in_memory()`, which skips the FK pragma (#485).
+/// `Connection::open_in_memory()`, which applies none of the engine's pragmas (#485).
 pub fn setup_memory_db() -> Connection {
     let conn = open_memory().expect("open in-memory db");
     init_schema(&conn).expect("init schema");
