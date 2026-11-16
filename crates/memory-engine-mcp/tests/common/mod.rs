@@ -192,7 +192,11 @@ impl TestServer {
             let _ = tx.send(());
         }
         if let Some(task) = self.task.take() {
-            task.await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .expect("serve did not return within 30 s of the shutdown signal")
+                .unwrap()
+                .unwrap();
         }
     }
 }
@@ -287,7 +291,10 @@ impl ServerProcess {
 
     /// Wait until `GET /mcp` answers 401, or return the exit status if the child dies first.
     pub fn wait_ready(&mut self) -> Result<(), ExitStatus> {
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
