@@ -10,26 +10,17 @@ use me_types::error::{MigrationError, Result};
 
 /// Pragmas safe for read-only connections — skip WAL and synchronous.
 pub(super) fn set_pragmas_read_only(conn: &Connection) -> Result<()> {
-    for pragma in &["PRAGMA foreign_keys = ON", "PRAGMA busy_timeout = 5000"] {
-        let mut stmt = conn.prepare(pragma).map_err(StorageError::backend)?;
-        let _ = stmt.query([]).map_err(StorageError::backend)?;
-    }
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
+        .map_err(StorageError::backend)?;
     Ok(())
 }
 
 pub(super) fn set_pragmas(conn: &Connection) -> Result<()> {
-    // All PRAGMA SET statements can return result rows in bundled SQLite.
-    // Use prepare+execute to avoid ExecuteReturnedResults from execute/execute_batch.
-    for pragma in &[
-        "PRAGMA journal_mode = WAL",
-        "PRAGMA foreign_keys = ON",
-        "PRAGMA busy_timeout = 5000",
-        "PRAGMA synchronous = NORMAL",
-    ] {
-        let mut stmt = conn.prepare(pragma).map_err(StorageError::backend)?;
-        // Consume all rows (PRAGMAs return 0 or 1 rows).
-        let _ = stmt.query([]).map_err(StorageError::backend)?;
-    }
+    set_pragmas_read_only(conn)?;
+    // `execute_batch` steps each statement: `journal_mode` takes effect only when stepped,
+    // and a bare `query` never steps (#1040).
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+        .map_err(StorageError::backend)?;
     Ok(())
 }
 
