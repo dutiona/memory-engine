@@ -209,3 +209,26 @@ fn starts_with_an_embedder_and_a_summary_endpoint() {
     assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
     assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
 }
+
+#[test]
+fn the_backup_dir_flag_and_variable_win_over_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = stale_store(dir.path());
+    let from_toml = dir.path().join("from-toml");
+    let from_env = dir.path().join("from-env");
+    std::fs::create_dir(&from_toml).unwrap();
+    std::fs::create_dir(&from_env).unwrap();
+    common::write_config(
+        dir.path(),
+        &format!("backup_dir = '{}'\n", from_toml.display()),
+    );
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &[],
+        &[("MEMORY_MCP_BACKUP_DIR", from_env.to_str().unwrap())],
+    );
+    let _ = server.wait_ready();
+    let backup = format!("memory.db.v{previous}.bak");
+    assert!(from_env.join(&backup).is_file(), "stderr:\n{}", server.stderr());
+    assert!(!from_toml.join(&backup).exists());
+}
