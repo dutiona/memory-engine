@@ -256,12 +256,13 @@ ADR-0021 (#1015) defines the full scope model and replaces this section. This is
 
 #### Project key (owner's decision, refined)
 
-The server derives the key from the facts the client sends.
+The server derives the key from the facts the client sends and, for a path key, from the machine its token names (§4).
 
-- **The key is the normalized `upstream` remote, else the normalized `origin`, else the project root's path relative to the machine's dev root, else nothing.** Preferring `upstream` keeps a fork and its upstream on one key.
+- **The key is the normalized `upstream` remote, else the normalized `origin`, else a path key, else nothing.** Preferring `upstream` keeps a fork and its upstream on one key.
 - **Normalizing** drops the scheme, the userinfo, the port, a trailing `/` and `.git`, lowercases the host, and reads `host:path` as `host/path`. The ssh and https forms of a remote give the same key, for example `github.com/example/project`.
-- A local-path or `file:` remote is ignored: it would give a per-machine key.
-- **Path key.** The root must sit strictly below the dev root, at a `/` boundary, with no `.` or `..` segment. A root equal to the dev root gives no key. Paths are POSIX only.
+- A local-path or `file:` remote is ignored: it names a place on one machine, not a shared repository.
+- **Path key.** `@<machine>/<path>`, where `<path>` is the project root's path relative to the machine's dev root: for example `@laptop/notes/2026`. The root must sit strictly below the dev root, at a `/` boundary, with no `.` or `..` segment. A root equal to the dev root gives no key. Paths are POSIX only. A remote key starts with its host, so it never starts with `@`, and a path key never equals a remote key.
+- **A path key belongs to one machine, and nothing joins two keys (owner's decision).** The same relative path on two machines gives two keys, hence two projects. The server cannot tell one project kept on two machines from two unrelated directories of the same name, so it fails closed: a missed join keeps memories apart, and a wrong one would mix the memories of two projects. Joining two keys is an alias that a human confirms. An agent may propose one; no rule of this ADR applies one. The alias model is ADR-0021's. A remote key holds no machine and no path, so every machine derives the same one.
 
 #### Scopes
 
@@ -273,17 +274,17 @@ ADR-0007 splits a scope path on `/`. A key used as is would therefore nest: proj
 | User | `user:<user>` |
 | No project | `unscoped:<machine>`, a top-level node |
 
-- `<label>` is the key with every byte outside `A-Z a-z 0-9 - . _ ~` percent-encoded in uppercase hex. The key above becomes `project:github.com%2Fexample%2Fproject`.
+- `<label>` is the key with every byte outside `A-Z a-z 0-9 - . _ ~` percent-encoded in uppercase hex. The key above becomes `project:github.com%2Fexample%2Fproject`, and the path key `@laptop/notes/2026` becomes `project:%40laptop%2Fnotes%2F2026`: one node per machine.
 - `<user>` is a server setting.
 - When the segment `project:<label>` exceeds 256 bytes, the scope tree's limit, there is no key.
 - No query rooted at the user can reach an `unscoped` bucket.
 
 #### Writes and reads (owner's decision)
 
-- **"The session's project" is always the project of the request at hand.** The key is derived from the facts that event or that MCP request carries. It is never looked up from what an earlier event of the session said, so nothing depends on the session start having arrived.
+- **"The session's project" is always the project of the request at hand.** The key is derived from the facts that event or that MCP request carries, and from the machine of its token. It is never looked up from what an earlier event of the session said, so nothing depends on the session start having arrived.
 - **Writes** go to the session's project. They go to user level only when the agent asks for it explicitly (§8).
 - **No key derived:** the memory goes to that machine's `unscoped` bucket, which is never injected into a project.
-- **Reads.** `recall` and the context block read the session's project and the user level, exactly. A session with no key reads its machine's bucket and the user level. Another project is reachable only through `recall`'s `project` argument. It swaps the project: the read is then the named project and the user level, not the session's own project, and it never reaches a bucket. Nothing reads the root scope.
+- **Reads.** `recall` and the context block read the session's project and the user level, exactly. A session with no key reads its machine's bucket and the user level. Another project is reachable only through `recall`'s `project` argument. It swaps the project: the read is then the named project and the user level, not the session's own project, and it never reaches a bucket. Another machine's path-keyed project is another project: no session reads it unless a `recall` names its key. Nothing reads the root scope.
 
 Every event and every model-tool call record keeps its decoded facts, userinfo removed, with the resolved key and the version of the derivation rules, so ADR-0021 can re-file history without capturing it again. That version is an integer owned by the key derivation: the rules of this section are version 1, and any change to them increments it.
 
@@ -338,7 +339,7 @@ set_level(id: integer, level: "project" | "user")
 - **`recall`** returns up to 10 results. Each carries the fact ID, its kind (remembered, final message or compaction summary), its scope (a project key, `user` or `unscoped`), its date and its machine. An answer built from full-text search alone says so. `project` names another project by its key and is read in place of the session's own (§7). The value is a project key as `recall` shows it in a result's scope, and it is matched exactly, with no normalization, so a key the server returned always names its project. A project is known once an event or a memory was filed under it. A value that is not the key of a known project is answered with an error that names the value; it never falls back to the session's project or to the root scope. For a known project the read is that project and the user level (§7), and the list is empty only when neither yields a result; an empty list is not an error. There is no limit argument and no mode: a fixed size keeps the recall log comparable.
 - **`remember`** stores a Semantic fact, at `project` level by default. It answers with the fact ID, where the memory went and who sees it, for example: `stored 412 in project github.com/example/project, visible to all agents`. When a server-side heuristic finds the placement doubtful (content that reads user-wide filed under a project, or the reverse), it adds one hint line that names `set_level`. It never refuses and never moves the memory itself. The heuristic's rules are not part of this contract.
 - **`forget`** retracts a fact (owner's decision): "this fact won't come up again". It ends the fact's validity in the bi-temporal model. The fact leaves recall. A tombstone stops it from coming back through promotion or re-import. The fact row and the raw events stay, and an admin can reverse it. It answers `forgotten`, `already forgotten` or `not found`.
-- **`set_level`** changes only a memory's level. `project` means the calling session's project, or its machine's bucket. It never moves a fact between two projects in one call. It answers with the same receipt as `remember`, and reports a fact already at that level as unchanged. The move is an event that records the scope the fact left, so it is auditable, and the opposite call from the same project undoes it. User level is shared: a fact raised to it from one project can be brought down into another by a session of that other project.
+- **`set_level`** changes only a memory's level. `project` means the calling session's project, or its machine's bucket. It never moves a fact between two projects in one call. It answers with the same receipt as `remember`, and reports a fact already at that level as unchanged. The move is an event that records the scope the fact left, so it is auditable, and the opposite call from the same project undoes it. User level is shared: a fact raised to it from one project can be brought down into another by a session of that other project. That two-call move is allowed (owner's decision): it is rare, and it is how an agent rehomes memories after a project is reworked, renamed or rehomed. The two events of the fact give its whole path, the project it started in included.
 - **Write authority.** `forget` and `set_level` act only on a fact in the session's own project (or bucket) or at user level. A fact of another project, even one `recall` returned through its `project` argument, answers `not found`, which does not reveal that it exists.
 - **Pruning and deletion are never the agent's.**
 
@@ -510,6 +511,7 @@ The helper accepts exactly one line that names an existing directory; otherwise 
 - Restoring a backup loses up to 6 h of acknowledged events. Fact IDs issued since the backup are issued again to other facts, so an ID a model still holds from that window can name another fact.
 - Nothing is distilled or deduplicated across sessions while the derived jobs are off.
 - Untrusted text can reach a final message, become a memory and come back in every later block. That is why the context block frames its items as recalled claims with their provenance, not as instructions (#1027).
+- A project with no remote is one project per machine. A session on a second machine starts without the first machine's project memories, until ADR-0021's alias joins the two.
 - The stores start empty. Nothing filed at the root scope, or under a scope path that does not follow §7, is read.
 - The MCP channel carries the accepted residual of §12.
 
@@ -527,6 +529,7 @@ The helper accepts exactly one line that names an existing directory; otherwise 
 - **A version in the route path.** Queued events outlive a plugin upgrade.
 - **A tie-break by kind, or by arrival.** Neither orders an exit and a resume in the same second.
 - **Nested scope labels**, the project key used as a scope path. Projects whose keys share a prefix would read each other.
+- **A path key without the machine**, the dev-root-relative path alone. Two unrelated directories at the same relative path on two machines would share their memories without anyone having decided it.
 - **Storing an unparseable body raw.** Redaction never ran on it.
 - **202 Accepted.** It invites acknowledging before the commit.
 - **The dev root read from a file the hooks write.** It would lift the ASCII restriction, but it races the first connection after an install.
