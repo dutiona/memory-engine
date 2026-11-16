@@ -201,8 +201,7 @@ async fn restore_sqlite_probe_failure_leaves_no_sidecars() {
         .execute_batch("CREATE TABLE t(x);")
         .unwrap();
 
-    let target_path = dir.path().join("restored.db");
-    let config = EngineConfig::new(target_path.clone(), DIM);
+    let config = EngineConfig::new(dir.path().join("restored.db"), DIM);
     MemoryEngine::restore_sqlite(&backup_path, &config).unwrap_err();
     for suffix in ["", "-wal", "-shm"] {
         let leftover = dir.path().join(format!("restored.db{suffix}"));
