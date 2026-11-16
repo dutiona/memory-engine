@@ -285,7 +285,7 @@ ADR-0007 splits a scope path on `/`. A key used as is would therefore nest: proj
 - **No key derived:** the memory goes to that machine's `unscoped` bucket, which is never injected into a project.
 - **Reads.** `recall` and the context block read the session's project and the user level, exactly. A session with no key reads its machine's bucket and the user level. Another project is reachable only through `recall`'s `project` argument. It swaps the project: the read is then the named project and the user level, not the session's own project, and it never reaches a bucket. Nothing reads the root scope.
 
-Every event and every model-tool call record keeps its decoded facts, userinfo removed, with the resolved key and the version of the derivation rules, so ADR-0021 can re-file history without capturing it again.
+Every event and every model-tool call record keeps its decoded facts, userinfo removed, with the resolved key and the version of the derivation rules, so ADR-0021 can re-file history without capturing it again. That version is an integer owned by the key derivation: the rules of this section are version 1, and any change to them increments it.
 
 ### 8. Lean tool map
 
@@ -335,7 +335,7 @@ forget(id: integer, reason: string)
 set_level(id: integer, level: "project" | "user")
 ```
 
-- **`recall`** returns up to 10 results. Each carries the fact ID, its kind (remembered, final message or compaction summary), its scope (a project key, `user` or `unscoped`), its date and its machine. An answer built from full-text search alone says so. `project` names another project by its key and is read in place of the session's own (§7). A value that resolves to no project the server knows is answered with an error that names the value; it never falls back to the session's project or to the root scope. There is no limit argument and no mode: a fixed size keeps the recall log comparable.
+- **`recall`** returns up to 10 results. Each carries the fact ID, its kind (remembered, final message or compaction summary), its scope (a project key, `user` or `unscoped`), its date and its machine. An answer built from full-text search alone says so. `project` names another project by its key and is read in place of the session's own (§7). The value is normalized by §7's rules before the lookup, so a remote URL works as well as a key. A project is known once an event or a memory was filed under it. A value that names no known project is answered with an error that names the value; it never falls back to the session's project or to the root scope. A known project with nothing to recall answers with an empty list, not an error. There is no limit argument and no mode: a fixed size keeps the recall log comparable.
 - **`remember`** stores a Semantic fact, at `project` level by default. It answers with the fact ID, where the memory went and who sees it, for example: `stored 412 in project github.com/example/project, visible to all agents`. When a server-side heuristic finds the placement doubtful (content that reads user-wide filed under a project, or the reverse), it adds one hint line that names `set_level`. It never refuses and never moves the memory itself. The heuristic's rules are not part of this contract.
 - **`forget`** retracts a fact (owner's decision): "this fact won't come up again". It ends the fact's validity in the bi-temporal model. The fact leaves recall. A tombstone stops it from coming back through promotion or re-import. The fact row and the raw events stay, and an admin can reverse it. It answers `forgotten`, `already forgotten` or `not found`.
 - **`set_level`** changes only a memory's level. `project` means the calling session's project, or its machine's bucket. It never moves a fact between two projects in one call. It answers with the same receipt as `remember`, and reports a fact already at that level as unchanged. The move is an event that records the scope the fact left, so it is auditable, and the opposite call from the same project undoes it. User level is shared: a fact raised to it from one project can be brought down into another by a session of that other project.
@@ -348,7 +348,7 @@ Every model-tool response starts with a call ID, so that the link to its session
 
 - A response is a tool result whose first text content starts with the line `call ` followed by 16 lowercase hex digits.
 - That includes failures. The four tools return a failure as a tool result, never as a JSON-RPC error, which has no first line.
-- The server records each call: its ID, the machine, the tool, the time, and the IDs of the facts returned or changed. The record also keeps the project facts the request carried (the root, the dev root, the two remote URLs, userinfo removed), the key resolved from them and the version of the rules that resolved it, exactly as an event does. Without them a remembered fact could not be re-filed later from the log.
+- The server records each call: its ID, the machine, the tool, the time, and the IDs of the facts returned or changed. The record also keeps the five project facts the request carried (the root, the dev root, the two remote URLs with userinfo removed, the branch), the key resolved from them and the version of the rules that resolved it, exactly as an event does. Without them a remembered fact could not be re-filed later from the log.
 - The adapter links a captured tool event to a call when the first line of its result or error text is a call line, and the server holds that call for the same machine. A forged line matches nothing.
 - 16 hex digits stay under every redaction rule (the hex rule needs 32, the entropy rule needs 20 characters), and a random ID cannot repeat after a restore.
 
@@ -383,7 +383,7 @@ An injection records what the server served, not what the session saw. Normally 
 | Budget | Value | Past it |
 |---|---|---|
 | Recall embed time limit | 500 ms, for `recall` and for the context build | Full-text search, flagged as degraded |
-| SessionStart server budget | 1,000 ms from request to response | The status line alone, `degraded (context timed out)` |
+| SessionStart server budget | 1,000 ms from request to response | A block that holds only the status line, `degraded (context timed out)`, so the model is told too |
 | Client timeout on the context read | 2.5 s in all, 1 s to connect. For the Claude Code client: `curl --connect-timeout 1 --max-time 2.5` | The client's fallback line |
 
 500 ms is about four times the embedder's measured 95th percentile under load. 1,000 ms leaves the full-text fallback room. 2.5 s adds connection setup over a slow link, and a machine that cannot reach the server gives up after one second.
