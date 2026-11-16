@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-03-10
+**Amended by:** [ADR-0021](0021-memory-scope-model.md) (in the memory service, passes 2 and 3 summarize only within one visibility meet of their sources, never across the entire store)
 
 ## Context
 
