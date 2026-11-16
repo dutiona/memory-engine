@@ -55,7 +55,9 @@ pub fn open_connection(path: &str) -> Result<Connection> {
 
 /// Open a read-only `SQLite` connection to a file, with safe pragmas.
 ///
-/// Uses `SQLITE_OPEN_READ_ONLY` flags — no file creation, no WAL mutation.
+/// Uses `SQLITE_OPEN_READ_ONLY` flags: the database file is never created or written.
+/// A WAL-mode database still needs a writable directory: SQLite creates its missing
+/// `-wal` and `-shm` sidecars, and a read-only connection leaves them behind on close.
 /// Skips `journal_mode` and `synchronous` pragmas (read-only connections
 /// cannot set them and don't need to).
 ///

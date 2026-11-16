@@ -408,7 +408,8 @@ impl ConnectionPool {
             .into());
         }
 
-        // Open with SQLITE_OPEN_READ_ONLY — no file creation, no WAL mutation
+        // SQLITE_OPEN_READ_ONLY never creates or writes the database file (its WAL
+        // sidecars are another matter: see `open_connection_read_only`).
         let path_str = path.to_string_lossy();
         let conn = open_connection_read_only(&path_str)?;
         validate_schema_version(&conn)?;

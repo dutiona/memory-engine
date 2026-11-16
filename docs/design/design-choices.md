@@ -161,4 +161,6 @@ This mirrors a common pattern in database tooling: `psql` vs `pg_dump --read-onl
 3. **SQLite-level enforcement:** All connections have `PRAGMA query_only = ON`, so even if a code path bypasses the Rust guard, SQLite rejects the write
 4. **Rust-level enforcement:** `pool.try_write()` checks the `read_only` flag and returns `MemoryError::ReadOnly` before acquiring the mutex
 
+**WAL requirement:** every database is in WAL mode (#1040), and SQLite creates a missing `-wal` and `-shm` even for a read-only connection. A read-only open therefore needs a writable directory: on a read-only mount it fails with "attempt to write a readonly database", and in a writable one it leaves both sidecars behind. Opening with `immutable=1` would avoid that, but is unsafe while a writer is live.
+
 **Trade-off:** `list_due()` and `resume_context()` have write side effects (stamping `surfaced_at`). In read-only mode, these return `ReadOnly` if unsurfaced facts exist. CLI tools should use `list_active_facts()` for inspection. A future follow-up (#93) may add a read-only variant that skips stamping.
