@@ -178,6 +178,13 @@ fn a_missing_backup_dir_stops_startup() {
     let status = server.wait_exit(Duration::from_secs(10));
     assert_eq!(status.code(), Some(1), "stderr:\n{}", server.stderr());
     assert!(
+        server
+            .stderr()
+            .contains("the backup directory is not a directory"),
+        "stderr:\n{}",
+        server.stderr()
+    );
+    assert!(
         server.stderr().contains("no-such-backups"),
         "stderr:\n{}",
         server.stderr()
@@ -229,6 +236,10 @@ fn the_backup_dir_flag_and_variable_win_over_toml() {
     );
     let _ = server.wait_ready();
     let backup = format!("memory.db.v{previous}.bak");
-    assert!(from_env.join(&backup).is_file(), "stderr:\n{}", server.stderr());
+    assert!(
+        from_env.join(&backup).is_file(),
+        "stderr:\n{}",
+        server.stderr()
+    );
     assert!(!from_toml.join(&backup).exists());
 }

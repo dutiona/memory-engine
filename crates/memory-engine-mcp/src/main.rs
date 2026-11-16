@@ -110,7 +110,10 @@ async fn main() -> Result<(), BoxError> {
     if let Some(dir) = &mcp_config.engine.backup_dir {
         // Checked now: `VACUUM INTO` would only fail at the next pending migration.
         if !dir.is_dir() {
-            return Err(format!("engine.backup_dir is not a directory: {}", dir.display()).into());
+            return Err(format!(
+                "the backup directory is not a directory (engine.backup_dir, --backup-dir or MEMORY_MCP_BACKUP_DIR): {}",
+                dir.display()
+            ).into());
         }
         builder = builder.backup_dir(dir.clone());
     }
