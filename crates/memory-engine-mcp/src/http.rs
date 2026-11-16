@@ -54,6 +54,27 @@ pub async fn serve(
     Ok(())
 }
 
+/// Validate one allowed `Host` value: a host name or `host:port`, never a wildcard.
+///
+/// rmcp compares entries literally, so `*` would admit nothing while its author believes
+/// it admits everything; userinfo would silently reduce to the bare host.
+///
+/// # Errors
+///
+/// Returns the reason the value is refused.
+pub fn parse_allowed_host(value: &str) -> Result<String, String> {
+    let refused = || {
+        format!(
+            "an allowed host is a host name or host:port, without '*', '@' or spaces: {value:?}"
+        )
+    };
+    if value.is_empty() || value.trim() != value || value.contains(['*', '@']) {
+        return Err(refused());
+    }
+    axum::http::uri::Authority::try_from(value).map_err(|_| refused())?;
+    Ok(value.to_owned())
+}
+
 fn router(server: MemoryMcpServer, tokens: TokenTable, allowed_hosts: Vec<String>) -> Router {
     let mut config = StreamableHttpServerConfig::default()
         .with_stateful_mode(false)
@@ -89,4 +110,30 @@ async fn require_machine(
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert(machine);
     next.run(request).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_allowed_host_accepts_authorities() {
+        for host in ["memory.example", "memory.example:8443", "[::1]"] {
+            assert_eq!(parse_allowed_host(host).unwrap(), host);
+        }
+    }
+
+    #[test]
+    fn parse_allowed_host_refuses_wildcards_userinfo_and_whitespace() {
+        for host in [
+            "",
+            "*",
+            "*.example",
+            "user@memory.example",
+            " memory.example",
+            "memory.example ",
+        ] {
+            assert!(parse_allowed_host(host).is_err(), "{host:?}");
+        }
+    }
 }

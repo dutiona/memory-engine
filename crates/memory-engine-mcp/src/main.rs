@@ -20,6 +20,16 @@ struct Cli {
     #[arg(long, env = "MEMORY_MCP_TOKEN_FILE")]
     token_file: std::path::PathBuf,
 
+    /// A `Host` value to serve besides loopback (repeatable; the variable takes a comma
+    /// list without spaces). An entry without a port admits any port.
+    #[arg(
+        long = "allowed-host",
+        env = "MEMORY_MCP_ALLOWED_HOSTS",
+        value_delimiter = ',',
+        value_parser = http::parse_allowed_host
+    )]
+    allowed_hosts: Vec<String>,
+
     /// Path to TOML configuration file.
     #[arg(long, env = "MEMORY_MCP_CONFIG")]
     config: Option<std::path::PathBuf>,
@@ -124,7 +134,14 @@ async fn main() -> Result<(), BoxError> {
 
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     tracing::info!("memory-engine-mcp listening on {}", listener.local_addr()?);
-    http::serve(listener, mcp_server, tokens, Vec::new(), shutdown).await?;
+    http::serve(
+        listener,
+        mcp_server,
+        tokens,
+        cli.allowed_hosts.clone(),
+        shutdown,
+    )
+    .await?;
 
     Ok(())
 }

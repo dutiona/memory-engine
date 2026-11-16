@@ -49,3 +49,47 @@ fn sigterm_flushes_the_snapshot_and_exits_zero() {
     assert!(status.success(), "{status}; stderr:\n{}", server.stderr());
     assert!(snapshot.is_file());
 }
+
+fn status_for_host(server: &ServerProcess, host: &str) -> u16 {
+    reqwest::blocking::Client::new()
+        .post(format!("{}/mcp", server.url()))
+        .bearer_auth(common::token("laptop"))
+        .header("Accept", "application/json, text/event-stream")
+        .header("Content-Type", "application/json")
+        .header("Host", host)
+        .body(common::jsonrpc("tools/list", &serde_json::json!({})).to_string())
+        .send()
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[test]
+fn allowed_host_from_flag_and_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = ServerProcess::spawn(dir.path(), &["--allowed-host", "memory.example"], &[]);
+    server.wait_ready().unwrap();
+    assert_eq!(status_for_host(&server, "memory.example"), 200);
+    assert_eq!(status_for_host(&server, "third.example"), 403);
+    drop(server);
+
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &[],
+        &[("MEMORY_MCP_ALLOWED_HOSTS", "memory.example,other.example")],
+    );
+    server.wait_ready().unwrap();
+    assert_eq!(status_for_host(&server, "memory.example"), 200);
+    assert_eq!(status_for_host(&server, "other.example"), 200);
+    assert_eq!(status_for_host(&server, "third.example"), 403);
+    drop(server);
+
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[("MEMORY_MCP_ALLOWED_HOSTS", "*")]);
+    let status = server.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.code(), Some(2), "stderr:\n{}", server.stderr());
+    assert!(
+        server.stderr().contains("an allowed host is a host name"),
+        "stderr:\n{}",
+        server.stderr()
+    );
+}
