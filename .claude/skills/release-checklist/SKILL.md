@@ -30,6 +30,8 @@ Run this checklist with **no live writer holding the DB**: stop the harness and 
 - `migrate` opens the engine **writable**; a second writer contends for the write lock.
 - Between Step 4 (migrate) and Step 5 (promote) the on-disk DB is at the **new** schema while the
   **old** binaries in `bin/` would reject it — keep that window offline and brief.
+- `memory-engine-mcp` no longer speaks stdio (#1018): it serves HTTP only and needs `--listen` and
+  `--token-file`. Do not promote it where a harness still launches it as a stdio MCP command.
 
 Confirm nothing holds the DB before starting:
 
