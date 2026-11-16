@@ -290,8 +290,9 @@ pub enum MigrationError {
 
     /// The database or snapshot is in a state this build cannot open or migrate
     /// — a corrupt/unparseable config value, an uninitialized database, a
-    /// snapshot from a newer schema, post-rebuild foreign-key violations, or a
-    /// non-file path opened read-only. The string carries the specific cause.
+    /// snapshot from a newer schema, post-rebuild foreign-key violations, a
+    /// non-file path opened read-only, or a `restore_sqlite` backup with a non-empty
+    /// `-wal` or `-journal`. The string carries the specific cause.
     #[error("{0}")]
     Incompatible(String),
 }

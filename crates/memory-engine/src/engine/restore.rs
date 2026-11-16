@@ -129,8 +129,9 @@ impl MemoryEngine {
                 backup_path.display()
             )));
         }
-        // A backup's own non-empty `-wal` or `-journal` holds pages its main file lacks:
-        // copying the main file alone would silently drop the newest commits (#1040).
+        // A backup's own non-empty `-wal` holds commits its main file lacks, and a hot
+        // `-journal` holds the rollback its main file still needs: copying the main file
+        // alone would drop the former or leave the latter torn (#1040).
         for suffix in ["-wal", "-journal"] {
             if std::fs::metadata(sidecar(backup_path, suffix)).is_ok_and(|m| m.len() > 0) {
                 return Err(MigrationError::Incompatible(format!(

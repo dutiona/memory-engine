@@ -190,8 +190,8 @@ async fn restore_sqlite_fails_if_target_sidecar_exists() {
     }
 }
 
-/// #1040: a backup with a non-empty `-wal` or a `-journal` holds commits its main file lacks,
-/// so restoring the main file alone would silently drop them.
+/// #1040: a backup's non-empty `-wal` holds commits its main file lacks, and a hot
+/// `-journal` the rollback it still needs, so restoring the main file alone is refused.
 #[tokio::test]
 async fn restore_sqlite_refuses_backup_with_journal_sidecar() {
     let engine = make_engine().await;
@@ -208,7 +208,11 @@ async fn restore_sqlite_refuses_backup_with_journal_sidecar() {
         let target_path = dir.path().join("restored.db");
         let config = EngineConfig::new(target_path.clone(), DIM);
         let err = MemoryEngine::restore_sqlite(&backup_path, &config).unwrap_err();
-        assert!(err.to_string().contains(suffix), "{suffix}: got {err}");
+        assert!(
+            matches!(err, memory_engine::error::MemoryError::Migration(_))
+                && err.to_string().contains(suffix),
+            "{suffix}: got {err}"
+        );
         assert!(!target_path.exists(), "{suffix}: nothing may be copied");
         std::fs::remove_file(&sidecar).unwrap();
     }

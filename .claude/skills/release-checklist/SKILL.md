@@ -149,8 +149,9 @@ if [ -f "$DB" ]; then
       [ ! -e "$BACKUP$s" ] || cp -- "$BACKUP$s" "$STAGE$s" || { echo "$STAGE_FAILED"; exit 1; }
     done
     rm -f -- "$DB-wal" "$DB-shm" "$DB-journal" || { echo "$SWAP_FAILED"; exit 1; }
-    # The main file first: until its sidecars follow, $DB is the backup minus its newest commits,
-    # older but never mixed with the failed migration's pages.
+    # The main file first: until its sidecars follow, $DB is the backup without them (missing its
+    # newest WAL commits, or torn if it had a hot journal), but never mixed with the failed
+    # migration's pages. Do not start the server on it before the swap completes.
     mv -f -- "$STAGE" "$DB" || { echo "$SWAP_FAILED"; exit 1; }
     for s in -wal -journal; do
       [ ! -e "$STAGE$s" ] || mv -f -- "$STAGE$s" "$DB$s" || { echo "$SWAP_FAILED"; exit 1; }
