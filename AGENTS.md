@@ -21,6 +21,7 @@ No external services needed — SQLite is bundled via `rusqlite`.
 ⚠️ **CI is `workflow_dispatch`-only — it does NOT run on push or PR** (#989). This matrix is therefore the **primary** verification, not a pre-check with CI as a backstop: nothing runs automatically to catch you skipping it. `.github/workflows/ci.yml` runs these same commands *when dispatched* (`gh workflow run ci.yml --ref <branch>`). A local pass that diverges from them — weaker features, narrower scope, or piped output — is a **false pass**, and now an *undetected* one. Treat a PR with no CI run as **unverified by machine**:
 
 ```bash
+cargo build --workspace --locked                                       # Lockfile is current — runs first, before any command could rewrite it
 cargo fmt --all --check                                                # Format
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
 cargo build --workspace                                                # Build (default features)

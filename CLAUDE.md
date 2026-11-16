@@ -42,6 +42,7 @@ Feature flags: `backend-sqlite` (default; the in-process SQLite backend — a #6
 **Verification gate — YOU are the runner** (#989). ⚠️ **CI is `workflow_dispatch`-only — it does NOT run on push or PR.** So this matrix is not a redundant pre-check with CI as the backstop; **it is the primary verification, and nothing runs automatically to catch you skipping it.** Run it before every commit, especially when touching `error.rs`, `types/`, `traits.rs`, `lib.rs`, or any public API. `.github/workflows/ci.yml` runs these same commands *when dispatched* — a local pass that diverges (weaker features, narrower scope, piped output) is a **false pass**, and now an *undetected* one:
 
 ```bash
+cargo build --workspace --locked                                       # Lockfile is current — runs first, before any command could rewrite it
 cargo fmt --all --check                                                # Format
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # Clippy (deny warnings)
 cargo build --workspace                                                # Build (default features)

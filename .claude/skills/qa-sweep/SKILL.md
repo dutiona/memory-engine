@@ -203,9 +203,9 @@ own labeled issues (per the PM contract in CLAUDE.md), don't fold them in.
   `&conn` transitively; clippy misses it). Use a scoped `#[allow(…, reason = "…")]`.
 - **The clippy gate is `-D warnings` workspace-wide now** (pedantic/nursery cleared to 0 + ~19
   justified `#[allow]`s). Keep changed code 0-warning or add a justified `#[allow]`.
-- **`Cargo.lock` is gitignored** — a `cargo update -p X` commits nothing; CI resolves fresh. A
-  RustSec advisory is closed by raising the MSRV floor (which excludes the vulnerable version via the
-  MSRV-aware resolver), _not_ by a committed pin. Say that in the PR.
+- **`Cargo.lock` is tracked** (#1016: the server image builds with `--locked`). A RustSec advisory is
+  closed by `cargo update -p X` and committing the lock; the MSRV-aware resolver keeps the fix at or
+  below the MSRV floor. Raise the MSRV only when no compatible fixed version exists, and say which in the PR.
 - **Mechanical fix patterns**: `as`→`try_from` (truncation/sign); count→`f64` keeps `as f64` + scoped
   `cast_precision_loss` allow (NOT saturating `try_from().unwrap_or(MAX)` — not lossless); >3-bool
   struct → one bool becomes a meaningful enum; `too_many_lines` → extract a cohesive helper.
