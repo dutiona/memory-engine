@@ -6,11 +6,14 @@ use memory_engine::traits::SummaryGenerator;
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Implementation, InitializeResult, ListToolsResult,
-    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool, ToolsCapability,
+    CallToolRequestParams, CallToolResult, ErrorData, Extensions, Implementation, InitializeResult,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool,
+    ToolsCapability,
 };
 use rmcp::service::RequestContext;
+use serde_json::{Map, Value};
 
+use crate::auth::Machine;
 use crate::embedding::HttpEmbeddingProvider;
 use crate::tools;
 
@@ -106,10 +109,14 @@ impl ServerHandler for MemoryMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let machine = calling_machine(&context.extensions)?;
         let name = request.name.clone();
-        let args = request.arguments.unwrap_or_default();
+        let mut args = request.arguments.unwrap_or_default();
+        if name == "memory_add_fact" {
+            record_machine(&mut args, machine)?;
+        }
 
         // The engine is async-native (#631): await the tool dispatch directly on the
         // runtime. Storage I/O is offloaded below the `StorageBackend` seam and any
@@ -128,5 +135,88 @@ impl ServerHandler for MemoryMcpServer {
         .await?;
 
         Ok(result)
+    }
+}
+
+/// The machine the HTTP layer authenticated. Without one, nothing runs: the router always
+/// supplies it, so its absence means a mount that bypassed the Bearer layer.
+fn calling_machine(extensions: &Extensions) -> Result<&Machine, ErrorData> {
+    extensions
+        .get::<axum::http::request::Parts>()
+        .and_then(|parts| parts.extensions.get::<Machine>())
+        .ok_or_else(|| ErrorData::internal_error("no authenticated machine on this call", None))
+}
+
+/// The server, not the client, says which machine a remembered fact came from.
+fn record_machine(args: &mut Map<String, Value>, machine: &Machine) -> Result<(), ErrorData> {
+    let metadata = args
+        .entry("metadata")
+        .and_modify(|m| {
+            if m.is_null() {
+                *m = Value::Object(Map::new());
+            }
+        })
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Value::Object(metadata) = metadata else {
+        return Err(ErrorData::invalid_params(
+            "metadata must be a JSON object",
+            None,
+        ));
+    };
+    metadata.insert(
+        "machine".to_owned(),
+        Value::String(machine.as_str().to_owned()),
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::TokenTable;
+    use rmcp::model::{ErrorCode, Extensions};
+    use sha2::{Digest, Sha256};
+
+    fn laptop() -> Machine {
+        let token = format!("me_{}", "L".repeat(32));
+        let hash: String = Sha256::digest(token.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .concat();
+        let table = TokenTable::parse(format!("laptop {hash}\n").as_bytes()).unwrap();
+        table
+            .authenticate(format!("Bearer {token}").as_bytes())
+            .unwrap()
+            .clone()
+    }
+
+    fn parts(machine: Option<Machine>) -> axum::http::request::Parts {
+        let (mut parts, ()) = axum::http::Request::new(()).into_parts();
+        if let Some(machine) = machine {
+            parts.extensions.insert(machine);
+        }
+        parts
+    }
+
+    #[test]
+    fn no_parts_is_refused() {
+        let err = calling_machine(&Extensions::new()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn parts_without_a_machine_are_refused() {
+        let mut extensions = Extensions::new();
+        extensions.insert(parts(None));
+        let err = calling_machine(&extensions).unwrap_err();
+        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn the_authenticated_machine_is_returned() {
+        let mut extensions = Extensions::new();
+        extensions.insert(parts(Some(laptop())));
+        assert_eq!(calling_machine(&extensions).unwrap().as_str(), "laptop");
     }
 }

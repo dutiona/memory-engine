@@ -208,3 +208,46 @@ async fn no_configured_host_admits_only_loopback() {
         200
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remembered_fact_records_the_calling_machine() {
+    let server = TestServer::start().await;
+
+    let laptop = server
+        .call_tool(
+            "laptop",
+            "memory_add_fact",
+            json!({ "content": "from the laptop", "metadata": { "machine": "forged", "note": 1 } }),
+        )
+        .await;
+    let fact = server
+        .engine
+        .get_fact(laptop["fact_id"].as_i64().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(fact.metadata, json!({ "machine": "laptop", "note": 1 }));
+
+    let desktop = server
+        .call_tool(
+            "desktop",
+            "memory_add_fact",
+            json!({ "content": "from the desktop" }),
+        )
+        .await;
+    let fact = server
+        .engine
+        .get_fact(desktop["fact_id"].as_i64().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(fact.metadata, json!({ "machine": "desktop" }));
+
+    let refused = server
+        .call(
+            "laptop",
+            "memory_add_fact",
+            json!({ "content": "string metadata", "metadata": "x" }),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    assert_eq!(server.fact_count().await, 2);
+}
