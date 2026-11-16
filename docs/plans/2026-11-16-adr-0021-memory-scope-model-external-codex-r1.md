@@ -1,0 +1,27 @@
+Michaël, **the plan needs revision before the ADR is written**. Confidence: high on the contract and verification findings below; the Locator collision needs an explicit compatibility decision.
+
+I accept the altitude report’s justified override: the outline is the requested design-review artifact, and archiving the plan bounds the duplication. The report and its three copied inputs match their recorded digests.
+
+Altitude report SHA-256: 646ddf1733b961652fb9f87e2bb45de4fcf4960bce2d678c865084aabc88cdcf
+
+- **[BLOCKER] §5, §7, §11 — By-ID authority changes the first-release contract.** ADR-0020 permits `forget` and `set_level` only in the session’s own project, bucket, or user Home, even after `recall(project: Q)` returns a fact from Q. §5 instead permits operations on memories the caller can recall; if that includes the overridden recall context, it grants access ADR-0020 denies. If it means only the ordinary session context, the plan must say so. Add a case that recalls Q from P, then attempts both mutations, and include write authority in the subset proof.
+
+- **[HIGH] §8, §11 — Locator identity does not preserve every first-release key.** ADR-0020 uses one untyped key namespace for normalized remotes and dev-relative paths. A remote key `github.com/example/x` and a dev-relative path with those same bytes share one first-release Home; §8 treats them as different Locator kinds and can mint separate projects. The 256-byte encoded-label cutoff in ADR-0020 is also absent: a formerly keyless session can gain a project. Specify how both states retain their original visibility and add them to MC and C28.
+
+- **[HIGH] §8 — Automatic non-git aliasing contradicts Michaël’s settled decision.** §8 joins equal dev-relative paths across machines before human confirmation; a hint does not prevent unrelated projects from seeing one another’s memories. The brief expressly requires human confirmation and no automated matcher. Resolve the conflict with ADR-0020’s existing sharing rule with Michaël, rather than presenting both as settled.
+
+- **[HIGH] §10 — The Home meet is not the intersection of visibility sets.** A keyless session sees its bucket *and* user Home, so `user ∧ bucket` must be that bucket, but the rule does not define equal-bucket or different-bucket meets. Likewise, an explicit `project: Q` recall changes the candidate project: the relationship between that override and bucket visibility needs definition before declaring project/bucket meets empty. Specify the meet from the actual recall relation and test every Home pair and override context.
+
+- **[HIGH] §8, §12 — Merge and replay lack a safe visibility contract.** Redirecting an absorbed project ID can make both projects’ memories visible together, but the plan does not say whether existing Home rows are resolved through redirects, moved, or left separate; these choices produce different results and may conflict with the no-relabel claim. Replay against the *current* registry also lacks a defined ordering or registry snapshot for historical events and corrections. Specify preview, approval, application, and deterministic replay semantics, with before/after visibility cases.
+
+- **[HIGH] §9 — Path substitution can silently point to the wrong file.** Both a linked worktree’s checkout root and its main working-tree root become `${PROJECT_ROOT}`, then expand to the reader’s single checkout root. A reference to a file in the main tree can therefore point to a different file in the worktree. Also, a user-level write containing a project path falls through to `${DEV_ROOT}` or `${HOME}` without establishing that the corresponding path identifies the same project on another machine. Preserve enough identity to distinguish these paths or explicitly leave them unexpanded and flagged; add cross-machine and linked-worktree cases.
+
+- **[MEDIUM] §12 — The visibility preview omits relevant contexts.** It enumerates machine, project, and lane, but Audiences also restrict role and session. A re-filing can widen or hide visibility for a role or session without appearing in the proposed diff. Define a complete comparison over the predicate, including missing values and future contexts, rather than only contexts observed in the log.
+
+- **[MEDIUM] Verification and implementation items 1–2 — The checks can report success after errors.** `docs_build` continues after a failed Sphinx command and returns the status of its final `grep`; `privacy` likewise does not distinguish a clean scan from a missing or unreadable deny file and does not scan the complete published diff and commit messages. H1 reports missing headings but does not validate the normative rules. Make command failures explicit, validate the deny file, scan all published material, and add content checks for the acceptance criteria. The specified final matrix also omits the fuzz gate despite this tree’s instruction to run every listed command after every change.
+
+- **[MEDIUM] §11 and §12 — “Every first-release call keeps its result” is unsupported.** The new receipt adds fields and hints, portable-path processing changes returned content, and an unknown `project` becomes a typed error without an equivalent rule established in the ADR-0020 snapshot. The proof needs a precise compatibility boundary—existing stored rows, existing calls, and newly enabled behavior—and cases for each, rather than asserting exact results across all stages.
+
+The review was read-only. I did not run project tests, builds, gates, or network commands.
+
+REVIEW COMPLETE
