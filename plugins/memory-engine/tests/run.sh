@@ -24,7 +24,7 @@ esac
 
 T=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/me hook.XXXXXX")" && pwd -P) || exit 2
 cleanup() {
-	for f in "$T"/*/stub.pid; do
+	for f in "$T"/*/stub*.pid; do
 		[ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null
 	done
 	pkill -f "$T/" 2>/dev/null
@@ -527,6 +527,256 @@ t_facts_layouts() {
 	eq "$(facts_of "$C/lw2" | sed -n 1p)" "ME-Project-Root: $(pct_oracle "$C/gds/p")" "separate git dir named .git, linked worktree"
 }
 
+# ---------------------------------------------------------------- item 5: delivery
+
+# stub_start NAME: start tests/stub_server.py in $C/NAME (its files steer it), with the token check on; prints the port.
+stub_start() {
+	mkdir -p "$C/$1"
+	printf '%s' "$TOKV" >"$C/$1/token"
+	python3 -I "$HERE/stub_server.py" "$C/$1" </dev/null >/dev/null 2>&1 &
+	printf '%s\n' "$!" >"$C/$1.pid"
+	_i=0
+	while [ ! -s "$C/$1/port" ]; do
+		_i=$((_i + 1))
+		[ "$_i" -lt 50 ] || fail "stub $1 did not start"
+		sleep 0.1
+	done
+	cat "$C/$1/port"
+}
+
+stub_lines() {
+	if [ -f "$C/$1/log" ]; then wc -l <"$C/$1/log" | tr -d ' '; else echo 0; fi
+}
+
+calls() {
+	_n=0
+	for _c in "$FAKE_CURL_DIR"/calls/*; do
+		[ -d "$_c" ] && _n=$((_n + 1))
+	done
+	printf '%s\n' "$_n"
+}
+
+reset_outbox() {
+	settle
+	rm -rf "$O" "$FAKE_CURL_DIR" "$TOKF"
+	mkdir -p "$FAKE_CURL_DIR"
+}
+
+# queue BODY...: one capture per body, with no token so that the detached flushes hold, then settle.
+queue() {
+	for _b; do
+		printf '%s' "$_b" >"$C/in"
+		hook capture <"$C/in"
+	done
+	settle
+}
+
+t_status_classes() {
+	for code in 204 400 409 413 422 408 429 500 503 000 401 403 200 201 202 302 307 404 405 410 418; do
+		reset_outbox
+		queue A B
+		token
+		printf '%s\n204\n' "$code" >"$FAKE_CURL_DIR/plan"
+		flush_fg
+		case $code in
+		204) want="0 0 2" ;;
+		400 | 409 | 413 | 422) want="0 1 2" ;;
+		*) want="2 0 1" ;;
+		esac
+		eq "$(count) $(count "$O/rejected") $(calls)" "$want" "queued, parked and calls after $code"
+		[ "$code" = 204 ] || [ "$(calls)" -eq 1 ] || [ "$(cat "$O/rejected"/*/body)" = A ] || fail "$code parked the wrong event"
+		rm -rf "$FAKE_CURL_DIR"/calls "$FAKE_CURL_DIR/plan"
+		flush_fg
+		eq "$(count)" 0 "queue after a 204 flush following $code"
+		for k in 1 2; do
+			[ -f "$FAKE_CURL_DIR/calls/$k/body" ] || break
+			case $code in 400 | 409 | 413 | 422) ;; *) eq "$(cat "$FAKE_CURL_DIR/calls/$k/body")" "$([ $k = 1 ] && echo A || echo B)" "delivery order after $code" ;; esac
+		done
+	done
+}
+
+t_curl_exit() {
+	queue A
+	token
+	printf '204/18\n' >"$FAKE_CURL_DIR/plan"
+	flush_fg
+	eq "$(count) $(calls)" "1 1" "a 204 with a curl error"
+}
+
+t_queue_while_failing() {
+	queue A B C
+	token
+	printf '000\n' >"$FAKE_CURL_DIR/plan"
+	flush_fg
+	eq "$(count) $(calls)" "3 1" "queued while curl fails"
+	printf '204\n' >"$FAKE_CURL_DIR/plan"
+	flush_fg
+	eq "$(count) $(calls)" "0 4" "after success"
+	eq "$(cat "$FAKE_CURL_DIR/calls/2/body")$(cat "$FAKE_CURL_DIR/calls/3/body")$(cat "$FAKE_CURL_DIR/calls/4/body")" ABC "order"
+}
+
+t_no_token() {
+	queue A
+	flush_fg
+	eq "$(count) $(calls)" "1 0" "without a token file"
+	token
+	flush_fg
+	eq "$(count) $(calls)" "0 1" "once the token exists"
+}
+
+t_token_channel() {
+	queue A
+	id=$(events)
+	cp -R "$O/$id" "$C/queued"
+	token
+	flush_fg
+	c=$FAKE_CURL_DIR/calls/1
+	printf 'Authorization: Bearer %s\n' "$TOKV" >"$C/want-auth"
+	cmp "$C/want-auth" "$c/stdin" || fail "curl stdin is not the Authorization line"
+	cmp "$C/queued/headers" "$c/headers" && cmp "$C/queued/body" "$c/body" || fail "curl did not get the queued files"
+	! grep -rq "$TOKV" "$FAKE_CURL_DIR"/calls/*/argv "$S" || fail "the token reached an argv or the state root"
+	eq "$(sed -n 1p "$c/argv")" -q "curl's first argument"
+	for want in -g --noproxy -H @- --connect-timeout 5 --speed-limit 8192 --speed-time 60; do
+		grep -qx -e "$want" "$c/argv" || fail "argv lacks $want"
+	done
+	grep -qx '\*' "$c/argv" || fail "argv lacks the --noproxy value"
+	! grep -qx -e -L -e --location -e --max-time -e -m "$c/argv" || fail "argv follows redirects or bounds total time"
+	eq "$(tail -n 1 "$c/argv")" "$URL/lifecycle/events" "url"
+}
+
+t_token_forms() {
+	queue A
+	mkdir -p "${TOKF%/*}"
+	printf '%s' "$TOKV" >"$TOKF"
+	flush_fg
+	printf 'Authorization: Bearer %s\n' "$TOKV" >"$C/want-auth"
+	cmp "$C/want-auth" "$FAKE_CURL_DIR/calls/1/stdin" || fail "a token file without its line feed"
+	rm -f "$TOKF"
+	queue B
+	: >"$TOKF"
+	flush_fg
+	eq "$(count) $(calls)" "1 1" "an empty token file holds"
+}
+
+t_endpoint_update_fail() {
+	token
+	printf '000\n' >"$FAKE_CURL_DIR/plan"
+	hook capture <"$C/in"
+	settle
+	wrap mv 'case $1 in *.endpoint) exit 1 ;; esac'
+	rm -rf "$FAKE_CURL_DIR/calls"
+	hook capture https://example.com/new <"$C/in"
+	settle
+	[ ! -e "$O/endpoint" ] || fail "the old endpoint survived a failed update"
+	flush_fg
+	eq "$(count) $(calls)" "2 0" "no request without an endpoint"
+}
+
+t_endpoint_changed_mid_flush() {
+	queue A B C
+	token
+	printf 'rm -f "%s/endpoint"\n' "$O" >"$FAKE_CURL_DIR/oncall.1"
+	flush_fg
+	eq "$(count) $(calls)" "2 1" "after the endpoint vanished mid-flush"
+	printf 'http://127.0.0.1:9\n' >"$O/endpoint"
+	rm -rf "$FAKE_CURL_DIR"/calls "$FAKE_CURL_DIR"/oncall.1
+	printf 'printf "https://example.com/other\\n" >"%s/endpoint"\n' "$O" >"$FAKE_CURL_DIR/oncall.1"
+	flush_fg
+	eq "$(count) $(calls)" "1 1" "after the endpoint changed mid-flush"
+}
+
+t_parked_kept() {
+	queue A
+	token
+	printf '422\n' >"$FAKE_CURL_DIR/plan"
+	flush_fg
+	eq "$(count "$O/rejected")" 1 "parked"
+	out=$(find "$O/rejected" -type f ! -perm 600)
+	[ -z "$out" ] || fail "parked files not 0600: $out"
+	printf '204\n' >"$FAKE_CURL_DIR/plan"
+	flush_fg
+	eq "$(count "$O/rejected") $(calls)" "1 1" "a parked event is not sent again"
+}
+
+t_park_heals() {
+	queue A
+	token
+	rm -rf "$O/rejected"
+	printf '400\n' >"$FAKE_CURL_DIR/plan"
+	flush_fg
+	id=$(events "$O/rejected")
+	[ -f "$O/rejected/$id/body" ] && [ -f "$O/rejected/$id/headers" ] || fail "the park did not land as rejected/<id>"
+}
+
+t_detached() {
+	token
+	printf 'block\n' >"$FAKE_CURL_DIR/plan"
+	t0=$(date +%s)
+	out=$(PATH=$RB /bin/sh "$HB" capture "$URL" "" <"$C/in")
+	t1=$(date +%s)
+	: >"$FAKE_CURL_DIR/release"
+	eq "$out" "" "capture output"
+	[ $((t1 - t0)) -le 2 ] || fail "capture took $((t1 - t0)) s while its flush blocked"
+	settle
+}
+
+t_real_curl() {
+	rm "$RB/curl"
+	ln -s "$(command -v curl)" "$RB/curl"
+	port=$(stub_start stub)
+	URL=http://127.0.0.1:$port
+	printf 503 >"$C/stub/status"
+	token
+	hook capture <"$C/in"
+	settle
+	id=$(events)
+	cp -R "$O/$id" "$C/queued"
+	printf 204 >"$C/stub/status"
+	flush_fg
+	eq "$(count)" 0 "queue"
+	n=$(stub_lines stub)
+	cmp "$C/queued/body" "$C/stub/req/$n.body" || fail "body differs"
+	while IFS= read -r l; do
+		grep -qxF "$l" "$C/stub/req/$n.headers" || grep -qxF "$l$(printf '\r')" "$C/stub/req/$n.headers" || fail "header [$l] not sent"
+	done <"$C/queued/headers"
+	grep -q "^Authorization: Bearer $TOKV" "$C/stub/req/$n.headers" || fail "no Authorization"
+}
+
+t_redirect() {
+	rm "$RB/curl"
+	ln -s "$(command -v curl)" "$RB/curl"
+	port=$(stub_start stub)
+	URL=http://127.0.0.1:$port
+	printf 307 >"$C/stub/status"
+	printf 'location\n' >"$HOME/.curlrc"
+	queue A
+	token
+	flush_fg
+	eq "$(stub_lines stub) $(count)" "1 1" "requests and queue after a 307"
+}
+
+t_proxy_bypassed() {
+	rm "$RB/curl"
+	ln -s "$(command -v curl)" "$RB/curl"
+	port=$(stub_start stub)
+	pport=$(stub_start proxy)
+	URL=http://127.0.0.1:$port
+	queue A
+	token
+	http_proxy=http://127.0.0.1:$pport HTTP_PROXY=http://127.0.0.1:$pport ALL_PROXY=http://127.0.0.1:$pport
+	export http_proxy HTTP_PROXY ALL_PROXY
+	flush_fg
+	eq "$(stub_lines stub) $(stub_lines proxy) $(count)" "1 0 0" "server, proxy, queue"
+}
+
+t_no_curl() {
+	rm "$RB/curl"
+	token
+	hook capture <"$C/in"
+	settle
+	eq "$(count)" 1 "events without curl"
+}
+
 # ---------------------------------------------------------------- runner
 
 CASES=${CASES:-"
@@ -535,6 +785,8 @@ body_identical envelope order seq_taken seq_bound pid_reuse id_collision rejecte
 body_write_fail endpoint side_duties_fail silent modes
 facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
 newline dev_root no_git facts_unborn facts_layouts
+status_classes curl_exit queue_while_failing no_token token_channel token_forms endpoint_update_fail
+endpoint_changed_mid_flush parked_kept park_heals detached real_curl redirect proxy_bypassed no_curl
 "}
 
 N=0
@@ -553,7 +805,7 @@ for name in $CASES; do
 		printf 'not ok %d - %s\n' "$N" "$name"
 		sed 's/^/#   /' "$C/log" | tail -n 20
 	fi
-	[ -f "$C/stub.pid" ] && kill "$(cat "$C/stub.pid")" 2>/dev/null
+	for f in "$C"/stub*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done
 	pkill -f "$C/plugin/bin/me-hook" 2>/dev/null
 done
 printf '# %d ok, %d not ok\n' "$OK" "$BAD"

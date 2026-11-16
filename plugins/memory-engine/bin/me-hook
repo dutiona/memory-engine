@@ -192,7 +192,89 @@ capture() {
 		fact_lines
 	} >"$_t/headers" || abandon
 	mv "$_t" "$O/$_id" || abandon
+	# A new process, not a subshell, so that the flusher's $$ is its own pid.
+	/bin/sh "$0" flush </dev/null >/dev/null 2>&1 &
 	exit 0
+}
+
+# ---------------------------------------------------------------- delivery (ADR-0020 §3, §12)
+
+# read_line FILE: RL := its first line, with or without a final line feed; fails when there is none.
+read_line() {
+	RL=
+	IFS= read -r RL <"$1" 2>/dev/null || [ -n "$RL" ]
+}
+
+now() {
+	NOW=$(date +%s)
+}
+
+lock_check() {
+	read_line "$O/lock/owner" && [ "$RL" = "$REC" ]
+}
+
+# lock_take: hold O/lock, published whole with this flusher's record by one rename.
+lock_take() {
+	now || return 1
+	REC="$$ $NOW"
+	rm -rf "$O/tmp/$$.lock"
+	{ mkdir "$O/tmp/$$.lock" || { heal && mkdir "$O/tmp/$$.lock"; }; } || return 1
+	printf '%s\n' "$REC" >"$O/tmp/$$.lock/owner" || return 1
+	mv "$O/tmp/$$.lock" "$O/lock" 2>/dev/null
+	lock_check && return 0
+	rm -rf "$O/tmp/$$.lock" "$O/lock/$$.lock"
+	return 1
+}
+
+lock_release() {
+	lock_check && rm -rf "$O/lock"
+}
+
+send() {
+	CODE=$(printf 'Authorization: Bearer %s\n' "$TOK" |
+		curl -q -g -s --noproxy '*' -o /dev/null -w '%{http_code}' --connect-timeout 5 --speed-limit 8192 \
+			--speed-time 60 -H @- -H "@$1/headers" --data-binary "@$1/body" "$URL/lifecycle/events") || CODE=000
+}
+
+# drain: deliver the queue oldest first; fails on a stop, with every event not yet answered still queued.
+drain() {
+	for _ev in "$O"/[0-9]*; do
+		[ -d "$_ev" ] || continue
+		lock_check || return 1
+		read_line "$O/endpoint" && [ "$RL" = "$URL" ] || return 1
+		send "$_ev"
+		case $CODE in
+		204) rm -rf "$_ev" ;;
+		400 | 409 | 413 | 422)
+			mv "$_ev" "$O/rejected/${_ev##*/}" || { heal && mv "$_ev" "$O/rejected/${_ev##*/}"; } || return 1
+			;;
+		# Retry (408, 429, 5xx, 000) and hold (everything else) both end the flush with the queue intact; they differ
+		# only in what the session-start status line reports (#1030).
+		*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
+flush() {
+	[ -n "$H" ] || {
+		printf 'me-hook: no HOME and not run as the stable copy\n' >&2
+		exit 1
+	}
+	exec 2>/dev/null
+	[ -d "$O" ] || exit 0
+	while :; do
+		lock_take || exit 0
+		if read_line "$O/endpoint" && URL=$RL && read_line "$TOKEN" && TOK=$RL && drain; then
+			lock_release
+		else
+			lock_release
+			exit 0
+		fi
+		# The queue was empty when the lock was released: look once more, for an event published meanwhile.
+		set -- "$O"/[0-9]*
+		[ -d "$1" ] || exit 0
+	done
 }
 
 case ${1-} in
@@ -202,6 +284,6 @@ capture | session-start)
 	DEV=${3-}
 	capture
 	;;
-flush) exit 0 ;;
+flush) flush ;;
 *) usage ;;
 esac

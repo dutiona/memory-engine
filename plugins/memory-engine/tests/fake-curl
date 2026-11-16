@@ -1,0 +1,54 @@
+#!/bin/sh
+# fake-curl: a curl stand-in for tests/run.sh. Call k is recorded under $FAKE_CURL_DIR/calls/<k>/ (argv one argument
+# per line, stdin, copies of the -H @file and --data-binary @file files, pid), and answered from line k of
+# $FAKE_CURL_DIR/plan (the last line repeats; no plan answers 204):
+#   NNN     prints NNN, exits 0        000    prints 000, exits 7 (a connection error)
+#   NNN/E   prints NNN, exits E        block  waits up to 30 s for $FAKE_CURL_DIR/release, then answers 204
+# $FAKE_CURL_DIR/oncall.<k>, when present, runs with sh before the answer; $FAKE_CURL_DIR/overlap appears when a call
+# starts while another one runs.
+PATH=/usr/bin:/bin
+D=${FAKE_CURL_DIR:?}
+mkdir -p "$D/calls"
+k=1
+while ! mkdir "$D/calls/$k" 2>/dev/null; do
+	k=$((k + 1))
+done
+C=$D/calls/$k
+printf '%s\n' "$$" >"$C/pid"
+if mkdir "$D/running" 2>/dev/null; then owner=1; else : >"$D/overlap"; fi
+for a; do printf '%s\n' "$a"; done >"$C/argv"
+prev=
+for a; do
+	case $prev in
+	-H) case $a in @-) cat >"$C/stdin" ;; @*) cat "${a#@}" >"$C/headers" ;; esac ;;
+	--data-binary) cat "${a#@}" >"$C/body" ;;
+	esac
+	prev=$a
+done
+[ -f "$D/oncall.$k" ] && sh "$D/oncall.$k"
+line=$(sed -n "${k}p" "$D/plan" 2>/dev/null)
+[ -n "$line" ] || line=$(tail -n 1 "$D/plan" 2>/dev/null)
+[ -n "$line" ] || line=204
+rc=0
+case $line in
+block)
+	i=0
+	while [ ! -e "$D/release" ] && [ "$i" -lt 300 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+	code=204
+	;;
+000)
+	code=000
+	rc=7
+	;;
+*/*)
+	code=${line%/*}
+	rc=${line#*/}
+	;;
+*) code=$line ;;
+esac
+printf '%s' "$code"
+[ -n "${owner-}" ] && rmdir "$D/running"
+exit "$rc"
