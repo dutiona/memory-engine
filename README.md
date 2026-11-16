@@ -149,6 +149,8 @@ memory-engine = { git = "https://github.com/dutiona/memory-engine", features = [
 
 **Requirements:** Rust 1.89+ (edition 2024). No external services needed.
 
+To run the MCP server as a container, see [Server image](docs/getting-started/installation.md#server-image).
+
 ## Workspace Crates
 
 | Crate               | Purpose                                          |
