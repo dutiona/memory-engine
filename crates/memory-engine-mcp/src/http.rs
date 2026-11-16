@@ -84,13 +84,18 @@ pub async fn serve(
 pub fn parse_allowed_host(value: &str) -> Result<String, String> {
     let refused = || {
         format!(
-            "an allowed host is a host name or host:port, without '*', '@' or spaces: {value:?}"
+            "an allowed host is a host name or host:port (a port from 0 to 65535), without '*', '@' or spaces: {value:?}"
         )
     };
     if value.is_empty() || value.trim() != value || value.contains(['*', '@']) {
         return Err(refused());
     }
-    axum::http::uri::Authority::try_from(value).map_err(|_| refused())?;
+    let authority = axum::http::uri::Authority::try_from(value).map_err(|_| refused())?;
+    // rmcp reads an entry whose port does not parse as "any port", so a typo would widen it.
+    let after_host = value.rsplit_once(']').map_or(value, |(_, rest)| rest);
+    if after_host.contains(':') && authority.port_u16().is_none() {
+        return Err(refused());
+    }
     Ok(value.to_owned())
 }
 
@@ -151,6 +156,9 @@ mod tests {
             "user@memory.example",
             " memory.example",
             "memory.example ",
+            "memory.example:",
+            "memory.example:99999",
+            "memory.example:https",
         ] {
             assert!(parse_allowed_host(host).is_err(), "{host:?}");
         }
