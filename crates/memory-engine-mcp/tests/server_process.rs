@@ -242,4 +242,22 @@ fn the_backup_dir_flag_and_variable_win_over_toml() {
         server.stderr()
     );
     assert!(!from_toml.join(&backup).exists());
+    drop(server);
+
+    // The flag, over the same TOML, with the store relabelled again.
+    let from_flag = dir.path().join("from-flag");
+    std::fs::create_dir(&from_flag).unwrap();
+    stale_store(dir.path());
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &["--backup-dir", from_flag.to_str().unwrap()],
+        &[],
+    );
+    let _ = server.wait_ready();
+    assert!(
+        from_flag.join(&backup).is_file(),
+        "stderr:\n{}",
+        server.stderr()
+    );
+    assert!(!from_toml.join(&backup).exists());
 }
