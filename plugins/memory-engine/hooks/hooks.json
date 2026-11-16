@@ -9,9 +9,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "session-start",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "session-start"
             ],
             "timeout": 5
           }
@@ -26,9 +24,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }
@@ -43,9 +39,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }
@@ -60,9 +54,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }
@@ -77,9 +69,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }
@@ -94,9 +84,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }
@@ -111,9 +99,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }
@@ -128,9 +114,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }
@@ -145,9 +129,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }
@@ -162,9 +144,7 @@
             "command": "/bin/sh",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/bin/me-hook",
-              "capture",
-              "${user_config.me_url}",
-              "${user_config.dev_root}"
+              "capture"
             ],
             "timeout": 5
           }

@@ -87,10 +87,12 @@ setup_case() {
 	printf '{"hook_event_name":"PostToolUse"}' >"$C/in"
 }
 
-# hook SUB [URL [DEV]] < input: run the helper as a hook does, on the restricted PATH.
+# hook SUB [URL [DEV]] < input: run the helper as a hook does, on the restricted PATH, with the plugin's options in
+# the environment as Claude Code exports them.
 hook() {
 	_sub=$1
-	PATH=$RB /bin/sh "$HB" "$_sub" "${2-$URL}" "${3-$DEV}" >"$C/out" 2>"$C/err"
+	CLAUDE_PLUGIN_OPTION_ME_URL=${2-$URL} CLAUDE_PLUGIN_OPTION_DEV_ROOT=${3-$DEV} PATH=$RB /bin/sh "$HB" "$_sub" \
+		>"$C/out" 2>"$C/err"
 	_rc=$?
 	[ "$_rc" -eq 0 ] || fail "hook $_sub exited $_rc"
 	if [ "$_sub" = capture ]; then
@@ -164,11 +166,11 @@ for e in events:
     assert len(groups) == 1 and set(groups[0]) == {"hooks"}, (e, groups)
     sub = "session-start" if e == "SessionStart" else "capture"
     want = {"type": "command", "command": "/bin/sh",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/me-hook", sub, "${user_config.me_url}", "${user_config.dev_root}"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/me-hook", sub],
             "timeout": 5}
     assert groups[0]["hooks"] == [want], (e, groups[0]["hooks"])
 ' "$PLUGIN/hooks/hooks.json" || fail "hooks.json is not the ten ADR-0020 handlers"
-	for never in PreCompact PreModelSwitch WorktreeCreate WorktreeRemove MessageDisplay async; do
+	for never in PreCompact PreModelSwitch WorktreeCreate WorktreeRemove MessageDisplay async user_config; do
 		! grep -q "$never" "$PLUGIN/hooks/hooks.json" || fail "hooks.json names $never"
 	done
 }
@@ -191,8 +193,8 @@ assert not any(o.get("sensitive") or o.get("required") for o in p["userConfig"].
 
 # hook_as_pid SCRIPT SUB: run SCRIPT in a shell that then execs the helper, so SCRIPT knows the hook's pid as $$.
 hook_as_pid() {
-	PATH=$RB /bin/sh -c "$1"'
-exec /bin/sh "$0" "$@"' "$HB" "$2" "$URL" "$DEV" <"$C/in" >"$C/out" 2>"$C/err" || fail "hook exited $?"
+	CLAUDE_PLUGIN_OPTION_ME_URL=$URL CLAUDE_PLUGIN_OPTION_DEV_ROOT=$DEV PATH=$RB /bin/sh -c "$1"'
+exec /bin/sh "$0" "$1"' "$HB" "$2" <"$C/in" >"$C/out" 2>"$C/err" || fail "hook exited $?"
 }
 
 t_body_identical() {
@@ -311,7 +313,7 @@ t_tree_heals() {
 t_seq_concurrent() {
 	i=0
 	while [ "$i" -lt 30 ]; do
-		PATH=$RB /bin/sh "$HB" capture "$URL" "" <"$C/in" >/dev/null 2>&1 &
+		CLAUDE_PLUGIN_OPTION_ME_URL=$URL PATH=$RB /bin/sh "$HB" capture <"$C/in" >/dev/null 2>&1 &
 		i=$((i + 1))
 	done
 	wait
@@ -341,6 +343,14 @@ t_endpoint() {
 	eq "$(count)" 6 "every event queued"
 }
 
+t_options_absent() {
+	PATH=$RB /bin/sh "$HB" capture <"$C/in" >"$C/out" 2>&1 || fail "capture without options exited $?"
+	[ ! -s "$C/out" ] || fail "capture without options printed"
+	eq "$(count)" 1 "events without options"
+	[ ! -e "$O/endpoint" ] || fail "an endpoint was recorded without me_url"
+	! grep -q Dev-Root "$O/$(events)/headers" || fail "a dev root was sent without dev_root"
+}
+
 t_side_duties_fail() {
 	hook capture http://127.0.0.1:9 <"$C/in"
 	wrap mv 'case $1 in *.endpoint) exit 1 ;; esac'
@@ -350,7 +360,7 @@ t_side_duties_fail() {
 }
 
 t_silent() {
-	env -u HOME PATH="$RB" /bin/sh "$HB" capture "$URL" "" <"$C/in" >"$C/out" 2>&1 || fail "no HOME: exit $?"
+	env -u HOME PATH="$RB" CLAUDE_PLUGIN_OPTION_ME_URL="$URL" /bin/sh "$HB" capture <"$C/in" >"$C/out" 2>&1 || fail "no HOME: exit $?"
 	[ ! -s "$C/out" ] || fail "no HOME: printed $(cat "$C/out")"
 	mkdir -p "$HOME/.local"
 	: >"$HOME/.local/state"
@@ -725,7 +735,7 @@ t_detached() {
 	token
 	printf 'block\n' >"$FAKE_CURL_DIR/plan"
 	t0=$(date +%s)
-	out=$(PATH=$RB /bin/sh "$HB" capture "$URL" "" <"$C/in")
+	out=$(CLAUDE_PLUGIN_OPTION_ME_URL=$URL PATH=$RB /bin/sh "$HB" capture <"$C/in")
 	t1=$(date +%s)
 	: >"$FAKE_CURL_DIR/release"
 	eq "$out" "" "capture output"
@@ -971,7 +981,7 @@ t_simultaneous() {
 	i=0
 	while [ "$i" -lt 20 ]; do
 		printf 'body %s' "$i" >"$C/in.$i"
-		PATH=$RB /bin/sh "$HB" capture "$URL" "" <"$C/in.$i" >/dev/null 2>&1 &
+		CLAUDE_PLUGIN_OPTION_ME_URL=$URL PATH=$RB /bin/sh "$HB" capture <"$C/in.$i" >/dev/null 2>&1 &
 		i=$((i + 1))
 	done
 	wait
@@ -1025,7 +1035,7 @@ t_stable_copy() {
 	cmp "$HB" "$S/bin/me-hook" || fail "the stable copy was not refreshed"
 	i=0
 	while [ "$i" -lt 20 ]; do
-		PATH=$RB /bin/sh "$HB" capture "$URL" "" <"$C/in" >/dev/null 2>&1 &
+		CLAUDE_PLUGIN_OPTION_ME_URL=$URL PATH=$RB /bin/sh "$HB" capture <"$C/in" >/dev/null 2>&1 &
 		i=$((i + 1))
 	done
 	wait
@@ -1097,14 +1107,14 @@ t_no_root() {
 	env -i /bin/sh "$HB" flush >"$C/out" 2>"$C/err"
 	eq "$?" 1 "flush without a state root"
 	eq "$(wc -l <"$C/err" | tr -d ' ')" 1 "stderr lines"
-	env -i /bin/sh "$HB" capture "$URL" "" <"$C/in" >"$C/out" 2>&1 || fail "capture without HOME exited $?"
+	env -i CLAUDE_PLUGIN_OPTION_ME_URL="$URL" /bin/sh "$HB" capture <"$C/in" >"$C/out" 2>&1 || fail "capture without HOME exited $?"
 	[ ! -s "$C/out" ] || fail "capture without HOME printed"
 }
 
 # ---------------------------------------------------------------- item 8: the SessionStart line
 
 session_start_out() {
-	PATH=$RB /bin/sh "$HB" session-start "$URL" "" <"$C/in" >"$C/out" 2>"$C/err" || fail "session-start exited $?"
+	CLAUDE_PLUGIN_OPTION_ME_URL=$URL PATH=$RB /bin/sh "$HB" session-start <"$C/in" >"$C/out" 2>"$C/err" || fail "session-start exited $?"
 }
 
 t_session_start_no_token() {
@@ -1133,7 +1143,7 @@ t_session_start_token() {
 CASES=${CASES:-"
 registration version
 body_identical envelope order seq_taken seq_bound seq_concurrent pid_reuse id_collision rejected_collision tree_heals
-body_write_fail endpoint side_duties_fail silent modes
+body_write_fail endpoint options_absent side_duties_fail silent modes
 facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
 newline dev_root no_git facts_unborn facts_layouts
 status_classes curl_exit queue_while_failing no_token token_channel token_forms endpoint_update_fail

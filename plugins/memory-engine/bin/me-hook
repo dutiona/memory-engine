@@ -27,7 +27,7 @@ O=$S/outbox
 TOKEN=$H/.config/memory-engine/secrets/token
 
 usage() {
-	printf 'usage: me-hook capture|session-start <me_url> <dev_root> | me-hook flush\n' >&2
+	printf 'usage: me-hook capture|session-start|flush\n' >&2
 	exit 1
 }
 
@@ -40,12 +40,6 @@ heal() {
 printable() {
 	case $1 in *[!!-~]*) return 1 ;; esac
 	return 0
-}
-
-# unset_arg VALUE: an option Claude Code passed empty, or left unsubstituted.
-unset_arg() {
-	case $1 in '' | '${user_config.'*) return 0 ;; esac
-	return 1
 }
 
 # ---------------------------------------------------------------- project facts (ADR-0020 §3), channel-neutral
@@ -134,9 +128,7 @@ fact_lines() {
 	[ -n "$F_OK" ] || return 0
 	pct "$F_ROOT"
 	printf 'ME-Project-Root: %s\n' "$R"
-	if ! unset_arg "$DEV"; then
-		case $DEV in /*) printable "$DEV" && case $DEV in *[%\"\\]*) ;; *) printf 'ME-Project-Dev-Root: %s\n' "$DEV" ;; esac ;; esac
-	fi
+	case $DEV in /*) printable "$DEV" && case $DEV in *[%\"\\]*) ;; *) printf 'ME-Project-Dev-Root: %s\n' "$DEV" ;; esac ;; esac
 	[ -z "$F_UPSTREAM" ] || { pct "$F_UPSTREAM" && printf 'ME-Project-Upstream-Url: %s\n' "$R"; }
 	[ -z "$F_ORIGIN" ] || { pct "$F_ORIGIN" && printf 'ME-Project-Origin-Url: %s\n' "$R"; }
 	[ -z "$F_BRANCH" ] || { pct "$F_BRANCH" && printf 'ME-Project-Branch: %s\n' "$R"; }
@@ -146,7 +138,6 @@ fact_lines() {
 # ---------------------------------------------------------------- enqueue
 
 record_endpoint() {
-	unset_arg "$1" && return 0
 	_u=${1%/}
 	case $_u in http://?* | https://?*) ;; *) return 0 ;; esac
 	printable "$_u" || return 0
@@ -375,8 +366,10 @@ flush() {
 case ${1-} in
 capture | session-start)
 	SUB=$1
-	ME_URL=${2-}
-	DEV=${3-}
+	# The options come from the environment Claude Code exports for every option that is set. Referencing an unset
+	# option as ${user_config.*} in the hook's args stops the hook from running at all.
+	ME_URL=${CLAUDE_PLUGIN_OPTION_ME_URL-}
+	DEV=${CLAUDE_PLUGIN_OPTION_DEV_ROOT-}
 	capture
 	;;
 flush) flush ;;
