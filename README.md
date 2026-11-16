@@ -140,13 +140,6 @@ Add to your `Cargo.toml`:
 memory-engine = { git = "https://github.com/dutiona/memory-engine" }
 ```
 
-For async support:
-
-```toml
-[dependencies]
-memory-engine = { git = "https://github.com/dutiona/memory-engine", features = ["async"] }
-```
-
 For HNSW approximate nearest neighbor search:
 
 ```toml

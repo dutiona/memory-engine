@@ -102,7 +102,7 @@ The crate is organized into modules with clear responsibilities:
 
 ## Threading Model
 
-`MemoryEngine` is `Send + Sync`. Consumers share it via `Arc<MemoryEngine>`. The engine is **async-native**: its DB-touching methods are `async fn` that `.await` an `Arc<dyn StorageBackend>` port, so a single tokio runtime fans many concurrent operations out across few threads (the design chosen over a thread-per-query wrapper). The `async` feature is default-on and provides that runtime.
+`MemoryEngine` is `Send + Sync`. Consumers share it via `Arc<MemoryEngine>`. The engine is **async-native**: its DB-touching methods are `async fn` that `.await` an `Arc<dyn StorageBackend>` port, so a single tokio runtime fans many concurrent operations out across few threads (the design chosen over a thread-per-query wrapper). The runtime is the caller's; `tokio` is a non-optional dependency, so no feature gates it.
 
 Concurrency is provided by four mechanisms:
 

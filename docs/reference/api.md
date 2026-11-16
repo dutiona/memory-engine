@@ -212,8 +212,7 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 
 ## Feature Flags
 
-`async`
-: **Default-on** (`default = ["async"]` in the crate-root `Cargo.toml`). Provides the tokio runtime that the async-native `MemoryEngine` requires: its DB-touching methods are `async fn` and must be `.await`ed from inside a tokio runtime (`#[tokio::main]` or `Runtime::block_on`). There is no `AsyncMemoryEngine` wrapper -- you use `MemoryEngine` directly and await it.
+`crates/memory-engine/Cargo.toml`'s `[features]` table lists the flags; no flag gates the runtime, since `tokio` is a non-optional dependency (#702). `MemoryEngine`'s DB-touching methods are `async fn` and must be `.await`ed from inside a tokio runtime (`#[tokio::main]` or `Runtime::block_on`); there is no `AsyncMemoryEngine` wrapper.
 
 ## Error Handling
 

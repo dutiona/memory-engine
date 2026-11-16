@@ -264,8 +264,7 @@ let engine = MemoryEngine::restore_sqlite(Path::new("backup.db"), &config)?;
 
 `MemoryEngine` is async-native: its inspection methods (`statistics`,
 `explain_fact`, `fact_history`, `dump_state`) are `async fn`, so you `.await` them
-directly from inside a tokio runtime (the `async` feature is default-on and supplies
-the runtime). There is no separate async wrapper type — you use `MemoryEngine`
+directly from inside the caller's tokio runtime. There is no separate async wrapper type — you use `MemoryEngine`
 itself. (Construction — the builder and the `restore_*` family — stays synchronous.)
 
 ```rust
