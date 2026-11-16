@@ -89,3 +89,27 @@ async fn shutdown_waits_for_an_abandoned_call() {
     );
     assert!(server.snapshot_path().is_file());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_connection_does_not_hold_the_shutdown() {
+    use tokio::io::AsyncWriteExt;
+
+    let mut server = TestServer::start().await;
+    // A peer that starts a request and never finishes it: no token needed.
+    let mut stalled = tokio::net::TcpStream::connect(server.url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    stalled.write_all(b"POST /mcp HTTP/1.1\r\n").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let started = Instant::now();
+    server.stop().await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(9),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(server.snapshot_path().is_file());
+    drop(stalled);
+}

@@ -20,6 +20,9 @@ use tokio::net::TcpListener;
 use crate::auth::TokenTable;
 use crate::server::MemoryMcpServer;
 
+/// How long a stop waits for open connections before it stops waiting for them.
+const CONNECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Serve MCP on `listener` until `shutdown` resolves, then flush the sidecar snapshot.
 ///
 /// `allowed_hosts` are added to rmcp's loopback default, never in place of it, so the
@@ -37,9 +40,25 @@ pub async fn serve(
 ) -> std::io::Result<()> {
     let engine = Arc::clone(&server.engine);
     let in_flight = Arc::clone(&server.in_flight);
-    axum::serve(listener, router(server, tokens, allowed_hosts))
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    let (stopping, stopped) = tokio::sync::oneshot::channel();
+    let serving = axum::serve(listener, router(server, tokens, allowed_hosts))
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = stopping.send(());
+        });
+    // hyper has no read timeout here, so a peer that sends half a request would hold the
+    // graceful shutdown open for good. Connections get a grace period; calls already
+    // started are still waited for below, whatever their connection does.
+    tokio::select! {
+        result = serving => result?,
+        () = async {
+            if stopped.await.is_ok() {
+                tokio::time::sleep(CONNECTION_GRACE).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => tracing::warn!("connections still open {CONNECTION_GRACE:?} after shutdown; closing"),
+    }
     // axum returns once connections close, but rmcp runs each call in its own task, so a
     // call whose client hung up may still be writing: wait for every call to finish. A
     // flush beside a write could pair the new DB fingerprint with old projections. The
