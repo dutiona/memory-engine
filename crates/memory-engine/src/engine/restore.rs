@@ -97,17 +97,25 @@ impl MemoryEngine {
     /// **Only accepts clean backups** produced by `dump_state(DumpFormat::Sqlite(..))`.
     /// Copying a live WAL-mode database is unsafe (the WAL sidecar may be missing).
     ///
-    /// `config.path` must not already exist. The backup's `embed_dim` is validated
-    /// against `config.embed_dim`.
+    /// Neither `config.path` nor its `-wal`, `-shm` or `-journal` sidecar may already
+    /// exist. The backup's `embed_dim` is validated against `config.embed_dim`.
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Conflict` if the target path already exists.
+    /// Returns `MemoryError::Conflict` if the target path or one of its sidecars
+    /// already exists.
     /// Returns `MemoryError::NotFound` if the backup path is not an existing
     /// regular file (missing, or a directory / other non-file).
     /// Returns `MemoryError::EmbeddingDimension` on dimension mismatch.
     pub fn restore_sqlite(backup_path: &Path, config: &EngineConfig) -> Result<Self> {
-        if config.path.exists() {
+        // SQLite replays a leftover `-wal` or `-journal` onto whatever file sits at the
+        // path, so a stale sidecar would corrupt the copied backup (#1040).
+        let has_sidecar = ["-wal", "-shm", "-journal"].iter().any(|suffix| {
+            let mut sidecar = config.path.clone().into_os_string();
+            sidecar.push(suffix);
+            Path::new(&sidecar).exists()
+        });
+        if config.path.exists() || has_sidecar {
             return Err(MemoryError::Conflict(ConflictError::TargetExists));
         }
         // Use `is_file()` (not `exists()`): a directory passed as the backup
@@ -129,11 +137,15 @@ impl MemoryEngine {
             e
         };
 
-        // Probe the copied DB for embedding-identity dim validation (#613).
-        let probe = crate::store::schema::open_connection(&config.path.to_string_lossy())
-            .map_err(cleanup)?;
-        let db_meta = crate::store::embedding_meta::load(&probe).map_err(cleanup)?;
-        drop(probe);
+        // Probe the copied DB for embedding-identity dim validation (#613). The probe is
+        // closed before any cleanup: removing the file under an open WAL connection
+        // leaves its `-wal` and `-shm` behind.
+        let db_meta = {
+            let probe = crate::store::schema::open_connection(&config.path.to_string_lossy())
+                .map_err(cleanup)?;
+            crate::store::embedding_meta::load(&probe)
+        }
+        .map_err(cleanup)?;
 
         // A backup that recorded an identity must agree on dimension. A backup with
         // no identity yet (never embedded) is valid and skips the check — the identity

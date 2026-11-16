@@ -163,6 +163,33 @@ async fn sqlite_restore_roundtrip() {
     assert!(new_id > 1);
 }
 
+/// #1040: a WAL left by an unclean stop would be replayed onto the copied backup, so a
+/// leftover sidecar makes the target count as existing.
+#[tokio::test]
+async fn restore_sqlite_fails_if_target_sidecar_exists() {
+    let engine = make_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backup_path = dir.path().join("backup.db");
+    engine
+        .dump_state(&DumpFormat::Sqlite(backup_path.clone()))
+        .await
+        .unwrap();
+
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let target_path = dir.path().join("restored.db");
+        let sidecar = dir.path().join(format!("restored.db{suffix}"));
+        std::fs::write(&sidecar, "stale").unwrap();
+        let config = EngineConfig::new(target_path.clone(), DIM);
+        let err = MemoryEngine::restore_sqlite(&backup_path, &config).unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "{suffix}: expected TargetExists, got {err}"
+        );
+        assert!(!target_path.exists(), "{suffix}: nothing may be copied");
+        std::fs::remove_file(&sidecar).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn restore_json_fails_if_target_exists() {
     let engine = make_engine().await;
