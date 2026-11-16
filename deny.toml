@@ -29,9 +29,9 @@ ignore = [
     # once tabled is upgraded/replaced. Tracking: #815.
     "RUSTSEC-2026-0173",
     # RUSTSEC-2026-0462: rmcp 1.8's streamable-HTTP *client* is vulnerable (fixed only in
-    # 3.9.0, a major bump). memory-engine-mcp builds rmcp server-only (server +
-    # transport-io), so the client is not compiled; the rmcp entry under [bans] keeps it
-    # that way. Documented exception; removal tracked by #1035.
+    # 3.9.0, a major bump). memory-engine-mcp enables only rmcp's server features, and its
+    # HTTP tests use reqwest, so the client is not compiled; the rmcp entry under [bans]
+    # keeps it that way. Documented exception; removal tracked by #1035.
     "RUSTSEC-2026-0462",
     # RUSTSEC-2026-0440: astral-tokio-tar is unmaintained (not a vuln), pulled via
     # testcontainers, a dev-dependency of me-backend-postgres only (the live-PG test

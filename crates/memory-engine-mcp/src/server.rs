@@ -22,6 +22,7 @@ use crate::tools;
 /// Tool calls are therefore `.await`ed directly on the async runtime — no
 /// `spawn_blocking` hop at the dispatch boundary. The server holds an
 /// `Arc<MemoryEngine>` for thread-safe sharing.
+#[derive(Clone)]
 pub struct MemoryMcpServer {
     pub(crate) engine: Arc<MemoryEngine>,
     pub(crate) embedder: Option<Arc<HttpEmbeddingProvider>>,

@@ -2,16 +2,23 @@ use std::sync::Arc;
 
 use clap::Parser;
 use memory_engine::MemoryEngine;
-use memory_engine_mcp::{config, embedding, server, summary};
-use rmcp::ServiceExt;
+use memory_engine_mcp::{auth, config, embedding, http, server, summary};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// MCP server for memory-engine — exposes agent memory as MCP tools over stdio.
+/// MCP server for memory-engine — exposes agent memory as MCP tools over streamable HTTP.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    /// Address to serve MCP on, e.g. `127.0.0.1:<port>`.
+    #[arg(long, env = "MEMORY_MCP_LISTEN")]
+    listen: std::net::SocketAddr,
+
+    /// The token-hash file: one `<machine> <sha256-hex>` line per machine (ADR-0020 §4).
+    #[arg(long, env = "MEMORY_MCP_TOKEN_FILE")]
+    token_file: std::path::PathBuf,
+
     /// Path to TOML configuration file.
     #[arg(long, env = "MEMORY_MCP_CONFIG")]
     config: Option<std::path::PathBuf>,
@@ -52,13 +59,15 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
-    // MCP uses stdout for JSON-RPC — all logging goes to stderr.
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(false))
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into()))
         .init();
 
     let cli = Cli::parse();
+
+    // 0. The token file first: a bad one must never get as far as migrating the store.
+    let tokens = auth::TokenTable::load(&cli.token_file).map_err(|e| e.to_string())?;
 
     // 1. Load config (TOML file, with CLI overrides)
     let mcp_config = load_config(&cli)?;
@@ -76,10 +85,6 @@ async fn main() -> Result<(), BoxError> {
         .build()
         .map_err(|e| format!("failed to open engine: {e}"))?;
     let engine = Arc::new(engine);
-    // Retain a shared handle for the shutdown sidecar flush: the server takes ownership
-    // of its own `Arc` clone below, and `close()` needs `&mut` (unreachable through a
-    // shared `Arc`), so the server-side handle uses `flush_snapshot(&self)` instead.
-    let engine_for_flush = Arc::clone(&engine);
 
     // 4. Initialize embedding provider (optional)
     // Use the resolved embed_dim (from DB probe or config), not the TOML value.
@@ -105,17 +110,16 @@ async fn main() -> Result<(), BoxError> {
     // 6. Construct and serve
     let mcp_server = server::MemoryMcpServer::new(engine, embedder, summary_gen, embed_dim);
 
-    tracing::info!("memory-engine-mcp starting on stdio");
-    let transport = rmcp::transport::io::stdio();
-    let service = mcp_server.serve(transport).await?;
-    service.waiting().await?;
-
-    // Shutdown: the serve loop has ended (engine is quiescent), so persist the in-memory
-    // projections to the sidecar snapshot. Best-effort — the DB is the source of truth,
-    // so a failed flush only means the next open rebuilds the sidecar from the DB.
-    if let Err(e) = engine_for_flush.flush_snapshot().await {
-        tracing::warn!("failed to flush sidecar snapshot on shutdown: {e}");
-    }
+    let listener = tokio::net::TcpListener::bind(cli.listen).await?;
+    tracing::info!("memory-engine-mcp listening on {}", listener.local_addr()?);
+    http::serve(
+        listener,
+        mcp_server,
+        tokens,
+        Vec::new(),
+        std::future::pending(),
+    )
+    .await?;
 
     Ok(())
 }
