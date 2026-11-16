@@ -125,8 +125,8 @@ printf 'Authorization: Bearer %s\n' "$(cat /path/to/token)" | curl -sS -H @- \
 
 ### Shutdown and health
 
-SIGTERM or SIGINT stops accepting connections, waits for every tool call already started, flushes the
-`<db>.snapshot` sidecar and exits 0. A stop timeout shorter than the slowest call becomes a kill, and the next start
+SIGTERM or SIGINT stops accepting connections, gives open connections 5 s to finish, waits for every tool call
+already started, flushes the `<db>.snapshot` sidecar and exits 0. A stop timeout shorter than the slowest call becomes a kill, and the next start
 rebuilds the projections from the database. There is no unauthenticated route, so a liveness probe expects 401:
 `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/mcp` prints `401`.
 
