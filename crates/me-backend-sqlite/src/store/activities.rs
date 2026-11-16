@@ -180,8 +180,9 @@ impl<'a> ActivityStore<'a> {
                  LIMIT ?2",
             )
             .map_err(StorageError::backend)?;
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = stmt
-            .query_map(params![ids_json, limit], row_to_activity)
+            .query_map(params![ids_json, limit_i64], row_to_activity)
             .map_err(StorageError::backend)?;
         rows.collect::<std::result::Result<_, _>>()
             .map_err(|e| StorageError::backend(e).into())
@@ -476,6 +477,11 @@ mod tests {
         }
         let list = store.list_recent_by_scope(&[1], 10).unwrap();
         assert_eq!(list.len(), 3);
+        assert_eq!(
+            store.list_recent_by_scope(&[1], usize::MAX).unwrap().len(),
+            3,
+            "a limit past i64::MAX saturates, as in list_by_session"
+        );
 
         let empty = store.list_recent_by_scope(&[], 10).unwrap();
         assert_eq!(empty, []);
