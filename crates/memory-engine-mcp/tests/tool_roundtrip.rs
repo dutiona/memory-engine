@@ -604,19 +604,10 @@ async fn resume_context_empty_engine() {
     .await;
     let body = unwrap_ok(result);
     // All tiers should be empty arrays
-    assert_eq!(
-        body["pinned"].as_array().unwrap().as_slice(),
-        [] as [Value; 0]
-    );
-    assert_eq!(
-        body["high_importance"].as_array().unwrap().as_slice(),
-        [] as [Value; 0]
-    );
-    assert_eq!(body["due"].as_array().unwrap().as_slice(), [] as [Value; 0]);
-    assert_eq!(
-        body["recent"].as_array().unwrap().as_slice(),
-        [] as [Value; 0]
-    );
+    assert_eq!(body["pinned"], json!([]));
+    assert_eq!(body["high_importance"], json!([]));
+    assert_eq!(body["due"], json!([]));
+    assert_eq!(body["recent"], json!([]));
 }
 
 #[tokio::test]

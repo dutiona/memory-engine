@@ -354,6 +354,6 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let back: CycleReport = serde_json::from_str(&json).unwrap();
         assert_eq!(report, back, "wire format must round-trip");
-        assert_eq!(report.identity.anchors, [] as [i64; 0]);
+        assert_eq!(report.identity.anchors, [] as [FactId; 0]);
     }
 }
