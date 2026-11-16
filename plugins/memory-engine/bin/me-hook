@@ -1,0 +1,19 @@
+#!/bin/sh
+# me-hook: the memory-engine client for Claude Code (ADR-0020 §12). Run by a shell, never executed directly.
+# Utilities: mkdir mv rm cat date git curl, and the shell's builtins. It never parses JSON.
+LC_ALL=C
+export LC_ALL
+umask 077
+unset GIT_DIR GIT_WORK_TREE
+ME_VERSION=0.1.0
+
+usage() {
+	printf 'usage: me-hook capture|session-start <me_url> <dev_root> | me-hook flush\n' >&2
+	exit 1
+}
+
+case ${1-} in
+capture | session-start) exit 0 ;;
+flush) exit 0 ;;
+*) usage ;;
+esac
