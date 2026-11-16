@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-03-10
+**Amended by:** [ADR-0021](0021-memory-scope-model.md) (for the memory service each memory has one Home in this tree, Audiences decide its visibility, and root is never read)
 
 ## Context
 

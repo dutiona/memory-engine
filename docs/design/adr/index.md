@@ -25,4 +25,5 @@ Key design decisions, documented as ADRs. Each records the context, decision, an
 0018-wave2-crate-decomposition-memoryctx
 0019-wisdom-substrate
 0020-harness-neutral-lifecycle-api
+0021-memory-scope-model
 ```
