@@ -160,7 +160,7 @@ mod tests {
         let json = serde_json::to_string(&empty).unwrap();
         let back: ConsolidationProposal = serde_json::from_str(&json).unwrap();
         assert_eq!(empty, back);
-        assert!(back.merges.is_empty());
+        assert_eq!(back.merges, []);
     }
 
     /// Property-based serde round-trips for `PromotionProvenance`.

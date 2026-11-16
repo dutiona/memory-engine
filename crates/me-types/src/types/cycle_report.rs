@@ -13,6 +13,13 @@
 //! `DefaultDreamCycle` is pure-Rust and deterministic, so
 //! it needs no such protection itself; the delta vocabulary exists for the *consumer*.
 
+// Module scope, not item scope: serde's `Deserialize` derive for `CycleAnomaly` emits its
+// own empty `__Field` enum inside the generated impl, which an attribute on the enum cannot reach.
+#![allow(
+    clippy::empty_enums,
+    reason = "`CycleAnomaly` is a reserved public placeholder that gains variants later; `!` is unstable and cannot grow variants"
+)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -347,6 +354,6 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let back: CycleReport = serde_json::from_str(&json).unwrap();
         assert_eq!(report, back, "wire format must round-trip");
-        assert!(report.identity.anchors.is_empty());
+        assert_eq!(report.identity.anchors, [] as [FactId; 0]);
     }
 }

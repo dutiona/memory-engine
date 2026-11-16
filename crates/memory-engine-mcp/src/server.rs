@@ -92,12 +92,14 @@ impl ServerHandler for MemoryMcpServer {
             )
     }
 
-    async fn list_tools(
+    fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, rmcp::model::ErrorData> {
-        Ok(ListToolsResult::with_all_items(Self::tool_definitions()))
+    ) -> impl Future<Output = Result<ListToolsResult, rmcp::model::ErrorData>> + Send + '_ {
+        std::future::ready(Ok(
+            ListToolsResult::with_all_items(Self::tool_definitions()),
+        ))
     }
 
     async fn call_tool(

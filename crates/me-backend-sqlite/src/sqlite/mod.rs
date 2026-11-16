@@ -200,6 +200,7 @@ impl SqliteBackend {
         not(feature = "ann"),
         allow(
             clippy::missing_const_for_fn,
+            clippy::needless_pass_by_value,
             unused_variables,
             reason = "non-ann build only stores search_config; HNSW args are inert"
         )

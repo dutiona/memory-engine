@@ -414,7 +414,7 @@ mod tests {
         );
 
         let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
-        assert!(synth_sources(&report).is_empty());
+        assert_eq!(synth_sources(&report), [] as [Vec<FactId>; 0]);
         crate::apply::apply_cycle_report(
             engine.ctx(),
             &engine.graph,

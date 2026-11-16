@@ -83,10 +83,10 @@ async fn arc_dyn_storage_backend_dispatches_every_bounded_trait() {
     assert!(hits.len() <= 5);
 
     // ConsolidationStore
-    assert!(be.list_all_summaries().await.unwrap().is_empty());
+    assert_eq!(be.list_all_summaries().await.unwrap(), []);
 
     // SessionStore
-    assert!(be.list_recent_checkpoints(10).await.unwrap().is_empty());
+    assert_eq!(be.list_recent_checkpoints(10).await.unwrap(), []);
 }
 
 #[tokio::test]

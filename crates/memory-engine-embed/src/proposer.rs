@@ -298,7 +298,7 @@ mod tests {
     fn parse_proposal_empty_merges_is_ok() {
         let env = envelope(r#"{"merges":[]}"#, 5, 9);
         let proposal = HttpDeltaProposer::parse_proposal(&env).unwrap();
-        assert!(proposal.merges.is_empty());
+        assert_eq!(proposal.merges, []);
     }
 
     #[test]

@@ -1440,7 +1440,7 @@ async fn list_summaries_empty() {
         .list_summaries(&ConsolidationLevel::Global)
         .await
         .unwrap();
-    assert!(summaries.is_empty());
+    assert_eq!(summaries, []);
 }
 
 // --- Phase 3 / T2: AddFactOptions ---
@@ -1682,10 +1682,10 @@ async fn resume_empty_engine() {
         .resume_context(&ResumeConfig::default())
         .await
         .unwrap();
-    assert!(ctx.pinned.is_empty());
-    assert!(ctx.high_importance.is_empty());
-    assert!(ctx.due.is_empty());
-    assert!(ctx.recent.is_empty());
+    assert_eq!(ctx.pinned, []);
+    assert_eq!(ctx.high_importance, []);
+    assert_eq!(ctx.due, []);
+    assert_eq!(ctx.recent, []);
 }
 
 #[tokio::test]
@@ -1742,7 +1742,7 @@ async fn resume_with_facts() {
     assert!(ctx.pinned[0].is_pinned);
     assert!(ctx.pinned[0].content.contains("Rust"));
     // The low-importance fact should appear in recent
-    assert!(!ctx.recent.is_empty());
+    assert_ne!(ctx.recent, []);
 }
 
 #[tokio::test]
@@ -1870,7 +1870,7 @@ async fn resume_stamps_surfaced_at_on_high_importance_due_fact() {
 
     // Fact should appear in high_importance tier (not due tier)
     assert_eq!(ctx.high_importance.len(), 1);
-    assert!(ctx.due.is_empty());
+    assert_eq!(ctx.due, []);
 
     // Bug: surfaced_at should be stamped because the fact IS due.
     assert!(
@@ -4285,7 +4285,7 @@ async fn embed_batch_default_impl_loops_embed() {
 async fn embed_batch_empty_returns_empty() {
     let embedder = crate::test_utils::MockEmbedder::new(DIM);
     let result = embedder.embed_batch(&[]).unwrap();
-    assert!(result.is_empty());
+    assert_eq!(result, [] as [Vec<f32>; 0]);
 }
 
 #[tokio::test]
@@ -4332,7 +4332,7 @@ async fn add_facts_batch_empty_returns_empty() {
         .add_facts_batch(&[], embedder.clone(), None)
         .await
         .unwrap();
-    assert!(ids.is_empty());
+    assert_eq!(ids, [] as [i64; 0]);
 }
 
 #[tokio::test]

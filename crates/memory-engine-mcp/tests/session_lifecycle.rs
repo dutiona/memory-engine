@@ -351,7 +351,7 @@ async fn replay_events_empty_log_is_empty_not_error() {
             .unwrap(),
     );
     assert_eq!(body["count"], json!(0));
-    assert!(body["events"].as_array().unwrap().is_empty());
+    assert_eq!(body["events"], json!([]));
 }
 
 #[tokio::test]

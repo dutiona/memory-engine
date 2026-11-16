@@ -842,7 +842,7 @@ mod tests {
             .list_summaries_by_level(&ConsolidationLevel::Global)
             .await
             .unwrap();
-        assert!(empty.is_empty());
+        assert_eq!(empty, []);
     }
 
     #[tokio::test]

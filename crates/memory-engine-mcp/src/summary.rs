@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn system_prompt_is_non_empty() {
-        assert!(!SUMMARIZE_SYSTEM_PROMPT.is_empty());
+        assert_ne!(SUMMARIZE_SYSTEM_PROMPT, "");
         assert!(SUMMARIZE_SYSTEM_PROMPT.contains("consolidation"));
     }
 }

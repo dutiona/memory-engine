@@ -29,7 +29,7 @@ mod tests {
     fn default_config_has_sensible_defaults() {
         let config = default_filter_config();
         assert_eq!(config.dedup_window_secs, 300);
-        assert!(!config.ignore_patterns().is_empty());
-        assert!(!config.promote_patterns().is_empty());
+        assert_ne!(config.ignore_patterns(), [] as [String; 0]);
+        assert_ne!(config.promote_patterns(), [] as [String; 0]);
     }
 }

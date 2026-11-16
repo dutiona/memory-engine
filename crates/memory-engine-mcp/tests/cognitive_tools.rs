@@ -117,7 +117,10 @@ async fn dream_cycle_apply_true_runs_and_applies() {
     );
     assert_eq!(body["did_run"], json!(true));
     assert_eq!(body["did_apply"], json!(true));
-    assert!(!body["report"]["deltas"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["report"]["deltas"].as_array().unwrap().as_slice(),
+        [] as [Value; 0]
+    );
     assert_eq!(
         body["applied"]["promoted"],
         json!(1),

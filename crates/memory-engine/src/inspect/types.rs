@@ -610,6 +610,6 @@ mod tests {
         });
         let snapshot: EngineSnapshot =
             serde_json::from_value(json).expect("pre-v8 snapshot must deserialize");
-        assert!(snapshot.lineage.is_empty());
+        assert_eq!(snapshot.lineage, []);
     }
 }

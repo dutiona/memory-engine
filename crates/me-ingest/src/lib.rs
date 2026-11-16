@@ -500,8 +500,8 @@ async fn compute_batch_pins(
     let mut slots: Vec<Option<bool>> = Vec::with_capacity(entries.len());
     let mut pending: Vec<ClassifierInput> = Vec::new();
     for entry in entries {
-        let opts = entry.opts.clone().unwrap_or_default();
-        slots.push(match opts.pinned {
+        let opts = entry.opts.as_ref();
+        slots.push(match opts.and_then(|o| o.pinned) {
             Some(p) => Some(p),
             None if classifier.is_some() => {
                 // Only the four classifier-authorised fields — no embedding
@@ -509,10 +509,9 @@ async fn compute_batch_pins(
                 pending.push(ClassifierInput {
                     content: entry.content.clone(),
                     fact_type: entry.fact_type,
-                    base_importance: opts.base_importance.unwrap_or(0.5),
+                    base_importance: opts.and_then(|o| o.base_importance).unwrap_or(0.5),
                     metadata: opts
-                        .metadata
-                        .clone()
+                        .and_then(|o| o.metadata.clone())
                         .unwrap_or_else(|| serde_json::json!({})),
                 });
                 None

@@ -939,7 +939,7 @@ mod tests {
                 me_types::types::EmbeddingFingerprint::new("mock", "test", 1)
             }
         }
-        assert!(Dummy.embed_batch(&[]).unwrap().is_empty());
+        assert_eq!(Dummy.embed_batch(&[]).unwrap(), [] as [Vec<f32>; 0]);
     }
 
     #[test]

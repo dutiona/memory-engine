@@ -287,7 +287,7 @@ mod tests {
             .unwrap();
 
         let results = fts_search(&conn, "JavaScript", 10, None, None).unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results, []);
     }
 
     #[test]
@@ -318,7 +318,7 @@ mod tests {
 
         // Unbalanced quotes are an FTS5 syntax error
         let results = fts_search(&conn, "\"unbalanced", 10, None, None).unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results, []);
     }
 
     #[test]
@@ -380,7 +380,7 @@ mod tests {
         store.expire(id, Utc::now()).unwrap();
 
         let results = fts_search(&conn, "Rust", 10, None, None).unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results, []);
     }
 
     #[test]
@@ -392,7 +392,7 @@ mod tests {
         // An empty MATCH string is an FTS5 syntax error -> caught and mapped
         // to an empty result vec (fts.rs:30-83), never an Err.
         let results = fts_search(&conn, "", 10, None, None).unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results, []);
     }
 
     #[test]

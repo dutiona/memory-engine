@@ -1926,7 +1926,7 @@ mod tests {
         assert_eq!(retrieved.id, id);
         assert_eq!(retrieved.content, "Rust is a systems language");
         assert_eq!(retrieved.fact_type, FactType::Episodic);
-        assert!(!retrieved.content_hash.is_empty());
+        assert_ne!(retrieved.content_hash, "");
     }
 
     #[test]
@@ -2165,11 +2165,11 @@ mod tests {
         assert_eq!(top1, vec![id2]);
 
         // A scope with no facts → empty (scope filter holds).
-        assert!(
+        assert_eq!(
             store
                 .list_active_by_metadata_key_recent(&[999], "insight", 10)
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            []
         );
     }
 
@@ -3327,7 +3327,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results, []);
     }
 
     #[test]
