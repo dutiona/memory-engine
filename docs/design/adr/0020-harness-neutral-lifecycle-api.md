@@ -54,7 +54,7 @@ A neutral record has:
 - **An actor**: `main`, or `subagent` with its ID and type. Segment boundaries and recallable memories belong to the main agent.
 - **An outcome**, where the kind has one: `success`, `failure` or `interrupted` for a `tool_use`; `completed` or `api_error` for a `stop`.
 - **The kind's own content**: the session's start source; the prompt; the tool name with excerpts of its input and result; the final message; the compaction summary; the reason a session ended.
-- **Provenance**: the machine (from the token), the harness, the client version, the session ID, the agent, the branch, the working directory the harness reported, the project root and the project key. Provenance is what lets ADR-0021 re-file history later without capturing it again.
+- **Provenance**: the machine (from the token), the harness, the client version, the session ID, the agent, the branch, the working directory the harness reported, the project facts as decoded, userinfo removed (§3), the project key resolved from them and the version of the rules that resolved it. Provenance is what lets ADR-0021 re-file history later without capturing it again.
 
 ### 3. Wire contract
 
@@ -285,7 +285,7 @@ ADR-0007 splits a scope path on `/`. A key used as is would therefore nest: proj
 - **No key derived:** the memory goes to that machine's `unscoped` bucket, which is never injected into a project.
 - **Reads.** `recall` and the context block read the session's project and the user level, exactly. A session with no key reads its machine's bucket and the user level. Another project is reachable only through `recall`'s `project` argument. It swaps the project: the read is then the named project and the user level, not the session's own project, and it never reaches a bucket. Nothing reads the root scope.
 
-Every event keeps its decoded facts, userinfo removed, so ADR-0021 can re-file history without capturing it again.
+Every event and every model-tool call record keeps its decoded facts, userinfo removed, with the resolved key and the version of the derivation rules, so ADR-0021 can re-file history without capturing it again.
 
 ### 8. Lean tool map
 
@@ -335,7 +335,7 @@ forget(id: integer, reason: string)
 set_level(id: integer, level: "project" | "user")
 ```
 
-- **`recall`** returns up to 10 results. Each carries the fact ID, its kind (remembered, final message or compaction summary), its scope (a project key, `user` or `unscoped`), its date and its machine. An answer built from full-text search alone says so. `project` names another project by its key and is read in place of the session's own (§7). There is no limit argument and no mode: a fixed size keeps the recall log comparable.
+- **`recall`** returns up to 10 results. Each carries the fact ID, its kind (remembered, final message or compaction summary), its scope (a project key, `user` or `unscoped`), its date and its machine. An answer built from full-text search alone says so. `project` names another project by its key and is read in place of the session's own (§7). A value that resolves to no project the server knows is answered with an error that names the value; it never falls back to the session's project or to the root scope. There is no limit argument and no mode: a fixed size keeps the recall log comparable.
 - **`remember`** stores a Semantic fact, at `project` level by default. It answers with the fact ID, where the memory went and who sees it, for example: `stored 412 in project github.com/example/project, visible to all agents`. When a server-side heuristic finds the placement doubtful (content that reads user-wide filed under a project, or the reverse), it adds one hint line that names `set_level`. It never refuses and never moves the memory itself. The heuristic's rules are not part of this contract.
 - **`forget`** retracts a fact (owner's decision): "this fact won't come up again". It ends the fact's validity in the bi-temporal model. The fact leaves recall. A tombstone stops it from coming back through promotion or re-import. The fact row and the raw events stay, and an admin can reverse it. It answers `forgotten`, `already forgotten` or `not found`.
 - **`set_level`** changes only a memory's level. `project` means the calling session's project, or its machine's bucket. It never moves a fact between two projects in one call. It answers with the same receipt as `remember`, and reports a fact already at that level as unchanged. The move is an event that records the scope the fact left, so it is auditable, and the opposite call from the same project undoes it. User level is shared: a fact raised to it from one project can be brought down into another by a session of that other project.
@@ -348,7 +348,7 @@ Every model-tool response starts with a call ID, so that the link to its session
 
 - A response is a tool result whose first text content starts with the line `call ` followed by 16 lowercase hex digits.
 - That includes failures. The four tools return a failure as a tool result, never as a JSON-RPC error, which has no first line.
-- The server records each call: its ID, the machine, the tool, the time, and the IDs of the facts returned or changed.
+- The server records each call: its ID, the machine, the tool, the time, and the IDs of the facts returned or changed. The record also keeps the project facts the request carried (the root, the dev root, the two remote URLs, userinfo removed), the key resolved from them and the version of the rules that resolved it, exactly as an event does. Without them a remembered fact could not be re-filed later from the log.
 - The adapter links a captured tool event to a call when the first line of its result or error text is a call line, and the server holds that call for the same machine. A forged line matches nothing.
 - 16 hex digits stay under every redaction rule (the hex rule needs 32, the entropy rule needs 20 characters), and a random ID cannot repeat after a restore.
 
@@ -368,7 +368,7 @@ A follow-up turns them on in the server, never as tools: after a segment ends, f
 
 Per-prompt recall stays off. Whether to switch it on is decided later, on data that cannot be collected after the fact. The server therefore logs these records from the first session. Each is redacted like every other write.
 
-- **Injection**, one per context read. The session start's machine and event ID, the session ID, the start source, the project key, the server time and the duration. The retrieval settings as run: the mode, the cause of a degraded read, the ADR-0015 embedding space, the caps and the fusion parameters. The candidates, each with its fact ID, its rank, its score per retrieval signal and its fused score. The injected items, each with its fact ID, position and size. The block's size and the status line.
+- **Injection**, one per session-start event that was read: the first read writes it, and a repeated read writes nothing (§3). The session start's machine and event ID, the session ID, the start source, the project key, the server time and the duration. The retrieval settings as run: the mode, the cause of a degraded read, the ADR-0015 embedding space, the caps and the fusion parameters. The candidates, each with its fact ID, its rank, its score per retrieval signal and its fused score. The injected items, each with its fact ID, position and size. The block's size and the status line.
 - **Model recall**, one per `recall` call. The call record of §8, the redacted query, the `project` argument, the scope read, the retrieval settings, the results with their ranks, per-signal scores and fused scores, and whether the answer was degraded. The session ID is filled in when the call is linked.
 - **Uptake**, written when a segment ends. One row per main-agent completed stop of the segment, naming the session's injection whose session start has the greatest order key below the stop's, among the injections the server holds then. A late completed stop gets its row when it is applied. A row is never rewritten, and it names no injection when none is held.
 
@@ -405,7 +405,7 @@ The context route returns the harness's finished hook output, rendered by its ad
 - `systemMessage` carries the status line. It is the only field Claude Code shows the user.
 - `additionalContext` carries the context block, which only the model sees. Its first line repeats the status line, so the model also knows when recall is degraded.
 - The block is at most 9,000 bytes of UTF-8. That is at most 9,000 characters however they are counted, under Claude Code's cap of 10,000.
-- Every start source gets a block.
+- Every start source gets a block. A repeated read for the same event is the one exception (§3): its answer is the same object without `hookSpecificOutput`, so `systemMessage` alone.
 - The context read carries the same body and the same header file as the queued session-start event (so the session ID, the start source, the event ID and the project facts), plus the two outbox counts.
 
 #### Status line
