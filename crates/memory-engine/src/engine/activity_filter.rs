@@ -147,8 +147,8 @@ fn format_promote_content(tool_name: &str, result: Option<&str>) -> String {
         Some(r) if !r.is_empty() => {
             let truncated = if r.len() > 200 {
                 // Find the last char boundary at or before 200 bytes.
-                // `str::floor_char_boundary` is unstable until Rust 1.91; the
-                // crate MSRV is 1.85, so walk back manually via the
+                // `str::floor_char_boundary` is stable only since Rust 1.91,
+                // above the workspace MSRV, so walk back manually via the
                 // long-stable `is_char_boundary`.
                 let mut end = 200;
                 while !r.is_char_boundary(end) {
