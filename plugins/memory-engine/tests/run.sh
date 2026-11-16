@@ -378,6 +378,11 @@ t_modes() {
 	[ -z "$out" ] || fail "wrong modes: $out"
 }
 
+t_real_no_token_argv() {
+	! grep -n 'CLAUDE_CODE_OAUTH_TOKEN=' "$HERE/real-claude.sh" || fail "real-claude.sh assigns the credential on a command line"
+	grep -q 'os.execve' "$HERE/real-claude.sh" || fail "real-claude.sh no longer builds the environment with execve"
+}
+
 # ---------------------------------------------------------------- item 4: project facts
 
 mkrepo() {
@@ -1143,7 +1148,7 @@ t_session_start_token() {
 CASES=${CASES:-"
 registration version
 body_identical envelope order seq_taken seq_bound seq_concurrent pid_reuse id_collision rejected_collision tree_heals
-body_write_fail endpoint options_absent side_duties_fail silent modes
+body_write_fail endpoint options_absent side_duties_fail silent modes real_no_token_argv
 facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
 newline dev_root no_git facts_unborn facts_layouts
 status_classes curl_exit queue_while_failing no_token token_channel token_forms endpoint_update_fail
