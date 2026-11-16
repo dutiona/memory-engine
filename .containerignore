@@ -4,6 +4,7 @@
 !Cargo.lock
 !crates/
 **/target
+**/.worktrees
 **/.env
 **/.env.*
 # The redaction denylist holds real secret literals; it must never enter an image.
