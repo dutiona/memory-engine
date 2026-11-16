@@ -9,7 +9,7 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResult, Implementation, InitializeResult, ListToolsResult,
     PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool, ToolsCapability,
 };
-use rmcp::service::{MaybeSendFuture, RequestContext};
+use rmcp::service::RequestContext;
 
 use crate::embedding::HttpEmbeddingProvider;
 use crate::tools;
@@ -96,8 +96,7 @@ impl ServerHandler for MemoryMcpServer {
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListToolsResult, rmcp::model::ErrorData>> + MaybeSendFuture + '_
-    {
+    ) -> impl Future<Output = Result<ListToolsResult, rmcp::model::ErrorData>> + Send + '_ {
         std::future::ready(Ok(
             ListToolsResult::with_all_items(Self::tool_definitions()),
         ))
