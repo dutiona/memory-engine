@@ -355,12 +355,186 @@ t_modes() {
 	[ -z "$out" ] || fail "wrong modes: $out"
 }
 
+# ---------------------------------------------------------------- item 4: project facts
+
+mkrepo() {
+	git init -q -b main "$1" && git -C "$1" commit -q --allow-empty -m init
+}
+
+last() {
+	events | tail -n 1
+}
+
+# facts_of [DIR]: capture with CLAUDE_PROJECT_DIR=DIR and print the event's ME-Project-* lines.
+facts_of() {
+	CLAUDE_PROJECT_DIR=$1
+	export CLAUDE_PROJECT_DIR
+	hook capture <"$C/in"
+	_l=$(last)
+	while IFS= read -r _h; do
+		case $_h in ME-Project-*) printf '%s\n' "$_h" ;; esac
+	done <"$O/$_l/headers"
+}
+
+# pct_oracle VALUE: ADR-0020 §3's encoding, computed independently.
+pct_oracle() {
+	py '
+import os, sys
+v = os.fsencode(sys.argv[1])
+print("".join(chr(b) if 0x21 <= b <= 0x7E and chr(b) not in "%\"\\" else "%%%02X" % b for b in v))
+' "$1"
+}
+
+t_facts_repo() {
+	mkrepo "$C/r"
+	git -C "$C/r" checkout -q -b feat/x
+	git -C "$C/r" remote add upstream git@example.org:up/proj.git
+	git -C "$C/r" remote add origin https://ci-user:not-a-secret@example.com/org/proj.git
+	DEV=/x/dev
+	got=$(facts_of "$C/r")
+	want="ME-Project-Root: $(pct_oracle "$C/r")
+ME-Project-Dev-Root: /x/dev
+ME-Project-Upstream-Url: example.org:up/proj.git
+ME-Project-Origin-Url: https://example.com/org/proj.git
+ME-Project-Branch: feat/x"
+	eq "$got" "$want" "facts"
+}
+
+t_facts_worktree() {
+	mkrepo "$C/r"
+	git -C "$C/r" worktree add -q -b wt "$C/w"
+	eq "$(facts_of "$C/w")" "ME-Project-Root: $(pct_oracle "$C/r")
+ME-Project-Branch: wt" "linked worktree facts"
+}
+
+t_facts_subdir() {
+	mkrepo "$C/r"
+	mkdir -p "$C/r/a/b"
+	eq "$(facts_of "$C/r/a/b")" "ME-Project-Root: $(pct_oracle "$C/r")
+ME-Project-Branch: main" "subdirectory facts"
+}
+
+t_facts_detached() {
+	mkrepo "$C/r"
+	git -C "$C/r" checkout -q --detach
+	eq "$(facts_of "$C/r")" "ME-Project-Root: $(pct_oracle "$C/r")" "detached facts"
+}
+
+t_facts_non_git() {
+	mkdir "$C/plain"
+	DEV=/x/dev
+	eq "$(facts_of "$C/plain")" "ME-Project-Root: $(pct_oracle "$C/plain")
+ME-Project-Dev-Root: /x/dev" "non-git facts"
+}
+
+t_facts_cwd() {
+	mkrepo "$C/r"
+	git -C "$C/r" remote add origin https://example.com/o/r.git
+	mkrepo "$C/other"
+	git -C "$C/other" checkout -q -b elsewhere
+	git -C "$C/other" remote add origin https://example.com/o/other.git
+	ref=$(facts_of "$C/r")
+	got1=$(cd / && facts_of "$C/r")
+	got2=$(cd "$C/other" && facts_of "$C/r")
+	got3=$(GIT_DIR=$C/other/.git && export GIT_DIR && facts_of "$C/r")
+	eq "$got1" "$ref" "facts from /"
+	eq "$got2" "$ref" "facts from another repository"
+	eq "$got3" "$ref" "facts with GIT_DIR set"
+}
+
+t_facts_insteadof() {
+	mkrepo "$C/r"
+	git -C "$C/r" config url.https://example.com/.insteadOf ex:
+	git -C "$C/r" remote add origin ex:org/proj
+	case $(facts_of "$C/r") in *"ME-Project-Origin-Url: https://example.com/org/proj"*) ;; *) fail "insteadOf not applied" ;; esac
+}
+
+t_userinfo() {
+	mkrepo "$C/r"
+	git -C "$C/r" remote add origin x
+	while IFS='|' read -r in want; do
+		git -C "$C/r" remote set-url origin "$in"
+		got=$(facts_of "$C/r" | sed -n 's/^ME-Project-Origin-Url: //p')
+		eq "$got" "$want" "userinfo of $in"
+	done <<'EOF'
+https://user:secret@example.com/o/r.git|https://example.com/o/r.git
+https://tok123@example.com/o/r|https://example.com/o/r
+https://a@b@example.com/o/r|https://example.com/o/r
+ssh://git@example.com:22/o/r.git|ssh://example.com:22/o/r.git
+git@example.com:o/r.git|example.com:o/r.git
+/srv/git/r.git|/srv/git/r.git
+https://example.com/o/r@v2|https://example.com/o/r@v2
+EOF
+	! grep -rq -e secret -e tok123 "$S" || fail "userinfo reached the state root"
+}
+
+t_encoding() {
+	py '
+import os, sys
+os.makedirs(os.path.join(sys.argv[1], "enc", "x \x27\"%\\é日"))
+' "$C"
+	for d in "$C"/enc/*; do :; done
+	got=$(facts_of "$d" | sed -n 's/^ME-Project-Root: //p')
+	eq "$got" "$(pct_oracle "$d")" "encoded root"
+	case $got in *"/x%20'%22%25%5C%C3%A9%E6%97%A5") ;; *) fail "fixed suffix missing: $got" ;; esac
+}
+
+t_newline() {
+	py 'import os, sys; os.makedirs(os.path.join(sys.argv[1], "nl", "a\nb"))' "$C"
+	for d in "$C"/nl/*; do :; done
+	DEV=/x/dev
+	eq "$(facts_of "$d")" "" "facts for a path with a line feed"
+	eq "$(count)" 1 "events"
+}
+
+t_dev_root() {
+	mkdir "$C/plain"
+	DEV=/x/dev
+	case $(facts_of "$C/plain") in *"ME-Project-Dev-Root: /x/dev"*) ;; *) fail "valid dev root not sent" ;; esac
+	for bad in '' '${user_config.dev_root}' rel/x '/a b' '/a%b' '/a"b'; do
+		DEV=$bad
+		case $(facts_of "$C/plain") in *Dev-Root*) fail "dev root [$bad] sent" ;; esac
+	done
+}
+
+t_no_git() {
+	mkrepo "$C/r"
+	rm "$RB/git"
+	eq "$(facts_of "$C/r")" "ME-Project-Root: $(pct_oracle "$C/r")" "facts without git"
+}
+
+t_facts_unborn() {
+	git init -q -b main "$C/r"
+	eq "$(facts_of "$C/r")" "ME-Project-Root: $(pct_oracle "$C/r")
+ME-Project-Branch: main" "unborn facts"
+}
+
+t_facts_layouts() {
+	main=$C/$(printf 'mt x %s"\303\251' "'")
+	git init -q -b main --separate-git-dir "$C/gd" "$main"
+	git -C "$main" commit -q --allow-empty -m init
+	git -C "$main" worktree add -q -b lw "$C/lw"
+	eq "$(facts_of "$main" | sed -n 1p)" "ME-Project-Root: $(pct_oracle "$main")" "separate git dir, main tree"
+	eq "$(facts_of "$C/lw" | sed -n 1p)" "ME-Project-Root: $(pct_oracle "$C/lw")" "separate git dir, linked worktree"
+	mkrepo "$C/sub"
+	mkrepo "$C/super"
+	git -C "$C/super" -c protocol.file.allow=always submodule add -q "$C/sub" sm 2>/dev/null
+	eq "$(facts_of "$C/super/sm" | sed -n 1p)" "ME-Project-Root: $(pct_oracle "$C/super/sm")" "submodule checkout"
+	mkdir -p "$C/gds/p"
+	git init -q -b main --separate-git-dir "$C/gds/p/.git" "$C/m2"
+	git -C "$C/m2" commit -q --allow-empty -m init
+	git -C "$C/m2" worktree add -q -b lw2 "$C/lw2"
+	eq "$(facts_of "$C/lw2" | sed -n 1p)" "ME-Project-Root: $(pct_oracle "$C/gds/p")" "separate git dir named .git, linked worktree"
+}
+
 # ---------------------------------------------------------------- runner
 
 CASES=${CASES:-"
 registration version
 body_identical envelope order seq_taken seq_bound pid_reuse id_collision rejected_collision tree_heals
 body_write_fail endpoint side_duties_fail silent modes
+facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
+newline dev_root no_git facts_unborn facts_layouts
 "}
 
 N=0
