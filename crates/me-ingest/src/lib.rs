@@ -510,10 +510,7 @@ async fn compute_batch_pins(
                     content: entry.content.clone(),
                     fact_type: entry.fact_type,
                     base_importance: opts.base_importance.unwrap_or(0.5),
-                    metadata: opts
-                        .metadata
-                        .clone()
-                        .unwrap_or_else(|| serde_json::json!({})),
+                    metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
                 });
                 None
             }
