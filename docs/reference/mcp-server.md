@@ -2,7 +2,7 @@
 
 ## What
 
-A stdio-based MCP server binary that exposes memory-engine as 26 tools (10 P0 + 5 P1 + 3 P2 + 2 Phase-5a outcome + 3 cognitive + 3 activity stream) for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
+An MCP server binary that serves memory-engine over streamable HTTP (stateless `POST /mcp`, JSON responses), behind per-machine Bearer tokens, and exposes it as 26 tools (10 P0 + 5 P1 + 3 P2 + 2 Phase-5a outcome + 3 cognitive + 3 activity stream) for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
 
 ## Why
 
@@ -27,14 +27,23 @@ cargo build -p memory-engine-mcp --release
 
 ```bash
 # With TOML config
-memory-engine-mcp --config /path/to/mcp.toml
+memory-engine-mcp --listen 127.0.0.1:<port> --token-file /path/to/tokens --config /path/to/mcp.toml
 
 # With CLI args
-memory-engine-mcp --db-path /path/to/memory.db --embed-url http://localhost:11434/v1/embeddings --embed-model nomic-embed-text
+memory-engine-mcp --listen 127.0.0.1:<port> --token-file /path/to/tokens \
+  --db-path /path/to/memory.db --embed-url http://localhost:11434/v1/embeddings --embed-model nomic-embed-text
 
 # With env vars
-MEMORY_MCP_DB_PATH=/path/to/memory.db MEMORY_MCP_EMBED_URL=... memory-engine-mcp
+MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens \
+  MEMORY_MCP_DB_PATH=/path/to/memory.db MEMORY_MCP_EMBED_URL=... memory-engine-mcp
 ```
+
+| Flag | Environment variable | Meaning |
+|---|---|---|
+| `--listen` (required) | `MEMORY_MCP_LISTEN` | Socket address to serve on |
+| `--token-file` (required) | `MEMORY_MCP_TOKEN_FILE` | The token-hash file (below) |
+| `--allowed-host` (repeatable) | `MEMORY_MCP_ALLOWED_HOSTS` (comma list, no spaces) | A `Host` value served besides loopback |
+| `--backup-dir` | `MEMORY_MCP_BACKUP_DIR` | Overrides `engine.backup_dir` |
 
 ### Configuration
 
@@ -42,6 +51,7 @@ MEMORY_MCP_DB_PATH=/path/to/memory.db MEMORY_MCP_EMBED_URL=... memory-engine-mcp
 [engine]
 db_path = "/path/to/memory.db"
 embed_dim = 384  # Optional — probed from existing DB if omitted
+backup_dir = "/path/to/backups"  # Optional — an existing directory; a migration first writes <db>.v<N>.bak there
 
 [embedding]
 endpoint = "http://localhost:11434/v1/embeddings"
@@ -78,18 +88,48 @@ mrl_dim = 256         # Truncate + L2-renormalize to this; must equal engine emb
 
 On startup the server verifies the configured provider's identity (`model`, `provider`, `dim`, MRL, element type) against the one the store was created with, and **refuses to start on a mismatch** (#614). This prevents the silent-corruption case where a different model — even at the same dimension — embeds queries into an incompatible vector space. A fresh store with nothing embedded yet has no recorded identity and accepts any provider; the identity is stamped on the first embedding write.
 
-Add to `.claude/settings.json`:
+### Transport and authentication
 
-```json
-{
-  "mcpServers": {
-    "memory-engine": {
-      "command": "/path/to/memory-engine-mcp",
-      "args": ["--config", "/path/to/mcp.toml"]
-    }
-  }
-}
+The server answers MCP only as rmcp's streamable-HTTP service on `POST /mcp`, in stateless mode with JSON responses:
+every call is an independent request, so an idle client or a server restart needs no session recovery.
+
+Every request must carry exactly one `Authorization: Bearer <token>` header whose token belongs to a machine in the
+token-hash file. The file's format, the token's shape and the fail-closed rules are those of
+[ADR-0020 §4](../design/adr/0020-harness-neutral-lifecycle-api.md#4-machine-tokens): one `<machine> <sha256-hex>`
+line per machine, read at startup only, and any malformed or repeated line refuses to start. Mint a line without
+putting the token on a command line or hashing a stray line feed:
+
+```bash
+printf '%s %s\n' laptop "$(printf '%s' "$token" | sha256sum | cut -d' ' -f1)" >> tokens
 ```
+
+| Status | When |
+|---|---|
+| 401 | Any request, on any method or path, without exactly one valid token |
+| 403 | A valid token, but a `Host` that is not admitted |
+| 405 | `GET` or `DELETE` on `/mcp` (stateless mode serves `POST` only) |
+| 406, 415 | A `POST` without `Accept: application/json, text/event-stream` or `Content-Type: application/json` |
+
+The `Host` check admits loopback plus each `--allowed-host` value; an entry without a port admits any port, and `*`,
+`@` and spaces are refused. The calling machine, taken from the token, is written to `metadata.machine` on every
+fact `memory_add_fact` stores; a client cannot set it.
+
+The Claude Code plugin sends the token through its `headersHelper` (ADR-0020 §12); never put a token in `.mcp.json`
+or on a command line. A manual check reads the header from standard input:
+
+```bash
+printf 'Authorization: Bearer %s\n' "$(cat /path/to/token)" | curl -sS -H @- \
+  -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' https://memory.example/mcp
+```
+
+### Shutdown and health
+
+SIGTERM or SIGINT stops accepting connections, gives open connections 5 s to finish, waits for every tool call
+already started, flushes the `<db>.snapshot` sidecar and exits 0. A stop timeout shorter than the slowest call
+becomes a kill, and the next start rebuilds the projections from the database. There is no unauthenticated route, so
+a liveness probe expects 401:
+`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/mcp` prints `401`.
 
 ### Tools
 
@@ -256,10 +296,12 @@ Migration from v8 is automatic on first open.
 ### Architecture
 
 ```
-Agent (Claude, etc.) → stdio JSON-RPC → memory-engine-mcp → MemoryEngine (SQLite)
+Agent (Claude, etc.) → HTTP POST /mcp → auth layer → rmcp (stateless) → MemoryEngine (SQLite)
+                                         ├── auth.rs (token-hash file, Bearer check)
+                                         ├── http.rs (router, auth layer, drain + flush)
                                          ├── config.rs (TOML + env + CLI)
-                                         ├── server.rs (ServerHandler, spawn_blocking)
-                                         ├── tools/   (18 handlers + dispatch)
+                                         ├── server.rs (ServerHandler, calling machine)
+                                         ├── tools/   (26 handlers + dispatch)
                                          ├── depth.rs (response shaping)
                                          ├── activity_policy.rs (Claude Code filter heuristics)
                                          ├── embedding.rs (HTTP embedding provider)
@@ -267,4 +309,5 @@ Agent (Claude, etc.) → stdio JSON-RPC → memory-engine-mcp → MemoryEngine (
                                          └── error.rs (MemoryError → MCP)
 ```
 
-Tool calls run on tokio's blocking thread pool (`spawn_blocking`) since the engine is sync (SQLite). Protocol version pinned to `2025-06-18`.
+The engine is async-native (#631): tool calls are awaited directly, and the engine offloads its storage and blocking
+consumer-trait calls itself. Protocol version pinned to `2025-06-18`.

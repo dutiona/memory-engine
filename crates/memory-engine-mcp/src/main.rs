@@ -2,16 +2,34 @@ use std::sync::Arc;
 
 use clap::Parser;
 use memory_engine::MemoryEngine;
-use memory_engine_mcp::{config, embedding, server, summary};
-use rmcp::ServiceExt;
+use memory_engine_mcp::{auth, config, embedding, http, server, summary};
+use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// MCP server for memory-engine — exposes agent memory as MCP tools over stdio.
+/// MCP server for memory-engine — exposes agent memory as MCP tools over streamable HTTP.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    /// Address to serve MCP on, e.g. `127.0.0.1:<port>`.
+    #[arg(long, env = "MEMORY_MCP_LISTEN")]
+    listen: std::net::SocketAddr,
+
+    /// The token-hash file: one `<machine> <sha256-hex>` line per machine (ADR-0020 §4).
+    #[arg(long, env = "MEMORY_MCP_TOKEN_FILE")]
+    token_file: std::path::PathBuf,
+
+    /// A `Host` value to serve besides loopback (repeatable; the variable takes a comma
+    /// list without spaces). An entry without a port admits any port.
+    #[arg(
+        long = "allowed-host",
+        env = "MEMORY_MCP_ALLOWED_HOSTS",
+        value_delimiter = ',',
+        value_parser = http::parse_allowed_host
+    )]
+    allowed_hosts: Vec<String>,
+
     /// Path to TOML configuration file.
     #[arg(long, env = "MEMORY_MCP_CONFIG")]
     config: Option<std::path::PathBuf>,
@@ -19,6 +37,10 @@ struct Cli {
     /// Path to the memory-engine `SQLite` database.
     #[arg(long, env = "MEMORY_MCP_DB_PATH")]
     db_path: Option<std::path::PathBuf>,
+
+    /// Directory for the pre-migration backup; overrides `engine.backup_dir`.
+    #[arg(long, env = "MEMORY_MCP_BACKUP_DIR")]
+    backup_dir: Option<std::path::PathBuf>,
 
     /// Embedding endpoint URL (OpenAI-compatible).
     #[arg(long, env = "MEMORY_MCP_EMBED_URL")]
@@ -52,13 +74,26 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
-    // MCP uses stdout for JSON-RPC — all logging goes to stderr.
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(false))
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into()))
         .init();
 
     let cli = Cli::parse();
+
+    // Before anything slow: a stop that arrives during startup or once the port is open
+    // must take the draining path, never the signal's default kill.
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let shutdown = async move {
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    };
+
+    // 0. The token file first: a bad one must never get as far as migrating the store.
+    let tokens = auth::TokenTable::load(&cli.token_file).map_err(|e| e.to_string())?;
 
     // 1. Load config (TOML file, with CLI overrides)
     let mcp_config = load_config(&cli)?;
@@ -71,19 +106,27 @@ async fn main() -> Result<(), BoxError> {
     };
 
     // 3. Open MemoryEngine
-    let engine = MemoryEngine::builder(embed_dim)
-        .path(mcp_config.engine.db_path.clone())
+    let mut builder = MemoryEngine::builder(embed_dim).path(mcp_config.engine.db_path.clone());
+    if let Some(dir) = &mcp_config.engine.backup_dir {
+        // Checked now: `VACUUM INTO` would only fail at the next pending migration.
+        if !dir.is_dir() {
+            return Err(format!(
+                "the backup directory is not a directory (engine.backup_dir, --backup-dir or MEMORY_MCP_BACKUP_DIR): {}",
+                dir.display()
+            ).into());
+        }
+        builder = builder.backup_dir(dir.clone());
+    }
+    let engine = builder
         .build()
         .map_err(|e| format!("failed to open engine: {e}"))?;
     let engine = Arc::new(engine);
-    // Retain a shared handle for the shutdown sidecar flush: the server takes ownership
-    // of its own `Arc` clone below, and `close()` needs `&mut` (unreachable through a
-    // shared `Arc`), so the server-side handle uses `flush_snapshot(&self)` instead.
-    let engine_for_flush = Arc::clone(&engine);
 
     // 4. Initialize embedding provider (optional)
     // Use the resolved embed_dim (from DB probe or config), not the TOML value.
-    let embedder = build_embedder(&cli, &mcp_config, embed_dim)?;
+    // Both builders make a blocking reqwest client, which in debug builds creates and drops
+    // a runtime of its own: that panics unless this thread leaves the async context first.
+    let embedder = tokio::task::block_in_place(|| build_embedder(&cli, &mcp_config, embed_dim))?;
 
     // 4b. Eager embedding-identity check (#614, §Design.2). The query path embeds at
     // this layer and hands the engine a pre-computed vector, so the engine can't
@@ -99,35 +142,34 @@ async fn main() -> Result<(), BoxError> {
 
     // 5. Initialize summary generator (optional — text only; embedding is done
     //    by the embedder, injected separately into consolidation per #116)
-    let summary_gen = build_summary_generator(&cli, &mcp_config)?
+    let summary_gen = tokio::task::block_in_place(|| build_summary_generator(&cli, &mcp_config))?
         .map(|sg| sg as Arc<dyn memory_engine::traits::SummaryGenerator + Send + Sync>);
 
     // 6. Construct and serve
     let mcp_server = server::MemoryMcpServer::new(engine, embedder, summary_gen, embed_dim);
 
-    tracing::info!("memory-engine-mcp starting on stdio");
-    let transport = rmcp::transport::io::stdio();
-    let service = mcp_server.serve(transport).await?;
-    service.waiting().await?;
-
-    // Shutdown: the serve loop has ended (engine is quiescent), so persist the in-memory
-    // projections to the sidecar snapshot. Best-effort — the DB is the source of truth,
-    // so a failed flush only means the next open rebuilds the sidecar from the DB.
-    if let Err(e) = engine_for_flush.flush_snapshot().await {
-        tracing::warn!("failed to flush sidecar snapshot on shutdown: {e}");
-    }
+    let listener = tokio::net::TcpListener::bind(cli.listen).await?;
+    tracing::info!("memory-engine-mcp listening on {}", listener.local_addr()?);
+    http::serve(
+        listener,
+        mcp_server,
+        tokens,
+        cli.allowed_hosts.clone(),
+        shutdown,
+    )
+    .await?;
 
     Ok(())
 }
+
+/// Recognized embedding backends. `provider` is free-form (it feeds the fingerprint),
+/// but a value outside this set warns at startup to catch typos.
+const KNOWN_PROVIDERS: [&str; 3] = ["ollama", "tei", "openai"];
 
 /// Build the embedding provider from config + CLI, using the probed `embed_dim`.
 ///
 /// CLI flags override TOML values (endpoint, model, `api_key`) when provided,
 /// enabling operators to inject runtime secrets via env/CLI.
-/// Recognized embedding backends. `provider` is free-form (it feeds the fingerprint),
-/// but a value outside this set warns at startup to catch typos.
-const KNOWN_PROVIDERS: [&str; 3] = ["ollama", "tei", "openai"];
-
 fn build_embedder(
     cli: &Cli,
     mcp_config: &config::McpConfig,
@@ -238,6 +280,7 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
             engine: config::EngineSection {
                 db_path,
                 embed_dim: None,
+                backup_dir: None,
             },
             embedding: None,
             summary: None,
@@ -247,6 +290,9 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
     // CLI overrides
     if let Some(db_path) = &cli.db_path {
         mcp_config.engine.db_path.clone_from(db_path);
+    }
+    if let Some(backup_dir) = &cli.backup_dir {
+        mcp_config.engine.backup_dir = Some(backup_dir.clone());
     }
 
     // NOTE: Embedding config from CLI is handled in build_embedder(),

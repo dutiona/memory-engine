@@ -57,7 +57,7 @@ pub fn all_tool_definitions() -> Vec<Tool> {
                     "source_event_id": { "type": "integer", "description": "Link to source event" },
                     "scope": { "type": "string", "description": "Scope path" },
                     "base_importance": { "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5 },
-                    "metadata": { "description": "Arbitrary JSON metadata" },
+                    "metadata": { "type": "object", "description": "Arbitrary JSON metadata. The server sets its `machine` key to the calling machine." },
                     "t_valid": { "type": "string", "format": "date-time", "description": "Real-world validity start (future = scheduled memory)" },
                     "t_invalid": { "type": "string", "format": "date-time", "description": "Real-world validity end" },
                     "pinned": { "type": "boolean", "description": "Make this fact unforgettable" },
