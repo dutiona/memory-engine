@@ -1,5 +1,4 @@
 .history/
-.vscode/
 
 # Rust
 /target/
@@ -48,11 +47,6 @@ uv.lock
 
 # Serena
 .serena/
-
-
-# Added by cargo
-
-/target
 
 # super-plan ephemeral lens drafts
 docs/plans/*-drafts/
