@@ -25,7 +25,8 @@ gate.** Do not shortcut it.
 Run this checklist with **no live writer holding the DB**: stop the harness and any running
 `memory-engine-mcp` first. This is load-bearing, not advisory:
 
-- The Step-3 `cp` backup of a WAL-mode DB is only consistent when no writer is mid-transaction.
+- The Step-3 `cp` backup of a WAL-mode DB is only consistent when no writer is mid-transaction,
+  and only together with the `-wal` (or hot `-journal`) an unclean stop leaves next to it.
 - `migrate` opens the engine **writable**; a second writer contends for the write lock.
 - Between Step 4 (migrate) and Step 5 (promote) the on-disk DB is at the **new** schema while the
   **old** binaries in `bin/` would reject it — keep that window offline and brief.
@@ -93,7 +94,13 @@ patch = fixes, minor = features, major = breaking). Any gate failure → STOP; f
 ```bash
 source ~/.local/opt/memory-engine/.release-env
 if [ -f "$DB" ]; then
-  cp -- "$DB" "$BACKUP" && echo "backed up → $BACKUP"
+  cp -- "$DB" "$BACKUP" || exit 1
+  # An unclean stop (SIGTERM, SIGKILL, power cut) leaves committed pages in $DB-wal, or a hot
+  # $DB-journal: they are part of the DB's state, so they are backed up with it.
+  for s in -wal -journal; do
+    [ ! -e "$DB$s" ] || cp -- "$DB$s" "$BACKUP$s" || exit 1
+  done
+  echo "backed up → $BACKUP"
 else
   echo "first release: no live DB at $DB — nothing to back up (the MCP server creates it on first run)"
 fi
@@ -101,8 +108,9 @@ fi
 
 `memory-engine` also self-backs-up via `VACUUM INTO` when the writable engine opens for a migration
 (the WAL-safe primary). The gate takes its **own** independent `cp` copy first so restore-on-fail
-never depends on the very operation that just failed. With the harness stopped (Preconditions) the DB
-is quiescent, so the plain `cp` is consistent.
+never depends on the very operation that just failed. With the harness stopped (Preconditions) no
+writer is mid-transaction, so the copy is consistent, as long as it carries the sidecars: the MCP server
+handles no signal, so a service stop leaves the newest commits in `$DB-wal` rather than in `$DB`.
 
 ## Step 4 — Migrate + verify — IRREVERSIBLE (requires explicit "go")
 
@@ -125,10 +133,14 @@ if [ -f "$DB" ]; then
   fi
   if [ -n "$NEED_RESTORE" ]; then
     echo "migrate/verify FAILED — restoring the pre-release backup and ABORTING (do not promote)"
-    # Drop stale WAL sidecars first, or SQLite replays the failed migration's frames onto the
-    # restored file → silent corruption. Restore via a temp file so a short write can't truncate $DB.
+    # Drop the failed migration's sidecars first, or SQLite replays its frames onto the restored
+    # file → silent corruption; then put back the backup's own sidecars, which hold its newest
+    # commits. Restore via a temp file so a short write can't truncate $DB.
     cp -- "$BACKUP" "$DB.restoring"
     rm -f -- "$DB-wal" "$DB-shm" "$DB-journal"
+    for s in -wal -journal; do
+      [ ! -e "$BACKUP$s" ] || cp -- "$BACKUP$s" "$DB$s"
+    done
     mv -f -- "$DB.restoring" "$DB"
     echo "restored from $BACKUP — the old binaries in bin/ keep serving this DB"
     exit 1
