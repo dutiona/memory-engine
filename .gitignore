@@ -1,7 +1,7 @@
 .history/
 
 # Rust
-/target/
+/target
 **/*.rs.bk
 
 # Environment
