@@ -190,6 +190,26 @@ async fn restore_sqlite_fails_if_target_sidecar_exists() {
     }
 }
 
+/// #1040: a probe failure must not leave the target's WAL sidecars behind, or the next
+/// restore to the same path is refused.
+#[tokio::test]
+async fn restore_sqlite_probe_failure_leaves_no_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let backup_path = dir.path().join("not-an-engine.db");
+    rusqlite::Connection::open(&backup_path)
+        .unwrap()
+        .execute_batch("CREATE TABLE t(x);")
+        .unwrap();
+
+    let target_path = dir.path().join("restored.db");
+    let config = EngineConfig::new(target_path.clone(), DIM);
+    MemoryEngine::restore_sqlite(&backup_path, &config).unwrap_err();
+    for suffix in ["", "-wal", "-shm"] {
+        let leftover = dir.path().join(format!("restored.db{suffix}"));
+        assert!(!leftover.exists(), "left behind: {}", leftover.display());
+    }
+}
+
 #[tokio::test]
 async fn restore_json_fails_if_target_exists() {
     let engine = make_engine().await;
