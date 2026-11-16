@@ -94,11 +94,11 @@ patch = fixes, minor = features, major = breaking). Any gate failure → STOP; f
 ```bash
 source ~/.local/opt/memory-engine/.release-env
 if [ -f "$DB" ]; then
-  cp -- "$DB" "$BACKUP" || exit 1
   # An unclean stop (SIGTERM, SIGKILL, power cut) leaves committed pages in $DB-wal, or a hot
   # $DB-journal: they are part of the DB's state, so they are backed up with it. A re-run under
   # the same $TS first drops the previous attempt's, which belong to an older $BACKUP.
-  rm -f -- "$BACKUP-wal" "$BACKUP-journal"
+  rm -f -- "$BACKUP-wal" "$BACKUP-journal" || exit 1
+  cp -- "$DB" "$BACKUP" || exit 1
   for s in -wal -journal; do
     [ ! -e "$DB$s" ] || cp -- "$DB$s" "$BACKUP$s" || exit 1
   done
@@ -136,19 +136,25 @@ if [ -f "$DB" ]; then
   if [ -n "$NEED_RESTORE" ]; then
     echo "migrate/verify FAILED — restoring the pre-release backup and ABORTING (do not promote)"
     # Stage the backup and its own sidecars (which hold its newest commits) and check every copy
-    # before touching anything live, so a short write (a full disk) leaves $DB as it was. Then drop
-    # the failed migration's sidecars, or SQLite replays its frames onto the restored file → silent
-    # corruption, and rename the staged files into place.
+    # before touching anything live, so a short write (a full disk) leaves $DB as it was; staging
+    # files a failed earlier restore left behind are dropped first. Then drop the failed
+    # migration's sidecars, or SQLite replays its frames onto the restored file → silent
+    # corruption, and rename the staged files into place, every step checked.
+    STAGE="$DB.restoring"
     STAGE_FAILED="RESTORE FAILED while staging: $DB is untouched, the backup is $BACKUP"
-    cp -- "$BACKUP" "$DB.restoring" || { echo "$STAGE_FAILED"; exit 1; }
+    SWAP_FAILED="RESTORE FAILED while swapping: keep the server stopped; restore $BACKUP and its sidecars by hand"
+    rm -f -- "$STAGE" "$STAGE-wal" "$STAGE-journal" || { echo "$STAGE_FAILED"; exit 1; }
+    cp -- "$BACKUP" "$STAGE" || { echo "$STAGE_FAILED"; exit 1; }
     for s in -wal -journal; do
-      [ ! -e "$BACKUP$s" ] || cp -- "$BACKUP$s" "$DB.restoring$s" || { echo "$STAGE_FAILED"; exit 1; }
+      [ ! -e "$BACKUP$s" ] || cp -- "$BACKUP$s" "$STAGE$s" || { echo "$STAGE_FAILED"; exit 1; }
     done
-    rm -f -- "$DB-wal" "$DB-shm" "$DB-journal"
+    rm -f -- "$DB-wal" "$DB-shm" "$DB-journal" || { echo "$SWAP_FAILED"; exit 1; }
+    # The main file first: until its sidecars follow, $DB is the backup minus its newest commits,
+    # older but never mixed with the failed migration's pages.
+    mv -f -- "$STAGE" "$DB" || { echo "$SWAP_FAILED"; exit 1; }
     for s in -wal -journal; do
-      [ ! -e "$DB.restoring$s" ] || mv -f -- "$DB.restoring$s" "$DB$s"
+      [ ! -e "$STAGE$s" ] || mv -f -- "$STAGE$s" "$DB$s" || { echo "$SWAP_FAILED"; exit 1; }
     done
-    mv -f -- "$DB.restoring" "$DB"
     echo "restored from $BACKUP — the old binaries in bin/ keep serving this DB"
     exit 1
   fi
