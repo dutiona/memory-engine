@@ -576,7 +576,7 @@ mod tests {
         let cycle = NoopCycle;
 
         let report = engine.run_dream_cycle(&cycle).await.unwrap();
-        assert!(report.deltas.is_empty());
+        assert_eq!(report.deltas, []);
         assert_eq!(report.metadata.method_version, "noop");
     }
 

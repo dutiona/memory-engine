@@ -257,7 +257,7 @@ mod tests {
         let restored = read_pak(&pak_path).unwrap();
         assert_eq!(restored.pak_version, CURRENT_PAK_VERSION);
         assert_eq!(restored.embed_dim, 3);
-        assert!(restored.facts.is_empty());
+        assert_eq!(restored.facts, []);
     }
 
     #[test]

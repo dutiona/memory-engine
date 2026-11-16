@@ -498,7 +498,10 @@ async fn query_fts_returns_results() {
     .await;
     let body = unwrap_ok(result);
     assert!(body["count"].as_u64().unwrap() >= 1);
-    assert!(!body["results"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["results"].as_array().unwrap().as_slice(),
+        [] as [Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -601,10 +604,19 @@ async fn resume_context_empty_engine() {
     .await;
     let body = unwrap_ok(result);
     // All tiers should be empty arrays
-    assert!(body["pinned"].as_array().unwrap().is_empty());
-    assert!(body["high_importance"].as_array().unwrap().is_empty());
-    assert!(body["due"].as_array().unwrap().is_empty());
-    assert!(body["recent"].as_array().unwrap().is_empty());
+    assert_eq!(
+        body["pinned"].as_array().unwrap().as_slice(),
+        [] as [Value; 0]
+    );
+    assert_eq!(
+        body["high_importance"].as_array().unwrap().as_slice(),
+        [] as [Value; 0]
+    );
+    assert_eq!(body["due"].as_array().unwrap().as_slice(), [] as [Value; 0]);
+    assert_eq!(
+        body["recent"].as_array().unwrap().as_slice(),
+        [] as [Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -643,7 +655,10 @@ async fn resume_context_with_pinned_fact() {
     )
     .await;
     let body = unwrap_ok(result);
-    assert!(!body["pinned"].as_array().unwrap().is_empty());
+    assert_ne!(
+        body["pinned"].as_array().unwrap().as_slice(),
+        [] as [Value; 0]
+    );
 }
 
 // ---------------------------------------------------------------------------

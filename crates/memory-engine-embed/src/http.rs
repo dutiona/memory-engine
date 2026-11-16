@@ -882,7 +882,7 @@ mod tests {
         let result = provider
             .embed_batch(&[])
             .expect("empty batch should succeed");
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [Vec<f32>; 0]);
     }
 
     #[test]

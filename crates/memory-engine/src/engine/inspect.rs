@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(snapshot.facts.len(), 1);
         assert_eq!(snapshot.facts[0].content, "test fact");
         assert_eq!(snapshot.embed_dim, DIM);
-        assert!(!snapshot.scopes.is_empty()); // root scope
+        assert_ne!(snapshot.scopes, []); // root scope
     }
 
     #[tokio::test]

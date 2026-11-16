@@ -503,7 +503,7 @@ mod tests {
         let mut g = MemoryGraph::new();
         g.add_edge(1, 2, make_edge_data(1, "related"));
         assert_eq!(g.neighbors(1), vec![2]);
-        assert!(g.neighbors(2).is_empty()); // directed: no outgoing from 2
+        assert_eq!(g.neighbors(2), [] as [i64; 0]); // directed: no outgoing from 2
     }
 
     #[test]
@@ -553,7 +553,7 @@ mod tests {
             "2's only neighbour is 1 (via the incoming 1->2 edge)"
         );
         // Absent node → empty.
-        assert!(g.neighbors_undirected(99).is_empty());
+        assert_eq!(g.neighbors_undirected(99), [] as [i64; 0]);
     }
 
     #[test]
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(comp4, vec![4]);
 
         // Unknown node returns empty
-        assert!(g.connected_component(99).is_empty());
+        assert_eq!(g.connected_component(99), [] as [i64; 0]);
     }
 
     #[test]
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(g.neighbors(2), vec![3]);
         assert_eq!(g.neighbors(3), vec![4]);
         assert_eq!(g.neighbors(4), vec![5]);
-        assert!(g.neighbors(5).is_empty());
+        assert_eq!(g.neighbors(5), [] as [i64; 0]);
         // Fact 5 was the displaced node; the 4→5 edge must still be visible.
         assert_eq!(g.degree(5), 1);
 
@@ -714,7 +714,7 @@ mod tests {
         // The self-loop (1→1) and the fact's edge (1→2) are gone.
         assert_eq!(g.edge_count(), 1);
         assert_eq!(g.degree(1), 0);
-        assert!(g.neighbors(1).is_empty());
+        assert_eq!(g.neighbors(1), [] as [i64; 0]);
 
         // The unrelated edge 3→4 must survive intact, right endpoints and all.
         assert_eq!(g.neighbors(3), vec![4]);
@@ -750,7 +750,7 @@ mod tests {
 
         // Fact 2 is fully disconnected: none of its three edges leaked.
         assert_eq!(g.degree(2), 0);
-        assert!(g.neighbors(2).is_empty());
+        assert_eq!(g.neighbors(2), [] as [i64; 0]);
 
         // The survivor 1→3 resolves to the correct endpoints/degree.
         assert_eq!(g.neighbors(1), vec![3]);
@@ -806,8 +806,8 @@ mod tests {
         // …but the node itself stays in the graph.
         assert!(g.has_node(2));
         // Neighbors no longer reference fact 2 through it.
-        assert!(g.neighbors(1).is_empty());
-        assert!(g.neighbors(2).is_empty());
+        assert_eq!(g.neighbors(1), [] as [i64; 0]);
+        assert_eq!(g.neighbors(2), [] as [i64; 0]);
     }
 
     #[test]

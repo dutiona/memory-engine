@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn empty_input_no_clusters() {
-        assert!(dbscan(&[], 0.15, 3).is_empty());
+        assert_eq!(dbscan(&[], 0.15, 3), [] as [Vec<i64>; 0]);
     }
 
     #[test]
@@ -153,7 +153,7 @@ mod tests {
         let b = [0.99, 0.01];
         let points: Vec<(FactId, &[f32])> = vec![(1, &a), (2, &b)];
         // min_pts = 3 but only 2 near points → no core → no clusters.
-        assert!(dbscan(&points, 0.15, 3).is_empty());
+        assert_eq!(dbscan(&points, 0.15, 3), [] as [Vec<i64>; 0]);
     }
 
     #[test]
@@ -172,7 +172,7 @@ mod tests {
         let z3 = [0.0_f32, 0.0, 0.0];
         let points: Vec<(FactId, &[f32])> = vec![(1, &z1), (2, &z2), (3, &z3)];
         // cosine of a zero vector is 0.0 → distance 1.0 → never a neighbour.
-        assert!(dbscan(&points, 0.15, 3).is_empty());
+        assert_eq!(dbscan(&points, 0.15, 3), [] as [Vec<i64>; 0]);
     }
 
     #[test]

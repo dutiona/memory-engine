@@ -360,11 +360,9 @@ mod tests {
 
         let deleted = store.delete_by_level(&ConsolidationLevel::Cluster).unwrap();
         assert_eq!(deleted, 2);
-        assert!(
-            store
-                .list_by_level(&ConsolidationLevel::Cluster)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            store.list_by_level(&ConsolidationLevel::Cluster).unwrap(),
+            []
         );
         assert_eq!(
             store
@@ -387,7 +385,7 @@ mod tests {
     fn list_all_empty_store_returns_empty() {
         let conn = setup();
         let store = SummaryStore::new(&conn, 4);
-        assert!(store.list_all().unwrap().is_empty());
+        assert_eq!(store.list_all().unwrap(), []);
     }
 
     #[test]

@@ -433,7 +433,7 @@ mod tests {
 
         let ctx = build_graph_context(&graph, 99);
         assert_eq!(ctx.degree, 0);
-        assert!(ctx.neighbor_ids.is_empty());
+        assert_eq!(ctx.neighbor_ids, [] as [i64; 0]);
         assert_eq!(ctx.component_size, 1);
     }
 

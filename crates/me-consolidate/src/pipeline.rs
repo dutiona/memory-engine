@@ -430,7 +430,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(stats.duplicates_removed, 0, "no near-duplicates expected");
-        assert!(expired.is_empty());
+        assert_eq!(expired, [] as [i64; 0]);
         assert_eq!(stats.clusters_created, 1);
         assert_eq!(stats.global_summaries, 1);
 
@@ -588,7 +588,7 @@ mod tests {
         // Because both facts predate the watermark, dedup's "new facts" set is
         // empty and nothing is removed — proving the watermark is read and applied.
         assert_eq!(stats.duplicates_removed, 0);
-        assert!(expired.is_empty());
+        assert_eq!(expired, [] as [i64; 0]);
         assert_eq!(
             FactStore::new(&conn, DIM).list_active(None).unwrap().len(),
             2
@@ -656,17 +656,13 @@ mod tests {
         );
 
         let store = SummaryStore::new(&conn, DIM);
-        assert!(
-            store
-                .list_by_level(&ConsolidationLevel::Cluster)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            store.list_by_level(&ConsolidationLevel::Cluster).unwrap(),
+            []
         );
-        assert!(
-            store
-                .list_by_level(&ConsolidationLevel::Global)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            store.list_by_level(&ConsolidationLevel::Global).unwrap(),
+            []
         );
 
         assert!(
@@ -692,7 +688,7 @@ mod tests {
         assert_eq!(stats.duplicates_removed, 0);
         assert_eq!(stats.clusters_created, 0);
         assert_eq!(stats.global_summaries, 0);
-        assert!(expired.is_empty());
+        assert_eq!(expired, [] as [i64; 0]);
 
         // An empty run is still a successful run: the watermark advances.
         assert!(get_config(&conn, "last_consolidated_at").unwrap().is_some());
@@ -730,7 +726,7 @@ mod tests {
 
         // Skipped dedup contributes no removals and expires nothing...
         assert_eq!(stats.duplicates_removed, 0, "skipped dedup removes nothing");
-        assert!(expired.is_empty());
+        assert_eq!(expired, [] as [i64; 0]);
 
         // ...but only the dedup-driven watermark advance is suppressed: the rest of
         // the pipeline proceeds, so the 3 surviving near-duplicates still cluster
@@ -793,7 +789,7 @@ mod tests {
         assert_eq!(stats.duplicates_removed, 0);
         assert_eq!(stats.clusters_created, 0);
         assert_eq!(stats.global_summaries, 0);
-        assert!(expired.is_empty());
+        assert_eq!(expired, [] as [i64; 0]);
 
         // Nothing expired; both passes skipped, so the watermark is held for retry.
         assert_eq!(
@@ -849,7 +845,7 @@ mod tests {
             stats.duplicates_removed, 0,
             "the loser was already expired concurrently; this run expired nothing"
         );
-        assert!(expired.is_empty());
+        assert_eq!(expired, [] as [i64; 0]);
         let active = FactStore::new(&conn, DIM).list_active(None).unwrap();
         assert_eq!(active.len(), 1, "exactly the survivor remains");
         assert_eq!(active[0].content, "keep");
@@ -891,7 +887,7 @@ mod tests {
             stats.duplicates_removed, 0,
             "survivor gone → the merge is void, so the loser is NOT expired"
         );
-        assert!(expired.is_empty());
+        assert_eq!(expired, [] as [i64; 0]);
 
         // The loser survives as the group's representative — the cluster is not orphaned.
         let active = FactStore::new(&conn, DIM).list_active(None).unwrap();

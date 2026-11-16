@@ -1162,7 +1162,7 @@ mod tests {
     fn empty_input() {
         let (out, findings) = redact_text("");
         assert_eq!(out, "");
-        assert!(findings.is_empty());
+        assert_eq!(findings, []);
     }
 
     // ── Idempotency ───────────────────────────────────────────────────────────
@@ -1352,7 +1352,7 @@ mod tests {
         let denylist = vec![String::new(), "a".to_owned(), "at".to_owned()];
         let (out, findings) = redact_text_with_denylist(&text, &denylist);
         assert_eq!(out, text, "short denylist entries over-redacted: {out}");
-        assert!(findings.is_empty());
+        assert_eq!(findings, []);
     }
 
     #[test]
@@ -1445,7 +1445,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         let already = "x [REDACTED:denylist] y";
         let (out, findings) = redact_text_with_denylist(already, &["denylist".to_owned()]);
         assert_eq!(out, already, "re-redacted inside placeholder: {out}");
-        assert!(findings.is_empty());
+        assert_eq!(findings, []);
     }
 
     #[test]
@@ -1480,7 +1480,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         // Byte-length guard boundary: 3 bytes skipped, 4 bytes honored.
         let (out3, f3) = redact_text_with_denylist("abc xyz", &["abc".to_owned()]);
         assert_eq!(out3, "abc xyz");
-        assert!(f3.is_empty());
+        assert_eq!(f3, []);
         let (out4, f4) = redact_text_with_denylist("abcd xyz", &["abcd".to_owned()]);
         assert!(!out4.contains("abcd"));
         assert!(f4.iter().any(|f| f.rule == "denylist"));

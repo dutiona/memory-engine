@@ -125,11 +125,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits, vec![(7, 1.5)]);
-        assert!(
+        assert_eq!(
             idx.vector_search(&[0.0], &FactFilter::default(), 5)
                 .await
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            []
         );
         assert_eq!(idx.lexical_count_expired("q", None, None).await.unwrap(), 0);
         // #624: `Dummy` does not override `rebuild_vector_index`, so it inherits the

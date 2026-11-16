@@ -124,7 +124,7 @@ mod tests {
             .sample_dormant(10, &[0.1, 0.2, 0.3, 0.4], None)
             .await
             .unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results, []);
     }
 
     #[tokio::test]
@@ -258,6 +258,6 @@ mod tests {
             .sample_dormant(0, &[1.0, 0.0, 0.0, 0.0], None)
             .await
             .unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results, []);
     }
 }

@@ -103,7 +103,7 @@ async fn archive_lifecycle_roundtrip() {
     assert_eq!(stats.facts_archived, 150);
     assert!(stats.pak_size_bytes > 0);
     assert!(stats.pak_path.exists());
-    assert!(!stats.blake3_hash.is_empty());
+    assert_ne!(stats.blake3_hash, "");
 
     // Manifest has exactly one entry
     let manifest = engine.list_archives().await.unwrap();

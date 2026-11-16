@@ -121,7 +121,7 @@ async fn full_lifecycle_pinned_and_future_memory() {
     );
 
     // 5. list_due at current time — nothing due yet
-    assert!(engine.list_due(now, None).await.unwrap().is_empty());
+    assert_eq!(engine.list_due(now, None).await.unwrap(), []);
 
     // 6. list_due at future time — reminder surfaces
     let later = now + chrono::Duration::hours(25);

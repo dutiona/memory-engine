@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn greedy_cluster_empty_input() {
-        assert!(greedy_cluster(&[], 0.85).is_empty());
+        assert_eq!(greedy_cluster(&[], 0.85), [] as [Vec<usize>; 0]);
     }
 
     #[test]

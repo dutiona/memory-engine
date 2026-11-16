@@ -826,10 +826,10 @@ mod tests {
             .unwrap()
             .expect_ran();
         assert_eq!(removed, 0);
-        assert!(expired.is_empty());
+        assert_eq!(expired, [] as [i64; 0]);
 
         let store = FactStore::new(&conn, dim);
-        assert!(store.list_active(None).unwrap().is_empty());
+        assert_eq!(store.list_active(None).unwrap(), []);
     }
 
     /// #272/#345/#142: when the active corpus exceeds the injected cap, the pass

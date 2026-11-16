@@ -120,7 +120,7 @@ mod tests {
     fn embedding_empty() {
         let blob = serialize_embedding(&[]);
         let recovered = deserialize_embedding(&blob, 0).unwrap();
-        assert!(recovered.is_empty());
+        assert_eq!(recovered, [] as [f32; 0]);
     }
 
     mod proptest_embedding {

@@ -606,7 +606,7 @@ mod tests {
 
         assert_eq!(snapshot.facts.len(), 2);
         assert_eq!(snapshot.edges.len(), 0);
-        assert!(!snapshot.scopes.is_empty());
+        assert_ne!(snapshot.scopes, []);
         assert_eq!(snapshot.embed_dim, DIM);
         assert!(snapshot.schema_version > 0);
     }
@@ -629,7 +629,7 @@ mod tests {
         assert_eq!(snapshot.facts.len(), 0);
         assert_eq!(snapshot.edges.len(), 0);
         assert_eq!(snapshot.summaries.len(), 0);
-        assert!(!snapshot.scopes.is_empty()); // root scope
+        assert_ne!(snapshot.scopes, []); // root scope
     }
 
     /// Stress test: 10K facts streamed to buffer. Verifies correctness at scale.

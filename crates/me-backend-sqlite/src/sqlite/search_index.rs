@@ -236,7 +236,7 @@ mod tests {
             .lexical_search("Rust", &FactFilter::new().scope_ids(Vec::<i64>::new()), 10)
             .await
             .unwrap();
-        assert!(none.is_empty());
+        assert_eq!(none, []);
     }
 
     #[tokio::test]
@@ -246,7 +246,7 @@ mod tests {
             .lexical_search("\"unbalanced", &FactFilter::default(), 10)
             .await
             .unwrap();
-        assert!(got.is_empty());
+        assert_eq!(got, []);
     }
 
     #[tokio::test]

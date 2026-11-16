@@ -132,11 +132,11 @@ async fn list_recent_insights_subtree_newest_first_limited_active_only() {
     assert_eq!(child, vec![at_child]);
 
     // Unknown project → empty (not an error).
-    assert!(
+    assert_eq!(
         engine
             .list_recent_insights("project:does-not-exist", 10)
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        []
     );
 }

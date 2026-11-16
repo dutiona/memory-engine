@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(list.len(), 3);
 
         let empty = store.list_recent_by_scope(&[], 10).unwrap();
-        assert!(empty.is_empty());
+        assert_eq!(empty, []);
     }
 
     #[test]
