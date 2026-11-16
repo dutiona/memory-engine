@@ -43,11 +43,6 @@ pub fn serialize_embedding(embedding: &[f32]) -> Vec<u8> {
 ///
 /// Returns `MemoryError::EmbeddingDimension` if the blob size doesn't match
 /// `dim * 4` bytes.
-///
-/// # Panics
-///
-/// Cannot panic. The `expect` call is guarded by `chunks_exact(4)` which
-/// guarantees each chunk is exactly 4 bytes.
 pub fn deserialize_embedding(blob: &[u8], dim: usize) -> Result<Vec<f32>> {
     if blob.len() != dim * 4 {
         return Err(MemoryError::EmbeddingDimension {
@@ -56,11 +51,10 @@ pub fn deserialize_embedding(blob: &[u8], dim: usize) -> Result<Vec<f32>> {
         });
     }
     Ok(blob
-        .chunks_exact(4)
-        .map(|chunk| {
-            let arr: [u8; 4] = chunk.try_into().expect("chunks_exact guarantees 4 bytes");
-            f32::from_le_bytes(arr)
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&bytes| f32::from_le_bytes(bytes))
         .collect())
 }
 
