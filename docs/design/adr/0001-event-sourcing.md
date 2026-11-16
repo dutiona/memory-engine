@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-03-10
+**Amended by:** ADR-0020 (two rule-based projections from lifecycle events)
 
 ## Context
 
