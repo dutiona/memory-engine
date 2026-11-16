@@ -4,10 +4,11 @@
 **Date:** 2026-11-16
 **Parent:** umbrella dutiona/infra#37
 **Amends:** [ADR-0007](0007-hierarchical-scoping.md) (scope tree), [ADR-0005](0005-consolidation-3pass.md) (consolidation)
-**Related:** [ADR-0001](0001-event-sourcing.md) (event log), [ADR-0004](0004-trait-based-extensibility.md) (no LLM in core), [ADR-0009](0009-session-bootstrap.md) (session bootstrap), [ADR-0015](0015-cross-layer-embedding-identity-policy.md) (cross-layer policy), [ADR-0016](0016-geometric-associative-memory.md) (derived structures), [ADR-0017](0017-cross-layer-faithful-metric-and-derived-structure-parity-policy.md) (shared metric), [ADR-0018](0018-wave2-crate-decomposition-memoryctx.md) (crate DAG), ADR-0020 (lifecycle API and its minimal scope contract, #1014), #1034 (standalone identity service), dutiona/knowledge-base#513
+**Related:** [ADR-0001](0001-event-sourcing.md) (event log), [ADR-0004](0004-trait-based-extensibility.md) (no LLM in core), [ADR-0009](0009-session-bootstrap.md) (session bootstrap), [ADR-0015](0015-cross-layer-embedding-identity-policy.md) (cross-layer policy), [ADR-0016](0016-geometric-associative-memory.md) (derived structures), [ADR-0017](0017-cross-layer-faithful-metric-and-derived-structure-parity-policy.md) (shared metric), [ADR-0018](0018-wave2-crate-decomposition-memoryctx.md) (crate DAG), [ADR-0020](0020-harness-neutral-lifecycle-api.md) (lifecycle API and its minimal scope contract, #1014), #1034 (standalone identity service), dutiona/knowledge-base#513
 
 Every decision below carries its provenance: *(owner)* for a decision the owner made in the 2026-11-16 design
-session, *(defaulted, for review)* for a default the owner asked to see written down and reviewed in the PR, and
+session or at plan approval (recorded verbatim on
+[dutiona/infra#37](https://github.com/dutiona/infra/issues/37#issuecomment-6928664516)), *(defaulted, for review)* for a default the owner asked to see written down and reviewed in the PR, and
 *(settled here)* for a detail this record fixes.
 
 ## Context
@@ -137,7 +138,8 @@ Recall is a deterministic procedure *(settled here)*:
 2. **Candidate Homes** = {context Home, `user`}. Recall's `project` argument replaces the context Home for that call
    with the project whose Locator key equals the value byte for byte. The key form is ADR-0020's, as `recall` reports
    it: a remote key, or a machine-qualified path key such as `laptop:x`, so a key names at most one project. The swap
-   never reaches a bucket. A value that is not the key of a known project (ADR-0020 §8: a project is known once an
+   never reaches a bucket. Another machine's path-keyed project is read only when named this way, never
+   automatically *(owner)*. A value that is not the key of a known project (ADR-0020 §8: a project is known once an
    event or a memory was filed under it) is a typed error, never a `user`-only read. Without the argument, a
    session whose own project is not minted yet (§8: only writes mint) reads `user` only, because that project holds
    nothing yet.
@@ -203,7 +205,9 @@ here.
   until a human confirms.
 - **`set_level(id, level)`** is ADR-0020's, unchanged in contract and in authority (§5) *(owner)*: it moves the Home
   between the session's project (or its bucket) and `user`. It keeps the ID, the Audiences and the content (the owner:
-  edit "only the level"), appends a Filing decision and answers with a receipt.
+  edit "only the level"), appends a Filing decision and answers with a receipt. A memory raised to `user` from one
+  project can be brought down into another by a session of that other project: the two-call move ADR-0020 §8
+  allows, for rehoming memories after a project is reworked, renamed or rehomed *(owner)*.
 
 ### 8. Locators and the project registry
 
@@ -533,7 +537,8 @@ Automated non-git matching is excluded, not deferred.
   [ADR-0009](0009-session-bootstrap.md), [ADR-0015](0015-cross-layer-embedding-identity-policy.md),
   [ADR-0016](0016-geometric-associative-memory.md),
   [ADR-0017](0017-cross-layer-faithful-metric-and-derived-structure-parity-policy.md),
-  [ADR-0018](0018-wave2-crate-decomposition-memoryctx.md); ADR-0020 (#1014).
+  [ADR-0018](0018-wave2-crate-decomposition-memoryctx.md), [ADR-0020](0020-harness-neutral-lifecycle-api.md) (#1014).
+- The owner's rulings, verbatim: [dutiona/infra#37](https://github.com/dutiona/infra/issues/37#issuecomment-6928664516).
 - The [schema evolution policy](../schema-evolution-policy.md) and the consolidation guide
   (`docs/advanced/consolidation.md`).
 - Issues: #1015 (this record), #1034 (standalone identity service), dutiona/knowledge-base#513 (knowledge-base
