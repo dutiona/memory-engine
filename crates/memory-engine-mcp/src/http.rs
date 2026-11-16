@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use crate::auth::TokenTable;
 use crate::server::MemoryMcpServer;
 
-/// Serve MCP on `listener` until `shutdown` resolves.
+/// Serve MCP on `listener` until `shutdown` resolves, then flush the sidecar snapshot.
 ///
 /// `allowed_hosts` are added to rmcp's loopback default, never in place of it, so the
 /// Host list can never be empty (rmcp reads an empty list as "admit every host").
@@ -35,9 +35,23 @@ pub async fn serve(
     allowed_hosts: Vec<String>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    let engine = Arc::clone(&server.engine);
+    let in_flight = Arc::clone(&server.in_flight);
     axum::serve(listener, router(server, tokens, allowed_hosts))
         .with_graceful_shutdown(shutdown)
-        .await
+        .await?;
+    // axum returns once connections close, but rmcp runs each call in its own task, so a
+    // call whose client hung up may still be writing: wait for every call to finish. A
+    // flush beside a write could pair the new DB fingerprint with old projections. The
+    // fence is never released, so a call queued behind it cannot commit after the flush;
+    // the process exits once `serve` returns.
+    std::mem::forget(in_flight.write_owned().await);
+    // Best effort: the DB is the source of truth, so a failed flush only means the next
+    // open rebuilds the projections from it.
+    if let Err(e) = engine.flush_snapshot().await {
+        tracing::warn!("failed to flush sidecar snapshot on shutdown: {e}");
+    }
+    Ok(())
 }
 
 fn router(server: MemoryMcpServer, tokens: TokenTable, allowed_hosts: Vec<String>) -> Router {

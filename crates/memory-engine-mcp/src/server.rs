@@ -32,6 +32,8 @@ pub struct MemoryMcpServer {
     pub(crate) summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
     pub(crate) embed_dim: usize,
     pub(crate) filter_config: Arc<ActivityFilterConfig>,
+    /// Held for reading by every tool call; `http::serve` takes it for writing to drain.
+    pub(crate) in_flight: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl MemoryMcpServer {
@@ -61,6 +63,7 @@ impl MemoryMcpServer {
             summary_gen,
             embed_dim,
             filter_config: Arc::new(crate::activity_policy::default_filter_config()),
+            in_flight: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
@@ -112,6 +115,7 @@ impl ServerHandler for MemoryMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         let machine = calling_machine(&context.extensions)?;
+        let _in_flight = self.in_flight.read().await;
         let name = request.name.clone();
         let mut args = request.arguments.unwrap_or_default();
         if name == "memory_add_fact" {

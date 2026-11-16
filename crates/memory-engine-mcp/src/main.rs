@@ -3,6 +3,7 @@ use std::sync::Arc;
 use clap::Parser;
 use memory_engine::MemoryEngine;
 use memory_engine_mcp::{auth, config, embedding, http, server, summary};
+use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -66,6 +67,17 @@ async fn main() -> Result<(), BoxError> {
 
     let cli = Cli::parse();
 
+    // Before anything slow: a stop that arrives during startup or once the port is open
+    // must take the draining path, never the signal's default kill.
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let shutdown = async move {
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    };
+
     // 0. The token file first: a bad one must never get as far as migrating the store.
     let tokens = auth::TokenTable::load(&cli.token_file).map_err(|e| e.to_string())?;
 
@@ -112,14 +124,7 @@ async fn main() -> Result<(), BoxError> {
 
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     tracing::info!("memory-engine-mcp listening on {}", listener.local_addr()?);
-    http::serve(
-        listener,
-        mcp_server,
-        tokens,
-        Vec::new(),
-        std::future::pending(),
-    )
-    .await?;
+    http::serve(listener, mcp_server, tokens, Vec::new(), shutdown).await?;
 
     Ok(())
 }

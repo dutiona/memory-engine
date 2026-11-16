@@ -35,3 +35,17 @@ fn a_bad_token_file_stops_startup_before_the_store_opens() {
         server.stderr()
     );
 }
+
+#[test]
+fn sigterm_flushes_the_snapshot_and_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    server.wait_ready().unwrap();
+    let snapshot = dir.path().join("memory.db.snapshot");
+    assert!(!snapshot.exists());
+
+    let status = server.terminate();
+
+    assert!(status.success(), "{status}; stderr:\n{}", server.stderr());
+    assert!(snapshot.is_file());
+}
