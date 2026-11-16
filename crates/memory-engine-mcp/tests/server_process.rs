@@ -184,3 +184,28 @@ fn a_missing_backup_dir_stops_startup() {
     );
     assert_eq!(schema_version(dir.path()), previous.to_string());
 }
+
+#[test]
+fn starts_with_an_embedder_and_a_summary_endpoint() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mock = runtime.block_on(wiremock::MockServer::start());
+    let dir = tempfile::tempdir().unwrap();
+    let embed_url = format!("{}/v1/embeddings", mock.uri());
+    let summary_url = format!("{}/v1/chat/completions", mock.uri());
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &[
+            "--embed-url",
+            &embed_url,
+            "--embed-model",
+            "m",
+            "--summary-url",
+            &summary_url,
+            "--summary-model",
+            "s",
+        ],
+        &[],
+    );
+    assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
+    assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
+}

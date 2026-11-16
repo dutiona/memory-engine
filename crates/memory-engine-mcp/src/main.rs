@@ -121,7 +121,9 @@ async fn main() -> Result<(), BoxError> {
 
     // 4. Initialize embedding provider (optional)
     // Use the resolved embed_dim (from DB probe or config), not the TOML value.
-    let embedder = build_embedder(&cli, &mcp_config, embed_dim)?;
+    // Both builders make a blocking reqwest client, which in debug builds creates and drops
+    // a runtime of its own: that panics unless this thread leaves the async context first.
+    let embedder = tokio::task::block_in_place(|| build_embedder(&cli, &mcp_config, embed_dim))?;
 
     // 4b. Eager embedding-identity check (#614, §Design.2). The query path embeds at
     // this layer and hands the engine a pre-computed vector, so the engine can't
@@ -137,7 +139,7 @@ async fn main() -> Result<(), BoxError> {
 
     // 5. Initialize summary generator (optional — text only; embedding is done
     //    by the embedder, injected separately into consolidation per #116)
-    let summary_gen = build_summary_generator(&cli, &mcp_config)?
+    let summary_gen = tokio::task::block_in_place(|| build_summary_generator(&cli, &mcp_config))?
         .map(|sg| sg as Arc<dyn memory_engine::traits::SummaryGenerator + Send + Sync>);
 
     // 6. Construct and serve
