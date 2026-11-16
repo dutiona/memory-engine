@@ -75,14 +75,14 @@ Generated from 85-agent deep-dive (workflow wf_43a240d4-be5) + Phase-1 + supply-
 | `core-root/design-importance-field-ambigu` | design | src/types.rs:133-139 | `Fact` has two importance fields with near-identical names but differe | N |  |
 | `embed/design-duplicated-http-plumbing` | design | memory-engine-embed/src/http.rs:116-181,183- | HTTP request/response plumbing duplicated verbatim between `embed` and | N |  |
 | `inspect/design-impl-submodules-overcalib` | design | src/inspect/mod.rs:6-11 | Implementation submodules exposed as `pub` despite no external callers | N |  |
-| `mcp/design-god-module-tools` | design | /home/mroynard/dev/memory-engine/memory-engi | God module: 1386-line flat file mixing tool schema, dispatch, and all  | N |  |
+| `mcp/design-god-module-tools` | design | memory-engine-mcp/src/tools/mod.rs:1-1386 | God module: 1386-line flat file mixing tool schema, dispatch, and all  | N |  |
 | `pool/design-inmemory-reentrant-deadlock` | design | src/pool/connection_pool.rs:187-192 | read() in in-memory mode acquires write_conn.lock(), creating a deadlo | N |  |
 | `resume/design-impure-default-now` | design | src/resume/context.rs:29-41 | ResumeConfig::Default captures wall-clock time — impure and stale-pron | N |  |
 | `store/design-god-module-schema` | design | src/store/schema.rs (2491 lines) | schema.rs is a 2491-line god module mixing DDL, migrations, config, ba | N |  |
 | `store/design-stringly-typed-relation-typ` | design | src/store/edges.rs:21,49 (and types.rs NewEd | relation_type is a bare String throughout EdgeStore — no newtype or en | N |  |
 | `core-root/documentation-fact-dual-import` | documentation | src/types.rs:133,139 | Fact struct: importance and importance_score are both undocumented wit | N |  |
-| `embed/documentation-embed-no-doc` | documentation | /home/mroynard/dev/memory-engine/memory-engi | `EmbeddingProvider::embed` impl has no /// doc comment | N |  |
-| `embed/documentation-embed-batch-no-doc` | documentation | /home/mroynard/dev/memory-engine/memory-engi | `EmbeddingProvider::embed_batch` impl has no /// doc comment | N |  |
+| `embed/documentation-embed-no-doc` | documentation | memory-engine-embed/src/http.rs:116 | `EmbeddingProvider::embed` impl has no /// doc comment | N |  |
+| `embed/documentation-embed-batch-no-doc` | documentation | memory-engine-embed/src/http.rs:183 | `EmbeddingProvider::embed_batch` impl has no /// doc comment | N |  |
 | `graph/documentation-remove-node-stale-in` | documentation | src/graph/memory_graph.rs:78-87 | remove_node doc omits NodeIndex invalidation side-effect; silent corre | N |  |
 | `search/documentation-results-returned-ne` | documentation | src/search/hybrid.rs:77,247-252 | `QueryDiagnostics::results_returned` documented but never assigned | Y |  |
 | `search/documentation-notify-insert-panic` | documentation | src/search/ann.rs:324-344 | `HnswStrategy::notify_insert` panics in production code with no `# Pan | N |  |
@@ -195,7 +195,7 @@ Generated from 85-agent deep-dive (workflow wf_43a240d4-be5) + Phase-1 + supply-
 | `core-root/design-importance-field-ambi` | high | src/types.rs:133-139 | `Fact` has two importance fields with near-identical names but dif |
 | `embed/design-duplicated-http-plumbing` | high | memory-engine-embed/src/http.rs:116-181, | HTTP request/response plumbing duplicated verbatim between `embed` |
 | `inspect/design-impl-submodules-overcal` | high | src/inspect/mod.rs:6-11 | Implementation submodules exposed as `pub` despite no external cal |
-| `mcp/design-god-module-tools` | high | /home/mroynard/dev/memory-engine/memory- | God module: 1386-line flat file mixing tool schema, dispatch, and  |
+| `mcp/design-god-module-tools` | high | memory-engine-mcp/src/tools/mod.rs:1-1386 | God module: 1386-line flat file mixing tool schema, dispatch, and  |
 | `pool/design-inmemory-reentrant-deadloc` | high | src/pool/connection_pool.rs:187-192 | read() in in-memory mode acquires write_conn.lock(), creating a de |
 | `resume/design-impure-default-now` | high | src/resume/context.rs:29-41 | ResumeConfig::Default captures wall-clock time — impure and stale- |
 | `store/design-god-module-schema` | high | src/store/schema.rs (2491 lines) | schema.rs is a 2491-line god module mixing DDL, migrations, config |
@@ -213,9 +213,9 @@ Generated from 85-agent deep-dive (workflow wf_43a240d4-be5) + Phase-1 + supply-
 | `forgetting/design-policy-types-misplac` | medium | src/traits.rs:200-293 | ForgetPolicy and PruneStats are concrete structs housed in traits. |
 | `graph/design-stringly-typed-relation-t` | medium | src/graph/memory_graph.rs:17 | EdgeData.relation_type is stringly-typed; no shared enum enforces  |
 | `inspect/design-manual-json-header-in-s` | medium | src/inspect/dump.rs:43-73 | JSON object header hand-assembled with raw `write!` instead of a s |
-| `mcp/design-stringly-typed-enums` | medium | /home/mroynard/dev/memory-engine/memory- | Hand-rolled string→enum parsers duplicate what serde already provi |
-| `mcp/design-dump-state-path-canonicaliz` | medium | /home/mroynard/dev/memory-engine/memory- | handle_dump_state path restriction canonicalizes the parent but no |
-| `mcp/design-bootstrap-no-size-limit` | medium | /home/mroynard/dev/memory-engine/memory- | handle_bootstrap_session accepts unbounded jsonl_data string — pot |
+| `mcp/design-stringly-typed-enums` | medium | memory-engine-mcp/src/tools/mod.rs:488-505 | Hand-rolled string→enum parsers duplicate what serde already provi |
+| `mcp/design-dump-state-path-canonicaliz` | medium | memory-engine-mcp/src/tools/mod.rs:1062-1073 | handle_dump_state path restriction canonicalizes the parent but no |
+| `mcp/design-bootstrap-no-size-limit` | medium | memory-engine-mcp/src/tools/mod.rs:1225-1239 | handle_bootstrap_session accepts unbounded jsonl_data string — pot |
 | `pool/design-in-memory-discriminant-sen` | medium | src/pool/connection_pool.rs:25, 132, 188 | read_pool_size == 0 is used as an implicit 'in-memory mode' sentin |
 | `pool/design-writeasreadguard-semantics` | medium | src/pool/connection_pool.rs:52-60 | WriteAsReadGuard name implies read-only but exposes a fully-writab |
 | `resume/design-kb-stubs-yagni` | medium | src/resume/context.rs:54-56, 104-105 | kb_stubs placeholder in public struct leaks internal roadmap into  |

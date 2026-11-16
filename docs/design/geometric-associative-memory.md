@@ -237,10 +237,10 @@ Domain-identity linear separability (is domain separable in Qwen3 final embeddin
 
 **Key source files:**
 
-- `/home/mroynard/dev/memory-engine/src/store/schema/mod.rs` — schema v14, all SQL tables; `config` K/V; edge indexes at lines 643–644
-- `/home/mroynard/dev/memory-engine/src/search/ann.rs` — HNSW: immutable `embed_dim`, tombstones, `rebuild_from_db` under write lock, reconstruction seam
-- `/home/mroynard/dev/memory-engine/src/store/embedding_spaces.rs` — multi-space registry, the extension point for all derived spaces
-- `/home/mroynard/dev/memory-engine/src/store/fact_vectors.rs` — non-active vector staging, cursorless anti-join, backfill substrate
-- `/home/mroynard/dev/memory-engine/src/storage/graph.rs` — in-memory adjacency / degree cache
-- `/home/mroynard/dev/autonomous-agent-project/raw/landscape/34-geometric-memory-operator-taxonomy.md` — full operator table (61+ operators), epistemic tiers, composition diagram, PoC specifications
-- `/home/mroynard/dev/autonomous-agent-project/raw/landscape/35-memory-data-structure-landscape.md` — full data-structure inventory with H/E/N classification, freshness matrix, gap analysis, critic amendments
+- `src/store/schema/mod.rs` — schema v14, all SQL tables; `config` K/V; edge indexes at lines 643–644
+- `src/search/ann.rs` — HNSW: immutable `embed_dim`, tombstones, `rebuild_from_db` under write lock, reconstruction seam
+- `src/store/embedding_spaces.rs` — multi-space registry, the extension point for all derived spaces
+- `src/store/fact_vectors.rs` — non-active vector staging, cursorless anti-join, backfill substrate
+- `src/storage/graph.rs` — in-memory adjacency / degree cache
+- `/home/alice/dev/autonomous-agent-project/raw/landscape/34-geometric-memory-operator-taxonomy.md` — full operator table (61+ operators), epistemic tiers, composition diagram, PoC specifications
+- `/home/alice/dev/autonomous-agent-project/raw/landscape/35-memory-data-structure-landscape.md` — full data-structure inventory with H/E/N classification, freshness matrix, gap analysis, critic amendments
