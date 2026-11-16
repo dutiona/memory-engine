@@ -23,7 +23,7 @@ serde_json = "1.0"
 anyhow = "1"
 tabled = "0.20"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 # Direct runtime dep for the Stage E cutover (`#[tokio::main]`/`block_on` at the
 # command boundary). Already present transitively via memory-engine's default
 # `async`; named here so the cutover can use it directly. (#631 Stage D)

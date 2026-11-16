@@ -1082,49 +1082,54 @@ mod tests {
             }
         }
 
+        /// Run `f` with SQL statement tracing on and return its result with the number
+        /// of traced statements that touch the batched candidate query (`json_each`).
+        fn count_batch_queries<R>(
+            conn: &mut rusqlite::Connection,
+            f: impl FnOnce(&rusqlite::Connection) -> R,
+        ) -> (R, usize) {
+            use rusqlite::trace::{TraceEvent, TraceEventCodes};
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let count = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::clone(&count);
+            conn.trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(move |ev: TraceEvent<'_>| {
+                    if let TraceEvent::Stmt(_, sql) = ev
+                        && sql.contains("json_each")
+                    {
+                        seen.fetch_add(1, Ordering::Relaxed);
+                    }
+                }),
+            )
+            .unwrap();
+            let result = f(conn);
+            conn.trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
+                .unwrap();
+            (result, count.load(Ordering::Relaxed))
+        }
+
         #[test]
         fn hnsw_strategy_one_batched_query_per_widening_attempt() {
             // #288 / #362: the batched candidate fetch must issue exactly ONE
             // candidate query (the `json_each` batch) per widening attempt — never
             // 2N per-candidate round-trips. We trace SQL statements during `search`
             // and count those that touch the batch query (identified by `json_each`).
-            use rusqlite::trace::{TraceEvent, TraceEventCodes};
-            use std::cell::Cell;
-
-            // `trace_v2` takes a bare `fn` pointer (no captures), so the counter
-            // lives in a thread-local the callback bumps. Single-threaded test.
-            thread_local! {
-                static BATCH_QUERIES: Cell<usize> = const { Cell::new(0) };
-            }
-            #[allow(
-                clippy::needless_pass_by_value,
-                reason = "signature is fixed by `Connection::trace_v2`, which takes a \
-                          bare `fn(TraceEvent)` — a reference param would not match"
-            )]
-            fn on_stmt(ev: TraceEvent<'_>) {
-                if let TraceEvent::Stmt(_, sql) = ev
-                    && sql.contains("json_each")
-                {
-                    BATCH_QUERIES.with(|c| c.set(c.get() + 1));
-                }
-            }
-
-            let (conn, _ids) = setup_with_facts();
+            let (mut conn, _ids) = setup_with_facts();
             let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
-
-            BATCH_QUERIES.with(|c| c.set(0));
-            conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(on_stmt));
 
             // A request the index can satisfy without widening: limit 2 over 3 facts,
             // no filters → first attempt yields >= limit, loop breaks after one pass.
             let query = [1.0_f32, 0.0, 0.0, 0.0];
-            let results = strategy.search(&conn, &query, DIM, 2, None, None).unwrap();
+            let (results, batch_queries) = count_batch_queries(&mut conn, |c| {
+                strategy.search(c, &query, DIM, 2, None, None).unwrap()
+            });
 
-            conn.trace_v2(TraceEventCodes::empty(), None);
             assert_eq!(results.len(), 2, "search must satisfy the request");
             assert_eq!(
-                BATCH_QUERIES.with(Cell::get),
-                1,
+                batch_queries, 1,
                 "exactly one batched candidate query per widening attempt (1 attempt here)"
             );
         }
@@ -1144,26 +1149,7 @@ mod tests {
             // overfetch on attempt 2 reaches a farther `Semantic` fact that survives.
             // (We filter on `fact_type` rather than `scope_id` to avoid seeding a
             // second scope row — `init_schema` only provides the default scope 1.)
-            use rusqlite::trace::{TraceEvent, TraceEventCodes};
-            use std::cell::Cell;
-
-            thread_local! {
-                static BATCH_QUERIES: Cell<usize> = const { Cell::new(0) };
-            }
-            #[allow(
-                clippy::needless_pass_by_value,
-                reason = "signature is fixed by `Connection::trace_v2`, which takes a \
-                          bare `fn(TraceEvent)` — a reference param would not match"
-            )]
-            fn on_stmt(ev: TraceEvent<'_>) {
-                if let TraceEvent::Stmt(_, sql) = ev
-                    && sql.contains("json_each")
-                {
-                    BATCH_QUERIES.with(|c| c.set(c.get() + 1));
-                }
-            }
-
-            let conn = open_memory().unwrap();
+            let mut conn = open_memory().unwrap();
             init_schema(&conn).unwrap();
             let store = FactStore::new(&conn, DIM);
 
@@ -1210,15 +1196,12 @@ mod tests {
 
             let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
 
-            BATCH_QUERIES.with(|c| c.set(0));
-            conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(on_stmt));
-
             let query = [1.0_f32, 0.0, 0.0, 0.0];
-            let results = strategy
-                .search(&conn, &query, DIM, 1, Some(&FactType::Semantic), None)
-                .unwrap();
-
-            conn.trace_v2(TraceEventCodes::empty(), None);
+            let (results, batch_queries) = count_batch_queries(&mut conn, |c| {
+                strategy
+                    .search(c, &query, DIM, 1, Some(&FactType::Semantic), None)
+                    .unwrap()
+            });
 
             assert_eq!(results.len(), 1, "the lone `Semantic` fact must be found");
             assert_eq!(
@@ -1226,8 +1209,7 @@ mod tests {
                 "the surviving result is the `Semantic` fact, reached only after widening"
             );
             assert_eq!(
-                BATCH_QUERIES.with(Cell::get),
-                2,
+                batch_queries, 2,
                 "two widening attempts must issue exactly two batched candidate \
                  queries — one per attempt, never 2N per-candidate round-trips"
             );

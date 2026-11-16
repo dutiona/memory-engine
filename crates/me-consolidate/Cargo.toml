@@ -43,7 +43,7 @@ me-traits = { path = "../me-traits", features = ["test-util"] }
 # The moved tests construct/drive raw connections directly (`open_memory()`
 # returns a `rusqlite::Connection`) and one helper (`cluster.rs::create_scope`)
 # uses `rusqlite::params!` directly.
-rusqlite = "0.34"
+rusqlite = "0.43"
 # Test fixtures hash fact content for `content_hash` (mirrors the facade's own
 # normal dependency, here test-only since no production path in this crate
 # touches content hashing).
