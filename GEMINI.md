@@ -165,6 +165,7 @@ Every issue MUST carry **exactly one** `type:*` label and **exactly one** `area:
 | `area:docs`          | Documentation and narrative docs                           |
 | `area:build`         | Build system, CI, tooling, dependencies                    |
 | `area:qa`            | Quality assurance, testing infrastructure, super-qa sweeps |
+| `area:plugin`        | Claude Code plugin (hooks, helper, skills)                 |
 | `area:viz`           | Phase-7 web UI / visualization (#13)                       |
 
 ### Additive labels (apply zero or more)

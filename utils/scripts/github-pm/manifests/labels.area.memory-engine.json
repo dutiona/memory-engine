@@ -65,6 +65,11 @@
     "description": "Quality assurance, testing infrastructure, super-qa sweeps"
   },
   {
+    "name": "area:plugin",
+    "color": "1d76db",
+    "description": "Claude Code plugin (hooks, helper, skills)"
+  },
+  {
     "name": "area:viz",
     "color": "D876E3",
     "description": "Phase-7 web UI / visualization (#13)"
