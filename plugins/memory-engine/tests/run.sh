@@ -187,10 +187,180 @@ assert not any(o.get("sensitive") or o.get("required") for o in p["userConfig"].
 		fail "plugin.json, marketplace.json and ME_VERSION disagree"
 }
 
+# ---------------------------------------------------------------- item 2: enqueue
+
+# hook_as_pid SCRIPT SUB: run SCRIPT in a shell that then execs the helper, so SCRIPT knows the hook's pid as $$.
+hook_as_pid() {
+	PATH=$RB /bin/sh -c "$1"'
+exec /bin/sh "$0" "$@"' "$HB" "$2" "$URL" "$DEV" <"$C/in" >"$C/out" 2>"$C/err" || fail "hook exited $?"
+}
+
+t_body_identical() {
+	py 'import sys; sys.stdout.buffer.write(bytes(range(256)))' >"$C/in"
+	hook capture <"$C/in"
+	printf 'a\r\nb\r\n' >"$C/in2"
+	hook capture <"$C/in2"
+	py 'import os, sys; sys.stdout.buffer.write(os.urandom(1 << 20))' >"$C/in3"
+	hook capture <"$C/in3"
+	set -- $(events)
+	[ $# -eq 3 ] || fail "want 3 events, got $#"
+	cmp "$C/in" "$O/$1/body" && cmp "$C/in2" "$O/$2/body" && cmp "$C/in3" "$O/$3/body" || fail "a body differs from its input"
+}
+
+t_envelope() {
+	hook capture <"$C/in"
+	id=$(events)
+	py '
+import re, sys, time
+id, path = sys.argv[1], sys.argv[2]
+m = re.fullmatch(r"([0-9]{10})-([0-9]{6})-([0-9]+)", id)
+assert m, id
+lines = open(path).read().split("\n")
+assert lines[-1] == "", "headers must end with a line feed"
+h = dict(l.split(": ", 1) for l in lines[:-1])
+assert list(h) == ["ME-Event-Id", "ME-Event-Time", "ME-Event-Seq", "ME-Harness", "ME-Client-Version"], list(h)
+assert h["ME-Event-Id"] == id
+assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", id)
+assert h["ME-Event-Time"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(m.group(1)))), h
+assert h["ME-Event-Seq"] == m.group(2)
+assert h["ME-Harness"] == "claude-code" and h["ME-Client-Version"] == "0.1.0", h
+' "$id" "$O/$id/headers" || fail "envelope off ADR-0020's grammar"
+}
+
+t_order() {
+	for i in 1 2 3 4 5; do
+		printf 'event %s' "$i" >"$C/in"
+		hook capture <"$C/in"
+	done
+	i=0
+	for id in $(events); do
+		i=$((i + 1))
+		eq "$(cat "$O/$id/body")" "event $i" "glob order"
+	done
+	eq "$i" 5 "event count"
+}
+
+t_seq_taken() {
+	e=$(date +%s)
+	mkdir -p "$O/seq" "$O/tmp" "$O/rejected"
+	for d in 0 1 2 3; do mkdir "$O/seq/$((e + d)).0"; done
+	hook capture <"$C/in"
+	id=$(events)
+	case $id in *-000001-*) ;; *) fail "want seq 000001, got $id" ;; esac
+}
+
+t_seq_bound() {
+	e=$(date +%s)
+	mkdir -p "$O/seq" "$O/tmp" "$O/rejected"
+	py '
+import os, sys
+o, e = sys.argv[1], int(sys.argv[2])
+for d in range(4):
+    for n in range(1000):
+        os.mkdir("%s/seq/%d.%d" % (o, e + d, n))
+' "$O" "$e"
+	hook capture <"$C/in"
+	eq "$(count)" 0 "events queued with every seq taken"
+	rm -rf "$O/seq"
+	mkdir "$O/seq"
+	chmod 500 "$O/seq"
+	hook capture <"$C/in"
+	chmod 700 "$O/seq"
+	eq "$(count)" 0 "events queued with a read-only seq/"
+	set -- "$O"/tmp/*
+	[ ! -e "$1" ] || fail "tmp/ not empty: $*"
+}
+
+t_pid_reuse() {
+	hook_as_pid 'mkdir -p "$HOME/.local/state/memory-engine/outbox/tmp/$$/stale"' capture
+	eq "$(count)" 1 "events"
+	[ ! -e "$O/$(events)/stale" ] || fail "the leftover tmp dir was published"
+}
+
+t_id_collision() {
+	hook_as_pid 'o=$HOME/.local/state/memory-engine/outbox; e=$(date +%s); mkdir -p "$o/tmp" "$o/seq" "$o/rejected"
+for d in 0 1 2 3; do mkdir -p "$o/$((e + d))-000000-$$"; printf old >"$o/$((e + d))-000000-$$/body"; done' capture
+	n=0
+	for id in $(events); do
+		case $id in
+		*-000000-*) eq "$(cat "$O/$id/body")" old "an existing event changed" ;;
+		*-000001-*) n=$((n + 1)) ;;
+		esac
+		set -- "$O/$id"/[0-9]*
+		[ ! -e "$1" ] || fail "an event was nested inside $id"
+	done
+	eq "$n" 1 "the new event under the next seq"
+}
+
+t_rejected_collision() {
+	hook_as_pid 'o=$HOME/.local/state/memory-engine/outbox; e=$(date +%s); mkdir -p "$o/tmp" "$o/seq" "$o/rejected"
+for d in 0 1 2 3; do mkdir -p "$o/rejected/$((e + d))-000000-$$"; done' capture
+	case $(events) in *-000001-*) ;; *) fail "want the next seq, got $(events)" ;; esac
+}
+
+t_tree_heals() {
+	hook capture <"$C/in"
+	for d in "$O/tmp" "$O/seq"; do
+		rm -rf "$d"
+		hook capture <"$C/in"
+		[ -d "$d" ] || fail "$d was not recreated"
+	done
+	eq "$(count)" 3 "events"
+}
+
+t_body_write_fail() {
+	wrap cat '[ $# -eq 0 ] && { dd bs=1 count=3 2>/dev/null; exit 1; }'
+	hook capture <"$C/in"
+	eq "$(count)" 0 "events"
+	set -- "$O"/tmp/*
+	[ ! -e "$1" ] || fail "tmp/ not empty: $*"
+}
+
+t_endpoint() {
+	hook capture http://127.0.0.1:9/ <"$C/in"
+	eq "$(cat "$O/endpoint")" http://127.0.0.1:9 "recorded endpoint"
+	hook capture https://example.com/me <"$C/in"
+	eq "$(cat "$O/endpoint")" https://example.com/me "changed endpoint"
+	for bad in '' '${user_config.me_url}' ftp://x 'http://a b'; do
+		hook capture "$bad" <"$C/in"
+		eq "$(cat "$O/endpoint")" https://example.com/me "endpoint after [$bad]"
+	done
+	eq "$(count)" 6 "every event queued"
+}
+
+t_side_duties_fail() {
+	hook capture http://127.0.0.1:9 <"$C/in"
+	wrap mv 'case $1 in *.endpoint) exit 1 ;; esac'
+	hook capture https://example.com/new <"$C/in"
+	[ ! -e "$O/endpoint" ] || fail "a failed endpoint update left $(cat "$O/endpoint")"
+	eq "$(count)" 2 "events"
+}
+
+t_silent() {
+	env -u HOME PATH="$RB" /bin/sh "$HB" capture "$URL" "" <"$C/in" >"$C/out" 2>&1 || fail "no HOME: exit $?"
+	[ ! -s "$C/out" ] || fail "no HOME: printed $(cat "$C/out")"
+	mkdir -p "$HOME/.local"
+	: >"$HOME/.local/state"
+	hook capture <"$C/in"
+	rm "$HOME/.local/state"
+	hook capture </dev/null
+	eq "$(count)" 1 "events"
+	[ ! -s "$O/$(events)/body" ] || fail "empty stdin gave a body"
+}
+
+t_modes() {
+	hook capture <"$C/in"
+	hook session-start <"$C/in"
+	out=$(find "$S" \( -type d ! -perm 700 \) -o \( -type f ! -perm 600 \))
+	[ -z "$out" ] || fail "wrong modes: $out"
+}
+
 # ---------------------------------------------------------------- runner
 
 CASES=${CASES:-"
 registration version
+body_identical envelope order seq_taken seq_bound pid_reuse id_collision rejected_collision tree_heals
+body_write_fail endpoint side_duties_fail silent modes
 "}
 
 N=0

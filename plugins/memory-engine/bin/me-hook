@@ -6,14 +6,105 @@ export LC_ALL
 umask 077
 unset GIT_DIR GIT_WORK_TREE
 ME_VERSION=0.1.0
+NL='
+'
+
+H=${HOME-}
+S=$H/.local/state/memory-engine
+O=$S/outbox
+TOKEN=$H/.config/memory-engine/secrets/token
 
 usage() {
 	printf 'usage: me-hook capture|session-start <me_url> <dev_root> | me-hook flush\n' >&2
 	exit 1
 }
 
+# heal: recreate every directory of the outbox; a step that failed is then retried once.
+heal() {
+	mkdir -p "$O/tmp" "$O/seq" "$O/rejected" "$S/bin" 2>/dev/null
+}
+
+# printable VALUE: every byte is in 0x21-0x7E.
+printable() {
+	case $1 in *[!!-~]*) return 1 ;; esac
+	return 0
+}
+
+# unset_arg VALUE: an option Claude Code passed empty, or left unsubstituted.
+unset_arg() {
+	case $1 in '' | '${user_config.'*) return 0 ;; esac
+	return 1
+}
+
+# ---------------------------------------------------------------- enqueue
+
+record_endpoint() {
+	unset_arg "$1" && return 0
+	_u=${1%/}
+	case $_u in http://?* | https://?*) ;; *) return 0 ;; esac
+	printable "$_u" || return 0
+	_cur=
+	[ -f "$O/endpoint" ] && { IFS= read -r _cur <"$O/endpoint" || :; }
+	[ "$_u" = "$_cur" ] && return 0
+	{ printf '%s\n' "$_u" >"$O/tmp/$$.endpoint" && mv "$O/tmp/$$.endpoint" "$O/endpoint"; } && return 0
+	heal
+	{ printf '%s\n' "$_u" >"$O/tmp/$$.endpoint" && mv "$O/tmp/$$.endpoint" "$O/endpoint"; } && return 0
+	# Never leave the previous URL recorded: a flush would send this event, and the token, there.
+	rm -f "$O/tmp/$$.endpoint" "$O/endpoint"
+}
+
+abandon() {
+	rm -rf "$O/tmp/$$"
+	exit 0
+}
+
+capture() {
+	[ -n "$H" ] || exit 0
+	exec 2>/dev/null
+	_t=$O/tmp/$$
+	[ -e "$_t" ] && rm -rf "$_t"
+	mkdir "$_t" || { heal && mkdir "$_t"; } || exit 0
+	record_endpoint "$ME_URL"
+	cat >"$_t/body" || abandon
+	_d=$(date -u '+%s %Y-%m-%dT%H:%M:%SZ') || abandon
+	_ep=${_d%% *}
+	_tm=${_d#* }
+	case $_ep in '' | *[!0-9]*) abandon ;; esac
+	_n=0
+	_healed=
+	while :; do
+		[ "$_n" -lt 1000 ] || abandon
+		if mkdir "$O/seq/$_ep.$_n"; then
+			_s=000000$_n
+			_seq=${_s#"${_s%??????}"}
+			_id=$_ep-$_seq-$$
+			[ -e "$O/$_id" ] || [ -e "$O/rejected/$_id" ] || break
+		elif [ ! -e "$O/seq/$_ep.$_n" ]; then
+			[ -z "$_healed" ] || abandon
+			_healed=1
+			heal
+			continue
+		fi
+		_n=$((_n + 1))
+	done
+	{
+		printf 'ME-Event-Id: %s\n' "$_id"
+		printf 'ME-Event-Time: %s\n' "$_tm"
+		printf 'ME-Event-Seq: %s\n' "$_seq"
+		printf 'ME-Harness: claude-code\n'
+		printf 'ME-Client-Version: %s\n' "$ME_VERSION"
+	} >"$_t/headers" || abandon
+	mv "$_t" "$O/$_id" || abandon
+	exit 0
+}
+
 case ${1-} in
-capture | session-start) exit 0 ;;
+capture | session-start)
+	SUB=$1
+	ME_URL=${2-}
+	DEV=${3-}
+	capture
+	;;
 flush) exit 0 ;;
 *) usage ;;
 esac
