@@ -1,4 +1,4 @@
-# The memory-engine server image: `podman build -t memory-engine:<tag> .` from a checkout of a tag.
+# The memory-engine server image: `podman build --pull=newer -t memory-engine:<tag> .` from a checkout of a tag.
 # Both stages name the same Debian release: the binaries link the builder's glibc and OpenSSL.
 
 FROM docker.io/library/rust:1-slim-trixie AS builder
