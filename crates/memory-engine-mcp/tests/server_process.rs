@@ -93,3 +93,94 @@ fn allowed_host_from_flag_and_environment() {
         server.stderr()
     );
 }
+
+/// A store one schema version behind, so opening it runs a migration.
+fn stale_store(dir: &std::path::Path) -> u32 {
+    let db = dir.join("memory.db");
+    drop(
+        memory_engine::MemoryEngine::builder(common::DIM)
+            .path(db.clone())
+            .build()
+            .unwrap(),
+    );
+    let previous = memory_engine::CURRENT_SCHEMA_VERSION - 1;
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE config SET value = ?1 WHERE key = 'schema_version'",
+            [previous.to_string()],
+        )
+        .unwrap();
+    previous
+}
+
+fn schema_version(dir: &std::path::Path) -> String {
+    rusqlite::Connection::open(dir.join("memory.db"))
+        .unwrap()
+        .query_row(
+            "SELECT value FROM config WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn backup_dir_from_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = stale_store(dir.path());
+    let backups = dir.path().join("backups");
+    std::fs::create_dir(&backups).unwrap();
+    common::write_config(
+        dir.path(),
+        &format!("backup_dir = '{}'\n", backups.display()),
+    );
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    // `migrate` writes the backup before any step runs, so it exists whether or not the
+    // relabelled store's last migration replays cleanly.
+    let _ = server.wait_ready();
+    assert!(
+        backups.join(format!("memory.db.v{previous}.bak")).is_file(),
+        "stderr:\n{}",
+        server.stderr()
+    );
+}
+
+#[test]
+fn backup_dir_from_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = stale_store(dir.path());
+    let backups = dir.path().join("backups");
+    std::fs::create_dir(&backups).unwrap();
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &[],
+        &[("MEMORY_MCP_BACKUP_DIR", backups.to_str().unwrap())],
+    );
+    let _ = server.wait_ready();
+    assert!(
+        backups.join(format!("memory.db.v{previous}.bak")).is_file(),
+        "stderr:\n{}",
+        server.stderr()
+    );
+}
+
+#[test]
+fn a_missing_backup_dir_stops_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = stale_store(dir.path());
+    let backups = dir.path().join("no-such-backups");
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &[],
+        &[("MEMORY_MCP_BACKUP_DIR", backups.to_str().unwrap())],
+    );
+    let status = server.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.code(), Some(1), "stderr:\n{}", server.stderr());
+    assert!(
+        server.stderr().contains("no-such-backups"),
+        "stderr:\n{}",
+        server.stderr()
+    );
+    assert_eq!(schema_version(dir.path()), previous.to_string());
+}

@@ -38,6 +38,10 @@ struct Cli {
     #[arg(long, env = "MEMORY_MCP_DB_PATH")]
     db_path: Option<std::path::PathBuf>,
 
+    /// Directory for the pre-migration backup; overrides `engine.backup_dir`.
+    #[arg(long, env = "MEMORY_MCP_BACKUP_DIR")]
+    backup_dir: Option<std::path::PathBuf>,
+
     /// Embedding endpoint URL (OpenAI-compatible).
     #[arg(long, env = "MEMORY_MCP_EMBED_URL")]
     embed_url: Option<String>,
@@ -102,8 +106,15 @@ async fn main() -> Result<(), BoxError> {
     };
 
     // 3. Open MemoryEngine
-    let engine = MemoryEngine::builder(embed_dim)
-        .path(mcp_config.engine.db_path.clone())
+    let mut builder = MemoryEngine::builder(embed_dim).path(mcp_config.engine.db_path.clone());
+    if let Some(dir) = &mcp_config.engine.backup_dir {
+        // Checked now: `VACUUM INTO` would only fail at the next pending migration.
+        if !dir.is_dir() {
+            return Err(format!("engine.backup_dir is not a directory: {}", dir.display()).into());
+        }
+        builder = builder.backup_dir(dir.clone());
+    }
+    let engine = builder
         .build()
         .map_err(|e| format!("failed to open engine: {e}"))?;
     let engine = Arc::new(engine);
@@ -264,6 +275,7 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
             engine: config::EngineSection {
                 db_path,
                 embed_dim: None,
+                backup_dir: None,
             },
             embedding: None,
             summary: None,
@@ -273,6 +285,9 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
     // CLI overrides
     if let Some(db_path) = &cli.db_path {
         mcp_config.engine.db_path.clone_from(db_path);
+    }
+    if let Some(backup_dir) = &cli.backup_dir {
+        mcp_config.engine.backup_dir = Some(backup_dir.clone());
     }
 
     // NOTE: Embedding config from CLI is handled in build_embedder(),

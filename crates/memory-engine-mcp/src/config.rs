@@ -29,6 +29,10 @@ pub struct EngineSection {
 
     /// Embedding dimension. If omitted, probed from existing database.
     pub embed_dim: Option<usize>,
+
+    /// An existing directory where a schema migration first writes `<db>.v<N>.bak`.
+    /// Unset means a migration runs without a backup.
+    pub backup_dir: Option<PathBuf>,
 }
 
 /// Embedding provider configuration.
@@ -206,6 +210,7 @@ mod tests {
 [engine]
 db_path = "/tmp/test.db"
 embed_dim = 384
+backup_dir = "/tmp/backups"
 
 [embedding]
 endpoint = "http://localhost:11434/v1/embeddings"
@@ -214,6 +219,10 @@ dimensions = 384
 "#;
         let config: McpConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.engine.embed_dim, Some(384));
+        assert_eq!(
+            config.engine.backup_dir,
+            Some(PathBuf::from("/tmp/backups"))
+        );
         assert!(config.embedding.is_some());
         let emb = config.embedding.unwrap();
         assert_eq!(emb.model, "nomic-embed-text");
