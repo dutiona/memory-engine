@@ -96,7 +96,9 @@ source ~/.local/opt/memory-engine/.release-env
 if [ -f "$DB" ]; then
   cp -- "$DB" "$BACKUP" || exit 1
   # An unclean stop (SIGTERM, SIGKILL, power cut) leaves committed pages in $DB-wal, or a hot
-  # $DB-journal: they are part of the DB's state, so they are backed up with it.
+  # $DB-journal: they are part of the DB's state, so they are backed up with it. A re-run under
+  # the same $TS first drops the previous attempt's, which belong to an older $BACKUP.
+  rm -f -- "$BACKUP-wal" "$BACKUP-journal"
   for s in -wal -journal; do
     [ ! -e "$DB$s" ] || cp -- "$DB$s" "$BACKUP$s" || exit 1
   done
@@ -133,13 +135,18 @@ if [ -f "$DB" ]; then
   fi
   if [ -n "$NEED_RESTORE" ]; then
     echo "migrate/verify FAILED — restoring the pre-release backup and ABORTING (do not promote)"
-    # Drop the failed migration's sidecars first, or SQLite replays its frames onto the restored
-    # file → silent corruption; then put back the backup's own sidecars, which hold its newest
-    # commits. Restore via a temp file so a short write can't truncate $DB.
-    cp -- "$BACKUP" "$DB.restoring"
+    # Stage the backup and its own sidecars (which hold its newest commits) and check every copy
+    # before touching anything live, so a short write (a full disk) leaves $DB as it was. Then drop
+    # the failed migration's sidecars, or SQLite replays its frames onto the restored file → silent
+    # corruption, and rename the staged files into place.
+    STAGE_FAILED="RESTORE FAILED while staging: $DB is untouched, the backup is $BACKUP"
+    cp -- "$BACKUP" "$DB.restoring" || { echo "$STAGE_FAILED"; exit 1; }
+    for s in -wal -journal; do
+      [ ! -e "$BACKUP$s" ] || cp -- "$BACKUP$s" "$DB.restoring$s" || { echo "$STAGE_FAILED"; exit 1; }
+    done
     rm -f -- "$DB-wal" "$DB-shm" "$DB-journal"
     for s in -wal -journal; do
-      [ ! -e "$BACKUP$s" ] || cp -- "$BACKUP$s" "$DB$s"
+      [ ! -e "$DB.restoring$s" ] || mv -f -- "$DB.restoring$s" "$DB$s"
     done
     mv -f -- "$DB.restoring" "$DB"
     echo "restored from $BACKUP — the old binaries in bin/ keep serving this DB"
