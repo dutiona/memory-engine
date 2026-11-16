@@ -159,14 +159,14 @@ async fn main() -> Result<(), BoxError> {
     Ok(())
 }
 
-/// Build the embedding provider from config + CLI, using the probed `embed_dim`.
-///
-/// CLI flags override TOML values (endpoint, model, `api_key`) when provided,
-/// enabling operators to inject runtime secrets via env/CLI.
 /// Recognized embedding backends. `provider` is free-form (it feeds the fingerprint),
 /// but a value outside this set warns at startup to catch typos.
 const KNOWN_PROVIDERS: [&str; 3] = ["ollama", "tei", "openai"];
 
+/// Build the embedding provider from config + CLI, using the probed `embed_dim`.
+///
+/// CLI flags override TOML values (endpoint, model, `api_key`) when provided,
+/// enabling operators to inject runtime secrets via env/CLI.
 fn build_embedder(
     cli: &Cli,
     mcp_config: &config::McpConfig,
