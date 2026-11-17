@@ -695,6 +695,9 @@ t_token_forms() {
 	: >"$TOKF"
 	flush_fg
 	eq "$(count) $(calls)" "1 1" "an empty token file holds"
+	printf '\n' >"$TOKF"
+	flush_fg
+	eq "$(count) $(calls)" "1 1" "a token file holding only a line feed holds"
 }
 
 t_endpoint_update_fail() {
@@ -1156,6 +1159,9 @@ t_session_start_empty_token() {
 	: >"$TOKF"
 	session_start_out
 	eq "$(cat "$C/out")" '{"systemMessage":"memory: no token file"}' "the line with an empty token file"
+	printf '\n' >"$TOKF"
+	session_start_out
+	case $(cat "$C/out") in '{"systemMessage":"memory: no token file'*) ;; *) fail "no line with a token file holding only a line feed" ;; esac
 }
 
 t_session_start_token() {

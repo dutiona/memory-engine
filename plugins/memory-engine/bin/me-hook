@@ -242,10 +242,11 @@ capture() {
 
 # ---------------------------------------------------------------- delivery (ADR-0020 §3, §12)
 
-# read_line FILE: RL := its first line, with or without a final line feed; fails when there is none.
+# read_line FILE: RL := its first line, with or without a final line feed; fails when that line is missing or empty.
 read_line() {
 	RL=
-	IFS= read -r RL <"$1" 2>/dev/null || [ -n "$RL" ]
+	IFS= read -r RL <"$1" 2>/dev/null
+	[ -n "$RL" ]
 }
 
 now() {
