@@ -1,5 +1,7 @@
 # The memory-engine server image: `podman build --pull=newer -t memory-engine:<tag> .` from a checkout of a tag.
 # Both stages name the same Debian release: the binaries link the builder's glibc and OpenSSL.
+# Network only for steps that run no crate code: apt-get (Debian-signed packages) and cargo fetch (downloads only).
+# Every step that runs crate code (build scripts, proc-macros, the built binaries) starts with `RUN --network=none`.
 
 FROM docker.io/library/rust:1-slim-trixie AS builder
 RUN apt-get update \
@@ -7,7 +9,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p memory-engine-mcp -p memory-engine-cli
+# Network, fetch only: cargo fetch downloads the locked crates and runs none of their code.
+RUN cargo fetch --locked
+# No network: build scripts and proc-macros run here.
+RUN --network=none cargo build --release --locked --offline -p memory-engine-mcp -p memory-engine-cli
 
 FROM docker.io/library/debian:trixie-slim
 LABEL org.opencontainers.image.source="https://github.com/dutiona/memory-engine"
@@ -20,7 +25,7 @@ RUN apt-get update \
         --home-dir /var/lib/memory-engine --shell /usr/sbin/nologin memory-engine
 COPY --from=builder /src/target/release/memory-engine-mcp /src/target/release/memory-engine-cli /usr/local/bin/
 # Fails the build if a shared library the binaries or tools need is missing.
-RUN memory-engine-mcp --version && memory-engine-cli --version && sqlite3 --version && curl --version
+RUN --network=none memory-engine-mcp --version && memory-engine-cli --version && sqlite3 --version && curl --version
 USER 10001:10001
 WORKDIR /var/lib/memory-engine
 ENTRYPOINT ["memory-engine-mcp"]
