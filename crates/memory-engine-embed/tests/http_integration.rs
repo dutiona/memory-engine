@@ -1,18 +1,19 @@
 //! wiremock-based end-to-end tests for `HttpEmbeddingProvider`'s public
 //! `EmbeddingProvider` contract (single + batch happy paths, the failure each answer
-//! maps to, and the response-body size cap).
+//! maps to, the response-body size cap, and the chunking of an over-length input).
 //!
 //! `HttpEmbeddingProvider` uses `reqwest::blocking::Client` (internal tokio
 //! runtime), so all provider work runs inside `spawn_blocking` to avoid the
 //! nested-runtime panic — mirroring `asymmetric_embedding.rs`.
 #![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
+use memory_engine::ServedArtifact;
 use memory_engine::error::{EmbedderError, MemoryError};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine_embed::HttpEmbeddingProvider;
-use serde_json::json;
+use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 /// Mount a `/v1/embeddings` mock returning the given JSON body with a 200 status.
 async fn mount_json(server: &MockServer, body: serde_json::Value) {
@@ -325,4 +326,468 @@ async fn embed_sends_the_bearer_api_key_when_configured() {
     .unwrap()
     .expect("the keyed request should match the mock");
     assert_eq!(emb.len(), 4);
+}
+
+// --- #1021: an over-length input is chunked by the server's own count and pooled ---
+
+const DIM: usize = 4;
+
+/// One token per whitespace-separated word, plus the EOS the server appends.
+fn words(text: &str) -> usize {
+    text.split_whitespace().count() + 1
+}
+
+/// llama-server's answer body for an input over its context (dutiona/infra#77, recorded).
+fn recorded_body(n_prompt_tokens: usize, n_ctx: usize) -> Value {
+    json!({ "error": {
+        "code": 400,
+        "message": format!(
+            "request ({n_prompt_tokens} tokens) exceeds the available context size \
+             ({n_ctx} tokens), try increasing it"
+        ),
+        "type": "exceed_context_size_error",
+        "n_prompt_tokens": n_prompt_tokens,
+        "n_ctx": n_ctx,
+    }})
+}
+
+/// The inputs of one embed request, whether it sent a string or an array.
+fn inputs(request: &Request) -> Vec<String> {
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    match &body["input"] {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(a) => a.iter().map(|v| v.as_str().unwrap().to_owned()).collect(),
+        other => panic!("no input in {other}"),
+    }
+}
+
+/// A llama-server `/tokenize` that counts as [`words`] does.
+async fn mount_tokenize(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/tokenize"))
+        .respond_with(|request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let n = words(body["content"].as_str().unwrap());
+            ResponseTemplate::new(200).set_body_json(json!({ "tokens": vec![0; n] }))
+        })
+        .mount(server)
+        .await;
+}
+
+/// An embedder that takes at most `limit` tokens: a request holding a longer input gets the
+/// recorded 400, any other gets `vector` of each input.
+async fn mount_embed(server: &MockServer, limit: usize, vector: fn(&str) -> Vec<f32>) {
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(move |request: &Request| {
+            let inputs = inputs(request);
+            if let Some(n) = inputs.iter().map(|t| words(t)).find(|&n| n > limit) {
+                return ResponseTemplate::new(400).set_body_json(recorded_body(n, limit + 1));
+            }
+            let data: Vec<Value> = inputs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| json!({ "index": i, "embedding": vector(t) }))
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+        })
+        .mount(server)
+        .await;
+}
+
+/// A piece's vector: how many of its words are `a`, `b` and `c`, then a constant.
+fn letters(text: &str) -> Vec<f32> {
+    let n = |w: &str| {
+        let n = text.split_whitespace().filter(|x| *x == w).count();
+        f32::from(u16::try_from(n).unwrap())
+    };
+    vec![n("a"), n("b"), n("c"), 1.0]
+}
+
+/// Seven `a`, seven `b` and seven `c` words: three pieces of 8 tokens at a limit of 8.
+fn abc() -> String {
+    [["a"; 7], ["b"; 7], ["c"; 7]].concat().join(" ")
+}
+
+/// A provider for `provider` declaring `limit` as the served `max_input_tokens`, if any.
+fn limited(uri: &str, provider: &str, limit: Option<usize>) -> HttpEmbeddingProvider {
+    let built = HttpEmbeddingProvider::new(
+        format!("{uri}/v1/embeddings"),
+        "m".into(),
+        provider.into(),
+        None,
+        DIM,
+        5,
+    )
+    .unwrap();
+    match limit {
+        Some(max_input_tokens) => built.with_served_artifact(ServedArtifact {
+            artifact_sha256: "0".repeat(64),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens,
+        }),
+        None => built,
+    }
+}
+
+/// Run `f` off the async executor: the provider's blocking client owns a runtime.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(f).await.unwrap()
+}
+
+/// The requests `server` received at `at`, oldest first.
+async fn requests(server: &MockServer, at: &str) -> Vec<Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == at)
+        .collect()
+}
+
+/// Every input the embed requests carried, oldest first.
+async fn embedded(server: &MockServer) -> Vec<String> {
+    requests(server, "/v1/embeddings")
+        .await
+        .iter()
+        .flat_map(inputs)
+        .collect()
+}
+
+/// The mean of the vectors weighted by their counts, L2-normalised.
+#[allow(clippy::cast_possible_truncation)] // f64 accumulation, f32 like the provider's
+fn pooled(pieces: &[(usize, Vec<f32>)]) -> Vec<f32> {
+    let mut sum = vec![0.0_f64; pieces[0].1.len()];
+    for (weight, vector) in pieces {
+        let weight = f64::from(u32::try_from(*weight).unwrap());
+        for (s, x) in sum.iter_mut().zip(vector) {
+            *s = weight.mul_add(f64::from(*x), *s);
+        }
+    }
+    let norm = sum.iter().map(|x| x * x).sum::<f64>().sqrt();
+    sum.iter().map(|x| (x / norm) as f32).collect()
+}
+
+fn assert_close(actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+    assert!(
+        actual
+            .iter()
+            .zip(expected)
+            .all(|(a, e)| (a - e).abs() < 1e-5),
+        "{actual:?} vs {expected:?}"
+    );
+}
+
+/// `pieces` weighted by the word count, as a `/tokenize` counting [`words`] weighs them.
+fn by_words(pieces: &[String], vector: fn(&str) -> Vec<f32>) -> Vec<f32> {
+    let weighted: Vec<_> = pieces.iter().map(|p| (words(p), vector(p))).collect();
+    pooled(&weighted)
+}
+
+#[tokio::test]
+async fn over_length_input_is_chunked_by_the_servers_count() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    mount_embed(&server, 8, letters).await;
+    let uri = server.uri();
+    let text = abc();
+    let input = text.clone();
+    let vector = blocking(move || {
+        HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "m".into(),
+            "llama.cpp".into(),
+            Some("test-key".into()),
+            DIM,
+            5,
+        )
+        .unwrap()
+        .with_served_artifact(ServedArtifact {
+            artifact_sha256: "0".repeat(64),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 8,
+        })
+        .embed(&input)
+    })
+    .await
+    .unwrap();
+
+    let sent = embedded(&server).await;
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert_eq!(sent.concat(), text);
+    assert!(sent.iter().all(|p| words(p) <= 8), "{sent:?}");
+    assert_close(&vector, &by_words(&sent, letters));
+
+    let counted = requests(&server, "/tokenize").await;
+    let body: Value = serde_json::from_slice(&counted[0].body).unwrap();
+    assert_eq!(body["add_special"], true);
+    assert_eq!(body["parse_special"], true);
+    assert_eq!(
+        counted[0].headers.get("authorization").unwrap(),
+        "Bearer test-key"
+    );
+}
+
+#[tokio::test]
+async fn over_length_short_input_is_never_counted() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    mount_embed(&server, 64, letters).await;
+    let uri = server.uri();
+    blocking(move || limited(&uri, "llama.cpp", Some(64)).embed("a short fact"))
+        .await
+        .unwrap();
+    assert!(requests(&server, "/tokenize").await.is_empty());
+    assert_eq!(embedded(&server).await, ["a short fact"]);
+}
+
+/// The byte bound's count: a token covers at least one byte, plus 2 special tokens.
+const fn byte_bound(text: &str) -> usize {
+    text.len() + 2
+}
+
+/// Assert `vector` pools `text`'s pieces, which the byte bound kept within `limit`.
+async fn assert_byte_bound_pieces(server: &MockServer, text: &str, limit: usize, vector: &[f32]) {
+    let sent = embedded(server).await;
+    assert!(sent.len() > 1, "{sent:?}");
+    assert_eq!(sent.concat(), text);
+    assert!(sent.iter().all(|p| byte_bound(p) <= limit), "{sent:?}");
+    let weighted: Vec<_> = sent.iter().map(|p| (byte_bound(p), letters(p))).collect();
+    assert_close(vector, &pooled(&weighted));
+}
+
+#[tokio::test]
+async fn over_length_without_tokenize_uses_the_byte_bound() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    mount_embed(&server, 16, letters).await;
+    let uri = server.uri();
+    let vector = blocking(move || limited(&uri, "tei", Some(16)).embed(&abc()))
+        .await
+        .unwrap();
+    assert!(requests(&server, "/tokenize").await.is_empty());
+    assert_byte_bound_pieces(&server, &abc(), 16, &vector).await;
+}
+
+#[tokio::test]
+async fn over_length_missing_tokenize_falls_back_to_the_byte_bound() {
+    for answer in [
+        ResponseTemplate::new(404),
+        ResponseTemplate::new(400),
+        ResponseTemplate::new(405),
+        ResponseTemplate::new(422),
+        ResponseTemplate::new(200).set_body_json(json!({ "count": 3 })),
+        ResponseTemplate::new(200).set_body_string("<html>not here</html>"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tokenize"))
+            .respond_with(answer)
+            .mount(&server)
+            .await;
+        mount_embed(&server, 16, letters).await;
+        let uri = server.uri();
+        let vector = blocking(move || limited(&uri, "llama.cpp", Some(16)).embed(&abc()))
+            .await
+            .unwrap();
+        assert_eq!(requests(&server, "/tokenize").await.len(), 1);
+        assert_byte_bound_pieces(&server, &abc(), 16, &vector).await;
+    }
+}
+
+#[tokio::test]
+async fn over_length_without_a_declared_limit_is_chunked_by_the_recorded_answer() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    mount_embed(&server, 8, letters).await;
+    let uri = server.uri();
+    let vector = blocking(move || limited(&uri, "tei", None).embed(&abc()))
+        .await
+        .unwrap();
+    let sent = embedded(&server).await;
+    assert_eq!(sent[0], abc(), "the whole input is tried first");
+    let pieces = &sent[1..];
+    assert_eq!(pieces.len(), 3, "{sent:?}");
+    assert_eq!(pieces.concat(), abc());
+    assert!(!requests(&server, "/tokenize").await.is_empty());
+    assert_close(&vector, &by_words(pieces, letters));
+}
+
+#[tokio::test]
+async fn over_length_in_a_batch_is_chunked_alone() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    mount_embed(&server, 8, letters).await;
+    let uri = server.uri();
+    let vectors = blocking(move || {
+        limited(&uri, "llama.cpp", Some(8)).embed_batch(&["a b", &abc(), "c c c"])
+    })
+    .await
+    .unwrap();
+
+    let (whole, alone): (Vec<_>, Vec<_>) = requests(&server, "/v1/embeddings")
+        .await
+        .iter()
+        .map(inputs)
+        .partition(|b| b.len() > 1);
+    assert_eq!(whole, [["a b", "c c c"]]);
+    let pieces: Vec<String> = alone.into_iter().flatten().collect();
+    assert_eq!(pieces.concat(), abc());
+    assert!(pieces.iter().all(|p| words(p) <= 8), "{pieces:?}");
+    assert_eq!(vectors.len(), 3);
+    assert_eq!(vectors[0], letters("a b"));
+    assert_close(&vectors[1], &by_words(&pieces, letters));
+    assert_eq!(vectors[2], letters("c c c"));
+}
+
+#[tokio::test]
+async fn over_length_recorded_answer_in_a_batch_falls_back_per_text() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    mount_embed(&server, 8, letters).await;
+    let uri = server.uri();
+    let vectors = blocking(move || limited(&uri, "tei", None).embed_batch(&["a b", &abc()]))
+        .await
+        .unwrap();
+
+    let batches: Vec<Vec<String>> = requests(&server, "/v1/embeddings")
+        .await
+        .iter()
+        .map(inputs)
+        .collect();
+    assert_eq!(
+        batches[0],
+        ["a b".to_owned(), abc()],
+        "the batch is tried first"
+    );
+    assert_eq!(batches[1], ["a b"]);
+    assert_eq!(batches[2], [abc()]);
+    let pieces: Vec<String> = batches[3..].iter().flatten().cloned().collect();
+    assert_eq!(pieces.concat(), abc());
+    assert_eq!(vectors.len(), 2);
+    assert_eq!(vectors[0], letters("a b"));
+    assert_close(&vectors[1], &by_words(&pieces, letters));
+}
+
+#[tokio::test]
+async fn over_length_tokenize_401_is_key_rejected() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/tokenize"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("bad key"))
+        .mount(&server)
+        .await;
+    mount_embed(&server, 8, letters).await;
+    let uri = server.uri();
+    let err = blocking(move || limited(&uri, "llama.cpp", Some(8)).embed(&abc()))
+        .await
+        .unwrap_err();
+    assert_eq!(kind(&err), "key rejected", "{err}");
+    assert_eq!(embedded(&server).await, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn over_length_counted_400_after_a_fitting_count_is_input_rejected() {
+    // The count says the input fits; the server disagrees.
+    for (provider, limit, embeds) in [("llama.cpp", Some(8), 1), ("tei", None, 2)] {
+        let server = MockServer::start().await;
+        mount_tokenize(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(recorded_body(9, 9)))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let err = blocking(move || limited(&uri, provider, limit).embed("alpha beta gamma"))
+            .await
+            .unwrap_err();
+        assert_eq!(kind(&err), "input rejected", "{provider}: {err}");
+        assert!(
+            err.to_string().contains("exceed_context_size_error"),
+            "{err}"
+        );
+        assert_eq!(embedded(&server).await.len(), embeds, "{provider}");
+    }
+}
+
+#[tokio::test]
+async fn over_length_pooling_applies_mrl_per_piece() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    // Truncated to 2 and renormalised, the pieces are [1, 0] and [0, 1]; truncating after
+    // pooling would give [1, 3] / √10 instead.
+    mount_embed(&server, 8, |t| {
+        if t.starts_with('a') {
+            vec![1.0, 0.0, 5.0, 5.0]
+        } else {
+            vec![0.0, 3.0, 5.0, 5.0]
+        }
+    })
+    .await;
+    let uri = server.uri();
+    let text = [["a"; 7], ["b"; 7]].concat().join(" ");
+    let vector = blocking(move || {
+        limited(&uri, "llama.cpp", Some(8))
+            .with_mrl_dim(2)
+            .unwrap()
+            .embed(&text)
+    })
+    .await
+    .unwrap();
+    assert_eq!(embedded(&server).await.len(), 2);
+    assert_close(&vector, &[std::f32::consts::FRAC_1_SQRT_2; 2]);
+}
+
+#[tokio::test]
+async fn over_length_zero_norm_pool_is_an_error() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    mount_embed(&server, 8, |t| {
+        let x = if t.starts_with('a') { 1.0 } else { -1.0 };
+        vec![x, 0.0, 0.0, 0.0]
+    })
+    .await;
+    let uri = server.uri();
+    let text = [["a"; 7], ["b"; 7]].concat().join(" ");
+    let err = blocking(move || limited(&uri, "llama.cpp", Some(8)).embed(&text))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("zero or non-finite L2 norm"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn over_length_rule_leaves_another_400_alone() {
+    let mut other_type = recorded_body(9, 9);
+    other_type["error"]["type"] = json!("invalid_request_error");
+    let mut textual_n_ctx = recorded_body(9, 9);
+    textual_n_ctx["error"]["n_ctx"] = json!("9");
+    for answer in [
+        ResponseTemplate::new(400).set_body_string("bad request"),
+        ResponseTemplate::new(400).set_body_json(other_type),
+        ResponseTemplate::new(400).set_body_json(textual_n_ctx),
+        ResponseTemplate::new(413).set_body_json(recorded_body(9, 9)),
+        ResponseTemplate::new(422).set_body_json(recorded_body(9, 9)),
+    ] {
+        let server = MockServer::start().await;
+        mount_tokenize(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(answer)
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let err = blocking(move || limited(&uri, "tei", None).embed(&abc()))
+            .await
+            .unwrap_err();
+        assert_eq!(kind(&err), "input rejected", "{err}");
+        assert_eq!(embedded(&server).await.len(), 1, "{err}");
+        assert!(requests(&server, "/tokenize").await.is_empty(), "{err}");
+    }
 }
