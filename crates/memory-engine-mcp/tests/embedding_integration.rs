@@ -878,3 +878,94 @@ async fn add_fact_path_never_applies_pinned_instruction() {
     .await;
     assert_eq!(sole_input(&server).await, json!("document text"));
 }
+
+// ---------------------------------------------------------------------------
+// A pre-computed write must match the configured provider (#1017)
+// ---------------------------------------------------------------------------
+
+/// A provider declaring the ADR 0015 served artifact, and a fresh engine.
+async fn served_engine_and_provider() -> (MemoryEngine, Arc<HttpEmbeddingProvider>) {
+    tokio::task::spawn_blocking(|| {
+        let served = memory_engine::ServedArtifact::from_parts(
+            Some("06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439".into()),
+            Some("last".into()),
+            Some("l2".into()),
+            Some(2048),
+        )
+        .unwrap()
+        .unwrap();
+        let p = HttpEmbeddingProvider::new(
+            "http://127.0.0.1:9/v1/embeddings".into(),
+            "Qwen/Qwen3-Embedding-0.6B".into(),
+            "llama.cpp".into(),
+            None,
+            DIM,
+            5,
+        )
+        .unwrap()
+        .with_served_artifact(served);
+        (MemoryEngine::builder(DIM).build().unwrap(), Arc::new(p))
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn precomputed_add_fact_on_blank_store_rejected_under_served_config() {
+    // A pre-computed declaration carries no served artifact, so on a blank store it would
+    // stamp an identity the server's own provider then mismatches at the next start.
+    let (engine, provider) = served_engine_and_provider().await;
+    let result = tools::dispatch(
+        "memory_add_fact",
+        args(json!({
+            "content": "pre-computed",
+            "embedding": vec![0.1_f32; DIM],
+            "model": "Qwen/Qwen3-Embedding-0.6B",
+            "provider": "llama.cpp",
+        })),
+        &engine,
+        Some(provider),
+        None,
+        DIM,
+        &cfg(),
+    )
+    .await;
+    assert!(result.is_err(), "the write is refused: {result:?}");
+    // A blank store accepts any same-dim identity; a stamped one would refuse this.
+    engine
+        .verify_embedding_fingerprint(&memory_engine::EmbeddingFingerprint::new(
+            "unrelated",
+            "x",
+            DIM,
+        ))
+        .await
+        .expect("nothing was stamped");
+}
+
+#[tokio::test]
+async fn precomputed_add_fact_matching_configured_provider_is_accepted() {
+    let (engine, provider) = build_engine_and_provider(
+        "http://127.0.0.1:9/v1/embeddings".into(),
+        "Qwen/Qwen3-Embedding-0.6B",
+        "llama.cpp",
+        None,
+        None,
+    )
+    .await;
+    let result = tools::dispatch(
+        "memory_add_fact",
+        args(json!({
+            "content": "pre-computed",
+            "embedding": vec![0.1_f32; DIM],
+            "model": "Qwen/Qwen3-Embedding-0.6B",
+            "provider": "llama.cpp",
+        })),
+        &engine,
+        Some(provider),
+        None,
+        DIM,
+        &cfg(),
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+}
