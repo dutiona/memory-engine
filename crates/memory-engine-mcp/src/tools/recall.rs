@@ -58,7 +58,7 @@ pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<Strin
         Ok((body, fact_ids)) => {
             let mut detail = serde_json::Map::new();
             detail.insert("fact_ids".to_owned(), json!(fact_ids));
-            super::record(ctx, call, "recall", detail).await?;
+            super::record(ctx, call, "recall", detail, &ctx.bucket()).await?;
             Ok(body)
         }
         Err(message) => super::refuse(ctx, call, "recall", message).await,

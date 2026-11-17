@@ -1,6 +1,7 @@
-//! The model's surface over HTTP (ADR-0020 §8, ADR-0021 §5-§6): `recall` and `remember`, each
-//! answer headed by its call ID. Until #1022 every session is keyless: it files into its
-//! machine's bucket and reads that bucket and `user:alice`.
+//! The model's surface over HTTP (ADR-0020 §8, ADR-0021 §5-§6), each answer headed by its call
+//! ID. These calls send no project facts, so every session here is keyless: it files into its
+//! machine's bucket and reads that bucket and `user:alice`. `tests/project_scope.rs` covers
+//! the keyed sessions.
 
 mod common;
 
@@ -407,28 +408,6 @@ async fn recall_embeds_with_the_query_instruction_and_remember_without() {
 
 // --- Call records (ADR-0020 §8, ADR-0021 §12): one event-log record per model-tool call ---
 
-/// The `MemoryOp` records, oldest first: (id, payload, scope path).
-fn records(server: &TestServer) -> Vec<(i64, Value, String)> {
-    let conn = rusqlite::Connection::open(server.dir.path().join("memory.db")).unwrap();
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.id, e.payload, s.label FROM events e JOIN scopes s ON s.id = e.scope_id \
-             WHERE e.event_type = 'MemoryOp' ORDER BY e.id",
-        )
-        .unwrap();
-    stmt.query_map([], |r| {
-        let payload: String = r.get(1)?;
-        Ok((
-            r.get(0)?,
-            serde_json::from_str(&payload).unwrap(),
-            r.get(2)?,
-        ))
-    })
-    .unwrap()
-    .map(Result::unwrap)
-    .collect()
-}
-
 fn remembered_id(reply: &common::Reply) -> i64 {
     reply.body.split(' ').nth(1).unwrap().parse().unwrap()
 }
@@ -463,7 +442,7 @@ async fn each_call_is_recorded_in_the_event_log() {
         .await;
     let _ = server.call("laptop", "memory_forget", json!({})).await;
 
-    let records = records(&server);
+    let records = server.records();
     assert_eq!(records.len(), 4, "{records:?}");
     for ((_, payload, scope), (reply, tool)) in records.iter().zip([
         (&remember, "remember"),
@@ -475,8 +454,13 @@ async fn each_call_is_recorded_in_the_event_log() {
         assert_eq!(payload["tool"], tool, "{payload}");
         assert_eq!(payload["machine"], "laptop", "{payload}");
         assert_eq!(
+            payload["project"],
+            json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+            "{payload}"
+        );
+        assert_eq!(
             scope, "unscoped:laptop",
-            "under the session's own Home, even under the swap"
+            "under the calling machine's bucket, even under the swap"
         );
     }
     assert_eq!(records[1].1["fact_ids"], json!([fact]));
@@ -521,19 +505,9 @@ async fn an_oversized_value_cannot_make_its_record_fail() {
         reply.is_error && reply.body.contains(&key),
         "the reply names the value in full"
     );
-    let records = records(&server);
+    let records = server.records();
     let error = records[0].1["error"].as_str().unwrap();
     assert!(error.len() <= 512, "{}", error.len());
-}
-
-fn refuse_event_writes(server: &TestServer) {
-    rusqlite::Connection::open(server.dir.path().join("memory.db"))
-        .unwrap()
-        .execute_batch(
-            "CREATE TRIGGER refuse_events BEFORE INSERT ON events \
-             BEGIN SELECT RAISE(ABORT, 'event writes refused by the test'); END;",
-        )
-        .unwrap();
 }
 
 #[tokio::test]
@@ -544,7 +518,7 @@ async fn a_remember_whose_record_fails_stores_nothing() {
         .ensure_scope_path("unscoped:laptop")
         .await
         .unwrap();
-    refuse_event_writes(&server);
+    server.refuse_event_writes();
     let reply = server
         .tool("laptop", "remember", json!({ "content": "kestrel" }))
         .await;
@@ -559,7 +533,7 @@ async fn a_recall_whose_record_fails_is_an_error() {
     server
         .seed(Some("unscoped:laptop"), "kestrel", json!({}))
         .await;
-    refuse_event_writes(&server);
+    server.refuse_event_writes();
     let reply = server
         .tool("laptop", "recall", json!({ "query": "kestrel" }))
         .await;
@@ -570,7 +544,7 @@ async fn a_recall_whose_record_fails_is_an_error() {
 #[tokio::test]
 async fn a_refusal_whose_record_fails_still_says_why() {
     let server = TestServer::start().await;
-    refuse_event_writes(&server);
+    server.refuse_event_writes();
     let reply = server
         .tool(
             "laptop",
@@ -598,7 +572,7 @@ async fn a_recall_whose_embedder_fails_is_a_recorded_error() {
         .tool("laptop", "recall", json!({ "query": "kestrel" }))
         .await;
     assert!(reply.is_error, "{reply:?}");
-    let records = records(&server);
+    let records = server.records();
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0].1["call"], reply.call, "{records:?}");
     assert!(
@@ -621,7 +595,7 @@ async fn a_remember_whose_fact_write_fails_leaves_an_unnamed_record() {
         .tool("laptop", "remember", json!({ "content": "kestrel" }))
         .await;
     assert!(reply.is_error, "{reply:?}");
-    let records = records(&server);
+    let records = server.records();
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0].1["call"], reply.call);
     assert_eq!(server.fact_count().await, 0, "no fact names the record");

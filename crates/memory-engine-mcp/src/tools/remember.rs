@@ -39,7 +39,8 @@ pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<Strin
     };
     // The record comes first and the fact names it, so no fact exists without its record. A
     // fact write that fails after it leaves a record no fact names: a failed remember.
-    let record = super::record(ctx, call, "remember", serde_json::Map::new()).await?;
+    let record =
+        super::record(ctx, call, "remember", serde_json::Map::new(), &ctx.bucket()).await?;
     // Until #1022 derives a project key, every session is keyless (ADR-0021 §6).
     let request = AddFactRequest {
         content,

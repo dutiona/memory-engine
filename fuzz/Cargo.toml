@@ -37,6 +37,9 @@ memory-engine-embed = { path = "../crates/memory-engine-embed" }
 # Drives the MCP tool dispatcher (`MemoryMcpServer::dispatch`), the server's primary
 # untrusted-input entry point (#321).
 memory-engine-mcp = { path = "../crates/memory-engine-mcp" }
+# The header map the dispatch target builds its project facts from; the version axum 0.8
+# uses, so `ProjectFacts::from_headers` takes it as is.
+http = "1"
 
 # Detach from the parent workspace: an empty `[workspace]` makes this its own
 # workspace root, so the repo-root `cargo build --workspace` ignores it.

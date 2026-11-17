@@ -7,12 +7,14 @@
 use std::sync::Arc;
 
 use memory_engine::engine::MemoryEngine;
+use memory_engine::types::{EventType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
 use serde_json::{Map, Value};
 
 use crate::auth::Machine;
 use crate::embedding::HttpEmbeddingProvider;
-use crate::home::User;
+use crate::home::{Home, User};
+use crate::project::{ProjectFacts, ProjectKey};
 
 mod recall;
 mod remember;
@@ -29,6 +31,15 @@ pub(crate) struct CallContext<'a> {
     pub(crate) embedder: Option<&'a Arc<HttpEmbeddingProvider>>,
     pub(crate) user: &'a User,
     pub(crate) machine: &'a Machine,
+    pub(crate) facts: &'a ProjectFacts,
+    /// The session's project key, derived once from `facts` and `machine`.
+    pub(crate) key: Option<ProjectKey>,
+}
+
+impl CallContext<'_> {
+    pub(crate) fn bucket(&self) -> Home {
+        Home::Bucket(self.machine.clone())
+    }
 }
 
 /// A fresh call ID: 16 lowercase hex digits from the OS random number generator
@@ -73,43 +84,50 @@ pub(crate) async fn call_model_tool(
     Some(Ok(respond(&call, outcome)))
 }
 
-/// Append the call's record to the event log (ADR-0021 §12: a call record is an ADR-0001
-/// event, never a table beside the log), filed under the session's own Home, and return the
-/// event's id. `detail` adds `fact_ids` or `error`. #1022 adds the request's project facts.
+/// The call's record (ADR-0020 §8): its ID, tool and machine, the request's project facts
+/// with the key and rules version, and `detail` (`fact_ids`, `error`, `level`, ...).
+fn call_record(
+    ctx: &CallContext<'_>,
+    call: &str,
+    tool: &str,
+    detail: Map<String, Value>,
+) -> NewEvent {
+    let mut payload = Map::new();
+    payload.insert("call".to_owned(), call.into());
+    payload.insert("tool".to_owned(), tool.into());
+    payload.insert("machine".to_owned(), ctx.machine.as_str().into());
+    payload.insert("project".to_owned(), ctx.facts.provenance(ctx.key.as_ref()));
+    payload.extend(detail);
+    NewEvent {
+        timestamp: chrono::Utc::now(),
+        event_type: EventType::MemoryOp,
+        payload: Value::Object(payload),
+        source: "mcp".to_owned(),
+        session_id: None,
+        scope_id: 1,
+        origin_node_id: "mcp".to_owned(),
+        sequence_id: 0,
+        created_at: None,
+    }
+}
+
+/// Append the call's record to the event log under `home` (ADR-0021 §12: a call record is an
+/// ADR-0001 event, never a table beside the log), creating `home` in the record's own
+/// transaction, and return the event's id. Records go under the calling machine's bucket,
+/// except a valid `remember`'s, which goes under the Home it writes to: a record is
+/// provenance, and filing a read's under a project would make that project known (ADR-0020
+/// §8). Re-filing reads the payload, never the record's scope.
 async fn record(
     ctx: &CallContext<'_>,
     call: &str,
     tool: &str,
     detail: Map<String, Value>,
+    home: &Home,
 ) -> Result<i64, String> {
-    let refused = |e: memory_engine::MemoryError| format!("cannot record this call: {e}");
-    let bucket = crate::home::Home::Bucket(ctx.machine.clone()).path(ctx.user);
-    // Resolve first: creating the path is a write transaction, needed once per machine.
-    let scope_id = match ctx.engine.resolve_scope_path(&bucket) {
-        Some(id) => id,
-        None => ctx
-            .engine
-            .ensure_scope_path(&bucket)
-            .await
-            .map_err(refused)?,
-    };
-    let mut payload = Map::new();
-    payload.insert("call".to_owned(), call.into());
-    payload.insert("tool".to_owned(), tool.into());
-    payload.insert("machine".to_owned(), ctx.machine.as_str().into());
-    payload.extend(detail);
-    let event = memory_engine::types::NewEvent {
-        timestamp: chrono::Utc::now(),
-        event_type: memory_engine::types::EventType::MemoryOp,
-        payload: Value::Object(payload),
-        source: "mcp".to_owned(),
-        session_id: None,
-        scope_id,
-        origin_node_id: "mcp".to_owned(),
-        sequence_id: 0,
-        created_at: None,
-    };
-    ctx.engine.ingest(&event).await.map_err(refused)
+    ctx.engine
+        .ingest_at(&home.path(ctx.user), &call_record(ctx, call, tool, detail))
+        .await
+        .map_err(|e| format!("cannot record this call: {e}"))
 }
 
 /// Record a call that failed before anything was stored, then answer its failure.
@@ -121,7 +139,7 @@ async fn refuse(
 ) -> Result<String, String> {
     let mut detail = Map::new();
     detail.insert("error".to_owned(), capture_cut(&message).into());
-    match record(ctx, call, tool, detail).await {
+    match record(ctx, call, tool, detail, &ctx.bucket()).await {
         Ok(_) => Err(message),
         Err(e) => Err(format!("{message} ({e})")),
     }
