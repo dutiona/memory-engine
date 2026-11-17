@@ -1,6 +1,6 @@
-//! The model's tools (ADR-0020 §8): `recall`, `remember` and `set_level`.
+//! The model's tools (ADR-0020 §8): `recall`, `remember`, `forget` and `set_level`.
 //!
-//! #1023 adds `forget`. Each tool is one module holding its
+//! Each tool is one module holding its
 //! definition, its closed argument struct and its handler; this module routes a name to it,
 //! mints the call ID that heads every answer and appends the call's record to the event log.
 
@@ -17,6 +17,7 @@ use crate::embedding::HttpEmbeddingProvider;
 use crate::home::{Home, User};
 use crate::project::{ProjectFacts, ProjectKey};
 
+mod forget;
 mod placement;
 mod recall;
 mod remember;
@@ -28,6 +29,7 @@ pub fn definitions() -> Vec<Tool> {
     vec![
         recall::definition(),
         remember::definition(),
+        forget::definition(),
         set_level::definition(),
     ]
 }
@@ -100,7 +102,7 @@ pub(crate) async fn call_model_tool(
     args: Map<String, Value>,
     ctx: &CallContext<'_>,
 ) -> Option<Result<CallToolResult, ErrorData>> {
-    if !matches!(name, "recall" | "remember" | "set_level") {
+    if !matches!(name, "recall" | "remember" | "forget" | "set_level") {
         return None;
     }
     // Unreachable once main's startup probe succeeded: Linux getrandom(2) never fails after
@@ -118,6 +120,7 @@ pub(crate) async fn call_model_tool(
     let outcome = match name {
         "recall" => recall::run(ctx, &call, args).await,
         "remember" => remember::run(ctx, &call, args).await,
+        "forget" => forget::run(ctx, &call, args).await,
         _ => set_level::run(ctx, &call, args).await,
     };
     Some(Ok(respond(&call, outcome)))
@@ -127,7 +130,8 @@ pub(crate) async fn call_model_tool(
 /// missing id, so it reveals nothing (ADR-0020 §8).
 pub(crate) const NOT_FOUND: &str = "not found";
 
-/// ADR-0021 §5's by-ID authority, shared with #1023's `forget`: the fact and the Home that
+/// ADR-0021 §5's by-ID authority for `set_level` (`forget` checks the same Homes inside its
+/// write): the fact and the Home that
 /// holds it when that Home is the session's own or the user level; `None` for anything else
 /// (root, another project, another bucket, a fact `recall` reached through `project`, a
 /// missing id). Liveness is the caller's.

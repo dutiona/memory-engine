@@ -1,5 +1,8 @@
 # ADR-0020 §8: the derived jobs are off in the server. No tool, route or timer may run them;
-# the follow-up that turns them on in the server deletes this guard deliberately.
+# the follow-up that turns them on in the server deletes this guard deliberately. Pruning,
+# erasure, archival and reversing a forget are maintenance CLI operations, never the
+# agent's (#1023). `archive` exists only under the facade's `archive` feature, which this
+# crate alone does not enable, hence `allow-invalid`.
 disallowed-methods = [
     { path = "memory_engine::engine::MemoryEngine::consolidate", reason = "ADR-0020 §8: derived jobs are off in the server" },
     { path = "memory_engine::engine::MemoryEngine::run_dream_cycle", reason = "ADR-0020 §8: derived jobs are off in the server" },
@@ -7,4 +10,8 @@ disallowed-methods = [
     { path = "memory_engine::engine::MemoryEngine::apply_cycle_report", reason = "ADR-0020 §8: derived jobs are off in the server" },
     { path = "memory_engine::engine::MemoryEngine::add_facts_batch", reason = "ADR-0020 §8: the insight flush is a derived job, off in the server; remember uses add_fact" },
     { path = "memory_engine::engine::MemoryEngine::add_facts_batch_partial", reason = "ADR-0020 §8: the same batch write as add_facts_batch; remember uses add_fact" },
+    { path = "memory_engine::engine::MemoryEngine::forget", reason = "ADR-0020 §8: pruning is a maintenance command (`prune`); the retraction is forget_fact" },
+    { path = "memory_engine::engine::MemoryEngine::unforget_fact", reason = "ADR-0020 §8: reversing a forget is a maintenance command (`unforget`)" },
+    { path = "memory_engine::engine::MemoryEngine::erase", reason = "ADR-0020 §8: erasure is a maintenance command (`erase`); there is no admin endpoint" },
+    { path = "memory_engine::engine::MemoryEngine::archive", reason = "ADR-0020 §8: archival hard-deletes; it is never the agent's", allow-invalid = true },
 ]
