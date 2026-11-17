@@ -1,13 +1,23 @@
-//! The request's project facts (ADR-0020 §3).
+//! The request's project facts (ADR-0020 §3) and the project key derived from them (§7).
 //!
 //! The five `ME-Project-*` headers are decoded once, canonically: a bad fact is dropped and
 //! flagged, never the request. Both remote URLs lose their userinfo before anything holds
-//! them. Nothing here depends on MCP, so the lifecycle routes (#1025) decode the same way.
+//! them. The key follows rules version [`KEY_RULES_VERSION`], stated canonically in
+//! `docs/reference/mcp-server.md`. Nothing here depends on MCP, so the lifecycle routes
+//! (#1025) decode and derive the same way.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use axum::http::HeaderMap;
+use memory_engine::types::MAX_SEGMENT_LEN;
 use serde::Serialize;
+use serde_json::{Map, Value, json};
+
+use crate::auth::Machine;
+
+/// The version of the key rules below; any change to them increments it (ADR-0020 §7).
+pub const KEY_RULES_VERSION: u32 = 1;
 
 /// Why a fact was dropped (ADR-0020 §3). These names are stored in the event log, so they
 /// never change.
@@ -95,6 +105,44 @@ impl ProjectFacts {
         facts
     }
 
+    /// The project key, by rules version 1: the `upstream` remote's, else the `origin`
+    /// remote's, else the path key; `None` when the chosen key exceeds the segment limit (no
+    /// fall-through to the next rule) or nothing gives one.
+    #[must_use]
+    pub fn key(&self, machine: &Machine) -> Option<ProjectKey> {
+        let candidate = self
+            .upstream_url
+            .as_deref()
+            .and_then(remote_key)
+            .or_else(|| self.origin_url.as_deref().and_then(remote_key))
+            .or_else(|| path_key(machine, self.root.as_deref()?, self.dev_root.as_deref()?))?;
+        ProjectKey::new(&candidate)
+    }
+
+    /// The block every call record keeps (ADR-0020 §8): the facts as decoded, the dropped
+    /// ones, the key and the rules version. All four members are always present.
+    #[must_use]
+    pub fn provenance(&self, key: Option<&ProjectKey>) -> Value {
+        let mut facts = Map::new();
+        for (name, value) in [
+            ("root", &self.root),
+            ("dev_root", &self.dev_root),
+            ("upstream_url", &self.upstream_url),
+            ("origin_url", &self.origin_url),
+            ("branch", &self.branch),
+        ] {
+            if let Some(value) = value {
+                facts.insert(name.to_owned(), value.as_str().into());
+            }
+        }
+        json!({
+            "facts": facts,
+            "dropped": self.dropped,
+            "key": key.map(ProjectKey::as_str),
+            "rules": KEY_RULES_VERSION,
+        })
+    }
+
     fn slot(&mut self, name: &str) -> &mut Option<String> {
         match name {
             "root" => &mut self.root,
@@ -104,6 +152,137 @@ impl ProjectFacts {
             _ => &mut self.branch,
         }
     }
+}
+
+/// A project's key, with its scope label: it exists only when `project:<label>` fits the
+/// scope tree's segment limit (ADR-0020 §7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectKey {
+    key: String,
+    label: String,
+}
+
+impl ProjectKey {
+    /// The key, or `None` when it is empty or its segment exceeds 256 bytes.
+    #[must_use]
+    pub fn new(key: &str) -> Option<Self> {
+        let label = label(key);
+        (!key.is_empty() && "project:".len() + label.len() <= MAX_SEGMENT_LEN).then(|| Self {
+            key: key.to_owned(),
+            label,
+        })
+    }
+
+    /// The key, as `recall` shows it in a result's scope.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.key
+    }
+
+    /// The scope label: every byte outside `A-Z a-z 0-9 - . _ ~` as uppercase `%HH`.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+impl fmt::Display for ProjectKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.key)
+    }
+}
+
+fn label(key: &str) -> String {
+    use std::fmt::Write;
+    key.bytes()
+        .fold(String::with_capacity(key.len()), |mut out, b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+                out.push(char::from(b));
+            } else {
+                let _ = write!(out, "%{b:02X}");
+            }
+            out
+        })
+}
+
+fn is_scheme(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'))
+}
+
+/// Rules R1 to R6: the normalized remote, or `None` for a local, `file:`, helper or unusable
+/// remote, which is then ignored as input.
+fn remote_key(url: &str) -> Option<String> {
+    if url
+        .get(..5)
+        .is_some_and(|p| p.eq_ignore_ascii_case("file:"))
+    {
+        return None;
+    }
+    if url.find("::").is_some_and(|i| is_scheme(&url[..i])) {
+        return None;
+    }
+    let (host, path) = match url.find("://") {
+        Some(i) if is_scheme(&url[..i]) => {
+            let rest = &url[i + 3..];
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            let (host, after) = split_host(host)?;
+            if !(after.is_empty()
+                || after
+                    .strip_prefix(':')
+                    .is_some_and(|port| port.bytes().all(|b| b.is_ascii_digit())))
+            {
+                return None;
+            }
+            (host, path)
+        }
+        _ => {
+            let colon = url.find(':')?;
+            if url[..colon].contains('/') {
+                return None;
+            }
+            let at = url[..colon].rfind('@').map_or(0, |i| i + 1);
+            let (host, after) = split_host(&url[at..])?;
+            (host, after.strip_prefix(':')?)
+        }
+    };
+    let path = path.trim_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    (!host.is_empty() && !path.is_empty()).then(|| format!("{}/{path}", host.to_ascii_lowercase()))
+}
+
+/// Split a host from what follows it: a bracketed host runs through its `]`, any other up
+/// to its first `:`. `None` for an unclosed bracket.
+fn split_host(text: &str) -> Option<(&str, &str)> {
+    if text.starts_with('[') {
+        let end = text.find(']')? + 1;
+        Some(text.split_at(end))
+    } else {
+        Some(text.find(':').map_or((text, ""), |i| text.split_at(i)))
+    }
+}
+
+/// Rules P1 to P4: `<machine>:<path>`, the root relative to the dev root, strictly below it
+/// and canonical.
+fn path_key(machine: &Machine, root: &str, dev_root: &str) -> Option<String> {
+    let dev = dev_root.trim_end_matches('/');
+    let relative = root
+        .strip_prefix(dev)?
+        .strip_prefix('/')?
+        .trim_end_matches('/');
+    if relative.is_empty()
+        || relative
+            .split('/')
+            .any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return None;
+    }
+    Some(format!("{}:{relative}", machine.as_str()))
 }
 
 /// The length and printable-ASCII checks every fact shares (ADR-0020 §3, rules 3 to 5).
@@ -384,5 +563,234 @@ mod tests {
         assert_eq!(facts.root.as_deref(), Some("/home/alice/dev/p"));
         assert_eq!(facts.dev_root, None);
         assert!(!facts.dropped.contains_key("dev_root"));
+    }
+
+    fn laptop() -> crate::auth::Machine {
+        crate::auth::Machine::named("laptop")
+    }
+
+    fn remote(url: &str) -> Option<String> {
+        ProjectFacts {
+            origin_url: Some(url.to_owned()),
+            ..ProjectFacts::default()
+        }
+        .key(&laptop())
+        .map(|k| k.as_str().to_owned())
+    }
+
+    fn path(root: &str, dev: &str) -> Option<String> {
+        ProjectFacts {
+            root: Some(root.to_owned()),
+            dev_root: Some(dev.to_owned()),
+            ..ProjectFacts::default()
+        }
+        .key(&laptop())
+        .map(|k| k.as_str().to_owned())
+    }
+
+    #[test]
+    fn remote_keys_follow_rules_v1() {
+        for url in [
+            "git@github.com:example/project.git",
+            "https://github.com/example/project.git/",
+            "ssh://git@GitHub.com:22/example/project.git",
+            "git+ssh://git@github.com/example/project",
+            "https://alice:s3cret@github.com/example/project",
+        ] {
+            assert_eq!(
+                remote(&strip_userinfo(url)).as_deref(),
+                Some("github.com/example/project"),
+                "{url}"
+            );
+        }
+        for (url, key) in [
+            (
+                "https://github.com/example/Project",
+                "github.com/example/Project",
+            ),
+            (
+                "ssh://git@[2001:DB8::1]:2222/example/x.git",
+                "[2001:db8::1]/example/x",
+            ),
+            ("git@[2001:db8::1]:example/x", "[2001:db8::1]/example/x"),
+            ("https://github.com/example/a:b", "github.com/example/a:b"),
+            ("git@github.com:/srv/x.git", "github.com/srv/x"),
+            ("ssh://github.com/srv/x", "github.com/srv/x"),
+            (
+                "https://github.com/example/X.GIT",
+                "github.com/example/X.GIT",
+            ),
+        ] {
+            assert_eq!(remote(&strip_userinfo(url)).as_deref(), Some(key), "{url}");
+        }
+        for url in [
+            "file:///srv/x.git",
+            "FILE:/x",
+            "/srv/x.git",
+            "./x",
+            "../x",
+            "x",
+            "./a:b",
+            "hg::ssh://host/x",
+            "https://github.com",
+            "https://github.com/",
+            "https:///x",
+            "https://host/.git",
+            "https://github.com:abc/x",
+            "ssh://[2001:db8::1/x",
+            "git@:x",
+            "host:",
+            ":x",
+        ] {
+            assert_eq!(remote(&strip_userinfo(url)), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn the_key_order_is_upstream_origin_path() {
+        let facts = |upstream: Option<&str>, origin: Option<&str>| ProjectFacts {
+            root: Some("/home/alice/dev/p".to_owned()),
+            dev_root: Some("/home/alice/dev".to_owned()),
+            upstream_url: upstream.map(str::to_owned),
+            origin_url: origin.map(str::to_owned),
+            ..ProjectFacts::default()
+        };
+        let key = |f: ProjectFacts| f.key(&laptop()).map(|k| k.as_str().to_owned());
+        let up = Some("github.com:example/p.git");
+        let fork = Some("https://github.com/alice/p");
+        assert_eq!(
+            key(facts(up, fork)).as_deref(),
+            Some("github.com/example/p")
+        );
+        assert_eq!(
+            key(facts(Some("/srv/p.git"), fork)).as_deref(),
+            Some("github.com/alice/p")
+        );
+        assert_eq!(
+            key(facts(None, fork)).as_deref(),
+            Some("github.com/alice/p")
+        );
+        assert_eq!(
+            key(facts(Some("file:///p"), Some("/srv/p"))).as_deref(),
+            Some("laptop:p")
+        );
+        let mut none = facts(None, None);
+        none.root = None;
+        assert_eq!(key(none), None);
+    }
+
+    #[test]
+    fn path_keys_follow_rules_v1() {
+        for dev in ["/home/alice/perso/dev", "/home/alice/perso/dev/"] {
+            for root in [
+                "/home/alice/perso/dev/notes/2026",
+                "/home/alice/perso/dev/notes/2026/",
+            ] {
+                assert_eq!(
+                    path(root, dev).as_deref(),
+                    Some("laptop:notes/2026"),
+                    "{root} {dev}"
+                );
+            }
+        }
+        let dev = "/home/alice/perso/dev";
+        assert_eq!(
+            path("/home/alice/perso/dev/café", dev).as_deref(),
+            Some("laptop:café")
+        );
+        assert_eq!(
+            path("/home/alice/perso/dev/a:b", dev).as_deref(),
+            Some("laptop:a:b")
+        );
+        assert_eq!(
+            path("/home/alice/x", "/").as_deref(),
+            Some("laptop:home/alice/x")
+        );
+        for root in [
+            "/home/alice/perso/dev",
+            "/home/alice/perso/dev/",
+            "/home/alice/perso/devtools/x",
+            "/home/alice/x",
+            "/home/alice/perso/dev//x",
+            "/home/alice/perso/dev/./x",
+            "/home/alice/perso/dev/a/../b",
+            "notes/2026",
+        ] {
+            assert_eq!(path(root, dev), None, "{root}");
+        }
+        assert_eq!(path("x", "/"), None);
+    }
+
+    #[test]
+    fn the_segment_limit_rejects_the_final_key() {
+        let dev = "/home/alice/dev";
+        let rel = |s: String| path(&format!("{dev}/{s}"), dev);
+        assert!(rel("a".repeat(239)).is_some());
+        assert!(rel("a".repeat(240)).is_none());
+        assert!(rel("é".repeat(39)).is_some());
+        assert!(rel("é".repeat(40)).is_none());
+        let long = ProjectFacts {
+            upstream_url: Some(format!("https://github.com/example/{}", "a".repeat(240))),
+            origin_url: Some("https://github.com/example/p".to_owned()),
+            ..ProjectFacts::default()
+        };
+        assert_eq!(long.key(&laptop()), None);
+        assert_eq!(ProjectKey::new(""), None);
+    }
+
+    #[test]
+    fn path_keys_and_remote_keys_never_collide() {
+        let shadow = path(
+            "/home/alice/dev/github.com/example/project",
+            "/home/alice/dev",
+        );
+        assert_eq!(shadow.as_deref(), Some("laptop:github.com/example/project"));
+        let keys = [
+            "github.com/example/project",
+            "github.com/example/a:b",
+            "[2001:db8::1]/example/x",
+            "laptop:a:b",
+            "laptop:github.com/example/project",
+            "laptop:notes/2026",
+        ];
+        for key in keys {
+            let colon = key.find(':');
+            let slash = key.find('/');
+            // ADR-0020 §7: a path key starts with a machine name (a letter or a digit) and
+            // has no `/` before its first `:`.
+            let is_path = key.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && colon.is_some_and(|c| slash.is_none_or(|s| c < s));
+            let is_remote =
+                key.starts_with('[') || colon.is_none_or(|c| slash.is_some_and(|s| s < c));
+            assert!(is_path != is_remote, "{key}");
+        }
+        let labels: std::collections::HashSet<_> = keys
+            .iter()
+            .map(|k| ProjectKey::new(k).unwrap().label().to_owned())
+            .collect();
+        assert_eq!(labels.len(), keys.len());
+    }
+
+    #[test]
+    fn labels_follow_the_adr_examples() {
+        assert_eq!(
+            ProjectKey::new("github.com/example/project")
+                .unwrap()
+                .label(),
+            "github.com%2Fexample%2Fproject"
+        );
+        assert_eq!(
+            ProjectKey::new("laptop:notes/2026").unwrap().label(),
+            "laptop%3Anotes%2F2026"
+        );
+    }
+
+    #[test]
+    fn labels_encode_every_other_byte() {
+        let label = |k: &str| ProjectKey::new(k).unwrap().label().to_owned();
+        assert_eq!(label("%"), "%25");
+        assert_eq!(label("é"), "%C3%A9");
+        assert_eq!(label("a~b-c.d_e"), "a~b-c.d_e");
+        assert_ne!(label("a/b"), label("a%2Fb"));
     }
 }

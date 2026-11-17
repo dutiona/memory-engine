@@ -9,7 +9,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::CallContext;
-use crate::home;
+use crate::home::Home;
+use crate::project::ProjectKey;
 
 /// A fixed result count keeps the recall log comparable (ADR-0020 §8: no limit argument).
 const RESULTS: usize = 10;
@@ -76,17 +77,21 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
         ));
     }
 
-    let user_home = home::user_home(ctx.user);
+    let user_home = Home::User.path(ctx.user);
     let (context, context_label) = match project {
         Some(key) => {
-            let known = home::project_home(ctx.user, &key)
+            let known = ProjectKey::new(&key)
+                .map(|k| Home::Project(k).path(ctx.user))
                 .filter(|path| ctx.engine.resolve_scope_path(path).is_some());
             let Some(path) = known else {
                 return Err(format!("unknown project: {key:?}"));
             };
             (path, key)
         }
-        None => (home::bucket(ctx.machine), "unscoped".to_owned()),
+        None => (
+            Home::Bucket(ctx.machine.clone()).path(ctx.user),
+            "unscoped".to_owned(),
+        ),
     };
 
     let terms = fts_terms(&query);

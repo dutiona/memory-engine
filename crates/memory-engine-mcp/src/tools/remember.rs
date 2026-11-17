@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::CallContext;
-use crate::home;
+use crate::home::Home;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,7 +45,7 @@ pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<Strin
         content,
         fact_type: FactType::Semantic,
         source_event_id: Some(record),
-        scope: Some(home::bucket(ctx.machine)),
+        scope: Some(Home::Bucket(ctx.machine.clone()).path(ctx.user)),
         opts: Some(AddFactOptions {
             metadata: Some(json!({ "machine": ctx.machine.as_str() })),
             ..Default::default()

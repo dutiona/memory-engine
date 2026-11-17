@@ -1,13 +1,9 @@
 //! Homes: where a memory is filed and what a session reads (ADR-0020 §7, ADR-0021 §3).
-//!
-//! Until #1022 derives a project key from each request, every session is keyless: it files
-//! into its machine's bucket and reads that bucket and the user level (ADR-0021 §6).
 
 use std::fmt;
 
-use memory_engine::types::MAX_SEGMENT_LEN;
-
 use crate::auth::Machine;
+use crate::project::ProjectKey;
 
 /// The owner, `user:<user>` in the scope tree: a server setting (ADR-0020 §7).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,35 +33,27 @@ impl fmt::Display for User {
     }
 }
 
-/// The user level.
-pub(crate) fn user_home(user: &User) -> String {
-    format!("user:{user}")
+/// A Home: the one scope node a memory is filed at (ADR-0021 §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Home {
+    /// The user level, `user:<user>`.
+    User,
+    /// A project, `user:<user>/project:<label>`.
+    Project(ProjectKey),
+    /// A machine's bucket, `unscoped:<machine>`, a top-level node no query rooted at the
+    /// user reaches.
+    Bucket(Machine),
 }
 
-/// A machine's bucket, a top-level node no query rooted at the user reaches.
-pub(crate) fn bucket(machine: &Machine) -> String {
-    format!("unscoped:{}", machine.as_str())
-}
-
-/// The project whose key is `key`, or `None` when its segment exceeds the scope tree's limit
-/// (ADR-0020 §7: then there is no key).
-pub(crate) fn project_home(user: &User, key: &str) -> Option<String> {
-    let segment = format!("project:{}", label(key));
-    (segment.len() <= MAX_SEGMENT_LEN).then(|| format!("{}/{segment}", user_home(user)))
-}
-
-/// ADR-0020 §7: every byte outside `A-Z a-z 0-9 - . _ ~` percent-encoded in uppercase hex.
-fn label(key: &str) -> String {
-    use std::fmt::Write;
-    key.bytes()
-        .fold(String::with_capacity(key.len()), |mut out, b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-                out.push(char::from(b));
-            } else {
-                let _ = write!(out, "%{b:02X}");
-            }
-            out
-        })
+impl Home {
+    /// The Home's scope path.
+    pub(crate) fn path(&self, user: &User) -> String {
+        match self {
+            Self::User => format!("user:{user}"),
+            Self::Project(key) => format!("user:{user}/project:{}", key.label()),
+            Self::Bucket(machine) => format!("unscoped:{}", machine.as_str()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -77,38 +65,17 @@ mod tests {
     }
 
     #[test]
-    fn labels_follow_the_adr_examples() {
+    fn homes_render_their_paths() {
+        let key = ProjectKey::new("github.com/example/project").unwrap();
+        assert_eq!(Home::User.path(&alice()), "user:alice");
         assert_eq!(
-            label("github.com/example/project"),
-            "github.com%2Fexample%2Fproject"
+            Home::Project(key).path(&alice()),
+            "user:alice/project:github.com%2Fexample%2Fproject"
         );
-        assert_eq!(label("laptop:notes/2026"), "laptop%3Anotes%2F2026");
-    }
-
-    #[test]
-    fn labels_encode_every_other_byte() {
-        assert_eq!(label("%"), "%25");
-        assert_eq!(label("é"), "%C3%A9");
-        assert_eq!(label("a~b-c.d_e"), "a~b-c.d_e");
-        assert_ne!(label("a/b"), label("a%2Fb"));
-    }
-
-    #[test]
-    fn a_project_home_sits_under_the_user() {
         assert_eq!(
-            project_home(&alice(), "github.com/example/project").as_deref(),
-            Some("user:alice/project:github.com%2Fexample%2Fproject")
+            Home::Bucket(Machine::named("laptop")).path(&alice()),
+            "unscoped:laptop"
         );
-        assert_eq!(user_home(&alice()), "user:alice");
-    }
-
-    #[test]
-    fn a_segment_past_the_scope_limit_has_no_home() {
-        let fits = "a".repeat(MAX_SEGMENT_LEN - "project:".len());
-        assert!(project_home(&alice(), &fits).is_some());
-        assert!(project_home(&alice(), &format!("{fits}a")).is_none());
-        // Each `/` costs three bytes once encoded.
-        assert!(project_home(&alice(), &"/".repeat(83)).is_none());
     }
 
     #[test]

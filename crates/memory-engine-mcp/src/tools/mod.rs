@@ -83,7 +83,7 @@ async fn record(
     detail: Map<String, Value>,
 ) -> Result<i64, String> {
     let refused = |e: memory_engine::MemoryError| format!("cannot record this call: {e}");
-    let bucket = crate::home::bucket(ctx.machine);
+    let bucket = crate::home::Home::Bucket(ctx.machine.clone()).path(ctx.user);
     // Resolve first: creating the path is a write transaction, needed once per machine.
     let scope_id = match ctx.engine.resolve_scope_path(&bucket) {
         Some(id) => id,
