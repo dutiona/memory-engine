@@ -41,8 +41,8 @@ pub enum StoreLockError {
 impl StoreLock {
     /// Take the exclusive lock for the database at `db`, without waiting.
     ///
-    /// The lock file is `db` with `.store-lock` appended (not `.lock`, which SQLite's
-    /// unix-dotfile VFS uses). It is created when missing and never deleted: unlinking a
+    /// The lock file is `db`, with its symlinks resolved, plus `.store-lock` (not `.lock`,
+    /// which SQLite's unix-dotfile VFS uses). It is created when missing and never deleted: unlinking a
     /// held lock file would hand the next process a fresh inode and a second "exclusive"
     /// lock.
     ///
@@ -64,9 +64,14 @@ impl StoreLock {
     /// assert!(StoreLock::acquire(&db).is_ok());
     /// ```
     pub fn acquire(db: &Path) -> Result<Self, StoreLockError> {
-        let mut name = db.as_os_str().to_owned();
-        name.push(".store-lock");
-        let path = PathBuf::from(name);
+        let path = lock_path(db).map_err(|source| {
+            let mut name = db.as_os_str().to_owned();
+            name.push(".store-lock");
+            StoreLockError::Io {
+                lock: name.into(),
+                source,
+            }
+        })?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -97,6 +102,31 @@ impl StoreLock {
     }
 }
 
+/// The lock file for `db`, after symlinks: SQLite follows them to one store, so every name
+/// for it must find one lock. A database not created yet resolves through its directory.
+fn lock_path(db: &Path) -> io::Result<PathBuf> {
+    let db = match db.canonicalize() {
+        Ok(target) => target,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let dir = match db.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => Path::new("."),
+            };
+            let file = db.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the database path names no file",
+                )
+            })?;
+            dir.canonicalize()?.join(file)
+        }
+        Err(e) => return Err(e),
+    };
+    let mut name = db.into_os_string();
+    name.push(".store-lock");
+    Ok(PathBuf::from(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,7 +150,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("memory.db");
         let lock = StoreLock::acquire(&db).unwrap();
-        assert_eq!(lock.path(), dir.path().join("memory.db.store-lock"));
+        assert_eq!(
+            lock.path(),
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join("memory.db.store-lock")
+        );
         assert!(lock.path().is_file());
         assert!(!db.exists(), "taking the lock must not create the database");
     }
@@ -160,6 +196,32 @@ mod tests {
         let held = StoreLock::acquire(&db).unwrap();
         assert!(matches!(
             StoreLock::acquire(&db),
+            Err(StoreLockError::Held { .. })
+        ));
+        drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_database_shares_its_targets_lock() {
+        // SQLite follows the link to one store, so the lock must too.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        std::fs::write(&db, b"").unwrap();
+        let alias = dir.path().join("alias.db");
+        std::os::unix::fs::symlink(&db, &alias).unwrap();
+        let held = StoreLock::acquire(&db).unwrap();
+        assert!(matches!(
+            StoreLock::acquire(&alias),
+            Err(StoreLockError::Held { .. })
+        ));
+        drop(held);
+        let linked_dir = dir.path().join("linked");
+        std::os::unix::fs::symlink(dir.path(), &linked_dir).unwrap();
+        let fresh = dir.path().join("fresh.db");
+        let held = StoreLock::acquire(&fresh).unwrap();
+        assert!(matches!(
+            StoreLock::acquire(&linked_dir.join("fresh.db")),
             Err(StoreLockError::Held { .. })
         ));
         drop(held);
