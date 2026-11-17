@@ -398,3 +398,110 @@ async fn post_restore_ids_dont_collide() {
         );
     }
 }
+
+fn forget_record() -> memory_engine::types::NewEvent {
+    memory_engine::types::NewEvent {
+        timestamp: chrono::Utc::now(),
+        event_type: memory_engine::types::EventType::MemoryOp,
+        payload: serde_json::json!({}),
+        source: "test".into(),
+        session_id: None,
+        scope_id: 1,
+        origin_node_id: "test".into(),
+        sequence_id: 0,
+        created_at: None,
+    }
+}
+
+/// A JSON export carries the tombstones (#1023): a restored store still knows the fact is
+/// forgotten, still blocks its content and can still unforget it.
+#[tokio::test]
+async fn export_and_import_carry_tombstones() {
+    let engine = make_engine().await;
+    let id = engine.list_active_facts(None).await.unwrap()[0].id;
+    let content = engine.get_fact(id).await.unwrap().content;
+    engine
+        .forget_fact(
+            id,
+            &["/".into()],
+            "wrong",
+            "unscoped:test",
+            &forget_record(),
+        )
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("dump.json");
+    engine
+        .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
+        .unwrap();
+    let restored = MemoryEngine::restore_json_memory(&json_path).unwrap();
+    assert!(matches!(
+        restored.explain_fact(id).await.unwrap().state,
+        memory_engine::inspect::FactState::Expired {
+            reason: memory_engine::inspect::ExpiredReason::Forgotten { .. }
+        }
+    ));
+    let err = restored
+        .add_facts_batch(
+            &[AddFactRequest {
+                content,
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            }],
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            memory_engine::MemoryError::Conflict(memory_engine::ConflictError::Forgotten)
+        ),
+        "{err:?}"
+    );
+    assert!(matches!(
+        restored.unforget_fact(id).await.unwrap(),
+        memory_engine::types::UnforgetOutcome::Restored { .. }
+    ));
+}
+
+/// A tombstone naming a fact or an event the snapshot lacks is refused before any write.
+#[tokio::test]
+async fn a_snapshot_with_a_dangling_tombstone_is_refused() {
+    let engine = make_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("dump.json");
+    engine
+        .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
+        .unwrap();
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    for stone in [
+        serde_json::json!({ "fact_id": 999, "content_hash": "0".repeat(32),
+            "reason": null, "forgotten_at": "2026-01-01T00:00:00Z", "record_event_id": null,
+            "prior_t_expired": null, "prior_t_invalid": null }),
+        serde_json::json!({ "fact_id": null, "content_hash": "0".repeat(32),
+            "reason": null, "forgotten_at": "2026-01-01T00:00:00Z", "record_event_id": 999,
+            "prior_t_expired": null, "prior_t_invalid": null }),
+        serde_json::json!({ "fact_id": null, "content_hash": "short",
+            "reason": null, "forgotten_at": "2026-01-01T00:00:00Z", "record_event_id": null,
+            "prior_t_expired": null, "prior_t_invalid": null }),
+    ] {
+        snapshot["tombstones"] = serde_json::json!([stone]);
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let target = dir.path().join("restored.db");
+        let config = EngineConfig::new(target.clone(), DIM);
+        assert!(
+            MemoryEngine::restore_json(&bad, &config).is_err(),
+            "{stone}"
+        );
+        assert!(!target.exists(), "nothing written for {stone}");
+    }
+}

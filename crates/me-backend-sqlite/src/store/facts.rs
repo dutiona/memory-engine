@@ -1618,6 +1618,9 @@ impl<'a> FactStore<'a> {
     /// expired before `expired_before` (`t_expired IS NOT NULL AND t_expired <
     /// expired_before`), ordered by id ascending.
     ///
+    /// A forgotten fact is never a candidate (#1023): the forget keeps its row so an
+    /// unforget can restore it, and archival hard-deletes what it archives.
+    ///
     /// This pushes the archive selection predicate into SQL so the engine never
     /// materializes every fact (and every embedding BLOB) just to discard the
     /// ones that don't qualify. Equivalent to the prior Rust-side filter
@@ -1650,6 +1653,7 @@ impl<'a> FactStore<'a> {
              WHERE is_pinned = 0
                AND t_expired IS NOT NULL
                AND t_expired < ?1
+               AND id NOT IN (SELECT fact_id FROM fact_tombstones WHERE fact_id IS NOT NULL)
              ORDER BY id ASC"
             ))
             .map_err(StorageError::backend)?;

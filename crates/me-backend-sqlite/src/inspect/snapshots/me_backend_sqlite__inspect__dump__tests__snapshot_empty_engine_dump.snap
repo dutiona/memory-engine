@@ -17,6 +17,7 @@ events: []
 lineage: []
 embedding_spaces: []
 fact_vectors: []
+tombstones: []
 config:
   schema_version: "16"
   storage_epoch: "1"

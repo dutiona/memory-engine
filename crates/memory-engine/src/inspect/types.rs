@@ -598,6 +598,7 @@ mod tests {
             lineage: vec![sample_lineage()],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config,
         };
         // EngineSnapshot does not derive `PartialEq` (it nests `serde_json::Value`
@@ -625,5 +626,10 @@ mod tests {
         let snapshot: EngineSnapshot =
             serde_json::from_value(json).expect("pre-v8 snapshot must deserialize");
         assert_eq!(snapshot.lineage, []);
+        assert_eq!(
+            snapshot.tombstones,
+            [],
+            "pre-v16 snapshots have no tombstones"
+        );
     }
 }

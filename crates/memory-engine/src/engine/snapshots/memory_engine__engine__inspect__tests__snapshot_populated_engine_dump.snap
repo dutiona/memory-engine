@@ -42,4 +42,5 @@ embedding_spaces:
     matryoshka_base_dim: ~
     element_type: float32
 fact_vectors: []
+tombstones: []
 config: "{}"

@@ -266,6 +266,29 @@ pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
         }
     }
 
+    // Tombstones (#1023) link to a fact and to the forget's record, both nullable (an erasure
+    // clears them). A link to a row the snapshot lacks would fail the restore's foreign
+    // key only after the write began, so refuse it here, as the edge checks do (#257).
+    let fact_ids: std::collections::HashSet<i64> = snapshot.facts.iter().map(|f| f.id).collect();
+    let event_ids: std::collections::HashSet<i64> = snapshot.events.iter().map(|e| e.id).collect();
+    for stone in &snapshot.tombstones {
+        let dangling_fact = stone.fact_id.is_some_and(|id| !fact_ids.contains(&id));
+        let dangling_record = stone
+            .record_event_id
+            .is_some_and(|id| !event_ids.contains(&id));
+        let bad_hash = stone.content_hash.len() != 32
+            || !stone
+                .content_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if dangling_fact || dangling_record || bad_hash {
+            return Err(MemoryError::Internal(format!(
+                "snapshot tombstone is invalid: fact {:?}, record {:?}, hash {:?}",
+                stone.fact_id, stone.record_event_id, stone.content_hash
+            )));
+        }
+    }
+
     // Root scope invariant: ScopeTree hardcodes root id=1, parent_id=None.
     let has_root = snapshot
         .scopes
@@ -311,6 +334,9 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
     let fact_vector_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM fact_vectors", [], |r| r.get(0))
         .map_err(StorageError::backend)?;
+    let tombstone_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM fact_tombstones", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
 
     let total = event_count
         + fact_count
@@ -318,7 +344,8 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
         + summary_count
         + scope_count
         + lineage_count
-        + fact_vector_count;
+        + fact_vector_count
+        + tombstone_count;
     if total > 0 {
         return Err(MemoryError::Conflict(ConflictError::TargetNotEmpty));
     }
@@ -473,6 +500,30 @@ fn restore_embedding_spaces(tx: &Transaction, snapshot: &EngineSnapshot) -> Resu
     Ok(())
 }
 
+/// Restore the tombstones (#1023), keeping their links and prior timestamps.
+fn restore_tombstones(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO fact_tombstones (fact_id, content_hash, reason, forgotten_at,
+                                          record_event_id, prior_t_expired, prior_t_invalid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .map_err(StorageError::backend)?;
+    for stone in &snapshot.tombstones {
+        stmt.execute(rusqlite::params![
+            stone.fact_id,
+            stone.content_hash,
+            stone.reason,
+            stone.forgotten_at.to_rfc3339(),
+            stone.record_event_id,
+            stone.prior_t_expired.map(|t| t.to_rfc3339()),
+            stone.prior_t_invalid.map(|t| t.to_rfc3339()),
+        ])
+        .map_err(StorageError::backend)?;
+    }
+    Ok(())
+}
+
 /// Restore the `fact_vectors` rows (#623): the non-active spaces' per-fact vectors
 /// (a `populating` space mid-reconstruction, or a `deprecated` space retained for
 /// rollback). Pre-#623 snapshots have none — a no-op. MUST run **after**
@@ -598,6 +649,9 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
     //     3-5: facts) so both foreign keys resolve.
     restore_fact_vectors(&tx, snapshot)?;
 
+    // 8d. Restore the tombstones (#1023) — after facts and events, which they reference.
+    restore_tombstones(&tx, snapshot)?;
+
     // 9. Reset autoincrement sequences so new inserts don't collide.
     reset_autoincrement(
         &tx,
@@ -718,6 +772,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -738,6 +793,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -758,6 +814,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -784,6 +841,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -804,6 +862,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config: BTreeMap::new(),
         };
         validate_snapshot(&snapshot).unwrap();
@@ -982,6 +1041,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces: vec![], // pre-#622 dump: identity is in `config`, not here
             fact_vectors: vec![],     // pre-#623 dump: no shadow vectors
+            tombstones: vec![],
             config,
         };
 
@@ -1331,6 +1391,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces,
             fact_vectors,
+            tombstones: vec![],
             config: BTreeMap::new(),
         }
     }
@@ -1664,6 +1725,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config: BTreeMap::new(),
         };
 
@@ -1890,6 +1952,7 @@ mod tests {
             lineage: vec![],
             embedding_spaces: vec![], // empty → legacy embedding_meta fallback runs
             fact_vectors: vec![],
+            tombstones: vec![],
             config,
         };
 
@@ -2011,6 +2074,7 @@ mod tests {
             lineage: vec![entry],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config: BTreeMap::new(),
         };
 
@@ -2451,6 +2515,7 @@ mod tests {
                         lineage,
                         embedding_spaces: vec![],
                         fact_vectors: vec![],
+                        tombstones: vec![],
                         config,
                     }
                 })
