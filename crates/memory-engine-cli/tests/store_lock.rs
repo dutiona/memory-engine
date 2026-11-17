@@ -112,6 +112,7 @@ async fn every_writable_command_refuses_while_the_store_is_held() {
             .arg(&memory_dir)
             .args(embed),
     );
+    refuses_as_held(cli(&db).args(["unforget", "1"]));
 
     assert_eq!(fact_and_event_counts(&db), before);
     assert_eq!(
