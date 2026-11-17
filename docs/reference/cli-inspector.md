@@ -43,7 +43,7 @@ error: the store is in use by another process (/data/memory.db.store-lock is loc
 - **Take the lock** (writable): `add-fact`, `batch-ingest`, `bootstrap`, `consolidate`, `erase`, `import` (its new
   target), `migrate` (when it applies migrations), `prune`, `record-outcome`, `unforget`. Stop the server first.
 - **Never take it** (read-only, safe beside a live server): `stats`, `inspect`, `explain`, `query`, `dump`,
-  `outcome-counts`, `export` in every format, `schema`, `migrate --check`.
+  `outcome-counts`, `export` in every format, `schema`, `migrate --check`, `status`.
 
 The lock is released when its holder exits, even when killed. The lock file is never deleted. It holds between
 processes and containers on one host that share the store's volume, never across hosts or on a network filesystem.
@@ -99,6 +99,43 @@ memory-engine-cli query "how does auth work" \
 ```
 
 FTS5 text search by default. **When `--embed-url` + `--embed-model` are supplied (#619), the query text is embedded via `embed_query`** (prefixed with ME's pinned instruction unless `--query-instruction` replaces it; `''` means no prefix) for hybrid FTS + vector retrieval; with no embedder it stays FTS-only. The embedder flags are shared with `batch-ingest` / `bootstrap` / `consolidate` (`--embed-provider`, `--embed-api-key`, `--query-instruction`, `--mrl-dim`, `--native-dim`, `--embed-timeout`, and the served-artifact flags `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens`, all four or none, with `MEMORY_ENGINE_EMBED_*` variables). Before embedding, `query` checks the declared identity against the store's recorded one and fails with `embedding identity check failed` on a mismatch (#614, #1017). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
+
+#### `status` — Embedding Queue
+
+```bash
+memory-engine-cli status
+memory-engine-cli --format json status
+podman exec <container> memory-engine-cli --db <db> status   # beside the running server
+```
+
+Reports the deferred-embedding queue (#1021): the facts waiting for their vector, those the MCP `remember` tool stored
+([MCP server](mcp-server.md#embedding-queue)) and any restored from a dump without one.
+
+```text
+embedding queue: 3 waiting, oldest 2h; 1 failed
+paused: no
+last embed success: 2026-11-17T09:12:03+00:00
+last embed error: 2026-11-17T09:10:41+00:00: embedder: embedding endpoint returned 503 Service Unavailable: …
+```
+
+- `waiting`: items not failed, due now or backing off; `oldest`: the age of the oldest of them, in its largest whole
+  unit (`m`, `h`, `d`).
+- `failed`: items the embedder refused for good (400, 413 or 422); each stays found by full-text search.
+- `paused`: `no`, or `since <time>: <error>` while the embedder rejects the key (401 or 403): the alarm.
+- `last embed success`, `last embed error`: their times (RFC 3339, UTC) and the last error, or `never`.
+
+`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error"}`,
+each absent value `null`; `--format plain` prints the same keys as `key=value` lines, an absent value empty. Error
+texts come from the embedder, so their control characters are escaped in the table and plain formats. `status` exits 0
+in every queue state; the alarm is in the output.
+
+It builds no engine: it opens one SQLite connection with `SQLITE_OPEN_READ_ONLY` and a 5 s busy timeout, checks that
+the connection is read-only, and checks the schema version without migrating. It takes no lock, so it runs beside a
+live server and a writer and changes nothing. A store below schema v17 has no queue: `status` exits 1 with an error
+naming the migration it needs (a store newer than the binary is refused too), and the store stays as it was.
+
+A store whose facts all wait has no embedding identity yet, so the commands that open the engine (`stats`, `query`,
+…) refuse it with an error that names that state and points to `status`.
 
 #### `export -o <path>` — Export State
 

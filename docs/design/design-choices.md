@@ -164,3 +164,17 @@ This mirrors a common pattern in database tooling: `psql` vs `pg_dump --read-onl
 **WAL requirement:** a database switches to WAL mode on its first read-write open (#1040), and SQLite creates a missing `-wal` and `-shm` even for a read-only connection. A read-only open of a WAL database therefore needs a writable directory unless both sidecars already exist (a running server or an earlier read-only open leaves them): in a directory the process cannot write it fails with "attempt to write a readonly database" (on a read-only mount SQLite reports "unable to open database file" instead), and in a writable one it leaves both sidecars behind. Opening with `immutable=1` would avoid that, but is unsafe while a writer is live.
 
 **Trade-off:** `list_due()` and `resume_context()` have write side effects (stamping `surfaced_at`). In read-only mode, these return `ReadOnly` if unsurfaced facts exist. CLI tools should use `list_active_facts()` for inspection. A future follow-up (#93) may add a read-only variant that skips stamping.
+
+---
+
+## Deferred Embedding: One Pooled Vector per Fact **{Implemented}**
+
+A fact can be stored before it has a vector (#1021): `add_fact_deferred` writes it with `facts.embedding = X''` (the zero-length BLOB) and one `embed_queue` row, and a drain gives it its vector later. Every vector reader filters on `length(embedding) > 0`, and an unguarded SQL reader fails with `EmbeddingDimension` rather than scoring a placeholder. A fact longer than the embedder's input limit is chunked, never cut: split into consecutive pieces that rejoin exactly, each within the limit as the server counts it, and each piece is embedded.
+
+**Decision (D1, chosen by the owner): one pooled vector per fact.** The fact keeps one vector, the pieces' vectors averaged with each piece's token count as its weight, then L2-normalised, in `facts.embedding` as for any other fact. No table is added for chunks.
+
+**Why:** One vector per fact is the invariant every vector reader already relies on (brute-force search, the HNSW index and its sidecar, dedup and clustering, the dream cycle, resonance, reconstruction, export and restore), so none of them changes and the change stays one PR. The cost falls only on facts longer than the limit (2,047 tokens of text for the deployed model): a detail that is a small part of a long fact is diluted in the vector channel, while hybrid recall's full-text channel still finds its words. Remembered facts are statements; the long ones are final messages and compaction summaries (#1025), and the recall log (#1029) is the data that would show whether the alternative is worth its size.
+
+**Recorded alternative (option A, deferred: #1084): one vector per chunk.** A `fact_chunk_vectors (fact_id, space_id, ord, embedding)` table beside `facts.embedding`, keyed by space as `fact_vectors` is; a chunked fact would score by its best-matching chunk, and is invisible to the API (the chunks are linked under their fact, never returned as facts). It needs every guarded reader to read chunk vectors or deliberately use a representative one, brute force and HNSW to agree, and export, restore, reconstruction, Postgres (#634) and the dump format to gain the table: roughly the PR again.
+
+**Trade-off kept open:** B's storage is the ordinary `facts.embedding`, so A can be added later without migrating B's data: re-embedding the chunked facts fills the new table. Nothing records that a vector was pooled; whether it was is recomputed by counting the fact's content, which is what A would do.

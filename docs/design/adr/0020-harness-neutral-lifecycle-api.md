@@ -244,7 +244,7 @@ Some activity is not captured at all, and the promise says nothing about it: a t
 - **A sensitive-path stub** keeps the tool, the path, the outcome and the time, plus the event's provenance. The path is the matched path only; for a shell command, the matched token and never the command. Nothing of the input, the result or the error is kept.
 - **What becomes recallable.** A main-agent `stop` with outcome `completed` and a non-empty final message, and a main-agent `compact`, each become one Episodic fact under the event's project (or the machine's bucket, §7). Full-text search finds it at once; vector search finds it once it is embedded (#1021). A stop that a hook then continues still counts: it was a final message. The fact is valid from the event's client time, or from its receipt if that is earlier, so that a fast client clock cannot schedule a memory in the future (ADR-0003).
 - **What stays in the event log only.** Prompts, tool events, subagent final messages and stops with outcome `api_error`. Facts the model remembers itself are stored as before.
-- **The embedding drain is rate-limited and yields to interactive queries.** The rate is set from the embedder's measured throughput (#1021).
+- **The embedding drain is rate-limited and yields to interactive queries.** The rate is one embedding input in flight, shared by ME and KB, and no other limit (owner's decision, from dutiona/infra#77's measurements): three in flight drained no faster (2.77 vs 2.80 chunks/s of 541 tokens under load) and tripled a query's p95, while during a one-input drain under load a query's p95 was 175.0 ms (130-token items), 120.4 ms (256-token) and 320.9 ms (541-token), inside §10's 500 ms.
 
 #### Relation to ADR-0001
 
