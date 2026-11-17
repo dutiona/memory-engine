@@ -16,6 +16,7 @@ pub mod lineage;
 pub mod schema;
 pub mod scopes;
 pub mod summaries;
+pub mod tombstones;
 
 pub use scopes::ScopeStore;
 // `UpcasterRegistry`/`UpcasterFn` carved into the me-storage (L1) port (Wave 2 #816);

@@ -87,7 +87,7 @@ fn str_to_fact_type(s: &str) -> Result<FactType> {
 }
 
 /// Compute blake3 hex hash of content, truncated to first 32 characters (128 bits).
-fn content_hash(content: &str) -> String {
+pub(crate) fn content_hash(content: &str) -> String {
     let hash = blake3::hash(content.as_bytes());
     hash.to_hex()[..32].to_string()
 }

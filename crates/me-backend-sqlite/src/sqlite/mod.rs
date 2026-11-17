@@ -57,6 +57,7 @@ mod event_log;
 mod graph;
 #[cfg(test)]
 mod realization;
+mod retraction;
 mod schema;
 mod search_index;
 mod session;
