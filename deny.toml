@@ -38,6 +38,10 @@ ignore = [
     # harness). No testcontainers release drops it yet: testcontainers/testcontainers-rs#1006
     # is open. Documented exception; removal tracked by #1036.
     "RUSTSEC-2026-0440",
+    # RUSTSEC-2026-0543: chrono is unmaintained (not a vuln; all versions, no safe upgrade).
+    # Direct dependency of nine workspace crates, and pulled via rmcp -> schemars.
+    # Documented exception; replacement with jiff or time tracked by #1073.
+    "RUSTSEC-2026-0543",
 ]
 
 # --- License compliance ------------------------------------------------------------
