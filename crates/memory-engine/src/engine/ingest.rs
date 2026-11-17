@@ -185,6 +185,8 @@ impl MemoryEngine {
     /// Returns `MemoryError::Conflict(ConflictError::PolicyParameter)` if any
     /// entry's `opts.base_importance` is set and outside `[0, 1]` (or non-finite);
     /// the whole batch is rejected up front, so no entry is embedded or written.
+    /// Returns `MemoryError::Conflict(ConflictError::Forgotten)` if a forget's tombstone
+    /// blocks an entry's content (#1023); the whole batch rolls back.
     /// Returns errors from batch embedding, dimension validation, or DB insert.
     /// Returns `MemoryError::Internal` if the embedder returns a different
     /// number of embeddings than input entries.
@@ -210,7 +212,8 @@ impl MemoryEngine {
     ///
     /// Each input entry maps positionally to one `Result<i64, MemoryError>`:
     /// `Ok(id)` if it was embedded and inserted, `Err(e)` if it was rejected by
-    /// per-record validation (importance range, oversized content/metadata). The
+    /// per-record validation (importance range, oversized content/metadata) or because a
+    /// forget's tombstone blocks its content (`Conflict(Forgotten)`, #1023). The
     /// **valid** partition is embedded and inserted in one atomic batch, so the
     /// invalid records are simply skipped rather than failing their neighbours.
     ///

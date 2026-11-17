@@ -4,7 +4,7 @@ use crate::bootstrap::{
     BootstrapConfig, BootstrapReport, ParsedSession, PrepareCtx, PreparedSession, SessionExtractor,
 };
 use crate::error::Result;
-use crate::storage::BootstrapIngestOutcome;
+use crate::storage::{BootstrapIngestOutcome, ImportOutcome};
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{EventFilter, FactType};
 
@@ -169,13 +169,13 @@ impl MemoryEngine {
             )));
         }
         let mut importance_sum = 0.0;
-        for ((fact_type, base_importance, redactions), (_, reinforced)) in
-            metas.into_iter().zip(flags)
-        {
-            if reinforced {
-                // A reinforcement adds no new row: no prewarm / importance / redaction
-                // count (the audit counter stays idempotent across re-runs).
+        for ((fact_type, base_importance, redactions), outcome) in metas.into_iter().zip(flags) {
+            // A reinforcement or a forget's block adds no new row: no prewarm / importance /
+            // redaction count (the audit counter stays idempotent across re-runs).
+            if matches!(outcome, ImportOutcome::Reinforced(_)) {
                 report.facts_reinforced += 1;
+            } else if outcome == ImportOutcome::Blocked {
+                report.facts_blocked += 1;
             } else {
                 report.facts_created += 1;
                 report.secrets_redacted += redactions;
@@ -403,7 +403,7 @@ impl MemoryEngine {
                     // session path's length guard above (#725): an out-of-contract backend
                     // must fail loudly, not silently miscount facts_created/reinforced/
                     // secrets_redacted in release (a `debug_assert` would compile out there).
-                    let reinforced = match self
+                    let outcome = match self
                         .storage
                         .ingest_bootstrap_batch_atomic(
                             None,
@@ -415,7 +415,7 @@ impl MemoryEngine {
                         .await?
                     {
                         BootstrapIngestOutcome::Ingested(flags) => match flags.as_slice() {
-                            [(_, reinforced)] => *reinforced,
+                            [outcome] => *outcome,
                             other => {
                                 return Err(crate::error::MemoryError::Internal(format!(
                                     "memory-dir bootstrap ingest returned {} flags for 1 fact (port contract violation)",
@@ -430,8 +430,10 @@ impl MemoryEngine {
                             ));
                         }
                     };
-                    if reinforced {
+                    if matches!(outcome, ImportOutcome::Reinforced(_)) {
                         report.facts_reinforced += 1;
+                    } else if outcome == ImportOutcome::Blocked {
+                        report.facts_blocked += 1;
                     } else {
                         report.facts_created += 1;
                         report.secrets_redacted += redactions;

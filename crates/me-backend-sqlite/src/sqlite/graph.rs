@@ -23,7 +23,7 @@ use super::{SqliteBackend, stream_consumer_dropped};
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
-use me_storage::graph::{BootstrapIngestOutcome, FactGraph, ScopedWrite};
+use me_storage::graph::{BootstrapIngestOutcome, FactGraph, ImportOutcome, ScopedWrite};
 use me_types::error::Result;
 use me_types::types::{
     Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
@@ -715,7 +715,8 @@ impl FactGraph for SqliteBackend {
                     .map_err(StorageError::backend)?;
                 // stamp_identity equivalent: record-if-absent or compare-and-reject
                 crate::store::embedding_meta::record_if_absent(&tx, &fingerprint, expected_dim)?;
-                let id = FactStore::new(&tx, dim).insert(&fact)?;
+                // The single explicit assertion (`remember`, `add-fact`): never gated (#1023).
+                let id = FactStore::new(&tx, dim).insert_asserted(&fact)?;
                 tx.commit().map_err(StorageError::backend)?;
                 Ok(id)
             })
@@ -1125,9 +1126,9 @@ impl FactGraph for SqliteBackend {
                         // original source event; only newly-created facts adopt this one.
                         fact.source_event_id = Some(marker_id);
                     }
-                    let (id, reinforced) = fact_store.insert_or_reinforce(&fact)?;
-                    any_created |= !reinforced;
-                    out.push((id, reinforced));
+                    let outcome = fact_store.insert_or_reinforce(&fact)?;
+                    any_created |= matches!(outcome, ImportOutcome::Created(_));
+                    out.push(outcome);
                 }
                 // #643: stamp the embedding identity only once a new vector has actually
                 // been written, at the tail of the transaction so it commits atomically
@@ -2238,5 +2239,119 @@ mod tests {
             1,
             "a skipped ingest must NOT insert a duplicate marker (the pre-fix TOCTOU damage)"
         );
+    }
+
+    /// Block `content` as a forget does (#1023).
+    fn tombstone(pool: &ConnectionPool, content: &str) {
+        pool.write()
+            .execute(
+                "INSERT INTO fact_tombstones (content_hash, forgotten_at) VALUES (?1, 't')",
+                [crate::store::facts::content_hash(content)],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ingest_bootstrap_batch_reports_blocked_facts() {
+        use me_storage::{BootstrapIngestOutcome, ImportOutcome};
+        use me_types::types::EmbeddingFingerprint;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        tombstone(&pool, "forgotten");
+        let be = backend(Arc::clone(&pool));
+        let fp = EmbeddingFingerprint::new("mock", "test", DIM);
+        let marker = me_types::types::NewEvent {
+            timestamp: Utc::now(),
+            event_type: me_types::types::EventType::SystemEvent,
+            payload: serde_json::json!({}),
+            source: "bootstrap".into(),
+            session_id: Some("s".into()),
+            scope_id: 1,
+            origin_node_id: "bootstrap".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        for marker in [Some(&marker), None] {
+            let outcome = be
+                .ingest_bootstrap_batch_atomic(
+                    marker,
+                    None,
+                    vec![fact("forgotten", [0.1; DIM]), fact("fresh", [0.2; DIM])],
+                    &fp,
+                    DIM,
+                )
+                .await
+                .unwrap();
+            let BootstrapIngestOutcome::Ingested(outcomes) = outcome else {
+                panic!("no skip filter, so the batch is ingested");
+            };
+            assert_eq!(outcomes[0], ImportOutcome::Blocked);
+            assert!(matches!(
+                outcomes[1],
+                ImportOutcome::Created(_) | ImportOutcome::Reinforced(_)
+            ));
+        }
+        assert_eq!(
+            be.list_all_facts().await.unwrap().len(),
+            1,
+            "only the fresh fact"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_and_conflict_inserts_refuse_forgotten_content() {
+        use me_types::error::{ConflictError, MemoryError};
+        use me_types::types::EmbeddingFingerprint;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let be = backend(Arc::clone(&pool));
+        let fp = EmbeddingFingerprint::new("mock", "test", DIM);
+        let old = be
+            .insert_fact_atomic(&fact("old", [0.3; DIM]), &fp, DIM)
+            .await
+            .unwrap();
+        tombstone(&pool, "forgotten");
+        let is_forgotten =
+            |e: &MemoryError| matches!(e, MemoryError::Conflict(ConflictError::Forgotten));
+        let err = be
+            .insert_facts_batch_atomic(
+                &[fact("fresh", [0.1; DIM]), fact("forgotten", [0.1; DIM])],
+                &[None, None],
+                &fp,
+                DIM,
+            )
+            .await
+            .unwrap_err();
+        assert!(is_forgotten(&err), "{err:?}");
+        for decision in [
+            me_traits::CrudDecision::Add,
+            me_traits::CrudDecision::Update,
+        ] {
+            let err = be
+                .resolve_conflict_atomic(
+                    decision,
+                    old,
+                    &fact("forgotten", [0.1; DIM]),
+                    "related",
+                    1.0,
+                    Utc::now(),
+                )
+                .await
+                .unwrap_err();
+            assert!(is_forgotten(&err), "{err:?}");
+        }
+        let all = be.list_all_facts().await.unwrap();
+        assert_eq!(all.len(), 1, "nothing written");
+        assert!(all[0].t_expired.is_none(), "the old fact stays active");
+    }
+
+    #[tokio::test]
+    async fn insert_fact_atomic_accepts_forgotten_content() {
+        use me_types::types::EmbeddingFingerprint;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        tombstone(&pool, "asserted again");
+        let be = backend(Arc::clone(&pool));
+        let fp = EmbeddingFingerprint::new("mock", "test", DIM);
+        be.insert_fact_atomic(&fact("asserted again", [0.1; DIM]), &fp, DIM)
+            .await
+            .unwrap();
     }
 }

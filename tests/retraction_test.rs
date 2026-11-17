@@ -184,3 +184,139 @@ async fn a_read_only_engine_refuses_forget_and_unforget() {
         "{err:?}"
     );
 }
+
+/// Constant-vector embedder (dim 4) — the import paths embed every candidate.
+struct FixedEmbedder;
+impl memory_engine::EmbeddingProvider for FixedEmbedder {
+    fn embed(&self, _text: &str) -> Result<Vec<f32>, memory_engine::MemoryError> {
+        Ok(EMBEDDING.to_vec())
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("test", "test", DIM)
+    }
+}
+
+fn embedder() -> std::sync::Arc<dyn memory_engine::EmbeddingProvider> {
+    std::sync::Arc::new(FixedEmbedder)
+}
+
+fn config(scope: &str) -> memory_engine::BootstrapConfig {
+    memory_engine::BootstrapConfig {
+        scope: Some(scope.into()),
+        ..Default::default()
+    }
+}
+
+/// The one active fact holding `content`, if any.
+async fn active_with(engine: &MemoryEngine, content: &str) -> Vec<i64> {
+    let all = engine.list_active_facts(None).await.unwrap();
+    all.iter()
+        .filter(|f| f.content.contains(content))
+        .map(|f| f.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn re_importing_a_memory_dir_leaves_a_forgotten_fact_out() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("kestrel.md"),
+        "---\nname: kestrel\nmetadata:\n  type: project\n---\nKestrels nest on the north ledge.\n",
+    )
+    .unwrap();
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let run = |scope: &'static str| {
+        let engine = &engine;
+        let dir = dir.path().to_owned();
+        async move {
+            engine
+                .bootstrap_memory_directory(&dir, embedder(), &config(scope), None)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(run("user:alice").await.facts_created, 1);
+    let id = active_with(&engine, "Kestrels").await[0];
+    assert_eq!(
+        forget(&engine, id, &homes()).await,
+        ForgetOutcome::Forgotten
+    );
+    for scope in ["user:alice", "unscoped:laptop"] {
+        let report = run(scope).await;
+        assert_eq!(
+            (report.facts_created, report.facts_blocked),
+            (0, 1),
+            "{scope}"
+        );
+    }
+    assert_eq!(active_with(&engine, "Kestrels").await, Vec::<i64>::new());
+    engine.unforget_fact(id).await.unwrap();
+    assert_eq!(run("user:alice").await.facts_reinforced, 1);
+}
+
+#[tokio::test]
+async fn re_bootstrapping_a_session_leaves_a_forgotten_fact_out() {
+    let session = include_str!("fixtures/success_session.jsonl");
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let mut cfg = config("user:alice");
+    cfg.skip_existing = false;
+    let run = || {
+        engine.bootstrap_session(
+            std::io::Cursor::new(session),
+            embedder(),
+            std::sync::Arc::new(memory_engine::KeywordExtractor),
+            &cfg,
+            None,
+        )
+    };
+    let first = run().await.unwrap();
+    assert!(first.facts_created > 0);
+    let ids: Vec<i64> = engine
+        .list_active_facts(None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|f| f.id)
+        .collect();
+    for &id in &ids {
+        forget(&engine, id, &homes()).await;
+    }
+    let again = run().await.unwrap();
+    assert_eq!(again.facts_created, 0);
+    assert_eq!(again.facts_blocked, first.facts_created);
+    assert_eq!(engine.list_active_facts(None).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn a_partial_batch_fails_only_its_forgotten_entry() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let id = remember(&engine, "forgotten line", "user:alice").await;
+    forget(&engine, id, &homes()).await;
+    let entry = |content: &str| AddFactRequest {
+        content: content.into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: Some("user:alice".into()),
+        opts: None,
+    };
+    let results = engine
+        .add_facts_batch_partial(
+            &[entry("fresh line"), entry("forgotten line")],
+            embedder(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(results[0].is_ok());
+    assert!(
+        matches!(
+            results[1],
+            Err(memory_engine::MemoryError::Conflict(
+                memory_engine::ConflictError::Forgotten
+            ))
+        ),
+        "{:?}",
+        results[1]
+    );
+    assert_eq!(active_with(&engine, "line").await.len(), 1);
+}

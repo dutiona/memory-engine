@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::store::tombstones;
 use crate::store::{
     deserialize_embedding, parse_optional_timestamp, parse_timestamp, serialize_embedding,
 };
-use me_types::error::{MemoryError, Result, StorageError};
+use me_storage::ImportOutcome;
+use me_types::error::{ConflictError, MemoryError, Result, StorageError};
 use me_types::types::{Fact, FactType, NewFact};
 
 /// Store for bi-temporal facts with embedding BLOBs.
@@ -143,15 +145,36 @@ impl<'a> FactStore<'a> {
         Self { conn, embed_dim }
     }
 
-    /// Insert a new fact. Validates embedding dimension, computes `content_hash`
-    /// via blake3 (hex, first 32 chars / 128 bits), serializes embedding as BLOB.
-    /// Returns the auto-assigned id.
+    /// Insert a new fact unless a forget's tombstone blocks its content (#1023): the gate
+    /// fails closed, so every insert path is gated unless it deliberately calls
+    /// [`insert_asserted`](Self::insert_asserted). Validates embedding dimension, computes
+    /// `content_hash` via blake3 (hex, first 32 chars / 128 bits), serializes embedding as
+    /// BLOB. Returns the auto-assigned id.
     ///
     /// # Errors
     ///
+    /// Returns `MemoryError::Conflict(ConflictError::Forgotten)` for forgotten content.
     /// Returns `MemoryError::EmbeddingDimension` if embedding length != `embed_dim`.
     /// Returns `MemoryError::Storage` on insert failure.
     pub fn insert(&self, fact: &NewFact) -> Result<i64> {
+        if tombstones::blocks(self.conn, &fact.content)? {
+            return Err(MemoryError::Conflict(ConflictError::Forgotten));
+        }
+        self.insert_row(fact)
+    }
+
+    /// Insert a new fact with no tombstone check: the one ungated insert, for an explicit
+    /// single assertion (`remember`, `add-fact`). A fresh assertion is not a forgotten fact
+    /// coming back, and `remember` never refuses (ADR-0020 §8).
+    ///
+    /// # Errors
+    ///
+    /// As [`insert`](Self::insert), without the `Forgotten` conflict.
+    pub fn insert_asserted(&self, fact: &NewFact) -> Result<i64> {
+        self.insert_row(fact)
+    }
+
+    fn insert_row(&self, fact: &NewFact) -> Result<i64> {
         if fact.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
                 expected: self.embed_dim,
@@ -226,14 +249,15 @@ impl<'a> FactStore<'a> {
     /// pool (one mutex-guarded write connection); a caller outside that serialization
     /// must provide its own.
     ///
-    /// Returns `(id, reinforced)`: `reinforced` is `true` when an existing fact was
-    /// reinforced instead of a new row inserted.
+    /// A new row is never written for content a forget's tombstone blocks (#1023):
+    /// re-running an import over its source leaves a forgotten fact absent, in any scope.
+    /// An active twin is a live memory and is still reinforced.
     ///
     /// # Errors
     ///
     /// Returns `MemoryError::EmbeddingDimension` if embedding length != `embed_dim`.
     /// Returns `MemoryError::Storage` on query or insert failure.
-    pub fn insert_or_reinforce(&self, fact: &NewFact) -> Result<(i64, bool)> {
+    pub fn insert_or_reinforce(&self, fact: &NewFact) -> Result<ImportOutcome> {
         if fact.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
                 expected: self.embed_dim,
@@ -282,9 +306,10 @@ impl<'a> FactStore<'a> {
                         ],
                     )
                     .map_err(StorageError::backend)?;
-                Ok((id, true))
+                Ok(ImportOutcome::Reinforced(id))
             }
-            None => Ok((self.insert(fact)?, false)),
+            None if tombstones::blocks(self.conn, &fact.content)? => Ok(ImportOutcome::Blocked),
+            None => Ok(ImportOutcome::Created(self.insert_row(fact)?)),
         }
     }
 
@@ -1718,6 +1743,21 @@ mod tests {
     use crate::store::schema::{init_schema, open_memory};
     use chrono::TimeDelta;
 
+    /// The pre-#1023 `(id, reinforced)` view of an import outcome that wrote a row.
+    trait Pair {
+        fn pair(self) -> (i64, bool);
+    }
+
+    impl Pair for ImportOutcome {
+        fn pair(self) -> (i64, bool) {
+            match self {
+                Self::Created(id) => (id, false),
+                Self::Reinforced(id) => (id, true),
+                Self::Blocked => panic!("blocked: no row"),
+            }
+        }
+    }
+
     const DIM: usize = 768;
 
     fn setup() -> Connection {
@@ -2210,6 +2250,63 @@ mod tests {
         }
     }
 
+    /// Block `content` as a forget does: a tombstone row with its hash.
+    fn tombstone(conn: &Connection, content: &str) {
+        conn.execute(
+            "INSERT INTO fact_tombstones (content_hash, forgotten_at) VALUES (?1, 't')",
+            params![content_hash(content)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn insert_refuses_forgotten_content_and_insert_asserted_does_not() {
+        let conn = setup();
+        tombstone(&conn, "forgotten");
+        let store = FactStore::new(&conn, DIM);
+        let err = store
+            .insert(&make_fact("forgotten", vec![0.1; DIM]))
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Conflict(ConflictError::Forgotten)),
+            "{err:?}"
+        );
+        assert_eq!(store.count_active().unwrap(), 0);
+        store
+            .insert_asserted(&make_fact("forgotten", vec![0.1; DIM]))
+            .unwrap();
+        store.insert(&make_fact("other", vec![0.1; DIM])).unwrap();
+        assert_eq!(store.count_active().unwrap(), 2);
+    }
+
+    #[test]
+    fn insert_or_reinforce_blocks_only_the_create_branch() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut twin = make_fact("twin", vec![0.1; DIM]);
+        twin.scope_id = 1;
+        let live = store.insert(&twin).unwrap();
+        tombstone(&conn, "twin");
+        tombstone(&conn, "gone");
+        // An active twin is a live memory: it is still reinforced.
+        assert_eq!(
+            store.insert_or_reinforce(&twin).unwrap(),
+            ImportOutcome::Reinforced(live)
+        );
+        // Forgotten content with no active twin writes nothing, in any scope.
+        let gone = make_fact("gone", vec![0.1; DIM]);
+        assert_eq!(
+            store.insert_or_reinforce(&gone).unwrap(),
+            ImportOutcome::Blocked
+        );
+        assert_eq!(store.count_active().unwrap(), 1);
+        let fresh = make_fact("fresh", vec![0.1; DIM]);
+        assert!(matches!(
+            store.insert_or_reinforce(&fresh).unwrap(),
+            ImportOutcome::Created(_)
+        ));
+    }
+
     #[test]
     fn insert_or_reinforce_dedups_and_reinforces_in_scope() {
         let conn = setup();
@@ -2217,13 +2314,13 @@ mod tests {
         let mut first = make_fact("always use rustfmt", vec![0.1; DIM]);
         first.t_created = "2024-07-20T14:00:00Z".parse().unwrap();
         first.last_accessed = first.t_created;
-        let (id, reinforced) = store.insert_or_reinforce(&first).unwrap();
+        let (id, reinforced) = store.insert_or_reinforce(&first).unwrap().pair();
         assert!(!reinforced, "first occurrence inserts");
 
         let mut again = make_fact("always use rustfmt", vec![0.9; DIM]);
         again.t_created = "2025-01-12T10:00:00Z".parse().unwrap();
         again.last_accessed = again.t_created;
-        let (id2, reinforced2) = store.insert_or_reinforce(&again).unwrap();
+        let (id2, reinforced2) = store.insert_or_reinforce(&again).unwrap().pair();
         assert_eq!(id2, id, "reinforce returns the existing id");
         assert!(reinforced2, "second occurrence reinforces");
 
@@ -2254,7 +2351,7 @@ mod tests {
         let mut late = make_fact("conv", vec![0.1; DIM]);
         late.t_created = "2025-01-12T10:00:00Z".parse().unwrap();
         late.last_accessed = late.t_created;
-        let (id, _) = store.insert_or_reinforce(&late).unwrap();
+        let (id, _) = store.insert_or_reinforce(&late).unwrap().pair();
         let mut early = make_fact("conv", vec![0.1; DIM]);
         early.t_created = "2024-07-20T14:00:00Z".parse().unwrap();
         early.last_accessed = early.t_created;
@@ -2285,15 +2382,16 @@ mod tests {
         a.scope_id = 1;
         let mut b = make_fact("same text", vec![0.1; DIM]);
         b.scope_id = 2;
-        let (_, ra) = store.insert_or_reinforce(&a).unwrap();
-        let (_, rb) = store.insert_or_reinforce(&b).unwrap();
+        let (_, ra) = store.insert_or_reinforce(&a).unwrap().pair();
+        let (_, rb) = store.insert_or_reinforce(&b).unwrap().pair();
         assert!(
             !ra && !rb,
             "identical content in different scopes is not deduped"
         );
         let (_, rc) = store
             .insert_or_reinforce(&make_fact("different text", vec![0.1; DIM]))
-            .unwrap();
+            .unwrap()
+            .pair();
         assert!(!rc, "different content is not deduped");
         assert_eq!(store.list_active(None).unwrap().len(), 3);
     }
@@ -2304,11 +2402,13 @@ mod tests {
         let store = FactStore::new(&conn, DIM);
         let (id, _) = store
             .insert_or_reinforce(&make_fact("convention", vec![0.1; DIM]))
-            .unwrap();
+            .unwrap()
+            .pair();
         store.expire(id, Utc::now()).unwrap();
         let (id2, reinforced) = store
             .insert_or_reinforce(&make_fact("convention", vec![0.1; DIM]))
-            .unwrap();
+            .unwrap()
+            .pair();
         assert!(!reinforced, "an expired fact must not be reinforced");
         assert_ne!(id2, id, "a fresh row is inserted instead");
     }
@@ -2320,7 +2420,7 @@ mod tests {
         let mut weak = make_fact("shared note", vec![0.1; DIM]);
         weak.is_pinned = false;
         weak.base_importance = 0.3;
-        let (id, _) = store.insert_or_reinforce(&weak).unwrap();
+        let (id, _) = store.insert_or_reinforce(&weak).unwrap().pair();
 
         // A later occurrence judged pinned + more important — the strongest signal wins.
         let mut strong = make_fact("shared note", vec![0.1; DIM]);
@@ -2363,7 +2463,7 @@ mod tests {
         let mut first = make_fact("conv", vec![0.1; DIM]);
         first.t_created = late;
         first.last_accessed = late;
-        let (id, _) = store.insert_or_reinforce(&first).unwrap();
+        let (id, _) = store.insert_or_reinforce(&first).unwrap().pair();
         let mut second = make_fact("conv", vec![0.1; DIM]);
         second.t_created = early;
         second.last_accessed = early;
@@ -2396,7 +2496,7 @@ mod tests {
         let mut w = make_fact("conv2", vec![0.1; DIM]);
         w.t_created = frac;
         w.last_accessed = whole;
-        let (id2, _) = store.insert_or_reinforce(&w).unwrap();
+        let (id2, _) = store.insert_or_reinforce(&w).unwrap().pair();
         let mut x = make_fact("conv2", vec![0.1; DIM]);
         x.t_created = whole;
         x.last_accessed = frac;

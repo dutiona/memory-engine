@@ -46,8 +46,8 @@ pub use me_storage::{
 pub use me_storage::ColdStorage;
 pub use me_storage::{
     BackendCapabilities, BootstrapIngestOutcome, ConsolidationStore, EventLog, FactFilter,
-    FactGraph, LexicalRanker, MemoryCtx, MetadataPredicate, Retraction, SchemaManager, SearchIndex,
-    SessionStore, StorageBackend, TemporalFilter,
+    FactGraph, ImportOutcome, LexicalRanker, MemoryCtx, MetadataPredicate, Retraction,
+    SchemaManager, SearchIndex, SessionStore, StorageBackend, TemporalFilter,
 };
 
 // --- The concrete backend impls. ---

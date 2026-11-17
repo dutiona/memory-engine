@@ -70,6 +70,9 @@ pub struct BootstrapReport {
     pub facts_created: usize,
     /// Existing facts reinforced (dedup-with-reinforcement) instead of duplicated.
     pub facts_reinforced: usize,
+    /// Facts not written because a forget's tombstone blocks their content (#1023): a
+    /// re-import leaves a forgotten fact absent.
+    pub facts_blocked: usize,
     /// Secret/PII findings scrubbed before any content reaches an extractor, the
     /// embedder, or storage (#51). Counts individual findings, not facts. The
     /// jsonl path scrubs whole turns upfront; the md path scrubs body + metadata.
@@ -98,6 +101,7 @@ impl BootstrapReport {
         self.candidates_found += other.candidates_found;
         self.facts_created += other.facts_created;
         self.facts_reinforced += other.facts_reinforced;
+        self.facts_blocked += other.facts_blocked;
         self.secrets_redacted += other.secrets_redacted;
         self.memory_files_parsed += other.memory_files_parsed;
         self.memory_files_skipped += other.memory_files_skipped;
@@ -226,6 +230,7 @@ mod tests {
             candidates_found: 12,
             facts_created: 8,
             facts_reinforced: 2,
+            facts_blocked: 1,
             secrets_redacted: 3,
             memory_files_parsed: 0,
             memory_files_skipped: 0,

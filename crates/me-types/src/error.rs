@@ -19,6 +19,12 @@ pub enum ConflictError {
     #[error("{0}")]
     QueryValidation(String),
 
+    /// The content is forgotten: a forget's tombstone keeps it out of every import,
+    /// batch, promotion and derivation (#1023). Only an explicit single assertion
+    /// (`remember`, `add-fact`) may store it again.
+    #[error("the content is forgotten: a forget's tombstone blocks it")]
+    Forgotten,
+
     /// A configuration or policy parameter is out of its accepted range — e.g. a
     /// non-positive half-life, a weight below zero, or a ratio/percentile outside
     /// `[0.0, 1.0]`. Raised by `ForgetPolicy::validate`

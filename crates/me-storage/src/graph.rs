@@ -31,9 +31,19 @@ pub enum BootstrapIngestOutcome {
     /// The `skip_if_present` filter matched an existing event **under the write lock**,
     /// so nothing was written and the savepoint was released empty.
     Skipped,
-    /// The batch committed. `(fact_id, reinforced)` per input fact, in `facts` order;
-    /// `reinforced == false` ⟹ a new row was created.
-    Ingested(Vec<(i64, bool)>),
+    /// The batch committed. One [`ImportOutcome`] per input fact, in `facts` order.
+    Ingested(Vec<ImportOutcome>),
+}
+
+/// What an idempotent import did with one fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// A new row, with this id.
+    Created(i64),
+    /// An active fact with the same content in the same scope, reinforced.
+    Reinforced(i64),
+    /// A forget's tombstone blocks the content and no active twin exists: nothing written.
+    Blocked,
 }
 
 /// What a write that names scope paths returns.
@@ -83,6 +93,8 @@ pub struct ScopedWrite {
 #[async_trait]
 pub trait FactGraph: Send + Sync {
     // --- facts: write ---
+    /// Insert a fact. Gated (#1023): content a forget's tombstone blocks is refused with
+    /// `Conflict(Forgotten)`.
     async fn insert_fact(&self, fact: &NewFact) -> Result<i64>;
     async fn expire_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()>;
     /// Bi-temporally expire **and** invalidate a fact (set both `t_expired` and
@@ -269,6 +281,9 @@ pub trait FactGraph: Send + Sync {
     /// Atomically stamp the embedding identity (fingerprint) and insert one fact,
     /// in a single `rusqlite` transaction.
     ///
+    /// The one ungated insert (#1023): it serves the single explicit assertion (`remember`,
+    /// `add-fact`), which a forget's tombstone never blocks.
+    ///
     /// The caller (`insert_fact_with_embedding`) is responsible for:
     /// - scope resolution (done before the call, autocommit-separate by design)
     /// - HNSW `notify_insert` (fired post-call, engine-side, on success)
@@ -307,6 +322,9 @@ pub trait FactGraph: Send + Sync {
     /// run inside the savepoint and are returned as `scope_ids_to_cache` so the
     /// engine can update `scope_tree.write()` **after** the successful commit,
     /// preventing cache desync on rollback.
+    ///
+    /// Gated (#1023): one entry whose content a forget's tombstone blocks refuses the
+    /// whole batch with `Conflict(Forgotten)`.
     ///
     /// # Contract
     ///

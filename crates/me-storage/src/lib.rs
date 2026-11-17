@@ -50,7 +50,7 @@ pub use consolidation::ConsolidationStore;
 pub use ctx::MemoryCtx;
 pub use event_log::EventLog;
 pub use filter::{FactFilter, MetadataPredicate, TemporalFilter};
-pub use graph::{BootstrapIngestOutcome, FactGraph, ScopedWrite};
+pub use graph::{BootstrapIngestOutcome, FactGraph, ImportOutcome, ScopedWrite};
 pub use offload::spawn_join_err;
 pub use retraction::Retraction;
 pub use schema::SchemaManager;
