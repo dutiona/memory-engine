@@ -1,8 +1,8 @@
 use std::io::Read;
 
-use memory_engine::EmbeddingFingerprint;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
+use memory_engine::{EmbeddingFingerprint, ServedArtifact};
 
 /// Maximum embedding-response body the provider will buffer, in bytes (32 MiB).
 ///
@@ -108,6 +108,8 @@ pub struct HttpEmbeddingProvider {
     query_instruction: Option<String>,
     /// Matryoshka truncation target. `None` = no truncation (store the native vector).
     mrl_dim: Option<usize>,
+    /// The declared served artifact (ADR 0015 §1), reported in the fingerprint.
+    served: Option<ServedArtifact>,
 }
 
 impl HttpEmbeddingProvider {
@@ -160,6 +162,7 @@ impl HttpEmbeddingProvider {
             expected_dim,
             query_instruction: None,
             mrl_dim: None,
+            served: None,
         })
     }
 
@@ -177,6 +180,45 @@ impl HttpEmbeddingProvider {
     #[must_use]
     pub fn with_query_instruction(mut self, instruction: impl Into<String>) -> Self {
         self.query_instruction = Some(instruction.into());
+        self
+    }
+
+    /// Declare the served artifact (ADR 0015 §1) this provider's server runs; it is
+    /// reported in [`fingerprint`](EmbeddingProvider::fingerprint), so the store records and
+    /// compares it. Pass a value obtained from [`ServedArtifact::from_parts`], the validating
+    /// boundary: the fields are public, so this method does not validate them again.
+    /// Chainable; defaults to `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use memory_engine::ServedArtifact;
+    /// use memory_engine::traits::EmbeddingProvider;
+    /// use memory_engine_embed::HttpEmbeddingProvider;
+    ///
+    /// let served = ServedArtifact::from_parts(
+    ///     Some("06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439".into()),
+    ///     Some("last".into()),
+    ///     Some("l2".into()),
+    ///     Some(2048),
+    /// )
+    /// .unwrap()
+    /// .unwrap();
+    /// let provider = HttpEmbeddingProvider::new(
+    ///     "http://localhost:8080/v1/embeddings".to_string(),
+    ///     "Qwen/Qwen3-Embedding-0.6B".to_string(),
+    ///     "llama.cpp".to_string(),
+    ///     None,
+    ///     1024,
+    ///     30,
+    /// )
+    /// .expect("failed to build HTTP client")
+    /// .with_served_artifact(served.clone());
+    /// assert_eq!(provider.fingerprint().served, Some(served));
+    /// ```
+    #[must_use]
+    pub fn with_served_artifact(mut self, served: ServedArtifact) -> Self {
+        self.served = Some(served);
         self
     }
 
@@ -579,7 +621,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     fn fingerprint(&self) -> EmbeddingFingerprint {
         // `dim` is the stored (post-MRL) dimension; `matryoshka_base_dim` records the
         // native dim only when truncation is active.
-        match self.mrl_dim {
+        let fp = match self.mrl_dim {
             Some(stored_dim) => EmbeddingFingerprint::with_matryoshka(
                 self.model.clone(),
                 self.provider.clone(),
@@ -591,6 +633,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
                 self.provider.clone(),
                 self.expected_dim,
             ),
+        };
+        EmbeddingFingerprint {
+            served: self.served.clone(),
+            ..fp
         }
     }
 }
@@ -1031,6 +1077,27 @@ mod tests {
         assert_eq!(fp.model, "Qwen/Qwen3-Embedding-0.6B");
         assert_eq!(fp.provider, "tei");
         assert_eq!(fp.element_type, "float32");
+    }
+
+    #[test]
+    fn fingerprint_reports_declared_served_artifact() {
+        let served = memory_engine::ServedArtifact {
+            artifact_sha256: "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
+                .into(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        };
+        assert_eq!(tei_provider(1024).fingerprint().served, None);
+        let plain = tei_provider(1024).with_served_artifact(served.clone());
+        assert_eq!(plain.fingerprint().served.as_ref(), Some(&served));
+        let mrl = tei_provider(1024)
+            .with_mrl_dim(256)
+            .unwrap()
+            .with_served_artifact(served.clone());
+        let fp = mrl.fingerprint();
+        assert_eq!(fp.served, Some(served));
+        assert_eq!(fp.matryoshka_base_dim, Some(1024));
     }
 
     #[test]
