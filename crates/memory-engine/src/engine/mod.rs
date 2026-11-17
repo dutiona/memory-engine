@@ -764,6 +764,26 @@ impl MemoryEngine {
         Ok(id)
     }
 
+    /// Resolve a scope path to its id without creating anything: the read-only twin of
+    /// [`ensure_scope_path`](Self::ensure_scope_path). Reads the cached scope tree, so it
+    /// answers for nodes this engine created or loaded; a node another writer created since
+    /// this engine opened is not seen.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// let engine = memory_engine::MemoryEngine::builder(4).build().unwrap();
+    /// assert_eq!(engine.resolve_scope_path("user:alice"), None);
+    /// let id = engine.ensure_scope_path("user:alice").await.unwrap();
+    /// assert_eq!(engine.resolve_scope_path("user:alice"), Some(id));
+    /// # });
+    /// ```
+    #[must_use]
+    pub fn resolve_scope_path(&self, path: &str) -> Option<i64> {
+        self.scope_tree.read().resolve_path(path)
+    }
+
     // --- Public API: Direct data access ---
 
     /// Get a fact by id.
