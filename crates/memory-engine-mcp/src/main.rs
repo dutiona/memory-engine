@@ -276,6 +276,12 @@ fn build_summary_generator(
             summary::HttpSummaryGenerator::new(url, mdl, api_key, timeout)
                 .map_err(|e| format!("failed to create summary generator: {e}"))?,
         ))),
-        _ => Ok(None),
+        (None, None) => Ok(None),
+        // One without the other would start silently without consolidation.
+        _ => Err(
+            "the summary generator needs both a url (--summary-url / MEMORY_MCP_SUMMARY_URL) \
+                  and a model (--summary-model / MEMORY_MCP_SUMMARY_MODEL)"
+                .into(),
+        ),
     }
 }

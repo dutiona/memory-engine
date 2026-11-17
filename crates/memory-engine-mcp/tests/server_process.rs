@@ -275,3 +275,26 @@ fn help_never_prints_an_api_key_from_the_environment() {
     assert!(!help.contains("embed-key-sentinel"), "{help}");
     assert!(!help.contains("summary-key-sentinel"), "{help}");
 }
+
+#[test]
+fn a_half_configured_summary_endpoint_is_refused() {
+    // With only one of the summary url and model, the server used to start silently
+    // without consolidation.
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &["--summary-url", "http://127.0.0.1:9/v1/chat/completions"],
+        &[],
+    );
+    let status = server.wait_exit(Duration::from_secs(20));
+    assert!(!status.success(), "stderr:\n{}", server.stderr());
+    assert!(
+        server.stderr().contains("summary"),
+        "stderr:\n{}",
+        server.stderr()
+    );
+    assert!(
+        !dir.path().join("memory.db").exists(),
+        "refused before the store opens"
+    );
+}
