@@ -13,6 +13,11 @@
 //! `#[from] rusqlite::Error` variant Postgres cannot construct), so PG re-expresses the
 //! SQL and maps driver errors via [`pg_err`], while preserving the *exact* semantic
 //! variants (`EmbeddingDimension`, `EmbeddingModelMismatch`, `Internal`).
+//!
+//! Postgres does not store the ADR 0015 served artifact yet (SQLite schema v15 added its
+//! columns; parity is dutiona/memory-engine#634): every write or comparison path refuses a
+//! served fingerprint with `NotImplemented` through [`ensure_no_served`] rather than
+//! silently dropping it, and the load path reports `served: None`.
 
 use async_trait::async_trait;
 use me_storage::capabilities::{BackendCapabilities, LexicalRanker};
@@ -68,6 +73,7 @@ impl SchemaManager for PgBackend {
     }
 
     async fn store_embedding_fingerprint(&self, fp: &EmbeddingFingerprint) -> Result<()> {
+        ensure_no_served(fp)?;
         self.read_only_guard()?;
         let fp = fp.clone();
         self.with_client(|client| async move { store_fingerprint(&client, &fp).await })
@@ -79,6 +85,7 @@ impl SchemaManager for PgBackend {
         candidate: &EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<EmbeddingFingerprint> {
+        ensure_no_served(candidate)?;
         self.read_only_guard()?;
         let candidate = candidate.clone();
         self.with_client(|client| async move {
@@ -118,6 +125,7 @@ impl SchemaManager for PgBackend {
     }
 
     async fn check_embedding_compatible(&self, candidate: &EmbeddingFingerprint) -> Result<()> {
+        ensure_no_served(candidate)?;
         let candidate = candidate.clone();
         self.with_client(|client| async move {
             load_fingerprint(&client)
@@ -261,6 +269,7 @@ async fn load_fingerprint(client: &Client) -> Result<Option<EmbeddingFingerprint
         dim,
         matryoshka_base_dim,
         element_type,
+        // No served-artifact columns until dutiona/memory-engine#634 (see ensure_no_served).
         served: None,
     }))
 }
@@ -307,6 +316,19 @@ async fn store_fingerprint(client: &Client, fp: &EmbeddingFingerprint) -> Result
     Ok(())
 }
 
+/// Refuse a fingerprint that carries a served artifact: Postgres has no columns for it
+/// until dutiona/memory-engine#634, and dropping it would silently downgrade the identity.
+fn ensure_no_served(fp: &EmbeddingFingerprint) -> Result<()> {
+    if fp.served.is_some() {
+        return Err(MemoryError::NotImplemented(
+            "PgBackend does not store the ADR 0015 served artifact yet \
+             (dutiona/memory-engine#634)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Reject a candidate that differs from the stored identity (#614) — field-by-field
 /// equality, identical to `store::embedding_meta::ensure_match`.
 fn ensure_match(stored: &EmbeddingFingerprint, candidate: &EmbeddingFingerprint) -> Result<()> {
@@ -317,4 +339,27 @@ fn ensure_match(stored: &EmbeddingFingerprint, candidate: &EmbeddingFingerprint)
         expected: Box::new(stored.clone()),
         actual: Box::new(candidate.clone()),
     })
+}
+
+#[cfg(test)]
+mod served_guard_tests {
+    use super::*;
+    use me_types::types::ServedArtifact;
+
+    #[test]
+    fn ensure_no_served_refuses_a_served_fingerprint() {
+        let plain = EmbeddingFingerprint::new("m", "llama.cpp", 8);
+        ensure_no_served(&plain).expect("an unserved identity is storable");
+        let served = plain.with_served(ServedArtifact {
+            artifact_sha256: "a".repeat(64),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        });
+        let err = ensure_no_served(&served).unwrap_err();
+        assert!(
+            matches!(err, MemoryError::NotImplemented(ref m) if m.contains("#634")),
+            "{err:?}"
+        );
+    }
 }
