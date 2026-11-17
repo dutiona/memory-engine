@@ -40,9 +40,9 @@ pub enum Flaw {
     Control,
     /// The dev root is not an absolute path of plain ASCII without `%`, `"` or `\`.
     NotPlainAbsolute,
-    /// A remote URL still holds an `@` after stripping and gives no remote key (or ends its
-    /// authority with an empty port): userinfo an encoded `/` or `@` hid from the strip, or a
-    /// keyless URL with an `@` in its path; dropped rather than stored.
+    /// A remote URL still holds an `@` after stripping and gives no remote key: userinfo an
+    /// encoded `/` or `@` hid from the strip, or a keyless URL with an `@` in its path; dropped
+    /// rather than stored, which changes no key.
     UnstrippedUserinfo,
 }
 
@@ -338,19 +338,15 @@ fn dev_root(raw: &[u8]) -> Result<String, Flaw> {
     Ok(String::from_utf8_lossy(raw).into_owned())
 }
 
-/// A scheme-form URL that still holds an `@` after stripping, and gives no remote key or ends
-/// its authority with an empty port (which git never writes), had its userinfo hidden from the
-/// strip: a `/` in the password, or the separating `@`, came encoded (`https://user:pa/ss@…`
-/// once decoded). Judged on the decoded value alone, so every encoding of one URL gives one
-/// outcome.
+/// A scheme-form URL that still holds an `@` after stripping and gives no remote key had its
+/// userinfo hidden from the strip: a `/` in the password, or the separating `@`, came encoded
+/// (`https://user:pa/ss@…` once decoded). Judged on the decoded value alone, so every encoding
+/// of one URL gives one outcome, and a dropped URL gave no key anyway: the flag never changes a
+/// key.
 fn unstripped_userinfo(url: &str) -> bool {
-    url.find("://").is_some_and(|at| {
-        let rest = &url[at + 3..];
-        let authority = rest.split('/').next().unwrap_or(rest);
-        is_scheme(&url[..at])
-            && rest.contains('@')
-            && (authority.ends_with(':') || remote_key(url).is_none())
-    })
+    url.find("://")
+        .is_some_and(|at| is_scheme(&url[..at]) && url[at + 3..].contains('@'))
+        && remote_key(url).is_none()
 }
 
 /// Remove the userinfo of every URL in free text, such as an error that quotes a tool argument.
@@ -404,8 +400,11 @@ fn redact_hidden_userinfo(token: &str) -> String {
     let Some(at) = token.find("://") else {
         return token.to_owned();
     };
-    let scheme_start = token[..at]
-        .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-')))
+    // Bytes, not chars: a non-ASCII byte is never a scheme byte, and the byte after one ends
+    // its character, so the start is always a char boundary.
+    let scheme_start = token.as_bytes()[..at]
+        .iter()
+        .rposition(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-')))
         .map_or(0, |i| i + 1);
     let url = token[scheme_start..].trim_end_matches(|c: char| {
         c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';' | ')' | '\\')
@@ -620,7 +619,6 @@ mod tests {
             b"https://alice:a%2Fb%2Fc@github.com/x",
             b"https://alice%40corp:pa%2Fss@github.com/x",
             b"https://alice:pa%2Fss%40github.com/x",
-            b"https://alice:%2Fss@github.com/x",
         ] {
             let map = headers(&[("ME-Project-Origin-Url", raw)]);
             let facts = ProjectFacts::from_headers(&map);
@@ -648,10 +646,30 @@ mod tests {
                 "https://github.com/example/a@b",
             ),
             (b"git@host:a://b/c@d", "host:a://b/c@d"),
+            (
+                b"https://github.com:/example/a@b",
+                "https://github.com:/example/a@b",
+            ),
         ] {
             let map = headers(&[("ME-Project-Upstream-Url", raw)]);
             let facts = ProjectFacts::from_headers(&map);
             assert_eq!(facts.upstream_url.as_deref(), Some(stored), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn redaction_is_total_over_mixed_text() {
+        // Every sequence of four pieces, non-ASCII ones next to schemes included, redacts
+        // without a panic.
+        let pieces = ["é", "😀", "a", ":", "/", "@", " ", "\"", "https://", "x:"];
+        for a in pieces {
+            for b in pieces {
+                for c in pieces {
+                    for d in pieces {
+                        let _ = redact_userinfo(&format!("{a}{b}{c}{d}"));
+                    }
+                }
+            }
         }
     }
 
@@ -690,6 +708,10 @@ mod tests {
             (
                 "unknown project: \"https://alice:pa/ss@github.com/p\"",
                 "unknown project: \"https://github.com/p\"",
+            ),
+            (
+                "unknown project: \"éhttps://a:b/c@d/e\"",
+                "unknown project: \"éhttps://d/e\"",
             ),
             (
                 "https://github.com/example/a@b",
