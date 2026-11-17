@@ -81,7 +81,7 @@ fn main() -> Result<(), MemoryError> {
 - **Pinned facts** — exempt critical facts from decay and deduplication
 - **4-tier resume** — `resume_context()` bootstraps agent sessions with graduated detail levels
 - **Introspection** — `explain_fact()`, `replay_events()`, `statistics()`, import/export (JSON + SQLite, gzip/zstd compression)
-- **MCP server** — `memory-engine-mcp` crate exposes engine operations as MCP tools
+- **MCP server** — `memory-engine-mcp` serves the model two tools, `recall` and `remember`, over authenticated HTTP; maintenance runs through `memory-engine-cli`
 - **CLI inspector** — `memory-engine-cli` for terminal-based inspection and debugging
 - **Thread-safe** — `Send + Sync` via connection pool and `RwLock` caches
 - **Zero external services** — SQLite bundled, pure Rust vector search
@@ -158,8 +158,8 @@ To capture Claude Code sessions into a memory-engine server, install the [Claude
 | Crate               | Purpose                                          |
 | ------------------- | ------------------------------------------------ |
 | `memory-engine`     | Core library (5 primitives, traits, storage)     |
-| `memory-engine-mcp` | MCP server adapter (rmcp-based, P0+P1 tools)     |
-| `memory-engine-cli` | Terminal inspector (query, explain, dump, stats) |
+| `memory-engine-mcp` | MCP server (`recall`, `remember`)                |
+| `memory-engine-cli` | Terminal inspector and maintenance (query, explain, dump, stats, prune) |
 
 ## Current Status
 

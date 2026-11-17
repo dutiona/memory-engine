@@ -2,18 +2,18 @@
 
 ## What
 
-An MCP server binary that serves memory-engine over streamable HTTP (stateless `POST /mcp`, JSON responses), behind per-machine Bearer tokens, and exposes it as 26 tools (10 P0 + 5 P1 + 3 P2 + 2 Phase-5a outcome + 3 cognitive + 3 activity stream) for autonomous AI agents. Part of the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence) — this crate bridges Memory to Intelligence via the Model Context Protocol.
+An MCP server binary that serves memory-engine over streamable HTTP (stateless `POST /mcp`, JSON responses), behind
+per-machine Bearer tokens, and gives the model exactly two tools: `recall` and `remember` (ADR-0020 §8). Part of the
+four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence): this crate bridges Memory to
+Intelligence via the Model Context Protocol.
 
 ## Why
 
-Autonomous agents need a standard protocol to interact with their memory. Raw library calls aren't accessible from agent runtimes (Claude Code, etc.). The MCP server provides a thin, validated adapter layer that:
-
-- Exposes the 5 memory primitives (ingest, query, consolidate, forget, resolve) as MCP tools
-- Shapes responses via tiered depth (sparse/standard/full) to respect agent context window budgets
-- Provides a pre-compaction flush endpoint for capturing insights before context compression
-- Validates inputs at the transport boundary (the engine trusts its callers; the MCP server doesn't)
-
-**Research basis:** NeuroStack's auto-escalating retrieval pattern (sparse → medium → full), ACC's bounded compressed cognitive state, MCP ecosystem analysis (5 memory servers evaluated).
+The memory service is reachable from every machine of its owner, so its model-facing surface is deliberately small
+(ADR-0020 §8): the model reads and writes memories, and nothing it can call prunes, deletes, dumps or writes a path.
+Maintenance (pruning, export, consolidation, inspection) is `memory-engine-cli`'s, run by an operator; captured
+session events arrive through the lifecycle routes, not through tools. The server validates every input at the
+transport boundary: the engine trusts its callers, the server does not.
 
 ## How
 
@@ -99,7 +99,7 @@ The four served-artifact keys (`artifact_sha256`, `pooling`, `normalization`, `m
 
 #### Asymmetric models (TEI / Qwen)
 
-Models like `Qwen/Qwen3-Embedding-0.6B` take a query-only instruction prefix and support Matryoshka (MRL) truncation. The MCP query path uses `embed_query` (prefix applied); `memory_add_fact` embeds documents prefix-free.
+Models like `Qwen/Qwen3-Embedding-0.6B` take a query-only instruction prefix and support Matryoshka (MRL) truncation. `recall` embeds its query with `embed_query` (prefix applied); `remember` embeds documents prefix-free.
 
 ```toml
 [engine]
@@ -121,8 +121,6 @@ mrl_dim = 256         # Truncate + L2-renormalize to this; must equal engine emb
 On startup the server verifies the configured provider's identity (`model`, `provider`, `dim`, MRL, element type and the served artifact) against the one the store was created with, and **refuses to start on a mismatch** (#614, #1017). This prevents the silent-corruption case where a different model — even at the same dimension, or the same model served from another file — embeds queries into an incompatible vector space. A fresh store with nothing embedded yet has no recorded identity and accepts any provider; the identity is stamped on the first embedding write.
 
 An absent served artifact matches only another absent one, so a store recorded before schema v15 (or without the served keys) refuses a configuration that declares them, and the reverse. The recoveries are to drop the declaration and keep serving the recorded identity, or to start from a blank store. Reconstruction under the new identity is the normative path (ADR-0015 §4) but has no CLI or MCP surface yet (#689). The refused start has already migrated the store to schema v15, which an older binary refuses, so recover with the new binary; rolling back is not one of the recoveries.
-
-A pre-computed `memory_add_fact` must declare exactly the configured embedder's identity, and a declaration cannot carry a served artifact, so a served deployment refuses pre-computed writes; a pre-computed `memory_query` against a served store is refused too.
 
 ### Transport and authentication
 
@@ -148,7 +146,7 @@ printf '%s %s\n' laptop "$(printf '%s' "$token" | sha256sum | cut -d' ' -f1)" >>
 
 The `Host` check admits loopback plus each `--allowed-host` value; an entry without a port admits any port, and `*`,
 `@` and spaces are refused. The calling machine, taken from the token, is written to `metadata.machine` on every
-fact `memory_add_fact` stores; a client cannot set it.
+fact `remember` stores; a client cannot set it.
 
 The Claude Code plugin sends the token through its `headersHelper` (ADR-0020 §12); never put a token in `.mcp.json`
 or on a command line. A manual check reads the header from standard input:
@@ -176,165 +174,66 @@ stopped; read-only commands, `export` included, run beside it
 
 ### Tools
 
-| Tool                         | Priority  | Purpose                                | Depth                |
-| ---------------------------- | --------- | -------------------------------------- | -------------------- |
-| `memory_ingest`              | P0        | Append event to log                    | —                    |
-| `memory_add_fact`            | P0        | Add fact with embedding                | —                    |
-| `memory_query`               | P0        | Hybrid FTS + vector search             | sparse/standard/full |
-| `memory_resume_context`      | P0        | 4-tier cognitive boot                  | sparse/standard/full |
-| `memory_list_due`            | P0        | Scheduled fact surfacing               | sparse/standard/full |
-| `memory_next_due_time`       | P0        | Next scheduled time                    | —                    |
-| `memory_explain_fact`        | P0        | Fact provenance                        | sparse/standard/full |
-| `memory_get_fact`            | P0        | Single fact by ID                      | sparse/standard/full |
-| `memory_statistics`          | P0        | Aggregate stats                        | —                    |
-| `memory_flush_insights`      | P0        | Batch pre-compaction capture           | —                    |
-| `memory_consolidate`         | P1        | Dedup + cluster facts into summaries   | —                    |
-| `memory_forget`              | P1        | Ebbinghaus decay pruning               | —                    |
-| `memory_dump_state`          | P1        | Export snapshot (JSON/SQLite)          | —                    |
-| `memory_pin_fact`            | P1        | Make fact unforgettable                | —                    |
-| `memory_unpin_fact`          | P1        | Allow forgetting a pinned fact         | —                    |
-| `memory_replay_events`       | P2        | Replay the event log                   | —                    |
-| `memory_fact_history`        | P2        | Bi-temporal history of a fact          | —                    |
-| `memory_bootstrap_session`   | P2        | Seed a session from prior memory       | sparse/standard/full |
-| `memory_record_outcome`      | Phase 5a  | Record an outcome for a fact           | —                    |
-| `memory_outcome_counts`      | Phase 5a  | Aggregate outcome counts               | —                    |
-| `memory_dream_cycle`         | Cognitive | Run the DreamCycle (`apply` flag)      | —                    |
-| `memory_apply_cycle_report`  | Cognitive | Apply a previously-produced report     | —                    |
-| `memory_get_recent_insights` | Cognitive | Recent flushed insights by scope       | sparse/standard/full |
-| `memory_record_activity`     | Activity  | Record tool invocation with dedup      | —                    |
-| `memory_checkpoint_session`  | Activity  | Checkpoint session state (LWW)         | —                    |
-| `memory_load_context`        | Activity  | Load project context for session start | sparse/standard/full |
+Two tools, each taking a JSON object and refusing any argument it does not declare (`additionalProperties: false`,
+and the server refuses a stray key even when the client ignores the schema):
 
-### Tiered Depth
+```text
+recall(query: string, project?: string)
+remember(content: string)
+```
 
-Controls response verbosity to manage token budget:
+`remember`'s `level` and `set_level` arrive with #1022, `forget` (a reversible retraction) with #1023.
 
-| Depth      | ~Tokens/fact | Includes                                                    |
-| ---------- | ------------ | ----------------------------------------------------------- |
-| `sparse`   | ~15          | id, truncated content (200 chars), importance_score, scope  |
-| `standard` | ~75          | All fields except embedding and content_hash                |
-| `full`     | ~300+        | Everything: provenance, graph context, embedding dimensions |
+**Every answer starts with its call ID.** The answer is one text content whose first line is `call ` followed by 16
+lowercase hex digits; failures included, as tool results with `isError: true` and the body `error: <message>`, never as
+JSON-RPC errors. A name that is not a tool is a JSON-RPC `-32602 unknown tool: <name>`. Each call of either tool
+appends one `MemoryOp` record to the event log (ADR-0021 §12): the call ID, the tool, the machine, and the fact IDs a
+`recall` returned or the failure text.
 
-Usage: pass `"depth": "sparse"` (or `"standard"`, `"full"`) as a tool parameter.
+**Homes.** Until #1022 derives a project key from each request, every session is keyless (ADR-0021 §6):
 
-### Embedding
+| Call | Writes to | Reads |
+|---|---|---|
+| `remember(content)` | `unscoped:<machine>`, the calling machine's bucket | — |
+| `recall(query)` | — | exactly the bucket and `user:<user>` |
+| `recall(query, project: K)` | — | exactly the project whose key is `K` and `user:<user>`; never a bucket |
 
-The server requires an OpenAI-compatible embedding endpoint for `memory_add_fact` and vector/hybrid queries. Compatible with:
+The restriction is applied inside candidate generation, so the fixed cut of 10 never sees a memory of another Home.
+`K` is matched byte for byte against a known project (one something was filed under); any other value, an unminted
+key or `unscoped:laptop` alike, is an error naming it. Nothing reads the root scope.
 
-- **ollama**: `http://localhost:11434/v1/embeddings`
-- **OpenAI**: `https://api.openai.com/v1/embeddings`
-- Any endpoint returning `{ "data": [{ "embedding": [...] }] }` or `{ "embeddings": [[...]] }`
+**`recall`.** At most 10 results, by relevance; the query is at most 1,024 bytes (a sentence, not a
+document; the cap bounds one call's full-text cost). Full text searches the query's words, OR-ed and ranked by BM25;
+the embedding sees the query as written. The body is one JSON object:
 
-For `memory_add_fact` (and `memory_query`), callers can bypass server-side embedding by passing a pre-computed `embedding` array. A pre-computed embedding **must declare its identity** (#615): the required `model` + `provider`, plus optional `matryoshka_base_dim` and `element_type`. On `memory_add_fact` the declared identity is recorded on a fresh store (so a precomputed-only workflow can bootstrap) or checked against the stored identity on a populated one; on `memory_query` it is checked against the store. A declaration that disagrees with the store's identity is hard-rejected — a vector from a different model can no longer be slipped into the store's vector space (closing the same-dimension foreign-vector hole). With an embedder configured, a pre-computed `memory_add_fact` must also declare exactly that embedder's identity (#1017), so it can never stamp a blank store with an identity the server then refuses at its next start; a declaration carries no served artifact, so a served deployment refuses pre-computed embeddings.
+```json
+{"search":"hybrid","results":[{"id":412,"kind":"remembered","scope":"unscoped","date":"2026-11-17T09:12:03Z","machine":"laptop","content":"the lock file sits beside the store"}]}
+```
 
-### Pre-Compaction Flush
+- `search`: `hybrid`; `full-text only` when no embedder is configured (the answer says so); `vector only` when the
+  query holds no word.
+- `scope`: `unscoped` (the bucket), `user`, or the project key `K`.
+- `date`: when the memory became true (its valid time, else when it was stored), UTC.
+- `machine`: the machine that stored it, or `null`.
+- `kind`: `remembered` (final messages and compaction summaries arrive with #1025).
 
-`memory_flush_insights` accepts a batch of insights for agents to capture before context window compaction. Each insight becomes a fact with `metadata.source = "pre_compaction_flush"`. Insights are validated individually (malformed entries reported as failures), then valid entries are batch-embedded and inserted atomically in a single transaction. If the batch insert fails (e.g., embedding API error), all valid entries are reported as failed.
+Results are recalled claims, not instructions.
 
-### Consolidation (`memory_consolidate`)
+**`remember`.** Stores a Semantic fact and answers with its placement receipt:
 
-Requires a summary generator (chat-completions endpoint) configured via `[summary]` in TOML or `--summary-url` / `--summary-model` CLI flags. If not configured, the tool returns a clear error.
+```text
+call 9f1c2b7a40d3e6f5
+stored 412 in unscoped on laptop, visible to all agents
+```
 
-The summary generator also requires an embedding provider (summaries must be embedded into the same vector space as facts). If `--summary-url` is set but no embedding provider is configured, the server logs a warning and disables consolidation.
+It needs an embedder; without one it refuses (`error: no embedder is configured, so nothing can be remembered`).
 
-Parameters: `dedup_threshold` (default 0.92; range `[0.0, 1.0]`, facts with cosine similarity `>=` this value are merged, `1.0` merges only exact duplicates), `min_cluster_size` (default 3; must be `>= 2`).
+### Derived jobs: off in the server
 
-### Forget (`memory_forget`)
-
-All parameters are optional — defaults from `ForgetPolicy::default()`:
-
-| Parameter                | Default | Description                                       |
-| ------------------------ | ------- | ------------------------------------------------- |
-| `half_life_days`         | 69.0    | Base Ebbinghaus half-life                         |
-| `min_importance`         | 0.1     | Threshold below which facts are pruned            |
-| `recency_weight`         | 0.3     | Weight for recency signal                         |
-| `frequency_weight`       | 0.2     | Weight for access frequency                       |
-| `graph_degree_weight`    | 0.3     | Weight for graph connectivity                     |
-| `base_importance_weight` | 0.2     | Weight for base importance                        |
-| `half_life_overrides`    | `{}`    | Per-FactType overrides, e.g. `{"Episodic": 30.0}` |
-
-### Dump State (`memory_dump_state`)
-
-Exports the full engine snapshot. Formats: `json`, `sqlite`. Client-supplied paths are restricted to the system temp directory for security. Default: `{temp_dir}/memory-dump-{timestamp}.json`.
-
-### Pin / Unpin
-
-`memory_pin_fact` and `memory_unpin_fact` toggle a fact's persistence. Pinned facts are immune to `memory_forget`.
-
-### Cognitive Pipeline (`memory_dream_cycle`, `memory_apply_cycle_report`, `memory_get_recent_insights`)
-
-These expose the Phase-5a [DreamCycle](../advanced/dream-cycle.md) over MCP. The engine separates _producing_ a cycle report (a pure analysis pass, no mutation) from _applying_ it (the mutating step). The MCP surface offers both the ergonomic one-call form and the explicit two-step gate:
-
-| Tool                         | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory_dream_cycle`         | Runs `DefaultDreamCycle::with_defaults()` **through the #209 guard** (`run_dream_cycle_guarded`). If the caller wrote facts since the cursor, the run is **deferred**: `{ "did_run": false, "skipped": { "CallerWroteFacts": { "since_fact_id", "new_max_fact_id" } } }` (no report, nothing applied). Otherwise it runs: `{ "did_run": true, "report", "did_apply", "applied"? }` — `apply` (bool, default `true`) controls in-call application; `applied` present only when `did_apply` is true. |
-| `memory_apply_cycle_report`  | Applies a report produced by an earlier `apply:false` run (serde round-trips across the boundary). Malformed JSON or a report referencing an unknown fact → `invalid_params`. Returns the `ApplyResult`.                                                                                                                                                                                                                                                                                           |
-| `memory_get_recent_insights` | Returns facts flushed via `memory_flush_insights`, scoped to `project_path`'s subtree, newest-first, capped by `limit` (default 20). An unknown `project_path` returns an empty list, not an error. Honors tiered `depth`.                                                                                                                                                                                                                                                                         |
-
-The dream cycle does **not** run consolidation — it is a lightweight, idempotent-by-report analysis pass. The `apply:false` → `memory_apply_cycle_report` split lets an agent review the proposed deltas before committing them. `memory_get_recent_insights` reads the same shared insight marker (`INSIGHT_MARKER_KEY`) that `memory_flush_insights` stamps, so the writer and reader cannot drift.
-
-**Caller-write deferral (#209).** `memory_dream_cycle` stands down (`did_run: false`) when the caller wrote facts since the last run — the write/consolidate-race gate for a harness that fires writes and the cycle on the same trigger. It is a per-invocation deferral: the facts are processed by a later quiet run, not dropped. See [dream-cycle § Caller-write deferral](../advanced/dream-cycle.md#caller-write-deferral-209).
-
-### Activity Stream (`memory_record_activity`)
-
-Records tool invocations with server-side filtering. The pipeline runs: **ignore** (drop noise) → **dedup** (collapse repeats within a configurable window) → **promote** (auto-create facts from significant actions).
-
-Parameters:
-
-| Param           | Type   | Required | Description                                                         |
-| --------------- | ------ | -------- | ------------------------------------------------------------------- |
-| `tool`          | string | yes      | Tool name that was invoked                                          |
-| `session_id`    | string | yes      | Current session ID                                                  |
-| `args`          | object | no       | Tool arguments (arbitrary JSON)                                     |
-| `result`        | string | no       | Tool result summary (truncated at 512 chars server-side)            |
-| `timestamp`     | string | no       | ISO 8601 timestamp. Defaults to now                                 |
-| `scope`         | string | no       | Scope path for the activity                                         |
-| `outcome_class` | string | no       | `"success"`, `"error"`, `"test_failure"`, etc. Default: `"success"` |
-
-Returns `{ activity_id, was_deduplicated, promoted_fact_id, status }`.
-
-Dedup key: `(session_id, tool_name, args_hash, outcome_class, scope_id)` within the configured window (default 300s). Outcome-class-aware: a passing `cargo test` and a failing one within the same window are NOT collapsed.
-
-Filtering policy is adapter-specific — the MCP adapter supplies Claude Code heuristics (ignore/promote patterns) via `activity_policy.rs`. The core engine is generic.
-
-### Session Checkpoint (`memory_checkpoint_session`)
-
-Saves session state (last-write-wins per `session_id`). Designed to be called from a Stop hook.
-
-Parameters:
-
-| Param        | Type   | Required | Description               |
-| ------------ | ------ | -------- | ------------------------- |
-| `session_id` | string | yes      | Session ID to checkpoint  |
-| `scope`      | string | no       | Scope path                |
-| `summary`    | string | no       | Free-form session summary |
-| `metadata`   | object | no       | Arbitrary JSON metadata   |
-
-Returns `{ session_id, checkpointed: true }`.
-
-### Load Context (`memory_load_context`)
-
-Loads project-scoped context for session bootstrap. Returns recent activities, the last checkpoint, and relevant scope-filtered facts in a single read snapshot (consistent cross-query results).
-
-Parameters:
-
-| Param            | Type    | Required | Description                                                 |
-| ---------------- | ------- | -------- | ----------------------------------------------------------- |
-| `scope`          | string  | yes      | Scope path                                                  |
-| `activity_limit` | integer | no       | Max recent activities (default 20)                          |
-| `fact_limit`     | integer | no       | Max relevant facts (default 10)                             |
-| `depth`          | string  | no       | `"sparse"` / `"standard"` / `"full"` (default `"standard"`) |
-
-Returns `{ scope_path, recent_activities, last_checkpoint, relevant_facts }` shaped by the requested depth level.
-
-### Schema v9
-
-The activity stream adds two tables in schema version 9:
-
-- **`activities`** — append-only log of tool invocations with dedup counters, outcome classification, and optional promotion linkage (`promoted_fact_id` FK to `facts`).
-- **`session_checkpoints`** — last-write-wins session state (scope, summary, metadata, timestamp).
-
-Migration from v8 is automatic on first open.
+Consolidation, the dream cycle, applying a cycle report and the insight flush are off (ADR-0020 §8): no tool, route or
+timer runs them, and the crate's `clippy.toml` refuses any server code path that calls them. Run consolidation with
+`memory-engine-cli consolidate`, the server stopped. The server has no summary generator: a `--summary-*` flag or a
+`[summary]` section refuses to start.
 
 ### Architecture
 
@@ -343,13 +242,10 @@ Agent (Claude, etc.) → HTTP POST /mcp → auth layer → rmcp (stateless) → 
                                          ├── auth.rs (token-hash file, Bearer check)
                                          ├── http.rs (router, auth layer, drain + flush)
                                          ├── config.rs (TOML + env + CLI)
-                                         ├── server.rs (ServerHandler, calling machine)
-                                         ├── tools/   (26 handlers + dispatch)
-                                         ├── depth.rs (response shaping)
-                                         ├── activity_policy.rs (Claude Code filter heuristics)
-                                         ├── embedding.rs (HTTP embedding provider)
-                                         ├── summary.rs (HTTP summary generator)
-                                         └── error.rs (MemoryError → MCP)
+                                         ├── server.rs (ServerHandler, calling machine, instructions)
+                                         ├── home.rs (the user, Homes, project labels)
+                                         ├── tools/ (recall, remember, call IDs, call records)
+                                         └── embedding.rs (HTTP embedding provider)
 ```
 
 The engine is async-native (#631): tool calls are awaited directly, and the engine offloads its storage and blocking

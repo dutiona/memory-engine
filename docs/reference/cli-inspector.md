@@ -191,7 +191,7 @@ policy of the forgetting engine. Flags, each defaulting to `ForgetPolicy::defaul
 the store is opened. Pinned facts and the decay-exempt types (Semantic and Procedural by default, so every memory the
 MCP `remember` tool stores) are never pruned. Output: `expired N of M facts evaluated`, `{"facts_expired":N,"facts_evaluated":M}`
 or `facts_expired=N` / `facts_evaluated=M`. It writes the store, so it takes the store lock: stop the server first.
-This was the `memory_forget` MCP tool; pruning is never the model's (ADR-0020 §8).
+Pruning is never the model's (ADR-0020 §8).
 
 #### `dump [facts|events|all]` — Debug Listing
 
