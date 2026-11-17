@@ -1714,10 +1714,11 @@ CREATE TRIGGER facts_fts_au AFTER UPDATE ON facts BEGIN INSERT INTO facts_fts(fa
 /// registered in `MIGRATIONS`.
 ///
 /// **Note on init-vs-migrated divergence**: The golden here intentionally
-/// differs from the `schema_ddl_snapshot_is_stable` golden. `SQLite`'s
-/// `ALTER TABLE ADD COLUMN` does not rewrite the `sql` column in
-/// `sqlite_master`, so tables rebuilt at v3 and extended at v3→v4 and
-/// v5→v6 show only their v3-era column set in `CREATE TABLE` DDL. This is a
+/// differs from the `schema_ddl_snapshot_is_stable` golden in TEXT, not in
+/// shape. Tables rebuilt at v2→v3 keep a quoted name and lose their inline
+/// comments, and `SQLite`'s `ALTER TABLE ADD COLUMN` splices each new column
+/// into the stored `CREATE TABLE` text as ` , <column>` before the closing
+/// parenthesis. Columns, constraints and indexes are the same. This is a
 /// known structural artifact of the migration path, not a bug; see
 /// `migration_chain_ddl_differs_from_init_known_artifact` for a pinned
 /// assertion of this difference.
@@ -1739,11 +1740,11 @@ fn schema_ddl_migration_chain_snapshot() {
 /// Documents and asserts the known structural difference between the
 /// fresh-init DDL and the migration-chain DDL.
 ///
-/// Because `ALTER TABLE ADD COLUMN` (used in migrations v3→v4, v4→v5,
-/// v5→v6) does not modify the `sql` column in `sqlite_master`, a v1→v11
-/// migrated database produces different DDL text than a direct `init_schema`
-/// call, even though both databases are functionally equivalent (same
-/// columns, same constraints, same indexes).
+/// Tables rebuilt at v2→v3 keep a quoted name and lose their inline comments,
+/// and `ALTER TABLE ADD COLUMN` (v3→v4, v4→v5, v5→v6) splices its column into
+/// the stored `sql` text with its own spacing, so a migrated database produces
+/// different DDL text than a direct `init_schema` call, even though both are
+/// functionally equivalent (same columns, same constraints, same indexes).
 ///
 /// This test pins the fact that the two paths DIFFER, preventing a false
 /// future "equality" assertion that would hide a real migration regression.
@@ -1760,9 +1761,9 @@ fn migration_chain_ddl_differs_from_init_known_artifact() {
     migrate(&migrated_conn, None).unwrap();
     let migrated_ddl = deterministic_schema_dump(&migrated_conn);
 
-    // The two DDL strings must differ: ALTER TABLE ADD COLUMN leaves behind
-    // truncated CREATE TABLE SQL for tables that were rebuilt at v3 and later
-    // extended. This is intentional: we pin the divergence here so that any
+    // The two DDL strings must differ: the v3 rebuilds and the ADD COLUMN
+    // splices leave CREATE TABLE text that differs from the fresh DDL. This is
+    // intentional: we pin the divergence here so that any
     // unexpected convergence (or unexpected further divergence) is caught.
     assert_ne!(
         init_ddl, migrated_ddl,
