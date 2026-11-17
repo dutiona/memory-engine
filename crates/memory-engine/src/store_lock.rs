@@ -103,28 +103,41 @@ impl StoreLock {
 }
 
 /// The lock file for `db`, after symlinks: SQLite follows them to one store, so every name
-/// for it must find one lock. A database not created yet resolves through its directory.
+/// for it must find one lock. A store not created yet resolves through its directory, and a
+/// dangling link through the target SQLite would create.
 fn lock_path(db: &Path) -> io::Result<PathBuf> {
-    let db = match db.canonicalize() {
-        Ok(target) => target,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let dir = match db.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p,
-                _ => Path::new("."),
-            };
-            let file = db.file_name().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "the database path names no file",
-                )
-            })?;
-            dir.canonicalize()?.join(file)
+    let mut db = db.to_path_buf();
+    // A bound on dangling hops; a cycle fails canonicalize with its own error.
+    for _ in 0..40 {
+        match db.canonicalize() {
+            Ok(target) => return Ok(with_suffix(target)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e),
+        let Ok(target) = std::fs::read_link(&db) else {
+            break;
+        };
+        db = db
+            .parent()
+            .map_or_else(|| target.clone(), |dir| dir.join(&target));
+    }
+    let dir = match db.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
     };
+    let file = db.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the database path names no file",
+        )
+    })?;
+    Ok(with_suffix(dir.canonicalize()?.join(file)))
+}
+
+fn with_suffix(db: PathBuf) -> PathBuf {
     let mut name = db.into_os_string();
     name.push(".store-lock");
-    Ok(PathBuf::from(name))
+    PathBuf::from(name)
 }
 
 #[cfg(test)]
@@ -222,6 +235,21 @@ mod tests {
         let held = StoreLock::acquire(&fresh).unwrap();
         assert!(matches!(
             StoreLock::acquire(&linked_dir.join("fresh.db")),
+            Err(StoreLockError::Held { .. })
+        ));
+        drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_locks_the_store_it_will_create() {
+        // SQLite creates the target through the link, so the target's lock is the one.
+        let dir = tempfile::tempdir().unwrap();
+        let alias = dir.path().join("alias.db");
+        std::os::unix::fs::symlink("memory.db", &alias).unwrap();
+        let held = StoreLock::acquire(&alias).unwrap();
+        assert!(matches!(
+            StoreLock::acquire(&dir.path().join("memory.db")),
             Err(StoreLockError::Held { .. })
         ));
         drop(held);
