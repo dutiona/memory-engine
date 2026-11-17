@@ -20,6 +20,10 @@ pub enum ScopeQuery {
     Ancestors(String),
     /// Facts at ancestors + at this scope path's subtree (full inherited context).
     Inherited(String),
+    /// Facts at exactly any of these scope paths: never a descendant, never an ancestor.
+    /// A path that does not exist contributes nothing; when none exists the query resolves
+    /// to nothing, so an empty set never reaches storage.
+    ExactSet(Vec<String>),
 }
 
 /// Maximum byte length of a single scope-path segment (label).

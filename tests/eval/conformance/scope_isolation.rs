@@ -373,3 +373,174 @@ async fn scope_exact_does_not_include_parent_facts() {
         "exact scope should not include parent facts; got {ids:?}"
     );
 }
+
+// --- ScopeQuery::ExactSet (#1020): the memory service's two-Home read ------------------
+
+/// Insert a fact at `scope` (root when `None`) with an explicit vector.
+async fn add_with_vector(
+    engine: &memory_engine::engine::MemoryEngine,
+    content: &str,
+    scope: Option<&str>,
+    embedding: Vec<f32>,
+) -> i64 {
+    use memory_engine::traits::EmbeddingProvider;
+    use memory_engine::types::AddFactRequest;
+    engine
+        .add_fact_precomputed(
+            &AddFactRequest {
+                content: content.to_owned(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: scope.map(str::to_owned),
+                opts: None,
+            },
+            embedding,
+            &crate::helpers::TestEmbedder.fingerprint(),
+            None,
+        )
+        .await
+        .expect("add_fact_precomputed failed")
+}
+
+fn embed(text: &str) -> Vec<f32> {
+    use memory_engine::traits::EmbeddingProvider;
+    crate::helpers::TestEmbedder.embed(text).expect("embed")
+}
+
+const VISIBLE_HOMES: [&str; 2] = ["unscoped:laptop", "user:alice"];
+
+#[tokio::test]
+async fn exact_set_reads_only_the_named_homes() {
+    let engine = eval_engine();
+    let mut visible = Vec::new();
+    for home in VISIBLE_HOMES {
+        visible.push(
+            add_scoped_fact(
+                &engine,
+                &format!("kestrel note in {home}"),
+                FactType::Semantic,
+                home,
+            )
+            .await,
+        );
+    }
+    for home in ["unscoped:desktop", "user:alice/project:p"] {
+        add_scoped_fact(
+            &engine,
+            &format!("kestrel note in {home}"),
+            FactType::Semantic,
+            home,
+        )
+        .await;
+    }
+    add_with_vector(&engine, "kestrel note at root", None, embed("root")).await;
+    visible.sort_unstable();
+
+    for query in [
+        MemoryQuery::new().scope_exact_set(VISIBLE_HOMES),
+        MemoryQuery::new()
+            .text("kestrel")
+            .scope_exact_set(VISIBLE_HOMES),
+    ] {
+        let response = engine.execute_query(&query).await.expect("query failed");
+        let mut ids: Vec<i64> = response.results.iter().map(|r| r.fact.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, visible, "{query:?}");
+    }
+}
+
+#[tokio::test]
+async fn exact_set_without_an_existing_home_returns_nothing() {
+    let engine = eval_engine();
+    add_scoped_fact(
+        &engine,
+        "kestrel elsewhere",
+        FactType::Semantic,
+        "unscoped:desktop",
+    )
+    .await;
+    for query in [
+        MemoryQuery::new().scope_exact_set(VISIBLE_HOMES),
+        MemoryQuery::new()
+            .text("kestrel")
+            .scope_exact_set(VISIBLE_HOMES),
+        MemoryQuery::new().scope_exact_set(Vec::<String>::new()),
+    ] {
+        let response = engine.execute_query(&query).await.expect("query failed");
+        assert!(
+            response.results.is_empty(),
+            "{query:?}: {:?}",
+            response.results
+        );
+    }
+}
+
+/// C16 (ADR-0021): 50 hidden facts rank first on every channel, 12 visible ones exist, and a
+/// limit of 10 must still return 10 visible facts.
+async fn assert_filtered_before_top_k(engine: &memory_engine::engine::MemoryEngine) {
+    use memory_engine::SearchMode;
+    let query_vec = embed("kestrel");
+    for i in 0..50 {
+        let home = ["unscoped:desktop", "user:alice/project:p"][i % 2];
+        add_with_vector(
+            engine,
+            &format!("kestrel kestrel kestrel hidden {i}"),
+            Some(home),
+            query_vec.clone(),
+        )
+        .await;
+    }
+    for i in 0..5 {
+        add_with_vector(
+            engine,
+            &format!("kestrel kestrel kestrel at root {i}"),
+            None,
+            query_vec.clone(),
+        )
+        .await;
+    }
+    let mut visible = Vec::new();
+    for i in 0..12 {
+        let home = VISIBLE_HOMES[i % 2];
+        visible.push(
+            add_with_vector(
+                engine,
+                &format!("kestrel visible {i}"),
+                Some(home),
+                embed(&format!("v{i}")),
+            )
+            .await,
+        );
+    }
+
+    for (mode, query) in [
+        (SearchMode::Fts, MemoryQuery::new().text("kestrel")),
+        (
+            SearchMode::Vector,
+            MemoryQuery::new().embedding(query_vec.clone()),
+        ),
+        (
+            SearchMode::Hybrid,
+            MemoryQuery::new()
+                .text("kestrel")
+                .embedding(query_vec.clone()),
+        ),
+    ] {
+        let query = query
+            .search_mode(mode)
+            .scope_exact_set(VISIBLE_HOMES)
+            .limit(10);
+        let response = engine.execute_query(&query).await.expect("query failed");
+        let ids: Vec<i64> = response.results.iter().map(|r| r.fact.id).collect();
+        assert_eq!(ids.len(), 10, "{mode:?} starved: {ids:?}");
+        assert!(
+            ids.iter().all(|id| visible.contains(id)),
+            "{mode:?} leaked a hidden fact: {ids:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn exact_set_filters_before_top_k_on_every_channel() {
+    assert_filtered_before_top_k(&eval_engine()).await;
+}

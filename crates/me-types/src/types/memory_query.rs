@@ -139,6 +139,15 @@ impl MemoryQuery {
         self
     }
 
+    /// Filter to facts at exactly any of these scope paths (see [`ScopeQuery::ExactSet`]).
+    #[must_use]
+    pub fn scope_exact_set(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.scope = Some(ScopeQuery::ExactSet(
+            paths.into_iter().map(Into::into).collect(),
+        ));
+        self
+    }
+
     // --- Temporal ---
 
     /// Point-in-time filter (existing `SearchQuery` semantics).
@@ -356,6 +365,18 @@ mod tests {
     fn scope_inherited_sets_inherited_variant() {
         let q = MemoryQuery::new().scope_inherited("ctx");
         assert_eq!(q.scope, Some(ScopeQuery::Inherited("ctx".into())));
+    }
+
+    #[test]
+    fn scope_exact_set_sets_the_exact_set_variant() {
+        let q = MemoryQuery::new().scope_exact_set(["unscoped:laptop", "user:alice"]);
+        assert_eq!(
+            q.scope,
+            Some(ScopeQuery::ExactSet(vec![
+                "unscoped:laptop".into(),
+                "user:alice".into()
+            ]))
+        );
     }
 
     #[test]

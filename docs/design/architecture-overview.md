@@ -270,6 +270,7 @@ The `ScopeQuery` enum controls scope resolution for searches:
 - **Subtree** -- Facts at this scope and all descendants.
 - **Ancestors** -- Facts at this scope and all ancestors up to root.
 - **Inherited** -- Ancestors + subtree (full inherited context).
+- **ExactSet** -- Facts at exactly any of several scopes; none resolved matches nothing.
 
 ## Consumer Traits
 
