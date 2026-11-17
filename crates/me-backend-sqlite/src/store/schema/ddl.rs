@@ -160,6 +160,20 @@ CREATE TABLE IF NOT EXISTS fact_vectors (
 ) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS idx_fact_vectors_space ON fact_vectors(space_id);
+
+CREATE TABLE IF NOT EXISTS fact_tombstones (
+    id              INTEGER PRIMARY KEY,
+    fact_id         INTEGER UNIQUE REFERENCES facts(id) ON DELETE SET NULL,
+    content_hash    TEXT    NOT NULL,
+    reason          TEXT,
+    forgotten_at    TEXT    NOT NULL,
+    record_event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
+    prior_t_expired TEXT,
+    prior_t_invalid TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_tombstones_hash ON fact_tombstones(content_hash);
+CREATE INDEX IF NOT EXISTS idx_fact_tombstones_record ON fact_tombstones(record_event_id);
 ";
 
 pub(super) const SCOPES_DDL: &str = "
@@ -221,4 +235,6 @@ CREATE INDEX IF NOT EXISTS idx_facts_importance_score ON facts(importance_score)
 CREATE INDEX IF NOT EXISTS idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
 CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);
 CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, sequence_id);
+CREATE INDEX IF NOT EXISTS idx_facts_source_event ON facts(source_event_id);
+CREATE INDEX IF NOT EXISTS idx_activities_promoted ON activities(promoted_fact_id);
 ";

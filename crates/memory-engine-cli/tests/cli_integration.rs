@@ -542,8 +542,8 @@ async fn query_table_output_shows_temporal_columns() {
 
 /// Create a current-schema DB, then roll its recorded `schema_version` back one
 /// version to simulate a stale database. The on-disk schema is already current, but
-/// the newest migration is idempotent (v14→v15 adds each column only if
-/// `pragma_table_info` lacks it), so `migrate` re-applies it cleanly — exercising the
+/// the newest migration is idempotent (v15→v16 creates its table and indexes
+/// `IF NOT EXISTS`), so `migrate` re-applies it cleanly — exercising the
 /// version reading, pending computation, and exit codes.
 async fn create_stale_db() -> (TempDir, PathBuf) {
     let (dir, db_path) = create_test_db().await;

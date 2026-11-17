@@ -5,6 +5,9 @@ expression: schema
 -- index: idx_activities_dedup
 CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
 
+-- index: idx_activities_promoted
+CREATE INDEX idx_activities_promoted ON activities(promoted_fact_id);
+
 -- index: idx_activities_scope_recent
 CREATE INDEX idx_activities_scope_recent ON activities(scope_id, last_seen DESC);
 
@@ -47,6 +50,12 @@ CREATE INDEX idx_events_session ON events(session_id) WHERE session_id IS NOT NU
 -- index: idx_events_timestamp
 CREATE INDEX idx_events_timestamp ON events(timestamp);
 
+-- index: idx_fact_tombstones_hash
+CREATE INDEX idx_fact_tombstones_hash ON fact_tombstones(content_hash);
+
+-- index: idx_fact_tombstones_record
+CREATE INDEX idx_fact_tombstones_record ON fact_tombstones(record_event_id);
+
 -- index: idx_fact_vectors_space
 CREATE INDEX idx_fact_vectors_space ON fact_vectors(space_id);
 
@@ -67,6 +76,9 @@ CREATE INDEX idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
 
 -- index: idx_facts_scope
 CREATE INDEX idx_facts_scope ON facts(scope_id);
+
+-- index: idx_facts_source_event
+CREATE INDEX idx_facts_source_event ON facts(source_event_id);
 
 -- index: idx_facts_t_valid_due
 CREATE INDEX idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
@@ -106,6 +118,9 @@ CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, prov
 
 -- table: events
 CREATE TABLE events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1 );
+
+-- table: fact_tombstones
+CREATE TABLE fact_tombstones ( id INTEGER PRIMARY KEY, fact_id INTEGER UNIQUE REFERENCES facts(id) ON DELETE SET NULL, content_hash TEXT NOT NULL, reason TEXT, forgotten_at TEXT NOT NULL, record_event_id INTEGER REFERENCES events(id) ON DELETE SET NULL, prior_t_expired TEXT, prior_t_invalid TEXT );
 
 -- table: fact_vectors
 CREATE TABLE fact_vectors ( fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE, space_id TEXT NOT NULL REFERENCES embedding_spaces(name) ON DELETE CASCADE, embedding BLOB NOT NULL, PRIMARY KEY (fact_id, space_id) ) WITHOUT ROWID;

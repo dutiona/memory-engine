@@ -522,3 +522,32 @@ pub(super) fn migrate_v14_to_v15(tx: &Transaction) -> Result<()> {
     }
     Ok(())
 }
+
+/// Add `fact_tombstones`, the forget retraction's blocks (#1023), and the indexes on the
+/// child keys an erasure deletes through (`facts.source_event_id`,
+/// `activities.promoted_fact_id`), which SQLite probes on every parent delete.
+///
+/// Purely additive and `IF NOT EXISTS`, because tests roll a current schema back and
+/// re-run the chain. A tombstone outlives its fact and its record (`ON DELETE SET NULL`):
+/// it keeps a content hash, never the text. Frozen DDL snapshot — never reference the
+/// live `TABLES_DDL`.
+pub(super) fn migrate_v15_to_v16(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS fact_tombstones (
+    id              INTEGER PRIMARY KEY,
+    fact_id         INTEGER UNIQUE REFERENCES facts(id) ON DELETE SET NULL,
+    content_hash    TEXT    NOT NULL,
+    reason          TEXT,
+    forgotten_at    TEXT    NOT NULL,
+    record_event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
+    prior_t_expired TEXT,
+    prior_t_invalid TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fact_tombstones_hash ON fact_tombstones(content_hash);
+CREATE INDEX IF NOT EXISTS idx_fact_tombstones_record ON fact_tombstones(record_event_id);
+CREATE INDEX IF NOT EXISTS idx_facts_source_event ON facts(source_event_id);
+CREATE INDEX IF NOT EXISTS idx_activities_promoted ON activities(promoted_fact_id);",
+    )
+    .map_err(StorageError::backend)?;
+    Ok(())
+}

@@ -136,6 +136,17 @@ its own spacing, so `fresh_vs_migrated_embedding_spaces_converge` compares the t
 SQL. Postgres does not mirror these columns yet (#634): `PgBackend` refuses a served
 fingerprint with `NotImplemented` rather than dropping it.
 
+**v15→v16** (#1023, the forget retraction) is additive again: one table, `fact_tombstones`,
+and four indexes (`idx_fact_tombstones_hash`, `idx_fact_tombstones_record`,
+`idx_facts_source_event`, `idx_activities_promoted`), every statement `IF NOT EXISTS`. The
+table outlives its rows by design: `fact_id` and `record_event_id` are `ON DELETE SET NULL`,
+and a row keeps a content hash, never the text, so an erased forgotten fact stays blocked from
+re-import. The last two indexes are the child keys SQLite probes on every parent delete, so an
+erasure by machine does not scan `facts` once per deleted event. The oracles are
+`fresh_vs_migrated_tombstones_converge`, `migrate_v15_to_v16_is_idempotent_on_a_current_schema`,
+the goldens and `all_nine_indexes_created` = **33**. A v15 binary refuses a v16 store; rolling
+an image back means restoring the `memory.db.v15.bak` the first open writes.
+
 ## Event Envelope Versioning
 
 Events in the append-only log carry a per-event-type revision via the `event_revision` column.
