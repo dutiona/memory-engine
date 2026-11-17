@@ -157,6 +157,9 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
 `storage/`
 : The persistence **port** — carved into the `me-storage` crate (L1). This facade module **re-exports** the port (both the submodules and the flat trait names) so every existing `crate::storage::graph::FactGraph` and `crate::storage::FactGraph` path keeps resolving, plus the concrete backend impls: `SqliteBackend` (from **me-backend-sqlite**) and `PgBackend` (from **me-backend-postgres**, `backend-postgres` feature, #633). What still lives here physically: the `#[cfg(test)]` cross-backend **`storage/conformance/`** battery (#632) that encodes the trait _contract_ once and runs it against every backend via a `ConformanceBackend` factory (`SqliteBackend` always; `PgBackend` inert/`#[ignore]`d until #635).
 
+`store_lock`
+: `StoreLock`, the one exclusive advisory lock beside the database (`<db>.store-lock`, ADR-0020 §8) that the MCP server holds for its whole life and every writable `memory-engine-cli` command takes or refuses on. It lives in the facade because it is the one crate both binaries depend on.
+
 `search/`
 : Hybrid search pipeline → **me-query** (S4). Combines three retrieval modes:
 

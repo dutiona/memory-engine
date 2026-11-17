@@ -55,6 +55,13 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | `ensure_scope_path`  | `(&self, path: &str) -> Result<i64>`          | Create any missing segment of a scope path and return the leaf's id. Refused on a read-only engine. |
 | `resolve_scope_path` | `(&self, path: &str) -> Option<i64>`          | The read-only twin: the path's id from the cached scope tree, or `None`. Never creates a node.      |
 
+### Store lock
+
+| Item                         | Signature                                               | Description                                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `StoreLock::acquire`         | `(db: &Path) -> Result<StoreLock, StoreLockError>`      | Take the exclusive advisory lock `<db>.store-lock` without waiting. `Held` when another process holds it, `Io` when it cannot be opened. Released on drop. |
+| `StoreLock::path`            | `(&self) -> &Path`                                      | The lock file.                                                                                                                                          |
+
 ### Query
 
 | Method          | Signature                                                   | Description                                                                                                                             |
