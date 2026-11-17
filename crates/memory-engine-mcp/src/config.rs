@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use memory_engine::ServedArtifact;
+use memory_engine::error::{ConflictError, MemoryError, Result as EngineResult};
 use serde::Deserialize;
 
 /// Top-level MCP server configuration.
@@ -48,7 +50,7 @@ pub struct EmbeddingSection {
     /// API key (optional — for authenticated endpoints).
     pub api_key: Option<String>,
 
-    /// Operator-declared serving backend (e.g. `"ollama"`, `"tei"`, `"openai"`). Cannot
+    /// Operator-declared serving backend (e.g. `"llama.cpp"`, `"ollama"`, `"tei"`, `"openai"`). Cannot
     /// be sniffed from the endpoint (Ollama and TEI both speak `/v1/embeddings`); it feeds
     /// the [`EmbeddingFingerprint`](memory_engine::EmbeddingFingerprint) identity, so it
     /// must reflect the real backend. Free-form (like `model`); unrecognized values warn
@@ -78,6 +80,198 @@ pub struct EmbeddingSection {
     /// HTTP timeout in seconds. Default: 30.
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+
+    /// Served artifact (ADR 0015 §1): SHA-256 of the model file the provider serves, as 64
+    /// lowercase hex digits. The four served keys are all set or all absent.
+    #[serde(default)]
+    pub artifact_sha256: Option<String>,
+
+    /// Served artifact: the pooling the server applies, e.g. `last`.
+    #[serde(default)]
+    pub pooling: Option<String>,
+
+    /// Served artifact: the normalization of each output vector, e.g. `l2`.
+    #[serde(default)]
+    pub normalization: Option<String>,
+
+    /// Served artifact: the maximum input length, in tokens, the server embeds.
+    #[serde(default)]
+    pub max_input_tokens: Option<usize>,
+}
+
+/// The embedder settings that flags and environment variables override, field by field,
+/// over `[embedding]`.
+///
+/// Deliberately no `Debug`: it holds the embedding API key in clear text.
+#[derive(clap::Args, Clone, Default)]
+pub struct EmbeddingOverrides {
+    /// Embedding endpoint URL (OpenAI-compatible).
+    #[arg(long = "embed-url", env = "MEMORY_MCP_EMBED_URL")]
+    pub url: Option<String>,
+
+    /// Embedding model name.
+    #[arg(long = "embed-model", env = "MEMORY_MCP_EMBED_MODEL")]
+    pub model: Option<String>,
+
+    /// Embedding API key (optional, for authenticated endpoints).
+    #[arg(long = "embed-api-key", env = "MEMORY_MCP_EMBED_API_KEY")]
+    pub api_key: Option<String>,
+
+    /// Embedding serving backend (e.g. `llama.cpp`, `ollama`, `tei`, `openai`) —
+    /// operator-declared, feeds the fingerprint. Free-form; unrecognized values warn.
+    #[arg(long = "embed-provider", env = "MEMORY_MCP_EMBED_PROVIDER")]
+    pub provider: Option<String>,
+
+    /// Query instruction prefix; `''` for a symmetric model (default: ME's pinned one).
+    #[arg(
+        long = "embed-query-instruction",
+        env = "MEMORY_MCP_EMBED_QUERY_INSTRUCTION"
+    )]
+    pub query_instruction: Option<String>,
+
+    /// Served artifact: SHA-256 of the served model file (64 lowercase hex digits).
+    #[arg(
+        long = "embed-artifact-sha256",
+        env = "MEMORY_MCP_EMBED_ARTIFACT_SHA256"
+    )]
+    pub artifact_sha256: Option<String>,
+
+    /// Served artifact: pooling, e.g. `last`.
+    #[arg(long = "embed-pooling", env = "MEMORY_MCP_EMBED_POOLING")]
+    pub pooling: Option<String>,
+
+    /// Served artifact: normalization, e.g. `l2`.
+    #[arg(long = "embed-normalization", env = "MEMORY_MCP_EMBED_NORMALIZATION")]
+    pub normalization: Option<String>,
+
+    /// Served artifact: maximum input length in tokens.
+    #[arg(
+        long = "embed-max-input-tokens",
+        env = "MEMORY_MCP_EMBED_MAX_INPUT_TOKENS"
+    )]
+    pub max_input_tokens: Option<usize>,
+}
+
+/// The embedder configuration after the CLI-over-TOML merge and its checks, ready to build
+/// a provider from.
+///
+/// Deliberately no `Debug`: it holds the embedding API key in clear text.
+#[derive(Clone)]
+pub struct ResolvedEmbedding {
+    /// Endpoint URL.
+    pub endpoint: String,
+    /// Model name, stamped into the fingerprint.
+    pub model: String,
+    /// API key, if any.
+    pub api_key: Option<String>,
+    /// Serving backend, stamped into the fingerprint (default `ollama`).
+    pub provider: String,
+    /// The native dimension the model emits.
+    pub native_dim: usize,
+    /// The query instruction override; `None` keeps the provider's pinned default.
+    pub query_instruction: Option<String>,
+    /// The Matryoshka truncation target, equal to the engine dimension when set.
+    pub mrl_dim: Option<usize>,
+    /// HTTP timeout in seconds.
+    pub timeout_secs: u64,
+    /// The declared served artifact (ADR 0015 §1), validated.
+    pub served: Option<ServedArtifact>,
+}
+
+/// Merge the embedder settings — each field from its override, else from `[embedding]` —
+/// and check them against the engine dimension, before any store is opened.
+///
+/// Returns `Ok(None)` when neither a URL nor a model is configured (no embedder). Without
+/// an `[embedding]` section the native dimension is `engine_dim`.
+///
+/// # Errors
+///
+/// [`MemoryError::Conflict`] (`PolicyParameter`) when the served artifact is partial or
+/// invalid ([`ServedArtifact::from_parts`]), when `mrl_dim` differs from `engine_dim`, or
+/// when, without MRL, the native dimension differs from `engine_dim`.
+///
+/// # Examples
+///
+/// ```
+/// use memory_engine_mcp::config::{EmbeddingOverrides, resolve_embedding};
+///
+/// let overrides = EmbeddingOverrides {
+///     url: Some("http://127.0.0.1:8080/v1/embeddings".into()),
+///     model: Some("Qwen/Qwen3-Embedding-0.6B".into()),
+///     provider: Some("llama.cpp".into()),
+///     ..EmbeddingOverrides::default()
+/// };
+/// let resolved = resolve_embedding(&overrides, None, 1024).unwrap().unwrap();
+/// assert_eq!(resolved.native_dim, 1024);
+/// assert!(resolved.served.is_none());
+/// ```
+pub fn resolve_embedding(
+    overrides: &EmbeddingOverrides,
+    section: Option<&EmbeddingSection>,
+    engine_dim: usize,
+) -> EngineResult<Option<ResolvedEmbedding>> {
+    let invalid = |msg: String| MemoryError::Conflict(ConflictError::PolicyParameter(msg));
+    let pick = |cli: &Option<String>, toml: Option<String>| cli.clone().or(toml);
+    let url = pick(&overrides.url, section.map(|b| b.endpoint.clone()));
+    let model = pick(&overrides.model, section.map(|b| b.model.clone()));
+    let api_key = pick(&overrides.api_key, section.and_then(|b| b.api_key.clone()));
+    let provider = pick(&overrides.provider, section.map(|b| b.provider.clone()));
+    let query_instruction = pick(
+        &overrides.query_instruction,
+        section.and_then(|b| b.query_instruction.clone()),
+    );
+    let served = ServedArtifact::from_parts(
+        pick(
+            &overrides.artifact_sha256,
+            section.and_then(|b| b.artifact_sha256.clone()),
+        ),
+        pick(&overrides.pooling, section.and_then(|b| b.pooling.clone())),
+        pick(
+            &overrides.normalization,
+            section.and_then(|b| b.normalization.clone()),
+        ),
+        overrides
+            .max_input_tokens
+            .or_else(|| section.and_then(|b| b.max_input_tokens)),
+    )?;
+
+    let (Some(endpoint), Some(model)) = (url, model) else {
+        return Ok(None);
+    };
+
+    // `native_dim` is what the provider validates raw responses against: the configured
+    // `dimensions`, or the engine dim on the flag/env-only path with no `[embedding]`.
+    let native_dim = section.map_or(engine_dim, |b| b.dimensions);
+    let mrl_dim = section.and_then(|b| b.mrl_dim);
+    match mrl_dim {
+        // The engine stores post-truncation vectors, so the MRL target must equal it.
+        Some(target) if target != engine_dim => {
+            return Err(invalid(format!(
+                "embedding.mrl_dim ({target}) must equal the engine embed_dim ({engine_dim}): \
+                 the engine stores post-truncation vectors"
+            )));
+        }
+        None if native_dim != engine_dim => {
+            return Err(invalid(format!(
+                "embedding.dimensions ({native_dim}) must equal the engine embed_dim \
+                 ({engine_dim}) when MRL is disabled (native and stored dimensions are \
+                 identical without truncation)"
+            )));
+        }
+        _ => {}
+    }
+
+    Ok(Some(ResolvedEmbedding {
+        endpoint,
+        model,
+        api_key,
+        provider: provider.unwrap_or_else(default_provider),
+        native_dim,
+        query_instruction,
+        mrl_dim,
+        timeout_secs: section.map_or_else(default_timeout, |b| b.timeout_secs),
+        served,
+    }))
 }
 
 /// Summary / LLM provider configuration for consolidation.

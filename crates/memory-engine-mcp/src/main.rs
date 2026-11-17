@@ -42,22 +42,14 @@ struct Cli {
     #[arg(long, env = "MEMORY_MCP_BACKUP_DIR")]
     backup_dir: Option<std::path::PathBuf>,
 
-    /// Embedding endpoint URL (OpenAI-compatible).
-    #[arg(long, env = "MEMORY_MCP_EMBED_URL")]
-    embed_url: Option<String>,
+    /// The engine's stored embedding dimension; overrides `engine.embed_dim`. Needed to
+    /// start on a blank store without a TOML file.
+    #[arg(long, env = "MEMORY_MCP_EMBED_DIM")]
+    embed_dim: Option<usize>,
 
-    /// Embedding model name.
-    #[arg(long, env = "MEMORY_MCP_EMBED_MODEL")]
-    embed_model: Option<String>,
-
-    /// Embedding API key (optional, for authenticated endpoints).
-    #[arg(long, env = "MEMORY_MCP_EMBED_API_KEY")]
-    embed_api_key: Option<String>,
-
-    /// Embedding serving backend (e.g. `ollama`, `tei`, `openai`) — operator-declared,
-    /// feeds the fingerprint. Free-form; unrecognized values warn but are accepted.
-    #[arg(long, env = "MEMORY_MCP_EMBED_PROVIDER")]
-    embed_provider: Option<String>,
+    /// Embedder settings, each overriding its `[embedding]` key.
+    #[command(flatten)]
+    embedding: config::EmbeddingOverrides,
 
     /// Summary / chat-completions endpoint URL (for consolidation).
     #[arg(long, env = "MEMORY_MCP_SUMMARY_URL")]
@@ -105,7 +97,18 @@ async fn main() -> Result<(), BoxError> {
             .map_err(|e| format!("cannot determine embed_dim: {e}"))?,
     };
 
-    // 3. Open MemoryEngine
+    // 3. Resolve the embedder configuration and build the providers before the store opens,
+    //    so a configuration refusal creates no database and migrates nothing. Both builders
+    //    make a blocking reqwest client, which in debug builds creates and drops a runtime of
+    //    its own: that panics unless this thread leaves the async context first.
+    let resolved =
+        config::resolve_embedding(&cli.embedding, mcp_config.embedding.as_ref(), embed_dim)
+            .map_err(|e| format!("invalid embedding configuration: {e}"))?;
+    let embedder = tokio::task::block_in_place(|| build_embedder(resolved))?;
+    let summary_gen = tokio::task::block_in_place(|| build_summary_generator(&cli, &mcp_config))?
+        .map(|sg| sg as Arc<dyn memory_engine::traits::SummaryGenerator + Send + Sync>);
+
+    // 4. Open MemoryEngine
     let mut builder = MemoryEngine::builder(embed_dim).path(mcp_config.engine.db_path.clone());
     if let Some(dir) = &mcp_config.engine.backup_dir {
         // Checked now: `VACUUM INTO` would only fail at the next pending migration.
@@ -122,13 +125,7 @@ async fn main() -> Result<(), BoxError> {
         .map_err(|e| format!("failed to open engine: {e}"))?;
     let engine = Arc::new(engine);
 
-    // 4. Initialize embedding provider (optional)
-    // Use the resolved embed_dim (from DB probe or config), not the TOML value.
-    // Both builders make a blocking reqwest client, which in debug builds creates and drops
-    // a runtime of its own: that panics unless this thread leaves the async context first.
-    let embedder = tokio::task::block_in_place(|| build_embedder(&cli, &mcp_config, embed_dim))?;
-
-    // 4b. Eager embedding-identity check (#614, §Design.2). The query path embeds at
+    // 5. Eager embedding-identity check (#614, §Design.2). The query path embeds at
     // this layer and hands the engine a pre-computed vector, so the engine can't
     // fingerprint-check per query — verify once at startup that the configured provider
     // matches the store's recorded identity, and refuse to serve on a mismatch rather
@@ -139,11 +136,6 @@ async fn main() -> Result<(), BoxError> {
             .await
             .map_err(|e| format!("embedding identity check failed: {e}"))?;
     }
-
-    // 5. Initialize summary generator (optional — text only; embedding is done
-    //    by the embedder, injected separately into consolidation per #116)
-    let summary_gen = tokio::task::block_in_place(|| build_summary_generator(&cli, &mcp_config))?
-        .map(|sg| sg as Arc<dyn memory_engine::traits::SummaryGenerator + Send + Sync>);
 
     // 6. Construct and serve
     let mcp_server = server::MemoryMcpServer::new(engine, embedder, summary_gen, embed_dim);
@@ -164,98 +156,47 @@ async fn main() -> Result<(), BoxError> {
 
 /// Recognized embedding backends. `provider` is free-form (it feeds the fingerprint),
 /// but a value outside this set warns at startup to catch typos.
-const KNOWN_PROVIDERS: [&str; 3] = ["ollama", "tei", "openai"];
+const KNOWN_PROVIDERS: [&str; 4] = ["llama.cpp", "ollama", "tei", "openai"];
 
-/// Build the embedding provider from config + CLI, using the probed `embed_dim`.
-///
-/// CLI flags override TOML values (endpoint, model, `api_key`) when provided,
-/// enabling operators to inject runtime secrets via env/CLI.
+/// Build the embedding provider from the resolved configuration (`None` = no embedder).
 fn build_embedder(
-    cli: &Cli,
-    mcp_config: &config::McpConfig,
-    embed_dim: usize,
+    resolved: Option<config::ResolvedEmbedding>,
 ) -> Result<Option<Arc<embedding::HttpEmbeddingProvider>>, BoxError> {
-    // Merge TOML + CLI: CLI overrides individual fields
-    let base = mcp_config.embedding.as_ref();
-
-    let endpoint = cli
-        .embed_url
-        .clone()
-        .or_else(|| base.map(|b| b.endpoint.clone()));
-    let model = cli
-        .embed_model
-        .clone()
-        .or_else(|| base.map(|b| b.model.clone()));
-    let api_key = cli
-        .embed_api_key
-        .clone()
-        .or_else(|| base.and_then(|b| b.api_key.clone()));
-    // `provider` feeds the fingerprint (#614); source it from CLI > TOML, defaulting to
-    // "ollama" (also EmbeddingSection's serde default) for the CLI-only / legacy path.
-    let provider = cli
-        .embed_provider
-        .clone()
-        .or_else(|| base.map(|b| b.provider.clone()))
-        .unwrap_or_else(|| "ollama".to_string());
-    let timeout = base.map_or(30, |b| b.timeout_secs);
-    let query_instruction = base.and_then(|b| b.query_instruction.clone());
-    let mrl_dim = base.and_then(|b| b.mrl_dim);
-
-    let (Some(url), Some(mdl)) = (endpoint, model) else {
+    let Some(r) = resolved else {
         return Ok(None);
     };
-
-    // `native_dim` is the dimension the model emits — what the provider validates the
-    // raw HTTP response against. With MRL the provider truncates to `mrl_dim`, so the
-    // native dim comes from the config's `dimensions`; without MRL native == stored ==
-    // `embed_dim`. Always read `dimensions` (falling back to `embed_dim` only on the
-    // CLI-only path with no `[embedding]` section) so a `dimensions != embed_dim`
-    // misconfig surfaces at startup instead of failing cryptically on the first embed.
-    let native_dim = base.map_or(embed_dim, |b| b.dimensions);
-
     // `provider` is stamped verbatim into the persisted fingerprint (#614), like the
     // equally free-form `model`. We don't hard-restrict it — custom OpenAI-compatible
     // backends are valid — but warn on an unrecognized value to catch typos before they
     // bake a bogus identity into a fresh store.
-    if !KNOWN_PROVIDERS.contains(&provider.as_str()) {
+    if !KNOWN_PROVIDERS.contains(&r.provider.as_str()) {
         tracing::warn!(
-            provider = %provider,
+            provider = %r.provider,
             "embedding provider is not one of {KNOWN_PROVIDERS:?}; it is stamped into the \
              persisted embedding fingerprint as-is — check for a typo"
         );
     }
 
-    let mut provider =
-        embedding::HttpEmbeddingProvider::new(url, mdl, provider, api_key, native_dim, timeout)
-            .map_err(|e| format!("failed to create embedding provider: {e}"))?;
-
-    if let Some(instruction) = query_instruction {
+    let mut provider = embedding::HttpEmbeddingProvider::new(
+        r.endpoint,
+        r.model,
+        r.provider,
+        r.api_key,
+        r.native_dim,
+        r.timeout_secs,
+    )
+    .map_err(|e| format!("failed to create embedding provider: {e}"))?;
+    if let Some(instruction) = r.query_instruction {
         provider = provider.with_query_instruction(instruction);
     }
-    if let Some(target) = mrl_dim {
-        // The engine stores post-truncation vectors, so the MRL target MUST equal the
-        // engine's `embed_dim`; otherwise the engine would reject every truncated vector.
-        // Fail loudly here at startup rather than on the first embed call.
-        if target != embed_dim {
-            return Err(format!(
-                "embedding.mrl_dim ({target}) must equal the engine embed_dim ({embed_dim}): \
-                 the engine stores post-truncation vectors"
-            )
-            .into());
-        }
+    if let Some(target) = r.mrl_dim {
         provider = provider
             .with_mrl_dim(target)
             .map_err(|e| format!("invalid embedding.mrl_dim: {e}"))?;
-    } else if native_dim != embed_dim {
-        // No truncation: the native dim the provider validates against must equal the
-        // engine's stored dim. An unequal pair is a misconfiguration — surface it now.
-        return Err(format!(
-            "embedding.dimensions ({native_dim}) must equal the engine embed_dim ({embed_dim}) \
-             when MRL is disabled (native and stored dimensions are identical without truncation)"
-        )
-        .into());
     }
-
+    if let Some(served) = r.served {
+        provider = provider.with_served_artifact(served);
+    }
     Ok(Some(Arc::new(provider)))
 }
 
@@ -294,9 +235,12 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
     if let Some(backup_dir) = &cli.backup_dir {
         mcp_config.engine.backup_dir = Some(backup_dir.clone());
     }
+    if let Some(dim) = cli.embed_dim {
+        mcp_config.engine.embed_dim = Some(dim);
+    }
 
-    // NOTE: Embedding config from CLI is handled in build_embedder(),
-    // which runs after embed_dim probe to avoid dimension mismatch.
+    // The embedder settings are merged by `config::resolve_embedding`, once the engine
+    // dimension is known.
 
     Ok(mcp_config)
 }
