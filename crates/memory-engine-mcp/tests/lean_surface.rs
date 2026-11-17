@@ -585,8 +585,11 @@ async fn a_refusal_whose_record_fails_still_says_why() {
 }
 
 #[tokio::test]
-async fn a_recall_whose_embedder_fails_is_a_recorded_error() {
+async fn a_recall_whose_embedder_fails_answers_from_full_text() {
     let server = TestServer::start().await;
+    let id = server
+        .seed(Some("unscoped:laptop"), "kestrel", json!({}))
+        .await;
     server.embedder.reset().await;
     wiremock::Mock::given(wiremock::matchers::any())
         .respond_with(wiremock::ResponseTemplate::new(500))
@@ -595,16 +598,12 @@ async fn a_recall_whose_embedder_fails_is_a_recorded_error() {
     let reply = server
         .tool("laptop", "recall", json!({ "query": "kestrel" }))
         .await;
-    assert!(reply.is_error, "{reply:?}");
+    assert!(!reply.is_error, "{reply:?}");
+    assert_eq!(reply.json()["degraded"], "embedder down", "{reply:?}");
     let records = server.records();
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0].1["call"], reply.call, "{records:?}");
-    assert!(
-        records[0].1["error"]
-            .as_str()
-            .is_some_and(|e| !e.is_empty()),
-        "{records:?}"
-    );
+    assert_eq!(records[0].1["fact_ids"], json!([id]), "{records:?}");
 }
 
 #[tokio::test]

@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 pub const DIM: usize = 4;
@@ -71,6 +71,13 @@ pub fn initialize_params() -> Value {
     })
 }
 
+/// The mock embedder's answer: one `DIM`-wide vector.
+#[must_use]
+pub fn an_embedding() -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .set_body_json(json!({ "data": [{ "embedding": vec![0.25_f32; DIM] }] }))
+}
+
 /// The in-process server, on an ephemeral loopback port.
 pub struct TestServer {
     pub url: String,
@@ -111,10 +118,7 @@ impl TestServer {
         let embedder = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({ "data": [{ "embedding": vec![0.25_f32; DIM] }] })),
-            )
+            .respond_with(an_embedding())
             .mount(&embedder)
             .await;
         let endpoint = format!("{}/v1/embeddings", embedder.uri());
@@ -329,6 +333,24 @@ impl TestServer {
             .unwrap()
             .execute_batch(sql)
             .unwrap();
+    }
+
+    /// Answer query embeds (their body holds the query instruction) with `query`, and every
+    /// other embed with `document`, in place of the default mock.
+    pub async fn mount_embedder(&self, query: ResponseTemplate, document: ResponseTemplate) {
+        self.embedder.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .and(body_string_contains("Instruct:"))
+            .respond_with(query)
+            .with_priority(1)
+            .mount(&self.embedder)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(document)
+            .mount(&self.embedder)
+            .await;
     }
 
     pub async fn fact_count(&self) -> i64 {
