@@ -166,6 +166,13 @@ becomes a kill, and the next start rebuilds the projections from the database. T
 a liveness probe expects 401:
 `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/mcp` prints `401`.
 
+**Store lock.** For its whole life the server holds an exclusive advisory lock on `<db>.store-lock` beside the
+database (ADR-0020 §8), taken after every configuration check and before the store opens or migrates. A second server
+on the same store, or a server started while a maintenance command holds the lock, exits 1 naming the lock file.
+Every writable `memory-engine-cli` command takes the same lock or refuses, so maintenance runs with the server
+stopped; read-only commands, `export` included, run beside it
+([CLI reference](cli-inspector.md#store-lock)).
+
 ### Tools
 
 | Tool                         | Priority  | Purpose                                | Depth                |

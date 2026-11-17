@@ -261,7 +261,8 @@ impl ServerProcess {
             .local_addr()
             .unwrap()
             .port();
-        let stderr = dir.join("stderr.log");
+        // Per port, so two servers started in one directory keep their own logs.
+        let stderr = dir.join(format!("stderr-{port}.log"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_memory-engine-mcp"));
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("MEMORY_MCP_") {

@@ -298,3 +298,50 @@ fn a_half_configured_summary_endpoint_is_refused() {
         "refused before the store opens"
     );
 }
+
+#[test]
+fn the_running_server_holds_the_store_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    server.wait_ready().unwrap();
+    assert!(matches!(
+        memory_engine::StoreLock::acquire(&db),
+        Err(memory_engine::StoreLockError::Held { .. })
+    ));
+    assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
+    assert!(memory_engine::StoreLock::acquire(&db).is_ok());
+}
+
+#[test]
+fn a_held_store_lock_stops_startup_before_the_store_migrates() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = stale_store(dir.path());
+    let _held = memory_engine::StoreLock::acquire(&dir.path().join("memory.db")).unwrap();
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    let status = server.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.code(), Some(1), "stderr:\n{}", server.stderr());
+    assert!(
+        server.stderr().contains("memory.db.store-lock"),
+        "stderr:\n{}",
+        server.stderr()
+    );
+    assert!(!server.stderr().contains("listening on"));
+    assert_eq!(schema_version(dir.path()), previous.to_string());
+}
+
+#[test]
+fn a_second_server_on_the_same_store_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut first = ServerProcess::spawn(dir.path(), &[], &[]);
+    first.wait_ready().unwrap();
+    let mut second = ServerProcess::spawn(dir.path(), &[], &[]);
+    let status = second.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.code(), Some(1), "stderr:\n{}", second.stderr());
+    assert!(
+        second.stderr().contains("memory.db.store-lock"),
+        "stderr:\n{}",
+        second.stderr()
+    );
+    first.wait_ready().unwrap();
+}

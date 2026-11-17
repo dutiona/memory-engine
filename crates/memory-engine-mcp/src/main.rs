@@ -120,6 +120,11 @@ async fn main() -> Result<(), BoxError> {
         }
         builder = builder.backup_dir(dir.clone());
     }
+    // The store lock (ADR-0020 §8), held until `main` returns: no maintenance command and no
+    // second server writes beside this one. Taken after every configuration check and before
+    // the open, which migrates, so a refusal still writes nothing.
+    let _store_lock = memory_engine::StoreLock::acquire(&mcp_config.engine.db_path)
+        .map_err(|e| format!("{e}: stop the other server or maintenance command first"))?;
     let engine = builder
         .build()
         .map_err(|e| format!("failed to open engine: {e}"))?;
