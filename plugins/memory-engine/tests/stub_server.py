@@ -4,8 +4,7 @@ python3 -I stub_server.py DIR. Binds 127.0.0.1 on a free port and writes it to D
 files in DIR at request time, so a test changes the stub's behaviour by writing them:
 
 - DIR/status: the status for POST /lifecycle/events (default 204);
-- DIR/token: when present, any other Authorization than "Bearer <token>" gets 401;
-- DIR/delay: seconds to wait before answering (default 0).
+- DIR/token: when present, any other Authorization than "Bearer <token>" gets 401.
 
 Each request is saved as DIR/req/<n>.headers and DIR/req/<n>.body, and logged in DIR/log as
 "<ms since epoch> <status> <ME-Event-Id>".
@@ -19,7 +18,7 @@ import time
 
 DIR = sys.argv[1]
 LOCK = threading.Lock()
-STATE = {"n": 0, "stored": set()}
+STATE = {"n": 0}
 
 
 def read(name, default):
@@ -55,14 +54,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             status = 401
         else:
             status = int(read("status", "204"))
-        time.sleep(float(read("delay", "0") or 0))
         event_id = self.headers.get("ME-Event-Id", "-")
         with LOCK:
             STATE["n"] += 1
             n = STATE["n"]
-            outcome = "duplicate" if event_id in STATE["stored"] else "stored"
-            if status == 204:
-                STATE["stored"].add(event_id)
             os.makedirs(os.path.join(DIR, "req"), exist_ok=True)
             with open(os.path.join(DIR, "req", "%d.headers" % n), "w") as f:
                 f.write(str(self.headers))
@@ -71,9 +66,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with open(os.path.join(DIR, "log"), "a") as f:
                 f.write("%d %d %s\n" % (time.time() * 1000, status, event_id))
         extra = []
-        if status == 204:
-            extra.append(("ME-Event-Outcome", outcome))
-        elif 300 <= status < 400:
+        if 300 <= status < 400:
             extra.append(("Location", "/moved"))
         self.answer(status, extra)
 
