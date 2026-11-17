@@ -33,7 +33,7 @@ use std::sync::atomic::Ordering;
 
 use super::spawn_join_err;
 use crate::engine::MemoryEngine;
-use crate::error::{MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::traits::EmbeddingProvider;
 use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 
@@ -110,7 +110,9 @@ impl MemoryEngine {
     ///
     /// Returns [`MemoryError::EmbeddingDimension`] if `new_fingerprint.dim` disagrees
     /// with the provider's own `fingerprint().dim` (a misconfiguration, rejected
-    /// before any backfill), [`MemoryError::ReadOnly`] from the write port on a
+    /// before any backfill), [`MemoryError::Conflict`] (`PolicyParameter`) if the rest of
+    /// `new_fingerprint` differs from the provider's identity (the vectors would be stamped
+    /// with an identity their provider does not report), [`MemoryError::ReadOnly`] from the write port on a
     /// read-only engine, or any embedding-provider / storage failure surfaced by the
     /// backfill or promote.
     ///
@@ -138,11 +140,21 @@ impl MemoryEngine {
         // dimension must match what the provider actually produces. (A target dim
         // that differs from the engine's *current* dim is the whole point of #742
         // and is allowed — that is the different-dimension transition.)
-        if new_fingerprint.dim != embedder.fingerprint().dim {
+        let embedder_fp = embedder.fingerprint();
+        if new_fingerprint.dim != embedder_fp.dim {
             return Err(MemoryError::EmbeddingDimension {
                 expected: new_fingerprint.dim,
-                actual: embedder.fingerprint().dim,
+                actual: embedder_fp.dim,
             });
+        }
+        // The vectors are stamped with `new_fingerprint`, so they must come from a provider
+        // that reports exactly that identity; otherwise every later check would accept
+        // vectors from another space.
+        if *new_fingerprint != embedder_fp {
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(format!(
+                "reconstruct target identity {new_fingerprint:?} differs from the embedder's \
+                 identity {embedder_fp:?}"
+            ))));
         }
 
         let target_dim = new_fingerprint.dim;
@@ -633,6 +645,38 @@ mod tests {
                     if expected == DIM * 2 && actual == DIM
             ),
             "embedder/target dim mismatch rejected, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconstruct_refuses_a_target_its_embedder_does_not_report() {
+        // Same dim, different model: re-embedding with A while stamping B would make every
+        // later identity check accept vectors from the wrong space.
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "old-model",
+            value: 0.1,
+            dim: DIM,
+        });
+        engine.add_fact(&req("a"), old.clone(), None).await.unwrap();
+        let other: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "other-model",
+            value: 0.9,
+            dim: DIM,
+        });
+        let target = EmbeddingFingerprint::new("new-model", "test", DIM);
+        let err = engine.reconstruct(&target, &other).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Conflict(crate::error::ConflictError::PolicyParameter(_))
+            ),
+            "a target its embedder does not report is refused, got {err:?}"
+        );
+        assert_eq!(
+            engine.storage().load_embedding_fingerprint().await.unwrap(),
+            Some(EmbeddingFingerprint::new("old-model", "test", DIM)),
+            "the store keeps its identity"
         );
     }
 
