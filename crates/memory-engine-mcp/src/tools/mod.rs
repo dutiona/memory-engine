@@ -37,6 +37,11 @@ pub(crate) struct CallContext<'a> {
 }
 
 impl CallContext<'_> {
+    /// The session's own Home: its project, else its machine's bucket.
+    pub(crate) fn own_home(&self) -> Home {
+        Home::own(self.key.clone(), self.machine)
+    }
+
     pub(crate) fn bucket(&self) -> Home {
         Home::Bucket(self.machine.clone())
     }

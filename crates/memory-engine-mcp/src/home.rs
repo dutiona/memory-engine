@@ -46,6 +46,20 @@ pub(crate) enum Home {
 }
 
 impl Home {
+    /// A session's own Home: its project, else its machine's bucket.
+    pub(crate) fn own(key: Option<ProjectKey>, machine: &Machine) -> Self {
+        key.map_or_else(|| Self::Bucket(machine.clone()), Self::Project)
+    }
+
+    /// How `recall` names the Home in a result's scope: `user`, the key, or `unscoped`.
+    pub(crate) fn scope_label(&self) -> &str {
+        match self {
+            Self::User => "user",
+            Self::Project(key) => key.as_str(),
+            Self::Bucket(_) => "unscoped",
+        }
+    }
+
     /// The Home's scope path.
     pub(crate) fn path(&self, user: &User) -> String {
         match self {

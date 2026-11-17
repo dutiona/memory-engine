@@ -17,6 +17,7 @@ const ORIGIN: &str = "ME-Project-Origin-Url";
 const BRANCH: &str = "ME-Project-Branch";
 
 const LAPTOP_DEV: &str = "/home/alice/perso/dev";
+const DESKTOP_DEV: &str = "/home/alice/dev";
 
 /// Every file of the server's directory, as bytes.
 fn store_bytes(server: &TestServer) -> Vec<(String, Vec<u8>)> {
@@ -209,4 +210,249 @@ async fn a_read_never_mints_a_project() {
         .await;
     assert!(refused.is_error, "{refused:?}");
     assert_eq!(project_nodes(&server), 0);
+}
+
+// --- recall reads the session's project (ADR-0020 §7, ADR-0021 §5) ---
+
+/// A laptop session whose origin is `github.com/example/<name>`.
+fn in_repo(name: &str) -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        (ROOT, format!("{LAPTOP_DEV}/{name}").into_bytes()),
+        (DEV, LAPTOP_DEV.as_bytes().to_vec()),
+        (
+            ORIGIN,
+            format!("https://github.com/example/{name}").into_bytes(),
+        ),
+    ]
+}
+
+/// A remote-less session at `<dev>/<rel>`.
+fn at_path(dev: &str, rel: &str) -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        (ROOT, format!("{dev}/{rel}").into_bytes()),
+        (DEV, dev.as_bytes().to_vec()),
+    ]
+}
+
+fn borrow<'a>(facts: &'a [(&'static str, Vec<u8>)]) -> Facts<'a> {
+    facts.iter().map(|(n, v)| (*n, v.as_slice())).collect()
+}
+
+fn home_of(key: &str) -> String {
+    let label: String = key
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    format!("user:alice/project:{label}")
+}
+
+fn result_ids(reply: &common::Reply) -> Vec<i64> {
+    let mut ids: Vec<i64> = reply.json()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+fn scopes(reply: &common::Reply) -> Vec<String> {
+    reply.json()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["scope"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+async fn recall(
+    server: &TestServer,
+    machine: &str,
+    facts: &[(&'static str, Vec<u8>)],
+    args: serde_json::Value,
+) -> common::Reply {
+    server
+        .tool_with(machine, &borrow(facts), "recall", args)
+        .await
+}
+
+#[tokio::test]
+async fn recall_reads_exactly_the_project_and_the_user_level() {
+    let server = TestServer::start().await;
+    let p = "github.com/example/p";
+    let mut want = Vec::new();
+    for i in 0..3 {
+        want.push(
+            server
+                .seed(Some(&home_of(p)), &format!("kestrel {i} in p"), json!({}))
+                .await,
+        );
+    }
+    for i in 0..2 {
+        want.push(
+            server
+                .seed(
+                    Some("user:alice"),
+                    &format!("kestrel {i} for alice"),
+                    json!({}),
+                )
+                .await,
+        );
+    }
+    let strong = "kestrel kestrel kestrel kestrel kestrel";
+    for home in [
+        None,
+        Some(home_of("github.com/example/q")),
+        Some("unscoped:laptop".to_owned()),
+        Some("unscoped:desktop".to_owned()),
+    ] {
+        for _ in 0..5 {
+            server.seed(home.as_deref(), strong, json!({})).await;
+        }
+    }
+    let reply = recall(
+        &server,
+        "laptop",
+        &in_repo("p"),
+        json!({ "query": "kestrel" }),
+    )
+    .await;
+    assert!(!reply.is_error, "{reply:?}");
+    want.sort_unstable();
+    assert_eq!(result_ids(&reply), want);
+    let labels = scopes(&reply);
+    assert_eq!(labels.iter().filter(|s| *s == p).count(), 3, "{labels:?}");
+    assert_eq!(
+        labels.iter().filter(|s| *s == "user").count(),
+        2,
+        "{labels:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unminted_project_reads_the_user_level_only() {
+    let server = TestServer::start().await;
+    let at_user = server
+        .seed(Some("user:alice"), "kestrel for alice", json!({}))
+        .await;
+    server
+        .seed(Some("unscoped:laptop"), "kestrel in the bucket", json!({}))
+        .await;
+    let reply = recall(
+        &server,
+        "laptop",
+        &in_repo("fresh"),
+        json!({ "query": "kestrel" }),
+    )
+    .await;
+    assert_eq!(result_ids(&reply), vec![at_user]);
+    assert_eq!(project_nodes(&server), 0);
+}
+
+#[tokio::test]
+async fn an_unminted_well_formed_key_is_an_unknown_project() {
+    let server = TestServer::start().await;
+    recall(
+        &server,
+        "desktop",
+        &at_path(DESKTOP_DEV, "x"),
+        json!({ "query": "kestrel" }),
+    )
+    .await;
+    let reply = recall(
+        &server,
+        "laptop",
+        &[],
+        json!({ "query": "kestrel", "project": "desktop:x" }),
+    )
+    .await;
+    assert!(
+        reply.is_error && reply.body.contains("unknown project: \"desktop:x\""),
+        "{reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn another_machines_path_key_is_read_only_when_named() {
+    let server = TestServer::start().await;
+    let on_laptop = server
+        .seed(Some(&home_of("laptop:x")), "kestrel on laptop", json!({}))
+        .await;
+    let on_desktop = server
+        .seed(Some(&home_of("desktop:x")), "kestrel on desktop", json!({}))
+        .await;
+    let at_user = server
+        .seed(Some("user:alice"), "kestrel for alice", json!({}))
+        .await;
+    let own = recall(
+        &server,
+        "desktop",
+        &at_path(DESKTOP_DEV, "x"),
+        json!({ "query": "kestrel" }),
+    )
+    .await;
+    let mut want = vec![on_desktop, at_user];
+    want.sort_unstable();
+    assert_eq!(result_ids(&own), want);
+    let named = recall(
+        &server,
+        "desktop",
+        &at_path(DESKTOP_DEV, "x"),
+        json!({ "query": "kestrel", "project": "laptop:x" }),
+    )
+    .await;
+    let mut want = vec![on_laptop, at_user];
+    want.sort_unstable();
+    assert_eq!(result_ids(&named), want);
+    assert!(scopes(&named).contains(&"laptop:x".to_owned()));
+    let bare = recall(
+        &server,
+        "desktop",
+        &at_path(DESKTOP_DEV, "x"),
+        json!({ "query": "kestrel", "project": "x" }),
+    )
+    .await;
+    assert!(
+        bare.is_error && bare.body.contains("unknown project: \"x\""),
+        "{bare:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_swap_reads_the_named_project_and_never_the_own() {
+    let server = TestServer::start().await;
+    server
+        .seed(
+            Some(&home_of("github.com/example/p")),
+            "kestrel in p",
+            json!({}),
+        )
+        .await;
+    let in_q = server
+        .seed(
+            Some(&home_of("github.com/example/q")),
+            "kestrel in q",
+            json!({}),
+        )
+        .await;
+    let at_user = server
+        .seed(Some("user:alice"), "kestrel for alice", json!({}))
+        .await;
+    let reply = recall(
+        &server,
+        "laptop",
+        &in_repo("p"),
+        json!({ "query": "kestrel", "project": "github.com/example/q" }),
+    )
+    .await;
+    let mut want = vec![in_q, at_user];
+    want.sort_unstable();
+    assert_eq!(result_ids(&reply), want);
 }
