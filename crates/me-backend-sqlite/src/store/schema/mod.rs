@@ -32,7 +32,7 @@ pub use config::{get_config, list_config, set_config};
 /// the archive one; if a migration also changes the shape of the `Fact`/`Edge` DTOs a
 /// `.pak` serializes, `ARCHIVE_SCHEMA_VERSION` must be bumped too (the `ArchivePak`
 /// serde-shape test in `archive/types.rs` reddens to remind you). (Wave 2 #816 / S4.)
-pub const CURRENT_SCHEMA_VERSION: u32 = 14;
+pub const CURRENT_SCHEMA_VERSION: u32 = 15;
 
 /// Storage epoch — coarse-grained compatibility gate.
 ///
@@ -151,6 +151,7 @@ const MIGRATIONS: &[(MigrationFn, bool)] = &[
     (migrations::migrate_v11_to_v12, false),
     (migrations::migrate_v12_to_v13, false),
     (migrations::migrate_v13_to_v14, false),
+    (migrations::migrate_v14_to_v15, false),
 ];
 
 /// Run forward-only migrations from the current schema version to

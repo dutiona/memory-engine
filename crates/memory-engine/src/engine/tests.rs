@@ -440,6 +440,53 @@ async fn first_add_fact_records_embedding_meta() {
 }
 
 #[tokio::test]
+async fn first_write_records_the_served_artifact() {
+    // A blank store records the whole declared identity, served artifact included, on its
+    // first embedding write (ADR 0015 §2).
+    struct Served(EmbeddingFingerprint);
+    impl EmbeddingProvider for Served {
+        fn embed(&self, _t: &str) -> Result<Vec<f32>> {
+            Ok(vec![0.5; DIM])
+        }
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            self.0.clone()
+        }
+    }
+    let fp = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", DIM).with_served(
+        crate::types::ServedArtifact {
+            artifact_sha256: "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
+                .into(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        },
+    );
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    assert_eq!(
+        engine.storage().load_embedding_fingerprint().await.unwrap(),
+        None
+    );
+    engine
+        .add_fact(
+            &AddFactRequest {
+                content: "first".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            Arc::new(Served(fp.clone())) as Arc<dyn EmbeddingProvider>,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.storage().load_embedding_fingerprint().await.unwrap(),
+        Some(fp)
+    );
+}
+
+#[tokio::test]
 async fn verify_embedding_identity_enforces_match() {
     // The eager fail-fast check (#614, §Design.2) consumed by MCP startup.
     struct OtherEmbedder {

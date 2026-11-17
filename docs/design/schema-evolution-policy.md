@@ -123,6 +123,19 @@ reader is unaffected. Only steps 4–5 apply (the table lives in the fresh-init 
 because nothing is folded: `migrate_v13_to_v14_idempotent` and
 `fresh_vs_migrated_fact_vectors_converge` (normalized `sqlite_master.sql`) suffice.
 
+**v14→v15** (#1017, the ADR 0015 served artifact) is the additive-*column* shape: four
+nullable `embedding_spaces` columns (`artifact_sha256`, `pooling`, `normalization`,
+`max_input_tokens`), no DEFAULT, no CHECK, no data move, so every recorded identity reads
+back with its served artifact absent (decode rejects a partially set row). It uses `ALTER
+TABLE … ADD COLUMN`, never a table rebuild (`embedding_spaces` is the parent of
+`fact_vectors … ON DELETE CASCADE`), and adds each column only if `pragma_table_info` lacks
+it, because several tests and the CLI's `create_stale_db` roll a current schema back and
+re-run the chain. `ADD COLUMN` splices each column into the stored `CREATE TABLE` text with
+its own spacing, so `fresh_vs_migrated_embedding_spaces_converge` compares the table on
+`PRAGMA table_xinfo` (plus the `CHECK` enumeration and the index text), not on normalized
+SQL. Postgres does not mirror these columns yet (#634): `PgBackend` refuses a served
+fingerprint with `NotImplemented` rather than dropping it.
+
 ## Event Envelope Versioning
 
 Events in the append-only log carry a per-event-type revision via the `event_revision` column.

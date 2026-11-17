@@ -129,7 +129,9 @@ pub fn check_compatible(conn: &Connection, candidate: &EmbeddingFingerprint) -> 
 ///
 /// Equality is field-by-field over the whole tuple (`EmbeddingFingerprint: Eq`), so a
 /// difference in *any* identity field — `model`, `provider`, `dim`,
-/// `matryoshka_base_dim`, or `element_type` — is a mismatch.
+/// `matryoshka_base_dim`, `element_type`, or the served artifact (`artifact_sha256`,
+/// `pooling`, `normalization`, `max_input_tokens`; absent equals only absent) — is a
+/// mismatch.
 fn ensure_match(stored: &EmbeddingFingerprint, candidate: &EmbeddingFingerprint) -> Result<()> {
     if stored == candidate {
         return Ok(());
@@ -346,5 +348,40 @@ mod tests {
             load(&conn).expect("load").is_none(),
             "a deprecated-only store has no active identity"
         );
+    }
+
+    fn served(sha_digit: char) -> me_types::types::ServedArtifact {
+        me_types::types::ServedArtifact {
+            artifact_sha256: std::iter::repeat_n(sha_digit, 64).collect(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        }
+    }
+
+    #[test]
+    fn served_and_unserved_identities_mismatch_both_ways() {
+        let plain = EmbeddingFingerprint::new("m", "p", 8);
+        let pinned = plain.clone().with_served(served('a'));
+        for (stored, candidate) in [(&plain, &pinned), (&pinned, &plain)] {
+            let conn = fresh_conn();
+            store(&conn, stored).expect("store");
+            assert!(matches!(
+                check_compatible(&conn, candidate),
+                Err(MemoryError::EmbeddingModelMismatch { .. })
+            ));
+            assert!(matches!(
+                record_if_absent(&conn, candidate, 8),
+                Err(MemoryError::EmbeddingModelMismatch { .. })
+            ));
+            assert_eq!(
+                load(&conn).unwrap().as_ref(),
+                Some(stored),
+                "nothing re-stamped"
+            );
+        }
+        let conn = fresh_conn();
+        store(&conn, &plain).expect("store");
+        check_compatible(&conn, &plain).expect("unserved accepts unserved");
     }
 }

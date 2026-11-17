@@ -32,14 +32,14 @@ use me_types::error::StorageError;
 use rusqlite::{Connection, Transaction};
 
 use me_types::error::{MemoryError, Result};
-use me_types::types::EmbeddingFingerprint;
+use me_types::types::{EmbeddingFingerprint, ServedArtifact};
 /// Re-exported for path stability: `EmbeddingSpace`/`SpaceStatus` relocated to
 /// `me-types` (Wave 2 #816 / S2, sub-PR 3) — see the module doc.
 pub use me_types::types::{EmbeddingSpace, SpaceStatus};
 
-/// Decode a `SELECT name, model, provider, dim, matryoshka_base_dim, element_type, status`
-/// row into an [`EmbeddingSpace`]. Guards the `i64 → usize` dimension reads (a negative or
-/// overflowing stored dim is corrupt state).
+/// Decode a [`SELECT_COLS`] row into an [`EmbeddingSpace`]. Guards the `i64 → usize`
+/// reads (a negative or overflowing stored value is corrupt state) and the all-or-none rule
+/// of the served-artifact columns (ADR 0015 §1).
 fn row_to_space(row: &rusqlite::Row) -> rusqlite::Result<Result<EmbeddingSpace>> {
     let name: String = row.get(0)?;
     let model: String = row.get(1)?;
@@ -48,6 +48,10 @@ fn row_to_space(row: &rusqlite::Row) -> rusqlite::Result<Result<EmbeddingSpace>>
     let base_raw: Option<i64> = row.get(4)?;
     let element_type: String = row.get(5)?;
     let status_raw: String = row.get(6)?;
+    let sha: Option<String> = row.get(7)?;
+    let pooling: Option<String> = row.get(8)?;
+    let normalization: Option<String> = row.get(9)?;
+    let tokens_raw: Option<i64> = row.get(10)?;
     // The closure returns rusqlite::Result so query errors propagate; the inner Result
     // carries our domain decode errors (bad dim / bad status) without a panic.
     Ok((|| {
@@ -62,6 +66,26 @@ fn row_to_space(row: &rusqlite::Row) -> rusqlite::Result<Result<EmbeddingSpace>>
             })?),
             None => None,
         };
+        let served = match (sha, pooling, normalization, tokens_raw) {
+            (None, None, None, None) => None,
+            (Some(artifact_sha256), Some(pooling), Some(normalization), Some(tokens)) => {
+                Some(ServedArtifact {
+                    artifact_sha256,
+                    pooling,
+                    normalization,
+                    max_input_tokens: usize::try_from(tokens).map_err(|_| {
+                        MemoryError::Internal(
+                            "embedding_spaces.max_input_tokens is negative/oversized".into(),
+                        )
+                    })?,
+                })
+            }
+            _ => {
+                return Err(MemoryError::Internal(
+                    "embedding_spaces served-artifact columns are partially set (corrupt)".into(),
+                ));
+            }
+        };
         Ok(EmbeddingSpace {
             name,
             fingerprint: EmbeddingFingerprint {
@@ -70,15 +94,15 @@ fn row_to_space(row: &rusqlite::Row) -> rusqlite::Result<Result<EmbeddingSpace>>
                 dim,
                 matryoshka_base_dim,
                 element_type,
-                served: None,
+                served,
             },
             status: SpaceStatus::from_sql(&status_raw)?,
         })
     })())
 }
 
-const SELECT_COLS: &str =
-    "name, model, provider, dim, matryoshka_base_dim, element_type, status FROM embedding_spaces";
+const SELECT_COLS: &str = "name, model, provider, dim, matryoshka_base_dim, element_type, status, \
+     artifact_sha256, pooling, normalization, max_input_tokens FROM embedding_spaces";
 
 /// The single active space, or `None` on a store that has never embedded.
 ///
@@ -155,10 +179,12 @@ pub fn list_spaces(conn: &Connection) -> Result<Vec<EmbeddingSpace>> {
 /// or `MemoryError::Internal` if a dimension overflows `i64`.
 pub fn insert_active(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
     let (dim, base) = dims_to_sql(&space.fingerprint)?;
+    let (sha, pooling, normalization, tokens) = served_to_sql(&space.fingerprint)?;
     conn.execute(
         "INSERT INTO embedding_spaces
-             (name, model, provider, dim, matryoshka_base_dim, element_type, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (name, model, provider, dim, matryoshka_base_dim, element_type, status,
+              artifact_sha256, pooling, normalization, max_input_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             space.name,
             space.fingerprint.model,
@@ -167,6 +193,10 @@ pub fn insert_active(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
             base,
             space.fingerprint.element_type,
             space.status.as_sql(),
+            sha,
+            pooling,
+            normalization,
+            tokens,
         ],
     )
     .map_err(map_single_active_violation)?;
@@ -186,10 +216,12 @@ pub fn insert_active(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
 /// `MemoryError::Internal` if a dimension overflows `i64`.
 pub fn insert_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()> {
     let (dim, base) = dims_to_sql(&space.fingerprint)?;
+    let (sha, pooling, normalization, tokens) = served_to_sql(&space.fingerprint)?;
     conn.execute(
         "INSERT INTO embedding_spaces
-             (name, model, provider, dim, matryoshka_base_dim, element_type, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'populating')",
+             (name, model, provider, dim, matryoshka_base_dim, element_type, status,
+              artifact_sha256, pooling, normalization, max_input_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'populating', ?7, ?8, ?9, ?10)",
         rusqlite::params![
             space.name,
             space.fingerprint.model,
@@ -197,6 +229,10 @@ pub fn insert_populating(conn: &Connection, space: &EmbeddingSpace) -> Result<()
             dim,
             base,
             space.fingerprint.element_type,
+            sha,
+            pooling,
+            normalization,
+            tokens,
         ],
     )
     .map_err(map_single_active_violation)?;
@@ -299,22 +335,35 @@ pub fn activate(conn: &Connection, name: &str) -> Result<()> {
 /// dimension overflows `i64`.
 pub fn upsert_active_fingerprint(tx: &Transaction, fp: &EmbeddingFingerprint) -> Result<()> {
     let (dim, base) = dims_to_sql(fp)?;
+    let (sha, pooling, normalization, tokens) = served_to_sql(fp)?;
     // Re-stamp the current active row in place (at most one exists, by the partial
-    // unique index), whatever its name.
+    // unique index), whatever its name. An unserved identity writes four NULLs.
     let updated = tx
         .execute(
             "UPDATE embedding_spaces
-            SET model = ?1, provider = ?2, dim = ?3, matryoshka_base_dim = ?4, element_type = ?5
+            SET model = ?1, provider = ?2, dim = ?3, matryoshka_base_dim = ?4, element_type = ?5,
+                artifact_sha256 = ?6, pooling = ?7, normalization = ?8, max_input_tokens = ?9
           WHERE status = 'active'",
-            rusqlite::params![fp.model, fp.provider, dim, base, fp.element_type],
+            rusqlite::params![
+                fp.model,
+                fp.provider,
+                dim,
+                base,
+                fp.element_type,
+                sha,
+                pooling,
+                normalization,
+                tokens,
+            ],
         )
         .map_err(StorageError::backend)?;
     if updated == 0 {
         // No active space yet — seed the canonical `default` active row.
         tx.execute(
             "INSERT INTO embedding_spaces
-                 (name, model, provider, dim, matryoshka_base_dim, element_type, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
+                 (name, model, provider, dim, matryoshka_base_dim, element_type, status,
+                  artifact_sha256, pooling, normalization, max_input_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 EmbeddingSpace::DEFAULT_NAME,
                 fp.model,
@@ -322,6 +371,10 @@ pub fn upsert_active_fingerprint(tx: &Transaction, fp: &EmbeddingFingerprint) ->
                 dim,
                 base,
                 fp.element_type,
+                sha,
+                pooling,
+                normalization,
+                tokens,
             ],
         )
         .map_err(StorageError::backend)?;
@@ -343,6 +396,28 @@ fn dims_to_sql(fp: &EmbeddingFingerprint) -> Result<(i64, Option<i64>)> {
         None => None,
     };
     Ok((dim, base))
+}
+
+/// The served-artifact columns of `fp`: four values, or four NULLs for an unserved identity.
+type ServedSql<'a> = (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<i64>,
+);
+
+fn served_to_sql(fp: &EmbeddingFingerprint) -> Result<ServedSql<'_>> {
+    let Some(served) = &fp.served else {
+        return Ok((None, None, None, None));
+    };
+    let tokens = i64::try_from(served.max_input_tokens)
+        .map_err(|_| MemoryError::Internal("max_input_tokens exceeds i64".into()))?;
+    Ok((
+        Some(&served.artifact_sha256),
+        Some(&served.pooling),
+        Some(&served.normalization),
+        Some(tokens),
+    ))
 }
 
 /// Remap a single-active partial-unique-index violation to a diagnosable engine error.
@@ -600,5 +675,65 @@ mod tests {
                 .any(|s| s.name == "model-b_8" && s.status == SpaceStatus::Deprecated),
             "model-b_8 is now deprecated"
         );
+    }
+
+    fn served(sha_digit: char) -> me_types::types::ServedArtifact {
+        me_types::types::ServedArtifact {
+            artifact_sha256: std::iter::repeat_n(sha_digit, 64).collect(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        }
+    }
+
+    #[test]
+    fn insert_then_find_active_roundtrip_with_served() {
+        let conn = fresh_conn();
+        let fp = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", 8)
+            .with_served(served('a'));
+        insert_active(&conn, &EmbeddingSpace::default_active(fp.clone())).expect("insert");
+        assert_eq!(find_active(&conn).unwrap().unwrap().fingerprint, fp);
+    }
+
+    #[test]
+    fn upsert_restamps_and_clears_the_served_artifact() {
+        let conn = fresh_conn();
+        let served_fp = EmbeddingFingerprint::new("m", "llama.cpp", 8).with_served(served('a'));
+        let plain = EmbeddingFingerprint::new("m", "llama.cpp", 8);
+        // INSERT branch (no active row yet), then UPDATE branch both ways.
+        for fp in [&served_fp, &plain, &served_fp] {
+            upsert_active_fingerprint(&conn, fp).expect("upsert");
+            assert_eq!(&find_active(&conn).unwrap().unwrap().fingerprint, fp);
+        }
+    }
+
+    #[test]
+    fn partially_set_served_columns_are_corrupt() {
+        let conn = fresh_conn();
+        conn.execute(
+            "INSERT INTO embedding_spaces (name, model, provider, dim, pooling, status)
+             VALUES ('default', 'm', 'p', 8, 'last', 'active')",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(find_active(&conn), Err(MemoryError::Internal(_))));
+    }
+
+    #[test]
+    fn begin_populating_resumes_only_with_the_same_served_artifact() {
+        let conn = fresh_conn();
+        let a = EmbeddingFingerprint::new("m", "p", 8).with_served(served('a'));
+        let space = EmbeddingSpace {
+            name: "shadow".into(),
+            fingerprint: a,
+            status: SpaceStatus::Populating,
+        };
+        begin_populating(&conn, &space).expect("open");
+        begin_populating(&conn, &space).expect("resume with the same served artifact");
+        let other = EmbeddingSpace {
+            fingerprint: EmbeddingFingerprint::new("m", "p", 8).with_served(served('b')),
+            ..space
+        };
+        assert!(begin_populating(&conn, &other).is_err());
     }
 }
