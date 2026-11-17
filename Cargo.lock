@@ -1881,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "me-archive"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "me-backend-postgres"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "deadpool-postgres",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "me-backend-sqlite"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "me-cognitive"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "me-consolidate"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "me-forget"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "chrono",
  "me-index",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "me-index"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "me-storage",
  "me-types",
@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "me-ingest"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "chrono",
  "me-index",
@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "me-query"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "chrono",
  "me-backend-sqlite",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "me-resolve"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "chrono",
  "me-index",
@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "me-storage"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2060,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "me-test-support"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "me-traits"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "me-types",
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "me-types"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -2104,7 +2104,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memory-engine"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "memory-engine-cli"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "memory-engine-embed"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "memory-engine",
  "proptest",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "memory-engine-mcp"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 dependencies = [
  "axum",
  "chrono",
