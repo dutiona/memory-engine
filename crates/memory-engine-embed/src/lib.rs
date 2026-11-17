@@ -17,7 +17,9 @@
 //!     768,    // expected embedding dimension
 //!     30,     // HTTP timeout in seconds
 //! )
-//! .expect("failed to build HTTP client");
+//! .expect("failed to build HTTP client")
+//! // nomic is symmetric: opt out of ME's default query instruction (ADR 0015 §6).
+//! .with_query_instruction("");
 //! ```
 
 //! This crate also provides [`HttpDeltaProposer`], an HTTP

@@ -808,3 +808,73 @@ async fn add_fact_path_does_not_apply_query_instruction() {
     // Documents are embedded prefix-free even when a query instruction is configured.
     assert_eq!(sole_input(&server).await, json!("document text"));
 }
+
+// ---------------------------------------------------------------------------
+// ME's pinned query instruction is the default (ADR 0015 §6, #1017)
+// ---------------------------------------------------------------------------
+
+async fn mount_one_embedding(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "index": 0, "embedding": make_embedding(DIM) }]
+        })))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn query_path_applies_pinned_instruction_by_default() {
+    let server = MockServer::start().await;
+    mount_one_embedding(&server).await;
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "Qwen/Qwen3-Embedding-0.6B",
+        "llama.cpp",
+        None,
+        None, // no instruction configured
+    )
+    .await;
+    let _ = tools::dispatch(
+        "memory_query",
+        args(json!({ "text": "search terms", "mode": "vector" })),
+        &engine,
+        Some(provider),
+        None,
+        DIM,
+        &cfg(),
+    )
+    .await;
+    assert_eq!(
+        sole_input(&server).await,
+        json!(format!(
+            "{}search terms",
+            HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION
+        ))
+    );
+}
+
+#[tokio::test]
+async fn add_fact_path_never_applies_pinned_instruction() {
+    let server = MockServer::start().await;
+    mount_one_embedding(&server).await;
+    let (engine, provider) = build_engine_and_provider(
+        format!("{}/v1/embeddings", server.uri()),
+        "Qwen/Qwen3-Embedding-0.6B",
+        "llama.cpp",
+        None,
+        None,
+    )
+    .await;
+    let _ = tools::dispatch(
+        "memory_add_fact",
+        args(json!({ "content": "document text" })),
+        &engine,
+        Some(provider),
+        None,
+        DIM,
+        &cfg(),
+    )
+    .await;
+    assert_eq!(sole_input(&server).await, json!("document text"));
+}

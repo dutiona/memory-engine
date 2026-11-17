@@ -48,10 +48,11 @@ fn model() -> String {
 fn provider(with_prefix: bool) -> HttpEmbeddingProvider {
     let p = HttpEmbeddingProvider::new(endpoint(), model(), "tei".into(), None, NATIVE_DIM, 60)
         .expect("build provider");
+    // `new` applies ME's pinned instruction by default; the symmetric arm opts out.
     if with_prefix {
         p.with_query_instruction(QUERY_INSTRUCTION)
     } else {
-        p
+        p.with_query_instruction("")
     }
 }
 

@@ -62,9 +62,9 @@ pub struct EmbeddingSection {
     /// this stays the native (pre-truncation) length.
     pub dimensions: usize,
 
-    /// Optional query-only instruction prefix for asymmetric models (e.g. Qwen). Applied
-    /// by the query path (`embed_query`); the document path (`add_fact`/`embed`) is never
-    /// prefixed. `None` = symmetric (no prefix).
+    /// Query-only instruction prefix, applied by the query path (`embed_query`); the
+    /// document path (`add_fact`/`embed`) is never prefixed. Absent = ME's pinned instruction
+    /// (ADR 0015 §6); `""` = no prefix, for a symmetric model.
     #[serde(default)]
     pub query_instruction: Option<String>,
 

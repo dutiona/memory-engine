@@ -45,8 +45,9 @@ pub struct EmbeddingArgs {
     #[arg(long)]
     pub native_dim: Option<usize>,
 
-    /// Query-only instruction prefix for asymmetric models (e.g. Qwen). Applied by the
-    /// query path's `embed_query`; document embedding is never prefixed.
+    /// Query-only instruction prefix, applied by the query path's `embed_query`; document
+    /// embedding is never prefixed. Absent = ME's pinned instruction (ADR 0015 §6); `''` =
+    /// no prefix, for a symmetric model.
     #[arg(long)]
     pub query_instruction: Option<String>,
 
