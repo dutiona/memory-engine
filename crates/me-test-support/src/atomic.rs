@@ -15,7 +15,7 @@ use me_types::error::MemoryError;
 use me_types::types::{EmbeddingFingerprint, FactType, NewFact};
 
 use super::factory::ConformanceBackend;
-use super::fixtures::{DIM, fingerprint, new_fact, seed_facts, snapshot};
+use super::fixtures::{DIM, fingerprint, new_event, new_fact, seed_facts, snapshot};
 
 /// A fact whose embedding length deliberately disagrees with `DIM` (the dim injector).
 fn wrong_dim_fact(content: &str) -> NewFact {
@@ -272,4 +272,93 @@ pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
         "[{}] apply_cycle rollback must leak no event row",
         f.name()
     );
+}
+
+/// `insert_event_at` whose event insert fails ⇒ `Err`, store identical: no new path.
+pub async fn insert_event_at_rolls_back_its_path<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    f.refuse_event_inserts(&be)
+        .await
+        .expect("refuse_event_inserts");
+    let before = snapshot(&be).await;
+    be.insert_event_at("a/b", &new_event("sess"))
+        .await
+        .expect_err("a refused event insert must fail the call");
+    assert_eq!(
+        before,
+        snapshot(&be).await,
+        "[{}] no path without its event",
+        f.name()
+    );
+}
+
+/// A seeded fact at scope `a` (returned with `a`'s id).
+async fn fact_at_a(
+    be: &std::sync::Arc<dyn me_storage::StorageBackend>,
+    fact: NewFact,
+) -> (i64, i64) {
+    let a = be.ensure_scope_path("a").await.expect("ensure a");
+    let mut fact = fact;
+    fact.scope_id = a;
+    (seed_facts(be, &[fact]).await[0], a)
+}
+
+/// A stale `from`, an expired fact, a fact whose validity ended, and a missing id each give
+/// `NotFound`, store identical: no event, no new scope node at either path.
+pub async fn move_fact_atomic_refuses_a_stale_source<F: ConformanceBackend>(f: &F) {
+    let now = Utc::now();
+    let be = f.make().await;
+    let (id, a) = fact_at_a(&be, new_fact("live")).await;
+    let other = be.ensure_scope_path("other").await.unwrap();
+    let (expired, _) = fact_at_a(&be, new_fact("expired")).await;
+    be.expire_fact(expired, now).await.expect("expire_fact");
+    let mut ended = new_fact("ended");
+    ended.t_invalid = Some(now - chrono::Duration::seconds(1));
+    let (ended, _) = fact_at_a(&be, ended).await;
+    let before = snapshot(&be).await;
+    for (fact, from, what) in [
+        (id, other, "a wrong from"),
+        (expired, a, "an expired fact"),
+        (ended, a, "an ended validity"),
+        (999_999, a, "a missing id"),
+    ] {
+        let err = be
+            .move_fact_atomic(fact, from, "x/y", now, "m", &new_fact_event())
+            .await
+            .expect_err(what);
+        assert!(
+            matches!(err, MemoryError::NotFound(_)),
+            "[{}] {what}: expected NotFound, got {err:?}",
+            f.name()
+        );
+    }
+    assert_eq!(
+        before,
+        snapshot(&be).await,
+        "[{}] nothing written",
+        f.name()
+    );
+}
+
+/// A move whose record insert fails ⇒ `Err`, store identical: the fact unmoved, neither path.
+pub async fn move_fact_atomic_rolls_back_when_its_record_fails<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let (id, a) = fact_at_a(&be, new_fact("stays")).await;
+    f.refuse_event_inserts(&be)
+        .await
+        .expect("refuse_event_inserts");
+    let before = snapshot(&be).await;
+    be.move_fact_atomic(id, a, "x/y", Utc::now(), "m", &new_fact_event())
+        .await
+        .expect_err("a refused record must fail the move");
+    assert_eq!(
+        before,
+        snapshot(&be).await,
+        "[{}] no move without its record",
+        f.name()
+    );
+}
+
+fn new_fact_event() -> me_types::types::NewEvent {
+    super::fixtures::new_event("sess")
 }

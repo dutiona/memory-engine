@@ -6,6 +6,7 @@ use parking_lot::RwLock;
 
 use me_storage::StorageBackend;
 use me_types::error::Result;
+use me_types::types::ScopeNode;
 
 pub use tree::ScopeTree;
 
@@ -74,6 +75,18 @@ pub async fn cache_scope_chain(
         }
     }
     Ok(())
+}
+
+/// Insert nodes a storage transaction already read into the in-memory tree.
+///
+/// The nodes are a [`me_storage::ScopedWrite`]'s `chain`. Infallible and idempotent by id:
+/// the cache step that follows a committed write can never report a failure the write did
+/// not have.
+pub fn insert_scope_chain(scope_tree: &RwLock<ScopeTree>, chain: Vec<ScopeNode>) {
+    let mut tree = scope_tree.write();
+    for node in chain {
+        tree.insert(node);
+    }
 }
 
 // `MAX_SEGMENT_LEN` + `validate_segment` live in `me-types` (Wave 2 #816 / S2): the

@@ -5960,3 +5960,113 @@ async fn resolve_scope_path_never_creates_a_node() {
     );
     assert_eq!(read_only.resolve_scope_path("user:bob"), None);
 }
+
+/// The two scoped writes (#1022): a record appended with its scope path, a fact moved with
+/// its record. Both cache the paths they created, and both keep `ingest`'s guards.
+mod scope_writes {
+    use super::*;
+
+    fn record(payload: serde_json::Value) -> NewEvent {
+        NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::MemoryOp,
+            payload,
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "local".into(),
+            sequence_id: 0,
+            created_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_at_and_move_fact_cache_the_new_scopes() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let id = engine
+            .ingest_at("unscoped:laptop", &record(serde_json::json!({})))
+            .await
+            .unwrap();
+        let bucket = engine.resolve_scope_path("unscoped:laptop").unwrap();
+        assert_eq!(
+            engine.storage().get_event(id).await.unwrap().scope_id,
+            bucket
+        );
+
+        let from = engine.ensure_scope_path("user:alice").await.unwrap();
+        let mut fact = make_new_fact("moves", vec![0.5; DIM]);
+        fact.scope_id = from;
+        let fact = insert_raw_fact(&engine, &fact).await;
+        engine
+            .move_fact(
+                fact,
+                from,
+                "user:alice/project:p",
+                "unscoped:desktop",
+                &record(serde_json::json!({})),
+            )
+            .await
+            .unwrap();
+        let to = engine.resolve_scope_path("user:alice/project:p").unwrap();
+        assert!(engine.resolve_scope_path("unscoped:desktop").is_some());
+        assert_eq!(engine.get_fact(fact).await.unwrap().scope_id, to);
+        assert_eq!(
+            engine.explain_fact(fact).await.unwrap().scope_path,
+            "user:alice/project:p"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_at_and_move_fact_refuse_read_only_and_oversized_records() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let huge = serde_json::json!({ "x": "a".repeat(crate::limits::MAX_PAYLOAD_BYTES) });
+        assert!(matches!(
+            engine
+                .ingest_at("a", &record(huge.clone()))
+                .await
+                .unwrap_err(),
+            MemoryError::Conflict(crate::error::ConflictError::PayloadTooLarge { .. })
+        ));
+        let from = engine.ensure_scope_path("a").await.unwrap();
+        let mut fact = make_new_fact("stays", vec![0.5; DIM]);
+        fact.scope_id = from;
+        let fact = insert_raw_fact(&engine, &fact).await;
+        assert!(matches!(
+            engine
+                .move_fact(fact, from, "b", "c", &record(huge))
+                .await
+                .unwrap_err(),
+            MemoryError::Conflict(crate::error::ConflictError::PayloadTooLarge { .. })
+        ));
+        assert_eq!(engine.resolve_scope_path("b"), None);
+        assert_eq!(engine.get_fact(fact).await.unwrap().scope_id, from);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ro.db");
+        drop(
+            MemoryEngine::builder(DIM)
+                .path(path.clone())
+                .build()
+                .unwrap(),
+        );
+        let read_only = MemoryEngine::builder(DIM)
+            .path(path)
+            .read_only(true)
+            .build()
+            .unwrap();
+        assert!(matches!(
+            read_only
+                .ingest_at("a", &record(serde_json::json!({})))
+                .await
+                .unwrap_err(),
+            MemoryError::ReadOnly
+        ));
+        assert!(matches!(
+            read_only
+                .move_fact(1, 1, "b", "c", &record(serde_json::json!({})))
+                .await
+                .unwrap_err(),
+            MemoryError::ReadOnly
+        ));
+    }
+}

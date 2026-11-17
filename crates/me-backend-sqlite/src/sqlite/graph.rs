@@ -23,7 +23,7 @@ use super::{SqliteBackend, stream_consumer_dropped};
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
-use me_storage::graph::{BootstrapIngestOutcome, FactGraph};
+use me_storage::graph::{BootstrapIngestOutcome, FactGraph, ScopedWrite};
 use me_types::error::Result;
 use me_types::types::{
     Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
@@ -1077,6 +1077,43 @@ impl FactGraph for SqliteBackend {
     // dedup-with-reinforces the batch, and stamps identity if any created. It does NOT
     // fire the HNSW notify (unlike `insert_or_reinforce_fact`): bootstrap facts enter
     // the vector index only on the next open — kept consistent across both paths.
+    // WRITE
+    async fn move_fact_atomic(
+        &self,
+        id: i64,
+        from: i64,
+        to: &str,
+        now: DateTime<Utc>,
+        record_at: &str,
+        record: &NewEvent,
+    ) -> Result<ScopedWrite> {
+        let dim = self.embed_dim;
+        let to = to.to_owned();
+        let record_at = record_at.to_owned();
+        let mut record = record.clone();
+        let registry = Arc::clone(&self.upcaster_registry);
+        self.block_write(move |c| {
+            let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
+            let scopes = ScopeStore::new(&tx);
+            let to_id = scopes.ensure_path(&to)?;
+            record.scope_id = scopes.ensure_path(&record_at)?;
+            if !FactStore::new(&tx, dim).move_scope(id, from, to_id, now)? {
+                return Err(me_types::error::MemoryError::NotFound(format!(
+                    "live fact {id} in scope {from}"
+                )));
+            }
+            let event_id = crate::store::events::EventStore::new(&tx, &registry).insert(&record)?;
+            let mut chain = scopes.chain(to_id)?;
+            chain.extend(scopes.chain(record.scope_id)?);
+            tx.commit().map_err(StorageError::backend)?;
+            Ok(ScopedWrite {
+                id: event_id,
+                chain,
+            })
+        })
+        .await
+    }
+
     async fn ingest_bootstrap_batch_atomic(
         &self,
         marker: Option<&NewEvent>,

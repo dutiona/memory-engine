@@ -168,3 +168,46 @@ pub async fn count_outcome_signals_and_batch<F: ConformanceBackend>(f: &F) {
         f.name()
     );
 }
+
+/// `insert_event_at` creates the scope path and appends the event under its leaf, in one
+/// transaction; `chain` holds the path's nodes below root. At an existing path it adds no
+/// scope node.
+pub async fn insert_event_at_files_the_event_and_its_path<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let mut event = new_event("sess");
+    event.payload = serde_json::json!({ "k": "v" });
+    let written = be
+        .insert_event_at("a/b", &event)
+        .await
+        .expect("insert_event_at");
+    let leaf = be
+        .get_scope(written.chain.iter().map(|n| n.id).max().unwrap())
+        .await;
+    let got = be.get_event(written.id).await.expect("get_event");
+    assert_eq!(
+        got.payload,
+        serde_json::json!({ "k": "v" }),
+        "[{}] payload",
+        f.name()
+    );
+    let leaf = leaf.expect("leaf scope");
+    assert_eq!(
+        got.scope_id,
+        leaf.id,
+        "[{}] event filed at the leaf",
+        f.name()
+    );
+    let mut labels: Vec<_> = written.chain.iter().map(|n| n.label.clone()).collect();
+    labels.sort();
+    assert_eq!(labels, ["a", "b"], "[{}] chain below root", f.name());
+    let scopes = be.list_all_scopes().await.expect("list_all_scopes").len();
+    be.insert_event_at("a/b", &event)
+        .await
+        .expect("insert_event_at again");
+    assert_eq!(
+        be.list_all_scopes().await.expect("list_all_scopes").len(),
+        scopes,
+        "[{}] an existing path adds no node",
+        f.name()
+    );
+}

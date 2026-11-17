@@ -19,6 +19,96 @@ impl MemoryEngine {
         me_ingest::ingest(self.mem_ctx(), event).await
     }
 
+    /// Append an event under the scope `path`, creating the path in the event's own
+    /// transaction: a failed append leaves no new scope node. `event.scope_id` is replaced
+    /// by the path's leaf. Returns the assigned event id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only, a
+    /// `PayloadTooLarge` conflict for an oversized payload, `MemoryError::Storage` on a
+    /// write failure. Nothing is written on any error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// use memory_engine::types::{EventType, NewEvent};
+    /// let engine = memory_engine::MemoryEngine::builder(4).build().unwrap();
+    /// let event = NewEvent {
+    ///     timestamp: chrono::Utc::now(),
+    ///     event_type: EventType::MemoryOp,
+    ///     payload: serde_json::json!({}),
+    ///     source: "doc".into(),
+    ///     session_id: None,
+    ///     scope_id: 1,
+    ///     origin_node_id: "doc".into(),
+    ///     sequence_id: 0,
+    ///     created_at: None,
+    /// };
+    /// engine.ingest_at("unscoped:laptop", &event).await.unwrap();
+    /// assert!(engine.resolve_scope_path("unscoped:laptop").is_some());
+    /// # });
+    /// ```
+    pub async fn ingest_at(&self, path: &str, event: &NewEvent) -> Result<i64> {
+        me_ingest::ingest_at(self.mem_ctx(), &self.scope_tree, path, event).await
+    }
+
+    /// Move fact `id` from scope `from` to the scope path `to` and append `record` under
+    /// the scope path `record_at`, in one transaction that creates both paths. Only a
+    /// live fact (not expired, valid now) still at `from` moves, so of two concurrent
+    /// moves the second answers `NotFound`. Returns the record's id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` when no live fact `id` sits at `from`,
+    /// `MemoryError::ReadOnly` on a read-only engine, a `PayloadTooLarge` conflict for an
+    /// oversized record, `MemoryError::Storage` on a write failure. Nothing is written on
+    /// any error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// use memory_engine::types::{EventType, NewEvent};
+    /// let engine = memory_engine::MemoryEngine::builder(4).build().unwrap();
+    /// let record = NewEvent {
+    ///     timestamp: chrono::Utc::now(),
+    ///     event_type: EventType::MemoryOp,
+    ///     payload: serde_json::json!({}),
+    ///     source: "doc".into(),
+    ///     session_id: None,
+    ///     scope_id: 1,
+    ///     origin_node_id: "doc".into(),
+    ///     sequence_id: 0,
+    ///     created_at: None,
+    /// };
+    /// // No fact 7 sits at the root: nothing moves and nothing is created.
+    /// let err = engine.move_fact(7, 1, "user:alice", "unscoped:laptop", &record).await;
+    /// assert!(matches!(err, Err(memory_engine::MemoryError::NotFound(_))));
+    /// assert_eq!(engine.resolve_scope_path("user:alice"), None);
+    /// # });
+    /// ```
+    pub async fn move_fact(
+        &self,
+        id: i64,
+        from: i64,
+        to: &str,
+        record_at: &str,
+        record: &NewEvent,
+    ) -> Result<i64> {
+        me_ingest::move_fact(
+            self.mem_ctx(),
+            &self.scope_tree,
+            id,
+            from,
+            to,
+            record_at,
+            record,
+        )
+        .await
+    }
+
     /// Add a fact: compute embedding via `embedder`, compute blake3 content hash,
     /// and insert into the fact store. Returns the assigned fact id.
     ///

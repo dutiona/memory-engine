@@ -906,6 +906,24 @@ impl<'a> FactStore<'a> {
             .map_err(|e| StorageError::backend(e).into())
     }
 
+    /// Move fact `id` from scope `from` to scope `to` when it is live at `now`; `false` when
+    /// no such live fact sits at `from`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on SQL failure, a missing `to` scope included.
+    pub fn move_scope(&self, id: i64, from: i64, to: i64, now: DateTime<Utc>) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute(
+                "UPDATE facts SET scope_id = ?3 WHERE id = ?1 AND scope_id = ?2 \
+                 AND t_expired IS NULL AND (t_invalid IS NULL OR t_invalid > ?4)",
+                rusqlite::params![id, from, to, now.to_rfc3339()],
+            )
+            .map_err(StorageError::backend)?;
+        Ok(rows == 1)
+    }
+
     /// Set the pinned flag on a fact.
     ///
     /// # Errors

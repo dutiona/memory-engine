@@ -36,6 +36,18 @@ pub enum BootstrapIngestOutcome {
     Ingested(Vec<(i64, bool)>),
 }
 
+/// What a write that names scope paths returns.
+///
+/// The event it appended, and the nodes below root of every path it named, read inside its
+/// transaction, so the caller caches them with no storage read after the commit.
+#[derive(Debug)]
+pub struct ScopedWrite {
+    /// The id of the appended event.
+    pub id: i64,
+    /// The nodes of the named paths, root excluded.
+    pub chain: Vec<ScopeNode>,
+}
+
 /// Core knowledge graph: facts, edges, the scope hierarchy.
 ///
 /// All methods are async (boxed via `async_trait`): the `SQLite` backend wraps
@@ -522,4 +534,31 @@ pub trait FactGraph: Send + Sync {
         fingerprint: &me_types::types::EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<BootstrapIngestOutcome>;
+
+    /// Atomically file fact `id` under the scope path `to` and append `record` under the
+    /// scope path `record_at`, creating both paths, when the fact is live at `now` (not
+    /// expired; `t_invalid` null or after `now`) and still sits at scope `from`. `to` may
+    /// name `from`'s own path: the record is appended and the fact is unchanged.
+    /// `record.scope_id` is replaced by `record_at`'s leaf. No vector changes, so no
+    /// index is notified: both search channels filter on the fact's scope at query time.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ both paths, the move and the record committed together; Err ⟹ store
+    /// byte-identical`. The check runs inside the transaction, so of two concurrent moves
+    /// of one fact the second answers `NotFound` instead of overwriting the first.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::NotFound`](me_types::error::MemoryError::NotFound) when no live fact
+    /// `id` sits at `from`; a storage error otherwise.
+    async fn move_fact_atomic(
+        &self,
+        id: i64,
+        from: i64,
+        to: &str,
+        now: DateTime<Utc>,
+        record_at: &str,
+        record: &NewEvent,
+    ) -> Result<ScopedWrite>;
 }
