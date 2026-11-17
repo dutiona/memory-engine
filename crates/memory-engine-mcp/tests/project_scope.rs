@@ -209,9 +209,22 @@ async fn no_file_of_the_store_holds_userinfo_quoted_from_a_tool_argument() {
         )
         .await;
     assert!(reply.is_error, "{reply:?}");
+    for project in [
+        "TOKEN456@github.com:alice/fork.git",
+        "https://alice:p'SECRET789@github.com/p",
+    ] {
+        let reply = server
+            .tool(
+                "laptop",
+                "recall",
+                json!({ "query": "kestrel", "project": project }),
+            )
+            .await;
+        assert!(reply.is_error, "{reply:?}");
+    }
     server.stop().await;
     for (name, bytes) in &store_bytes(&server) {
-        for secret in [&b"s3cret"[..], b"TOKEN123"] {
+        for secret in [&b"s3cret"[..], b"TOKEN123", b"TOKEN456", b"SECRET789"] {
             assert!(!holds(bytes, secret), "{name} holds {secret:?}");
         }
     }
@@ -1287,7 +1300,10 @@ async fn a_move_whose_record_fails_does_not_happen() {
         stored_id(&remember(&server, "laptop", &p, json!({ "content": "kestrel stays" })).await);
     server.refuse_event_writes();
     let reply = set_level(&server, "laptop", &p, id, "user").await;
-    assert!(reply.is_error && reply.body.contains("record"), "{reply:?}");
+    assert!(
+        reply.is_error && reply.body.contains("cannot move memory"),
+        "{reply:?}"
+    );
     let fact = server.engine.get_fact(id).await.unwrap();
     assert_eq!(
         Some(fact.scope_id),
