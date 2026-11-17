@@ -76,7 +76,7 @@ impl StoreLock {
             // A lock file another user created (a maintenance command run as root) still
             // locks: the lock needs only a read handle.
             .or_else(|e| match e.kind() {
-                io::ErrorKind::PermissionDenied => File::open(&path),
+                io::ErrorKind::PermissionDenied => File::open(&path).map_err(|_| e),
                 _ => Err(e),
             })
             .map_err(|source| StoreLockError::Io {
@@ -153,11 +153,34 @@ mod tests {
         drop(StoreLock::acquire(&db).unwrap());
         let lock = dir.path().join("memory.db.store-lock");
         std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if OpenOptions::new().write(true).open(&lock).is_ok() {
+            eprintln!("skipped: this user (root?) can write a 0444 file");
+            return;
+        }
         let held = StoreLock::acquire(&db).unwrap();
         assert!(matches!(
             StoreLock::acquire(&db),
             Err(StoreLockError::Held { .. })
         ));
         drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_directory_reports_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ro = dir.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(ro.join("probe"), b"").is_ok() {
+            eprintln!("skipped: this user (root?) can write a 0555 directory");
+            return;
+        }
+        let err = StoreLock::acquire(&ro.join("memory.db")).unwrap_err();
+        assert!(
+            matches!(&err, StoreLockError::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied),
+            "{err}"
+        );
     }
 }
