@@ -51,7 +51,7 @@ pub struct EmbeddingArgs {
     pub query_instruction: Option<String>,
 
     /// Matryoshka (MRL) truncation target. Must equal the engine `embed_dim` (the engine
-    /// stores post-truncation vectors); `--embed-dimensions` gives the native length.
+    /// stores post-truncation vectors); `--native-dim` gives the native length.
     #[arg(long)]
     pub mrl_dim: Option<usize>,
 
