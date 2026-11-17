@@ -113,6 +113,8 @@ async fn every_writable_command_refuses_while_the_store_is_held() {
             .args(embed),
     );
     refuses_as_held(cli(&db).args(["unforget", "1"]));
+    refuses_as_held(cli(&db).args(["erase", "--fact", "1"]));
+    refuses_as_held(cli(&db).args(["erase", "--machine", "laptop"]));
 
     assert_eq!(fact_and_event_counts(&db), before);
     assert_eq!(

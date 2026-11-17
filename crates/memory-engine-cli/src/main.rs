@@ -77,6 +77,9 @@ enum Commands {
         /// Fact ID
         id: i64,
     },
+    /// Delete a fact, or every fact and event a machine wrote: the one operation that
+    /// deletes. Writes the store: run it with the server stopped
+    Erase(commands::erase::EraseArgs),
     /// Apply pending schema migrations (use --check for a dry-run)
     Migrate(commands::migrate::MigrateArgs),
     /// Report the database schema version vs the binary's `CURRENT_SCHEMA_VERSION`
@@ -137,6 +140,9 @@ async fn main() -> ExitCode {
             .await
             .map(|()| ExitCode::SUCCESS),
         Commands::Unforget { id } => commands::unforget::run(&cli.db, id, cli.format)
+            .await
+            .map(|()| ExitCode::SUCCESS),
+        Commands::Erase(ref args) => commands::erase::run(&cli.db, args, cli.format)
             .await
             .map(|()| ExitCode::SUCCESS),
         Commands::Migrate(ref args) => commands::migrate::run(&cli.db, args, cli.format),

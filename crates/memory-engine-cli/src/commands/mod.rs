@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod consolidate;
 pub mod dump;
 pub mod embedding_args;
+pub mod erase;
 pub mod explain;
 pub mod export;
 pub mod import;
