@@ -66,14 +66,21 @@ Shows why a fact is in its current state: active/expired/pinned/due, scope path,
 memory-engine-cli query "database migration"
 memory-engine-cli query "auth" --scope "project/backend" --limit 5
 
-# Hybrid FTS + vector: pass an embedder and the query text is embedded via embed_query
+# Hybrid FTS + vector: pass an embedder and the query text is embedded via embed_query,
+# prefixed with ME's pinned query instruction (ADR-0015 §6) by default
 memory-engine-cli query "how does auth work" \
   --embed-url http://localhost:8080/v1/embeddings \
-  --embed-model Qwen/Qwen3-Embedding-0.6B --embed-provider tei \
-  --query-instruction "Instruct: Given a search query, retrieve relevant memory facts.\nQuery: "
+  --embed-model Qwen/Qwen3-Embedding-0.6B --embed-provider llama.cpp \
+  --embed-artifact-sha256 06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439 \
+  --embed-pooling last --embed-normalization l2 --embed-max-input-tokens 2048
+
+# A symmetric model opts out of the query instruction
+memory-engine-cli query "how does auth work" \
+  --embed-url http://localhost:11434/v1/embeddings \
+  --embed-model nomic-embed-text --embed-provider ollama --query-instruction ''
 ```
 
-FTS5 text search by default. **When `--embed-url` + `--embed-model` are supplied (#619), the query text is embedded via `embed_query`** (applying an asymmetric model's query-instruction prefix) for hybrid FTS + vector retrieval; with no embedder it stays FTS-only. The embedder flags are shared with `batch-ingest` / `bootstrap` / `consolidate` (`--embed-provider`, `--embed-api-key`, `--query-instruction`, `--mrl-dim`, `--native-dim`, `--embed-timeout`) and the declared `--embed-provider` must match the store's recorded identity (#614). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
+FTS5 text search by default. **When `--embed-url` + `--embed-model` are supplied (#619), the query text is embedded via `embed_query`** (prefixed with ME's pinned instruction unless `--query-instruction` replaces it; `''` means no prefix) for hybrid FTS + vector retrieval; with no embedder it stays FTS-only. The embedder flags are shared with `batch-ingest` / `bootstrap` / `consolidate` (`--embed-provider`, `--embed-api-key`, `--query-instruction`, `--mrl-dim`, `--native-dim`, `--embed-timeout`, and the served-artifact flags `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens`, all four or none, with `MEMORY_ENGINE_EMBED_*` variables). Before embedding, `query` checks the declared identity against the store's recorded one and fails with `embedding identity check failed` on a mismatch (#614, #1017). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
 
 #### `export -o <path>` — Export State
 
