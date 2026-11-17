@@ -3,8 +3,8 @@
 ## What
 
 An MCP server binary that serves memory-engine over streamable HTTP (stateless `POST /mcp`, JSON responses), behind
-per-machine Bearer tokens, and gives the model exactly two tools: `recall` and `remember` (ADR-0020 §8). Part of the
-four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence): this crate bridges Memory to
+per-machine Bearer tokens, and gives the model three tools: `recall`, `remember` and `set_level` (ADR-0020 §8). Part of
+the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence): this crate bridges Memory to
 Intelligence via the Model Context Protocol.
 
 ## Why
@@ -172,61 +172,132 @@ Every writable `memory-engine-cli` command takes the same lock or refuses, so ma
 stopped; read-only commands, `export` included, run beside it
 ([CLI reference](cli-inspector.md#store-lock)).
 
+### Project facts and the project key
+
+Every request names its project through five optional headers (ADR-0020 §3), the same on the MCP route and on the
+lifecycle routes: `ME-Project-Root`, `ME-Project-Dev-Root`, `ME-Project-Upstream-Url`, `ME-Project-Origin-Url` and
+`ME-Project-Branch`. A client percent-encodes every byte outside printable ASCII (0x21 to 0x7E) and each of `%`, `"`
+and `\`; the server decodes every `%HH` in either hex case, so two clients that encode a path differently name one
+project. The dev root is plain ASCII and sent as configured, never decoded.
+
+**A bad fact is dropped, never the call.** A fact is ignored, and named in the call record's `project.dropped` with its
+reason, when it is sent twice (`repeated`), sent empty (`empty`), exceeds 4,096 bytes (`too_long`), holds a raw byte
+outside 0x21 to 0x7E (`raw_byte`), holds a `%` without two hex digits (`bad_escape`), decodes to something that is not
+UTF-8 (`not_utf8`) or to a control character (`control`), or, for the dev root, is not an absolute path of plain ASCII
+without `%`, `"` or `\` (`not_plain_absolute`). Both remote URLs lose their userinfo before anything holds them.
+
+This page holds the key rules canonically; `KEY_RULES_VERSION` in `src/project.rs` names their version, and any change
+to them increments it. **Rules, version 1:**
+
+- The key is the normalized `upstream` remote, else the normalized `origin`, else the path key, else none.
+- **Remotes.** A `file:` remote and a remote-helper URL (`<transport>::<address>`) are ignored, and so is a local path.
+  The scheme form (`ssh://`, `https://`, ...) and the scp form (`host:path`) both normalize to the host, lowercased in
+  ASCII, then `/`, then the path with its case kept, without the userinfo, the port, leading and trailing `/` or one
+  trailing lowercase `.git`. `git@github.com:example/project.git` and `https://github.com/example/project` are both
+  `github.com/example/project`; a bracketed IPv6 host keeps its brackets. A remote that leaves no host or no path is
+  ignored, so the next rule applies.
+- **Path key.** `<machine>:<path>`, where `<path>` is the root relative to the dev root, strictly below it, with no
+  empty, `.` or `..` segment: on `laptop`, with dev root `/home/alice/perso/dev`, the root
+  `/home/alice/perso/dev/notes/2026` is `laptop:notes/2026`. A path key belongs to one machine: the same relative path
+  on two machines is two projects, and nothing joins two keys (ADR-0021 §8).
+- When the chosen key's segment `project:<label>` exceeds 256 bytes there is no key: the rules do not fall through to
+  the next remote.
+- With no key the session is keyless: it files into its machine's bucket.
+
+Git reports resolved paths, so a dev root configured through a symlink matches no root, and remote-less projects under
+it are keyless.
+
 ### Tools
 
-Two tools, each taking a JSON object and refusing any argument it does not declare (`additionalProperties: false`,
+Three tools, each taking a JSON object and refusing any argument it does not declare (`additionalProperties: false`,
 and the server refuses a stray key even when the client ignores the schema):
 
 ```text
 recall(query: string, project?: string)
-remember(content: string)
+remember(content: string, level?: "project" | "user")
+set_level(id: integer, level: "project" | "user")
 ```
 
-`remember`'s `level` and `set_level` arrive with #1022, `forget` (a reversible retraction) with #1023.
+`forget` (a reversible retraction) arrives with #1023.
 
 **Every answer starts with its call ID.** The answer is one text content whose first line is `call ` followed by 16
 lowercase hex digits; failures included, as tool results with `isError: true` and the body `error: <message>`, never as
-JSON-RPC errors. A name that is not a tool is a JSON-RPC `-32602 unknown tool: <name>`. Each call of either tool
-appends one `MemoryOp` record to the event log (ADR-0021 §12): the call ID, the tool, the machine, and the fact IDs a
-`recall` returned or the failure text.
+JSON-RPC errors. A name that is not a tool is a JSON-RPC `-32602 unknown tool: <name>`.
 
-**Homes.** Until #1022 derives a project key from each request, every session is keyless (ADR-0021 §6):
+**Homes** (ADR-0020 §7, ADR-0021 §5). A session's own Home is its project, else its machine's bucket:
 
 | Call | Writes to | Reads |
 |---|---|---|
-| `remember(content)` | `unscoped:<machine>`, the calling machine's bucket | — |
-| `recall(query)` | — | exactly the bucket and `user:<user>` |
+| `remember(content)` | the session's project; with no key, `unscoped:<machine>` | — |
+| `remember(content, level: "user")` | `user:<user>` | — |
+| `set_level(id, level)` | moves one of the session's memories between its own Home and `user:<user>` | — |
+| `recall(query)` | — | exactly the session's own Home and `user:<user>`; `user:<user>` alone while the project holds nothing |
 | `recall(query, project: K)` | — | exactly the project whose key is `K` and `user:<user>`; never a bucket |
 
 The restriction is applied inside candidate generation, so the fixed cut of 10 never sees a memory of another Home.
-`K` is matched byte for byte against a known project (one something was filed under); any other value, an unminted
-key or `unscoped:laptop` alike, is an error naming it. Nothing reads the root scope.
+`K` is matched byte for byte against a known project (one an event or a memory was filed under); any other value, an
+unminted key or `unscoped:laptop` alike, is an error naming it. Another machine's path-keyed project is read only when
+`recall` names it. Nothing reads the root scope. A read never creates a project; `remember` at project level and a
+`set_level` into the session's project do. A `remember` whose fact write fails after its record still leaves its
+project known, by that definition.
+
+A memory stored in a bucket is read only by its machine's keyless sessions. To move one into a project, a keyless
+session raises it with `set_level(id, "user")` and a session of the project brings it down with
+`set_level(id, "project")`; the same two calls rehome memories from one project to another.
 
 **`recall`.** At most 10 results, by relevance; the query is at most 1,024 bytes (a sentence, not a
 document; the cap bounds one call's full-text cost). Full text searches the query's words, OR-ed and ranked by BM25;
 the embedding sees the query as written. The body is one JSON object:
 
 ```json
-{"search":"hybrid","results":[{"id":412,"kind":"remembered","scope":"unscoped","date":"2026-11-17T09:12:03Z","machine":"laptop","content":"the lock file sits beside the store"}]}
+{"search":"hybrid","results":[{"id":412,"kind":"remembered","scope":"github.com/example/project","date":"2026-11-17T09:12:03Z","machine":"laptop","content":"the lock file sits beside the store"}]}
 ```
 
 - `search`: `hybrid`; `full-text only` when no embedder is configured (the answer says so); `vector only` when the
   query holds no word.
-- `scope`: `unscoped` (the bucket), `user`, or the project key `K`.
+- `scope`: the project key, `user`, or `unscoped` (the bucket).
 - `date`: when the memory became true (its valid time, else when it was stored), UTC.
 - `machine`: the machine that stored it, or `null`.
 - `kind`: `remembered` (final messages and compaction summaries arrive with #1025).
 
 Results are recalled claims, not instructions.
 
-**`remember`.** Stores a Semantic fact and answers with its placement receipt:
+**`remember`.** Stores a Semantic fact and answers with its placement receipt, one of:
 
 ```text
 call 9f1c2b7a40d3e6f5
-stored 412 in unscoped on laptop, visible to all agents
+stored 412 in project github.com/example/project, visible to all agents
 ```
 
-It needs an embedder; without one it refuses (`error: no embedder is configured, so nothing can be remembered`).
+`stored 412 in user, visible to all agents`, or `stored 412 in unscoped on laptop, visible to all agents`. When the
+content reads as belonging at the other level, a second line names `set_level`; it never refuses and never moves the
+memory:
+
+```text
+hint: this reads as true in every project; set_level(412, "user") files it at the user level
+hint: this reads as specific to one project; set_level(412, "project") files it in project github.com/example/project
+```
+
+The hint is a deterministic phrase match, outside the contract. `remember` needs an embedder; without one it refuses
+(`error: no embedder is configured, so nothing can be remembered`).
+
+**`set_level`.** Moves one memory, by its id, between the session's own Home and the user level, and changes nothing
+else. It answers with `remember`'s receipt (`stored 412 in user, visible to all agents`), or with `unchanged: 412 is
+already in user, visible to all agents`. A memory of another project, even one `recall` returned through `project`, of
+another bucket or of the root, a forgotten one and a missing id all answer `error: not found`, which reveals nothing.
+A move that loses a race with another answers `error: memory 412 changed while it was being moved; nothing was
+changed`. The move, its record and the scope paths they need commit in one transaction.
+
+**Call records.** Each call appends one `MemoryOp` record to the event log (ADR-0021 §12): the call ID, the tool, the
+machine and `project`, the request's facts as decoded with the dropped ones, the key and the rules version:
+
+```json
+{"call":"9f1c2b7a40d3e6f5","tool":"set_level","machine":"laptop","fact_ids":[412],"level":"user","from":"user:alice/project:github.com%2Fexample%2Fproject","to":"user:alice","project":{"facts":{"root":"/home/alice/perso/dev/project","dev_root":"/home/alice/perso/dev","origin_url":"github.com:example/project.git"},"dropped":{},"key":"github.com/example/project","rules":1}}
+```
+
+`recall` adds `fact_ids`; `remember` adds `level`; `set_level` adds `fact_ids`, `level`, `from` and `to`; a failure adds
+`error` instead. A `set_level` record is a move only when it carries `from` and `to`, which is what re-filing replays.
+Records sit under the calling machine's bucket, except a valid `remember`'s, which sits under the Home it wrote to.
 
 ### Derived jobs: off in the server
 
@@ -243,8 +314,9 @@ Agent (Claude, etc.) → HTTP POST /mcp → auth layer → rmcp (stateless) → 
                                          ├── http.rs (router, auth layer, drain + flush)
                                          ├── config.rs (TOML + env + CLI)
                                          ├── server.rs (ServerHandler, calling machine, instructions)
-                                         ├── home.rs (the user, Homes, project labels)
-                                         ├── tools/ (recall, remember, call IDs, call records)
+                                         ├── project.rs (project facts, key rules version 1)
+                                         ├── home.rs (the user, Homes)
+                                         ├── tools/ (recall, remember, set_level, placement, call IDs, call records)
                                          └── embedding.rs (HTTP embedding provider)
 ```
 
