@@ -358,3 +358,41 @@ fn an_environment_only_deployment_starts_on_a_blank_store() {
     let mut server = spawn_from_environment(dir.path());
     assert_serves(&mut server, "environment, blank store");
 }
+
+/// A blank store and an environment-only configuration (with its dimension, so the exit
+/// cannot come from `cannot determine embed_dim`) carrying `envs`.
+fn refuses_from_environment(case: &str, envs: &[(&str, &str)]) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    let mut env = vec![
+        ("MEMORY_MCP_DB_PATH", db.to_str().unwrap()),
+        ("MEMORY_MCP_EMBED_DIM", "1024"),
+    ];
+    env.extend_from_slice(envs);
+    let tokens = write_token_file(dir.path(), &common::MACHINES);
+    let mut server = ServerProcess::spawn_bare(dir.path(), &tokens, &[], &env);
+    assert_refused(&mut server, case, "invalid embedding configuration");
+    assert!(server.stderr().contains("url"), "{}", server.stderr());
+    assert!(!db.exists(), "{case}: no database is created");
+}
+
+#[test]
+fn refuses_a_half_configured_embedder() {
+    refuses_from_environment(
+        "model without url",
+        &[("MEMORY_MCP_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")],
+    );
+}
+
+#[test]
+fn refuses_embedder_fields_without_an_embedder() {
+    refuses_from_environment(
+        "served fields only",
+        &[
+            ("MEMORY_MCP_EMBED_ARTIFACT_SHA256", SHA),
+            ("MEMORY_MCP_EMBED_POOLING", "last"),
+            ("MEMORY_MCP_EMBED_NORMALIZATION", "l2"),
+            ("MEMORY_MCP_EMBED_MAX_INPUT_TOKENS", "2048"),
+        ],
+    );
+}

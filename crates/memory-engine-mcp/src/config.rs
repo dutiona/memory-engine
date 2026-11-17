@@ -181,12 +181,13 @@ pub struct ResolvedEmbedding {
 /// Merge the embedder settings — each field from its override, else from `[embedding]` —
 /// and check them against the engine dimension, before any store is opened.
 ///
-/// Returns `Ok(None)` when neither a URL nor a model is configured (no embedder). Without
-/// an `[embedding]` section the native dimension is `engine_dim`.
+/// Returns `Ok(None)` when no embedder setting is configured at all. Without an
+/// `[embedding]` section the native dimension is `engine_dim`.
 ///
 /// # Errors
 ///
-/// [`MemoryError::Conflict`] (`PolicyParameter`) when the served artifact is partial or
+/// [`MemoryError::Conflict`] (`PolicyParameter`) when any embedder setting is given
+/// without both a URL and a model, when the served artifact is partial or
 /// invalid ([`ServedArtifact::from_parts`]), when `mrl_dim` differs from `engine_dim`, or
 /// when, without MRL, the native dimension differs from `engine_dim`.
 ///
@@ -235,8 +236,26 @@ pub fn resolve_embedding(
             .or_else(|| section.and_then(|b| b.max_input_tokens)),
     )?;
 
-    let (Some(endpoint), Some(model)) = (url, model) else {
-        return Ok(None);
+    let (endpoint, model) = match (url, model) {
+        (Some(endpoint), Some(model)) => (endpoint, model),
+        (None, None)
+            if api_key.is_none()
+                && provider.is_none()
+                && query_instruction.is_none()
+                && served.is_none() =>
+        {
+            return Ok(None);
+        }
+        // Anything else would start with no embedder, and so no identity check, while the
+        // operator believes one is configured.
+        _ => {
+            return Err(invalid(
+                "the embedder needs both a url (--embed-url / MEMORY_MCP_EMBED_URL) and a \
+                 model (--embed-model / MEMORY_MCP_EMBED_MODEL); other embedder settings were \
+                 given without them"
+                    .into(),
+            ));
+        }
     };
 
     // `native_dim` is what the provider validates raw responses against: the configured

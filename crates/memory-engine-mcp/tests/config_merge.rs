@@ -370,3 +370,35 @@ timeout_secs = 10
     assert_eq!(emb.model, "all-minilm");
     assert_eq!(emb.timeout_secs, 10);
 }
+
+#[test]
+fn an_embedder_field_without_both_url_and_model_is_refused() {
+    let cases = [
+        EmbeddingOverrides {
+            url: Some("http://cli-host:8080/embed".into()),
+            ..EmbeddingOverrides::default()
+        },
+        EmbeddingOverrides {
+            model: Some("m".into()),
+            ..EmbeddingOverrides::default()
+        },
+        EmbeddingOverrides {
+            provider: Some("llama.cpp".into()),
+            ..EmbeddingOverrides::default()
+        },
+        EmbeddingOverrides {
+            artifact_sha256: Some(SHA.into()),
+            pooling: Some("last".into()),
+            normalization: Some("l2".into()),
+            max_input_tokens: Some(2048),
+            ..EmbeddingOverrides::default()
+        },
+    ];
+    for overrides in cases {
+        let err = resolve_embedding(&overrides, None, 8)
+            .err()
+            .expect("a half-configured embedder is refused")
+            .to_string();
+        assert!(err.contains("url") && err.contains("model"), "{err}");
+    }
+}
