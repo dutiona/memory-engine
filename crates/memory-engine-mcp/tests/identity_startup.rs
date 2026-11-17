@@ -115,7 +115,32 @@ fn write_config(dir: &Path, fp: &EmbeddingFingerprint) {
     std::fs::write(&file, format!("{engine}{embedding}")).unwrap();
 }
 
-/// Assert the server exits non-zero before `/mcp` ever answered, naming `marker`.
+/// The log line `main` writes right after binding its listener. Every spawn here enables it,
+/// so its absence proves the listener was never bound, not merely that a poll missed it.
+const LISTENING: &str = "listening on";
+
+fn with_log<'a>(envs: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut all = vec![("RUST_LOG", "memory_engine_mcp=info")];
+    all.extend_from_slice(envs);
+    all
+}
+
+/// The binary with `--config` for `dir`, logging at info.
+fn spawn(dir: &Path, envs: &[(&str, &str)]) -> ServerProcess {
+    ServerProcess::spawn(dir, &[], &with_log(envs))
+}
+
+/// The binary without `--config` (an environment-only deployment), logging at info.
+fn spawn_bare(dir: &Path, envs: &[(&str, &str)]) -> ServerProcess {
+    ServerProcess::spawn_bare(
+        dir,
+        &write_token_file(dir, &common::MACHINES),
+        &[],
+        &with_log(envs),
+    )
+}
+
+/// Assert the server exits non-zero having never bound its listener, naming `marker`.
 fn assert_refused(server: &mut ServerProcess, case: &str, marker: &str) {
     let status = server.wait_ready().expect_err(&format!(
         "{case}: the server served; stderr:\n{}",
@@ -127,6 +152,10 @@ fn assert_refused(server: &mut ServerProcess, case: &str, marker: &str) {
         stderr.contains(marker),
         "{case}: expected {marker:?}; stderr:\n{stderr}"
     );
+    assert!(
+        !stderr.contains(LISTENING),
+        "{case}: the listener was bound before the refusal; stderr:\n{stderr}"
+    );
 }
 
 /// Assert the server comes up and stops cleanly.
@@ -137,6 +166,10 @@ fn assert_serves(server: &mut ServerProcess, case: &str) {
         server.stderr()
     );
     let stderr = server.stderr();
+    assert!(
+        stderr.contains(LISTENING),
+        "{case}: the listening line is logged, so its absence on a refusal means something; {stderr}"
+    );
     assert!(
         !stderr.contains("is not one of"),
         "{case}: llama.cpp is known; {stderr}"
@@ -159,7 +192,7 @@ fn refuses(
     stamp_store(dir.path(), stamped);
     let before = recorded(dir.path());
     write_config(dir.path(), configured);
-    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    let mut server = spawn(dir.path(), &[]);
     assert_refused(&mut server, case, marker);
     assert_eq!(
         recorded(dir.path()),
@@ -259,9 +292,8 @@ fn an_environment_override_reaches_the_identity_check() {
     let before = recorded(dir.path());
     write_config(dir.path(), &base());
     let other = "1".repeat(64);
-    let mut server = ServerProcess::spawn(
+    let mut server = spawn(
         dir.path(),
-        &[],
         &[("MEMORY_MCP_EMBED_ARTIFACT_SHA256", other.as_str())],
     );
     assert_refused(
@@ -277,11 +309,7 @@ fn a_partial_served_declaration_is_refused_before_the_store_opens() {
     let dir = tempfile::tempdir().unwrap();
     let unserved = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", DIM);
     write_config(dir.path(), &unserved);
-    let mut server = ServerProcess::spawn(
-        dir.path(),
-        &[],
-        &[("MEMORY_MCP_EMBED_ARTIFACT_SHA256", SHA)],
-    );
+    let mut server = spawn(dir.path(), &[("MEMORY_MCP_EMBED_ARTIFACT_SHA256", SHA)]);
     assert_refused(
         &mut server,
         "partial declaration",
@@ -302,7 +330,7 @@ fn serves_when_the_store_matches_the_pinned_identity() {
     let dir = tempfile::tempdir().unwrap();
     stamp_store(dir.path(), &base());
     write_config(dir.path(), &base());
-    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    let mut server = spawn(dir.path(), &[]);
     assert_serves(&mut server, "pinned identity");
 }
 
@@ -312,7 +340,7 @@ fn serves_an_unserved_store_under_an_unserved_config() {
     let unserved = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", DIM);
     stamp_store(dir.path(), &unserved);
     write_config(dir.path(), &unserved);
-    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    let mut server = spawn(dir.path(), &[]);
     assert_serves(&mut server, "unserved store");
 }
 
@@ -338,7 +366,7 @@ fn spawn_from_environment(dir: &Path) -> ServerProcess {
     let db = dir.join("memory.db");
     let env = deployment_env(db.to_str().unwrap());
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    ServerProcess::spawn_bare(dir, &write_token_file(dir, &common::MACHINES), &[], &env)
+    spawn_bare(dir, &env)
 }
 
 #[test]
@@ -369,8 +397,7 @@ fn refuses_from_environment(case: &str, envs: &[(&str, &str)]) {
         ("MEMORY_MCP_EMBED_DIM", "1024"),
     ];
     env.extend_from_slice(envs);
-    let tokens = write_token_file(dir.path(), &common::MACHINES);
-    let mut server = ServerProcess::spawn_bare(dir.path(), &tokens, &[], &env);
+    let mut server = spawn_bare(dir.path(), &env);
     assert_refused(&mut server, case, "invalid embedding configuration");
     assert!(server.stderr().contains("url"), "{}", server.stderr());
     assert!(!db.exists(), "{case}: no database is created");
