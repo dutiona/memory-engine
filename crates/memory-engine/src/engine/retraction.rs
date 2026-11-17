@@ -6,7 +6,7 @@ use chrono::Utc;
 use me_types::limits::{check_json_size, check_str_size};
 
 use crate::error::Result;
-use crate::types::{ForgetOutcome, NewEvent, UnforgetOutcome};
+use crate::types::{EraseReport, EraseTarget, ForgetOutcome, NewEvent, UnforgetOutcome};
 
 use super::MemoryEngine;
 
@@ -120,5 +120,57 @@ impl MemoryEngine {
         self.ensure_open()?;
         self.ensure_writable()?;
         self.storage.unforget_fact(id, Utc::now()).await
+    }
+
+    /// Erase `target`, the store's one hard delete: one fact, or everything a machine
+    /// wrote (#1023). What it takes and leaves is
+    /// [`Retraction::erase`](me_storage::Retraction::erase)'s contract; the in-memory graph
+    /// drops the erased facts' nodes and edges after the commit. This is a maintenance
+    /// operation, never a model tool (ADR-0020 §8), and backups keep their copies.
+    ///
+    /// A missing fact or a machine that wrote nothing deletes nothing, and the purge still
+    /// runs, so the same call retries a purge that failed ([`EraseReport::purged`]).
+    ///
+    /// # Errors
+    ///
+    /// `MemoryError::ReadOnly` on a read-only engine; a `PolicyParameter` conflict for a
+    /// machine name that is not a lowercase DNS label; a `PayloadTooLarge` conflict when
+    /// the erasure record would exceed the event limit (erase by fact then);
+    /// `MemoryError::Storage` on a write failure. Nothing is deleted on any error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// use memory_engine::types::{AddFactRequest, EraseTarget, FactType};
+    /// let engine = memory_engine::MemoryEngine::builder(4).build().unwrap();
+    /// let fingerprint = memory_engine::EmbeddingFingerprint::new("doc", "test", 4);
+    /// let request = AddFactRequest {
+    ///     content: "smoke test".into(),
+    ///     fact_type: FactType::Semantic,
+    ///     source_event_id: None,
+    ///     scope: Some("unscoped:smoke".into()),
+    ///     opts: None,
+    /// };
+    /// let id = engine
+    ///     .add_fact_precomputed(&request, vec![0.1; 4], &fingerprint, None)
+    ///     .await
+    ///     .unwrap();
+    /// let report = engine.erase(&EraseTarget::Machine("smoke".into())).await.unwrap();
+    /// assert_eq!(report.erased_facts, vec![id]);
+    /// assert!(engine.get_fact(id).await.is_err());
+    /// # });
+    /// ```
+    pub async fn erase(&self, target: &EraseTarget) -> Result<EraseReport> {
+        self.ensure_open()?;
+        self.ensure_writable()?;
+        let report = self.storage.erase(target, Utc::now()).await?;
+        let mut graph = self.graph.write();
+        for &fact in &report.erased_facts {
+            graph.remove_edges_by_fact(fact);
+            graph.remove_node(fact);
+        }
+        drop(graph);
+        Ok(report)
     }
 }

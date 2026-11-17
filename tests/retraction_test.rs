@@ -320,3 +320,91 @@ async fn a_partial_batch_fails_only_its_forgotten_entry() {
     );
     assert_eq!(active_with(&engine, "line").await.len(), 1);
 }
+
+#[tokio::test]
+async fn erase_mirrors_the_graph_and_the_vector_index() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let session = engine
+        .ingest(&NewEvent {
+            session_id: Some("s1".into()),
+            ..record()
+        })
+        .await
+        .unwrap();
+    let fingerprint = EmbeddingFingerprint::new("test", "test", DIM);
+    let mut ids = Vec::new();
+    for content in ["kestrel nests", "kestrel eggs"] {
+        let request = AddFactRequest {
+            content: content.into(),
+            fact_type: FactType::Semantic,
+            source_event_id: Some(session),
+            scope: Some("user:alice".into()),
+            opts: None,
+        };
+        ids.push(
+            engine
+                .add_fact_precomputed(&request, EMBEDDING.to_vec(), &fingerprint, None)
+                .await
+                .unwrap(),
+        );
+    }
+    engine.link_session_facts("s1", None).await.unwrap();
+    assert_eq!(engine.graph_neighbors(ids[1]), vec![ids[0]]);
+    let report = engine
+        .erase(&memory_engine::types::EraseTarget::Fact(ids[0]))
+        .await
+        .unwrap();
+    assert_eq!(report.erased_facts, vec![ids[0]]);
+    assert_eq!(engine.graph_neighbors(ids[1]), Vec::<i64>::new());
+    assert!(!engine.graph_has_node(ids[0]));
+    for found in recall(&engine).await {
+        assert!(!found.contains(&ids[0]), "{found:?}");
+    }
+}
+
+#[tokio::test]
+async fn erase_removes_the_sidecar_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let mut engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    let id = remember(&engine, "kestrel nests", "unscoped:laptop").await;
+    engine.close().await.unwrap();
+    let sidecars = || {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".snapshot"))
+            .count()
+    };
+    assert_eq!(sidecars(), 1, "a clean close writes the sidecar");
+    let engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    let report = engine
+        .erase(&memory_engine::types::EraseTarget::Machine("laptop".into()))
+        .await
+        .unwrap();
+    assert_eq!(report.erased_facts, vec![id]);
+    assert!(report.purged, "{:?}", report.purge_error);
+    assert_eq!(sidecars(), 0, "erasure removes the sidecar");
+}
+
+#[tokio::test]
+async fn a_read_only_engine_refuses_erase() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let mut engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    remember(&engine, "kestrel nests", "user:alice").await;
+    engine.close().await.unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(&path)
+        .read_only(true)
+        .build()
+        .unwrap();
+    let err = engine
+        .erase(&memory_engine::types::EraseTarget::Fact(1))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, memory_engine::MemoryError::ReadOnly),
+        "{err:?}"
+    );
+}

@@ -125,6 +125,17 @@ impl Retraction for SqliteBackend {
 
     // WRITE
     async fn erase(&self, target: &EraseTarget, now: DateTime<Utc>) -> Result<EraseReport> {
+        // The sidecar holds the erased facts' vectors and graph nodes. Remove it first, so
+        // a crash before the next clean close cannot leave them behind; the next open
+        // rebuilds it from the store.
+        if let Some(db_path) = self.pool.path() {
+            match std::fs::remove_file(crate::snapshot::snapshot_path(db_path)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(StorageError::backend(e).into());
+                }
+                _ => {}
+            }
+        }
         let target = target.clone();
         let registry = Arc::clone(&self.upcaster_registry);
         let dim = self.embed_dim;

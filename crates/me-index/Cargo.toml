@@ -32,11 +32,5 @@ petgraph = "0.7"
 # The pure-graph proptests (`graph::memory_graph::proptests`) moved verbatim.
 proptest = "1"
 
-[features]
-# Gates `MemoryGraph::remove_node` (archival prune, #879/#833). Forwarded by the
-# facade's own `archive` feature (`me-index/archive`) so the two stay in lockstep;
-# needs no me-types archive types itself, so it is a bare marker.
-archive = []
-
 [lints]
 workspace = true

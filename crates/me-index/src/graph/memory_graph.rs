@@ -104,8 +104,7 @@ impl MemoryGraph {
     /// the store *without* expiring either endpoint fact, this drops the matching edge from
     /// the derived graph cache so reads (degree, neighbors, components,
     /// `explain_fact` context) stay consistent — the edge counterpart of
-    /// `remove_node` (`#[cfg(feature = "archive")]`-gated, so not always a
-    /// resolvable intra-doc link). Its fact-level sibling
+    /// [`remove_node`](Self::remove_node). Its fact-level sibling
     /// [`remove_edges_by_fact`](Self::remove_edges_by_fact) handles the bulk
     /// fact-supersession path; this single-edge one is now wired through
     /// `MemoryEngine::expire_edge` (#879).
@@ -128,11 +127,8 @@ impl MemoryGraph {
     ///
     /// No-op if the fact id is not in the graph.
     ///
-    /// Used by archival (`#[cfg(feature = "archive")]`) after the facts are
-    /// hard-deleted from `SQLite` into a cold-storage `.pak`. That archival prune
-    /// is its only production caller, so the method is gated to
-    /// `any(feature = "archive", test)`: without the `archive` feature it would be
-    /// dead code, and the repo forbids `#[allow(dead_code)]` masks (#879).
+    /// Used after facts are hard-deleted from the store: by archival into a cold-storage
+    /// `.pak`, and by erasure (#1023).
     ///
     /// petgraph's [`DiGraph::remove_node`] uses swap-remove: the former last
     /// node is relocated into the freed slot, which invalidates that node's
@@ -140,7 +136,6 @@ impl MemoryGraph {
     /// removal it rewrites `node_map` for the displaced node so every surviving
     /// node still resolves to its correct index. Callers may therefore remove
     /// nodes in a loop (e.g. archival) without corrupting the map.
-    #[cfg(any(feature = "archive", test))]
     pub fn remove_node(&mut self, fact_id: i64) {
         let Some(idx) = self.node_map.remove(&fact_id) else {
             return;
