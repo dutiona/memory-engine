@@ -360,7 +360,7 @@ mod tests {
     /// archived fact is hard-deleted inside `commit_archive_atomic`.
     ///
     /// Before the fix, `commit_archive_atomic` deleted only edges whose *both*
-    /// endpoints were archived (`hard_delete_by_facts`), so a boundary edge
+    /// endpoints were archived, so a boundary edge
     /// survived the edge-delete and then referenced an about-to-be-hard-deleted
     /// archived fact → `FOREIGN KEY constraint failed`, aborting the whole tx.
     ///

@@ -172,21 +172,6 @@ impl FactGraph for SqliteBackend {
     }
 
     // WRITE
-    async fn insert_or_reinforce_fact(&self, fact: &NewFact) -> Result<(i64, bool)> {
-        #[cfg(feature = "ann")]
-        let embedding = fact.embedding.clone();
-        let fact = fact.clone();
-        let dim = self.embed_dim;
-        let result = self
-            .block_write(move |c| FactStore::new(c, dim).insert_or_reinforce(&fact))
-            .await?;
-        // Notify on any write that changes the active vector set (insert or reinforce).
-        #[cfg(feature = "ann")]
-        self.hnsw_notify_insert(result.0, &embedding)?;
-        Ok(result)
-    }
-
-    // WRITE
     async fn expire_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()> {
         let dim = self.embed_dim;
         self.block_write(move |c| FactStore::new(c, dim).expire(id, now))
@@ -278,23 +263,6 @@ impl FactGraph for SqliteBackend {
         let dim = self.embed_dim;
         self.block_write(move |c| FactStore::new(c, dim).stamp_surfaced(&fact_ids, now))
             .await
-    }
-
-    // WRITE
-    async fn hard_delete_facts(&self, ids: &[i64]) -> Result<usize> {
-        #[cfg(feature = "ann")]
-        let ids_for_notify = ids.to_vec();
-        let ids = ids.to_vec();
-        let dim = self.embed_dim;
-        let count = self
-            .block_write(move |c| FactStore::new(c, dim).hard_delete_ids(&ids))
-            .await?;
-        // Post-commit HNSW notification: tombstone each hard-deleted fact.
-        #[cfg(feature = "ann")]
-        for id in ids_for_notify {
-            self.hnsw_notify_expire(id);
-        }
-        Ok(count)
     }
 
     // -------------------------------------------------------------------------
@@ -656,13 +624,6 @@ impl FactGraph for SqliteBackend {
             EdgeStore::new(c).list_active_pairs_by_facts(&fact_ids, &relation_type)
         })
         .await
-    }
-
-    // WRITE
-    async fn hard_delete_edges_by_facts(&self, fact_ids: &[i64]) -> Result<usize> {
-        let fact_ids = fact_ids.to_vec();
-        self.block_write(move |c| EdgeStore::new(c).hard_delete_by_facts(&fact_ids))
-            .await
     }
 
     // -------------------------------------------------------------------------
@@ -1110,7 +1071,7 @@ impl FactGraph for SqliteBackend {
     // WRITE — pre-embedded bootstrap batch (one savepoint) below the seam. The engine
     // parses/extracts/embeds facade-side; this anchors the optional marker event,
     // dedup-with-reinforces the batch, and stamps identity if any created. It does NOT
-    // fire the HNSW notify (unlike `insert_or_reinforce_fact`): bootstrap facts enter
+    // fire the HNSW notify: bootstrap facts enter
     // the vector index only on the next open — kept consistent across both paths.
     async fn ingest_bootstrap_batch_atomic(
         &self,

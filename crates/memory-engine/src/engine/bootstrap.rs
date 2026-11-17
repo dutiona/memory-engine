@@ -326,7 +326,7 @@ impl MemoryEngine {
     /// Facts are written one at a time in **autocommit** (no wrapping savepoint):
     /// one bad file does not abort the batch, and a re-run is idempotent
     /// (dedup-with-reinforcement). Per-file parsing + embedding run on a blocking
-    /// thread; the write is a single `insert_or_reinforce_fact` port call.
+    /// thread; the write is a single marker-less `ingest_bootstrap_batch_atomic` port call.
     ///
     /// The embedding identity is stamped meta-first (#643) before the first file,
     /// because this path is autocommit-per-file (no wrapping savepoint to defer under).
@@ -394,9 +394,9 @@ impl MemoryEngine {
                     let base_importance = fact.base_importance;
                     // Autocommit-per-file semantics preserved: each file is its own
                     // one-fact, marker-less bootstrap batch (own savepoint). Routing
-                    // through the bootstrap primitive (rather than `insert_or_reinforce_fact`)
-                    // keeps the `.md` path from populating the live HNSW index, matching
-                    // the session path and the pre-#816 behavior.
+                    // through the bootstrap primitive keeps the `.md` path from
+                    // populating the live HNSW index, matching the session path and the
+                    // pre-#816 behavior.
                     // No idempotency filter: the `.md` path dedups on content, so it
                     // never skips → always `Ingested` with exactly one flag (one fact in).
                     // Enforce that storage-port contract with a typed error, mirroring the
