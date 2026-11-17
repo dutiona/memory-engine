@@ -584,3 +584,92 @@ async fn a_remember_whose_fact_write_fails_leaves_an_unnamed_record() {
     assert_eq!(records[0].1["call"], reply.call);
     assert_eq!(server.fact_count().await, 0, "no fact names the record");
 }
+
+// --- Natural-language full text (D12): words, never FTS5 syntax ---
+
+#[tokio::test]
+async fn a_question_with_punctuation_still_finds_full_text() {
+    let server = TestServer::start_without_embedder().await;
+    let id = server
+        .seed(
+            Some("unscoped:laptop"),
+            "the lock file sits beside the store",
+            json!({}),
+        )
+        .await;
+    let reply = server
+        .tool(
+            "laptop",
+            "recall",
+            json!({ "query": "what's the lock file?" }),
+        )
+        .await;
+    assert!(!reply.is_error, "{reply:?}");
+    assert_eq!(ids(&reply), vec![id]);
+}
+
+#[tokio::test]
+async fn a_query_without_words_lists_nothing() {
+    let server = TestServer::start_without_embedder().await;
+    server
+        .seed(Some("unscoped:laptop"), "an important fact", json!({}))
+        .await;
+    let reply = server
+        .tool("laptop", "recall", json!({ "query": "?!" }))
+        .await;
+    assert!(!reply.is_error, "{reply:?}");
+    assert_eq!(
+        reply.json(),
+        json!({ "search": "full-text only", "results": [] })
+    );
+
+    let server = TestServer::start().await;
+    server
+        .seed(Some("unscoped:laptop"), "an important fact", json!({}))
+        .await;
+    let reply = server
+        .tool("laptop", "recall", json!({ "query": "?!" }))
+        .await;
+    assert_eq!(reply.json()["search"], "vector only");
+}
+
+#[tokio::test]
+async fn worst_case_queries_at_the_cap_are_answered() {
+    let server = TestServer::start_without_embedder().await;
+    let id = server
+        .seed(Some("unscoped:laptop"), "lock file", json!({}))
+        .await;
+    // Each is answered within the 1 KiB cap. U+0345 is alphanumeric to Rust and a separator to
+    // unicode61, so its run is one long phrase that matches nothing: bounded, never an error.
+    for (query, found) in [
+        ("lock_".repeat(204), true),
+        ("lock ".repeat(204), true),
+        ("lock\u{345}".repeat(170), false),
+    ] {
+        assert!(query.len() <= 1024, "{}", query.len());
+        let reply = server
+            .tool("laptop", "recall", json!({ "query": query }))
+            .await;
+        assert!(!reply.is_error, "{reply:?}");
+        assert_eq!(ids(&reply) == vec![id], found, "{reply:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_query_whose_last_word_matches_is_found() {
+    let server = TestServer::start_without_embedder().await;
+    let id = server
+        .seed(Some("unscoped:laptop"), "kestrel", json!({}))
+        .await;
+    let mut query = (0..150)
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    query.push(' ');
+    query.push_str("kestrel");
+    assert!(query.len() <= 1024);
+    let reply = server
+        .tool("laptop", "recall", json!({ "query": query }))
+        .await;
+    assert_eq!(ids(&reply), vec![id]);
+}

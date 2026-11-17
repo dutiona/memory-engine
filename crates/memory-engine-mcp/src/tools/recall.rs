@@ -89,10 +89,20 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
         None => (home::bucket(ctx.machine), "unscoped".to_owned()),
     };
 
+    let terms = fts_terms(&query);
+    if terms.is_none() && ctx.embedder.is_none() {
+        // Neither text nor a vector: the engine would read that as a non-search listing.
+        return Ok((
+            json!({ "search": "full-text only", "results": [] }).to_string(),
+            Vec::new(),
+        ));
+    }
     let mut memory_query = MemoryQuery::new()
-        .text(query.clone())
         .scope_exact_set([context.clone(), user_home.clone()])
         .limit(RESULTS);
+    if let Some(terms) = &terms {
+        memory_query = memory_query.text(terms.clone());
+    }
     let search = if let Some(provider) = ctx.embedder {
         // A blocking reqwest provider must run off the async executor: dropping its
         // internal runtime on an executor thread panics.
@@ -105,7 +115,11 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
         .map_err(|e| format!("query embedding task failed: {e}"))?
         .map_err(|e| e.to_string())?;
         memory_query = memory_query.embedding(embedding);
-        "hybrid"
+        if terms.is_some() {
+            "hybrid"
+        } else {
+            "vector only"
+        }
     } else {
         "full-text only"
     };
@@ -132,6 +146,19 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
     ))
 }
 
+/// The query's words for FTS5: each maximal run of alphanumerics, quoted and OR-ed (bm25
+/// ranks them), repeats dropped. A raw question is FTS5 syntax, and a syntax error reads as no
+/// result. This puts FTS5's phrase syntax above the storage port; the server is SQLite-only.
+fn fts_terms(query: &str) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && seen.insert(w.to_lowercase()))
+        .map(|w| format!("\"{}\"", w.to_lowercase()))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" OR "))
+}
+
 fn shape(fact: &Fact, homes: &Homes) -> Result<Value, String> {
     let scope = if Some(fact.scope_id) == homes.user_id {
         "user"
@@ -150,4 +177,46 @@ fn shape(fact: &Fact, homes: &Homes) -> Result<Value, String> {
         "machine": fact.metadata.get("machine").and_then(Value::as_str),
         "content": fact.content,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_question_becomes_or_ed_quoted_words() {
+        assert_eq!(
+            fts_terms("what's the lock file?").as_deref(),
+            Some(r#""what" OR "s" OR "the" OR "lock" OR "file""#)
+        );
+    }
+
+    #[test]
+    fn no_word_means_no_full_text_channel() {
+        assert_eq!(fts_terms("?!"), None);
+        assert_eq!(fts_terms("  — "), None);
+    }
+
+    #[test]
+    fn no_operator_or_quote_survives() {
+        let terms = fts_terms(r#"a" OR b* NEAR(c) -d ^e col:f"#).unwrap();
+        assert_eq!(
+            terms,
+            r#""a" OR "or" OR "b" OR "near" OR "c" OR "d" OR "e" OR "col" OR "f""#
+        );
+    }
+
+    #[test]
+    fn letters_split_on_separators_and_repeats_go() {
+        assert_eq!(fts_terms("été").as_deref(), Some(r#""été""#));
+        assert_eq!(
+            fts_terms("memory_query").as_deref(),
+            Some(r#""memory" OR "query""#)
+        );
+        assert_eq!(
+            fts_terms("lock\u{a0}file\u{2014}lock").as_deref(),
+            Some(r#""lock" OR "file""#)
+        );
+        assert_eq!(fts_terms("The the THE").as_deref(), Some(r#""the""#));
+    }
 }
