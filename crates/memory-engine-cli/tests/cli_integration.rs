@@ -1028,3 +1028,17 @@ async fn unreachable_embedder_bootstrap_fails_cleanly() {
         .unwrap();
     assert_clean_failure(&output, "embedding HTTP request failed");
 }
+
+#[tokio::test]
+async fn query_refuses_an_embedder_whose_identity_differs() {
+    // The store is stamped mock/test/4; a vector query through another model would
+    // silently retrieve against a foreign vector space.
+    let (_dir, db_path) = create_test_db().await;
+    let output = cli()
+        .args(["--db", db_path.to_str().unwrap(), "query", "blue sky"])
+        .args(["--embed-url", UNREACHABLE_EMBEDDER, "--embed-model", "other"])
+        .args(["--embed-provider", "test"])
+        .output()
+        .unwrap();
+    assert_clean_failure(&output, "embedding identity check failed");
+}
