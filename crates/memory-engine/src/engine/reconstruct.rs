@@ -151,10 +151,12 @@ impl MemoryEngine {
         // that reports exactly that identity; otherwise every later check would accept
         // vectors from another space.
         if *new_fingerprint != embedder_fp {
-            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(format!(
-                "reconstruct target identity {new_fingerprint:?} differs from the embedder's \
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!(
+                    "reconstruct target identity {new_fingerprint:?} differs from the embedder's \
                  identity {embedder_fp:?}"
-            ))));
+                ),
+            )));
         }
 
         let target_dim = new_fingerprint.dim;
@@ -483,7 +485,11 @@ mod tests {
         assert_ne!(names[0], names[1], "MRL must change the name");
         assert_ne!(names[0], names[2], "element type must change the name");
         assert_ne!(names[1], names[2]);
-        assert_eq!(space_name_for(&mrl).unwrap(), names[1], "same identity, same name");
+        assert_eq!(
+            space_name_for(&mrl).unwrap(),
+            names[1],
+            "same identity, same name"
+        );
     }
 
     // --- reconstruct() end-to-end (#623 T4) ---

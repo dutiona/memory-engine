@@ -198,7 +198,10 @@ pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyho
         } else {
             open_engine_writable(db)?
         };
-        let embedder = args.embed.build_required_blocking(engine.embed_dim()).await?;
+        let embedder = args
+            .embed
+            .build_required_blocking(engine.embed_dim())
+            .await?;
         (engine, embedder)
     };
 

@@ -103,7 +103,11 @@ pub async fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::R
     // When an embedder is configured, embed the query text via embed_query (so an
     // asymmetric model applies its query instruction prefix) for hybrid FTS + vector
     // search. With no embedder configured the query stays FTS-only (#619, §Design.6).
-    if let Some(provider) = args.embed.build_optional_blocking(engine.embed_dim()).await? {
+    if let Some(provider) = args
+        .embed
+        .build_optional_blocking(engine.embed_dim())
+        .await?
+    {
         // A vector from another model would silently retrieve against a foreign space
         // (#614): check the declared identity against the store's before embedding.
         engine

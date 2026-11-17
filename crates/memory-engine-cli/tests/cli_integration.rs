@@ -983,7 +983,10 @@ fn assert_clean_failure(output: &std::process::Output, marker: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "stderr:\n{stderr}");
     assert!(!stderr.contains("panicked"), "stderr:\n{stderr}");
-    assert!(stderr.contains(marker), "expected {marker:?}; stderr:\n{stderr}");
+    assert!(
+        stderr.contains(marker),
+        "expected {marker:?}; stderr:\n{stderr}"
+    );
 }
 
 #[tokio::test]
@@ -1002,7 +1005,11 @@ async fn unreachable_embedder_query_fails_cleanly() {
 async fn unreachable_embedder_batch_ingest_fails_cleanly() {
     let (dir, db_path) = create_test_db().await;
     let input = dir.path().join("facts.jsonl");
-    std::fs::write(&input, "{\"content\":\"a fact\",\"fact_type\":\"semantic\"}\n").unwrap();
+    std::fs::write(
+        &input,
+        "{\"content\":\"a fact\",\"fact_type\":\"semantic\"}\n",
+    )
+    .unwrap();
     let output = cli()
         .args(["--db", db_path.to_str().unwrap(), "batch-ingest"])
         .args(["--file", input.to_str().unwrap()])
@@ -1018,7 +1025,11 @@ async fn unreachable_embedder_bootstrap_fails_cleanly() {
     let (dir, db_path) = create_test_db().await;
     let memory = dir.path().join("memory");
     std::fs::create_dir(&memory).unwrap();
-    std::fs::write(memory.join("note.md"), "# A note\n\nSome remembered text.\n").unwrap();
+    std::fs::write(
+        memory.join("note.md"),
+        "# A note\n\nSome remembered text.\n",
+    )
+    .unwrap();
     let output = cli()
         .args(["--db", db_path.to_str().unwrap(), "bootstrap"])
         .args(["--memory-dir", memory.to_str().unwrap()])
@@ -1036,7 +1047,12 @@ async fn query_refuses_an_embedder_whose_identity_differs() {
     let (_dir, db_path) = create_test_db().await;
     let output = cli()
         .args(["--db", db_path.to_str().unwrap(), "query", "blue sky"])
-        .args(["--embed-url", UNREACHABLE_EMBEDDER, "--embed-model", "other"])
+        .args([
+            "--embed-url",
+            UNREACHABLE_EMBEDDER,
+            "--embed-model",
+            "other",
+        ])
         .args(["--embed-provider", "test"])
         .output()
         .unwrap();
