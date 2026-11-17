@@ -41,13 +41,19 @@ use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 /// Bounds peak memory (window content + vectors) and the crash-loss granularity.
 const DEFAULT_BACKFILL_BATCH: usize = 128;
 
-/// Derive a stable, unique `populating`/active space name from an embedding
-/// identity: a sanitized `model_provider_dim` slug. Distinct identities map to
-/// distinct names; the same identity maps to the same name (so a crash-resumed
-/// reconstruction reopens its space). Non-alphanumeric characters in `model` /
-/// `provider` (e.g. the `/` and `.` in `"Qwen/Qwen3-Embedding-0.6B"`) collapse to
-/// `_`, keeping the name a clean SQL identifier.
-fn space_name_for(fp: &EmbeddingFingerprint) -> String {
+/// Derive a stable `populating`/active space name from an embedding identity.
+///
+/// A *plain* identity (the defaults of [`EmbeddingFingerprint::new`]: no MRL, `float32`, no
+/// served artifact) keeps the historical sanitized `model_provider_dim` slug, so a
+/// reconstruction an older binary left `populating` resumes after an upgrade. Any other
+/// identity appends the first 16 hex digits of a BLAKE3 digest of the whole serialized
+/// fingerprint, so identities that differ only in a non-slug field never share a name (they
+/// used to collide, and `begin_populating` then refused the second space). The resume
+/// property holds for both forms: the same identity always maps to the same name.
+/// Residuals: an older binary's in-flight *non-plain* reconstruction restarts under the new
+/// name (its old `populating` row is left for the operator to deprecate), and two plain
+/// slugs that sanitize alike (`a.b` vs `a_b`) still collide as before.
+fn space_name_for(fp: &EmbeddingFingerprint) -> Result<String> {
     let mut slug = String::with_capacity(fp.model.len() + fp.provider.len() + 8);
     for ch in fp
         .model
@@ -59,7 +65,12 @@ fn space_name_for(fp: &EmbeddingFingerprint) -> String {
         slug.push(if ch.is_ascii_alphanumeric() { ch } else { '_' });
     }
     slug.push_str(&fp.dim.to_string());
-    slug
+    if *fp == EmbeddingFingerprint::new(fp.model.clone(), fp.provider.clone(), fp.dim) {
+        return Ok(slug);
+    }
+    let digest = blake3::hash(&serde_json::to_vec(fp)?);
+    let hex = digest.to_hex();
+    Ok(format!("{slug}_{}", &hex[..16]))
 }
 
 impl MemoryEngine {
@@ -135,7 +146,7 @@ impl MemoryEngine {
         }
 
         let target_dim = new_fingerprint.dim;
-        let space = space_name_for(new_fingerprint);
+        let space = space_name_for(new_fingerprint)?;
 
         // 1. Open (or resume) the shadow space.
         self.storage
@@ -438,6 +449,31 @@ mod tests {
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 0);
     }
 
+    // --- space_name_for: distinct identities never share a space name ---
+
+    #[test]
+    fn space_name_for_keeps_the_legacy_name_for_a_plain_identity() {
+        // A plain identity keeps today's sanitized `model_provider_dim`, so a reconstruction an
+        // older binary left `populating` resumes after an upgrade.
+        let plain = EmbeddingFingerprint::new("new-model", "test", DIM);
+        assert_eq!(space_name_for(&plain).unwrap(), "new_model_test_4");
+    }
+
+    #[test]
+    fn space_name_for_distinguishes_mrl_and_element_type() {
+        let plain = EmbeddingFingerprint::new("m", "p", DIM);
+        let mrl = EmbeddingFingerprint::with_matryoshka("m", "p", DIM, DIM * 2);
+        let int8 = EmbeddingFingerprint {
+            element_type: "int8".into(),
+            ..plain.clone()
+        };
+        let names = [&plain, &mrl, &int8].map(|fp| space_name_for(fp).unwrap());
+        assert_ne!(names[0], names[1], "MRL must change the name");
+        assert_ne!(names[0], names[2], "element type must change the name");
+        assert_ne!(names[1], names[2]);
+        assert_eq!(space_name_for(&mrl).unwrap(), names[1], "same identity, same name");
+    }
+
     // --- reconstruct() end-to-end (#623 T4) ---
 
     // kept: purpose-built - parameterized model slug + value so reconstruction tests
@@ -601,6 +637,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconstruct_resumes_a_legacy_named_populating_space() {
+        // A populating space an older binary opened under the historical slug (a literal here,
+        // not `space_name_for`) is resumed by a plain-target reconstruction, not duplicated.
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "old-model",
+            value: 0.1,
+            dim: DIM,
+        });
+        let new: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "new-model",
+            value: 0.9,
+            dim: DIM,
+        });
+        let new_fp = EmbeddingFingerprint::new("new-model", "test", DIM);
+        for c in ["a", "b", "c"] {
+            engine.add_fact(&req(c), old.clone(), None).await.unwrap();
+        }
+        let legacy = "new_model_test_4";
+        engine
+            .storage()
+            .begin_populating_space(legacy, &new_fp)
+            .await
+            .unwrap();
+        let partial = engine
+            .storage()
+            .next_backfill_window(legacy, 0, 1)
+            .await
+            .unwrap();
+        let rows: Vec<(i64, Vec<f32>)> = partial
+            .iter()
+            .map(|(id, _)| (*id, vec![0.9_f32; DIM]))
+            .collect();
+        engine
+            .storage()
+            .write_backfill_batch(legacy, rows)
+            .await
+            .unwrap();
+
+        let outcome = engine.reconstruct(&new_fp, &new).await.unwrap();
+        assert_eq!(outcome.promoted, 3);
+        assert_eq!(outcome.new_fingerprint, new_fp);
+        // The legacy-named space is the one that was promoted: it is active now, so it can
+        // no longer be reopened as `populating`.
+        assert!(
+            engine
+                .storage()
+                .begin_populating_space(legacy, &new_fp)
+                .await
+                .is_err(),
+            "the legacy-named space was resumed and promoted"
+        );
+    }
+
+    #[tokio::test]
     async fn reconstruct_resumes_a_crashed_reconstruction() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
@@ -622,7 +713,7 @@ mod tests {
 
         // Simulate a crash partway through a prior reconstruction: the populating
         // space exists and 2 of 4 facts are already backfilled.
-        let space = space_name_for(&new_fp);
+        let space = space_name_for(&new_fp).unwrap();
         engine
             .storage()
             .begin_populating_space(&space, &new_fp)
