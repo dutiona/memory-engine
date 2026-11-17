@@ -52,7 +52,19 @@ struct Homes {
     user_id: Option<i64>,
 }
 
-pub async fn run(ctx: &CallContext<'_>, args: Value) -> Result<String, String> {
+pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<String, String> {
+    match search(ctx, args).await {
+        Ok((body, fact_ids)) => {
+            let mut detail = serde_json::Map::new();
+            detail.insert("fact_ids".to_owned(), json!(fact_ids));
+            super::record(ctx, call, "recall", detail).await?;
+            Ok(body)
+        }
+        Err(message) => super::refuse(ctx, call, "recall", message).await,
+    }
+}
+
+async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>), String> {
     let Args { query, project } = serde_json::from_value(args).map_err(|e| e.to_string())?;
     if query.trim().is_empty() {
         return Err("query must be a non-empty string".to_owned());
@@ -113,7 +125,11 @@ pub async fn run(ctx: &CallContext<'_>, args: Value) -> Result<String, String> {
         .iter()
         .map(|r| shape(&r.fact, &homes))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({ "search": search, "results": results }).to_string())
+    let fact_ids = response.results.iter().map(|r| r.fact.id).collect();
+    Ok((
+        json!({ "search": search, "results": results }).to_string(),
+        fact_ids,
+    ))
 }
 
 fn shape(fact: &Fact, homes: &Homes) -> Result<Value, String> {

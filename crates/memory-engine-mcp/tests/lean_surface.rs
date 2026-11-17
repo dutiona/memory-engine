@@ -404,3 +404,183 @@ async fn recall_embeds_with_the_query_instruction_and_remember_without() {
         ]
     );
 }
+
+// --- Call records (ADR-0020 §8, ADR-0021 §12): one event-log record per model-tool call ---
+
+/// The `MemoryOp` records, oldest first: (id, payload, scope path).
+fn records(server: &TestServer) -> Vec<(i64, Value, String)> {
+    let conn = rusqlite::Connection::open(server.dir.path().join("memory.db")).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.id, e.payload, s.label FROM events e JOIN scopes s ON s.id = e.scope_id \
+             WHERE e.event_type = 'MemoryOp' ORDER BY e.id",
+        )
+        .unwrap();
+    stmt.query_map([], |r| {
+        let payload: String = r.get(1)?;
+        Ok((
+            r.get(0)?,
+            serde_json::from_str(&payload).unwrap(),
+            r.get(2)?,
+        ))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+fn remembered_id(reply: &common::Reply) -> i64 {
+    reply.body.split(' ').nth(1).unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn each_call_is_recorded_in_the_event_log() {
+    let server = TestServer::start().await;
+    let remember = server
+        .tool(
+            "laptop",
+            "remember",
+            json!({ "content": "kestrel recorded" }),
+        )
+        .await;
+    let fact = remembered_id(&remember);
+    let recall = server
+        .tool("laptop", "recall", json!({ "query": "kestrel" }))
+        .await;
+    let unknown = server
+        .tool(
+            "laptop",
+            "recall",
+            json!({ "query": "kestrel", "project": "nowhere" }),
+        )
+        .await;
+    let refused = server
+        .tool(
+            "laptop",
+            "remember",
+            json!({ "content": "c", "level": "user" }),
+        )
+        .await;
+    let _ = server.call("laptop", "memory_forget", json!({})).await;
+
+    let records = records(&server);
+    assert_eq!(records.len(), 4, "{records:?}");
+    for ((_, payload, scope), (reply, tool)) in records.iter().zip([
+        (&remember, "remember"),
+        (&recall, "recall"),
+        (&unknown, "recall"),
+        (&refused, "remember"),
+    ]) {
+        assert_eq!(payload["call"], reply.call, "{payload}");
+        assert_eq!(payload["tool"], tool, "{payload}");
+        assert_eq!(payload["machine"], "laptop", "{payload}");
+        assert_eq!(
+            scope, "unscoped:laptop",
+            "under the session's own Home, even under the swap"
+        );
+    }
+    assert_eq!(records[1].1["fact_ids"], json!([fact]));
+    assert!(records[2].1["error"].as_str().unwrap().contains("nowhere"));
+    assert!(records[3].1["error"].as_str().unwrap().contains("level"));
+    assert!(records[0].1.get("fact_ids").is_none() && records[0].1.get("error").is_none());
+    let stored = server.engine.get_fact(fact).await.unwrap();
+    assert_eq!(stored.source_event_id, Some(records[0].0));
+}
+
+#[tokio::test]
+async fn a_keyless_recall_on_a_fresh_store_creates_the_bucket_and_no_project() {
+    let server = TestServer::start().await;
+    let before = server.engine.statistics().await.unwrap().scopes.total;
+    server
+        .tool("desktop", "recall", json!({ "query": "kestrel" }))
+        .await;
+    assert!(
+        server
+            .engine
+            .resolve_scope_path("unscoped:desktop")
+            .is_some()
+    );
+    assert_eq!(
+        server.engine.statistics().await.unwrap().scopes.total,
+        before + 1
+    );
+}
+
+#[tokio::test]
+async fn an_oversized_value_cannot_make_its_record_fail() {
+    let server = TestServer::start().await;
+    let key = "p".repeat(5000);
+    let reply = server
+        .tool(
+            "laptop",
+            "recall",
+            json!({ "query": "kestrel", "project": key }),
+        )
+        .await;
+    assert!(
+        reply.is_error && reply.body.contains(&key),
+        "the reply names the value in full"
+    );
+    let records = records(&server);
+    let error = records[0].1["error"].as_str().unwrap();
+    assert!(error.len() <= 512, "{}", error.len());
+}
+
+fn refuse_event_writes(server: &TestServer) {
+    rusqlite::Connection::open(server.dir.path().join("memory.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_events BEFORE INSERT ON events \
+             BEGIN SELECT RAISE(ABORT, 'event writes refused by the test'); END;",
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_remember_whose_record_fails_stores_nothing() {
+    let server = TestServer::start().await;
+    server
+        .engine
+        .ensure_scope_path("unscoped:laptop")
+        .await
+        .unwrap();
+    refuse_event_writes(&server);
+    let reply = server
+        .tool("laptop", "remember", json!({ "content": "kestrel" }))
+        .await;
+    assert!(reply.is_error, "{reply:?}");
+    assert!(reply.body.contains("record"), "{reply:?}");
+    assert_eq!(server.fact_count().await, 0);
+}
+
+#[tokio::test]
+async fn a_recall_whose_record_fails_is_an_error() {
+    let server = TestServer::start().await;
+    server
+        .seed(Some("unscoped:laptop"), "kestrel", json!({}))
+        .await;
+    refuse_event_writes(&server);
+    let reply = server
+        .tool("laptop", "recall", json!({ "query": "kestrel" }))
+        .await;
+    assert!(reply.is_error, "{reply:?}");
+    assert!(reply.body.contains("record"), "{reply:?}");
+}
+
+#[tokio::test]
+async fn a_remember_whose_fact_write_fails_leaves_an_unnamed_record() {
+    let server = TestServer::start().await;
+    server.embedder.reset().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .mount(&server.embedder)
+        .await;
+    let reply = server
+        .tool("laptop", "remember", json!({ "content": "kestrel" }))
+        .await;
+    assert!(reply.is_error, "{reply:?}");
+    let records = records(&server);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].1["call"], reply.call);
+    assert_eq!(server.fact_count().await, 0, "no fact names the record");
+}
