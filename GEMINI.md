@@ -89,7 +89,7 @@ Virtual workspace (no root package); the **18 crates live flat under `crates/<cr
 - `bootstrap/` — Parse Claude Code JSONL session logs into historical facts.
 - `inspect/` — Debugging APIs: `explain_fact`, `fact_history`, `replay_events`, `dump_state`, `statistics`.
 
-Sibling crates (flat under `crates/`): `crates/memory-engine-embed/` (HTTP embedding + `HttpDeltaProposer`), `crates/memory-engine-cli/`, `crates/memory-engine-mcp/`. Workspace integration tests in `tests/`, benchmarks in `benches/`, examples in `examples/`, fuzz targets in `fuzz/` (detached, nightly).
+Sibling crates (flat under `crates/`): `crates/memory-engine-embed/` (HTTP embedding + `HttpDeltaProposer`), `crates/memory-engine-cli/`, `crates/memory-engine-mcp/`. Workspace integration tests in `tests/`, benchmarks in `benches/`, examples in `examples/`, fuzz targets in `fuzz/` (detached, nightly). The Claude Code plugin is `plugins/memory-engine/` (POSIX `sh`, listed by `.claude-plugin/marketplace.json`; its gate is in AGENTS.md).
 
 ## Conventions
 
@@ -165,6 +165,7 @@ Every issue MUST carry **exactly one** `type:*` label and **exactly one** `area:
 | `area:docs`          | Documentation and narrative docs                           |
 | `area:build`         | Build system, CI, tooling, dependencies                    |
 | `area:qa`            | Quality assurance, testing infrastructure, super-qa sweeps |
+| `area:plugin`        | Claude Code plugin (hooks, helper, skills)                 |
 | `area:viz`           | Phase-7 web UI / visualization (#13)                       |
 
 ### Additive labels (apply zero or more)

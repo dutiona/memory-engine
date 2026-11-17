@@ -1,0 +1,22 @@
+{
+  "name": "memory-engine",
+  "version": "0.1.0",
+  "description": "Queue every Claude Code lifecycle event in a local outbox and deliver it to a memory-engine server",
+  "author": { "name": "dutiona" },
+  "repository": "https://github.com/dutiona/memory-engine",
+  "license": "MIT OR Apache-2.0",
+  "userConfig": {
+    "me_url": {
+      "type": "string",
+      "title": "memory-engine URL",
+      "description": "Base URL of the memory-engine server, such as https://memory.example.net. Events queue locally until it is set.",
+      "default": ""
+    },
+    "dev_root": {
+      "type": "string",
+      "title": "Dev root",
+      "description": "Absolute path of this machine's dev root, in printable ASCII without space, quote, percent sign or backslash. Optional.",
+      "default": ""
+    }
+  }
+}

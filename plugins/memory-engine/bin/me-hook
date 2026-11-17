@@ -1,0 +1,390 @@
+#!/bin/sh
+# me-hook: the memory-engine client for Claude Code (ADR-0020 §12). Run by a shell, never executed directly.
+# Utilities: mkdir mv rm cat date git curl, and the shell's builtins. It never parses JSON.
+LC_ALL=C
+export LC_ALL
+umask 077
+unset GIT_DIR GIT_WORK_TREE
+ME_VERSION=0.1.0
+NL='
+'
+
+case $0 in
+*/.local/state/memory-engine/bin/me-hook)
+	# The stable copy, which the watcher runs as `env -i /bin/sh <path> flush`: everything follows from its path, and
+	# PATH is fixed, because the shell's default PATH under env -i ends in . on macOS.
+	S=${0%/bin/me-hook}
+	H=${S%/.local/state/memory-engine}
+	PATH=/usr/bin:/bin
+	export PATH
+	;;
+*)
+	H=${HOME-}
+	S=$H/.local/state/memory-engine
+	;;
+esac
+O=$S/outbox
+TOKEN=$H/.config/memory-engine/secrets/token
+
+usage() {
+	printf 'usage: me-hook capture|session-start|flush\n' >&2
+	exit 1
+}
+
+# heal: recreate every directory of the outbox; a step that failed is then retried once.
+heal() {
+	mkdir -p "$O/tmp" "$O/seq" "$O/rejected" "$S/bin" 2>/dev/null
+}
+
+# printable VALUE: every byte is in 0x21-0x7E.
+printable() {
+	case $1 in *[!!-~]*) return 1 ;; esac
+	return 0
+}
+
+# ---------------------------------------------------------------- project facts (ADR-0020 §3), channel-neutral
+
+# pct VALUE: R := VALUE with every byte outside 0x21-0x7E, and each of % " \, written as %HH.
+pct() {
+	_s=$1
+	case $_s in *[!!-~]* | *[%\"\\]*) ;; *)
+		R=$_s
+		return 0
+		;;
+	esac
+	R=
+	while [ -n "$_s" ]; do
+		_r=${_s#?}
+		_c=${_s%"$_r"}
+		_s=$_r
+		case $_c in
+		' ') R="$R%20" ;;
+		'%') R="$R%25" ;;
+		'"') R="$R%22" ;;
+		'\') R="$R%5C" ;;
+		[!!-~])
+			# bash 3.2 prints a byte above 0x7F as a sign-extended FFFFFFFFFFFFFFxx; the last two digits are the byte.
+			_h=$(printf %02X "'$_c")
+			R="$R%${_h#"${_h%??}"}"
+			;;
+		*) R=$R$_c ;;
+		esac
+	done
+}
+
+# strip_userinfo URL: R := URL without everything up to its host's last @, in both forms a remote takes.
+strip_userinfo() {
+	case $1 in
+	*://*)
+		_sch=${1%%://*}
+		_rest=${1#*://}
+		_auth=${_rest%%/*}
+		_path=${_rest#"$_auth"}
+		R=$_sch://${_auth##*@}$_path
+		;;
+	*:*)
+		_pre=${1%%:*}
+		case $_pre in
+		*/*) R=$1 ;;
+		*) R=${_pre##*@}${1#"$_pre"} ;;
+		esac
+		;;
+	*) R=$1 ;;
+	esac
+}
+
+# facts: F_ROOT F_UPSTREAM F_ORIGIN F_BRANCH from CLAUDE_PROJECT_DIR only; F_OK when there is a project at all.
+facts() {
+	F_OK= F_ROOT= F_UPSTREAM= F_ORIGIN= F_BRANCH=
+	_dir=${CLAUDE_PROJECT_DIR-}
+	[ -n "$_dir" ] || return 0
+	case $_dir in *"$NL"*) return 0 ;; esac
+	[ -d "$_dir" ] || return 0
+	F_OK=1
+	_out=$(git -C "$_dir" rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel </dev/null 2>/dev/null) || {
+		F_ROOT=$_dir
+		return 0
+	}
+	_gd=${_out%%"$NL"*}
+	_rest=${_out#*"$NL"}
+	_cd=${_rest%%"$NL"*}
+	_top=${_rest#*"$NL"}
+	if [ "$_gd" = "$_cd" ]; then
+		F_ROOT=$_top
+	else
+		case $_cd in
+		*/.git) F_ROOT=${_cd%/.git} ;;
+		*) F_ROOT=$_top ;;
+		esac
+	fi
+	_b=$(git -C "$_dir" symbolic-ref -q HEAD </dev/null 2>/dev/null) && case $_b in refs/heads/?*) F_BRANCH=${_b#refs/heads/} ;; esac
+	_u=$(git -C "$_dir" remote get-url upstream </dev/null 2>/dev/null) && [ -n "$_u" ] && strip_userinfo "$_u" && F_UPSTREAM=$R
+	_u=$(git -C "$_dir" remote get-url origin </dev/null 2>/dev/null) && [ -n "$_u" ] && strip_userinfo "$_u" && F_ORIGIN=$R
+	return 0
+}
+
+# dev_root_ok: the dev root is sent as configured, so it must already be its own encoding (ADR-0020 §3).
+dev_root_ok() {
+	case $DEV in /*) ;; *) return 1 ;; esac
+	printable "$DEV" || return 1
+	case $DEV in *[%\"\\]*) return 1 ;; esac
+	return 0
+}
+
+# fact_lines: the ME-Project-* header lines, an absent fact omitted; fails when a write fails.
+fact_lines() {
+	[ -n "$F_OK" ] || return 0
+	pct "$F_ROOT"
+	printf 'ME-Project-Root: %s\n' "$R" || return 1
+	if dev_root_ok; then printf 'ME-Project-Dev-Root: %s\n' "$DEV" || return 1; fi
+	if [ -n "$F_UPSTREAM" ]; then pct "$F_UPSTREAM" && printf 'ME-Project-Upstream-Url: %s\n' "$R" || return 1; fi
+	if [ -n "$F_ORIGIN" ]; then pct "$F_ORIGIN" && printf 'ME-Project-Origin-Url: %s\n' "$R" || return 1; fi
+	if [ -n "$F_BRANCH" ]; then pct "$F_BRANCH" && printf 'ME-Project-Branch: %s\n' "$R" || return 1; fi
+	return 0
+}
+
+# ---------------------------------------------------------------- enqueue
+
+record_endpoint() {
+	_u=${1%/}
+	case $_u in http://?* | https://?*) ;; *) return 0 ;; esac
+	printable "$_u" || return 0
+	_cur=
+	[ -f "$O/endpoint" ] && { IFS= read -r _cur <"$O/endpoint" || :; }
+	[ "$_u" = "$_cur" ] && return 0
+	{ printf '%s\n' "$_u" >"$O/tmp/$$.endpoint" && mv "$O/tmp/$$.endpoint" "$O/endpoint"; } && return 0
+	heal
+	{ printf '%s\n' "$_u" >"$O/tmp/$$.endpoint" && mv "$O/tmp/$$.endpoint" "$O/endpoint"; } && return 0
+	# Never leave the previous URL recorded: a flush would send this event, and the token, there.
+	rm -f "$O/tmp/$$.endpoint" "$O/endpoint"
+}
+
+# count_outbox: Q and P := the queued and parked events, before this hook's own event is published.
+count_outbox() {
+	Q=0
+	P=0
+	for _e in "$O"/[0-9]*; do [ -d "$_e" ] && Q=$((Q + 1)); done
+	for _e in "$O"/rejected/[0-9]*; do [ -d "$_e" ] && P=$((P + 1)); done
+}
+
+# no_token_line: ADR-0020 §10's client-made state, as the hook output's systemMessage, from a fixed template.
+no_token_line() {
+	# The same test as the flush's: a token file that cannot be read, or is empty, delivers nothing either.
+	read_line "$TOKEN" && return 0
+	if [ "$Q" -eq 0 ] && [ "$P" -eq 0 ]; then
+		printf '{"systemMessage":"memory: no token file"}\n'
+	else
+		printf '{"systemMessage":"memory: no token file; outbox %d queued, %d parked"}\n' "$Q" "$P"
+	fi
+}
+
+abandon() {
+	rm -rf "$O/tmp/$$"
+	exit 0
+}
+
+capture() {
+	[ -n "$H" ] || exit 0
+	exec 2>/dev/null
+	_t=$O/tmp/$$
+	[ -e "$_t" ] && rm -rf "$_t"
+	mkdir "$_t" || { heal && mkdir "$_t"; } || exit 0
+	record_endpoint "$ME_URL"
+	facts
+	cat >"$_t/body" || abandon
+	_d=$(date -u '+%s %Y-%m-%dT%H:%M:%SZ') || abandon
+	_ep=${_d%% *}
+	_tm=${_d#* }
+	case $_ep in '' | *[!0-9]*) abandon ;; esac
+	_n=0
+	_healed=
+	while :; do
+		[ "$_n" -lt 1000 ] || abandon
+		# The reservation is an exclusive create (noclobber is O_EXCL), not mkdir: uutils mkdir, the default on
+		# Ubuntu 26.04, can report success to two concurrent callers for one directory.
+		set -C
+		printf '%s\n' "$$" >"$O/seq/$_ep.$_n"
+		_ok=$?
+		set +C
+		if [ "$_ok" -eq 0 ]; then
+			_s=000000$_n
+			_seq=${_s#"${_s%??????}"}
+			_id=$_ep-$_seq-$$
+			[ -e "$O/$_id" ] || [ -e "$O/rejected/$_id" ] || break
+		elif [ ! -e "$O/seq/$_ep.$_n" ]; then
+			[ -z "$_healed" ] || abandon
+			_healed=1
+			heal
+			continue
+		fi
+		_n=$((_n + 1))
+	done
+	# Every write is checked: a group's status is only its last command's.
+	{
+		printf 'ME-Event-Id: %s\n' "$_id" &&
+			printf 'ME-Event-Time: %s\n' "$_tm" &&
+			printf 'ME-Event-Seq: %s\n' "$_seq" &&
+			printf 'ME-Harness: claude-code\n' &&
+			printf 'ME-Client-Version: %s\n' "$ME_VERSION" &&
+			fact_lines
+	} >"$_t/headers" || abandon
+	[ "$SUB" = session-start ] && count_outbox
+	mv "$_t" "$O/$_id" || abandon
+	[ "$SUB" = session-start ] && no_token_line
+	# The stable copy the watcher runs; best effort, after publication, so that it never costs the event.
+	{ cat "$0" >"$O/tmp/$$.me-hook" && mv "$O/tmp/$$.me-hook" "$S/bin/me-hook"; } ||
+		{ heal && cat "$0" >"$O/tmp/$$.me-hook" && mv "$O/tmp/$$.me-hook" "$S/bin/me-hook"; } ||
+		rm -f "$O/tmp/$$.me-hook"
+	# A new process, not a subshell, so that the flusher's $$ is its own pid.
+	/bin/sh "$0" flush </dev/null >/dev/null 2>&1 &
+	exit 0
+}
+
+# ---------------------------------------------------------------- delivery (ADR-0020 §3, §12)
+
+# read_line FILE: RL := its first line, with or without a final line feed; fails when that line is missing or empty.
+read_line() {
+	RL=
+	IFS= read -r RL <"$1" 2>/dev/null
+	[ -n "$RL" ]
+}
+
+now() {
+	NOW=$(date +%s)
+}
+
+lock_check() {
+	read_line "$O/lock/owner" && [ "$RL" = "$REC" ]
+}
+
+# lock_publish: try once to publish O/lock whole, with this flusher's record, by one rename.
+lock_publish() {
+	rm -rf "$O/tmp/$$.lock"
+	{ mkdir "$O/tmp/$$.lock" || { heal && mkdir "$O/tmp/$$.lock"; }; } || return 1
+	printf '%s\n' "$REC" >"$O/tmp/$$.lock/owner" || return 1
+	mv "$O/tmp/$$.lock" "$O/lock"
+	lock_check && return 0
+	# The rename failed, or moved our directory inside a lock that exists.
+	rm -rf "$O/tmp/$$.lock" "$O/lock/$$.lock"
+	return 1
+}
+
+# lock_stale: the lock's record is not two numbers, its flusher is gone, or its newest stamp is over an hour old.
+# A lock is always published with its whole record, so a record that cannot be read has no live writer.
+lock_stale() {
+	read_line "$O/lock/owner" || return 0
+	_pid=${RL%% *}
+	_st=${RL#* }
+	case $_pid in '' | *[!0-9]*) return 0 ;; esac
+	case $_st in '' | *[!0-9]*) return 0 ;; esac
+	kill -0 "$_pid" || return 0
+	if read_line "$O/lock/$_pid.stamp"; then
+		case $RL in '' | *[!0-9]*) ;; *) [ "$RL" -gt "$_st" ] && _st=$RL ;; esac
+	fi
+	[ $((NOW - _st)) -gt 3600 ]
+}
+
+# lock_take: hold O/lock, breaking it once when it is stale.
+lock_take() {
+	now || return 1
+	REC="$$ $NOW"
+	lock_publish && return 0
+	lock_stale || return 1
+	# One rename: of several breakers of one stale lock still in place, exactly one succeeds. A breaker that judged
+	# it stale just before another breaker replaced it can still take the new lock; that lock's flusher then stops
+	# at its next check (ADR-0020 §12, best effort).
+	rm -rf "$O/tmp/$$.stale"
+	mv "$O/lock" "$O/tmp/$$.stale" && rm -rf "$O/tmp/$$.stale"
+	lock_publish
+}
+
+# lock_renew: stamp this flusher's own file; a lock replaced since the check gets a stamp nobody reads as its own.
+lock_renew() {
+	now && printf '%s\n' "$NOW" >"$O/tmp/$$.stamp" && mv "$O/tmp/$$.stamp" "$O/lock/$$.stamp"
+}
+
+# prune: what dead writers left in tmp/, and seq reservations older than an hour.
+prune() {
+	set --
+	for _e in "$O"/tmp/*; do
+		[ -e "$_e" ] || continue
+		_p=${_e##*/}
+		_p=${_p%%.*}
+		case $_p in '' | *[!0-9]*) continue ;; esac
+		[ "$_p" = "$$" ] && continue
+		kill -0 "$_p" || set -- "$@" "$_e"
+	done
+	for _e in "$O"/seq/*; do
+		_p=${_e##*/}
+		_p=${_p%%.*}
+		case $_p in '' | *[!0-9]*) continue ;; esac
+		[ $((NOW - _p)) -gt 3600 ] && set -- "$@" "$_e"
+	done
+	[ $# -eq 0 ] || rm -rf -- "$@"
+}
+
+lock_release() {
+	lock_check && rm -rf "$O/lock"
+}
+
+send() {
+	CODE=$(printf 'Authorization: Bearer %s\n' "$TOK" |
+		curl -q -g -s --noproxy '*' -o /dev/null -w '%{http_code}' --connect-timeout 5 --speed-limit 8192 \
+			--speed-time 60 -H @- -H "@$1/headers" --data-binary "@$1/body" "$URL/lifecycle/events") || CODE=000
+}
+
+# drain: deliver the queue oldest first; fails on a stop, with every event not yet answered still queued.
+drain() {
+	for _ev in "$O"/[0-9]*; do
+		[ -d "$_ev" ] || continue
+		lock_check || return 1
+		read_line "$O/endpoint" && [ "$RL" = "$URL" ] || return 1
+		lock_renew
+		send "$_ev"
+		case $CODE in
+		204) rm -rf "$_ev" ;;
+		400 | 409 | 413 | 422)
+			mv "$_ev" "$O/rejected/${_ev##*/}" || { heal && mv "$_ev" "$O/rejected/${_ev##*/}"; } || return 1
+			;;
+		# Retry (408, 429, 5xx, 000) and hold (everything else) both end the flush with the queue intact; they differ
+		# only in what the session-start status line reports (#1030).
+		*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
+flush() {
+	[ -n "$H" ] || {
+		printf 'me-hook: no HOME and not run as the stable copy\n' >&2
+		exit 1
+	}
+	exec 2>/dev/null
+	[ -d "$O" ] || exit 0
+	while :; do
+		lock_take || exit 0
+		prune
+		if read_line "$O/endpoint" && URL=$RL && read_line "$TOKEN" && TOK=$RL && drain; then
+			lock_release
+		else
+			lock_release
+			exit 0
+		fi
+		# The queue was empty when the lock was released: look once more, for an event published meanwhile.
+		set -- "$O"/[0-9]*
+		[ -d "$1" ] || exit 0
+	done
+}
+
+case ${1-} in
+capture | session-start)
+	SUB=$1
+	# The options come from the environment Claude Code exports for every option that is set. Referencing an unset
+	# option as ${user_config.*} in the hook's args stops the hook from running at all.
+	ME_URL=${CLAUDE_PLUGIN_OPTION_ME_URL-}
+	DEV=${CLAUDE_PLUGIN_OPTION_DEV_ROOT-}
+	capture
+	;;
+flush) flush ;;
+*) usage ;;
+esac
