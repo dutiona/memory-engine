@@ -7,11 +7,14 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use crate::store::facts::FactStore;
-use crate::store::schema::set_config;
-use crate::store::{embedding_meta, parse_timestamp, serialize_embedding};
+use crate::store::schema::{get_config, set_config};
+use crate::store::{
+    embedding_meta, parse_optional_timestamp, parse_timestamp, serialize_embedding,
+};
 use me_types::error::{MemoryError, Result, StorageError};
 use me_types::types::{
-    EmbeddingFailure, EmbeddingFingerprint, NewFact, NextEmbedding, PendingEmbedding,
+    EmbedQueueStatus, EmbeddingFailure, EmbeddingFingerprint, NewFact, NextEmbedding,
+    PendingEmbedding,
 };
 
 /// When the queue was first paused by a rejected key; absent when not paused.
@@ -188,6 +191,40 @@ pub fn record_failure(
     set_config(&tx, LAST_ERROR, error)?;
     tx.commit().map_err(StorageError::backend)?;
     Ok(())
+}
+
+/// The queue as `status` reports it: counts, the oldest waiting item, and the queue-wide
+/// state. Reads only, so it runs on a read-only connection.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` on a query failure or an unparseable timestamp.
+pub fn read_status(conn: &Connection) -> Result<EmbedQueueStatus> {
+    let (waiting, oldest, failed): (i64, Option<String>, i64) = conn
+        .query_row(
+            "SELECT COUNT(*) FILTER (WHERE failed_at IS NULL),
+                    MIN(enqueued_at) FILTER (WHERE failed_at IS NULL),
+                    COUNT(*) FILTER (WHERE failed_at IS NOT NULL)
+               FROM embed_queue",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(StorageError::backend)?;
+    let time = |key: &str| -> Result<Option<DateTime<Utc>>> {
+        parse_optional_timestamp(get_config(conn, key)?.as_deref())
+            .map_err(|e| StorageError::backend(e).into())
+    };
+    Ok(EmbedQueueStatus {
+        waiting: u64::try_from(waiting).unwrap_or(0),
+        oldest_enqueued_at: parse_optional_timestamp(oldest.as_deref())
+            .map_err(StorageError::backend)?,
+        failed: u64::try_from(failed).unwrap_or(0),
+        paused_since: time(PAUSED_SINCE)?,
+        pause_error: get_config(conn, PAUSE_ERROR)?,
+        last_success_at: time(LAST_SUCCESS_AT)?,
+        last_error_at: time(LAST_ERROR_AT)?,
+        last_error: get_config(conn, LAST_ERROR)?,
+    })
 }
 
 fn clear_pause(tx: &Transaction) -> Result<()> {

@@ -1,12 +1,16 @@
 //! The deferred-embedding drain's two steps (#1021): take the next item, then settle
 //! the embedder's answer for it. The drain loop itself lives with its consumer.
 
+use std::path::Path;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use rusqlite::{Connection, MAIN_DB};
 
-use crate::error::{EmbedderError, MemoryError, Result};
-use crate::types::{EmbeddingFailure, EmbeddingFingerprint, NextEmbedding, PendingEmbedding};
+use crate::error::{EmbedderError, MemoryError, Result, StorageError};
+use crate::types::{
+    EmbedQueueStatus, EmbeddingFailure, EmbeddingFingerprint, NextEmbedding, PendingEmbedding,
+};
 
 use super::MemoryEngine;
 
@@ -205,6 +209,60 @@ impl MemoryEngine {
             .await?;
         Ok(settled)
     }
+}
+
+/// Report the embedding queue of the store at `db` without building an engine (#1021).
+///
+/// Opens one `SQLite` connection with `SQLITE_OPEN_READ_ONLY` and a busy timeout, checks
+/// that it is read-only, and checks the schema version without migrating, so it runs
+/// beside a live server and changes nothing; it takes no store lock (ADR-0020 §8).
+///
+/// # Errors
+///
+/// Returns `MemoryError::Migration` for a store whose schema is older or newer than this
+/// build's (an older one names the migration it needs), `MemoryError::Internal` if the
+/// connection is not read-only, or `MemoryError::Storage` if the store cannot be read.
+///
+/// # Examples
+///
+/// ```
+/// use memory_engine::{AddFactRequest, FactType, MemoryEngine};
+///
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let dir = tempfile::tempdir().unwrap();
+/// let db = dir.path().join("memory.db");
+/// let mut engine = MemoryEngine::builder(4).path(&db).build()?;
+/// engine
+///     .add_fact_deferred(&AddFactRequest {
+///         content: "embed me later".into(),
+///         fact_type: FactType::Semantic,
+///         source_event_id: None,
+///         scope: None,
+///         opts: None,
+///     })
+///     .await?;
+/// engine.close().await?;
+///
+/// let status = memory_engine::read_embed_queue_status(&db)?;
+/// assert_eq!((status.waiting, status.failed), (1, 0));
+/// assert_eq!(status.paused_since, None);
+/// # Ok::<(), memory_engine::MemoryError>(())
+/// # }).unwrap();
+/// ```
+pub fn read_embed_queue_status(db: &Path) -> Result<EmbedQueueStatus> {
+    let conn = open_status_connection(db)?;
+    crate::store::embed_queue::read_status(&conn)
+}
+
+fn open_status_connection(db: &Path) -> Result<Connection> {
+    let conn = crate::store::schema::open_connection_read_only(&db.to_string_lossy())?;
+    if !conn.is_readonly(MAIN_DB).map_err(StorageError::backend)? {
+        return Err(MemoryError::Internal(
+            "status needs a read-only connection".into(),
+        ));
+    }
+    crate::store::schema::validate_schema_version(&conn)?;
+    Ok(conn)
 }
 
 #[cfg(test)]
@@ -574,6 +632,19 @@ mod tests {
         assert_eq!(reopened.next_embedding().await.unwrap(), scheduled);
         assert_eq!(queue_row(&path, id), row);
         drop(dir);
+    }
+
+    #[tokio::test]
+    async fn the_status_connection_is_read_only() {
+        let s = store();
+        deferred(&s.engine, "a").await;
+        let conn = super::open_status_connection(&s.path).unwrap();
+        assert!(conn.is_readonly(rusqlite::MAIN_DB).unwrap());
+        let err = conn
+            .execute("DELETE FROM embed_queue", [])
+            .expect_err("a write through the status connection");
+        assert_eq!(err.sqlite_error_code(), Some(rusqlite::ErrorCode::ReadOnly));
+        assert_eq!(super::read_embed_queue_status(&s.path).unwrap().waiting, 1);
     }
 
     #[test]

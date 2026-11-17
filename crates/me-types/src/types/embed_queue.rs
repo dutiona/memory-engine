@@ -1,5 +1,5 @@
-//! The deferred-embedding queue's vocabulary (#1021): what the drain takes, and how a
-//! failed attempt changes the queue.
+//! The deferred-embedding queue's vocabulary (#1021): what the drain takes, how a failed
+//! attempt changes the queue, and what `status` reports.
 
 use chrono::{DateTime, Utc};
 
@@ -41,4 +41,25 @@ pub enum EmbeddingFailure {
         /// Whether the attempt pauses the queue.
         paused: bool,
     },
+}
+
+/// The deferred-embedding queue as `status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedQueueStatus {
+    /// Items waiting for their vector (failed ones excluded).
+    pub waiting: u64,
+    /// When the oldest waiting item was queued.
+    pub oldest_enqueued_at: Option<DateTime<Utc>>,
+    /// Items whose input the embedder refused.
+    pub failed: u64,
+    /// When a rejected key first paused the queue; `None` when not paused.
+    pub paused_since: Option<DateTime<Utc>>,
+    /// The latest rejected-key error while paused.
+    pub pause_error: Option<String>,
+    /// When an embed last succeeded.
+    pub last_success_at: Option<DateTime<Utc>>,
+    /// When an embed last failed.
+    pub last_error_at: Option<DateTime<Utc>>,
+    /// The last embed failure's error.
+    pub last_error: Option<String>,
 }

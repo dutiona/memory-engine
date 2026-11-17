@@ -210,6 +210,7 @@ async fn read_only_commands_run_while_the_store_is_held() {
         vec!["dump", "facts"],
         vec!["outcome-counts", "--fact-id", "1"],
         vec!["schema"],
+        vec!["status"],
     ] {
         cli(&db).args(&args).assert().success();
     }

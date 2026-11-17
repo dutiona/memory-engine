@@ -90,6 +90,25 @@ pub fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
             .map_err(|_| anyhow::anyhow!("invalid embed_dim value in config table"));
     }
 
+    // No identity before the first vector (#1021): a store whose facts all wait has none.
+    let has_queue: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='embed_queue'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if has_queue {
+        let queued: i64 =
+            conn.query_row("SELECT COUNT(*) FROM embed_queue", [], |row| row.get(0))?;
+        anyhow::ensure!(
+            queued == 0,
+            "database has no embedding identity yet: its {queued} fact(s) all wait for their \
+             vectors (see `memory-engine-cli status`)"
+        );
+    }
+
     anyhow::bail!(
         "database has no embedding identity yet (nothing has been embedded) — \
          add a fact first, or is this a memory-engine database?"
@@ -176,7 +195,7 @@ pub fn lock_store(path: &Path) -> anyhow::Result<StoreLock> {
     })
 }
 
-fn ensure_store_exists(path: &Path) -> anyhow::Result<()> {
+pub fn ensure_store_exists(path: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
         path.is_file(),
         "database not found (or is a directory): {}",
@@ -308,6 +327,32 @@ mod tests {
             msg.contains("no embedding identity") || msg.contains("embed_dim"),
             "expected 'no embedding identity' or 'embed_dim' in error, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_store_whose_facts_all_wait_names_the_queue() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("waiting.db");
+        let mut engine = memory_engine::MemoryEngine::builder(4)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
+        engine
+            .add_fact_deferred(&memory_engine::AddFactRequest {
+                content: "waits for its vector".into(),
+                fact_type: memory_engine::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            })
+            .await
+            .unwrap();
+        engine.close().await.unwrap();
+
+        let msg = peek_embed_dim_from_db(&db_path).unwrap_err().to_string();
+        assert!(msg.contains("wait"), "{msg}");
+        assert!(msg.contains("memory-engine-cli status"), "{msg}");
+        assert!(!msg.contains("add a fact first"), "{msg}");
     }
 
     // --- peek_schema_version_from_db ---
