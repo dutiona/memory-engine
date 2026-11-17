@@ -715,7 +715,8 @@ impl FactGraph for SqliteBackend {
                     .map_err(StorageError::backend)?;
                 // stamp_identity equivalent: record-if-absent or compare-and-reject
                 crate::store::embedding_meta::record_if_absent(&tx, &fingerprint, expected_dim)?;
-                // The single explicit assertion (`remember`, `add-fact`): never gated (#1023).
+                // The single explicit assertion with its vector (`add-fact`): never gated
+                // (#1023).
                 let id = FactStore::new(&tx, dim).insert_asserted(&fact)?;
                 tx.commit().map_err(StorageError::backend)?;
                 Ok(id)

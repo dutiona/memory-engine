@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod drain;
 pub mod embedding;
 pub mod home;
 pub mod http;

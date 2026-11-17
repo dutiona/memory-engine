@@ -169,8 +169,8 @@ impl<'a> FactStore<'a> {
         self.insert_row(fact, self.embed_dim)
     }
 
-    /// Insert a new fact with no tombstone check, for an explicit single assertion
-    /// (`remember`, `add-fact`). A fresh assertion is not a forgotten fact coming back, and
+    /// Insert a new fact with no tombstone check, for an explicit single assertion with its
+    /// vector (`add-fact`). A fresh assertion is not a forgotten fact coming back, and
     /// `remember` never refuses (ADR-0020 §8).
     ///
     /// # Errors
@@ -183,7 +183,7 @@ impl<'a> FactStore<'a> {
     /// Insert a fact that has no vector yet: its `embedding` must be empty and is stored
     /// as `X''` (#1021). The caller queues it in the same transaction. Like
     /// [`insert_asserted`](Self::insert_asserted) it has no tombstone check: it is the same
-    /// explicit single assertion, stored before its vector.
+    /// explicit single assertion (`remember`), stored before its vector.
     ///
     /// # Errors
     ///

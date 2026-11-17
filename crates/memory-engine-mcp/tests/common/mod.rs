@@ -8,7 +8,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use memory_engine::MemoryEngine;
+use memory_engine::{Backoff, MemoryEngine, NextEmbedding, ServedArtifact};
 use memory_engine_mcp::auth::TokenTable;
 use memory_engine_mcp::embedding::HttpEmbeddingProvider;
 use memory_engine_mcp::home::User;
@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use wiremock::matchers::{body_string_contains, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 pub const DIM: usize = 4;
 pub const MACHINES: [&str; 2] = ["laptop", "desktop"];
@@ -78,6 +78,38 @@ pub fn an_embedding() -> ResponseTemplate {
         .set_body_json(json!({ "data": [{ "embedding": vec![0.25_f32; DIM] }] }))
 }
 
+/// The drain's retry schedule in these tests: an outage longer than the cap lasts a fraction
+/// of a second.
+pub const BACKOFF: Backoff = Backoff {
+    base: Duration::from_millis(10),
+    cap: Duration::from_millis(100),
+};
+
+/// What a [`TestServer`] starts with; the default is the mock embedder behind provider `tei`.
+#[derive(Default)]
+struct Setup {
+    allowed_hosts: Vec<String>,
+    without_embedder: bool,
+    instruction: Option<String>,
+    /// The embedder's port is reserved and closed until [`TestServer::bring_embedder_up`].
+    unreachable: bool,
+    /// The provider's timeout; 10 s when unset.
+    timeout_secs: Option<u64>,
+    /// Provider `llama.cpp`, declaring this `max_input_tokens`, beside a `/tokenize`.
+    input_limit: Option<usize>,
+}
+
+/// llama-server's `/tokenize`, counting one token per two bytes of `content`.
+struct HalfByteTokens;
+
+impl Respond for HalfByteTokens {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let tokens = body["content"].as_str().unwrap().len() / 2;
+        ResponseTemplate::new(200).set_body_json(json!({ "tokens": vec![0; tokens] }))
+    }
+}
+
 /// The in-process server, on an ephemeral loopback port.
 pub struct TestServer {
     pub url: String,
@@ -86,34 +118,73 @@ pub struct TestServer {
     pub provider: Option<Arc<HttpEmbeddingProvider>>,
     pub embedder: MockServer,
     pub dir: TempDir,
+    allowed_hosts: Vec<String>,
+    closed_port: Option<u16>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<std::io::Result<()>>>,
 }
 
 impl TestServer {
     pub async fn start() -> Self {
-        Self::start_with_hosts(&[]).await
+        Self::start_with(Setup::default()).await
     }
 
     pub async fn start_with_hosts(allowed_hosts: &[&str]) -> Self {
-        Self::start_with(allowed_hosts, true, None).await
+        Self::start_with(Setup {
+            allowed_hosts: allowed_hosts.iter().map(|h| (*h).to_owned()).collect(),
+            ..Setup::default()
+        })
+        .await
     }
 
-    /// A server with no embedder: recall is full-text only and remember refuses.
+    /// A server with no embedder: recall is full-text only and nothing is embedded.
     pub async fn start_without_embedder() -> Self {
-        Self::start_with(&[], false, None).await
+        Self::start_with(Setup {
+            without_embedder: true,
+            ..Setup::default()
+        })
+        .await
     }
 
     /// A server whose provider carries `instruction` as its configured query instruction.
     pub async fn start_with_query_instruction(instruction: &str) -> Self {
-        Self::start_with(&[], true, Some(instruction.to_owned())).await
+        Self::start_with(Setup {
+            instruction: Some(instruction.to_owned()),
+            ..Setup::default()
+        })
+        .await
     }
 
-    async fn start_with(
-        allowed_hosts: &[&str],
-        with_embedder: bool,
-        instruction: Option<String>,
-    ) -> Self {
+    /// A server whose embedder's port is closed: no request reaches it until
+    /// [`bring_embedder_up`](Self::bring_embedder_up).
+    pub async fn start_unreachable() -> Self {
+        Self::start_with(Setup {
+            unreachable: true,
+            ..Setup::default()
+        })
+        .await
+    }
+
+    /// A server whose provider gives up on an answer after `timeout_secs`.
+    pub async fn start_with_timeout(timeout_secs: u64) -> Self {
+        Self::start_with(Setup {
+            timeout_secs: Some(timeout_secs),
+            ..Setup::default()
+        })
+        .await
+    }
+
+    /// A server whose provider is `llama.cpp` declaring `max_input_tokens`, whose `/tokenize`
+    /// counts one token per two bytes.
+    pub async fn start_with_input_limit(max_input_tokens: usize) -> Self {
+        Self::start_with(Setup {
+            input_limit: Some(max_input_tokens),
+            ..Setup::default()
+        })
+        .await
+    }
+
+    async fn start_with(setup: Setup) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let embedder = MockServer::start().await;
         Mock::given(method("POST"))
@@ -121,46 +192,176 @@ impl TestServer {
             .respond_with(an_embedding())
             .mount(&embedder)
             .await;
-        let endpoint = format!("{}/v1/embeddings", embedder.uri());
+        if setup.input_limit.is_some() {
+            Mock::given(method("POST"))
+                .and(path("/tokenize"))
+                .respond_with(HalfByteTokens)
+                .mount(&embedder)
+                .await;
+        }
+        let closed_port = setup.unreachable.then(|| {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        });
+        let endpoint = closed_port.map_or_else(
+            || format!("{}/v1/embeddings", embedder.uri()),
+            |port| format!("http://127.0.0.1:{port}/v1/embeddings"),
+        );
         let db = dir.path().join("memory.db");
+        let Setup {
+            allowed_hosts,
+            without_embedder,
+            instruction,
+            timeout_secs,
+            input_limit,
+            ..
+        } = setup;
         // The blocking reqwest client inside the provider must not be built on the runtime.
         let (engine, provider) = tokio::task::spawn_blocking(move || {
-            let provider = with_embedder.then(|| {
-                let provider =
-                    HttpEmbeddingProvider::new(endpoint, "m".into(), "tei".into(), None, DIM, 10)
-                        .unwrap();
-                Arc::new(match instruction {
-                    Some(i) => provider.with_query_instruction(i),
-                    None => provider,
-                })
+            let provider = (!without_embedder).then(|| {
+                let label = if input_limit.is_some() {
+                    "llama.cpp"
+                } else {
+                    "tei"
+                };
+                let mut provider = HttpEmbeddingProvider::new(
+                    endpoint,
+                    "m".into(),
+                    label.into(),
+                    None,
+                    DIM,
+                    timeout_secs.unwrap_or(10),
+                )
+                .unwrap();
+                if let Some(i) = instruction {
+                    provider = provider.with_query_instruction(i);
+                }
+                if let Some(max_input_tokens) = input_limit {
+                    provider = provider.with_served_artifact(ServedArtifact {
+                        artifact_sha256: "0".repeat(64),
+                        pooling: "last".into(),
+                        normalization: "l2".into(),
+                        max_input_tokens,
+                    });
+                }
+                Arc::new(provider)
             });
             let engine = MemoryEngine::builder(DIM).path(db).build().unwrap();
             (Arc::new(engine), provider)
         })
         .await
         .unwrap();
-        let tokens = TokenTable::load(&write_token_file(dir.path(), &MACHINES)).unwrap();
-        let server = MemoryMcpServer::new(
-            Arc::clone(&engine),
-            provider.clone(),
-            User::parse("alice").unwrap(),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let (tx, rx) = oneshot::channel();
-        let hosts = allowed_hosts.iter().map(|h| (*h).to_owned()).collect();
-        let task = tokio::spawn(http::serve(listener, server, tokens, hosts, async move {
-            let _ = rx.await;
-        }));
-        Self {
-            url,
+        let mut server = Self {
+            url: String::new(),
             client: reqwest::Client::new(),
             engine,
             provider,
             embedder,
             dir,
-            shutdown: Some(tx),
-            task: Some(task),
+            allowed_hosts,
+            closed_port,
+            shutdown: None,
+            task: None,
+        };
+        server.serve().await;
+        server
+    }
+
+    /// Run `http::serve` over the engine on a fresh loopback port.
+    async fn serve(&mut self) {
+        let tokens = TokenTable::load(&write_token_file(self.dir.path(), &MACHINES)).unwrap();
+        let server = MemoryMcpServer::new(
+            Arc::clone(&self.engine),
+            self.provider.clone(),
+            User::parse("alice").unwrap(),
+        )
+        .with_embed_backoff(BACKOFF);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        self.url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = oneshot::channel();
+        let hosts = self.allowed_hosts.clone();
+        self.task = Some(tokio::spawn(http::serve(
+            listener,
+            server,
+            tokens,
+            hosts,
+            async move {
+                let _ = rx.await;
+            },
+        )));
+        self.shutdown = Some(tx);
+    }
+
+    /// Stop the server, then serve the same store again from a fresh engine.
+    pub async fn restart(&mut self) {
+        self.stop().await;
+        let db = self.db();
+        let engine =
+            tokio::task::spawn_blocking(move || MemoryEngine::builder(DIM).path(db).build())
+                .await
+                .unwrap()
+                .unwrap();
+        self.engine = Arc::new(engine);
+        self.serve().await;
+    }
+
+    /// Open the closed port of [`start_unreachable`](Self::start_unreachable): a mock embedder
+    /// answering every embed with a vector listens there from now on.
+    pub async fn bring_embedder_up(&mut self) {
+        let port = self
+            .closed_port
+            .expect("the server was started unreachable");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        self.embedder = MockServer::builder().listener(listener).start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(an_embedding())
+            .mount(&self.embedder)
+            .await;
+    }
+
+    #[must_use]
+    pub fn db(&self) -> PathBuf {
+        self.dir.path().join("memory.db")
+    }
+
+    /// Fact `id`'s embedding-queue row, `(attempts, next_attempt_at, failed_at, last_error)`;
+    /// `None` once it left the queue.
+    pub fn queue(&self, id: i64) -> Option<(i64, String, Option<String>, Option<String>)> {
+        use rusqlite::OptionalExtension as _;
+        rusqlite::Connection::open(self.db())
+            .unwrap()
+            .query_row(
+                "SELECT attempts, next_attempt_at, failed_at, last_error \
+                 FROM embed_queue WHERE fact_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    /// Whether fact `id` has its `DIM`-wide vector.
+    pub async fn has_vector(&self, id: i64) -> bool {
+        self.engine.get_fact(id).await.unwrap().embedding.len() == DIM
+    }
+
+    /// Wait, at most 10 s, until no fact waits for its vector (a failed one aside).
+    pub async fn wait_drained(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let next = self.engine.next_embedding().await.unwrap();
+            if next == NextEmbedding::Idle {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the queue did not drain in 10 s: {next:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -296,7 +497,7 @@ impl TestServer {
 
     /// The `MemoryOp` records, oldest first: (id, payload, scope path).
     pub fn records(&self) -> Vec<(i64, Value, String)> {
-        let conn = rusqlite::Connection::open(self.dir.path().join("memory.db")).unwrap();
+        let conn = rusqlite::Connection::open(self.db()).unwrap();
         let mut stmt = conn
             .prepare(
                 "SELECT e.id, e.payload, e.scope_id FROM events e \
@@ -329,7 +530,7 @@ impl TestServer {
 
     /// Run `sql` on the store through a second connection.
     pub fn sql(&self, sql: &str) {
-        rusqlite::Connection::open(self.dir.path().join("memory.db"))
+        rusqlite::Connection::open(self.db())
             .unwrap()
             .execute_batch(sql)
             .unwrap();
@@ -337,7 +538,11 @@ impl TestServer {
 
     /// Answer query embeds (their body holds the query instruction) with `query`, and every
     /// other embed with `document`, in place of the default mock.
-    pub async fn mount_embedder(&self, query: ResponseTemplate, document: ResponseTemplate) {
+    pub async fn mount_embedder(
+        &self,
+        query: impl Respond + 'static,
+        document: impl Respond + 'static,
+    ) {
         self.embedder.reset().await;
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))

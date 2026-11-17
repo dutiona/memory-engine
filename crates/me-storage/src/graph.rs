@@ -282,7 +282,7 @@ pub trait FactGraph: Send + Sync {
     /// in a single `rusqlite` transaction.
     ///
     /// Ungated (#1023), as [`insert_fact_deferred`](Self::insert_fact_deferred) is: it
-    /// serves the single explicit assertion (`remember`, `add-fact`), which a forget's
+    /// serves the single explicit assertion with its vector (`add-fact`), which a forget's
     /// tombstone never blocks.
     ///
     /// The caller (`insert_fact_with_embedding`) is responsible for:
@@ -582,7 +582,7 @@ pub trait FactGraph: Send + Sync {
     /// The queue entry is due at `now`. No identity is recorded and no vector index is
     /// notified: the fact has no vector until the drain gives it one. Ungated (#1023), as
     /// [`insert_fact_atomic`](Self::insert_fact_atomic) is: the same explicit single
-    /// assertion, stored before its vector.
+    /// assertion (`remember`), stored before its vector.
     ///
     /// # Errors
     ///

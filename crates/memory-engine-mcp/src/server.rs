@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use memory_engine::Backoff;
 use memory_engine::engine::MemoryEngine;
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
@@ -26,8 +27,11 @@ pub struct MemoryMcpServer {
     pub(crate) engine: Arc<MemoryEngine>,
     pub(crate) embedder: Option<Arc<HttpEmbeddingProvider>>,
     pub(crate) user: User,
-    /// Held for reading by every tool call; `http::serve` takes it for writing to drain.
+    /// Held for reading by every tool call and every drain settle; `http::serve` takes it
+    /// for writing to stop them.
     pub(crate) in_flight: Arc<tokio::sync::RwLock<()>>,
+    /// The embedding drain's retry schedule.
+    pub(crate) embed_backoff: Backoff,
 }
 
 impl MemoryMcpServer {
@@ -43,7 +47,30 @@ impl MemoryMcpServer {
             embedder,
             user,
             in_flight: Arc::new(tokio::sync::RwLock::new(())),
+            embed_backoff: Backoff::DEFAULT,
         }
+    }
+
+    /// The embedding drain's retry schedule, in place of [`Backoff::DEFAULT`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    /// use memory_engine::{Backoff, MemoryEngine};
+    /// use memory_engine_mcp::home::User;
+    /// use memory_engine_mcp::server::MemoryMcpServer;
+    ///
+    /// let engine = Arc::new(MemoryEngine::builder(4).build()?);
+    /// let fast = Backoff { base: Duration::from_millis(10), cap: Duration::from_millis(100) };
+    /// let server = MemoryMcpServer::new(engine, None, User::parse("alice")?).with_embed_backoff(fast);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub const fn with_embed_backoff(mut self, backoff: Backoff) -> Self {
+        self.embed_backoff = backoff;
+        self
     }
 
     /// Run one tool call for the authenticated `machine`, with the project `facts` its

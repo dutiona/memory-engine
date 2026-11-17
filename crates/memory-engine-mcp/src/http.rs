@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
+use memory_engine::traits::EmbeddingProvider;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio::net::TcpListener;
@@ -27,6 +28,9 @@ const CONNECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 const RESPONSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Serve MCP on `listener` until `shutdown` resolves, then flush the sidecar snapshot.
+///
+/// With an embedder, the embedding drain ([`crate::drain`]) runs beside the server and stops
+/// with it, before the flush.
 ///
 /// `allowed_hosts` are added to rmcp's loopback default, never in place of it, so the
 /// Host list can never be empty (rmcp reads an empty list as "admit every host").
@@ -43,6 +47,16 @@ pub async fn serve(
 ) -> std::io::Result<()> {
     let engine = Arc::clone(&server.engine);
     let in_flight = Arc::clone(&server.in_flight);
+    // A set, so the drain is aborted even when this future is dropped instead of finishing.
+    let mut drain = tokio::task::JoinSet::new();
+    if let Some(provider) = &server.embedder {
+        drain.spawn(crate::drain::run(
+            Arc::clone(&engine),
+            Arc::clone(provider) as Arc<dyn EmbeddingProvider>,
+            Arc::clone(&in_flight),
+            server.embed_backoff,
+        ));
+    }
     let (stopping, stopped) = tokio::sync::oneshot::channel();
     let serving = axum::serve(listener, router(server, tokens, allowed_hosts))
         .with_graceful_shutdown(async move {
@@ -73,6 +87,10 @@ pub async fn serve(
     // fence is never released, so a call queued behind it cannot commit after the flush;
     // the process exits once `serve` returns.
     std::mem::forget(in_flight.write_owned().await);
+    // A settle holds the fence too, so one in progress has committed and none can start. An
+    // embed call still in flight is abandoned, its item retried at the next start. Awaiting
+    // the abort drops the drain's engine before the flush.
+    drain.shutdown().await;
     // Best effort: the DB is the source of truth, so a failed flush only means the next
     // open rebuilds the projections from it.
     if let Err(e) = engine.flush_snapshot().await {

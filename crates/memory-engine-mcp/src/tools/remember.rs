@@ -1,9 +1,6 @@
 //! `remember(content, level?)` (ADR-0020 §8): store one Semantic memory in the session's
 //! project (its machine's bucket outside a project), or at the user level when asked.
 
-use std::sync::Arc;
-
-use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 use rmcp::model::Tool;
 use serde::Deserialize;
@@ -42,7 +39,7 @@ pub fn definition() -> Tool {
 }
 
 pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<String, String> {
-    let (content, level, provider) = match validate(ctx, args) {
+    let (content, level) = match validate(args) {
         Ok(valid) => valid,
         Err(message) => return super::refuse(ctx, call, "remember", message).await,
     };
@@ -65,10 +62,9 @@ pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<Strin
             ..Default::default()
         }),
     };
-    let provider = Arc::clone(provider) as Arc<dyn EmbeddingProvider>;
     let id = ctx
         .engine
-        .add_fact(&request, provider, None)
+        .add_fact_deferred(&request)
         .await
         .map_err(|e| e.to_string())?;
     let receipt = placement::receipt(id, &target);
@@ -80,23 +76,10 @@ pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<Strin
     )
 }
 
-fn validate<'a>(
-    ctx: &CallContext<'a>,
-    args: Value,
-) -> Result<
-    (
-        String,
-        Level,
-        &'a Arc<crate::embedding::HttpEmbeddingProvider>,
-    ),
-    String,
-> {
+fn validate(args: Value) -> Result<(String, Level), String> {
     let Args { content, level } = serde_json::from_value(args).map_err(|e| e.to_string())?;
     if content.trim().is_empty() {
         return Err("content must be a non-empty string".to_owned());
     }
-    let provider = ctx
-        .embedder
-        .ok_or("no embedder is configured, so nothing can be remembered")?;
-    Ok((content, level, provider))
+    Ok((content, level))
 }
