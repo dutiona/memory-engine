@@ -37,8 +37,8 @@ pub struct EngineSection {
     pub backup_dir: Option<PathBuf>,
 }
 
-/// Embedding provider configuration.
-#[derive(Debug, Clone, Deserialize)]
+/// Embedding provider configuration. Its `Debug` redacts `api_key`.
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingSection {
     /// OpenAI-compatible embedding endpoint URL (e.g. `http://localhost:11434/v1/embeddings`).
@@ -297,8 +297,8 @@ pub fn resolve_embedding(
     }))
 }
 
-/// Summary / LLM provider configuration for consolidation.
-#[derive(Debug, Clone, Deserialize)]
+/// Summary / LLM provider configuration for consolidation. Its `Debug` redacts `api_key`.
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SummarySection {
     /// Chat-completions endpoint URL (e.g. `https://api.openai.com/v1/chat/completions`).
@@ -313,6 +313,39 @@ pub struct SummarySection {
     /// HTTP timeout in seconds. Default: 120 (LLM inference is slower than embedding).
     #[serde(default = "default_summary_timeout")]
     pub timeout_secs: u64,
+}
+
+/// Shown in place of a present API key, so `Debug` says whether one is set but never shows it.
+const REDACTED: &str = "<redacted>";
+
+impl std::fmt::Debug for EmbeddingSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingSection")
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| REDACTED))
+            .field("provider", &self.provider)
+            .field("dimensions", &self.dimensions)
+            .field("query_instruction", &self.query_instruction)
+            .field("mrl_dim", &self.mrl_dim)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("artifact_sha256", &self.artifact_sha256)
+            .field("pooling", &self.pooling)
+            .field("normalization", &self.normalization)
+            .field("max_input_tokens", &self.max_input_tokens)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SummarySection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SummarySection")
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| REDACTED))
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 fn default_provider() -> String {

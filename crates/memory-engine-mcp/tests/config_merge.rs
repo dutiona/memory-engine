@@ -402,3 +402,29 @@ fn an_embedder_field_without_both_url_and_model_is_refused() {
         assert!(err.contains("url") && err.contains("model"), "{err}");
     }
 }
+
+#[test]
+fn debug_output_never_prints_an_api_key() {
+    let config: McpConfig = toml::from_str(
+        r#"
+[engine]
+db_path = "/tmp/test.db"
+
+[embedding]
+endpoint = "http://localhost:11434/v1/embeddings"
+model = "m"
+dimensions = 8
+api_key = "embed-key-sentinel"
+
+[summary]
+endpoint = "http://localhost:11434/v1/chat/completions"
+model = "s"
+api_key = "summary-key-sentinel"
+"#,
+    )
+    .unwrap();
+    let debug = format!("{config:?}");
+    assert!(debug.contains("api_key"), "{debug}");
+    assert!(!debug.contains("embed-key-sentinel"), "{debug}");
+    assert!(!debug.contains("summary-key-sentinel"), "{debug}");
+}
