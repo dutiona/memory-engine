@@ -218,3 +218,51 @@ async fn load_context_nonexistent_scope_errors() {
         memory_engine::error::MemoryError::NotFound(_)
     ));
 }
+
+/// A promotion is a derivation: once a forget's tombstone blocks the content, the same
+/// activity is recorded, not promoted again (#1023).
+#[tokio::test]
+async fn a_forgotten_activity_promotion_is_recorded_not_promoted() {
+    let engine = engine();
+    let embedder = || {
+        Some(std::sync::Arc::new(ZeroEmbedder(DIM))
+            as std::sync::Arc<dyn memory_engine::EmbeddingProvider>)
+    };
+    let config = ActivityFilterConfig::new(0, [] as [&str; 0], ["commit"]);
+    let req = |session: &str| RecordActivityRequest {
+        tool_name: "git_commit".into(),
+        args: serde_json::json!({"msg": "feat: add feature"}),
+        result: Some("committed abc123".into()),
+        session_id: session.into(),
+        timestamp: Utc::now(),
+        scope_path: None,
+        outcome_class: None,
+    };
+    let first = engine
+        .record_activity(&req("sess-1"), embedder(), &config)
+        .await
+        .unwrap();
+    let id = first.promoted_fact_id.unwrap();
+    let record = memory_engine::types::NewEvent {
+        timestamp: Utc::now(),
+        event_type: memory_engine::types::EventType::MemoryOp,
+        payload: serde_json::json!({}),
+        source: "test".into(),
+        session_id: None,
+        scope_id: 1,
+        origin_node_id: "test".into(),
+        sequence_id: 0,
+        created_at: None,
+    };
+    engine
+        .forget_fact(id, &["/".into()], "wrong", "unscoped:test", &record)
+        .await
+        .unwrap();
+    let again = engine
+        .record_activity(&req("sess-2"), embedder(), &config)
+        .await
+        .unwrap();
+    assert_eq!(again.status, ActivityStatus::Recorded);
+    assert_eq!(again.promoted_fact_id, None);
+    assert_eq!(engine.list_active_facts(None).await.unwrap().len(), 0);
+}

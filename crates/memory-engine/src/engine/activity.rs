@@ -94,8 +94,13 @@ impl MemoryEngine {
         let status = if was_deduplicated {
             ActivityStatus::Deduplicated
         } else if let ActivityFilterDecision::Promote(action) = &decision {
-            // Embed OUTSIDE the write lock.
-            if let Some(emb) = embedder {
+            // A promotion is a derivation, so a forget's tombstone keeps its content out
+            // (#1023). `add_fact` is the ungated assertion path, so the check is here; it
+            // reads outside the write, and `record_activity` has no server or CLI caller.
+            if self.storage.is_forgotten(&action.fact_content).await? {
+                ActivityStatus::Recorded
+            } else if let Some(emb) = embedder {
+                // Embed OUTSIDE the write lock.
                 match self
                     .add_fact(
                         &AddFactRequest {

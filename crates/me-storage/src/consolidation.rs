@@ -174,6 +174,11 @@ pub trait ConsolidationStore: Send + Sync {
     /// into `fact.metadata` engine-side; `fact.scope_id` is a placeholder patched
     /// from the resolved `scope_path`.
     ///
+    /// Content a forget's tombstone blocks (#1023) is refused with `Conflict(Forgotten)`
+    /// and nothing is written; [`apply_cycle_deltas_atomic`](Self::apply_cycle_deltas_atomic)
+    /// instead skips such a `Promote`, `AddFact` or `Synthesize` delta and counts it in
+    /// `ApplyResult::blocked`.
+    ///
     /// # Contract
     ///
     /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
