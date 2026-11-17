@@ -2113,7 +2113,6 @@ dependencies = [
  "flate2",
  "hnsw",
  "insta",
- "libc",
  "me-archive",
  "me-backend-postgres",
  "me-backend-sqlite",

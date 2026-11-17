@@ -84,11 +84,6 @@ rand = { version = "0.8", features = ["small_rng"], optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 
-# `libc::O_NOFOLLOW` for the symlink-safe dump open (#296/#354/#414). Unix-only;
-# already in the dependency graph transitively, so this adds no new crate.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
