@@ -510,7 +510,7 @@ fn migrate_v11_to_v12_drops_embed_dim() {
 
     migrate(&conn, None).unwrap();
 
-    // Migrating from v11 runs the full chain forward to CURRENT (v11→…→v15).
+    // Migrating from v11 runs the full chain forward to CURRENT (v11→…→v17).
     assert_eq!(
         get_config(&conn, "schema_version").unwrap(),
         Some(CURRENT_SCHEMA_VERSION.to_string()),
@@ -573,7 +573,7 @@ fn migrate_v12_to_v13_roundtrips_fingerprint() {
     assert_eq!(
         get_config(&conn, "schema_version").unwrap(),
         Some(CURRENT_SCHEMA_VERSION.to_string()),
-        "schema_version bumped to CURRENT (migrate chains v12→…→v15)"
+        "schema_version bumped to CURRENT (migrate chains v12→…→v17)"
     );
     // Exactly one active row, columns identical to the stamped tuple.
     let (name, model, provider, dim, base, elem, status): (
@@ -743,8 +743,8 @@ fn all_nine_indexes_created() {
             |r| r.get(0),
         )
         .unwrap();
-    // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13) + 1 fact_vectors space (v14) + 4 tombstone/erasure child keys (v16)
-    assert_eq!(count, 33);
+    // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13) + 1 fact_vectors space (v14) + 4 tombstone/erasure child keys (v16) + 1 embed_queue due (v17)
+    assert_eq!(count, 34);
 }
 
 // --- Migration framework tests ---
@@ -1579,6 +1579,9 @@ CREATE INDEX idx_edges_source ON edges(source_fact_id);
 -- index: idx_edges_target
 CREATE INDEX idx_edges_target ON edges(target_fact_id);
 
+-- index: idx_embed_queue_due
+CREATE INDEX idx_embed_queue_due ON embed_queue(next_attempt_at) WHERE failed_at IS NULL;
+
 -- index: idx_embedding_spaces_one_active
 CREATE UNIQUE INDEX idx_embedding_spaces_one_active ON embedding_spaces(status) WHERE status = 'active';
 
@@ -1656,6 +1659,9 @@ CREATE TABLE config ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
 
 -- table: edges
 CREATE TABLE edges ( id INTEGER PRIMARY KEY AUTOINCREMENT, source_fact_id INTEGER NOT NULL REFERENCES facts(id), target_fact_id INTEGER NOT NULL REFERENCES facts(id), relation_type TEXT NOT NULL, weight REAL NOT NULL DEFAULT 1.0, t_created TEXT NOT NULL, t_expired TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) );
+
+-- table: embed_queue
+CREATE TABLE embed_queue ( fact_id INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE, enqueued_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL, last_error TEXT, failed_at TEXT );
 
 -- table: embedding_spaces
 CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, provider TEXT NOT NULL, dim INTEGER NOT NULL, matryoshka_base_dim INTEGER, element_type TEXT NOT NULL DEFAULT 'float32', status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'populating', 'deprecated')), created_at TEXT NOT NULL DEFAULT (datetime('now')), artifact_sha256 TEXT, pooling TEXT, normalization TEXT, max_input_tokens INTEGER );
@@ -2620,7 +2626,7 @@ fn migrate_v15_to_v16_adds_the_tombstone_table() {
     migrate(&conn, None).unwrap();
     assert_eq!(
         get_config(&conn, "schema_version").unwrap().as_deref(),
-        Some("16")
+        Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
     );
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM fact_tombstones", [], |r| r.get(0))
@@ -2679,4 +2685,98 @@ fn a_tombstone_outlives_its_fact_and_its_record() {
         )
         .unwrap();
     assert_eq!(row, (None, "hash".to_owned(), None));
+}
+
+// --- v16 → v17 (deferred-embedding queue, #1021) ---
+
+/// Roll a fresh DB back to a simulated v16 state: drop the v17 `embed_queue` table and its
+/// index and reset `schema_version` to 16.
+fn simulate_v16(conn: &Connection) {
+    init_schema(conn).unwrap();
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_embed_queue_due;
+         DROP TABLE IF EXISTS embed_queue;",
+    )
+    .unwrap();
+    set_config(conn, "schema_version", "16").unwrap();
+}
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap()
+        > 0
+}
+
+#[test]
+fn migrate_v16_to_v17_adds_the_embedding_queue() {
+    let conn = open_memory().unwrap();
+    simulate_v16(&conn);
+    assert!(!table_exists(&conn, "embed_queue"));
+    assert!(!index_exists(&conn, "idx_embed_queue_due"));
+
+    migrate(&conn, None).unwrap();
+
+    assert_eq!(
+        get_config(&conn, "schema_version").unwrap().as_deref(),
+        Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
+    );
+    assert!(table_exists(&conn, "embed_queue"));
+    assert!(index_exists(&conn, "idx_embed_queue_due"));
+}
+
+#[test]
+fn migrate_v16_to_v17_is_idempotent_on_a_current_schema() {
+    // A current schema rolled back to v16 without dropping the table re-runs the step.
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    set_config(&conn, "schema_version", "16").unwrap();
+    migrate(&conn, None).unwrap();
+    migrate(&conn, None).unwrap();
+    assert_eq!(
+        get_config(&conn, "schema_version").unwrap().as_deref(),
+        Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
+    );
+    assert!(table_exists(&conn, "embed_queue"));
+}
+
+#[test]
+fn fresh_vs_migrated_embed_queue_converge() {
+    let fresh = open_memory().unwrap();
+    init_schema(&fresh).unwrap();
+
+    let migrated = open_memory().unwrap();
+    simulate_v16(&migrated);
+    migrate(&migrated, None).unwrap();
+
+    for obj in ["embed_queue", "idx_embed_queue_due"] {
+        assert_eq!(
+            normalized_object_sql(&fresh, obj),
+            normalized_object_sql(&migrated, obj),
+            "fresh-init and migrated {obj} DDL must converge"
+        );
+    }
+}
+
+#[test]
+fn an_embed_queue_row_goes_with_its_fact() {
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed)
+             VALUES ('waiting', 'h', X'', 'semantic', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+         INSERT INTO embed_queue (fact_id, enqueued_at, next_attempt_at)
+             VALUES (last_insert_rowid(), '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+    )
+    .unwrap();
+
+    conn.execute("DELETE FROM facts", []).unwrap();
+
+    let left: i64 = conn
+        .query_row("SELECT COUNT(*) FROM embed_queue", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0, "deleting the fact deletes its queue row");
 }

@@ -551,3 +551,25 @@ CREATE INDEX IF NOT EXISTS idx_activities_promoted ON activities(promoted_fact_i
     .map_err(StorageError::backend)?;
     Ok(())
 }
+
+/// Add the `embed_queue` table: one row per fact stored without a vector (`embedding = X''`)
+/// until the drain embeds it (#1021).
+///
+/// Purely additive. `IF NOT EXISTS` keeps the step re-runnable, because tests roll a
+/// current schema back and re-run the chain. Frozen DDL snapshot — never reference the live
+/// `TABLES_DDL`.
+pub(super) fn migrate_v16_to_v17(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS embed_queue (
+            fact_id         INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+            enqueued_at     TEXT    NOT NULL,
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT    NOT NULL,
+            last_error      TEXT,
+            failed_at       TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_embed_queue_due ON embed_queue(next_attempt_at) WHERE failed_at IS NULL;",
+    )
+    .map_err(StorageError::backend)?;
+    Ok(())
+}

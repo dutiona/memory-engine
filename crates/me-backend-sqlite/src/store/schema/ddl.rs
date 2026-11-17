@@ -174,6 +174,15 @@ CREATE TABLE IF NOT EXISTS fact_tombstones (
 
 CREATE INDEX IF NOT EXISTS idx_fact_tombstones_hash ON fact_tombstones(content_hash);
 CREATE INDEX IF NOT EXISTS idx_fact_tombstones_record ON fact_tombstones(record_event_id);
+
+CREATE TABLE IF NOT EXISTS embed_queue (
+    fact_id         INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+    enqueued_at     TEXT    NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT    NOT NULL,
+    last_error      TEXT,
+    failed_at       TEXT
+);
 ";
 
 pub(super) const SCOPES_DDL: &str = "
@@ -237,4 +246,5 @@ CREATE INDEX IF NOT EXISTS idx_facts_created ON facts(t_created);
 CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, sequence_id);
 CREATE INDEX IF NOT EXISTS idx_facts_source_event ON facts(source_event_id);
 CREATE INDEX IF NOT EXISTS idx_activities_promoted ON activities(promoted_fact_id);
+CREATE INDEX IF NOT EXISTS idx_embed_queue_due ON embed_queue(next_attempt_at) WHERE failed_at IS NULL;
 ";
