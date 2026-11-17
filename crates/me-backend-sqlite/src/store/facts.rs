@@ -1577,15 +1577,14 @@ impl<'a> FactStore<'a> {
         if ids.is_empty() {
             return Ok(0);
         }
-        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("DELETE FROM facts WHERE id IN ({placeholders})");
-        let params: Vec<&dyn rusqlite::types::ToSql> = ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::types::ToSql)
-            .collect();
+        // One JSON array, not one variable per id: SQLite caps bound variables.
+        let ids_json = serde_json::to_string(ids).map_err(StorageError::backend)?;
         let deleted = self
             .conn
-            .execute(&sql, params.as_slice())
+            .execute(
+                "DELETE FROM facts WHERE id IN (SELECT value FROM json_each(?1))",
+                params![ids_json],
+            )
             .map_err(StorageError::backend)?;
         Ok(deleted)
     }
@@ -3497,6 +3496,20 @@ mod tests {
         // deleted facts are truly gone
         assert!(store.get(id1).is_err());
         assert!(store.get(id2).is_err());
+    }
+
+    #[test]
+    fn hard_delete_ids_accepts_more_ids_than_sqlite_binds() {
+        // The bundled SQLite caps bound variables at 32766; erase by machine can pass more.
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let kept = store.insert(&make_fact("kept", vec![0.1; DIM])).unwrap();
+        let gone = store.insert(&make_fact("gone", vec![0.2; DIM])).unwrap();
+        let mut ids: Vec<i64> = (1_000_000..1_035_000).collect();
+        ids.push(gone);
+        assert_eq!(store.hard_delete_ids(&ids).unwrap(), 1);
+        assert!(store.get(kept).is_ok());
+        assert!(store.get(gone).is_err());
     }
 
     #[test]
