@@ -746,8 +746,9 @@ impl FactGraph for SqliteBackend {
         let dim = self.embed_dim;
         let id = self
             .block_write(move |conn| {
-                // One unchecked_transaction wrapping stamp_identity + FactStore::insert so a vector is never committed
-                // without an established, matching identity (the #614 silent-corruption guard).
+                // One unchecked_transaction wrapping stamp_identity + FactStore::insert so a
+                // vector is never committed without an established, matching identity (the
+                // #614 silent-corruption guard).
                 let tx = conn
                     .unchecked_transaction()
                     .map_err(StorageError::backend)?;
@@ -758,8 +759,9 @@ impl FactGraph for SqliteBackend {
                 Ok(id)
             })
             .await?;
-        // Post-commit HNSW notification. The fact is already durably committed, so this `?` is the SOLE carve-out to this
-        // method's `Err ⟹ byte-identical` contract: it can only surface
+        // Post-commit HNSW notification. The fact is already durably committed, so this `?`
+        // is the SOLE carve-out to this method's `Err ⟹ byte-identical` contract: it can
+        // only surface
         // `IndexInconsistent` (the write SUCCEEDED, only the in-memory index is now
         // stale — rebuild it, do NOT retry the write, which would duplicate the fact).
         #[cfg(feature = "ann")]
@@ -1069,11 +1071,6 @@ impl FactGraph for SqliteBackend {
         Ok((stats, expired))
     }
 
-    // WRITE — pre-embedded bootstrap batch (one savepoint) below the seam. The engine
-    // parses/extracts/embeds facade-side; this anchors the optional marker event,
-    // dedup-with-reinforces the batch, and stamps identity if any created. It does NOT
-    // fire the HNSW notify (unlike `insert_or_reinforce_fact`): bootstrap facts enter
-    // the vector index only on the next open — kept consistent across both paths.
     // WRITE
     async fn move_fact_atomic(
         &self,
@@ -1111,6 +1108,11 @@ impl FactGraph for SqliteBackend {
         .await
     }
 
+    // WRITE — pre-embedded bootstrap batch (one savepoint) below the seam. The engine
+    // parses/extracts/embeds facade-side; this anchors the optional marker event,
+    // dedup-with-reinforces the batch, and stamps identity if any created. It does NOT
+    // fire the HNSW notify (unlike `insert_or_reinforce_fact`): bootstrap facts enter
+    // the vector index only on the next open — kept consistent across both paths.
     async fn ingest_bootstrap_batch_atomic(
         &self,
         marker: Option<&NewEvent>,

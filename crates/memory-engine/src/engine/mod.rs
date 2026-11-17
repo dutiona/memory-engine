@@ -628,11 +628,12 @@ impl MemoryEngine {
     /// though the facts are correctly persisted. [`ScopeTree::insert`] is
     /// idempotent by id, so re-inserting shared ancestors is a no-op.
     ///
-    /// Delegates to [`me_index::cache_scope_chain`] — the single home for the port
-    /// walk + `ScopeTree` hydration (#973), beside [`me_index::insert_scope_chain`], which
-    /// caches nodes a scoped write already read inside its transaction. The port walk (`get_scope`) is awaited up
-    /// front into an owned `Vec` there; the `scope_tree` write guard is taken only
-    /// afterward, so no lock is held across `.await` (keeps the future `Send`).
+    /// Delegates to [`me_index::cache_scope_chain`] — the single home for the port walk +
+    /// `ScopeTree` hydration (#973), beside [`me_index::insert_scope_chain`], which caches
+    /// nodes a scoped write already read inside its transaction. The port walk
+    /// (`get_scope`) is awaited up front into an owned `Vec` there; the `scope_tree` write
+    /// guard is taken only afterward, so no lock is held across `.await` (keeps the future
+    /// `Send`).
     async fn cache_scope_chain(&self, leaf_id: i64) -> Result<()> {
         me_index::cache_scope_chain(&*self.storage, &self.scope_tree, leaf_id).await
     }
