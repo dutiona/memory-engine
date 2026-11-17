@@ -368,9 +368,14 @@ pub fn redact_userinfo(text: &str) -> String {
         // The authority runs to the next `/`, across whitespace (a secret may hold a space),
         // but never into the next URL's token.
         let next_url = tail.find("://").map_or(tail.len(), |at| {
-            tail[..at]
-                .rfind(char::is_whitespace)
-                .map_or(at, |ws| ws + 1)
+            // The byte after the last whitespace char, which may be multibyte.
+            match tail[..at]
+                .trim_end_matches(|c: char| !c.is_whitespace())
+                .len()
+            {
+                0 => at,
+                token_start => token_start,
+            }
         });
         let end = tail.find('/').unwrap_or(tail.len()).min(next_url);
         let authority = &tail[..end];
@@ -661,7 +666,9 @@ mod tests {
     fn redaction_is_total_over_mixed_text() {
         // Every sequence of four pieces, non-ASCII ones next to schemes included, redacts
         // without a panic.
-        let pieces = ["é", "😀", "a", ":", "/", "@", " ", "\"", "https://", "x:"];
+        let pieces = [
+            "é", "😀", "\u{a0}", "\u{3000}", "a", ":", "/", "@", " ", "\"", "https://", "x:",
+        ];
         for a in pieces {
             for b in pieces {
                 for c in pieces {
@@ -712,6 +719,10 @@ mod tests {
             (
                 "unknown project: \"éhttps://a:b/c@d/e\"",
                 "unknown project: \"éhttps://d/e\"",
+            ),
+            (
+                "unknown variant `https://a\u{a0}https://b`, expected",
+                "unknown variant `https://a\u{a0}https://b`, expected",
             ),
             (
                 "https://github.com/example/a@b",
