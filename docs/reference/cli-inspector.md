@@ -307,14 +307,13 @@ subprocess seam the efficiency×quality benchmark drives — see
 
 The CLI is a workspace member crate (`memory-engine-cli/`). Its inspection commands have no LLM dependencies; only the optional `consolidate --backend llm` path pulls in `memory-engine-embed` for the HTTP proposer + embedder. Each subcommand is a thin module in `src/commands/` that:
 
-1. Opens the engine via `db::open_engine()` (probes `embed_dim` from config table)
-2. Calls the library's inspection API
+1. Opens the engine (probing `embed_dim` from the config table): `db::open_engine()` for a read-only command, which
+   never takes the store lock and never migrates; `db::open_engine_writable()` for a command that writes, which takes
+   the store lock first and sets `backup_dir` next to the database so a schema migration backs it up
+2. Calls the library's API
 3. Formats output according to `--format`
-
-The `open_engine()` function sets `backup_dir` adjacent to the database as a safety measure — building a file-backed `MemoryEngine` may run schema migrations. A true read-only open path is tracked in #103.
 
 ### Known Limitations
 
 - **`query` is FTS-only without an embedder**: with no `--embed-url`/`--embed-model` the `query` subcommand does FTS5 text matching only. Supplying the embedder flags (#619) enables hybrid FTS + vector search via `embed_query`.
 - **`dump --limit` pushes SQL LIMIT**: `list_active_facts(Some(n))` adds a `LIMIT` clause to avoid materializing the full corpus.
-- **Import schema version**: Export/import roundtrip fails due to schema v6 vs restore v5 mismatch. Tracked in #80.
