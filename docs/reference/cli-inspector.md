@@ -41,7 +41,7 @@ error: the store is in use by another process (/data/memory.db.store-lock is loc
 ```
 
 - **Take the lock** (writable): `add-fact`, `batch-ingest`, `bootstrap`, `consolidate`, `import` (its new target),
-  `migrate` (when it applies migrations), `record-outcome`. Stop the server first.
+  `migrate` (when it applies migrations), `prune`, `record-outcome`. Stop the server first.
 - **Never take it** (read-only, safe beside a live server): `stats`, `inspect`, `explain`, `query`, `dump`,
   `outcome-counts`, `export` in every format, `schema`, `migrate --check`.
 
@@ -176,6 +176,22 @@ Bulk-ingests facts from a JSONL file (or stdin with `--file -`). Each line is a 
 - `--format json`: `{"total_ingested": N, "total_skipped": N, "failed_batches": N, "elapsed_secs": X}`
 - `--format table`: Human-readable summary
 - `--format plain`: `ingested=N skipped=N failed_batches=N elapsed_secs=X`
+
+#### `prune` — Expire Decayed Facts
+
+```bash
+memory-engine-cli prune
+memory-engine-cli --format json prune --min-importance 0.2 --half-life-override episodic=30
+```
+
+Expires (never deletes) every fact whose decayed importance falls below `--min-importance`, scored with the Ebbinghaus
+policy of the forgetting engine. Flags, each defaulting to `ForgetPolicy::default()`: `--half-life-days`,
+`--min-importance` (in [0, 1]), `--recency-weight`, `--frequency-weight`, `--graph-degree-weight`,
+`--base-importance-weight`, and the repeatable `--half-life-override TYPE=DAYS`. An invalid policy is refused before
+the store is opened. Pinned facts and the decay-exempt types (Semantic and Procedural by default, so every memory the
+MCP `remember` tool stores) are never pruned. Output: `expired N of M facts evaluated`, `{"facts_expired":N,"facts_evaluated":M}`
+or `facts_expired=N` / `facts_evaluated=M`. It writes the store, so it takes the store lock: stop the server first.
+This was the `memory_forget` MCP tool; pruning is never the model's (ADR-0020 §8).
 
 #### `dump [facts|events|all]` — Debug Listing
 

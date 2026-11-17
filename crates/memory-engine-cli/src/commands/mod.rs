@@ -10,6 +10,7 @@ pub mod import;
 pub mod inspect;
 pub mod migrate;
 pub mod outcome_counts;
+pub mod prune;
 pub mod query;
 pub mod record_outcome;
 pub mod schema;

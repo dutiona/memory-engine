@@ -99,6 +99,7 @@ async fn every_writable_command_refuses_while_the_store_is_held() {
     ]));
     refuses_as_held(cli(&db).args(["record-outcome", "--fact-id", "1", "--outcome", "positive"]));
     refuses_as_held(cli(&db).arg("consolidate"));
+    refuses_as_held(cli(&db).args(["prune", "--min-importance", "1"]));
     refuses_as_held(
         cli(&db)
             .args(["batch-ingest", "--file"])

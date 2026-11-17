@@ -68,6 +68,9 @@ enum Commands {
     RecordOutcome(commands::record_outcome::RecordOutcomeArgs),
     /// Show aggregated outcome counts for a fact
     OutcomeCounts(commands::outcome_counts::OutcomeCountsArgs),
+    /// Expire facts whose decayed importance falls below a threshold. Writes the store: run
+    /// it with the server stopped
+    Prune(commands::prune::PruneArgs),
     /// Apply pending schema migrations (use --check for a dry-run)
     Migrate(commands::migrate::MigrateArgs),
     /// Report the database schema version vs the binary's `CURRENT_SCHEMA_VERSION`
@@ -124,6 +127,9 @@ async fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS)
         }
+        Commands::Prune(ref args) => commands::prune::run(&cli.db, args, cli.format)
+            .await
+            .map(|()| ExitCode::SUCCESS),
         Commands::Migrate(ref args) => commands::migrate::run(&cli.db, args, cli.format),
         Commands::Schema => commands::schema::run(&cli.db, cli.format),
     };
