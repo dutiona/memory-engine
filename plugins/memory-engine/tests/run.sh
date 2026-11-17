@@ -1147,6 +1147,13 @@ t_session_start_no_token() {
 	eq "$(count)" 3 "events"
 }
 
+t_session_start_empty_token() {
+	mkdir -p "${TOKF%/*}"
+	: >"$TOKF"
+	session_start_out
+	eq "$(cat "$C/out")" '{"systemMessage":"memory: no token file"}' "the line with an empty token file"
+}
+
 t_session_start_token() {
 	token
 	session_start_out
@@ -1167,7 +1174,7 @@ endpoint_changed_mid_flush parked_kept park_heals detached real_curl redirect pr
 lock_live lock_dead lock_age lock_unreadable lock_stamp lock_killed lock_broken_stops lock_steal renew_race
 release_race second_look no_second_look simultaneous prune
 stable_copy stable_copy_fails watcher_env_i watcher_no_plugin watcher_path no_root
-session_start_no_token session_start_token
+session_start_no_token session_start_empty_token session_start_token
 "}
 
 N=0

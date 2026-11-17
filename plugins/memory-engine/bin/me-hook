@@ -169,7 +169,8 @@ count_outbox() {
 
 # no_token_line: ADR-0020 §10's client-made state, as the hook output's systemMessage, from a fixed template.
 no_token_line() {
-	[ -e "$TOKEN" ] && return 0
+	# The same test as the flush's: a token file that cannot be read, or is empty, delivers nothing either.
+	read_line "$TOKEN" && return 0
 	if [ "$Q" -eq 0 ] && [ "$P" -eq 0 ]; then
 		printf '{"systemMessage":"memory: no token file"}\n'
 	else
