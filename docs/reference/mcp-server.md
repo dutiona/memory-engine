@@ -203,13 +203,13 @@ Decoding, per header (`ME-Project-Root` → `root`, `-Dev-Root` → `dev_root`, 
     the next `/`) loses everything through its last `@`; then, when a `:` exists and the text before the first one
     holds no `/`, that text loses everything through its last `@`. This removes at least what the plugin's client
     removes.
-11. A scheme-form URL that still holds an `@` after step 10, and gives no remote key or ends its authority with an empty
-    port (which git never writes), had its userinfo hidden from the strip by a client that did not encode `%`: an
-    encoded `/` in the password, or an encoded separating `@` (`https://user:pa%2Fss@host/x`). It is dropped as
-    `unstripped_userinfo` instead of stored. The rule reads only the decoded value, so every encoding of one URL gives
-    one outcome. An `@` in a path that gives a key is kept (`https://github.com/example/a@b`), and a keyless URL with an
-    `@` in its path is dropped under the same name, which changes no key. Residual, for such a client only: when the
-    userinfo's text before its first encoded `/` reads as `host` or `host:<digits>` (`https://to%2Fken@host/x`,
+11. A scheme-form URL that still holds an `@` after step 10 and gives no remote key had its userinfo hidden from the
+    strip by a client that did not encode `%`: an encoded `/` in the password, or an encoded separating `@`
+    (`https://user:pa%2Fss@host/x`). It is dropped as `unstripped_userinfo` instead of stored. The rule reads only the
+    decoded value, so every encoding of one URL gives one outcome, and it changes no key: a dropped URL gave none. An
+    `@` in a path that gives a key is kept (`https://github.com/example/a@b`), and a keyless URL with an `@` in its
+    path is dropped under the same name. Residual, for such a client only: when the userinfo's text before its first
+    encoded `/` reads as `host`, `host:` or `host:<digits>` (`https://to%2Fken@host/x`, `https://user:%2Fss@host/x`,
     `https://user:12%2F34@host/x`), the URL gives a key, so the URL, the key and its scope node hold the secret; the
     same holds for an scp-form remote whose user name holds an encoded `/` (`to%2Fken@host:x`, stored, keyless).
 
