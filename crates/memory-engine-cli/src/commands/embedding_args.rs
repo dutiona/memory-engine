@@ -37,7 +37,7 @@ pub struct EmbeddingArgs {
     pub embed_provider: String,
 
     /// Bearer API key for the embedding endpoint.
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY")]
+    #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY", hide_env_values = true)]
     pub embed_api_key: Option<String>,
 
     /// Native model dimension before MRL truncation. Required only with `--mrl-dim`

@@ -1059,3 +1059,15 @@ async fn query_refuses_an_embedder_whose_identity_differs() {
         .unwrap();
     assert_clean_failure(&output, "embedding identity check failed");
 }
+
+#[test]
+fn help_never_prints_the_embedding_api_key_from_the_environment() {
+    let output = cli()
+        .args(["query", "--help"])
+        .env("MEMORY_ENGINE_EMBED_API_KEY", "embed-key-sentinel")
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("MEMORY_ENGINE_EMBED_API_KEY"), "{help}");
+    assert!(!help.contains("embed-key-sentinel"), "{help}");
+}

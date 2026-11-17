@@ -60,7 +60,7 @@ struct Cli {
     summary_model: Option<String>,
 
     /// Summary API key (optional, for authenticated endpoints).
-    #[arg(long, env = "MEMORY_MCP_SUMMARY_API_KEY")]
+    #[arg(long, env = "MEMORY_MCP_SUMMARY_API_KEY", hide_env_values = true)]
     summary_api_key: Option<String>,
 }
 

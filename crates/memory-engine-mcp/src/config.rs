@@ -114,7 +114,11 @@ pub struct EmbeddingOverrides {
     pub model: Option<String>,
 
     /// Embedding API key (optional, for authenticated endpoints).
-    #[arg(long = "embed-api-key", env = "MEMORY_MCP_EMBED_API_KEY")]
+    #[arg(
+        long = "embed-api-key",
+        env = "MEMORY_MCP_EMBED_API_KEY",
+        hide_env_values = true
+    )]
     pub api_key: Option<String>,
 
     /// Embedding serving backend (e.g. `llama.cpp`, `ollama`, `tei`, `openai`) —
