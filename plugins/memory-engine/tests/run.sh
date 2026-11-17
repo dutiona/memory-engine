@@ -845,7 +845,8 @@ t_lock_live() {
 	queue A
 	token
 	live_pid
-	for st in $(date +%s) $(($(date +%s) - 3599)); do
+	for age in 0 3590; do
+		st=$(($(date +%s) - age))
 		mklock "$LIVE" "$st"
 		cp "$O/lock/owner" "$C/owner.before"
 		flush_fg
@@ -876,10 +877,12 @@ t_lock_age() {
 }
 
 t_lock_unreadable() {
-	token
 	live_pid
+	n=0
 	for kind in empty missing malformed; do
+		rm -f "$TOKF"
 		queue A
+		token
 		mkdir -p "$O/lock"
 		case $kind in
 		empty) : >"$O/lock/owner" ;;
@@ -887,7 +890,8 @@ t_lock_unreadable() {
 		malformed) printf '%s x\n' "$LIVE" >"$O/lock/owner" ;;
 		esac
 		flush_fg
-		eq "$(count)" 0 "queue after a $kind owner record"
+		n=$((n + 1))
+		eq "$(count) $(calls)" "0 $n" "the flush broke a lock with a $kind owner record"
 	done
 	kill_live
 }
