@@ -493,7 +493,7 @@ impl MemoryEngine {
     /// Verify a **declared** embedding fingerprint is compatible with the store's
     /// recorded identity, without writing (#615, §Design.3).
     ///
-    /// This is the read-only check behind a pre-computed `memory_query` submission: the
+    /// This is the read-only check behind a query that carries a pre-computed vector: the
     /// caller declares the identity of the model that produced the query vector, and we
     /// reject it if it disagrees with the store's space — otherwise the query would
     /// silently retrieve against a foreign vector space. Same semantics as
@@ -762,6 +762,26 @@ impl MemoryEngine {
         let id = self.storage.ensure_scope_path(path).await?;
         self.cache_scope_chain(id).await?;
         Ok(id)
+    }
+
+    /// Resolve a scope path to its id without creating anything: the read-only twin of
+    /// [`ensure_scope_path`](Self::ensure_scope_path). Reads the cached scope tree, so it
+    /// answers for nodes this engine created or loaded; a node another writer created since
+    /// this engine opened is not seen.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// let engine = memory_engine::MemoryEngine::builder(4).build().unwrap();
+    /// assert_eq!(engine.resolve_scope_path("user:alice"), None);
+    /// let id = engine.ensure_scope_path("user:alice").await.unwrap();
+    /// assert_eq!(engine.resolve_scope_path("user:alice"), Some(id));
+    /// # });
+    /// ```
+    #[must_use]
+    pub fn resolve_scope_path(&self, path: &str) -> Option<i64> {
+        self.scope_tree.read().resolve_path(path)
     }
 
     // --- Public API: Direct data access ---

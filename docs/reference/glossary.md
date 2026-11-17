@@ -33,7 +33,7 @@ Scope
 : Hierarchical isolation context expressed as a path string (e.g., `user:michael/project:demo`). Each path segment becomes a node in the scope tree. Facts, edges, and summaries are tagged with a scope ID. Scopes enable multi-tenant and multi-project isolation within a single database.
 
 ScopeQuery
-: Enum controlling how scopes are resolved during search. `Exact` matches a single scope. `Subtree` matches a scope and all descendants. `Ancestors` matches a scope and all parents up to root. `Inherited` combines ancestors and subtree for full inherited context.
+: Enum controlling how scopes are resolved during search. `Exact` matches a single scope. `Subtree` matches a scope and all descendants. `Ancestors` matches a scope and all parents up to root. `Inherited` combines ancestors and subtree for full inherited context. `ExactSet` matches exactly any of several scopes.
 
 Content hash
 : blake3 hex digest of fact content, truncated to 32 characters. Used during deduplication to detect exact content matches before falling back to embedding similarity.

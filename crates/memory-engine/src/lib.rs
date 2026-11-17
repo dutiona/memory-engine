@@ -116,6 +116,7 @@ pub use me_types::error;
 pub mod inspect;
 pub mod search;
 pub mod storage;
+pub mod store_lock;
 // `traits` is relocated to the L0.5 `me-traits` crate (Wave 2 #816); the crate
 // re-export preserves `memory_engine::traits::*` and every internal `crate::traits::`.
 pub use me_traits as traits;
@@ -175,6 +176,7 @@ pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionE
 pub use engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, PromoteAction};
 pub use engine::builder::{File, InMemory, MemoryEngineBuilder};
 pub use engine::{EngineConfig, MemoryEngine};
+pub use store_lock::{StoreLock, StoreLockError};
 // Explicit re-export of the full `error` public surface (the umbrella
 // `MemoryError` + the `Result` alias + each typed sub-enum). Enumerated rather
 // than glob-imported so the crate-root API is auditable and a new public error

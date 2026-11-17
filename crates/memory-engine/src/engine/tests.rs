@@ -5928,3 +5928,35 @@ mod expired_probe_e2e {
         );
     }
 }
+
+#[tokio::test]
+async fn resolve_scope_path_never_creates_a_node() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("resolve.db");
+    let engine = MemoryEngine::builder(DIM)
+        .path(path.clone())
+        .build()
+        .unwrap();
+    let before = engine.statistics().await.unwrap().scopes.total;
+    assert_eq!(engine.resolve_scope_path("user:alice/project:p"), None);
+    assert_eq!(engine.resolve_scope_path("user:alice/project:p"), None);
+    assert_eq!(engine.statistics().await.unwrap().scopes.total, before);
+
+    let id = engine
+        .ensure_scope_path("user:alice/project:p")
+        .await
+        .unwrap();
+    assert_eq!(engine.resolve_scope_path("user:alice/project:p"), Some(id));
+    drop(engine);
+
+    let read_only = MemoryEngine::builder(DIM)
+        .path(path)
+        .read_only(true)
+        .build()
+        .unwrap();
+    assert_eq!(
+        read_only.resolve_scope_path("user:alice/project:p"),
+        Some(id)
+    );
+    assert_eq!(read_only.resolve_scope_path("user:bob"), None);
+}

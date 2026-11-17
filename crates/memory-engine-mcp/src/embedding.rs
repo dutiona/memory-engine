@@ -1,7 +1,3 @@
-pub use memory_engine_embed::HttpEmbeddingProvider;
+//! The HTTP embedding provider the server embeds `remember` content and `recall` queries with.
 
-// `PassthroughEmbedder` was removed in #615: pre-computed `memory_add_fact` /
-// `memory_query` submissions now declare their model identity directly (parsed into an
-// `EmbeddingFingerprint` and checked against the store), instead of wrapping the vector
-// in a sentinel-fingerprint embedder. See `tools::parse::parse_declared_fingerprint` and
-// `MemoryEngine::add_fact_precomputed` / `verify_embedding_fingerprint`.
+pub use memory_engine_embed::HttpEmbeddingProvider;

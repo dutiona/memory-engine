@@ -39,9 +39,9 @@ pub const CALLER_WRITE_CURSOR: &str = "last_caller_write_fact_id";
 
 /// Top-level `metadata` key marking a fact captured via the pre-compaction insight flush.
 ///
-/// Written by the MCP `memory_flush_insights` tool and read by the facade's
-/// `MemoryEngine::list_recent_insights`. Defined once here so the writer (MCP crate)
-/// and the reader (facade) share a single literal and cannot drift. The stamped value
+/// Written by an insight flush (an engine consumer; the memory service runs none, ADR-0020
+/// §8) and read by the facade's `MemoryEngine::list_recent_insights`. Defined once here so
+/// writer and reader share a single literal and cannot drift. The stamped value
 /// is an object (e.g. `{"flushed_at": <rfc3339>}`); readers match on key *presence
 /// with a non-null value*.
 pub const INSIGHT_MARKER_KEY: &str = "insight";

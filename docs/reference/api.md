@@ -48,6 +48,20 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | `list_active_facts` | `(&self, limit: Option<usize>) -> Result<Vec<Fact>>`          | List non-expired facts; `Some(n)` pushes SQL `LIMIT`. |
 | `list_summaries`    | `(&self, level: &ConsolidationLevel) -> Result<Vec<Summary>>` | List summaries filtered by consolidation level.       |
 
+### Scopes
+
+| Method               | Signature                                     | Description                                                                                       |
+| -------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `ensure_scope_path`  | `(&self, path: &str) -> Result<i64>`          | Create any missing segment of a scope path and return the leaf's id. Refused on a read-only engine. |
+| `resolve_scope_path` | `(&self, path: &str) -> Option<i64>`          | The read-only twin: the path's id from the cached scope tree, or `None`. Never creates a node.      |
+
+### Store lock
+
+| Item                         | Signature                                               | Description                                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `StoreLock::acquire`         | `(db: &Path) -> Result<StoreLock, StoreLockError>`      | Take the exclusive advisory lock `<db>.store-lock` without waiting. `Held` when another process holds it, `Io` when it cannot be opened. Released on drop. |
+| `StoreLock::path`            | `(&self) -> &Path`                                      | The lock file.                                                                                                                                          |
+
 ### Query
 
 | Method          | Signature                                                   | Description                                                                                                                             |

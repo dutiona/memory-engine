@@ -34,8 +34,8 @@ tokio = { version = "1", features = ["rt"] }
 # plain path, so the snapshot/restore targets cover every deserialization route.
 memory-engine = { path = "../crates/memory-engine", features = ["ann", "compress-gzip", "compress-zstd", "archive"] }
 memory-engine-embed = { path = "../crates/memory-engine-embed" }
-# Drives the MCP tool dispatcher (`tools::dispatch`), the server's primary
-# untrusted-input entry point (#321). The crate's lib.rs re-exports `tools`.
+# Drives the MCP tool dispatcher (`MemoryMcpServer::dispatch`), the server's primary
+# untrusted-input entry point (#321).
 memory-engine-mcp = { path = "../crates/memory-engine-mcp" }
 
 # Detach from the parent workspace: an empty `[workspace]` makes this its own

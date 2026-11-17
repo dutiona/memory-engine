@@ -23,8 +23,8 @@ fn refused_credentials() -> Vec<Vec<String>> {
     ]
 }
 
-fn add_fact_call() -> Value {
-    json!({ "name": "memory_add_fact", "arguments": { "content": "refused" } })
+fn remember_call() -> Value {
+    json!({ "name": "remember", "arguments": { "content": "refused" } })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -44,7 +44,7 @@ async fn refuses_every_request_without_a_valid_token() {
         (
             Method::POST,
             "/mcp",
-            Some(jsonrpc("tools/call", &add_fact_call())),
+            Some(jsonrpc("tools/call", &remember_call())),
         ),
         (Method::GET, "/mcp", None),
         (Method::DELETE, "/mcp", None),
@@ -89,7 +89,7 @@ async fn a_valid_token_is_served_statelessly() {
         .rpc(
             Some("laptop"),
             "tools/call",
-            &json!({ "name": "memory_statistics", "arguments": {} }),
+            &json!({ "name": "recall", "arguments": { "query": "anything" } }),
         )
         .send()
         .await
@@ -113,7 +113,7 @@ async fn a_valid_token_is_served_statelessly() {
     assert_eq!(response.status(), 200);
     let body: Value = response.json().await.unwrap();
     let tools = body["result"]["tools"].as_array().unwrap();
-    assert!(tools.iter().any(|t| t["name"] == "memory_add_fact"));
+    assert!(tools.iter().any(|t| t["name"] == "remember"));
 
     let response = server
         .rpc(Some("laptop"), "initialize", &initialize_params())
@@ -212,42 +212,31 @@ async fn no_configured_host_admits_only_loopback() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_remembered_fact_records_the_calling_machine() {
     let server = TestServer::start().await;
+    for machine in ["laptop", "desktop"] {
+        let reply = server
+            .tool(
+                machine,
+                "remember",
+                json!({ "content": format!("from the {machine}") }),
+            )
+            .await;
+        assert!(!reply.is_error, "{reply:?}");
+        let id: i64 = reply.body.split(' ').nth(1).unwrap().parse().unwrap();
+        let fact = server.engine.get_fact(id).await.unwrap();
+        assert_eq!(fact.metadata, json!({ "machine": machine }));
+    }
 
-    let laptop = server
-        .call_tool(
-            "laptop",
-            "memory_add_fact",
-            json!({ "content": "from the laptop", "metadata": { "machine": "forged", "note": 1 } }),
-        )
-        .await;
-    let fact = server
-        .engine
-        .get_fact(laptop["fact_id"].as_i64().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(fact.metadata, json!({ "machine": "laptop", "note": 1 }));
-
-    let desktop = server
-        .call_tool(
-            "desktop",
-            "memory_add_fact",
-            json!({ "content": "from the desktop" }),
-        )
-        .await;
-    let fact = server
-        .engine
-        .get_fact(desktop["fact_id"].as_i64().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(fact.metadata, json!({ "machine": "desktop" }));
-
+    // The client cannot name the machine: metadata is not an argument.
     let refused = server
-        .call(
+        .tool(
             "laptop",
-            "memory_add_fact",
-            json!({ "content": "string metadata", "metadata": "x" }),
+            "remember",
+            json!({ "content": "forged", "metadata": { "machine": "forged" } }),
         )
         .await;
-    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    assert!(
+        refused.is_error && refused.body.contains("metadata"),
+        "{refused:?}"
+    );
     assert_eq!(server.fact_count().await, 2);
 }

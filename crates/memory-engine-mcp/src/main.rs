@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use memory_engine::MemoryEngine;
-use memory_engine_mcp::{auth, config, embedding, http, server, summary};
+use memory_engine_mcp::{auth, config, embedding, home, http, server, tools};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -30,6 +30,10 @@ struct Cli {
     )]
     allowed_hosts: Vec<String>,
 
+    /// The owner whose user level (`user:<user>`) this server reads and files (ADR-0020 §7).
+    #[arg(long, env = "MEMORY_MCP_USER", value_parser = home::User::parse)]
+    user: home::User,
+
     /// Path to TOML configuration file.
     #[arg(long, env = "MEMORY_MCP_CONFIG")]
     config: Option<std::path::PathBuf>,
@@ -50,18 +54,6 @@ struct Cli {
     /// Embedder settings, each overriding its `[embedding]` key.
     #[command(flatten)]
     embedding: config::EmbeddingOverrides,
-
-    /// Summary / chat-completions endpoint URL (for consolidation).
-    #[arg(long, env = "MEMORY_MCP_SUMMARY_URL")]
-    summary_url: Option<String>,
-
-    /// Summary model name.
-    #[arg(long, env = "MEMORY_MCP_SUMMARY_MODEL")]
-    summary_model: Option<String>,
-
-    /// Summary API key (optional, for authenticated endpoints).
-    #[arg(long, env = "MEMORY_MCP_SUMMARY_API_KEY", hide_env_values = true)]
-    summary_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -86,6 +78,9 @@ async fn main() -> Result<(), BoxError> {
 
     // 0. The token file first: a bad one must never get as far as migrating the store.
     let tokens = auth::TokenTable::load(&cli.token_file).map_err(|e| e.to_string())?;
+    // Every model-tool answer starts with a call ID drawn from the OS RNG (ADR-0020 §8). One
+    // draw now, before anything opens, so a served call never meets an uninitialised RNG.
+    tools::new_call_id().map_err(|e| format!("the OS random number generator failed: {e}"))?;
 
     // 1. Load config (TOML file, with CLI overrides)
     let mcp_config = load_config(&cli)?;
@@ -97,16 +92,14 @@ async fn main() -> Result<(), BoxError> {
             .map_err(|e| format!("cannot determine embed_dim: {e}"))?,
     };
 
-    // 3. Resolve the embedder configuration and build the providers before the store opens,
-    //    so a configuration refusal creates no database and migrates nothing. Both builders
-    //    make a blocking reqwest client, which in debug builds creates and drops a runtime of
+    // 3. Resolve the embedder configuration and build the provider before the store opens,
+    //    so a configuration refusal creates no database and migrates nothing. The builder
+    //    makes a blocking reqwest client, which in debug builds creates and drops a runtime of
     //    its own: that panics unless this thread leaves the async context first.
     let resolved =
         config::resolve_embedding(&cli.embedding, mcp_config.embedding.as_ref(), embed_dim)
             .map_err(|e| format!("invalid embedding configuration: {e}"))?;
     let embedder = tokio::task::block_in_place(|| build_embedder(resolved))?;
-    let summary_gen = tokio::task::block_in_place(|| build_summary_generator(&cli, &mcp_config))?
-        .map(|sg| sg as Arc<dyn memory_engine::traits::SummaryGenerator + Send + Sync>);
 
     // 4. Open MemoryEngine
     let mut builder = MemoryEngine::builder(embed_dim).path(mcp_config.engine.db_path.clone());
@@ -120,6 +113,16 @@ async fn main() -> Result<(), BoxError> {
         }
         builder = builder.backup_dir(dir.clone());
     }
+    // The store lock (ADR-0020 §8), held until `main` returns: no maintenance command and no
+    // second server writes beside this one. Taken after every configuration check and before
+    // the open, which migrates, so a refusal still writes nothing.
+    let _store_lock =
+        memory_engine::StoreLock::acquire(&mcp_config.engine.db_path).map_err(|e| match e {
+            memory_engine::StoreLockError::Held { .. } => {
+                format!("{e}: stop the other server or maintenance command first")
+            }
+            memory_engine::StoreLockError::Io { .. } => e.to_string(),
+        })?;
     let engine = builder
         .build()
         .map_err(|e| format!("failed to open engine: {e}"))?;
@@ -138,7 +141,7 @@ async fn main() -> Result<(), BoxError> {
     }
 
     // 6. Construct and serve
-    let mcp_server = server::MemoryMcpServer::new(engine, embedder, summary_gen, embed_dim);
+    let mcp_server = server::MemoryMcpServer::new(engine, embedder, cli.user.clone());
 
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     tracing::info!("memory-engine-mcp listening on {}", listener.local_addr()?);
@@ -224,7 +227,6 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
                 backup_dir: None,
             },
             embedding: None,
-            summary: None,
         }
     };
 
@@ -243,45 +245,4 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
     // dimension is known.
 
     Ok(mcp_config)
-}
-
-/// Build the summary generator from config + CLI.
-///
-/// The generator produces summary text only; embedding of those summaries is
-/// performed by the separately-configured embedder at consolidation time
-/// (issue #116). The `memory_consolidate` tool therefore needs *both* a summary
-/// generator and an embedder — that requirement is enforced in the tool handler.
-fn build_summary_generator(
-    cli: &Cli,
-    mcp_config: &config::McpConfig,
-) -> Result<Option<Arc<summary::HttpSummaryGenerator>>, BoxError> {
-    let base = mcp_config.summary.as_ref();
-
-    let endpoint = cli
-        .summary_url
-        .clone()
-        .or_else(|| base.map(|b| b.endpoint.clone()));
-    let model = cli
-        .summary_model
-        .clone()
-        .or_else(|| base.map(|b| b.model.clone()));
-    let api_key = cli
-        .summary_api_key
-        .clone()
-        .or_else(|| base.and_then(|b| b.api_key.clone()));
-    let timeout = base.map_or(120, |b| b.timeout_secs);
-
-    match (endpoint, model) {
-        (Some(url), Some(mdl)) => Ok(Some(Arc::new(
-            summary::HttpSummaryGenerator::new(url, mdl, api_key, timeout)
-                .map_err(|e| format!("failed to create summary generator: {e}"))?,
-        ))),
-        (None, None) => Ok(None),
-        // One without the other would start silently without consolidation.
-        _ => Err(
-            "the summary generator needs both a url (--summary-url / MEMORY_MCP_SUMMARY_URL) \
-                  and a model (--summary-model / MEMORY_MCP_SUMMARY_MODEL)"
-                .into(),
-        ),
-    }
 }

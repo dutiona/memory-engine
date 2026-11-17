@@ -27,6 +27,7 @@ pub async fn run(db: &Path, args: &ImportArgs) -> anyhow::Result<()> {
         })?,
     };
 
+    let _lock = crate::db::lock_store(db)?;
     let config = EngineConfig::new(db.to_path_buf(), embed_dim);
     let mut engine = MemoryEngine::restore_json(&args.snapshot, &config)?;
     // Flush the restored projections to the sidecar so the next open of the freshly

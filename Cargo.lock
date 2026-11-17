@@ -2113,7 +2113,6 @@ dependencies = [
  "flate2",
  "hnsw",
  "insta",
- "libc",
  "me-archive",
  "me-backend-postgres",
  "me-backend-sqlite",
@@ -2181,13 +2180,11 @@ name = "memory-engine-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
- "blake3",
  "chrono",
  "clap",
- "insta",
+ "getrandom 0.3.4",
  "memory-engine",
  "memory-engine-embed",
- "proptest",
  "reqwest",
  "rmcp",
  "rusqlite",

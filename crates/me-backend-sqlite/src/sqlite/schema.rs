@@ -210,7 +210,7 @@ impl SchemaManager for SqliteBackend {
         .await
     }
 
-    // READ (JSON variants) / WRITE (`VACUUM INTO`)
+    // READ (JSON variants, and `VACUUM INTO` on a read-only pool) / WRITE (`VACUUM INTO` otherwise)
     async fn dump_state(
         &self,
         embed_dim: usize,
@@ -242,6 +242,12 @@ impl SchemaManager for SqliteBackend {
             DumpFormat::JsonZstd(_) => Err(me_types::error::MemoryError::NotImplemented(
                 "zstd compression requires the `compress-zstd` feature".into(),
             )),
+            // `VACUUM INTO` fails under `PRAGMA query_only`, which the writable pool's read
+            // connections set; the read-only pool's connections are opened read-only at the
+            // OS level instead and run it beside a live writer, so a backup needs no writer.
+            DumpFormat::Sqlite(path) if self.pool.is_read_only() => {
+                self.block_read(move |c| dump::dump_sqlite(c, &path)).await
+            }
             DumpFormat::Sqlite(path) => {
                 self.block_write(move |c| dump::dump_sqlite(c, &path)).await
             }

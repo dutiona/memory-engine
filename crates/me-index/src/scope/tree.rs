@@ -190,6 +190,12 @@ impl ScopeTree {
             ScopeQuery::Subtree(path) => self.resolve_path(path).map(|id| self.subtree(id)),
             ScopeQuery::Ancestors(path) => self.resolve_path(path).map(|id| self.ancestors(id)),
             ScopeQuery::Inherited(path) => self.resolve_path(path).map(|id| self.inherited(id)),
+            ScopeQuery::ExactSet(paths) => {
+                let mut ids: Vec<i64> = paths.iter().filter_map(|p| self.resolve_path(p)).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                (!ids.is_empty()).then_some(ids)
+            }
         }
     }
 
@@ -501,6 +507,70 @@ mod tests {
         assert!(tree.resolve_path("user:michael//project:demo").is_none());
         assert!(tree.resolve_path("/user:michael").is_none());
         assert!(tree.resolve_path("user:michael/").is_none());
+    }
+
+    /// `setup_tree` plus the top-level bucket `unscoped:laptop` (id 5).
+    fn tree_with_bucket() -> ScopeTree {
+        let mut tree = setup_tree();
+        tree.insert(ScopeNode {
+            id: 5,
+            parent_id: Some(1),
+            label: "unscoped:laptop".into(),
+            depth: 1,
+        });
+        tree
+    }
+
+    #[test]
+    fn exact_set_is_exactly_the_listed_nodes() {
+        // A parent and an unrelated top-level node: exactly those two ids, never the
+        // parent's children and never root.
+        let tree = tree_with_bucket();
+        let ids = tree
+            .resolve_query(&ScopeQuery::ExactSet(vec![
+                "user:michael".into(),
+                "unscoped:laptop".into(),
+            ]))
+            .unwrap();
+        assert_eq!(ids, vec![2, 5]);
+    }
+
+    #[test]
+    fn exact_set_skips_missing_paths() {
+        let tree = tree_with_bucket();
+        let ids = tree
+            .resolve_query(&ScopeQuery::ExactSet(vec![
+                "user:ghost".into(),
+                "unscoped:laptop".into(),
+            ]))
+            .unwrap();
+        assert_eq!(ids, vec![5]);
+    }
+
+    #[test]
+    fn exact_set_dedups() {
+        let tree = tree_with_bucket();
+        let ids = tree
+            .resolve_query(&ScopeQuery::ExactSet(vec![
+                "unscoped:laptop".into(),
+                "user:michael".into(),
+                "unscoped:laptop".into(),
+            ]))
+            .unwrap();
+        assert_eq!(ids, vec![2, 5]);
+    }
+
+    #[test]
+    fn exact_set_resolving_nothing_is_none() {
+        // An empty id set must never reach storage, where `&[]` reads as "all scopes".
+        let tree = tree_with_bucket();
+        for paths in [vec![], vec![String::new()], vec!["user:ghost".to_owned()]] {
+            assert_eq!(
+                tree.resolve_query(&ScopeQuery::ExactSet(paths.clone())),
+                None,
+                "{paths:?}"
+            );
+        }
     }
 
     #[test]

@@ -415,16 +415,10 @@ endpoint = "http://localhost:11434/v1/embeddings"
 model = "m"
 dimensions = 8
 api_key = "embed-key-sentinel"
-
-[summary]
-endpoint = "http://localhost:11434/v1/chat/completions"
-model = "s"
-api_key = "summary-key-sentinel"
 "#,
     )
     .unwrap();
     let debug = format!("{config:?}");
     assert!(debug.contains("api_key"), "{debug}");
     assert!(!debug.contains("embed-key-sentinel"), "{debug}");
-    assert!(!debug.contains("summary-key-sentinel"), "{debug}");
 }

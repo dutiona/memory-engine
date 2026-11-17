@@ -39,11 +39,11 @@ async fn wait_for_embed_request(server: &TestServer) {
     }
 }
 
-fn add_fact(server: &TestServer) -> reqwest::RequestBuilder {
+fn remember(server: &TestServer) -> reqwest::RequestBuilder {
     server.rpc(
         Some("laptop"),
         "tools/call",
-        &json!({ "name": "memory_add_fact", "arguments": { "content": "in flight" } }),
+        &json!({ "name": "remember", "arguments": { "content": "in flight" } }),
     )
 }
 
@@ -51,7 +51,7 @@ fn add_fact(server: &TestServer) -> reqwest::RequestBuilder {
 async fn shutdown_lets_an_in_flight_call_finish() {
     let mut server = TestServer::start().await;
     slow_embedder(&server, Duration::from_millis(1500)).await;
-    let call = tokio::spawn(add_fact(&server).send());
+    let call = tokio::spawn(remember(&server).send());
     wait_for_embed_request(&server).await;
 
     server.stop().await;
@@ -74,7 +74,7 @@ async fn shutdown_lets_an_in_flight_call_finish() {
 async fn shutdown_waits_for_an_abandoned_call() {
     let mut server = TestServer::start().await;
     slow_embedder(&server, Duration::from_secs(2)).await;
-    let call = tokio::spawn(add_fact(&server).send());
+    let call = tokio::spawn(remember(&server).send());
     wait_for_embed_request(&server).await;
     // The client hangs up mid-call; rmcp keeps running the call in its own task.
     call.abort();

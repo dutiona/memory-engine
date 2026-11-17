@@ -932,7 +932,7 @@ mod tests {
         assert!(matches!(err, MemoryError::EmbeddingDimension { .. }));
     }
 
-    /// A client-supplied report (via `memory_apply_cycle_report`) must not bypass the
+    /// A client-supplied report (from outside the engine) must not bypass the
     /// importance guard the trusted `add_fact` path enforces: an out-of-range
     /// `importance` would otherwise persist (no column CHECK) and poison decay/forget
     /// ranking. The whole report is rejected and nothing is written.

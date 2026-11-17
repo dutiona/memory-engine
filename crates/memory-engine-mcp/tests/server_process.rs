@@ -193,24 +193,14 @@ fn a_missing_backup_dir_stops_startup() {
 }
 
 #[test]
-fn starts_with_an_embedder_and_a_summary_endpoint() {
+fn starts_with_an_embedder() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mock = runtime.block_on(wiremock::MockServer::start());
     let dir = tempfile::tempdir().unwrap();
     let embed_url = format!("{}/v1/embeddings", mock.uri());
-    let summary_url = format!("{}/v1/chat/completions", mock.uri());
     let mut server = ServerProcess::spawn(
         dir.path(),
-        &[
-            "--embed-url",
-            &embed_url,
-            "--embed-model",
-            "m",
-            "--summary-url",
-            &summary_url,
-            "--summary-model",
-            "s",
-        ],
+        &["--embed-url", &embed_url, "--embed-model", "m"],
         &[],
     );
     assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
@@ -267,19 +257,17 @@ fn help_never_prints_an_api_key_from_the_environment() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_memory-engine-mcp"))
         .arg("--help")
         .env("MEMORY_MCP_EMBED_API_KEY", "embed-key-sentinel")
-        .env("MEMORY_MCP_SUMMARY_API_KEY", "summary-key-sentinel")
         .output()
         .unwrap();
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("MEMORY_MCP_EMBED_API_KEY"), "{help}");
     assert!(!help.contains("embed-key-sentinel"), "{help}");
-    assert!(!help.contains("summary-key-sentinel"), "{help}");
 }
 
 #[test]
-fn a_half_configured_summary_endpoint_is_refused() {
-    // With only one of the summary url and model, the server used to start silently
-    // without consolidation.
+fn the_summary_settings_are_refused_before_the_store_opens() {
+    // ADR-0020 §8: the derived jobs are off in the server, so it has no summary generator.
+    // A leftover flag or section refuses to start instead of being silently ignored.
     let dir = tempfile::tempdir().unwrap();
     let mut server = ServerProcess::spawn(
         dir.path(),
@@ -287,9 +275,22 @@ fn a_half_configured_summary_endpoint_is_refused() {
         &[],
     );
     let status = server.wait_exit(Duration::from_secs(20));
-    assert!(!status.success(), "stderr:\n{}", server.stderr());
+    assert_eq!(status.code(), Some(2), "stderr:\n{}", server.stderr());
     assert!(
-        server.stderr().contains("summary"),
+        server.stderr().contains("--summary-url"),
+        "stderr:\n{}",
+        server.stderr()
+    );
+
+    common::write_config(
+        dir.path(),
+        "[summary]\nendpoint = 'http://127.0.0.1:9'\nmodel = 's'\n",
+    );
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    let status = server.wait_exit(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(1), "stderr:\n{}", server.stderr());
+    assert!(
+        server.stderr().contains("unknown field"),
         "stderr:\n{}",
         server.stderr()
     );
@@ -297,4 +298,84 @@ fn a_half_configured_summary_endpoint_is_refused() {
         !dir.path().join("memory.db").exists(),
         "refused before the store opens"
     );
+}
+
+#[test]
+fn the_running_server_holds_the_store_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    server.wait_ready().unwrap();
+    assert!(matches!(
+        memory_engine::StoreLock::acquire(&db),
+        Err(memory_engine::StoreLockError::Held { .. })
+    ));
+    assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
+    assert!(memory_engine::StoreLock::acquire(&db).is_ok());
+}
+
+#[test]
+fn a_held_store_lock_stops_startup_before_the_store_migrates() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = stale_store(dir.path());
+    let _held = memory_engine::StoreLock::acquire(&dir.path().join("memory.db")).unwrap();
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    let status = server.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.code(), Some(1), "stderr:\n{}", server.stderr());
+    assert!(
+        server.stderr().contains("memory.db.store-lock"),
+        "stderr:\n{}",
+        server.stderr()
+    );
+    assert!(!server.stderr().contains("listening on"));
+    assert_eq!(schema_version(dir.path()), previous.to_string());
+}
+
+#[test]
+fn a_second_server_on_the_same_store_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut first = ServerProcess::spawn(dir.path(), &[], &[]);
+    first.wait_ready().unwrap();
+    let mut second = ServerProcess::spawn(dir.path(), &[], &[]);
+    let status = second.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.code(), Some(1), "stderr:\n{}", second.stderr());
+    assert!(
+        second.stderr().contains("memory.db.store-lock"),
+        "stderr:\n{}",
+        second.stderr()
+    );
+    first.wait_ready().unwrap();
+}
+
+#[test]
+fn the_user_setting_is_required_and_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(dir.path(), "");
+    let config = config.to_str().unwrap();
+    let mut missing = ServerProcess::spawn_without_user(dir.path(), &["--config", config]);
+    let status = missing.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.code(), Some(2), "stderr:\n{}", missing.stderr());
+    assert!(
+        missing.stderr().contains("--user"),
+        "stderr:\n{}",
+        missing.stderr()
+    );
+
+    for (args, envs) in [
+        (vec!["--user", "Alice"], vec![]),
+        (vec![], vec![("MEMORY_MCP_USER", "a/b")]),
+    ] {
+        let mut server = ServerProcess::spawn(dir.path(), &args, &envs);
+        let status = server.wait_exit(Duration::from_secs(10));
+        assert_eq!(status.code(), Some(2), "stderr:\n{}", server.stderr());
+        assert!(
+            server.stderr().contains("--user"),
+            "stderr:\n{}",
+            server.stderr()
+        );
+    }
+    assert!(!dir.path().join("memory.db").exists());
+
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[("MEMORY_MCP_USER", "bob")]);
+    server.wait_ready().unwrap();
 }

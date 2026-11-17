@@ -21,8 +21,8 @@ impl MemoryEngine {
     /// List recent insight facts within a project scope subtree, newest-first.
     ///
     /// Returns active facts whose `metadata` carries the insight marker
-    /// ([`INSIGHT_MARKER_KEY`](crate::INSIGHT_MARKER_KEY)) — written by the MCP
-    /// `memory_flush_insights` tool — anywhere in the subtree rooted at `scope_path`,
+    /// ([`INSIGHT_MARKER_KEY`](crate::INSIGHT_MARKER_KEY)) — written by an insight
+    /// flush — anywhere in the subtree rooted at `scope_path`,
     /// ordered `t_created` DESC and capped at `limit`. An unknown `scope_path` yields
     /// an empty vec: a not-yet-created project legitimately has no scope node, so this
     /// is "no insights" rather than an error.
@@ -187,8 +187,6 @@ impl MemoryEngine {
     /// serialization fails.
     /// Returns [`MemoryError::NotImplemented`](crate::MemoryError::NotImplemented) if a compression format is used
     /// without the corresponding feature enabled.
-    /// Returns [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly) for the `Sqlite` format if the engine
-    /// was opened read-only (the `VACUUM INTO` backup acquires the write lock).
     pub async fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
         self.ensure_open()?;
         // The whole format dispatch (including the feature-gated `NotImplemented`

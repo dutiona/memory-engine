@@ -118,6 +118,7 @@ Scope queries control visibility:
 - **Subtree** — this scope and all descendants
 - **Ancestors** — this scope and all parents up to root
 - **Inherited** — ancestors + subtree (full inherited context)
+- **ExactSet** — exactly any of several scopes, nothing above or below them
 
 **Global summary invariant:** Global-level summaries (pass 3 of consolidation) are always placed at `scope_id=1` (root scope), regardless of the scopes of the underlying facts. Cluster-level summaries (pass 2) use majority-vote scope assignment from their source facts.
 

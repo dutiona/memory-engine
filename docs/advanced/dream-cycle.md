@@ -28,13 +28,10 @@ flowchart LR
 `run_dream_cycle` returns the unapplied report; the caller inspects it and calls
 `apply_cycle_report`. This split is what lets a consumer gate promotion on review.
 
-**Exposed via MCP.** The `memory_dream_cycle`, `memory_apply_cycle_report`, and
-`memory_get_recent_insights` tools surface this pipeline over the Model Context
-Protocol. `memory_dream_cycle` carries an `apply` flag (default `true`) that
-collapses produce-and-apply into one call for the daily-hook ergonomic, while
-`apply:false` preserves the review gate by returning the report for a later
-`memory_apply_cycle_report`. See
-[MCP Server → Cognitive Pipeline](../reference/mcp-server.md#cognitive-pipeline-memory_dream_cycle-memory_apply_cycle_report-memory_get_recent_insights).
+**Off in the server (ADR-0020 §8).** The memory service runs no derived job: no MCP tool,
+route or timer runs the dream cycle. Run it with `memory-engine-cli consolidate --backend
+dream-cycle` (the CLI's dream-cycle command), with the server stopped. See
+[MCP Server → Derived jobs](../reference/mcp-server.md#derived-jobs-off-in-the-server).
 
 ## Caller-write deferral (#209)
 
@@ -74,11 +71,10 @@ This is **deferral, not mutual exclusion** — concurrent guarded calls can both
 | Method                    | Returns        | Use                                                     |
 | ------------------------- | -------------- | ------------------------------------------------------- |
 | `run_dream_cycle`         | `CycleReport`  | Unconditional produce (tests, force-a-run).             |
-| `run_dream_cycle_guarded` | `CycleOutcome` | The harness/MCP entry — defers on caller writes (#209). |
+| `run_dream_cycle_guarded` | `CycleOutcome` | The harness and CLI entry — defers on caller writes (#209). |
 
-`memory_dream_cycle` (MCP) uses the **guarded** path: a skip returns
-`{ "did_run": false, "skipped": { "CallerWroteFacts": { .. } } }`; a run returns
-`{ "did_run": true, "report": .., "did_apply": .. }`.
+`memory-engine-cli consolidate` uses the **guarded** path: a skip reports the
+`CallerWroteFacts` deferral, a run reports the cycle's deltas.
 
 ## The delta vocabulary
 

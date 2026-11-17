@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use memory_engine::MemoryEngine;
+use memory_engine::{MemoryEngine, StoreLock, StoreLockError};
 
 /// Peek the embedding dimension from an existing `SQLite` database.
 ///
@@ -141,19 +141,66 @@ pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
     Ok(engine)
 }
 
+/// A writable engine together with the store lock it holds (ADR-0020 §8).
+///
+/// Every command that opens the store writable goes through this module, so none can open
+/// it beside a running server. The engine drops before the lock.
+pub struct Writable {
+    engine: MemoryEngine,
+    _lock: StoreLock,
+}
+
+impl std::ops::Deref for Writable {
+    type Target = MemoryEngine;
+    fn deref(&self) -> &MemoryEngine {
+        &self.engine
+    }
+}
+
+impl std::ops::DerefMut for Writable {
+    fn deref_mut(&mut self) -> &mut MemoryEngine {
+        &mut self.engine
+    }
+}
+
+/// Take the store lock for the database at `path`, or refuse while another process (a
+/// running server, another maintenance command) holds it.
+///
+/// # Errors
+///
+/// The store is held, or its lock file cannot be opened.
+pub fn lock_store(path: &Path) -> anyhow::Result<StoreLock> {
+    StoreLock::acquire(path).map_err(|e| match e {
+        StoreLockError::Held { .. } => anyhow::anyhow!("{e}: stop the memory-engine server first"),
+        StoreLockError::Io { .. } => e.into(),
+    })
+}
+
+fn ensure_store_exists(path: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        path.is_file(),
+        "database not found (or is a directory): {}",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Open a `MemoryEngine` with **write** capability, peeking the dimension from
 /// the existing store.
 ///
 /// Used by every command that mutates a previously-embedded database and does not
 /// already know its embedding dimension — e.g. `record-outcome`, `consolidate`,
-/// `migrate`, `export` with `SQLite` format, and the no-`--embed-dim` branch of
+/// `migrate`, and the no-`--embed-dim` branch of
 /// `batch-ingest` / `bootstrap`. Commands that derive the dimension from their own
 /// input (`add-fact`, and `batch-ingest` / `bootstrap` *with* `--embed-dim`) use
 /// [`open_engine_writable_with_dim`] instead. Sets `backup_dir` next to the
-/// database so any schema migration creates a WAL-safe backup first.
-pub fn open_engine_writable(path: &Path) -> anyhow::Result<MemoryEngine> {
+/// database so any schema migration creates a WAL-safe backup first. The store lock is
+/// taken before the store is read at all.
+pub fn open_engine_writable(path: &Path) -> anyhow::Result<Writable> {
+    ensure_store_exists(path)?;
+    let lock = lock_store(path)?;
     let embed_dim = peek_embed_dim_from_db(path)?;
-    open_engine_writable_with_dim(path, embed_dim)
+    build_writable(path, embed_dim, lock)
 }
 
 /// Open a `MemoryEngine` with **write** capability using an explicitly known
@@ -164,22 +211,48 @@ pub fn open_engine_writable(path: &Path) -> anyhow::Result<MemoryEngine> {
 /// freshly-created, never-embedded database that has no recorded dimension yet.
 /// If the database *was* previously embedded at a different dimension, the
 /// engine's open path rejects the mismatch against the stored `embedding_meta`.
-pub fn open_engine_writable_with_dim(
-    path: &Path,
-    embed_dim: usize,
-) -> anyhow::Result<MemoryEngine> {
+pub fn open_engine_writable_with_dim(path: &Path, embed_dim: usize) -> anyhow::Result<Writable> {
+    ensure_store_exists(path)?;
+    let lock = lock_store(path)?;
+    build_writable(path, embed_dim, lock)
+}
+
+/// Create a new store at `path` (the `--create` paths of `batch-ingest` and `bootstrap`),
+/// holding its lock from before the file exists.
+pub fn create_engine(path: &Path, embed_dim: usize) -> anyhow::Result<Writable> {
+    let lock = lock_store(path)?;
+    ensure_store_absent(path)?;
+    let engine = MemoryEngine::builder(embed_dim)
+        .path(path.to_path_buf())
+        .build()?;
+    Ok(Writable {
+        engine,
+        _lock: lock,
+    })
+}
+
+/// Refuse `--create` over an existing database. Callers check early, before building their
+/// embedder; [`create_engine`] checks again under the lock, which another `--create` may
+/// have released after making the file.
+pub fn ensure_store_absent(path: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
-        path.is_file(),
-        "database not found (or is a directory): {}",
+        !path.exists(),
+        "database {} already exists — remove it first or omit --create",
         path.display()
     );
+    Ok(())
+}
+
+fn build_writable(path: &Path, embed_dim: usize, lock: StoreLock) -> anyhow::Result<Writable> {
     let backup_dir = path.parent().map(Path::to_path_buf);
     let mut builder = MemoryEngine::builder(embed_dim).path(path.to_path_buf());
     if let Some(dir) = backup_dir {
         builder = builder.backup_dir(dir);
     }
-    let engine = builder.build()?;
-    Ok(engine)
+    Ok(Writable {
+        engine: builder.build()?,
+        _lock: lock,
+    })
 }
 
 #[cfg(test)]
@@ -276,6 +349,49 @@ mod tests {
 
         let version = peek_schema_version_from_db(&db_path).unwrap();
         assert_eq!(version, memory_engine::CURRENT_SCHEMA_VERSION);
+    }
+
+    // --- the store lock (ADR-0020 §8) ---
+
+    #[test]
+    fn a_writable_open_refuses_while_the_store_is_locked() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join("existing.db");
+        drop(
+            memory_engine::MemoryEngine::builder(4)
+                .path(existing.clone())
+                .build()
+                .unwrap(),
+        );
+        let fresh = dir.path().join("fresh.db");
+        let _a = StoreLock::acquire(&existing).unwrap();
+        let _b = StoreLock::acquire(&fresh).unwrap();
+        for err in [
+            open_engine_writable_with_dim(&existing, 4).err().unwrap(),
+            create_engine(&fresh, 4).err().unwrap(),
+        ] {
+            assert!(
+                err.to_string()
+                    .contains("stop the memory-engine server first"),
+                "{err}"
+            );
+        }
+        assert!(!fresh.exists(), "a refused create must create no database");
+    }
+
+    #[test]
+    fn create_refuses_a_store_that_appeared_before_its_lock() {
+        // Another `--create` can finish between a caller's early check and this lock.
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("memory.db");
+        drop(
+            memory_engine::MemoryEngine::builder(4)
+                .path(db.clone())
+                .build()
+                .unwrap(),
+        );
+        let err = create_engine(&db, 4).err().unwrap();
+        assert!(err.to_string().contains("already exists"), "{err}");
     }
 
     // --- #622: identity in the embedding_spaces registry ---

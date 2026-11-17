@@ -126,6 +126,7 @@ pub enum ScopeQuery {
     Subtree(String),   // Facts at this scope and all descendants
     Ancestors(String), // Facts at this scope and all ancestors up to root
     Inherited(String), // Ancestors + subtree (full inherited context)
+    ExactSet(Vec<String>), // Facts at exactly any of these paths, nothing above or below
 }
 ```
 
@@ -135,6 +136,7 @@ pub enum ScopeQuery {
 | `Subtree`   | Everything under a project or user, including nested scopes.                                |
 | `Ancestors` | Facts this scope inherits from parent scopes (e.g., user preferences visible to a project). |
 | `Inherited` | Combines `Ancestors` and `Subtree` -- the full context visible to a scope.                  |
+| `ExactSet`  | Several unrelated nodes at once, filtered before ranking (the MCP `recall` reads its bucket or project plus `user:<user>` this way). A set that resolves to no node matches nothing. |
 
 ```rust
 use memory_engine::types::ScopeQuery;

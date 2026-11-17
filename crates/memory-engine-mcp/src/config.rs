@@ -13,13 +13,8 @@ pub struct McpConfig {
     /// Engine database configuration.
     pub engine: EngineSection,
 
-    /// Embedding provider configuration (optional — needed for `add_fact` + vector queries).
+    /// Embedding provider configuration (optional — needed for `remember` and vector recall).
     pub embedding: Option<EmbeddingSection>,
-
-    /// Summary generator configuration (optional — needed for consolidation).
-    ///
-    /// Requires `[embedding]` to also be configured, since summaries must be embedded.
-    pub summary: Option<SummarySection>,
 }
 
 /// Engine / database configuration.
@@ -297,24 +292,6 @@ pub fn resolve_embedding(
     }))
 }
 
-/// Summary / LLM provider configuration for consolidation. Its `Debug` redacts `api_key`.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SummarySection {
-    /// Chat-completions endpoint URL (e.g. `https://api.openai.com/v1/chat/completions`).
-    pub endpoint: String,
-
-    /// Model name to request (e.g. `gpt-4o-mini`).
-    pub model: String,
-
-    /// API key (optional — for authenticated endpoints).
-    pub api_key: Option<String>,
-
-    /// HTTP timeout in seconds. Default: 120 (LLM inference is slower than embedding).
-    #[serde(default = "default_summary_timeout")]
-    pub timeout_secs: u64,
-}
-
 /// Shown in place of a present API key, so `Debug` says whether one is set but never shows it.
 const REDACTED: &str = "<redacted>";
 
@@ -337,27 +314,12 @@ impl std::fmt::Debug for EmbeddingSection {
     }
 }
 
-impl std::fmt::Debug for SummarySection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SummarySection")
-            .field("endpoint", &self.endpoint)
-            .field("model", &self.model)
-            .field("api_key", &self.api_key.as_ref().map(|_| REDACTED))
-            .field("timeout_secs", &self.timeout_secs)
-            .finish()
-    }
-}
-
 fn default_provider() -> String {
     "ollama".to_string()
 }
 
 const fn default_timeout() -> u64 {
     30
-}
-
-const fn default_summary_timeout() -> u64 {
-    120
 }
 
 /// Probe the embedding dimension from an existing database.
@@ -488,29 +450,24 @@ db_path = "/tmp/test.db"
         let config: McpConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.engine.embed_dim, None);
         assert!(config.embedding.is_none());
-        assert!(config.summary.is_none());
     }
 
     #[test]
-    fn deserialize_config_with_summary() {
+    fn a_summary_section_is_refused() {
+        // ADR-0020 §8: the derived jobs are off in the server, so it has no summary
+        // generator to configure; a leftover section fails loudly instead of being ignored.
         let toml_str = r#"
 [engine]
 db_path = "/tmp/test.db"
-
-[embedding]
-endpoint = "http://localhost:11434/v1/embeddings"
-model = "nomic-embed-text"
-dimensions = 384
 
 [summary]
 endpoint = "http://localhost:11434/v1/chat/completions"
 model = "llama3"
 "#;
-        let config: McpConfig = toml::from_str(toml_str).unwrap();
-        let summary = config.summary.unwrap();
-        assert_eq!(summary.model, "llama3");
-        assert_eq!(summary.timeout_secs, 120); // default
-        assert!(summary.api_key.is_none());
+        let err = toml::from_str::<McpConfig>(toml_str)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field"), "{err}");
     }
 
     #[test]
