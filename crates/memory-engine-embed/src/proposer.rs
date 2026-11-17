@@ -9,7 +9,7 @@
 //! this). Uses `reqwest::blocking::Client` because the `DeltaProposer` trait is sync.
 //!
 //! The parser is deliberately split into pure helpers ([`request_body`](HttpDeltaProposer::request_body),
-//! [`parse_response`](HttpDeltaProposer::parse_response)) so the wire contract is unit-
+//! [`parse_proposal`](HttpDeltaProposer::parse_proposal)) so the wire contract is unit-
 //! testable without a network, and so a future `OpenAI` `usage`-style endpoint is a
 //! drop-in parser swap. Token usage (`eval_count` / `prompt_eval_count`) and the call
 //! count are captured into interior atomics and read back via [`HttpDeltaProposer::stats`]
