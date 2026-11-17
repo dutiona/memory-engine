@@ -98,13 +98,13 @@ Scopes form a tree (not a flat namespace). Scope paths like `"user:michael/proje
 
 ---
 
-## Unforgettable Facts **{Planned}**
+## Unforgettable Facts
 
 An `is_pinned: bool` flag on facts, with a `PersistenceClassifier` trait hook that lets the consumer decide which facts should never be forgotten.
 
 **Rationale:** Identity facts ("the user's name is Michael", "this agent runs on Mac Mini M4") must survive all forgetting cycles. Without pinning, the Ebbinghaus decay curve would eventually expire them if they are not accessed frequently enough.
 
-**Design:** The `PersistenceClassifier::should_pin(fact) -> bool` trait lets the consumer use LLM-based classification, rule-based logic, or a combination.
+**Design:** The `PersistenceClassifier::should_pin(&ClassifierInput) -> bool` trait lets the consumer use LLM-based classification, rule-based logic, or a combination.
 
 ---
 
