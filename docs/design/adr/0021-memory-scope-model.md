@@ -231,7 +231,10 @@ here.
   recorded state is deterministic. Every binding records its evidence: the raw remotes with userinfo removed, the
   roots, the rule applied, the rules version and the actor.
 - **First sight** *(owner: no automatic join of remote-less projects)*. Only write paths mint a project: the event
-  endpoint and `remember`. A unique binding per Locator serializes two first sights that arrive together.
+  endpoint, `remember`, and a `set_level` that files a memory in the session's project *(owner, on
+  [dutiona/infra#37](https://github.com/dutiona/infra/issues/37#issuecomment-6959376409): an agent can rehome
+  memories into a renamed or rehomed project that holds nothing yet)*. A unique binding per Locator serializes two
+  first sights that arrive together.
   - A `remote` Locator whose key equals a bound `remote` key binds to that project.
   - A `dev-relative` Locator binds only to its own (machine, path) binding: never to another machine's equal path,
     never to a remote key.

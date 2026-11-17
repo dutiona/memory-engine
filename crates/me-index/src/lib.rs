@@ -14,4 +14,4 @@ pub mod graph;
 pub mod scope;
 
 pub use graph::{EdgeData, MemoryGraph};
-pub use scope::{ScopeTree, cache_scope_chain};
+pub use scope::{ScopeTree, cache_scope_chain, insert_scope_chain};

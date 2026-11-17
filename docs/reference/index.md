@@ -6,5 +6,8 @@
 crate-layout
 glossary
 api
+mcp-server
+cli-inspector
+project-management
 issue-authoring-for-agents
 ```

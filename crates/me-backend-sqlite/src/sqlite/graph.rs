@@ -23,7 +23,7 @@ use super::{SqliteBackend, stream_consumer_dropped};
 use crate::store::edges::EdgeStore;
 use crate::store::facts::FactStore;
 use crate::store::scopes::ScopeStore;
-use me_storage::graph::{BootstrapIngestOutcome, FactGraph};
+use me_storage::graph::{BootstrapIngestOutcome, FactGraph, ScopedWrite};
 use me_types::error::Result;
 use me_types::types::{
     Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
@@ -165,7 +165,7 @@ impl FactGraph for SqliteBackend {
         let id = self
             .block_write(move |c| FactStore::new(c, dim).insert(&fact))
             .await?;
-        // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238).
+        // Post-commit HNSW notification: the index learns only of committed facts.
         #[cfg(feature = "ann")]
         self.hnsw_notify_insert(id, &embedding)?;
         Ok(id)
@@ -746,9 +746,9 @@ impl FactGraph for SqliteBackend {
         let dim = self.embed_dim;
         let id = self
             .block_write(move |conn| {
-                // Verbatim body of ingest.rs:228-231: one unchecked_transaction wrapping
-                // stamp_identity + FactStore::insert so a vector is never committed
-                // without an established, matching identity (the #614 silent-corruption guard).
+                // One unchecked_transaction wrapping stamp_identity + FactStore::insert so a
+                // vector is never committed without an established, matching identity (the
+                // #614 silent-corruption guard).
                 let tx = conn
                     .unchecked_transaction()
                     .map_err(StorageError::backend)?;
@@ -759,11 +759,10 @@ impl FactGraph for SqliteBackend {
                 Ok(id)
             })
             .await?;
-        // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238). The fact
-        // is already durably committed, so this `?` is the SOLE carve-out to this
-        // method's `Err ⟹ byte-identical` contract: it can only surface
-        // `IndexInconsistent` (the write SUCCEEDED, only the in-memory index is now
-        // stale — rebuild it, do NOT retry the write, which would duplicate the fact).
+        // Post-commit HNSW notification. The fact is already durably committed, so this `?`
+        // is the SOLE carve-out to this method's `Err ⟹ byte-identical` contract: it can
+        // only surface `IndexInconsistent` (the write SUCCEEDED, only the in-memory index is
+        // now stale — rebuild it, do NOT retry the write, which would duplicate the fact).
         #[cfg(feature = "ann")]
         self.hnsw_notify_insert(id, &embedding)?;
         Ok(id)
@@ -850,8 +849,7 @@ impl FactGraph for SqliteBackend {
         let fact_ids = fact_ids.to_vec();
         let relation = relation.to_owned();
         self.block_write(move |conn| {
-            // Verbatim body of engine/graph.rs:71-101: one unchecked_transaction
-            // wrapping batch-dedup + edge inserts.
+            // One unchecked_transaction wrapping batch-dedup + edge inserts.
             let tx = conn
                 .unchecked_transaction()
                 .map_err(StorageError::backend)?;
@@ -1008,7 +1006,7 @@ impl FactGraph for SqliteBackend {
         Ok((new_id, edge_id))
     }
 
-    // READ — archive candidate selection (verbatim body of engine/archive.rs:167-176).
+    // READ — archive candidate selection.
     async fn select_archive_candidates(
         &self,
         expired_before: DateTime<Utc>,
@@ -1070,6 +1068,43 @@ impl FactGraph for SqliteBackend {
         }
 
         Ok((stats, expired))
+    }
+
+    // WRITE
+    async fn move_fact_atomic(
+        &self,
+        id: i64,
+        from: i64,
+        to: &str,
+        now: DateTime<Utc>,
+        record_at: &str,
+        record: &NewEvent,
+    ) -> Result<ScopedWrite> {
+        let dim = self.embed_dim;
+        let to = to.to_owned();
+        let record_at = record_at.to_owned();
+        let mut record = record.clone();
+        let registry = Arc::clone(&self.upcaster_registry);
+        self.block_write(move |c| {
+            let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
+            let scopes = ScopeStore::new(&tx);
+            let to_id = scopes.ensure_path(&to)?;
+            record.scope_id = scopes.ensure_path(&record_at)?;
+            if !FactStore::new(&tx, dim).move_scope(id, from, to_id, now)? {
+                return Err(me_types::error::MemoryError::NotFound(format!(
+                    "live fact {id} in scope {from}"
+                )));
+            }
+            let event_id = crate::store::events::EventStore::new(&tx, &registry).insert(&record)?;
+            let mut chain = scopes.chain(to_id)?;
+            chain.extend(scopes.chain(record.scope_id)?);
+            tx.commit().map_err(StorageError::backend)?;
+            Ok(ScopedWrite {
+                id: event_id,
+                chain,
+            })
+        })
+        .await
     }
 
     // WRITE — pre-embedded bootstrap batch (one savepoint) below the seam. The engine

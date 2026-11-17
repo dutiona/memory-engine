@@ -58,8 +58,8 @@ pub trait SchemaManager: Send + Sync {
     async fn require_embedding_fingerprint_present(&self) -> Result<()>;
 
     // -------------------------------------------------------------------------
-    // Stage A config accessors (cutover needs them at engine/mod.rs:649,659 +
-    // cycle watermarks — currently backend-private via `store::schema::{get,set}_config`).
+    // Config accessors: the engine's config reads and the cycle watermarks, over the
+    // backend-private `store::schema::{get,set}_config`.
     // -------------------------------------------------------------------------
 
     /// Read a config value by key. Returns `None` if the key is absent.

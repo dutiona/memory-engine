@@ -582,3 +582,107 @@ pub async fn scope_ensure_get_find<F: ConformanceBackend>(f: &F) {
         f.name()
     );
 }
+
+/// A fact at `a` with the default validity, and the id of scope `a`.
+async fn fact_at_a(be: &std::sync::Arc<dyn me_storage::StorageBackend>) -> (i64, i64) {
+    let a = be.ensure_scope_path("a").await.expect("ensure a");
+    let mut fact = new_fact("movable");
+    fact.scope_id = a;
+    let id = seed_facts(be, &[fact]).await[0];
+    (id, a)
+}
+
+/// `move_fact_atomic` files the fact under `to` and its record under `record_at`, both paths
+/// created in the move's transaction; nothing else of the fact changes.
+pub async fn move_fact_atomic_moves_and_records<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let (id, a) = fact_at_a(&be).await;
+    let before = be.get_fact(id).await.expect("get_fact");
+    let events = be
+        .count_events(&me_types::types::EventFilter::default())
+        .await
+        .unwrap();
+    let mut record = new_event("sess");
+    record.payload = serde_json::json!({ "move": true });
+    let moved = be
+        .move_fact_atomic(id, a, "a/b", Utc::now(), "m", &record)
+        .await
+        .expect("move_fact_atomic");
+    let after = be.get_fact(id).await.expect("get_fact");
+    let ab = moved
+        .chain
+        .iter()
+        .find(|n| n.label == "b")
+        .expect("a/b in chain");
+    let m = moved
+        .chain
+        .iter()
+        .find(|n| n.label == "m")
+        .expect("m in chain");
+    assert_eq!(after.scope_id, ab.id, "[{}] fact filed at a/b", f.name());
+    let mut expected = before.clone();
+    expected.scope_id = ab.id;
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
+        "[{}] only scope_id changes",
+        f.name()
+    );
+    let event = be.get_event(moved.id).await.expect("get_event");
+    assert_eq!(
+        event.payload,
+        serde_json::json!({ "move": true }),
+        "[{}]",
+        f.name()
+    );
+    assert_eq!(
+        event.scope_id,
+        m.id,
+        "[{}] record filed at record_at",
+        f.name()
+    );
+    assert_eq!(
+        be.count_events(&me_types::types::EventFilter::default())
+            .await
+            .unwrap(),
+        events + 1,
+        "[{}] exactly one event",
+        f.name()
+    );
+}
+
+/// A move to the fact's own scope appends the record and leaves the fact as it was.
+pub async fn move_fact_atomic_to_its_own_scope_records_only<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let (id, a) = fact_at_a(&be).await;
+    let before = be.get_fact(id).await.expect("get_fact");
+    let moved = be
+        .move_fact_atomic(id, a, "a", Utc::now(), "a", &new_event("sess"))
+        .await
+        .expect("move_fact_atomic");
+    assert!(
+        be.get_event(moved.id).await.is_ok(),
+        "[{}] record",
+        f.name()
+    );
+    assert_eq!(
+        serde_json::to_value(be.get_fact(id).await.unwrap()).unwrap(),
+        serde_json::to_value(before).unwrap(),
+        "[{}] fact unchanged",
+        f.name()
+    );
+}
+
+/// A fact whose validity ends after `now` is live, so it moves.
+pub async fn move_fact_atomic_moves_a_fact_invalid_only_later<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let a = be.ensure_scope_path("a").await.expect("ensure a");
+    let now = Utc::now();
+    let mut fact = new_fact("valid for an hour");
+    fact.scope_id = a;
+    fact.t_invalid = Some(now + chrono::Duration::hours(1));
+    let id = seed_facts(&be, &[fact]).await[0];
+    be.move_fact_atomic(id, a, "a/b", now, "m", &new_event("sess"))
+        .await
+        .expect("a future t_invalid is live");
+}

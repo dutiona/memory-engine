@@ -35,6 +35,54 @@ pub async fn ingest(ctx: MemoryCtx<'_>, event: &NewEvent) -> Result<i64> {
     ctx.storage.insert_event(event).await
 }
 
+/// Append `event` under the scope `path`, creating the path in the event's own transaction,
+/// and cache the path. Returns the assigned event id.
+///
+/// # Errors
+///
+/// `MemoryError::ReadOnly` on a read-only engine; `PayloadTooLarge` for an oversized
+/// payload; a storage error otherwise. Nothing is written on any error.
+pub async fn ingest_at(
+    ctx: MemoryCtx<'_>,
+    scope_tree: &RwLock<ScopeTree>,
+    path: &str,
+    event: &NewEvent,
+) -> Result<i64> {
+    ctx.ensure_open()?;
+    ctx.ensure_writable()?;
+    check_json_size(&event.payload, "event payload")?;
+    let written = ctx.storage.insert_event_at(path, event).await?;
+    me_index::insert_scope_chain(scope_tree, written.chain);
+    Ok(written.id)
+}
+
+/// Move fact `id` from scope `from` to the scope path `to`, appending `record` under the
+/// scope path `record_at`, in one transaction; cache both paths. Returns the record's id.
+///
+/// # Errors
+///
+/// `MemoryError::NotFound` when no live fact `id` sits at `from`; `ReadOnly`,
+/// `PayloadTooLarge` or a storage error otherwise. Nothing is written on any error.
+pub async fn move_fact(
+    ctx: MemoryCtx<'_>,
+    scope_tree: &RwLock<ScopeTree>,
+    id: i64,
+    from: i64,
+    to: &str,
+    record_at: &str,
+    record: &NewEvent,
+) -> Result<i64> {
+    ctx.ensure_open()?;
+    ctx.ensure_writable()?;
+    check_json_size(&record.payload, "event payload")?;
+    let written = ctx
+        .storage
+        .move_fact_atomic(id, from, to, Utc::now(), record_at, record)
+        .await?;
+    me_index::insert_scope_chain(scope_tree, written.chain);
+    Ok(written.id)
+}
+
 /// Validate a caller-supplied `importance` override.
 ///
 /// `AddFactOptions::base_importance` is documented as living in `[0, 1]`. We

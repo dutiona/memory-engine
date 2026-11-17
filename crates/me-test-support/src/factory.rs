@@ -65,6 +65,19 @@ pub trait ConformanceBackend: Send + Sync + 'static {
         be.raw_exec("DROP TABLE facts").await
     }
 
+    /// Make every later event insert fail, so an atomic method that appends an event faults
+    /// at that step (the crash-injection seam for the scoped-write proofs). Required, with
+    /// no default body: the fault is a trigger, which is not portable SQL.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the backend's `raw_exec` returns on a SQL/backend failure.
+    #[cfg(feature = "test-util")]
+    async fn refuse_event_inserts(
+        &self,
+        be: &Arc<dyn StorageBackend>,
+    ) -> me_types::error::Result<()>;
+
     /// Stable identity for assertion messages.
     fn name(&self) -> &'static str;
 }
@@ -124,6 +137,18 @@ impl ConformanceBackend for SqliteFactory {
         (storage, cold)
     }
 
+    #[cfg(feature = "test-util")]
+    async fn refuse_event_inserts(
+        &self,
+        be: &Arc<dyn StorageBackend>,
+    ) -> me_types::error::Result<()> {
+        be.raw_exec(
+            "CREATE TRIGGER refuse_event_inserts BEFORE INSERT ON events \
+             BEGIN SELECT RAISE(ABORT, 'event inserts refused by the conformance battery'); END;",
+        )
+        .await
+    }
+
     fn name(&self) -> &'static str {
         "sqlite"
     }
@@ -155,6 +180,14 @@ impl ConformanceBackend for PgFactory {
     #[cfg(feature = "archive")]
     async fn make_with_cold(&self) -> (Arc<dyn StorageBackend>, Arc<dyn ColdStorage>) {
         todo!("#635: PG cold storage (or decide PG has no cold tier)")
+    }
+
+    #[cfg(feature = "test-util")]
+    async fn refuse_event_inserts(
+        &self,
+        _be: &Arc<dyn StorageBackend>,
+    ) -> me_types::error::Result<()> {
+        todo!("#635: a PG trigger that refuses event inserts")
     }
 
     fn name(&self) -> &'static str {

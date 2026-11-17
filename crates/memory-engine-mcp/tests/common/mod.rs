@@ -186,15 +186,30 @@ impl TestServer {
 
     /// Call `tool` as `machine`; the raw JSON-RPC response.
     pub async fn call(&self, machine: &str, tool: &str, args: Value) -> Value {
-        let response = self
-            .rpc(
-                Some(machine),
-                "tools/call",
-                &json!({ "name": tool, "arguments": args }),
-            )
-            .send()
-            .await
-            .unwrap();
+        self.call_with(machine, &[], tool, args).await
+    }
+
+    /// Call `tool` as `machine`, sending `facts` as `ME-Project-*` headers: raw bytes, so a
+    /// test can send what a client must not; a repeated name is appended.
+    pub async fn call_with(
+        &self,
+        machine: &str,
+        facts: &[(&str, &[u8])],
+        tool: &str,
+        args: Value,
+    ) -> Value {
+        let mut request = self.rpc(
+            Some(machine),
+            "tools/call",
+            &json!({ "name": tool, "arguments": args }),
+        );
+        for (name, value) in facts {
+            request = request.header(
+                *name,
+                reqwest::header::HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        let response = request.send().await.unwrap();
         assert_eq!(response.status(), 200);
         response.json().await.unwrap()
     }
@@ -210,7 +225,18 @@ impl TestServer {
 
     /// Call a model tool as `machine`: asserts the call line and splits the answer.
     pub async fn tool(&self, machine: &str, name: &str, args: Value) -> Reply {
-        let response = self.call(machine, name, args).await;
+        self.tool_with(machine, &[], name, args).await
+    }
+
+    /// [`Self::tool`] with `ME-Project-*` facts, as [`Self::call_with`] sends them.
+    pub async fn tool_with(
+        &self,
+        machine: &str,
+        facts: &[(&str, &[u8])],
+        name: &str,
+        args: Value,
+    ) -> Reply {
+        let response = self.call_with(machine, facts, name, args).await;
         assert!(
             response.get("error").is_none(),
             "a model tool answered a JSON-RPC error: {response}"
@@ -262,6 +288,47 @@ impl TestServer {
             )
             .await
             .unwrap()
+    }
+
+    /// The `MemoryOp` records, oldest first: (id, payload, scope path).
+    pub fn records(&self) -> Vec<(i64, Value, String)> {
+        let conn = rusqlite::Connection::open(self.dir.path().join("memory.db")).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.id, e.payload, e.scope_id FROM events e \
+                 WHERE e.event_type = 'MemoryOp' ORDER BY e.id",
+            )
+            .unwrap();
+        let rows: Vec<(i64, String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows.into_iter()
+            .map(|(id, payload, scope)| {
+                (
+                    id,
+                    serde_json::from_str(&payload).unwrap(),
+                    scope_path(&conn, scope),
+                )
+            })
+            .collect()
+    }
+
+    /// Make every later event insert fail, as a storage fault would.
+    pub fn refuse_event_writes(&self) {
+        self.sql(
+            "CREATE TRIGGER refuse_events BEFORE INSERT ON events \
+             BEGIN SELECT RAISE(ABORT, 'event writes refused by the test'); END;",
+        );
+    }
+
+    /// Run `sql` on the store through a second connection.
+    pub fn sql(&self, sql: &str) {
+        rusqlite::Connection::open(self.dir.path().join("memory.db"))
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
     }
 
     pub async fn fact_count(&self) -> i64 {
@@ -476,4 +543,26 @@ impl Drop for ServerProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The full scope path of scope `id`, root excluded, as `user:alice/project:x`.
+fn scope_path(conn: &rusqlite::Connection, id: i64) -> String {
+    let mut labels = Vec::new();
+    let mut current = Some(id);
+    while let Some(node) = current {
+        let (label, parent): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT label, parent_id FROM scopes WHERE id = ?1",
+                [node],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        if parent.is_none() {
+            break;
+        }
+        labels.push(label);
+        current = parent;
+    }
+    labels.reverse();
+    labels.join("/")
 }

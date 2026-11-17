@@ -36,6 +36,18 @@ pub enum BootstrapIngestOutcome {
     Ingested(Vec<(i64, bool)>),
 }
 
+/// What a write that names scope paths returns.
+///
+/// The event it appended, and the nodes below root of every path it named, read inside its
+/// transaction, so the caller caches them with no storage read after the commit.
+#[derive(Debug)]
+pub struct ScopedWrite {
+    /// The id of the appended event.
+    pub id: i64,
+    /// The nodes of the named paths, root excluded.
+    pub chain: Vec<ScopeNode>,
+}
+
 /// Core knowledge graph: facts, edges, the scope hierarchy.
 ///
 /// All methods are async (boxed via `async_trait`): the `SQLite` backend wraps
@@ -260,7 +272,6 @@ pub trait FactGraph: Send + Sync {
     /// Atomically stamp the embedding identity (fingerprint) and insert one fact,
     /// in a single `rusqlite` transaction.
     ///
-    /// This is the verbatim body of `ingest.rs:228–231` moved below the seam.
     /// The caller (`insert_fact_with_embedding`) is responsible for:
     /// - scope resolution (done before the call, autocommit-separate by design)
     /// - HNSW `notify_insert` (fired post-call, engine-side, on success)
@@ -295,8 +306,6 @@ pub trait FactGraph: Send + Sync {
     /// Atomically insert a batch of facts in a savepoint, returning their ids and
     /// the scope ids that need to be cached engine-side.
     ///
-    /// This is the verbatim DB body of `ingest.rs:397–476` moved below the seam.
-    ///
     /// The **scope split** (plan §3): scope resolution and `ScopeStore::ensure_path`
     /// run inside the savepoint and are returned as `scope_ids_to_cache` so the
     /// engine can update `scope_tree.write()` **after** the successful commit,
@@ -329,8 +338,7 @@ pub trait FactGraph: Send + Sync {
     /// Atomically insert co-session edges (deduplicating against existing ones)
     /// for the given list of fact ids, in a single transaction.
     ///
-    /// This is the verbatim tx body of `engine/graph.rs:71–101` moved below the
-    /// seam. The `now` timestamp is passed in so the engine controls the clock
+    /// The `now` timestamp is passed in so the engine controls the clock
     /// (consistent with the surrounding engine logic).
     ///
     /// The caller is responsible for:
@@ -412,7 +420,6 @@ pub trait FactGraph: Send + Sync {
     /// Select archive candidates (expired, non-pinned facts) and their internal
     /// edges.
     ///
-    /// This exposes the read body of `engine/archive.rs:167–176` through the port.
     /// It is a **read method** (uses a read connection) — the write commit is
     /// `ColdStorage::commit_archive_atomic`.
     ///
@@ -522,4 +529,31 @@ pub trait FactGraph: Send + Sync {
         fingerprint: &me_types::types::EmbeddingFingerprint,
         expected_dim: usize,
     ) -> Result<BootstrapIngestOutcome>;
+
+    /// Atomically file fact `id` under the scope path `to` and append `record` under the
+    /// scope path `record_at`, creating both paths, when the fact is live at `now` (not
+    /// expired; `t_invalid` null or after `now`) and still sits at scope `from`. `to` may
+    /// name `from`'s own path: the record is appended and the fact is unchanged.
+    /// `record.scope_id` is replaced by `record_at`'s leaf. No vector changes, so no
+    /// index is notified: both search channels filter on the fact's scope at query time.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ both paths, the move and the record committed together; Err ⟹ store
+    /// byte-identical`. The check runs inside the transaction, so of two concurrent moves
+    /// of one fact the second answers `NotFound` instead of overwriting the first.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::NotFound`](me_types::error::MemoryError::NotFound) when no live fact
+    /// `id` sits at `from`; a storage error otherwise.
+    async fn move_fact_atomic(
+        &self,
+        id: i64,
+        from: i64,
+        to: &str,
+        now: DateTime<Utc>,
+        record_at: &str,
+        record: &NewEvent,
+    ) -> Result<ScopedWrite>;
 }

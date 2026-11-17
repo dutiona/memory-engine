@@ -10,7 +10,8 @@ use async_trait::async_trait;
 
 use super::{SqliteBackend, stream_consumer_dropped};
 use crate::store::events::EventStore;
-use me_storage::EventLog;
+use crate::store::scopes::ScopeStore;
+use me_storage::{EventLog, ScopedWrite};
 use me_types::error::Result;
 use me_types::types::{Event, EventFilter, NewEvent};
 
@@ -21,6 +22,23 @@ impl EventLog for SqliteBackend {
         let registry = Arc::clone(&self.upcaster_registry);
         self.block_write(move |c| EventStore::new(c, &registry).insert(&event))
             .await
+    }
+
+    // WRITE
+    async fn insert_event_at(&self, path: &str, event: &NewEvent) -> Result<ScopedWrite> {
+        let path = path.to_owned();
+        let mut event = event.clone();
+        let registry = Arc::clone(&self.upcaster_registry);
+        self.block_write(move |c| {
+            let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
+            let scopes = ScopeStore::new(&tx);
+            event.scope_id = scopes.ensure_path(&path)?;
+            let id = EventStore::new(&tx, &registry).insert(&event)?;
+            let chain = scopes.chain(event.scope_id)?;
+            tx.commit().map_err(StorageError::backend)?;
+            Ok(ScopedWrite { id, chain })
+        })
+        .await
     }
 
     async fn get_event(&self, id: i64) -> Result<Event> {

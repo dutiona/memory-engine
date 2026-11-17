@@ -9,5 +9,6 @@ pub mod config;
 pub mod embedding;
 pub mod home;
 pub mod http;
+pub mod project;
 pub mod server;
 pub mod tools;

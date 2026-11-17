@@ -1,26 +1,35 @@
-//! The model's tools (ADR-0020 §8): `recall` and `remember`.
+//! The model's tools (ADR-0020 §8): `recall`, `remember` and `set_level`.
 //!
-//! #1022 and #1023 add `set_level` and `forget`. Each tool is one module holding its
+//! #1023 adds `forget`. Each tool is one module holding its
 //! definition, its closed argument struct and its handler; this module routes a name to it,
 //! mints the call ID that heads every answer and appends the call's record to the event log.
 
 use std::sync::Arc;
 
 use memory_engine::engine::MemoryEngine;
+use memory_engine::types::{EventType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::auth::Machine;
 use crate::embedding::HttpEmbeddingProvider;
-use crate::home::User;
+use crate::home::{Home, User};
+use crate::project::{ProjectFacts, ProjectKey};
 
+mod placement;
 mod recall;
 mod remember;
+mod set_level;
 
 /// The tools the server lists, in the order it lists them.
 #[must_use]
 pub fn definitions() -> Vec<Tool> {
-    vec![recall::definition(), remember::definition()]
+    vec![
+        recall::definition(),
+        remember::definition(),
+        set_level::definition(),
+    ]
 }
 
 /// What one model-tool call runs against.
@@ -29,6 +38,47 @@ pub(crate) struct CallContext<'a> {
     pub(crate) embedder: Option<&'a Arc<HttpEmbeddingProvider>>,
     pub(crate) user: &'a User,
     pub(crate) machine: &'a Machine,
+    pub(crate) facts: &'a ProjectFacts,
+    /// The session's project key, derived once from `facts` and `machine`.
+    pub(crate) key: Option<ProjectKey>,
+}
+
+/// The level a write asks for (ADR-0020 §8): the session's project (or its machine's bucket
+/// outside a project), or the user level.
+#[derive(Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Level {
+    #[default]
+    Project,
+    User,
+}
+
+impl Level {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::User => "user",
+        }
+    }
+}
+
+impl CallContext<'_> {
+    /// The Home a write at `level` targets.
+    pub(crate) fn home_at(&self, level: Level) -> Home {
+        match level {
+            Level::Project => self.own_home(),
+            Level::User => Home::User,
+        }
+    }
+
+    /// The session's own Home: its project, else its machine's bucket.
+    pub(crate) fn own_home(&self) -> Home {
+        Home::own(self.key.clone(), self.machine)
+    }
+
+    pub(crate) fn bucket(&self) -> Home {
+        Home::Bucket(self.machine.clone())
+    }
 }
 
 /// A fresh call ID: 16 lowercase hex digits from the OS random number generator
@@ -50,7 +100,7 @@ pub(crate) async fn call_model_tool(
     args: Map<String, Value>,
     ctx: &CallContext<'_>,
 ) -> Option<Result<CallToolResult, ErrorData>> {
-    if !matches!(name, "recall" | "remember") {
+    if !matches!(name, "recall" | "remember" | "set_level") {
         return None;
     }
     // Unreachable once main's startup probe succeeded: Linux getrandom(2) never fails after
@@ -65,54 +115,85 @@ pub(crate) async fn call_model_tool(
         }
     };
     let args = Value::Object(args);
-    let outcome = if name == "recall" {
-        recall::run(ctx, &call, args).await
-    } else {
-        remember::run(ctx, &call, args).await
+    let outcome = match name {
+        "recall" => recall::run(ctx, &call, args).await,
+        "remember" => remember::run(ctx, &call, args).await,
+        _ => set_level::run(ctx, &call, args).await,
     };
     Some(Ok(respond(&call, outcome)))
 }
 
-/// Append the call's record to the event log (ADR-0021 §12: a call record is an ADR-0001
-/// event, never a table beside the log), filed under the session's own Home, and return the
-/// event's id. `detail` adds `fact_ids` or `error`. #1022 adds the request's project facts.
+/// The answer to a by-ID call on a memory the session may not act on: the same as for a
+/// missing id, so it reveals nothing (ADR-0020 §8).
+pub(crate) const NOT_FOUND: &str = "not found";
+
+/// ADR-0021 §5's by-ID authority, shared with #1023's `forget`: the fact and the Home that
+/// holds it when that Home is the session's own or the user level; `None` for anything else
+/// (root, another project, another bucket, a fact `recall` reached through `project`, a
+/// missing id). Liveness is the caller's.
+pub(crate) async fn owned_fact(
+    ctx: &CallContext<'_>,
+    id: i64,
+) -> Result<Option<(memory_engine::types::Fact, Home)>, String> {
+    let fact = match ctx.engine.get_fact(id).await {
+        Ok(fact) => fact,
+        Err(memory_engine::MemoryError::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    Ok([ctx.own_home(), Home::User]
+        .into_iter()
+        .find(|home| ctx.engine.resolve_scope_path(&home.path(ctx.user)) == Some(fact.scope_id))
+        .map(|home| (fact, home)))
+}
+
+/// The call's record (ADR-0020 §8): its ID, tool and machine, the request's project facts
+/// with the key and rules version, and `detail` (`fact_ids`, `error`, `level`, ...).
+fn call_record(
+    ctx: &CallContext<'_>,
+    call: &str,
+    tool: &str,
+    detail: Map<String, Value>,
+) -> NewEvent {
+    let mut payload = Map::new();
+    payload.insert("call".to_owned(), call.into());
+    payload.insert("tool".to_owned(), tool.into());
+    payload.insert("machine".to_owned(), ctx.machine.as_str().into());
+    payload.insert("project".to_owned(), ctx.facts.provenance(ctx.key.as_ref()));
+    payload.extend(detail);
+    NewEvent {
+        timestamp: chrono::Utc::now(),
+        event_type: EventType::MemoryOp,
+        payload: Value::Object(payload),
+        source: "mcp".to_owned(),
+        session_id: None,
+        scope_id: 1,
+        origin_node_id: "mcp".to_owned(),
+        sequence_id: 0,
+        created_at: None,
+    }
+}
+
+/// Append the call's record to the event log under `home` (ADR-0021 §12: a call record is an
+/// ADR-0001 event, never a table beside the log), creating `home` in the record's own
+/// transaction, and return the event's id. Records go under the calling machine's bucket,
+/// except a valid `remember`'s, which goes under the Home it writes to: a record is
+/// provenance, and filing a read's under a project would make that project known (ADR-0020
+/// §8). Re-filing reads the payload, never the record's scope.
 async fn record(
     ctx: &CallContext<'_>,
     call: &str,
     tool: &str,
     detail: Map<String, Value>,
+    home: &Home,
 ) -> Result<i64, String> {
-    let refused = |e: memory_engine::MemoryError| format!("cannot record this call: {e}");
-    let bucket = crate::home::bucket(ctx.machine);
-    // Resolve first: creating the path is a write transaction, needed once per machine.
-    let scope_id = match ctx.engine.resolve_scope_path(&bucket) {
-        Some(id) => id,
-        None => ctx
-            .engine
-            .ensure_scope_path(&bucket)
-            .await
-            .map_err(refused)?,
-    };
-    let mut payload = Map::new();
-    payload.insert("call".to_owned(), call.into());
-    payload.insert("tool".to_owned(), tool.into());
-    payload.insert("machine".to_owned(), ctx.machine.as_str().into());
-    payload.extend(detail);
-    let event = memory_engine::types::NewEvent {
-        timestamp: chrono::Utc::now(),
-        event_type: memory_engine::types::EventType::MemoryOp,
-        payload: Value::Object(payload),
-        source: "mcp".to_owned(),
-        session_id: None,
-        scope_id,
-        origin_node_id: "mcp".to_owned(),
-        sequence_id: 0,
-        created_at: None,
-    };
-    ctx.engine.ingest(&event).await.map_err(refused)
+    ctx.engine
+        .ingest_at(&home.path(ctx.user), &call_record(ctx, call, tool, detail))
+        .await
+        .map_err(|e| format!("cannot record this call: {e}"))
 }
 
-/// Record a call that failed before anything was stored, then answer its failure.
+/// Record a call that failed before anything was stored, then answer its failure. The record
+/// keeps the message without the userinfo of any URL it quotes from a tool argument.
 async fn refuse(
     ctx: &CallContext<'_>,
     call: &str,
@@ -120,8 +201,9 @@ async fn refuse(
     message: String,
 ) -> Result<String, String> {
     let mut detail = Map::new();
-    detail.insert("error".to_owned(), capture_cut(&message).into());
-    match record(ctx, call, tool, detail).await {
+    let recorded = crate::project::redact_userinfo(&message);
+    detail.insert("error".to_owned(), capture_cut(&recorded).into());
+    match record(ctx, call, tool, detail, &ctx.bucket()).await {
         Ok(_) => Err(message),
         Err(e) => Err(format!("{message} ({e})")),
     }

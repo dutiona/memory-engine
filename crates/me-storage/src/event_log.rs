@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use me_types::error::Result;
 use me_types::types::{Event, EventFilter, NewEvent};
 
+use crate::graph::ScopedWrite;
+
 /// The append-only event log.
 ///
 /// # Errors
@@ -21,6 +23,13 @@ use me_types::types::{Event, EventFilter, NewEvent};
 #[async_trait]
 pub trait EventLog: Send + Sync {
     async fn insert_event(&self, event: &NewEvent) -> Result<i64>;
+    /// Append `event` under the scope `path`, creating the path in the same transaction;
+    /// `event.scope_id` is replaced by the path's leaf.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ the path and the event committed together; Err ⟹ store byte-identical`.
+    async fn insert_event_at(&self, path: &str, event: &NewEvent) -> Result<ScopedWrite>;
     async fn get_event(&self, id: i64) -> Result<Event>;
     async fn list_events(&self, filter: &EventFilter) -> Result<Vec<Event>>;
     async fn count_events(&self, filter: &EventFilter) -> Result<i64>;

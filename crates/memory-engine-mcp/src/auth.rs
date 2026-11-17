@@ -16,6 +16,13 @@ impl Machine {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// A machine for unit tests, which have no token file.
+    #[cfg(test)]
+    pub(crate) fn named(name: &str) -> Self {
+        assert!(is_dns_label(name.as_bytes()), "{name:?}");
+        Self(name.to_owned())
+    }
 }
 
 /// The parsed token-hash file: the SHA-256 of each machine's token.

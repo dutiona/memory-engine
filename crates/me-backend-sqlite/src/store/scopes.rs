@@ -18,6 +18,23 @@ impl<'a> ScopeStore<'a> {
         Self { conn }
     }
 
+    /// The nodes from `leaf` up to, but excluding, the root, leaf first.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::NotFound` if a node of the chain is missing.
+    /// Returns `MemoryError::Storage` on SQL failure.
+    pub fn chain(&self, leaf: i64) -> Result<Vec<ScopeNode>> {
+        let mut nodes = Vec::new();
+        let mut current = self.get(leaf)?;
+        while let Some(parent) = current.parent_id {
+            let next = self.get(parent)?;
+            nodes.push(current);
+            current = next;
+        }
+        Ok(nodes)
+    }
+
     /// Get a scope by id.
     ///
     /// # Errors

@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 use crate::auth::Machine;
 use crate::embedding::HttpEmbeddingProvider;
 use crate::home::User;
+use crate::project::ProjectFacts;
 use crate::tools;
 
 /// MCP server wrapping a [`MemoryEngine`] instance.
@@ -45,8 +46,8 @@ impl MemoryMcpServer {
         }
     }
 
-    /// Run one tool call for the authenticated `machine`: the seam `call_tool`, the fuzz
-    /// target and the tests drive.
+    /// Run one tool call for the authenticated `machine`, with the project `facts` its
+    /// request carried: the seam `call_tool`, the fuzz target and the tests drive.
     ///
     /// # Errors
     ///
@@ -55,6 +56,7 @@ impl MemoryMcpServer {
     pub async fn dispatch(
         &self,
         machine: &Machine,
+        facts: &ProjectFacts,
         name: &str,
         args: Map<String, Value>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -63,6 +65,8 @@ impl MemoryMcpServer {
             embedder: self.embedder.as_ref(),
             user: &self.user,
             machine,
+            facts,
+            key: facts.key(machine),
         };
         tools::call_model_tool(name, args, &ctx)
             .await
@@ -115,19 +119,23 @@ impl ServerHandler for MemoryMcpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
-        let machine = calling_machine(&context.extensions)?;
+        let (machine, headers) = calling_request(&context.extensions)?;
+        let facts = ProjectFacts::from_headers(headers);
         let _in_flight = self.in_flight.read().await;
         let args = request.arguments.unwrap_or_default();
-        self.dispatch(machine, &request.name, args).await
+        self.dispatch(machine, &facts, &request.name, args).await
     }
 }
 
-/// The machine the HTTP layer authenticated. Without one, nothing runs: the router always
-/// supplies it, so its absence means a mount that bypassed the Bearer layer.
-fn calling_machine(extensions: &Extensions) -> Result<&Machine, ErrorData> {
+/// The machine the HTTP layer authenticated, and the request's headers. Without a machine,
+/// nothing runs: the router always supplies it, so its absence means a mount that bypassed
+/// the Bearer layer.
+fn calling_request(
+    extensions: &Extensions,
+) -> Result<(&Machine, &axum::http::HeaderMap), ErrorData> {
     extensions
         .get::<axum::http::request::Parts>()
-        .and_then(|parts| parts.extensions.get::<Machine>())
+        .and_then(|parts| Some((parts.extensions.get::<Machine>()?, &parts.headers)))
         .ok_or_else(|| ErrorData::internal_error("no authenticated machine on this call", None))
 }
 
@@ -162,7 +170,7 @@ mod tests {
 
     #[test]
     fn no_parts_is_refused() {
-        let err = calling_machine(&Extensions::new()).unwrap_err();
+        let err = calling_request(&Extensions::new()).unwrap_err();
         assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
     }
 
@@ -170,7 +178,7 @@ mod tests {
     fn parts_without_a_machine_are_refused() {
         let mut extensions = Extensions::new();
         extensions.insert(parts(None));
-        let err = calling_machine(&extensions).unwrap_err();
+        let err = calling_request(&extensions).unwrap_err();
         assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
     }
 
@@ -178,6 +186,6 @@ mod tests {
     fn the_authenticated_machine_is_returned() {
         let mut extensions = Extensions::new();
         extensions.insert(parts(Some(laptop())));
-        assert_eq!(calling_machine(&extensions).unwrap().as_str(), "laptop");
+        assert_eq!(calling_request(&extensions).unwrap().0.as_str(), "laptop");
     }
 }

@@ -49,7 +49,7 @@ pub use consolidation::ConsolidationStore;
 pub use ctx::MemoryCtx;
 pub use event_log::EventLog;
 pub use filter::{FactFilter, MetadataPredicate, TemporalFilter};
-pub use graph::{BootstrapIngestOutcome, FactGraph};
+pub use graph::{BootstrapIngestOutcome, FactGraph, ScopedWrite};
 pub use offload::spawn_join_err;
 pub use schema::SchemaManager;
 pub use search_index::SearchIndex;
