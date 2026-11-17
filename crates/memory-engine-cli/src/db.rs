@@ -221,6 +221,7 @@ pub fn open_engine_writable_with_dim(path: &Path, embed_dim: usize) -> anyhow::R
 /// holding its lock from before the file exists.
 pub fn create_engine(path: &Path, embed_dim: usize) -> anyhow::Result<Writable> {
     let lock = lock_store(path)?;
+    ensure_store_absent(path)?;
     let engine = MemoryEngine::builder(embed_dim)
         .path(path.to_path_buf())
         .build()?;
@@ -228,6 +229,18 @@ pub fn create_engine(path: &Path, embed_dim: usize) -> anyhow::Result<Writable> 
         engine,
         _lock: lock,
     })
+}
+
+/// Refuse `--create` over an existing database. Callers check early, before building their
+/// embedder; [`create_engine`] checks again under the lock, which another `--create` may
+/// have released after making the file.
+pub fn ensure_store_absent(path: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !path.exists(),
+        "database {} already exists — remove it first or omit --create",
+        path.display()
+    );
+    Ok(())
 }
 
 fn build_writable(path: &Path, embed_dim: usize, lock: StoreLock) -> anyhow::Result<Writable> {
@@ -364,6 +377,21 @@ mod tests {
             );
         }
         assert!(!fresh.exists(), "a refused create must create no database");
+    }
+
+    #[test]
+    fn create_refuses_a_store_that_appeared_before_its_lock() {
+        // Another `--create` can finish between a caller's early check and this lock.
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("memory.db");
+        drop(
+            memory_engine::MemoryEngine::builder(4)
+                .path(db.clone())
+                .build()
+                .unwrap(),
+        );
+        let err = create_engine(&db, 4).err().unwrap();
+        assert!(err.to_string().contains("already exists"), "{err}");
     }
 
     // --- #622: identity in the embedding_spaces registry ---
