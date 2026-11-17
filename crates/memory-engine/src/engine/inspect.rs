@@ -117,7 +117,16 @@ impl MemoryEngine {
 
         // Fetch the fact + (when present) its upcasted source event via the port.
         let fact = self.storage.get_fact(id).await?;
-        let state = explain::determine_state(&fact, chrono::Utc::now());
+        let state = match self.storage.tombstone(id).await? {
+            Some(stone) => crate::inspect::FactState::Expired {
+                reason: crate::inspect::types::ExpiredReason::Forgotten {
+                    at: stone.forgotten_at,
+                    reason: stone.reason,
+                    record_event_id: stone.record_event_id,
+                },
+            },
+            None => explain::determine_state(&fact, chrono::Utc::now()),
+        };
         let source_event = match fact.source_event_id {
             Some(event_id) => Some(self.storage.get_upcasted_event(event_id).await?),
             None => None,

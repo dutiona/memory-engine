@@ -47,6 +47,7 @@ mod query;
 mod reconstruct;
 mod restore;
 mod resume;
+mod retraction;
 mod scheduling;
 // Carved into `me-backend-sqlite` (Wave 2 #816 / S2, sub-PR 2b); re-exported so every
 // `snapshot::*` reference below (and `crate::engine::snapshot::*` elsewhere) keeps

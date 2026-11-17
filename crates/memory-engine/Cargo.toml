@@ -168,6 +168,10 @@ name = "restore_roundtrip_test"
 path = "../../tests/restore_roundtrip_test.rs"
 
 [[test]]
+name = "retraction_test"
+path = "../../tests/retraction_test.rs"
+
+[[test]]
 name = "roundtrip_test"
 path = "../../tests/roundtrip_test.rs"
 
