@@ -374,6 +374,7 @@ mod tests {
                 query_instruction: None,
                 mrl_dim: None,
                 embed_timeout: 5,
+                served: crate::commands::embedding_args::ServedArgs::default(),
             },
             scope: None,
             max_turns: 0,

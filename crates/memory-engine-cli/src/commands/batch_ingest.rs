@@ -883,6 +883,7 @@ not valid json
                 query_instruction: None,
                 mrl_dim: None,
                 embed_timeout: 5,
+                served: crate::commands::embedding_args::ServedArgs::default(),
             },
             batch_size: 100,
             create: true,

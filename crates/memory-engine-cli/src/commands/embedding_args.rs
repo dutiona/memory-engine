@@ -4,9 +4,11 @@
 //! bootstrap, consolidate) flattens [`EmbeddingArgs`] so the identity/asymmetry config
 //! keys match the MCP server's `[embedding]` section: `provider` (feeds the
 //! [`EmbeddingFingerprint`] that #614 enforces — replaces the old hardcoded `"ollama"`),
-//! `query_instruction` (asymmetric query prefix), and `mrl_dim` (Matryoshka truncation).
-//! Centralizing construction here keeps the native-vs-stored dimension handling — the
-//! same model as the MCP `build_embedder` — in one place.
+//! `query_instruction` (asymmetric query prefix), `mrl_dim` (Matryoshka truncation), and
+//! the four served-artifact keys (`artifact_sha256`, `pooling`, `normalization`,
+//! `max_input_tokens`; ADR 0015 §1). Centralizing construction here keeps the
+//! native-vs-stored dimension handling — the same model as the MCP
+//! `config::resolve_embedding` — in one place.
 
 use anyhow::Context;
 use memory_engine_embed::HttpEmbeddingProvider;
@@ -30,7 +32,7 @@ pub struct EmbeddingArgs {
     pub embed_model: Option<String>,
 
     /// Serving backend — operator-declared, feeds the embedding fingerprint (#614).
-    /// e.g. `ollama`, `tei`, `openai`. Defaults to `ollama` for back-compat.
+    /// e.g. `llama.cpp`, `ollama`, `tei`, `openai`. Defaults to `ollama` for back-compat.
     #[arg(long, env = "MEMORY_ENGINE_EMBED_PROVIDER", default_value = "ollama")]
     pub embed_provider: String,
 
@@ -59,6 +61,60 @@ pub struct EmbeddingArgs {
     /// HTTP timeout in seconds for embedding calls.
     #[arg(long, default_value = "30")]
     pub embed_timeout: u64,
+
+    /// The served artifact (ADR 0015 §1): all four flags or none.
+    #[command(flatten)]
+    pub served: ServedArgs,
+}
+
+/// The served-artifact flags (ADR 0015 §1), mirroring the MCP server's `[embedding]` keys.
+/// All four or none; validated by `ServedArtifact::from_parts`.
+#[derive(clap::Args, Clone, Default)]
+pub struct ServedArgs {
+    /// SHA-256 of the served model file (for llama.cpp, the GGUF), 64 lowercase hex digits.
+    #[arg(
+        long = "embed-artifact-sha256",
+        env = "MEMORY_ENGINE_EMBED_ARTIFACT_SHA256"
+    )]
+    pub artifact_sha256: Option<String>,
+
+    /// The pooling the server applies, e.g. `last`.
+    #[arg(long = "embed-pooling", env = "MEMORY_ENGINE_EMBED_POOLING")]
+    pub pooling: Option<String>,
+
+    /// The normalization of each output vector, e.g. `l2`.
+    #[arg(
+        long = "embed-normalization",
+        env = "MEMORY_ENGINE_EMBED_NORMALIZATION"
+    )]
+    pub normalization: Option<String>,
+
+    /// The maximum input length, in tokens, the server embeds.
+    #[arg(
+        long = "embed-max-input-tokens",
+        env = "MEMORY_ENGINE_EMBED_MAX_INPUT_TOKENS"
+    )]
+    pub max_input_tokens: Option<usize>,
+}
+
+impl ServedArgs {
+    /// The validated served artifact, or `None` when no flag is set.
+    fn resolve(&self) -> anyhow::Result<Option<memory_engine::ServedArtifact>> {
+        memory_engine::ServedArtifact::from_parts(
+            self.artifact_sha256.clone(),
+            self.pooling.clone(),
+            self.normalization.clone(),
+            self.max_input_tokens,
+        )
+        .map_err(|e| anyhow::anyhow!("invalid served-artifact flags: {e}"))
+    }
+
+    const fn any(&self) -> bool {
+        self.artifact_sha256.is_some()
+            || self.pooling.is_some()
+            || self.normalization.is_some()
+            || self.max_input_tokens.is_some()
+    }
 }
 
 impl EmbeddingArgs {
@@ -77,6 +133,10 @@ impl EmbeddingArgs {
         engine_dim: usize,
     ) -> anyhow::Result<Option<HttpEmbeddingProvider>> {
         match (self.embed_url.as_deref(), self.embed_model.as_deref()) {
+            // Served flags declare an identity to check; without an embedder there is none.
+            (None, None) if self.served.any() => {
+                anyhow::bail!("the served-artifact flags need --embed-url and --embed-model")
+            }
             (None, None) => Ok(None),
             (Some(url), Some(model)) => Ok(Some(self.build_inner(url, model, engine_dim)?)),
             _ => anyhow::bail!("--embed-url and --embed-model must be provided together"),
@@ -168,6 +228,9 @@ impl EmbeddingArgs {
         if let Some(instruction) = &self.query_instruction {
             provider = provider.with_query_instruction(instruction.clone());
         }
+        if let Some(served) = self.served.resolve()? {
+            provider = provider.with_served_artifact(served);
+        }
         if let Some(target) = self.mrl_dim {
             anyhow::ensure!(
                 target == engine_dim,
@@ -205,6 +268,7 @@ mod tests {
             query_instruction: None,
             mrl_dim: None,
             embed_timeout: 5,
+            served: ServedArgs::default(),
         }
     }
 
@@ -274,5 +338,51 @@ mod tests {
         let fp = a.build_optional(8).unwrap().unwrap().fingerprint();
         assert_eq!(fp.dim, 8, "stored dim is the truncated mrl_dim");
         assert_eq!(fp.matryoshka_base_dim, Some(16), "native dim recorded");
+    }
+
+    const SHA: &str = "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439";
+
+    fn served_args(sha: Option<&str>, pooling: Option<&str>) -> ServedArgs {
+        ServedArgs {
+            artifact_sha256: sha.map(String::from),
+            pooling: pooling.map(String::from),
+            normalization: Some("l2".into()),
+            max_input_tokens: Some(2048),
+        }
+    }
+
+    #[test]
+    fn served_flags_feed_the_fingerprint() {
+        let mut a = args(Some(URL), Some("m"));
+        a.served = served_args(Some(SHA), Some("last"));
+        let fp = a.build_required(8).unwrap().fingerprint();
+        let served = fp.served.expect("served artifact declared");
+        assert_eq!(served.artifact_sha256, SHA);
+        assert_eq!(served.pooling, "last");
+        assert_eq!(served.normalization, "l2");
+        assert_eq!(served.max_input_tokens, 2048);
+    }
+
+    #[test]
+    fn partial_served_flags_name_the_missing_fields() {
+        let mut a = args(Some(URL), Some("m"));
+        a.served = served_args(Some(SHA), None);
+        let err = a.build_optional(8).err().expect("must error").to_string();
+        assert!(err.contains("pooling"), "{err}");
+    }
+
+    #[test]
+    fn a_non_canonical_sha256_is_rejected() {
+        let mut a = args(Some(URL), Some("m"));
+        a.served = served_args(Some(&SHA.to_uppercase()), Some("last"));
+        assert!(a.build_optional(8).is_err());
+    }
+
+    #[test]
+    fn served_flags_without_an_embedder_are_refused() {
+        let mut a = args(None, None);
+        a.served = served_args(Some(SHA), Some("last"));
+        let err = a.build_optional(8).err().expect("must error").to_string();
+        assert!(err.contains("--embed-url"), "{err}");
     }
 }
