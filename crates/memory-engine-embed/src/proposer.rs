@@ -34,7 +34,7 @@ pub struct ProposerStats {
 
 /// HTTP `DeltaProposer` calling an Ollama `/api/generate` endpoint in JSON mode.
 ///
-/// See the [module docs](self) for the wire contract and determinism guarantees.
+/// It asks at temperature 0, so a fixed corpus yields a deterministic proposal.
 pub struct HttpDeltaProposer {
     client: reqwest::blocking::Client,
     endpoint: String,
