@@ -7,8 +7,8 @@
 ## Context
 
 The embedding provider is on the **hot path**: every `add_fact` embeds content
-([`ingest.rs`](../../src/engine/ingest.rs)), and every query embeds the query text
-at the consumer layer ([MCP `tools/mod.rs`](../../memory-engine-mcp/src/tools/mod.rs)).
+([`ingest.rs`](../../crates/memory-engine/src/engine/ingest.rs)), and every query embeds the query text
+at the consumer layer ([MCP `tools/mod.rs`](../../crates/memory-engine-mcp/src/tools/mod.rs)).
 Today an `all-MiniLM` model is served via an OpenAI/Ollama-compatible
 `/v1/embeddings` endpoint, consumed by the sync `HttpEmbeddingProvider`. Two problems
 drive this work:
