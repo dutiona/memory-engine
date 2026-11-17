@@ -761,9 +761,8 @@ impl FactGraph for SqliteBackend {
             .await?;
         // Post-commit HNSW notification. The fact is already durably committed, so this `?`
         // is the SOLE carve-out to this method's `Err ⟹ byte-identical` contract: it can
-        // only surface
-        // `IndexInconsistent` (the write SUCCEEDED, only the in-memory index is now
-        // stale — rebuild it, do NOT retry the write, which would duplicate the fact).
+        // only surface `IndexInconsistent` (the write SUCCEEDED, only the in-memory index is
+        // now stale — rebuild it, do NOT retry the write, which would duplicate the fact).
         #[cfg(feature = "ann")]
         self.hnsw_notify_insert(id, &embedding)?;
         Ok(id)

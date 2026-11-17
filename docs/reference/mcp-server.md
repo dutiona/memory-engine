@@ -203,9 +203,10 @@ Decoding, per header (`ME-Project-Root` → `root`, `-Dev-Root` → `dev_root`, 
     the next `/`) loses everything through its last `@`; then, when a `:` exists and the text before the first one
     holds no `/`, that text loses everything through its last `@`. This removes at least what the plugin's client
     removes.
-11. A scheme-form URL whose first path segment still holds an `@` after step 10 had a `/` in its userinfo
-    (`https://user:pa/ss@host/x`, from a client that did not encode `%`): `unstripped_userinfo`, so the secret is never
-    stored. An `@` in a later segment is a path (`https://github.com/example/a@b`).
+11. A scheme-form URL whose raw authority (before decoding, up to the first raw `/`) holds an `@` that the decoded
+    authority has lost had an encoded `/` in its userinfo (`https://user:pa%2Fss@host/x`, from a client that did not
+    encode `%`): `unstripped_userinfo`, so the secret is never stored. An `@` in the path is kept
+    (`https://github.com/example/a@b`).
 
 Remote key, tried on `upstream_url` then `origin_url`; a URL that gives none is ignored, and the next rule applies:
 
@@ -327,7 +328,9 @@ machine and `project`, the request's facts as decoded with the dropped ones, the
 ```
 
 `recall` adds `fact_ids`; `remember` adds `level`; `set_level` adds `fact_ids`, `level`, `from` and `to`; a failure adds
-`error` instead, the message as answered but with the userinfo of any URL it quotes removed. A `set_level` record is a move only when it carries `from` and `to`, which is what re-filing replays.
+`error` instead: the message as answered, with the userinfo of every URL it quotes removed, in the scheme form and in
+the scp form. A `set_level` record is a move only when it carries `from` and `to`, which is what re-filing replays.
+`remember`'s content is stored as the memory, as written: redacting it is #1024's.
 Records sit under the calling machine's bucket, except a valid `remember`'s, which sits under the Home it wrote to.
 
 ### Derived jobs: off in the server
