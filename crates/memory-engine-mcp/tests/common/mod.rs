@@ -244,15 +244,23 @@ impl ServerProcess {
         args: &[&str],
         envs: &[(&str, &str)],
     ) -> Self {
+        let config = dir.join("config.toml");
+        if !config.exists() {
+            write_config(dir, "");
+        }
+        let mut with_config = vec!["--config", config.to_str().unwrap()];
+        with_config.extend_from_slice(args);
+        Self::spawn_bare(dir, token_file, &with_config, envs)
+    }
+
+    /// Start the binary with only `--listen` and `--token-file` plus `args` and `envs`: no
+    /// `--config`, as a deployment configured entirely through its environment runs it.
+    pub fn spawn_bare(dir: &Path, token_file: &Path, args: &[&str], envs: &[(&str, &str)]) -> Self {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        let config = dir.join("config.toml");
-        if !config.exists() {
-            write_config(dir, "");
-        }
         let stderr = dir.join("stderr.log");
         let mut command = Command::new(env!("CARGO_BIN_EXE_memory-engine-mcp"));
         for (key, _) in std::env::vars_os() {
@@ -265,8 +273,6 @@ impl ServerProcess {
             .arg(format!("127.0.0.1:{port}"))
             .arg("--token-file")
             .arg(token_file)
-            .arg("--config")
-            .arg(&config)
             .args(args)
             .envs(envs.iter().copied())
             .stdin(Stdio::null())

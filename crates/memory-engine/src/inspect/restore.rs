@@ -886,6 +886,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn json_dump_restore_preserves_served_artifacts() {
+        // The served artifact (ADR 0015 §1) rides the flattened `embedding_spaces`
+        // snapshot section through dump and restore, for the active and a populating space.
+        struct Served(crate::types::EmbeddingFingerprint);
+        impl EmbeddingProvider for Served {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.5; DIM])
+            }
+            fn fingerprint(&self) -> crate::types::EmbeddingFingerprint {
+                self.0.clone()
+            }
+        }
+        let artifact = |digit: char| crate::types::ServedArtifact {
+            artifact_sha256: std::iter::repeat_n(digit, 64).collect(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        };
+        let active = crate::types::EmbeddingFingerprint::new("m", "llama.cpp", DIM)
+            .with_served(artifact('a'));
+        let populating = crate::types::EmbeddingFingerprint::new("m", "llama.cpp", DIM)
+            .with_served(artifact('b'));
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "alpha fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(Served(active.clone()))
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+        engine
+            .storage()
+            .begin_populating_space("shadow", &populating)
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("dump.json");
+        engine
+            .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
+            .unwrap();
+        let snapshot = read_snapshot(&json_path).unwrap();
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        restore_snapshot_into(&conn, &snapshot).unwrap();
+
+        let spaces = crate::store::embedding_spaces::list_spaces(&conn).unwrap();
+        let fingerprint_of = |name: &str| {
+            spaces
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.fingerprint.clone())
+        };
+        assert_eq!(fingerprint_of("default"), Some(active));
+        assert_eq!(fingerprint_of("shadow"), Some(populating));
+    }
+
     #[test]
     fn restore_translates_legacy_embedding_meta_config() {
         // A pre-#622 dump has no `embedding_spaces` section but carries the identity as a
@@ -1775,7 +1843,7 @@ mod tests {
     /// imported.
     ///
     /// Non-vacuous & mutation-proof: the expected values are *asymmetric* — the
-    /// managed `schema_version` must stay `CURRENT_SCHEMA_VERSION` ("14") and reject
+    /// managed `schema_version` must stay `CURRENT_SCHEMA_VERSION` and reject
     /// the snapshot's "9999"; `storage_epoch` must stay "1" and reject "9999"; the
     /// custom key must equal exactly "imported-value". If a regression dropped the
     /// `!MANAGED_CONFIG_KEYS.contains(...)` filter, `schema_version` would become

@@ -183,3 +183,92 @@ async fn embed_query_applies_both_prefix_and_mrl() {
     assert!((out[0] - 0.6).abs() < 1e-6, "got {}", out[0]);
     assert!((out[1] - 0.8).abs() < 1e-6, "got {}", out[1]);
 }
+
+// --- ME's pinned query instruction is the default (ADR 0015 §6, #1017) ---
+
+const PINNED: &str = "Instruct: Given a search query, retrieve relevant memory facts.\nQuery: ";
+
+/// A provider built by `new` alone (no instruction configured), against `uri`.
+fn default_provider(uri: &str) -> HttpEmbeddingProvider {
+    HttpEmbeddingProvider::new(
+        format!("{uri}/v1/embeddings"),
+        "m".into(),
+        "llama.cpp".into(),
+        None,
+        4,
+        5,
+    )
+    .unwrap()
+}
+
+#[test]
+fn default_query_instruction_is_the_adr_0015_string() {
+    assert_eq!(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION, PINNED);
+}
+
+#[tokio::test]
+async fn embed_query_applies_the_pinned_instruction_by_default() {
+    let server = MockServer::start().await;
+    mount_embeddings(&server, vec![vec![0.1, 0.2, 0.3, 0.4]]).await;
+    let uri = server.uri();
+    tokio::task::spawn_blocking(move || default_provider(&uri).embed_query("hello").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        sole_request_input(&server).await,
+        json!(format!("{PINNED}hello"))
+    );
+}
+
+#[tokio::test]
+async fn embed_query_batch_applies_the_pinned_instruction_by_default() {
+    let server = MockServer::start().await;
+    mount_embeddings(&server, vec![vec![0.1; 4], vec![0.2; 4]]).await;
+    let uri = server.uri();
+    tokio::task::spawn_blocking(move || {
+        default_provider(&uri)
+            .embed_query_batch(&["a", "b"])
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        sole_request_input(&server).await,
+        json!([format!("{PINNED}a"), format!("{PINNED}b")])
+    );
+}
+
+#[tokio::test]
+async fn documents_never_carry_the_default_instruction() {
+    let server = MockServer::start().await;
+    mount_embeddings(&server, vec![vec![0.1; 4]]).await;
+    let uri = server.uri();
+    tokio::task::spawn_blocking(move || default_provider(&uri).embed("hello").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(sole_request_input(&server).await, json!("hello"));
+
+    let server = MockServer::start().await;
+    mount_embeddings(&server, vec![vec![0.1; 4], vec![0.2; 4]]).await;
+    let uri = server.uri();
+    tokio::task::spawn_blocking(move || default_provider(&uri).embed_batch(&["a", "b"]).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(sole_request_input(&server).await, json!(["a", "b"]));
+}
+
+#[tokio::test]
+async fn an_empty_instruction_sends_queries_bare() {
+    let server = MockServer::start().await;
+    mount_embeddings(&server, vec![vec![0.1; 4]]).await;
+    let uri = server.uri();
+    tokio::task::spawn_blocking(move || {
+        default_provider(&uri)
+            .with_query_instruction("")
+            .embed_query("hello")
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(sole_request_input(&server).await, json!("hello"));
+}

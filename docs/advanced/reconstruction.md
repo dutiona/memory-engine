@@ -65,7 +65,16 @@ flowchart LR
     D --> E["PromoteOutcome\n+ HNSW rebuild (#624)"]
 ```
 
-`MemoryEngine::reconstruct(new_fingerprint, embedder)` drives the cycle. The embedder stays
+`MemoryEngine::reconstruct(new_fingerprint, embedder)` drives the cycle. The embedder must report
+exactly `new_fingerprint` (dimension first, then the whole identity, served artifact included,
+#1017): the vectors are stamped with that identity, so a provider reporting another one is
+refused before any backfill. Changing a served-artifact field (another model file, pooling,
+normalization or input limit) is a reconstruction like a model swap (ADR-0015 §4).
+
+The shadow space's name is the sanitized `model_provider_dim` slug for a plain identity (no MRL,
+`float32`, no served artifact), so a reconstruction an older binary left `populating` resumes;
+any other identity appends the first 16 hex digits of a BLAKE3 digest of the whole fingerprint,
+so identities that differ only in a non-slug field never collide on a name. The embedder stays
 engine-side; the storage port methods are pure DB operations (the backend does no network/LLM
 work). Embedding runs off the write lock under `spawn_blocking`, so a slow or `reqwest::blocking`
 provider neither parks the runtime nor panics with a nested-runtime error (the #631 pattern).

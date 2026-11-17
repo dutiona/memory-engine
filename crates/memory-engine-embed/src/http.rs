@@ -1,8 +1,8 @@
 use std::io::Read;
 
-use memory_engine::EmbeddingFingerprint;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
+use memory_engine::{EmbeddingFingerprint, ServedArtifact};
 
 /// Maximum embedding-response body the provider will buffer, in bytes (32 MiB).
 ///
@@ -55,11 +55,13 @@ enum EmbeddingResponse {
 /// # Asymmetric embedding (TEI / Qwen)
 ///
 /// Models like `Qwen3-Embedding` are **asymmetric**: queries take an instruction
-/// prefix, documents do not. Opt in via the chainable builders, which keep [`new`](Self::new)
-/// backward-compatible (symmetric providers ignore them):
+/// prefix, documents do not. Every provider prefixes queries with ME's pinned instruction
+/// ([`DEFAULT_QUERY_INSTRUCTION`](Self::DEFAULT_QUERY_INSTRUCTION), ADR 0015 §6) unless
+/// told otherwise; the chainable builders adjust it:
 ///
-/// - [`with_query_instruction`](Self::with_query_instruction): prepended by `embed_query*`,
-///   never by the document `embed*` path.
+/// - [`with_query_instruction`](Self::with_query_instruction): replaces the instruction
+///   `embed_query*` prepends (`""` for a symmetric model: no prefix). The document `embed*`
+///   path never carries one.
 /// - [`with_mrl_dim`](Self::with_mrl_dim): Matryoshka truncation — every returned vector is
 ///   sliced to `mrl_dim` and L2-renormalized, so `expected_dim` stays the *native* model
 ///   dimension while the engine stores (and [`fingerprint`](EmbeddingProvider::fingerprint)
@@ -70,7 +72,7 @@ enum EmbeddingResponse {
 /// ```no_run
 /// use memory_engine_embed::HttpEmbeddingProvider;
 ///
-/// // Symmetric (unchanged): document == query semantics.
+/// // Symmetric: opt out of the default query instruction, so document == query semantics.
 /// let provider = HttpEmbeddingProvider::new(
 ///     "http://localhost:11434/v1/embeddings".to_string(),
 ///     "nomic-embed-text".to_string(),
@@ -79,9 +81,11 @@ enum EmbeddingResponse {
 ///     768,
 ///     30,
 /// )
-/// .expect("failed to build HTTP client");
+/// .expect("failed to build HTTP client")
+/// .with_query_instruction("");
 ///
-/// // Asymmetric Qwen via TEI: native 1024-dim, MRL-truncated to 256, query-prefixed.
+/// // Asymmetric Qwen via TEI: native 1024-dim, MRL-truncated to 256; queries carry the
+/// // pinned instruction by default.
 /// let qwen = HttpEmbeddingProvider::new(
 ///     "http://localhost:8080/v1/embeddings".to_string(),
 ///     "Qwen/Qwen3-Embedding-0.6B".to_string(),
@@ -91,7 +95,6 @@ enum EmbeddingResponse {
 ///     30,
 /// )
 /// .expect("failed to build HTTP client")
-/// .with_query_instruction(HttpEmbeddingProvider::DEFAULT_QUERY_INSTRUCTION)
 /// .with_mrl_dim(256)
 /// .expect("mrl_dim must be within the native dimension");
 /// ```
@@ -104,10 +107,12 @@ pub struct HttpEmbeddingProvider {
     /// Native model dimension — the length validated against the raw HTTP response.
     /// When `mrl_dim` is set, the stored/reported dimension is `mrl_dim`, not this.
     expected_dim: usize,
-    /// Query-only instruction prefix (asymmetric models). `None` = symmetric.
-    query_instruction: Option<String>,
+    /// Query-only instruction prefix; empty = symmetric (no prefix).
+    query_instruction: String,
     /// Matryoshka truncation target. `None` = no truncation (store the native vector).
     mrl_dim: Option<usize>,
+    /// The declared served artifact (ADR 0015 §1), reported in the fingerprint.
+    served: Option<ServedArtifact>,
 }
 
 impl HttpEmbeddingProvider {
@@ -158,25 +163,66 @@ impl HttpEmbeddingProvider {
             provider,
             api_key,
             expected_dim,
-            query_instruction: None,
+            query_instruction: Self::DEFAULT_QUERY_INSTRUCTION.to_owned(),
             mrl_dim: None,
+            served: None,
         })
     }
 
-    /// Default query instruction for `Qwen3-Embedding` asymmetric retrieval.
+    /// ME's pinned query instruction (ADR 0015 §6), the default of every provider.
     ///
-    /// Qwen prepends this to **queries only**; documents are embedded prefix-free.
-    /// Consumers (MCP/CLI config) use this as the default when none is supplied.
+    /// It is prepended to **queries only**; documents are embedded prefix-free, so document
+    /// vectors stay comparable across stores. The Knowledge layer pins its own instruction.
     pub const DEFAULT_QUERY_INSTRUCTION: &'static str =
         "Instruct: Given a search query, retrieve relevant memory facts.\nQuery: ";
 
-    /// Set the query-only instruction prefix (asymmetric models like Qwen).
+    /// Replace the query-only instruction prefix (default:
+    /// [`DEFAULT_QUERY_INSTRUCTION`](Self::DEFAULT_QUERY_INSTRUCTION)).
     ///
     /// `embed_query` / `embed_query_batch` prepend it; the document `embed` /
-    /// `embed_batch` path is unaffected. Chainable; defaults to `None` (symmetric).
+    /// `embed_batch` path is unaffected. `""` means no prefix (a symmetric model). Chainable.
     #[must_use]
     pub fn with_query_instruction(mut self, instruction: impl Into<String>) -> Self {
-        self.query_instruction = Some(instruction.into());
+        self.query_instruction = instruction.into();
+        self
+    }
+
+    /// Declare the served artifact (ADR 0015 §1) this provider's server runs; it is
+    /// reported in [`fingerprint`](EmbeddingProvider::fingerprint), so the store records and
+    /// compares it. Pass a value obtained from [`ServedArtifact::from_parts`], the validating
+    /// boundary: the fields are public, so this method does not validate them again.
+    /// Chainable; defaults to `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use memory_engine::ServedArtifact;
+    /// use memory_engine::traits::EmbeddingProvider;
+    /// use memory_engine_embed::HttpEmbeddingProvider;
+    ///
+    /// let served = ServedArtifact::from_parts(
+    ///     Some("06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439".into()),
+    ///     Some("last".into()),
+    ///     Some("l2".into()),
+    ///     Some(2048),
+    /// )
+    /// .unwrap()
+    /// .unwrap();
+    /// let provider = HttpEmbeddingProvider::new(
+    ///     "http://localhost:8080/v1/embeddings".to_string(),
+    ///     "Qwen/Qwen3-Embedding-0.6B".to_string(),
+    ///     "llama.cpp".to_string(),
+    ///     None,
+    ///     1024,
+    ///     30,
+    /// )
+    /// .expect("failed to build HTTP client")
+    /// .with_served_artifact(served.clone());
+    /// assert_eq!(provider.fingerprint().served, Some(served));
+    /// ```
+    #[must_use]
+    pub fn with_served_artifact(mut self, served: ServedArtifact) -> Self {
+        self.served = Some(served);
         self
     }
 
@@ -551,35 +597,32 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             .collect()
     }
 
-    // A match on the Option reads clearer than a nested `map_or_else` closure pair here
-    // (same rationale as the response-format dispatch in `embed`).
-    #[allow(clippy::option_if_let_else)]
     fn embed_query(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
-        // Asymmetric: prepend the query instruction (if any), then embed as usual.
+        // Asymmetric: prepend the query instruction (none when empty), then embed as usual.
         // Documents never see the prefix.
-        match &self.query_instruction {
-            Some(prefix) => self.embed(&format!("{prefix}{text}")),
-            None => self.embed(text),
+        if self.query_instruction.is_empty() {
+            return self.embed(text);
         }
+        self.embed(&format!("{}{text}", self.query_instruction))
     }
 
-    #[allow(clippy::option_if_let_else)]
     fn embed_query_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
-        match &self.query_instruction {
-            Some(prefix) => {
-                let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
-                let refs: Vec<&str> = prefixed.iter().map(String::as_str).collect();
-                self.embed_batch(&refs)
-            }
-            None => self.embed_batch(texts),
+        if self.query_instruction.is_empty() {
+            return self.embed_batch(texts);
         }
+        let prefixed: Vec<String> = texts
+            .iter()
+            .map(|t| format!("{}{t}", self.query_instruction))
+            .collect();
+        let refs: Vec<&str> = prefixed.iter().map(String::as_str).collect();
+        self.embed_batch(&refs)
     }
 
     #[allow(clippy::option_if_let_else)]
     fn fingerprint(&self) -> EmbeddingFingerprint {
         // `dim` is the stored (post-MRL) dimension; `matryoshka_base_dim` records the
         // native dim only when truncation is active.
-        match self.mrl_dim {
+        let fp = match self.mrl_dim {
             Some(stored_dim) => EmbeddingFingerprint::with_matryoshka(
                 self.model.clone(),
                 self.provider.clone(),
@@ -591,6 +634,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
                 self.provider.clone(),
                 self.expected_dim,
             ),
+        };
+        EmbeddingFingerprint {
+            served: self.served.clone(),
+            ..fp
         }
     }
 }
@@ -1031,6 +1078,27 @@ mod tests {
         assert_eq!(fp.model, "Qwen/Qwen3-Embedding-0.6B");
         assert_eq!(fp.provider, "tei");
         assert_eq!(fp.element_type, "float32");
+    }
+
+    #[test]
+    fn fingerprint_reports_declared_served_artifact() {
+        let served = memory_engine::ServedArtifact {
+            artifact_sha256: "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
+                .into(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        };
+        assert_eq!(tei_provider(1024).fingerprint().served, None);
+        let plain = tei_provider(1024).with_served_artifact(served.clone());
+        assert_eq!(plain.fingerprint().served.as_ref(), Some(&served));
+        let mrl = tei_provider(1024)
+            .with_mrl_dim(256)
+            .unwrap()
+            .with_served_artifact(served.clone());
+        let fp = mrl.fingerprint();
+        assert_eq!(fp.served, Some(served));
+        assert_eq!(fp.matryoshka_base_dim, Some(1024));
     }
 
     #[test]

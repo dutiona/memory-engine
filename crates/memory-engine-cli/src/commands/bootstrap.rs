@@ -184,7 +184,7 @@ pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyho
             "database {} already exists — remove it first or omit --create",
             db.display()
         );
-        let embedder = args.embed.build_required(embed_dim)?;
+        let embedder = args.embed.build_required_blocking(embed_dim).await?;
         let engine = MemoryEngine::builder(embed_dim)
             .path(db.to_path_buf())
             .build()?;
@@ -198,7 +198,10 @@ pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyho
         } else {
             open_engine_writable(db)?
         };
-        let embedder = args.embed.build_required(engine.embed_dim())?;
+        let embedder = args
+            .embed
+            .build_required_blocking(engine.embed_dim())
+            .await?;
         (engine, embedder)
     };
 
@@ -371,6 +374,7 @@ mod tests {
                 query_instruction: None,
                 mrl_dim: None,
                 embed_timeout: 5,
+                served: crate::commands::embedding_args::ServedArgs::default(),
             },
             scope: None,
             max_turns: 0,

@@ -7,8 +7,8 @@
 ## Context
 
 The embedding provider is on the **hot path**: every `add_fact` embeds content
-([`ingest.rs`](../../src/engine/ingest.rs)), and every query embeds the query text
-at the consumer layer ([MCP `tools/mod.rs`](../../memory-engine-mcp/src/tools/mod.rs)).
+([`ingest.rs`](../../crates/memory-engine/src/engine/ingest.rs)), and every query embeds the query text
+at the consumer layer ([MCP `tools/mod.rs`](../../crates/memory-engine-mcp/src/tools/mod.rs)).
 Today an `all-MiniLM` model is served via an OpenAI/Ollama-compatible
 `/v1/embeddings` endpoint, consumed by the sync `HttpEmbeddingProvider`. Two problems
 drive this work:
@@ -149,9 +149,13 @@ default, batch efficiency is the opt-in.
 
 `HttpEmbeddingProvider` already speaks OpenAI `/v1/embeddings` = TEI's API verbatim. Add:
 
-- `query_instruction: Option<String>` — Qwen's query-only prefix (default:
+- `query_instruction` — Qwen's query-only prefix (default:
   `"Instruct: Given a search query, retrieve relevant memory facts.\nQuery: "`).
   `embed_query*` prepend it; `embed*` (documents) stay prefix-free.
+  > **Status: delivered, then amended (#1017).** The default is now applied by
+  > `HttpEmbeddingProvider::new` itself (ADR-0015 §6), and `""` opts a symmetric model out;
+  > the served artifact (`artifact_sha256`, `pooling`, `normalization`, `max_input_tokens`)
+  > joined the fingerprint (ADR-0015 §1).
 - `mrl_dim: Option<usize>` — when set, truncate the returned vector and **renormalize to
   unit L2**. Lives provider-side so the engine `dim` matches stored vectors.
 - `fingerprint()` → `{ model, provider: "tei", dim, matryoshka_base_dim, element_type: "float32" }`.

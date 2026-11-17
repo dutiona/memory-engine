@@ -53,7 +53,7 @@ mod schema;
 // `SchemaManager::raw_exec` failure-injection seam, which since #816 A1 lives behind the
 // `test-util` feature (a cross-crate trait method can't ride `cfg(test)`). Every test here
 // is `#[ignore]` (needs a Docker Postgres), so run it with
-// `--features backend-postgres,test-util -- --ignored`.
+// `cargo test -p me-backend-postgres --features test-util -- --ignored`.
 #[cfg(all(test, feature = "test-util"))]
 mod tests;
 

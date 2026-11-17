@@ -142,7 +142,11 @@ CREATE TABLE IF NOT EXISTS embedding_spaces (
     element_type        TEXT    NOT NULL DEFAULT 'float32',
     status              TEXT    NOT NULL DEFAULT 'active'
                         CHECK(status IN ('active', 'populating', 'deprecated')),
-    created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+    artifact_sha256     TEXT,
+    pooling             TEXT,
+    normalization       TEXT,
+    max_input_tokens    INTEGER
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_spaces_one_active

@@ -490,3 +490,35 @@ pub(super) fn migrate_v13_to_v14(tx: &Transaction) -> Result<()> {
     .map_err(StorageError::backend)?;
     Ok(())
 }
+
+/// Add the served-artifact columns to `embedding_spaces` (ADR 0015 §1, #1017).
+///
+/// Purely additive: four nullable columns, no DEFAULT, no CHECK, no data move, so every
+/// recorded identity reads back with its served artifact absent (all four NULL; decode
+/// rejects a partial row). `ADD COLUMN`, not a table rebuild: rebuilding the parent of
+/// `fact_vectors … ON DELETE CASCADE` would delete the retained vectors. Each column is
+/// added only if missing, because tests roll a current schema back and re-run the chain.
+/// Frozen DDL snapshot — never reference the live `TABLES_DDL`.
+pub(super) fn migrate_v14_to_v15(tx: &Transaction) -> Result<()> {
+    for (column, decl) in [
+        ("artifact_sha256", "TEXT"),
+        ("pooling", "TEXT"),
+        ("normalization", "TEXT"),
+        ("max_input_tokens", "INTEGER"),
+    ] {
+        let present: bool = tx
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('embedding_spaces') WHERE name = ?1",
+                [column],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::backend)?;
+        if !present {
+            tx.execute_batch(&format!(
+                "ALTER TABLE embedding_spaces ADD COLUMN {column} {decl};"
+            ))
+            .map_err(StorageError::backend)?;
+        }
+    }
+    Ok(())
+}

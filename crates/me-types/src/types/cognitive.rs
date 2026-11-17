@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::types::facts::{FactId, FactType};
 use crate::types::provenance::PromotionProvenance;
 
@@ -172,9 +173,11 @@ pub struct PromoteOutcome {
 /// # Cross-layer parity contract
 ///
 /// The field **names** (`model`, `provider`, `dim`, `matryoshka_base_dim`,
-/// `element_type`) are **normative** and shared verbatim with the `knowledge-base`
-/// repository's `embed_spaces` registry. Do not rename without updating ADR 0015 in
-/// both repos. `model` is an operator-declared slug, not a weight hash.
+/// `element_type`, and the served artifact's `artifact_sha256`, `pooling`,
+/// `normalization`, `max_input_tokens`) are **normative** and shared verbatim with the
+/// `knowledge-base` repository's `embed_spaces` registry. Do not rename without updating
+/// ADR 0015 in both repos. `model` and `artifact_sha256` are operator-declared, never
+/// probed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EmbeddingFingerprint {
     /// Model identity slug, e.g. `"Qwen/Qwen3-Embedding-0.6B"`. Operator-declared.
@@ -187,6 +190,11 @@ pub struct EmbeddingFingerprint {
     pub matryoshka_base_dim: Option<usize>,
     /// Vector element storage type: `"float32"` today (reserved: `"int8"`).
     pub element_type: String,
+    /// The served artifact (ADR 0015 §1), or `None` for a store recorded without one. An
+    /// absent artifact equals only another absent one. Omitted from JSON when absent, so
+    /// unserved identities keep their five-key form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served: Option<ServedArtifact>,
 }
 
 impl EmbeddingFingerprint {
@@ -205,7 +213,33 @@ impl EmbeddingFingerprint {
             dim,
             matryoshka_base_dim: None,
             element_type: Self::ELEMENT_F32.to_string(),
+            served: None,
         }
+    }
+
+    /// Attach a served artifact (ADR 0015 §1) to this identity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::types::{EmbeddingFingerprint, ServedArtifact};
+    ///
+    /// let served = ServedArtifact::from_parts(
+    ///     Some("06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439".into()),
+    ///     Some("last".into()),
+    ///     Some("l2".into()),
+    ///     Some(2048),
+    /// )
+    /// .unwrap()
+    /// .unwrap();
+    /// let fp = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", 1024)
+    ///     .with_served(served);
+    /// assert!(fp.served.is_some());
+    /// ```
+    #[must_use]
+    pub fn with_served(mut self, served: ServedArtifact) -> Self {
+        self.served = Some(served);
+        self
     }
 
     /// Construct a fingerprint for a Matryoshka-truncated `float32` embedding space,
@@ -220,6 +254,105 @@ impl EmbeddingFingerprint {
         Self {
             matryoshka_base_dim: Some(base_dim),
             ..Self::new(model, provider, dim)
+        }
+    }
+}
+
+/// The **served artifact** of an embedding identity (ADR 0015 §1).
+///
+/// It is what the serving backend does to a model beyond its slug. The same slug served
+/// from another file (quantization), with another pooling or normalization, or with another
+/// input limit gives other vectors.
+///
+/// All four fields or none: a sub-struct makes a half-declared artifact unrepresentable.
+/// Build one from operator configuration through [`from_parts`](Self::from_parts), the
+/// single validating boundary; decoders of a stored identity construct it directly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServedArtifact {
+    /// SHA-256 of the single model file the provider serves (for llama.cpp, the GGUF), as
+    /// 64 lowercase hex digits. Operator-declared; never hashed at runtime.
+    pub artifact_sha256: String,
+    /// Pooling the server applies, e.g. `"last"`.
+    pub pooling: String,
+    /// Normalization of each output vector, e.g. `"l2"`.
+    pub normalization: String,
+    /// Maximum input length, in tokens, the server embeds.
+    pub max_input_tokens: usize,
+}
+
+impl ServedArtifact {
+    /// Validate an operator's declaration: all four parts or none.
+    ///
+    /// Returns `Ok(None)` when every part is absent and `Ok(Some(_))` when every part is
+    /// present and valid: `artifact_sha256` is exactly 64 lowercase hex digits (copies are
+    /// compared byte for byte across repositories, so case matters), `pooling` and
+    /// `normalization` are non-empty, and `max_input_tokens` is at least 1.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::Conflict`] with [`ConflictError::PolicyParameter`] naming the missing
+    /// fields of a partial declaration, or the invalid value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::types::ServedArtifact;
+    ///
+    /// assert!(ServedArtifact::from_parts(None, None, None, None).unwrap().is_none());
+    /// assert!(ServedArtifact::from_parts(None, Some("last".into()), None, None).is_err());
+    /// ```
+    pub fn from_parts(
+        artifact_sha256: Option<String>,
+        pooling: Option<String>,
+        normalization: Option<String>,
+        max_input_tokens: Option<usize>,
+    ) -> Result<Option<Self>> {
+        let invalid = |msg: String| MemoryError::Conflict(ConflictError::PolicyParameter(msg));
+        match (artifact_sha256, pooling, normalization, max_input_tokens) {
+            (None, None, None, None) => Ok(None),
+            (Some(artifact_sha256), Some(pooling), Some(normalization), Some(max_input_tokens)) => {
+                if artifact_sha256.len() != 64
+                    || !artifact_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(invalid(format!(
+                        "served artifact: artifact_sha256 must be 64 lowercase hex digits, got {artifact_sha256:?}"
+                    )));
+                }
+                if pooling.is_empty() || normalization.is_empty() {
+                    return Err(invalid(
+                        "served artifact: pooling and normalization must be non-empty".into(),
+                    ));
+                }
+                if max_input_tokens == 0 {
+                    return Err(invalid(
+                        "served artifact: max_input_tokens must be at least 1".into(),
+                    ));
+                }
+                Ok(Some(Self {
+                    artifact_sha256,
+                    pooling,
+                    normalization,
+                    max_input_tokens,
+                }))
+            }
+            (sha, pooling, normalization, tokens) => {
+                let missing: Vec<&str> = [
+                    ("artifact_sha256", sha.is_none()),
+                    ("pooling", pooling.is_none()),
+                    ("normalization", normalization.is_none()),
+                    ("max_input_tokens", tokens.is_none()),
+                ]
+                .into_iter()
+                .filter_map(|(name, absent)| absent.then_some(name))
+                .collect();
+                Err(invalid(format!(
+                    "served artifact is all four fields or none; missing: {}",
+                    missing.join(", ")
+                )))
+            }
         }
     }
 }
@@ -505,5 +638,141 @@ mod tests {
         );
         let back: EmbeddingFingerprint = serde_json::from_value(v).unwrap();
         assert_eq!(fp, back);
+    }
+
+    const SHA: &str = "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439";
+
+    fn served() -> ServedArtifact {
+        ServedArtifact {
+            artifact_sha256: SHA.into(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        }
+    }
+
+    #[test]
+    fn served_artifact_is_compared_field_by_field() {
+        let plain = EmbeddingFingerprint::new("m", "p", 768);
+        let pinned = plain.clone().with_served(served());
+        assert_ne!(plain, pinned, "absent never equals declared");
+        assert_eq!(pinned, plain.clone().with_served(served()));
+        let mutations: [fn(&mut ServedArtifact); 4] = [
+            |s| s.artifact_sha256 = "0".repeat(64),
+            |s| s.pooling = "mean".into(),
+            |s| s.normalization = "none".into(),
+            |s| s.max_input_tokens = 8192,
+        ];
+        for mutate in mutations {
+            let mut other = served();
+            mutate(&mut other);
+            assert_ne!(pinned, plain.clone().with_served(other));
+        }
+    }
+
+    #[test]
+    fn unserved_fingerprint_keeps_the_five_key_json_and_reads_legacy_json() {
+        let plain = EmbeddingFingerprint::new("m", "p", 8);
+        let v = serde_json::to_value(&plain).unwrap();
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            5,
+            "no `served` key when absent: {v}"
+        );
+        let legacy = r#"{"model":"m","provider":"p","dim":8,"matryoshka_base_dim":null,"element_type":"float32"}"#;
+        let back: EmbeddingFingerprint = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back, plain);
+        assert!(back.served.is_none());
+    }
+
+    #[test]
+    fn served_fingerprint_nests_its_artifact_under_served() {
+        let pinned = EmbeddingFingerprint::new("m", "p", 8).with_served(served());
+        let v = serde_json::to_value(&pinned).unwrap();
+        let mut keys: Vec<&str> = v["served"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "artifact_sha256",
+                "max_input_tokens",
+                "normalization",
+                "pooling"
+            ]
+        );
+        let back: EmbeddingFingerprint = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(back, pinned);
+        let mut unknown = v;
+        unknown["served"]["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<EmbeddingFingerprint>(unknown).is_err());
+    }
+
+    #[test]
+    fn space_snapshot_round_trips_a_served_fingerprint_through_flatten() {
+        let snapshot = crate::types::inspect::EmbeddingSpaceSnapshot {
+            name: "default".into(),
+            status: "active".into(),
+            fingerprint: EmbeddingFingerprint::new("m", "p", 8).with_served(served()),
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let back: crate::types::inspect::EmbeddingSpaceSnapshot =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(back.fingerprint, snapshot.fingerprint);
+    }
+
+    #[test]
+    fn from_parts_requires_all_four_or_none() {
+        assert_eq!(
+            ServedArtifact::from_parts(None, None, None, None).unwrap(),
+            None
+        );
+        let all = ServedArtifact::from_parts(
+            Some(SHA.into()),
+            Some("last".into()),
+            Some("l2".into()),
+            Some(2048),
+        )
+        .unwrap();
+        assert_eq!(all, Some(served()));
+        let err = ServedArtifact::from_parts(Some(SHA.into()), None, None, None)
+            .unwrap_err()
+            .to_string();
+        for field in ["pooling", "normalization", "max_input_tokens"] {
+            assert!(err.contains(field), "{err}");
+        }
+        assert!(matches!(
+            ServedArtifact::from_parts(Some(SHA.into()), None, None, None),
+            Err(crate::error::MemoryError::Conflict(
+                crate::error::ConflictError::PolicyParameter(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn from_parts_validates_its_values() {
+        let build = |sha: &str, tokens: usize| {
+            ServedArtifact::from_parts(
+                Some(sha.into()),
+                Some("last".into()),
+                Some("l2".into()),
+                Some(tokens),
+            )
+        };
+        assert!(build(&SHA.to_uppercase(), 2048).is_err(), "uppercase hex");
+        assert!(build(&SHA[..63], 2048).is_err(), "63 digits");
+        assert!(build(&format!("{}g", &SHA[..63]), 2048).is_err(), "non-hex");
+        assert!(build(SHA, 0).is_err(), "zero tokens");
+        let empty = ServedArtifact::from_parts(
+            Some(SHA.into()),
+            Some(String::new()),
+            Some("l2".into()),
+            Some(2048),
+        );
+        assert!(empty.is_err(), "empty pooling");
     }
 }

@@ -10,7 +10,7 @@
 //! `test-util` feature too. Run it with:
 //!
 //! ```text
-//! cargo test -p memory-engine --features backend-postgres,test-util -- --ignored
+//! cargo test -p me-backend-postgres --features test-util -- --ignored
 //! ```
 //!
 //! The `migrated_backend` helper (a `pgvector/pgvector:pg17` container + a migrated

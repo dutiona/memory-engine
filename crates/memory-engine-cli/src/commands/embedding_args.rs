@@ -4,9 +4,11 @@
 //! bootstrap, consolidate) flattens [`EmbeddingArgs`] so the identity/asymmetry config
 //! keys match the MCP server's `[embedding]` section: `provider` (feeds the
 //! [`EmbeddingFingerprint`] that #614 enforces — replaces the old hardcoded `"ollama"`),
-//! `query_instruction` (asymmetric query prefix), and `mrl_dim` (Matryoshka truncation).
-//! Centralizing construction here keeps the native-vs-stored dimension handling — the
-//! same model as the MCP `build_embedder` — in one place.
+//! `query_instruction` (asymmetric query prefix), `mrl_dim` (Matryoshka truncation), and
+//! the four served-artifact keys (`artifact_sha256`, `pooling`, `normalization`,
+//! `max_input_tokens`; ADR 0015 §1). Centralizing construction here keeps the
+//! native-vs-stored dimension handling — the same model as the MCP
+//! `config::resolve_embedding` — in one place.
 
 use anyhow::Context;
 use memory_engine_embed::HttpEmbeddingProvider;
@@ -30,12 +32,12 @@ pub struct EmbeddingArgs {
     pub embed_model: Option<String>,
 
     /// Serving backend — operator-declared, feeds the embedding fingerprint (#614).
-    /// e.g. `ollama`, `tei`, `openai`. Defaults to `ollama` for back-compat.
+    /// e.g. `llama.cpp`, `ollama`, `tei`, `openai`. Defaults to `ollama` for back-compat.
     #[arg(long, env = "MEMORY_ENGINE_EMBED_PROVIDER", default_value = "ollama")]
     pub embed_provider: String,
 
     /// Bearer API key for the embedding endpoint.
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY")]
+    #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY", hide_env_values = true)]
     pub embed_api_key: Option<String>,
 
     /// Native model dimension before MRL truncation. Required only with `--mrl-dim`
@@ -45,19 +47,74 @@ pub struct EmbeddingArgs {
     #[arg(long)]
     pub native_dim: Option<usize>,
 
-    /// Query-only instruction prefix for asymmetric models (e.g. Qwen). Applied by the
-    /// query path's `embed_query`; document embedding is never prefixed.
+    /// Query-only instruction prefix, applied by the query path's `embed_query`; document
+    /// embedding is never prefixed. Absent = ME's pinned instruction (ADR 0015 §6); `''` =
+    /// no prefix, for a symmetric model.
     #[arg(long)]
     pub query_instruction: Option<String>,
 
     /// Matryoshka (MRL) truncation target. Must equal the engine `embed_dim` (the engine
-    /// stores post-truncation vectors); `--embed-dimensions` gives the native length.
+    /// stores post-truncation vectors); `--native-dim` gives the native length.
     #[arg(long)]
     pub mrl_dim: Option<usize>,
 
     /// HTTP timeout in seconds for embedding calls.
     #[arg(long, default_value = "30")]
     pub embed_timeout: u64,
+
+    /// The served artifact (ADR 0015 §1): all four flags or none.
+    #[command(flatten)]
+    pub served: ServedArgs,
+}
+
+/// The served-artifact flags (ADR 0015 §1), mirroring the MCP server's `[embedding]` keys.
+/// All four or none; validated by `ServedArtifact::from_parts`.
+#[derive(clap::Args, Clone, Default)]
+pub struct ServedArgs {
+    /// SHA-256 of the served model file (for llama.cpp, the GGUF), 64 lowercase hex digits.
+    #[arg(
+        long = "embed-artifact-sha256",
+        env = "MEMORY_ENGINE_EMBED_ARTIFACT_SHA256"
+    )]
+    pub artifact_sha256: Option<String>,
+
+    /// The pooling the server applies, e.g. `last`.
+    #[arg(long = "embed-pooling", env = "MEMORY_ENGINE_EMBED_POOLING")]
+    pub pooling: Option<String>,
+
+    /// The normalization of each output vector, e.g. `l2`.
+    #[arg(
+        long = "embed-normalization",
+        env = "MEMORY_ENGINE_EMBED_NORMALIZATION"
+    )]
+    pub normalization: Option<String>,
+
+    /// The maximum input length, in tokens, the server embeds.
+    #[arg(
+        long = "embed-max-input-tokens",
+        env = "MEMORY_ENGINE_EMBED_MAX_INPUT_TOKENS"
+    )]
+    pub max_input_tokens: Option<usize>,
+}
+
+impl ServedArgs {
+    /// The validated served artifact, or `None` when no flag is set.
+    fn resolve(&self) -> anyhow::Result<Option<memory_engine::ServedArtifact>> {
+        memory_engine::ServedArtifact::from_parts(
+            self.artifact_sha256.clone(),
+            self.pooling.clone(),
+            self.normalization.clone(),
+            self.max_input_tokens,
+        )
+        .map_err(|e| anyhow::anyhow!("invalid served-artifact flags: {e}"))
+    }
+
+    const fn any(&self) -> bool {
+        self.artifact_sha256.is_some()
+            || self.pooling.is_some()
+            || self.normalization.is_some()
+            || self.max_input_tokens.is_some()
+    }
 }
 
 impl EmbeddingArgs {
@@ -76,6 +133,10 @@ impl EmbeddingArgs {
         engine_dim: usize,
     ) -> anyhow::Result<Option<HttpEmbeddingProvider>> {
         match (self.embed_url.as_deref(), self.embed_model.as_deref()) {
+            // Served flags declare an identity to check; without an embedder there is none.
+            (None, None) if self.served.any() => {
+                anyhow::bail!("the served-artifact flags need --embed-url and --embed-model")
+            }
             (None, None) => Ok(None),
             (Some(url), Some(model)) => Ok(Some(self.build_inner(url, model, engine_dim)?)),
             _ => anyhow::bail!("--embed-url and --embed-model must be provided together"),
@@ -91,6 +152,40 @@ impl EmbeddingArgs {
     pub fn build_required(&self, engine_dim: usize) -> anyhow::Result<HttpEmbeddingProvider> {
         self.build_optional(engine_dim)?
             .context("--embed-url and --embed-model are required for this command")
+    }
+
+    /// [`build_required`](Self::build_required) on a blocking thread.
+    ///
+    /// A blocking reqwest client builds and drops a runtime of its own in debug builds, which
+    /// panics on the async executor; async commands build the provider through this.
+    ///
+    /// # Errors
+    ///
+    /// As [`build_required`](Self::build_required), or if the blocking task fails to join.
+    pub async fn build_required_blocking(
+        &self,
+        engine_dim: usize,
+    ) -> anyhow::Result<HttpEmbeddingProvider> {
+        let args = self.clone();
+        tokio::task::spawn_blocking(move || args.build_required(engine_dim))
+            .await
+            .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))?
+    }
+
+    /// [`build_optional`](Self::build_optional) on a blocking thread, for the same reason as
+    /// [`build_required_blocking`](Self::build_required_blocking).
+    ///
+    /// # Errors
+    ///
+    /// As [`build_optional`](Self::build_optional), or if the blocking task fails to join.
+    pub async fn build_optional_blocking(
+        &self,
+        engine_dim: usize,
+    ) -> anyhow::Result<Option<HttpEmbeddingProvider>> {
+        let args = self.clone();
+        tokio::task::spawn_blocking(move || args.build_optional(engine_dim))
+            .await
+            .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))?
     }
 
     /// Construct the provider, wiring `provider`, `query_instruction`, and `mrl_dim`.
@@ -133,6 +228,9 @@ impl EmbeddingArgs {
         if let Some(instruction) = &self.query_instruction {
             provider = provider.with_query_instruction(instruction.clone());
         }
+        if let Some(served) = self.served.resolve()? {
+            provider = provider.with_served_artifact(served);
+        }
         if let Some(target) = self.mrl_dim {
             anyhow::ensure!(
                 target == engine_dim,
@@ -170,6 +268,7 @@ mod tests {
             query_instruction: None,
             mrl_dim: None,
             embed_timeout: 5,
+            served: ServedArgs::default(),
         }
     }
 
@@ -239,5 +338,51 @@ mod tests {
         let fp = a.build_optional(8).unwrap().unwrap().fingerprint();
         assert_eq!(fp.dim, 8, "stored dim is the truncated mrl_dim");
         assert_eq!(fp.matryoshka_base_dim, Some(16), "native dim recorded");
+    }
+
+    const SHA: &str = "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439";
+
+    fn served_args(sha: Option<&str>, pooling: Option<&str>) -> ServedArgs {
+        ServedArgs {
+            artifact_sha256: sha.map(String::from),
+            pooling: pooling.map(String::from),
+            normalization: Some("l2".into()),
+            max_input_tokens: Some(2048),
+        }
+    }
+
+    #[test]
+    fn served_flags_feed_the_fingerprint() {
+        let mut a = args(Some(URL), Some("m"));
+        a.served = served_args(Some(SHA), Some("last"));
+        let fp = a.build_required(8).unwrap().fingerprint();
+        let served = fp.served.expect("served artifact declared");
+        assert_eq!(served.artifact_sha256, SHA);
+        assert_eq!(served.pooling, "last");
+        assert_eq!(served.normalization, "l2");
+        assert_eq!(served.max_input_tokens, 2048);
+    }
+
+    #[test]
+    fn partial_served_flags_name_the_missing_fields() {
+        let mut a = args(Some(URL), Some("m"));
+        a.served = served_args(Some(SHA), None);
+        let err = a.build_optional(8).err().expect("must error").to_string();
+        assert!(err.contains("pooling"), "{err}");
+    }
+
+    #[test]
+    fn a_non_canonical_sha256_is_rejected() {
+        let mut a = args(Some(URL), Some("m"));
+        a.served = served_args(Some(&SHA.to_uppercase()), Some("last"));
+        assert!(a.build_optional(8).is_err());
+    }
+
+    #[test]
+    fn served_flags_without_an_embedder_are_refused() {
+        let mut a = args(None, None);
+        a.served = served_args(Some(SHA), Some("last"));
+        let err = a.build_optional(8).err().expect("must error").to_string();
+        assert!(err.contains("--embed-url"), "{err}");
     }
 }

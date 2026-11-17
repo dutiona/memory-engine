@@ -31,7 +31,8 @@ memory-engine-mcp --listen 127.0.0.1:<port> --token-file /path/to/tokens --confi
 
 # With CLI args
 memory-engine-mcp --listen 127.0.0.1:<port> --token-file /path/to/tokens \
-  --db-path /path/to/memory.db --embed-url http://localhost:11434/v1/embeddings --embed-model nomic-embed-text
+  --db-path /path/to/memory.db --embed-url http://localhost:11434/v1/embeddings --embed-model nomic-embed-text \
+  --embed-query-instruction ''   # nomic is symmetric: opt out of ME's default query instruction
 
 # With env vars
 MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens \
@@ -44,6 +45,10 @@ MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens \
 | `--token-file` (required) | `MEMORY_MCP_TOKEN_FILE` | The token-hash file (below) |
 | `--allowed-host` (repeatable) | `MEMORY_MCP_ALLOWED_HOSTS` (comma list, no spaces) | A `Host` value served besides loopback |
 | `--backup-dir` | `MEMORY_MCP_BACKUP_DIR` | Overrides `engine.backup_dir` |
+| `--embed-dim` | `MEMORY_MCP_EMBED_DIM` | Overrides `engine.embed_dim` (lets a blank store start without a TOML file) |
+| `--embed-url`, `--embed-model`, `--embed-api-key`, `--embed-provider` | `MEMORY_MCP_EMBED_URL`, `_MODEL`, `_API_KEY`, `_PROVIDER` | Override the `[embedding]` keys of the same meaning |
+| `--embed-query-instruction` | `MEMORY_MCP_EMBED_QUERY_INSTRUCTION` | Overrides `query_instruction`; `''` for a symmetric model |
+| `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens` | `MEMORY_MCP_EMBED_ARTIFACT_SHA256`, `_POOLING`, `_NORMALIZATION`, `_MAX_INPUT_TOKENS` | Override the served-artifact keys (below) |
 
 ### Configuration
 
@@ -57,12 +62,39 @@ backup_dir = "/path/to/backups"  # Optional — an existing directory; a migrati
 endpoint = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
 api_key = "sk-..."   # Optional — for authenticated endpoints
-provider = "ollama"  # Serving backend, e.g. ollama | tei | openai (default: ollama). Free-form; feeds the fingerprint.
+provider = "ollama"  # Serving backend, e.g. llama.cpp | ollama | tei | openai (default: ollama). Free-form; feeds the fingerprint.
 dimensions = 384     # Native model dimension (validated against the raw response)
+query_instruction = ""  # nomic is symmetric: no query prefix (absent = ME's pinned instruction)
 timeout_secs = 30
 ```
 
-CLI flags override TOML values field-by-field (e.g., `--embed-api-key` overrides `api_key` in TOML while keeping `endpoint` and `model` from TOML; `--embed-provider` overrides `provider`).
+CLI flags and environment variables override TOML values field-by-field (e.g., `--embed-api-key` overrides `api_key` in TOML while keeping `endpoint` and `model` from TOML; `--embed-provider` overrides `provider`). The merge and its checks run before the store opens, so a configuration error creates no database and migrates nothing. Any embedder setting given without both a URL and a model is refused, never silently dropped.
+
+#### Query instruction
+
+Queries are prefixed with ME's pinned instruction (ADR-0015 §6), `Instruct: Given a search query, retrieve relevant memory facts.\nQuery: `, unless `query_instruction` (or `--embed-query-instruction`) says otherwise; documents are never prefixed. **A symmetric model must opt out** with `query_instruction = ""`, or its queries carry the Qwen prefix. Changing the instruction re-embeds nothing.
+
+#### The pinned identity (ADR-0015 §5)
+
+The deployed identity declares every field, because a blank store records whatever its first embedding write declares:
+
+```toml
+[engine]
+db_path = "/path/to/memory.db"
+embed_dim = 1024
+
+[embedding]
+endpoint = "http://127.0.0.1:8080/v1/embeddings"
+model = "Qwen/Qwen3-Embedding-0.6B"
+provider = "llama.cpp"
+dimensions = 1024
+artifact_sha256 = "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
+pooling = "last"
+normalization = "l2"
+max_input_tokens = 2048
+```
+
+The four served-artifact keys (`artifact_sha256`, `pooling`, `normalization`, `max_input_tokens`) are all set or all absent; `artifact_sha256` is 64 lowercase hex digits. They are declared, never probed: the deployment checks the served file's SHA-256 at install.
 
 #### Asymmetric models (TEI / Qwen)
 
@@ -78,7 +110,6 @@ endpoint = "http://localhost:8080/v1/embeddings"
 model = "Qwen/Qwen3-Embedding-0.6B"
 provider = "tei"
 dimensions = 1024     # NATIVE dim the model emits (validated against the raw response)
-query_instruction = "Instruct: Given a search query, retrieve relevant memory facts.\nQuery: "
 mrl_dim = 256         # Truncate + L2-renormalize to this; must equal engine embed_dim
 ```
 
@@ -86,7 +117,11 @@ mrl_dim = 256         # Truncate + L2-renormalize to this; must equal engine emb
 
 #### Embedding-identity check (fail-fast)
 
-On startup the server verifies the configured provider's identity (`model`, `provider`, `dim`, MRL, element type) against the one the store was created with, and **refuses to start on a mismatch** (#614). This prevents the silent-corruption case where a different model — even at the same dimension — embeds queries into an incompatible vector space. A fresh store with nothing embedded yet has no recorded identity and accepts any provider; the identity is stamped on the first embedding write.
+On startup the server verifies the configured provider's identity (`model`, `provider`, `dim`, MRL, element type and the served artifact) against the one the store was created with, and **refuses to start on a mismatch** (#614, #1017). This prevents the silent-corruption case where a different model — even at the same dimension, or the same model served from another file — embeds queries into an incompatible vector space. A fresh store with nothing embedded yet has no recorded identity and accepts any provider; the identity is stamped on the first embedding write.
+
+An absent served artifact matches only another absent one, so a store recorded before schema v15 (or without the served keys) refuses a configuration that declares them, and the reverse. The recoveries are to drop the declaration and keep serving the recorded identity, or to start from a blank store. Reconstruction under the new identity is the normative path (ADR-0015 §4) but has no CLI or MCP surface yet (#689). The refused start has already migrated the store to schema v15, which an older binary refuses, so recover with the new binary; rolling back is not one of the recoveries.
+
+A pre-computed `memory_add_fact` must declare exactly the configured embedder's identity, and a declaration cannot carry a served artifact, so a served deployment refuses pre-computed writes; a pre-computed `memory_query` against a served store is refused too.
 
 ### Transport and authentication
 
@@ -182,7 +217,7 @@ The server requires an OpenAI-compatible embedding endpoint for `memory_add_fact
 - **OpenAI**: `https://api.openai.com/v1/embeddings`
 - Any endpoint returning `{ "data": [{ "embedding": [...] }] }` or `{ "embeddings": [[...]] }`
 
-For `memory_add_fact` (and `memory_query`), callers can bypass server-side embedding by passing a pre-computed `embedding` array. A pre-computed embedding **must declare its identity** (#615): the required `model` + `provider`, plus optional `matryoshka_base_dim` and `element_type`. On `memory_add_fact` the declared identity is recorded on a fresh store (so a precomputed-only workflow can bootstrap) or checked against the stored identity on a populated one; on `memory_query` it is checked against the store. A declaration that disagrees with the store's identity is hard-rejected — a vector from a different model can no longer be slipped into the store's vector space (closing the same-dimension foreign-vector hole).
+For `memory_add_fact` (and `memory_query`), callers can bypass server-side embedding by passing a pre-computed `embedding` array. A pre-computed embedding **must declare its identity** (#615): the required `model` + `provider`, plus optional `matryoshka_base_dim` and `element_type`. On `memory_add_fact` the declared identity is recorded on a fresh store (so a precomputed-only workflow can bootstrap) or checked against the stored identity on a populated one; on `memory_query` it is checked against the store. A declaration that disagrees with the store's identity is hard-rejected — a vector from a different model can no longer be slipped into the store's vector space (closing the same-dimension foreign-vector hole). With an embedder configured, a pre-computed `memory_add_fact` must also declare exactly that embedder's identity (#1017), so it can never stamp a blank store with an identity the server then refuses at its next start; a declaration carries no served artifact, so a served deployment refuses pre-computed embeddings.
 
 ### Pre-Compaction Flush
 

@@ -285,7 +285,7 @@ pub use me_types::types::{
     NewLineageRecord, NewSummary, Outcome, OutcomeClass, OutcomeCounts, ParseActivityStatusError,
     ProjectContext, PromoteOutcome, PromoteRequest, PromotionProvenance, PromotionResult,
     RecordActivityRequest, RecordActivityResult, RelationType, ScopeNode, ScopeQuery,
-    SessionCheckpoint, SessionFact, Summary,
+    ServedArtifact, SessionCheckpoint, SessionFact, Summary,
 };
 
 // Storage port — tight flat re-export of the umbrella + cross-cutting types only.

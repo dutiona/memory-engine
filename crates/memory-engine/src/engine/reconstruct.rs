@@ -33,7 +33,7 @@ use std::sync::atomic::Ordering;
 
 use super::spawn_join_err;
 use crate::engine::MemoryEngine;
-use crate::error::{MemoryError, Result};
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::traits::EmbeddingProvider;
 use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 
@@ -41,13 +41,19 @@ use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 /// Bounds peak memory (window content + vectors) and the crash-loss granularity.
 const DEFAULT_BACKFILL_BATCH: usize = 128;
 
-/// Derive a stable, unique `populating`/active space name from an embedding
-/// identity: a sanitized `model_provider_dim` slug. Distinct identities map to
-/// distinct names; the same identity maps to the same name (so a crash-resumed
-/// reconstruction reopens its space). Non-alphanumeric characters in `model` /
-/// `provider` (e.g. the `/` and `.` in `"Qwen/Qwen3-Embedding-0.6B"`) collapse to
-/// `_`, keeping the name a clean SQL identifier.
-fn space_name_for(fp: &EmbeddingFingerprint) -> String {
+/// Derive a stable `populating`/active space name from an embedding identity.
+///
+/// A *plain* identity (the defaults of [`EmbeddingFingerprint::new`]: no MRL, `float32`, no
+/// served artifact) keeps the historical sanitized `model_provider_dim` slug, so a
+/// reconstruction an older binary left `populating` resumes after an upgrade. Any other
+/// identity appends the first 16 hex digits of a BLAKE3 digest of the whole serialized
+/// fingerprint, so identities that differ only in a non-slug field never share a name (they
+/// used to collide, and `begin_populating` then refused the second space). The resume
+/// property holds for both forms: the same identity always maps to the same name.
+/// Residuals: an older binary's in-flight *non-plain* reconstruction restarts under the new
+/// name (its old `populating` row is left for the operator to deprecate), and two plain
+/// slugs that sanitize alike (`a.b` vs `a_b`) still collide as before.
+fn space_name_for(fp: &EmbeddingFingerprint) -> Result<String> {
     let mut slug = String::with_capacity(fp.model.len() + fp.provider.len() + 8);
     for ch in fp
         .model
@@ -59,7 +65,12 @@ fn space_name_for(fp: &EmbeddingFingerprint) -> String {
         slug.push(if ch.is_ascii_alphanumeric() { ch } else { '_' });
     }
     slug.push_str(&fp.dim.to_string());
-    slug
+    if *fp == EmbeddingFingerprint::new(fp.model.clone(), fp.provider.clone(), fp.dim) {
+        return Ok(slug);
+    }
+    let digest = blake3::hash(&serde_json::to_vec(fp)?);
+    let hex = digest.to_hex();
+    Ok(format!("{slug}_{}", &hex[..16]))
 }
 
 impl MemoryEngine {
@@ -99,7 +110,9 @@ impl MemoryEngine {
     ///
     /// Returns [`MemoryError::EmbeddingDimension`] if `new_fingerprint.dim` disagrees
     /// with the provider's own `fingerprint().dim` (a misconfiguration, rejected
-    /// before any backfill), [`MemoryError::ReadOnly`] from the write port on a
+    /// before any backfill), [`MemoryError::Conflict`] (`PolicyParameter`) if the rest of
+    /// `new_fingerprint` differs from the provider's identity (the vectors would be stamped
+    /// with an identity their provider does not report), [`MemoryError::ReadOnly`] from the write port on a
     /// read-only engine, or any embedding-provider / storage failure surfaced by the
     /// backfill or promote.
     ///
@@ -127,15 +140,27 @@ impl MemoryEngine {
         // dimension must match what the provider actually produces. (A target dim
         // that differs from the engine's *current* dim is the whole point of #742
         // and is allowed — that is the different-dimension transition.)
-        if new_fingerprint.dim != embedder.fingerprint().dim {
+        let embedder_fp = embedder.fingerprint();
+        if new_fingerprint.dim != embedder_fp.dim {
             return Err(MemoryError::EmbeddingDimension {
                 expected: new_fingerprint.dim,
-                actual: embedder.fingerprint().dim,
+                actual: embedder_fp.dim,
             });
+        }
+        // The vectors are stamped with `new_fingerprint`, so they must come from a provider
+        // that reports exactly that identity; otherwise every later check would accept
+        // vectors from another space.
+        if *new_fingerprint != embedder_fp {
+            return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!(
+                    "reconstruct target identity {new_fingerprint:?} differs from the embedder's \
+                 identity {embedder_fp:?}"
+                ),
+            )));
         }
 
         let target_dim = new_fingerprint.dim;
-        let space = space_name_for(new_fingerprint);
+        let space = space_name_for(new_fingerprint)?;
 
         // 1. Open (or resume) the shadow space.
         self.storage
@@ -438,6 +463,54 @@ mod tests {
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 0);
     }
 
+    // --- space_name_for: distinct identities never share a space name ---
+
+    #[test]
+    fn space_name_for_keeps_the_legacy_name_for_a_plain_identity() {
+        // A plain identity keeps today's sanitized `model_provider_dim`, so a reconstruction an
+        // older binary left `populating` resumes after an upgrade.
+        let plain = EmbeddingFingerprint::new("new-model", "test", DIM);
+        assert_eq!(space_name_for(&plain).unwrap(), "new_model_test_4");
+    }
+
+    #[test]
+    fn space_name_for_distinguishes_mrl_and_element_type() {
+        let plain = EmbeddingFingerprint::new("m", "p", DIM);
+        let mrl = EmbeddingFingerprint::with_matryoshka("m", "p", DIM, DIM * 2);
+        let int8 = EmbeddingFingerprint {
+            element_type: "int8".into(),
+            ..plain.clone()
+        };
+        let names = [&plain, &mrl, &int8].map(|fp| space_name_for(fp).unwrap());
+        assert_ne!(names[0], names[1], "MRL must change the name");
+        assert_ne!(names[0], names[2], "element type must change the name");
+        assert_ne!(names[1], names[2]);
+        assert_eq!(
+            space_name_for(&mrl).unwrap(),
+            names[1],
+            "same identity, same name"
+        );
+    }
+
+    fn served_fp(digit: char) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("m", "llama.cpp", DIM).with_served(crate::types::ServedArtifact {
+            artifact_sha256: std::iter::repeat_n(digit, 64).collect(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        })
+    }
+
+    #[test]
+    fn space_name_for_distinguishes_served_artifacts() {
+        let plain = space_name_for(&EmbeddingFingerprint::new("m", "llama.cpp", DIM)).unwrap();
+        let a = space_name_for(&served_fp('a')).unwrap();
+        let b = space_name_for(&served_fp('b')).unwrap();
+        assert_ne!(a, b, "served artifacts that differ get different names");
+        assert_ne!(a, plain, "a served identity is never the legacy slug");
+        assert_eq!(a, space_name_for(&served_fp('a')).unwrap());
+    }
+
     // --- reconstruct() end-to-end (#623 T4) ---
 
     // kept: purpose-built - parameterized model slug + value so reconstruction tests
@@ -601,6 +674,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconstruct_twice_across_served_artifacts() {
+        // Re-quantizing (another served file under the same model, provider and dim) is a
+        // reconstruction; doing it twice must not collide on the space name.
+        struct Served(EmbeddingFingerprint, f32);
+        impl EmbeddingProvider for Served {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![self.1; DIM])
+            }
+            fn fingerprint(&self) -> EmbeddingFingerprint {
+                self.0.clone()
+            }
+        }
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let a: Arc<dyn EmbeddingProvider> = Arc::new(Served(served_fp('a'), 0.1));
+        engine.add_fact(&req("x"), a, None).await.unwrap();
+        for (digit, value) in [('b', 0.5), ('c', 0.9)] {
+            let target = served_fp(digit);
+            let embedder: Arc<dyn EmbeddingProvider> = Arc::new(Served(target.clone(), value));
+            let outcome = engine.reconstruct(&target, &embedder).await.unwrap();
+            assert_eq!(outcome.new_fingerprint, target);
+            assert_eq!(
+                engine.storage().load_embedding_fingerprint().await.unwrap(),
+                Some(target),
+                "the active identity is the target, served artifact included"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reconstruct_refuses_a_target_its_embedder_does_not_report() {
+        // Same dim, different model: re-embedding with A while stamping B would make every
+        // later identity check accept vectors from the wrong space.
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "old-model",
+            value: 0.1,
+            dim: DIM,
+        });
+        engine.add_fact(&req("a"), old.clone(), None).await.unwrap();
+        let other: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "other-model",
+            value: 0.9,
+            dim: DIM,
+        });
+        let target = EmbeddingFingerprint::new("new-model", "test", DIM);
+        let err = engine.reconstruct(&target, &other).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Conflict(crate::error::ConflictError::PolicyParameter(_))
+            ),
+            "a target its embedder does not report is refused, got {err:?}"
+        );
+        assert_eq!(
+            engine.storage().load_embedding_fingerprint().await.unwrap(),
+            Some(EmbeddingFingerprint::new("old-model", "test", DIM)),
+            "the store keeps its identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconstruct_resumes_a_legacy_named_populating_space() {
+        // A populating space an older binary opened under the historical slug (a literal here,
+        // not `space_name_for`) is resumed by a plain-target reconstruction, not duplicated.
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "old-model",
+            value: 0.1,
+            dim: DIM,
+        });
+        let new: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
+            model: "new-model",
+            value: 0.9,
+            dim: DIM,
+        });
+        let new_fp = EmbeddingFingerprint::new("new-model", "test", DIM);
+        for c in ["a", "b", "c"] {
+            engine.add_fact(&req(c), old.clone(), None).await.unwrap();
+        }
+        let legacy = "new_model_test_4";
+        engine
+            .storage()
+            .begin_populating_space(legacy, &new_fp)
+            .await
+            .unwrap();
+        let partial = engine
+            .storage()
+            .next_backfill_window(legacy, 0, 1)
+            .await
+            .unwrap();
+        let rows: Vec<(i64, Vec<f32>)> = partial
+            .iter()
+            .map(|(id, _)| (*id, vec![0.9_f32; DIM]))
+            .collect();
+        engine
+            .storage()
+            .write_backfill_batch(legacy, rows)
+            .await
+            .unwrap();
+
+        let outcome = engine.reconstruct(&new_fp, &new).await.unwrap();
+        assert_eq!(outcome.promoted, 3);
+        assert_eq!(outcome.new_fingerprint, new_fp);
+        // The legacy-named space is the one that was promoted: it is active now, so it can
+        // no longer be reopened as `populating`.
+        assert!(
+            engine
+                .storage()
+                .begin_populating_space(legacy, &new_fp)
+                .await
+                .is_err(),
+            "the legacy-named space was resumed and promoted"
+        );
+    }
+
+    #[tokio::test]
     async fn reconstruct_resumes_a_crashed_reconstruction() {
         let engine = MemoryEngine::builder(DIM).build().unwrap();
         let old: Arc<dyn EmbeddingProvider> = Arc::new(TagEmbedder {
@@ -622,7 +811,7 @@ mod tests {
 
         // Simulate a crash partway through a prior reconstruction: the populating
         // space exists and 2 of 4 facts are already backfilled.
-        let space = space_name_for(&new_fp);
+        let space = space_name_for(&new_fp).unwrap();
         engine
             .storage()
             .begin_populating_space(&space, &new_fp)

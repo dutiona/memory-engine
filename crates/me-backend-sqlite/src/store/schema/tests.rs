@@ -510,7 +510,7 @@ fn migrate_v11_to_v12_drops_embed_dim() {
 
     migrate(&conn, None).unwrap();
 
-    // Migrating from v11 runs the full chain forward to CURRENT (v11→v12→v13).
+    // Migrating from v11 runs the full chain forward to CURRENT (v11→…→v15).
     assert_eq!(
         get_config(&conn, "schema_version").unwrap(),
         Some(CURRENT_SCHEMA_VERSION.to_string()),
@@ -573,7 +573,7 @@ fn migrate_v12_to_v13_roundtrips_fingerprint() {
     assert_eq!(
         get_config(&conn, "schema_version").unwrap(),
         Some(CURRENT_SCHEMA_VERSION.to_string()),
-        "schema_version bumped to CURRENT (migrate chains v12→v13→v14)"
+        "schema_version bumped to CURRENT (migrate chains v12→…→v15)"
     );
     // Exactly one active row, columns identical to the stamped tuple.
     let (name, model, provider, dim, base, elem, status): (
@@ -1646,7 +1646,7 @@ CREATE TABLE config ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
 CREATE TABLE edges ( id INTEGER PRIMARY KEY AUTOINCREMENT, source_fact_id INTEGER NOT NULL REFERENCES facts(id), target_fact_id INTEGER NOT NULL REFERENCES facts(id), relation_type TEXT NOT NULL, weight REAL NOT NULL DEFAULT 1.0, t_created TEXT NOT NULL, t_expired TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) );
 
 -- table: embedding_spaces
-CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, provider TEXT NOT NULL, dim INTEGER NOT NULL, matryoshka_base_dim INTEGER, element_type TEXT NOT NULL DEFAULT 'float32', status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'populating', 'deprecated')), created_at TEXT NOT NULL DEFAULT (datetime('now')) );
+CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, provider TEXT NOT NULL, dim INTEGER NOT NULL, matryoshka_base_dim INTEGER, element_type TEXT NOT NULL DEFAULT 'float32', status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'populating', 'deprecated')), created_at TEXT NOT NULL DEFAULT (datetime('now')), artifact_sha256 TEXT, pooling TEXT, normalization TEXT, max_input_tokens INTEGER );
 
 -- table: events
 CREATE TABLE events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1 );
@@ -1714,10 +1714,11 @@ CREATE TRIGGER facts_fts_au AFTER UPDATE ON facts BEGIN INSERT INTO facts_fts(fa
 /// registered in `MIGRATIONS`.
 ///
 /// **Note on init-vs-migrated divergence**: The golden here intentionally
-/// differs from the `schema_ddl_snapshot_is_stable` golden. `SQLite`'s
-/// `ALTER TABLE ADD COLUMN` does not rewrite the `sql` column in
-/// `sqlite_master`, so tables rebuilt at v3 and extended at v3→v4 and
-/// v5→v6 show only their v3-era column set in `CREATE TABLE` DDL. This is a
+/// differs from the `schema_ddl_snapshot_is_stable` golden in TEXT, not in
+/// shape. Tables rebuilt at v2→v3 keep a quoted name and lose their inline
+/// comments, and `SQLite`'s `ALTER TABLE ADD COLUMN` splices each new column
+/// into the stored `CREATE TABLE` text as ` , <column>` before the closing
+/// parenthesis. Columns, constraints and indexes are the same. This is a
 /// known structural artifact of the migration path, not a bug; see
 /// `migration_chain_ddl_differs_from_init_known_artifact` for a pinned
 /// assertion of this difference.
@@ -1739,11 +1740,11 @@ fn schema_ddl_migration_chain_snapshot() {
 /// Documents and asserts the known structural difference between the
 /// fresh-init DDL and the migration-chain DDL.
 ///
-/// Because `ALTER TABLE ADD COLUMN` (used in migrations v3→v4, v4→v5,
-/// v5→v6) does not modify the `sql` column in `sqlite_master`, a v1→v11
-/// migrated database produces different DDL text than a direct `init_schema`
-/// call, even though both databases are functionally equivalent (same
-/// columns, same constraints, same indexes).
+/// Tables rebuilt at v2→v3 keep a quoted name and lose their inline comments,
+/// and `ALTER TABLE ADD COLUMN` (v3→v4, v4→v5, v5→v6) splices its column into
+/// the stored `sql` text with its own spacing, so a migrated database produces
+/// different DDL text than a direct `init_schema` call, even though both are
+/// functionally equivalent (same columns, same constraints, same indexes).
 ///
 /// This test pins the fact that the two paths DIFFER, preventing a false
 /// future "equality" assertion that would hide a real migration regression.
@@ -1760,9 +1761,9 @@ fn migration_chain_ddl_differs_from_init_known_artifact() {
     migrate(&migrated_conn, None).unwrap();
     let migrated_ddl = deterministic_schema_dump(&migrated_conn);
 
-    // The two DDL strings must differ: ALTER TABLE ADD COLUMN leaves behind
-    // truncated CREATE TABLE SQL for tables that were rebuilt at v3 and later
-    // extended. This is intentional: we pin the divergence here so that any
+    // The two DDL strings must differ: the v3 rebuilds and the ADD COLUMN
+    // splices leave CREATE TABLE text that differs from the fresh DDL. This is
+    // intentional: we pin the divergence here so that any
     // unexpected convergence (or unexpected further divergence) is caught.
     assert_ne!(
         init_ddl, migrated_ddl,
@@ -2293,6 +2294,22 @@ fn normalized_object_sql(conn: &Connection, name: &str) -> String {
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// `PRAGMA table_xinfo` rows `(name, type, notnull, default, pk)` of `table`, in column order.
+fn table_columns(
+    conn: &Connection,
+    table: &str,
+) -> Vec<(String, String, i64, Option<String>, i64)> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_xinfo({table})"))
+        .unwrap();
+    stmt.query_map([], |r| {
+        Ok((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+    })
+    .unwrap()
+    .map(std::result::Result::unwrap)
+    .collect()
+}
+
 #[test]
 fn fresh_vs_migrated_embedding_spaces_converge() {
     // Fresh-init DDL (TABLES_DDL) and the frozen migration snapshot must produce a
@@ -2307,13 +2324,27 @@ fn fresh_vs_migrated_embedding_spaces_converge() {
     simulate_v12(&migrated);
     migrate(&migrated, None).unwrap();
 
-    for obj in ["embedding_spaces", "idx_embedding_spaces_one_active"] {
-        assert_eq!(
-            normalized_object_sql(&fresh, obj),
-            normalized_object_sql(&migrated, obj),
-            "fresh-init and migrated {obj} DDL must converge"
+    // The table is compared on its columns, not its text: the v14→v15 `ADD COLUMN` splices
+    // the served-artifact columns into the stored SQL with its own spacing. `table_xinfo`
+    // rows come in column order, so the order is checked too; it cannot see a CHECK, so the
+    // status enumeration is asserted on both texts.
+    assert_eq!(
+        table_columns(&fresh, "embedding_spaces"),
+        table_columns(&migrated, "embedding_spaces"),
+        "fresh-init and migrated embedding_spaces columns must converge"
+    );
+    for conn in [&fresh, &migrated] {
+        assert!(
+            normalized_object_sql(conn, "embedding_spaces")
+                .contains("CHECK(status IN ('active', 'populating', 'deprecated'))"),
+            "the status CHECK survives the migration"
         );
     }
+    assert_eq!(
+        normalized_object_sql(&fresh, "idx_embedding_spaces_one_active"),
+        normalized_object_sql(&migrated, "idx_embedding_spaces_one_active"),
+        "fresh-init and migrated idx_embedding_spaces_one_active DDL must converge"
+    );
     // The single-active partial index really is partial (WHERE status = 'active').
     assert!(
         normalized_object_sql(&fresh, "idx_embedding_spaces_one_active")
@@ -2356,7 +2387,7 @@ fn migrate_v13_to_v14_creates_empty_fact_vectors() {
 
     assert_eq!(
         get_config(&conn, "schema_version").unwrap().as_deref(),
-        Some("14")
+        Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
     );
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM fact_vectors", [], |r| r.get(0))
@@ -2373,7 +2404,7 @@ fn migrate_v13_to_v14_idempotent() {
     migrate(&conn, None).unwrap();
     assert_eq!(
         get_config(&conn, "schema_version").unwrap().as_deref(),
-        Some("14")
+        Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
     );
 }
 
@@ -2478,4 +2509,66 @@ fn reopening_v10_db_leaves_dedup_index_unchanged() {
         "re-running migrations on a fresh v10 DB must leave the dedup index unchanged"
     );
     assert_eq!(after.len(), 5, "dedup index must have 5 columns");
+}
+
+// --- v14 → v15 (served artifact, #1017) ---
+
+/// Roll a fresh DB back to a simulated v14 state: drop the four v15 served-artifact columns
+/// and reset `schema_version` to 14.
+fn simulate_v14(conn: &Connection) {
+    init_schema(conn).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE embedding_spaces DROP COLUMN artifact_sha256;
+         ALTER TABLE embedding_spaces DROP COLUMN pooling;
+         ALTER TABLE embedding_spaces DROP COLUMN normalization;
+         ALTER TABLE embedding_spaces DROP COLUMN max_input_tokens;",
+    )
+    .unwrap();
+    set_config(conn, "schema_version", "14").unwrap();
+}
+
+#[test]
+fn migrate_v14_to_v15_keeps_a_recorded_identity_unserved() {
+    let conn = open_memory().unwrap();
+    simulate_v14(&conn);
+    conn.execute(
+        "INSERT INTO embedding_spaces (name, model, provider, dim, status)
+         VALUES ('default', 'm', 'tei', 8, 'active')",
+        [],
+    )
+    .unwrap();
+    migrate(&conn, None).unwrap();
+    assert_eq!(
+        get_config(&conn, "schema_version").unwrap().as_deref(),
+        Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
+    );
+    let fp = crate::store::embedding_meta::load(&conn).unwrap().unwrap();
+    assert_eq!(
+        fp,
+        me_types::types::EmbeddingFingerprint::new("m", "tei", 8)
+    );
+    let nulls: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_spaces WHERE artifact_sha256 IS NULL
+             AND pooling IS NULL AND normalization IS NULL AND max_input_tokens IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        nulls, 1,
+        "the recorded identity reads back with no served artifact"
+    );
+}
+
+#[test]
+fn migrate_v14_to_v15_is_idempotent_on_a_current_schema() {
+    // A current schema rolled back to v14 without dropping the columns (as several tests
+    // and the CLI's stale-db fixture do) re-runs the step without a duplicate-column error.
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    set_config(&conn, "schema_version", "14").unwrap();
+    migrate(&conn, None).unwrap();
+    migrate(&conn, None).unwrap();
+    assert_eq!(table_columns(&conn, "embedding_spaces").len(), 12);
 }

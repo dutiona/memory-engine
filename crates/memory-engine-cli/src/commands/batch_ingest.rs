@@ -415,7 +415,7 @@ pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> any
             "database {} already exists — remove it first or omit --create",
             db.display()
         );
-        let embedder = args.embed.build_required(embed_dim)?;
+        let embedder = args.embed.build_required_blocking(embed_dim).await?;
         let engine = MemoryEngine::builder(embed_dim)
             .path(db.to_path_buf())
             .build()?;
@@ -429,7 +429,10 @@ pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> any
         } else {
             open_engine_writable(db)?
         };
-        let embedder = args.embed.build_required(engine.embed_dim())?;
+        let embedder = args
+            .embed
+            .build_required_blocking(engine.embed_dim())
+            .await?;
         (engine, embedder)
     };
 
@@ -880,6 +883,7 @@ not valid json
                 query_instruction: None,
                 mrl_dim: None,
                 embed_timeout: 5,
+                served: crate::commands::embedding_args::ServedArgs::default(),
             },
             batch_size: 100,
             create: true,

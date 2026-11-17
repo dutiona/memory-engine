@@ -121,6 +121,21 @@ pub async fn handle_add_fact(
         // compares it (full tuple) against the stored one, rejecting a foreign vector —
         // closing the same-dim hole the old passthrough sentinel left open.
         let declared = parse_declared_fingerprint(args, emb.len())?;
+        // With an embedder configured, a declared identity other than its own would stamp a
+        // blank store with an identity this server then refuses at its next start (ADR 0015
+        // §2); a declaration has no served artifact to give, so a served deployment refuses
+        // every pre-computed write.
+        if let Some(configured) = embedder.map(|e| e.fingerprint())
+            && configured != declared
+        {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "a pre-computed embedding must declare this server's embedder identity \
+                     {configured:?}; it declares {declared:?}"
+                ),
+                None,
+            ));
+        }
         engine
             .add_fact_precomputed(&req, emb, &declared, None)
             .await
