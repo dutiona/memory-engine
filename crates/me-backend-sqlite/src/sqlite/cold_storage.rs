@@ -84,6 +84,7 @@ impl ColdStorage for SqliteBackend {
         blake3_hash: &str,
         fact_ids: &[i64],
     ) -> Result<()> {
+        use crate::store::activities::ActivityStore;
         use crate::store::edges::EdgeStore;
         use crate::store::facts::FactStore;
         use me_types::error::ArchiveError;
@@ -113,13 +114,14 @@ impl ColdStorage for SqliteBackend {
                 blake3_hash: &blake3_hash,
             })?;
 
-            // Delete edges first (FK safety), then facts. Delete EVERY edge
+            // Delete edges and unlink promoting activities first (FK safety), then facts. Delete EVERY edge
             // incident to an archived fact — internal (both endpoints archived)
             // AND boundary (exactly one endpoint archived) — because the archived
             // fact leaves the live DB (#847). A boundary edge left behind would
             // reference an about-to-be-hard-deleted fact and trip the
             // `edges.*_fact_id REFERENCES facts(id)` FK, aborting the whole tx.
             EdgeStore::new(&tx).hard_delete_incident_to_facts(&fact_ids)?;
+            ActivityStore::new(&tx).unlink_promoted_facts(&fact_ids)?;
             FactStore::new(&tx, dim).hard_delete_ids(&fact_ids)?;
 
             tx.commit().map_err(|e| {
@@ -269,6 +271,54 @@ mod tests {
         assert_eq!(entry.fact_id_max, 141);
         assert_eq!(entry.size_bytes, 65536);
         assert_eq!(entry.blake3_hash, "cafebabecafebabecafebabecafebabe");
+    }
+
+    /// `activities.promoted_fact_id` has no `ON DELETE` action and foreign keys are on,
+    /// so archiving a fact an activity promoted must unlink it first.
+    #[tokio::test]
+    async fn commit_archive_unlinks_a_promoting_activity() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let fact_id = {
+            let conn = pool.write();
+            let id = FactStore::new(&conn, DIM)
+                .insert(&new_fact("promoted"))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO activities (session_id, tool_name, args_hash, first_seen, last_seen,
+                                         status, promoted_fact_id)
+                 VALUES ('s', 'Edit', 'h', '2026-01-01T00:00:00+00:00',
+                         '2026-01-01T00:00:00+00:00', 'promoted', ?1)",
+                [id],
+            )
+            .unwrap();
+            id
+        };
+        let be = backend_from(Arc::clone(&pool));
+        let now = Utc::now();
+        be.commit_archive_atomic(
+            "promoted.pak",
+            1,
+            0,
+            fact_id,
+            fact_id,
+            now,
+            now,
+            4096,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &[fact_id],
+        )
+        .await
+        .unwrap();
+        let (link, facts): (Option<i64>, i64) = pool
+            .write()
+            .query_row(
+                "SELECT (SELECT promoted_fact_id FROM activities), (SELECT COUNT(*) FROM facts)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(link, None);
+        assert_eq!(facts, 0);
     }
 
     // -------------------------------------------------------------------------
