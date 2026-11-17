@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use memory_engine::error::MemoryError;
+use memory_engine::error::{EmbedderError, MemoryError};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::{EmbeddingFingerprint, ServedArtifact};
 
@@ -405,18 +405,28 @@ impl HttpEmbeddingProvider {
     ///
     /// # Errors
     ///
-    /// [`MemoryError::Internal`] if the request cannot be sent, the server
-    /// returns a non-2xx status (body included, capped), the body exceeds the
-    /// size cap, or the body is not valid JSON.
+    /// [`MemoryError::Embedder`], by what a retry can do:
+    /// [`Unreachable`](EmbedderError::Unreachable) when the request never reached the
+    /// server, [`KeyRejected`](EmbedderError::KeyRejected) on 401 or 403,
+    /// [`InputRejected`](EmbedderError::InputRejected) on 400, 413 or 422, and
+    /// [`Failed`](EmbedderError::Failed) on a timeout, a reset, a broken body or any other
+    /// non-2xx (status and capped body included). [`MemoryError::Internal`] when a 2xx body
+    /// exceeds the size cap or is not valid JSON.
     fn send_request(&self, payload: &serde_json::Value) -> Result<serde_json::Value, MemoryError> {
         let mut req = self.client.post(&self.endpoint).json(payload);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
 
-        let resp = req
-            .send()
-            .map_err(|e| MemoryError::Internal(format!("embedding HTTP request failed: {e}")))?;
+        let resp = req.send().map_err(|e| {
+            let message = format!("embedding HTTP request failed: {e}");
+            // Only a request that never left can be no input's fault.
+            if e.is_connect() && !e.is_timeout() {
+                EmbedderError::Unreachable(message)
+            } else {
+                EmbedderError::Failed(message)
+            }
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -424,9 +434,13 @@ impl HttpEmbeddingProvider {
                 |_| String::new(),
                 |b| truncate_on_char_boundary(&String::from_utf8_lossy(&b), 1000),
             );
-            return Err(MemoryError::Internal(format!(
-                "embedding endpoint returned {status}: {body}"
-            )));
+            let message = format!("embedding endpoint returned {status}: {body}");
+            return Err(match status.as_u16() {
+                401 | 403 => EmbedderError::KeyRejected(message),
+                400 | 413 | 422 => EmbedderError::InputRejected(message),
+                _ => EmbedderError::Failed(message),
+            }
+            .into());
         }
 
         let bytes = read_body_capped(resp)?;
@@ -459,9 +473,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     ///
     /// # Errors
     ///
+    /// Returns [`MemoryError::Embedder`] if the request gets no answer or a non-2xx one
+    /// (status and capped body included), classified as in [`EmbedderError`].
+    ///
     /// Returns [`MemoryError::Internal`] if:
-    /// - the HTTP request cannot be sent;
-    /// - the server returns a non-2xx status (status and capped body included);
     /// - the response body exceeds the 32 MiB size cap;
     /// - the body is not valid JSON, or matches no recognised format;
     /// - the returned vector contains `NaN` or infinite values;
@@ -526,9 +541,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     ///
     /// # Errors
     ///
+    /// Returns [`MemoryError::Embedder`] if the request gets no answer or a non-2xx one
+    /// (status and capped body included), classified as in [`EmbedderError`].
+    ///
     /// Returns [`MemoryError::Internal`] if:
-    /// - the HTTP request cannot be sent;
-    /// - the server returns a non-2xx status (status and capped body included);
     /// - the response body exceeds the 32 MiB size cap;
     /// - the body is not valid JSON, or matches no recognised batch format;
     /// - the server returns a different number of embeddings than `texts.len()`,
@@ -655,7 +671,7 @@ fn read_body_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, Memory
     let read = resp
         .take(MAX_BODY + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| MemoryError::Internal(format!("embedding response read failed: {e}")))?;
+        .map_err(|e| EmbedderError::Failed(format!("embedding response read failed: {e}")))?;
     if read as u64 > MAX_BODY {
         return Err(MemoryError::Internal(format!(
             "embedding response too large: exceeds {MAX_BODY}-byte cap"

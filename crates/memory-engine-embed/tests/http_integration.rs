@@ -1,13 +1,13 @@
 //! wiremock-based end-to-end tests for `HttpEmbeddingProvider`'s public
-//! `EmbeddingProvider` contract (single + batch happy paths, HTTP error
-//! propagation, and the response-body size cap).
+//! `EmbeddingProvider` contract (single + batch happy paths, the failure each answer
+//! maps to, and the response-body size cap).
 //!
 //! `HttpEmbeddingProvider` uses `reqwest::blocking::Client` (internal tokio
 //! runtime), so all provider work runs inside `spawn_blocking` to avoid the
 //! nested-runtime panic — mirroring `asymmetric_embedding.rs`.
 #![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
-use memory_engine::error::MemoryError;
+use memory_engine::error::{EmbedderError, MemoryError};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine_embed::HttpEmbeddingProvider;
 use serde_json::json;
@@ -140,7 +140,7 @@ async fn embed_batch_ollama_multi_doc_happy_path() {
 }
 
 #[tokio::test]
-async fn embed_http_500_propagates_as_internal_error() {
+async fn embed_http_500_is_failed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
@@ -154,14 +154,14 @@ async fn embed_http_500_propagates_as_internal_error() {
         .unwrap()
         .expect_err("a 500 must propagate as an error");
     assert!(
-        matches!(&err, MemoryError::Internal(m)
+        matches!(&err, MemoryError::Embedder(EmbedderError::Failed(m))
             if m.contains("500") && m.contains("upstream model crashed")),
-        "expected the 500 status and body in the error, got: {err}"
+        "expected the 500 status and body in a failed embed, got: {err}"
     );
 }
 
 #[tokio::test]
-async fn embed_batch_http_500_propagates_as_internal_error() {
+async fn embed_batch_http_500_is_failed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
@@ -175,8 +175,107 @@ async fn embed_batch_http_500_propagates_as_internal_error() {
         .unwrap()
         .expect_err("a 500 must propagate as an error");
     assert!(
-        matches!(&err, MemoryError::Internal(m) if m.contains("500") && m.contains("boom")),
-        "expected the 500 status and body in the error, got: {err}"
+        matches!(&err, MemoryError::Embedder(EmbedderError::Failed(m))
+            if m.contains("500") && m.contains("boom")),
+        "expected the 500 status and body in a failed embed, got: {err}"
+    );
+}
+
+/// What a retry can do about `err`, as the embedding queue reads it.
+const fn kind(err: &MemoryError) -> &'static str {
+    match err {
+        MemoryError::Embedder(EmbedderError::Unreachable(_)) => "unreachable",
+        MemoryError::Embedder(EmbedderError::KeyRejected(_)) => "key rejected",
+        MemoryError::Embedder(EmbedderError::InputRejected(_)) => "input rejected",
+        MemoryError::Embedder(EmbedderError::Failed(_)) => "failed",
+        _ => "not an embedder error",
+    }
+}
+
+#[tokio::test]
+async fn a_status_maps_to_its_embedder_error() {
+    for (status, want) in [
+        (400, "input rejected"),
+        (401, "key rejected"),
+        (403, "key rejected"),
+        (404, "failed"),
+        (413, "input rejected"),
+        (422, "input rejected"),
+        (500, "failed"),
+        (503, "failed"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("refused"))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let err = tokio::task::spawn_blocking(move || provider_for(&uri, 4).embed("hello"))
+            .await
+            .unwrap()
+            .expect_err("a non-2xx must be an error");
+        assert_eq!(kind(&err), want, "{status}: {err}");
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("embedding endpoint returned {status}"))
+                && text.contains("refused"),
+            "{status}: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_closed_port_is_unreachable() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let uri = format!("http://127.0.0.1:{port}");
+    let err = tokio::task::spawn_blocking(move || provider_for(&uri, 4).embed("hello"))
+        .await
+        .unwrap()
+        .expect_err("nothing listens on a closed port");
+    assert_eq!(kind(&err), "unreachable", "{err}");
+    assert!(
+        err.to_string().contains("embedding HTTP request failed"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn an_answer_slower_than_the_timeout_is_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "data": [{ "embedding": [0.1, 0.2, 0.3, 0.4] }] }))
+                .set_delay(std::time::Duration::from_secs(3)),
+        )
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    let err = tokio::task::spawn_blocking(move || {
+        HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "m".into(),
+            "tei".into(),
+            None,
+            4,
+            1,
+        )
+        .unwrap()
+        .embed("hello")
+    })
+    .await
+    .unwrap()
+    .expect_err("an answer after the timeout is no answer");
+    assert_eq!(kind(&err), "failed", "{err}");
+    assert!(
+        err.to_string().contains("embedding HTTP request failed"),
+        "{err}"
     );
 }
 

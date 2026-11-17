@@ -427,6 +427,33 @@ impl StorageError {
     }
 }
 
+/// Why an embedding provider got no vector, by what a retry can do about it (#1021).
+///
+/// This is the typed payload of [`MemoryError::Embedder`]. A provider produces it, the
+/// deferred-embedding queue consumes it; no network type crosses the trait boundary. The
+/// string is the provider's own message.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
+/// downstream `match` expressions must include a wildcard (`_`) arm.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum EmbedderError {
+    /// The request never reached the server: reqwest's `is_connect()` (refused, DNS, TLS). A
+    /// timeout, even one that ends during connect, is `Failed`: reqwest's blocking client
+    /// reports it as a request timeout.
+    #[error("{0}")]
+    Unreachable(String),
+    /// 401 or 403.
+    #[error("{0}")]
+    KeyRejected(String),
+    /// 400, 413 or 422: this input will not be embedded as sent.
+    #[error("{0}")]
+    InputRejected(String),
+    /// No usable answer: a timeout, a reset after sending, a broken body, any other non-2xx.
+    #[error("{0}")]
+    Failed(String),
+}
+
 /// Errors returned by the memory engine.
 ///
 /// Marked `#[non_exhaustive]`: new variants may be added in minor releases, so
@@ -611,6 +638,10 @@ pub enum MemoryError {
     /// `String` at the seam.
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
+
+    /// The embedding provider got no vector; see [`EmbedderError`] for what a retry can do.
+    #[error("embedder: {0}")]
+    Embedder(#[from] EmbedderError),
 }
 
 /// Convenience alias for `Result<T, MemoryError>`.
@@ -1125,5 +1156,20 @@ mod tests {
         let s = err.to_string();
         assert!(s.starts_with("I/O error: "), "{s}");
         assert!(s.contains("gone"), "{s}");
+    }
+
+    #[test]
+    fn embedder_error_keeps_its_message() {
+        for (err, message) in [
+            (EmbedderError::Unreachable("refused".into()), "refused"),
+            (EmbedderError::KeyRejected("401".into()), "401"),
+            (EmbedderError::InputRejected("400".into()), "400"),
+            (EmbedderError::Failed("503".into()), "503"),
+        ] {
+            assert_eq!(err.to_string(), message);
+            let err: MemoryError = err.into();
+            assert!(matches!(err, MemoryError::Embedder(_)));
+            assert_eq!(err.to_string(), format!("embedder: {message}"));
+        }
     }
 }

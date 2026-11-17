@@ -190,8 +190,8 @@ pub use me_traits::{
     PersistenceClassifier, Reranker, SummarizableContent, SummaryGenerator,
 };
 pub use me_types::error::{
-    ArchiveError, ConflictError, CycleError, MemoryError, MigrationError, RerankerError, Result,
-    StorageError,
+    ArchiveError, ConflictError, CycleError, EmbedderError, MemoryError, MigrationError,
+    RerankerError, Result, StorageError,
 };
 pub use resume::{ResumeConfig, ResumeContext};
 /// End-to-end example: build an engine, add a fact, and retrieve it with
@@ -427,6 +427,7 @@ mod tests {
         let _ = std::mem::size_of::<crate::ArchiveError>();
         let _ = std::mem::size_of::<crate::MigrationError>();
         let _ = std::mem::size_of::<crate::CycleError>();
+        let _ = std::mem::size_of::<crate::EmbedderError>();
         // StorageError asserted in the storage-port block below; the `Result`
         // alias is asserted by `_accepts_result` above.
 
