@@ -737,6 +737,23 @@ impl ServerProcess {
         }
     }
 
+    /// Call the model tool `name` as `machine`; the raw JSON-RPC response.
+    pub fn tool(&self, machine: &str, name: &str, args: &Value) -> Value {
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .post(format!("{}/mcp", self.url()))
+            .bearer_auth(token(machine))
+            .header("Accept", "application/json, text/event-stream")
+            .header("Content-Type", "application/json")
+            .body(jsonrpc("tools/call", &json!({ "name": name, "arguments": args })).to_string())
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        response.json().unwrap()
+    }
+
     /// Wait for the child to exit on its own, at most `timeout`.
     pub fn wait_exit(&mut self, timeout: Duration) -> ExitStatus {
         let deadline = Instant::now() + timeout;
