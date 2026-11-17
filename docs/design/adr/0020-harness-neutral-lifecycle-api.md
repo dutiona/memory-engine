@@ -80,7 +80,7 @@ A neutral record has:
 | `ME-Event-Seq` | yes | 1 to 6 decimal digits, leading zeros allowed: the tie-break within one second (§5) |
 | `ME-Harness` | yes | `[a-z0-9-]{1,32}`. `claude-code` today. It selects the adapter |
 | `ME-Client-Version` | yes | The plugin's version, `[0-9A-Za-z.+-]{1,64}` |
-| `ME-Project-Root` | no | The main working tree's root for a git checkout, so that linked worktrees share it; otherwise the session's project directory. Where git cannot name the main working tree from a linked worktree (a bare or `--separate-git-dir` repository whose git dir is not named `.git`, or a submodule), the linked worktree sends its own top level |
+| `ME-Project-Root` | no | The main working tree's root for a git checkout, so that linked worktrees share it; otherwise the session's project directory. Where git cannot name the main working tree from a linked worktree (a bare or `--separate-git-dir` repository whose git dir is not named `.git`, or a submodule), the linked worktree sends its own top level. A linked worktree of a repository whose git dir is named `.git` sends that git dir's parent, which git itself reports as the main tree: for a bare repository cloned as `proj/.git` that is `proj/`, shared by its worktrees; for a separate git dir named `.git` it is that dir's parent, not a working tree, while the main tree sends its own top level |
 | `ME-Project-Dev-Root` | no | The machine's dev root, from the plugin's configuration |
 | `ME-Project-Upstream-Url` | no | The `upstream` remote's URL as `git remote get-url` prints it, with the user part removed |
 | `ME-Project-Origin-Url` | no | The `origin` remote's URL, read the same way |

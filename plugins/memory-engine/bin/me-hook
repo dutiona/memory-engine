@@ -289,7 +289,9 @@ lock_take() {
 	REC="$$ $NOW"
 	lock_publish && return 0
 	lock_stale || return 1
-	# One rename: of several breakers of one lock, exactly one succeeds.
+	# One rename: of several breakers of one stale lock still in place, exactly one succeeds. A breaker that judged
+	# it stale just before another breaker replaced it can still take the new lock; that lock's flusher then stops
+	# at its next check (ADR-0020 §12, best effort).
 	rm -rf "$O/tmp/$$.stale"
 	mv "$O/lock" "$O/tmp/$$.stale" && rm -rf "$O/tmp/$$.stale"
 	lock_publish

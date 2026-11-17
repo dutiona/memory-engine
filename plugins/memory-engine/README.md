@@ -19,7 +19,7 @@ to whichever URL a session recorded last.
 
 | Option | Meaning |
 |---|---|
-| `me_url` | The server's base URL, `http://` or `https://`, printable ASCII. Until it is set, events queue locally. |
+| `me_url` | The server's base URL, `http://` or `https://`, printable ASCII. Until it is first set, events queue locally. Unsetting it later does not withdraw the URL already recorded: to hold delivery, delete `~/.local/state/memory-engine/outbox/endpoint`. |
 | `dev_root` | Optional. The machine's dev root: an absolute path in printable ASCII without space, `"`, `%` or `\`. Any other value is ignored. |
 
 The plugin ships a `bin/` directory, so it installs in Claude Code only, not through claude.ai or Cowork.
@@ -62,7 +62,8 @@ A per-machine timer, installed by my-dotfiles, delivers what a machine queued wh
 /bin/sh ~/.local/state/memory-engine/bin/me-hook flush
 ```
 
-It needs no argument and no environment, and exits 0 (1 only when it finds no state directory).
+It needs no argument and no environment, and exits 0; 1 only when it can find no state root (no HOME, and not run from
+the stable path).
 
 ## Requirements
 
