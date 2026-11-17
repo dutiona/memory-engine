@@ -343,11 +343,13 @@ subprocess seam the efficiency×quality benchmark drives — see
 
 The CLI is a workspace member crate (`memory-engine-cli/`). Its inspection commands have no LLM dependencies; only the optional `consolidate --backend llm` path pulls in `memory-engine-embed` for the HTTP proposer + embedder. Each subcommand is a thin module in `src/commands/` that:
 
-1. Opens the engine (probing `embed_dim` from the config table): `db::open_engine()` for a read-only command, which
+1. Opens the engine (probing `embed_dim` from the store): `db::open_engine()` for a read-only command, which
    never takes the store lock and never migrates; `db::open_engine_writable()` for a command that writes, which takes
    the store lock first and sets `backup_dir` next to the database so a schema migration backs it up
 2. Calls the library's API
 3. Formats output according to `--format`
+
+`schema`, `migrate --check` and `status` build no engine: they read the store through one read-only connection.
 
 ### Known Limitations
 
