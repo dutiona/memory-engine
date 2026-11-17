@@ -261,6 +261,7 @@ async fn load_fingerprint(client: &Client) -> Result<Option<EmbeddingFingerprint
         dim,
         matryoshka_base_dim,
         element_type,
+        served: None,
     }))
 }
 

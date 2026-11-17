@@ -70,6 +70,7 @@ fn row_to_space(row: &rusqlite::Row) -> rusqlite::Result<Result<EmbeddingSpace>>
                 dim,
                 matryoshka_base_dim,
                 element_type,
+                served: None,
             },
             status: SpaceStatus::from_sql(&status_raw)?,
         })
