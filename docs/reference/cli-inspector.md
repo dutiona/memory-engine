@@ -30,6 +30,24 @@ Every command requires `--db <path>` (or set `MEMORY_ENGINE_DB` env var):
 export MEMORY_ENGINE_DB=/path/to/agent.db
 ```
 
+### Store lock
+
+A running `memory-engine-mcp` holds an exclusive advisory lock on `<db>.store-lock`, next to the database, for its
+whole life (ADR-0020 §8). Every command that opens the store writable takes the same lock first, before it reads the
+store, or exits 1:
+
+```text
+error: the store is in use by another process (/data/memory.db.store-lock is locked): stop the memory-engine server first
+```
+
+- **Take the lock** (writable): `add-fact`, `batch-ingest`, `bootstrap`, `consolidate`, `import` (its new target),
+  `migrate` (when it applies migrations), `record-outcome`. Stop the server first.
+- **Never take it** (read-only, safe beside a live server): `stats`, `inspect`, `explain`, `query`, `dump`,
+  `outcome-counts`, `export` in every format, `schema`, `migrate --check`.
+
+The lock is released when its holder exits, even when killed. The lock file is never deleted. It holds between
+processes and containers on one host that share the store's volume, never across hosts or on a network filesystem.
+
 ### Subcommands
 
 #### `stats` — Engine Statistics

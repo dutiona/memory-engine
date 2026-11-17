@@ -18,7 +18,7 @@ use memory_engine::bootstrap::{
 use memory_engine::traits::EmbeddingProvider;
 
 use crate::commands::embedding_args::EmbeddingArgs;
-use crate::db::{open_engine_writable, open_engine_writable_with_dim};
+use crate::db::{create_engine, open_engine_writable, open_engine_writable_with_dim};
 use crate::output::{OutputFormat, print_json};
 
 // ---------------------------------------------------------------------------
@@ -185,9 +185,7 @@ pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyho
             db.display()
         );
         let embedder = args.embed.build_required_blocking(embed_dim).await?;
-        let engine = MemoryEngine::builder(embed_dim)
-            .path(db.to_path_buf())
-            .build()?;
+        let engine = create_engine(db, embed_dim)?;
         (engine, embedder)
     } else {
         let engine = if let Some(dim) = args.embed_dim {
