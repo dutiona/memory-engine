@@ -73,6 +73,6 @@ pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<Strin
             ))
             .await
         }
-        Err(e) => refuse(format!("cannot record this move: {e}")).await,
+        Err(e) => refuse(format!("cannot move memory {id}: {e}")).await,
     }
 }
