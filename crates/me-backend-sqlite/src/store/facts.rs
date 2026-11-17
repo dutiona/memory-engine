@@ -152,9 +152,10 @@ impl<'a> FactStore<'a> {
 
     /// Insert a new fact unless a forget's tombstone blocks its content (#1023): the gate
     /// fails closed, so every insert path is gated unless it deliberately calls
-    /// [`insert_asserted`](Self::insert_asserted). Validates embedding dimension, computes
-    /// `content_hash` via blake3 (hex, first 32 chars / 128 bits), serializes embedding as
-    /// BLOB. Returns the auto-assigned id.
+    /// [`insert_asserted`](Self::insert_asserted) or
+    /// [`insert_without_vector`](Self::insert_without_vector). Validates embedding
+    /// dimension, computes `content_hash` via blake3 (hex, first 32 chars / 128 bits),
+    /// serializes embedding as BLOB. Returns the auto-assigned id.
     ///
     /// # Errors
     ///
@@ -165,24 +166,37 @@ impl<'a> FactStore<'a> {
         if tombstones::blocks(self.conn, &fact.content)? {
             return Err(MemoryError::Conflict(ConflictError::Forgotten));
         }
-        self.insert_row(fact)
+        self.insert_row(fact, self.embed_dim)
     }
 
-    /// Insert a new fact with no tombstone check: the one ungated insert, for an explicit
-    /// single assertion (`remember`, `add-fact`). A fresh assertion is not a forgotten fact
-    /// coming back, and `remember` never refuses (ADR-0020 §8).
+    /// Insert a new fact with no tombstone check, for an explicit single assertion
+    /// (`remember`, `add-fact`). A fresh assertion is not a forgotten fact coming back, and
+    /// `remember` never refuses (ADR-0020 §8).
     ///
     /// # Errors
     ///
     /// As [`insert`](Self::insert), without the `Forgotten` conflict.
     pub fn insert_asserted(&self, fact: &NewFact) -> Result<i64> {
-        self.insert_row(fact)
+        self.insert_row(fact, self.embed_dim)
     }
 
-    fn insert_row(&self, fact: &NewFact) -> Result<i64> {
-        if fact.embedding.len() != self.embed_dim {
+    /// Insert a fact that has no vector yet: its `embedding` must be empty and is stored
+    /// as `X''` (#1021). The caller queues it in the same transaction. Like
+    /// [`insert_asserted`](Self::insert_asserted) it has no tombstone check: it is the same
+    /// explicit single assertion, stored before its vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::EmbeddingDimension` (`expected: 0`) if `fact.embedding` is
+    /// not empty, or `MemoryError::Storage` on insert failure.
+    pub fn insert_without_vector(&self, fact: &NewFact) -> Result<i64> {
+        self.insert_row(fact, 0)
+    }
+
+    fn insert_row(&self, fact: &NewFact, width: usize) -> Result<i64> {
+        if fact.embedding.len() != width {
             return Err(MemoryError::EmbeddingDimension {
-                expected: self.embed_dim,
+                expected: width,
                 actual: fact.embedding.len(),
             });
         }
@@ -243,6 +257,9 @@ impl<'a> FactStore<'a> {
     /// and `base_importance` move to the max across occurrences (a fact later judged
     /// pinned or more important stays so). Frequency does not inflate `base_importance`
     /// — only the independent per-occurrence score does.
+    ///
+    /// A matched fact still waiting for its vector (#1021) keeps `X''` and its queue row:
+    /// the drain embeds it, so the identity stamp and the vector index see its vector.
     ///
     /// This instantiates "memory decays unless reinforced": a re-mention strengthens
     /// the recency/frequency signal rather than spawning a duplicate. It is
@@ -314,7 +331,9 @@ impl<'a> FactStore<'a> {
                 Ok(ImportOutcome::Reinforced(id))
             }
             None if tombstones::blocks(self.conn, &fact.content)? => Ok(ImportOutcome::Blocked),
-            None => Ok(ImportOutcome::Created(self.insert_row(fact)?)),
+            None => Ok(ImportOutcome::Created(
+                self.insert_row(fact, self.embed_dim)?,
+            )),
         }
     }
 

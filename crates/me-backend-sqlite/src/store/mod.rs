@@ -7,6 +7,7 @@ pub mod activities;
 pub mod archive_manifest;
 pub mod checkpoints;
 pub mod edges;
+pub mod embed_queue;
 pub mod embedding_meta;
 pub mod embedding_spaces;
 pub mod erase;

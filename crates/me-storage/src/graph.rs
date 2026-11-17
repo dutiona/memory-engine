@@ -281,8 +281,9 @@ pub trait FactGraph: Send + Sync {
     /// Atomically stamp the embedding identity (fingerprint) and insert one fact,
     /// in a single `rusqlite` transaction.
     ///
-    /// The one ungated insert (#1023): it serves the single explicit assertion (`remember`,
-    /// `add-fact`), which a forget's tombstone never blocks.
+    /// Ungated (#1023), as [`insert_fact_deferred`](Self::insert_fact_deferred) is: it
+    /// serves the single explicit assertion (`remember`, `add-fact`), which a forget's
+    /// tombstone never blocks.
     ///
     /// The caller (`insert_fact_with_embedding`) is responsible for:
     /// - scope resolution (done before the call, autocommit-separate by design)
@@ -570,4 +571,23 @@ pub trait FactGraph: Send + Sync {
         record_at: &str,
         record: &NewEvent,
     ) -> Result<ScopedWrite>;
+
+    // -------------------------------------------------------------------------
+    // deferred embedding (#1021)
+    // -------------------------------------------------------------------------
+
+    /// Insert `fact` with no vector (its `embedding` must be empty) and queue it, in one
+    /// transaction.
+    ///
+    /// The queue entry is due at `now`. No identity is recorded and no vector index is
+    /// notified: the fact has no vector until the drain gives it one. Ungated (#1023), as
+    /// [`insert_fact_atomic`](Self::insert_fact_atomic) is: the same explicit single
+    /// assertion, stored before its vector.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension)
+    /// (`expected: 0`) if `fact.embedding` is not empty, or any write error; on every
+    /// error nothing is written.
+    async fn insert_fact_deferred(&self, fact: &NewFact, now: DateTime<Utc>) -> Result<i64>;
 }
