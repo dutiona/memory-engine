@@ -2181,14 +2181,11 @@ name = "memory-engine-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
- "blake3",
  "chrono",
  "clap",
  "getrandom 0.3.4",
- "insta",
  "memory-engine",
  "memory-engine-embed",
- "proptest",
  "reqwest",
  "rmcp",
  "rusqlite",

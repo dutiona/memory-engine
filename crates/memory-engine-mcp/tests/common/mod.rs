@@ -139,8 +139,6 @@ impl TestServer {
         let server = MemoryMcpServer::new(
             Arc::clone(&engine),
             provider.clone(),
-            None,
-            DIM,
             User::parse("alice").unwrap(),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

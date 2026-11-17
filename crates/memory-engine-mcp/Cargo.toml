@@ -19,10 +19,6 @@ path = "src/lib.rs"
 name = "memory-engine-mcp"
 path = "src/main.rs"
 
-[[test]]
-name = "tools"
-path = "tests/tools.rs"
-
 [dependencies]
 memory-engine = { path = "../memory-engine" }
 rmcp = { version = "1", features = ["server", "transport-streamable-http-server"] }
@@ -34,7 +30,6 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 memory-engine-embed = { path = "../memory-engine-embed" }
-reqwest = { version = "0.12", features = ["blocking", "json"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -45,11 +40,9 @@ subtle = "2"
 getrandom = "0.3"
 
 [dev-dependencies]
-blake3 = "1"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 wiremock = "0.6"
 tempfile = "3"
-insta = { version = "1", features = ["yaml"] }
-proptest = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
 [lints.rust]

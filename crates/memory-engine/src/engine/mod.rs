@@ -493,7 +493,7 @@ impl MemoryEngine {
     /// Verify a **declared** embedding fingerprint is compatible with the store's
     /// recorded identity, without writing (#615, §Design.3).
     ///
-    /// This is the read-only check behind a pre-computed `memory_query` submission: the
+    /// This is the read-only check behind a query that carries a pre-computed vector: the
     /// caller declares the identity of the model that produced the query vector, and we
     /// reject it if it disagrees with the store's space — otherwise the query would
     /// silently retrieve against a foreign vector space. Same semantics as

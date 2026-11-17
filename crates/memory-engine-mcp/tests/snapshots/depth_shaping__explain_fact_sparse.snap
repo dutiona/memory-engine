@@ -1,7 +1,0 @@
----
-source: memory-engine-mcp/tests/depth_shaping.rs
-expression: body
----
-fact_id: 1
-scope_path: /
-state: Active

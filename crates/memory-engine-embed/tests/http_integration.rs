@@ -178,3 +178,51 @@ async fn embed_batch_http_500_propagates_as_internal_error() {
         "expected the 500 status and body in the error, got: {err}"
     );
 }
+
+#[tokio::test]
+async fn embed_direct_format_roundtrip() {
+    // `{"embedding": [...]}`, the shape some servers answer with.
+    let server = MockServer::start().await;
+    mount_json(&server, json!({ "embedding": [0.1, 0.2, 0.3, 0.4] })).await;
+    let uri = server.uri();
+    let emb = tokio::task::spawn_blocking(move || provider_for(&uri, 4).embed("direct"))
+        .await
+        .unwrap()
+        .expect("a direct-format response should parse");
+    assert_eq!(emb.len(), 4);
+}
+
+#[tokio::test]
+async fn embed_sends_the_bearer_api_key_when_configured() {
+    // The only request the mock answers carries the configured key.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .and(wiremock::matchers::header(
+            "Authorization",
+            "Bearer test-key-123",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "data": [{ "embedding": [0.1, 0.2, 0.3, 0.4] }] })),
+        )
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    let emb = tokio::task::spawn_blocking(move || {
+        HttpEmbeddingProvider::new(
+            format!("{uri}/v1/embeddings"),
+            "m".into(),
+            "tei".into(),
+            Some("test-key-123".into()),
+            4,
+            5,
+        )
+        .unwrap()
+        .embed("auth")
+    })
+    .await
+    .unwrap()
+    .expect("the keyed request should match the mock");
+    assert_eq!(emb.len(), 4);
+}

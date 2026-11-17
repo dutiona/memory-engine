@@ -1,0 +1,9 @@
+# ADR-0020 §8: the derived jobs are off in the server. No tool, route or timer may run them;
+# the follow-up that turns them on in the server deletes this guard deliberately.
+disallowed-methods = [
+    { path = "memory_engine::engine::MemoryEngine::consolidate", reason = "ADR-0020 §8: derived jobs are off in the server" },
+    { path = "memory_engine::engine::MemoryEngine::run_dream_cycle", reason = "ADR-0020 §8: derived jobs are off in the server" },
+    { path = "memory_engine::engine::MemoryEngine::run_dream_cycle_guarded", reason = "ADR-0020 §8: derived jobs are off in the server" },
+    { path = "memory_engine::engine::MemoryEngine::apply_cycle_report", reason = "ADR-0020 §8: derived jobs are off in the server" },
+    { path = "memory_engine::engine::MemoryEngine::add_facts_batch", reason = "ADR-0020 §8: the insight flush is a derived job, off in the server; remember uses add_fact" },
+]

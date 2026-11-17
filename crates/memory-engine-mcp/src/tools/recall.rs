@@ -97,11 +97,11 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
             Vec::new(),
         ));
     }
-    let mut memory_query = MemoryQuery::new()
+    let mut search_query = MemoryQuery::new()
         .scope_exact_set([context.clone(), user_home.clone()])
         .limit(RESULTS);
     if let Some(terms) = &terms {
-        memory_query = memory_query.text(terms.clone());
+        search_query = search_query.text(terms.clone());
     }
     let search = if let Some(provider) = ctx.embedder {
         // A blocking reqwest provider must run off the async executor: dropping its
@@ -114,7 +114,7 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
         .await
         .map_err(|e| format!("query embedding task failed: {e}"))?
         .map_err(|e| e.to_string())?;
-        memory_query = memory_query.embedding(embedding);
+        search_query = search_query.embedding(embedding);
         if terms.is_some() {
             "hybrid"
         } else {
@@ -126,7 +126,7 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
 
     let response = ctx
         .engine
-        .execute_query(&memory_query)
+        .execute_query(&search_query)
         .await
         .map_err(|e| e.to_string())?;
     let homes = Homes {
@@ -210,8 +210,8 @@ mod tests {
     fn letters_split_on_separators_and_repeats_go() {
         assert_eq!(fts_terms("été").as_deref(), Some(r#""été""#));
         assert_eq!(
-            fts_terms("memory_query").as_deref(),
-            Some(r#""memory" OR "query""#)
+            fts_terms("store_lock").as_deref(),
+            Some(r#""store" OR "lock""#)
         );
         assert_eq!(
             fts_terms("lock\u{a0}file\u{2014}lock").as_deref(),

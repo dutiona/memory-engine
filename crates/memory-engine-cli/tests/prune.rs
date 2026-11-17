@@ -1,5 +1,4 @@
-//! `prune`: decay pruning as a maintenance command (ADR-0020 §8, formerly the `memory_forget`
-//! MCP tool).
+//! `prune`: decay pruning as a maintenance command (ADR-0020 §8).
 
 use std::path::{Path, PathBuf};
 

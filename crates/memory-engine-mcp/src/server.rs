@@ -1,14 +1,11 @@
 use std::sync::Arc;
 
-use memory_engine::ActivityFilterConfig;
 use memory_engine::engine::MemoryEngine;
-use memory_engine::traits::SummaryGenerator;
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ErrorData, Extensions, Implementation, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool,
-    ToolsCapability,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ToolsCapability,
 };
 use rmcp::service::RequestContext;
 use serde_json::{Map, Value};
@@ -20,59 +17,32 @@ use crate::tools;
 
 /// MCP server wrapping a [`MemoryEngine`] instance.
 ///
-/// The engine is async-native (#631): every DB-touching method is an `async fn`
-/// whose storage I/O is offloaded below the `StorageBackend` seam and whose
-/// consumer-trait (HTTP/CPU) calls are offloaded internally via `spawn_blocking`.
-/// Tool calls are therefore `.await`ed directly on the async runtime — no
-/// `spawn_blocking` hop at the dispatch boundary. The server holds an
-/// `Arc<MemoryEngine>` for thread-safe sharing.
+/// The engine is async-native (#631): every DB-touching method is an `async fn`, so tool
+/// calls are `.await`ed directly on the runtime. The server holds an `Arc<MemoryEngine>` for
+/// thread-safe sharing.
 #[derive(Clone)]
 pub struct MemoryMcpServer {
     pub(crate) engine: Arc<MemoryEngine>,
     pub(crate) embedder: Option<Arc<HttpEmbeddingProvider>>,
-    pub(crate) summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
-    pub(crate) embed_dim: usize,
-    pub(crate) filter_config: Arc<ActivityFilterConfig>,
     pub(crate) user: User,
     /// Held for reading by every tool call; `http::serve` takes it for writing to drain.
     pub(crate) in_flight: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl MemoryMcpServer {
-    /// Construct a server over an already-opened [`MemoryEngine`].
-    ///
-    /// # Activity filter
-    ///
-    /// The activity-stream filter (`memory_record_activity` dedup window plus the
-    /// ignore/promote tool-name patterns) is **hardwired** to the Claude Code
-    /// defaults from [`activity_policy::default_filter_config`] — this constructor
-    /// takes no filter argument. The `filter_config` field is `pub(crate)`, so an
-    /// external consumer that needs a different policy (other tool names, a
-    /// different dedup window) cannot override it today; doing so requires adding a
-    /// constructor parameter or builder. Tracked as a follow-up; in-crate callers
-    /// (e.g. tests) can set the field directly.
-    ///
-    /// [`activity_policy::default_filter_config`]: crate::activity_policy::default_filter_config
+    /// Construct a server over an already-opened [`MemoryEngine`] for the owner `user`.
+    #[must_use]
     pub fn new(
         engine: Arc<MemoryEngine>,
         embedder: Option<Arc<HttpEmbeddingProvider>>,
-        summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
-        embed_dim: usize,
         user: User,
     ) -> Self {
         Self {
             engine,
             embedder,
-            summary_gen,
-            embed_dim,
-            filter_config: Arc::new(crate::activity_policy::default_filter_config()),
             user,
             in_flight: Arc::new(tokio::sync::RwLock::new(())),
         }
-    }
-
-    fn tool_definitions() -> Vec<Tool> {
-        tools::all_tool_definitions()
     }
 
     /// Run one tool call for the authenticated `machine`: the seam `call_tool`, the fuzz
@@ -86,7 +56,7 @@ impl MemoryMcpServer {
         &self,
         machine: &Machine,
         name: &str,
-        mut args: Map<String, Value>,
+        args: Map<String, Value>,
     ) -> Result<CallToolResult, ErrorData> {
         let ctx = tools::CallContext {
             engine: &self.engine,
@@ -94,23 +64,25 @@ impl MemoryMcpServer {
             user: &self.user,
             machine,
         };
-        if let Some(result) = tools::call_model_tool(name, args.clone(), &ctx).await {
-            return result;
-        }
-        if name == "memory_add_fact" {
-            record_machine(&mut args, machine)?;
-        }
-        tools::dispatch(
-            name,
-            args,
-            &self.engine,
-            self.embedder.clone(),
-            self.summary_gen.clone(),
-            self.embed_dim,
-            &self.filter_config,
-        )
-        .await
+        tools::call_model_tool(name, args, &ctx)
+            .await
+            .unwrap_or_else(|| {
+                Err(ErrorData::invalid_params(
+                    format!("unknown tool: {name}"),
+                    None,
+                ))
+            })
     }
+}
+
+/// The instructions name exactly the listed tools, so the two cannot drift apart.
+fn instructions() -> String {
+    let names: Vec<_> = tools::definitions().into_iter().map(|t| t.name).collect();
+    format!(
+        "memory-engine: long-term memory shared by your sessions. Tools: {}. The first line of \
+         every answer is its call ID.",
+        names.join(", ")
+    )
 }
 
 impl ServerHandler for MemoryMcpServer {
@@ -127,17 +99,7 @@ impl ServerHandler for MemoryMcpServer {
                     ),
             )
             .with_protocol_version(ProtocolVersion::V_2025_06_18)
-            .with_instructions(
-                "Memory engine MCP server. Tools: memory_ingest, memory_add_fact, memory_query, \
-             memory_resume_context, memory_list_due, memory_next_due_time, memory_explain_fact, \
-             memory_get_fact, memory_statistics, memory_flush_insights, \
-             memory_consolidate, memory_forget, memory_dump_state, \
-             memory_pin_fact, memory_unpin_fact, \
-             memory_replay_events, memory_fact_history, memory_bootstrap_session, \
-             memory_record_outcome, memory_outcome_counts, memory_record_activity, \
-             memory_checkpoint_session, memory_load_context. \
-             Use depth=sparse|standard|full on query tools to control response verbosity.",
-            )
+            .with_instructions(instructions())
     }
 
     fn list_tools(
@@ -145,9 +107,7 @@ impl ServerHandler for MemoryMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, rmcp::model::ErrorData>> + Send + '_ {
-        std::future::ready(Ok(
-            ListToolsResult::with_all_items(Self::tool_definitions()),
-        ))
+        std::future::ready(Ok(ListToolsResult::with_all_items(tools::definitions())))
     }
 
     async fn call_tool(
@@ -169,29 +129,6 @@ fn calling_machine(extensions: &Extensions) -> Result<&Machine, ErrorData> {
         .get::<axum::http::request::Parts>()
         .and_then(|parts| parts.extensions.get::<Machine>())
         .ok_or_else(|| ErrorData::internal_error("no authenticated machine on this call", None))
-}
-
-/// The server, not the client, says which machine a remembered fact came from.
-fn record_machine(args: &mut Map<String, Value>, machine: &Machine) -> Result<(), ErrorData> {
-    let metadata = args
-        .entry("metadata")
-        .and_modify(|m| {
-            if m.is_null() {
-                *m = Value::Object(Map::new());
-            }
-        })
-        .or_insert_with(|| Value::Object(Map::new()));
-    let Value::Object(metadata) = metadata else {
-        return Err(ErrorData::invalid_params(
-            "metadata must be a JSON object",
-            None,
-        ));
-    };
-    metadata.insert(
-        "machine".to_owned(),
-        Value::String(machine.as_str().to_owned()),
-    );
-    Ok(())
 }
 
 #[cfg(test)]

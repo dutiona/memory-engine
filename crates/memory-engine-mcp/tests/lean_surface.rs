@@ -673,3 +673,117 @@ async fn a_query_whose_last_word_matches_is_found() {
         .await;
     assert_eq!(ids(&reply), vec![id]);
 }
+
+// --- The surface itself: exactly the two model tools ---
+
+/// ADR-0020 §8's table: every one of today's 26 tools leaves the surface.
+const REMOVED: [&str; 26] = [
+    "memory_ingest",
+    "memory_add_fact",
+    "memory_query",
+    "memory_resume_context",
+    "memory_list_due",
+    "memory_next_due_time",
+    "memory_explain_fact",
+    "memory_get_fact",
+    "memory_statistics",
+    "memory_flush_insights",
+    "memory_consolidate",
+    "memory_forget",
+    "memory_dump_state",
+    "memory_pin_fact",
+    "memory_unpin_fact",
+    "memory_replay_events",
+    "memory_fact_history",
+    "memory_bootstrap_session",
+    "memory_record_outcome",
+    "memory_outcome_counts",
+    "memory_record_activity",
+    "memory_checkpoint_session",
+    "memory_load_context",
+    "memory_dream_cycle",
+    "memory_apply_cycle_report",
+    "memory_get_recent_insights",
+];
+
+#[tokio::test]
+async fn tools_list_is_exactly_recall_and_remember() {
+    let server = TestServer::start().await;
+    let response: Value = server
+        .rpc(Some("laptop"), "tools/list", &json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tools = response["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["recall", "remember"]);
+    for (tool, required) in tools.iter().zip([json!(["query"]), json!(["content"])]) {
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{tool}");
+        assert_eq!(tool["inputSchema"]["required"], required, "{tool}");
+    }
+}
+
+#[tokio::test]
+async fn every_other_name_is_refused_and_changes_nothing() {
+    let server = TestServer::start().await;
+    // A decayable, pinnable fact, so a tool that still acted would leave a trace.
+    let fact = server
+        .seed(Some("unscoped:laptop"), "kestrel", json!({}))
+        .await;
+    let dump = server.dir.path().join("dump.json");
+    let before = server.engine.statistics().await.unwrap();
+    for name in REMOVED
+        .iter()
+        .copied()
+        .chain(["forget", "set_level", "memory_unknown"])
+    {
+        let args = json!({
+            "min_importance": 1,
+            "fact_id": fact,
+            "path": dump.to_str().unwrap(),
+            "content": "x",
+            "event_type": "Interaction",
+            "payload": {},
+            "source": "s",
+        });
+        let response = server.call("laptop", name, args).await;
+        assert_eq!(response["error"]["code"], -32602, "{name}: {response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(name),
+            "{name}: {response}"
+        );
+    }
+    let after = server.engine.statistics().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&before).unwrap()
+    );
+    let fact = server.engine.get_fact(fact).await.unwrap();
+    assert!(fact.t_expired.is_none() && !fact.is_pinned, "{fact:?}");
+    assert!(!dump.exists());
+}
+
+#[tokio::test]
+async fn the_instructions_name_exactly_the_listed_tools() {
+    let server = TestServer::start().await;
+    let response: Value = server
+        .rpc(Some("laptop"), "initialize", &common::initialize_params())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let instructions = response["result"]["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("Tools: recall, remember."),
+        "{instructions}"
+    );
+    assert!(!instructions.contains("memory_"), "{instructions}");
+}

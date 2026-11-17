@@ -193,24 +193,14 @@ fn a_missing_backup_dir_stops_startup() {
 }
 
 #[test]
-fn starts_with_an_embedder_and_a_summary_endpoint() {
+fn starts_with_an_embedder() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mock = runtime.block_on(wiremock::MockServer::start());
     let dir = tempfile::tempdir().unwrap();
     let embed_url = format!("{}/v1/embeddings", mock.uri());
-    let summary_url = format!("{}/v1/chat/completions", mock.uri());
     let mut server = ServerProcess::spawn(
         dir.path(),
-        &[
-            "--embed-url",
-            &embed_url,
-            "--embed-model",
-            "m",
-            "--summary-url",
-            &summary_url,
-            "--summary-model",
-            "s",
-        ],
+        &["--embed-url", &embed_url, "--embed-model", "m"],
         &[],
     );
     assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
@@ -267,19 +257,17 @@ fn help_never_prints_an_api_key_from_the_environment() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_memory-engine-mcp"))
         .arg("--help")
         .env("MEMORY_MCP_EMBED_API_KEY", "embed-key-sentinel")
-        .env("MEMORY_MCP_SUMMARY_API_KEY", "summary-key-sentinel")
         .output()
         .unwrap();
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("MEMORY_MCP_EMBED_API_KEY"), "{help}");
     assert!(!help.contains("embed-key-sentinel"), "{help}");
-    assert!(!help.contains("summary-key-sentinel"), "{help}");
 }
 
 #[test]
-fn a_half_configured_summary_endpoint_is_refused() {
-    // With only one of the summary url and model, the server used to start silently
-    // without consolidation.
+fn the_summary_settings_are_refused_before_the_store_opens() {
+    // ADR-0020 §8: the derived jobs are off in the server, so it has no summary generator.
+    // A leftover flag or section refuses to start instead of being silently ignored.
     let dir = tempfile::tempdir().unwrap();
     let mut server = ServerProcess::spawn(
         dir.path(),
@@ -287,9 +275,22 @@ fn a_half_configured_summary_endpoint_is_refused() {
         &[],
     );
     let status = server.wait_exit(Duration::from_secs(20));
-    assert!(!status.success(), "stderr:\n{}", server.stderr());
+    assert_eq!(status.code(), Some(2), "stderr:\n{}", server.stderr());
     assert!(
-        server.stderr().contains("summary"),
+        server.stderr().contains("--summary-url"),
+        "stderr:\n{}",
+        server.stderr()
+    );
+
+    common::write_config(
+        dir.path(),
+        "[summary]\nendpoint = 'http://127.0.0.1:9'\nmodel = 's'\n",
+    );
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    let status = server.wait_exit(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(1), "stderr:\n{}", server.stderr());
+    assert!(
+        server.stderr().contains("unknown field"),
         "stderr:\n{}",
         server.stderr()
     );
