@@ -83,11 +83,16 @@ async fn record(
     detail: Map<String, Value>,
 ) -> Result<i64, String> {
     let refused = |e: memory_engine::MemoryError| format!("cannot record this call: {e}");
-    let scope_id = ctx
-        .engine
-        .ensure_scope_path(&crate::home::bucket(ctx.machine))
-        .await
-        .map_err(refused)?;
+    let bucket = crate::home::bucket(ctx.machine);
+    // Resolve first: creating the path is a write transaction, needed once per machine.
+    let scope_id = match ctx.engine.resolve_scope_path(&bucket) {
+        Some(id) => id,
+        None => ctx
+            .engine
+            .ensure_scope_path(&bucket)
+            .await
+            .map_err(refused)?,
+    };
     let mut payload = Map::new();
     payload.insert("call".to_owned(), call.into());
     payload.insert("tool".to_owned(), tool.into());
