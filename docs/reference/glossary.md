@@ -27,7 +27,16 @@ Consolidation
 : Three-pass process that compresses the fact store. Pass 1 (local dedup) expires near-duplicate facts by cosine similarity. Pass 2 (cluster fusion) groups related facts and generates cluster summaries via a `SummaryGenerator`. Pass 3 (global integration) produces cross-cluster summaries.
 
 Forgetting
-: Ebbinghaus-based decay that soft-deletes low-importance facts. Importance is computed as a weighted sum of four signals: recency (exponential decay with configurable half-life), access frequency, graph connectivity (degree), and base importance. Facts below the threshold have `t_expired` set rather than being physically deleted.
+: The decay prune (`MemoryEngine::forget`, the CLI's `prune`), not the model's `forget` tool. Ebbinghaus-based decay that soft-deletes low-importance facts. Importance is computed as a weighted sum of four signals: recency (exponential decay with configurable half-life), access frequency, graph connectivity (degree), and base importance. Facts below the threshold have `t_expired` set rather than being physically deleted.
+
+Forget (retraction)
+: The model's `forget(id, reason)` tool (#1023): "this fact won't come up again". The fact and its active identical copies in the session's Homes end their validity and leave recall; the rows and events stay, and a tombstone keeps the content out of imports and promotions. Only `memory-engine-cli unforget` reverses it.
+
+Tombstone
+: The block a forget leaves (`fact_tombstones`): the content's hash, never its text, the reason, the call record and the fact's prior timestamps. It outlives an erasure of its fact, so the content stays blocked.
+
+Erasure
+: `memory-engine-cli erase --fact | --machine`, the store's one hard delete (#1023). It removes a fact, or what a machine wrote, with what was derived from it, records itself, and purges the store's files of the earlier copies. Backups are not reached.
 
 Scope
 : Hierarchical isolation context expressed as a path string (e.g., `user:michael/project:demo`). Each path segment becomes a node in the scope tree. Facts, edges, and summaries are tagged with a scope ID. Scopes enable multi-tenant and multi-project isolation within a single database.

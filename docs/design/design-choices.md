@@ -36,7 +36,7 @@ Every interaction enters the system through an append-only event log (`EventStor
 
 ## Soft Deletion **{Implemented}**
 
-Facts are expired by setting `t_expired`, never hard-deleted. This applies to forgetting (Ebbinghaus decay), conflict resolution (superseded facts), and deduplication (consolidation).
+Facts are expired by setting `t_expired`, never hard-deleted. This applies to forgetting (Ebbinghaus decay), the model's `forget` retraction, conflict resolution (superseded facts), and deduplication (consolidation). The exceptions are deliberate: archival moves expired facts into a `.pak`, and `memory-engine-cli erase` (#1023) is the one operator command that deletes.
 
 **Rationale:** Graphiti's bi-temporal model requires full history for temporal reasoning. Hard deletion destroys audit trails and makes it impossible to answer "what did the agent believe at time T?" Soft deletion also makes undo trivial (clear `t_expired`).
 

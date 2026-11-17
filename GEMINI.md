@@ -89,13 +89,13 @@ Virtual workspace (no root package); the **18 crates live flat under `crates/<cr
 - `bootstrap/` — Parse Claude Code JSONL session logs into historical facts.
 - `inspect/` — Debugging APIs: `explain_fact`, `fact_history`, `replay_events`, `dump_state`, `statistics`.
 
-Sibling crates (flat under `crates/`): `crates/memory-engine-embed/` (HTTP embedding + `HttpDeltaProposer`), `crates/memory-engine-cli/`, `crates/memory-engine-mcp/` (MCP server: `recall`, `remember`, `set_level`, ADR-0020 §8). Workspace integration tests in `tests/`, benchmarks in `benches/`, examples in `examples/`, fuzz targets in `fuzz/` (detached, nightly). The Claude Code plugin is `plugins/memory-engine/` (POSIX `sh`, listed by `.claude-plugin/marketplace.json`; its gate is in AGENTS.md).
+Sibling crates (flat under `crates/`): `crates/memory-engine-embed/` (HTTP embedding + `HttpDeltaProposer`), `crates/memory-engine-cli/`, `crates/memory-engine-mcp/` (MCP server: `recall`, `remember`, `forget`, `set_level`, ADR-0020 §8). Workspace integration tests in `tests/`, benchmarks in `benches/`, examples in `examples/`, fuzz targets in `fuzz/` (detached, nightly). The Claude Code plugin is `plugins/memory-engine/` (POSIX `sh`, listed by `.claude-plugin/marketplace.json`; its gate is in AGENTS.md).
 
 ## Conventions
 
 - **No unsafe code** — `unsafe_code = "forbid"` in Cargo.toml lints
 - **Error handling** — `thiserror` derivation, `Result<T, MemoryError>` everywhere
-- **Soft deletion** — facts are expired (`t_expired` set), never hard-deleted
+- **Soft deletion** — facts are expired (`t_expired` set), never hard-deleted, except `memory-engine-cli erase` (#1023), the one hard delete, and archival into a `.pak`
 - **Event-sourced** — append-only event log is source of truth; facts are consumer-derived
 - **Trait boundary** — no LLM/network deps in core; all intelligence via consumer traits
 - **Commits** — Conventional Commits (`feat:`, `fix:`, `refactor:`), imperative mood, atomic changes

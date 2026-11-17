@@ -4,6 +4,9 @@
 
 The forgetting system prunes stale facts using Ebbinghaus decay combined with multi-signal importance scoring. Facts scoring below a configurable threshold are soft-deleted. This keeps the active fact store bounded without losing history.
 
+This is the decay prune (`MemoryEngine::forget`, the CLI's `prune`). The model's `forget` tool is a different
+operation: a retraction behind a tombstone (#1023), reversed only by `memory-engine-cli unforget`.
+
 ## Importance Scoring
 
 Each fact's importance is computed as a weighted sum of 4 normalized signals:

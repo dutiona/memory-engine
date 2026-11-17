@@ -40,8 +40,8 @@ store, or exits 1:
 error: the store is in use by another process (/data/memory.db.store-lock is locked): stop the memory-engine server first
 ```
 
-- **Take the lock** (writable): `add-fact`, `batch-ingest`, `bootstrap`, `consolidate`, `import` (its new target),
-  `migrate` (when it applies migrations), `prune`, `record-outcome`. Stop the server first.
+- **Take the lock** (writable): `add-fact`, `batch-ingest`, `bootstrap`, `consolidate`, `erase`, `import` (its new
+  target), `migrate` (when it applies migrations), `prune`, `record-outcome`, `unforget`. Stop the server first.
 - **Never take it** (read-only, safe beside a live server): `stats`, `inspect`, `explain`, `query`, `dump`,
   `outcome-counts`, `export` in every format, `schema`, `migrate --check`.
 
@@ -75,7 +75,7 @@ Shows all 17 fields of a fact: content, type, importance scores, bi-temporal tim
 memory-engine-cli explain 42
 ```
 
-Shows why a fact is in its current state: active/expired/pinned/due, scope path, importance breakdown (base vs composite), access count, source event ID, and graph context (degree, component size, neighbor IDs).
+Shows why a fact is in its current state: active/expired/pinned/due, scope path, importance breakdown (base vs composite), access count, source event ID, and graph context (degree, component size, neighbor IDs). A forgotten fact shows `Expired { reason: Forgotten { at, reason, record_event_id } }`: when, why, and the forget's call record (#1023).
 
 #### `query <text>` — Full-Text + (optional) Vector Search
 
@@ -192,6 +192,60 @@ the store is opened. Pinned facts and the decay-exempt types (Semantic and Proce
 MCP `remember` tool stores) are never pruned. Output: `expired N of M facts evaluated`, `{"facts_expired":N,"facts_evaluated":M}`
 or `facts_expired=N` / `facts_evaluated=M`. It writes the store, so it takes the store lock: stop the server first.
 Pruning is never the model's (ADR-0020 §8).
+
+#### `unforget <id>` — Reverse a Forget
+
+```bash
+memory-engine-cli unforget 412
+```
+
+The model's `forget` retracts a memory behind a tombstone and never deletes it (#1023); only this command reverses it.
+It restores every fact that forget retracted (the named one and the identical copies it took with it) to the
+`t_expired`/`t_invalid` it had before, drops their tombstones and appends an `unforget` maintenance record. A copy
+erased since then keeps its block. Output, one line per restored fact: `unforgot fact 412: back in recall`, or
+`…: still out of recall (it was expired or invalid before the forget)`; `{"restored":[{"fact_id":412,"active":true}]}`;
+`fact_id=412 active=true`. A fact that is not forgotten, or does not exist, exits 1. It writes the store, so it takes
+the store lock: stop the server first.
+
+To find what to unforget: `dump events` lists the forget call records (`"tool":"forget"`), `explain <id>` shows a
+fact's forget and its reason, then `unforget <id>`.
+
+#### `erase --fact <id> | --machine <name>` — Delete for Good
+
+```bash
+memory-engine-cli erase --fact 412
+memory-engine-cli --format json erase --machine smoke
+```
+
+The one operation that deletes (ADR-0020 §8, #1023). Exactly one target:
+
+- `--fact <id>`: the fact. Its events stay, so a `remember`'s call record still links to it: the `erase` maintenance
+  record lists each erased fact with its surviving source event (`linked`).
+- `--machine <name>` (a lowercase DNS label): the facts whose `metadata.machine` is the name or that sit in the
+  `unscoped:<name>` bucket or below it, user-level facts it stamped included; the events whose top-level
+  `payload.machine` is the name or that sit there; the facts built on those events; the bucket's activities, and the
+  session checkpoints whose `scope_path` is the bucket or below it (a checkpoint with no `scope_path`, or an activity
+  of its sessions filed elsewhere, is not taken: neither carries a machine).
+
+Both also take every wisdom fact derived from a taken fact, the summaries naming one, the activities that promoted
+one, and every incident edge, in one transaction. A forgotten fact's tombstone keeps its hash and loses its reason, so
+the content stays blocked from re-import; an erased fact that was never forgotten can come back from a source that
+still holds it. Expired facts a taken fact had replaced are listed as `orphaned` and stay expired; facts left with the
+same content are listed as `copies`. Output: `erased: activities=0 checkpoints=0 edges=2 events=0 facts=1 summaries=0`
+(every kind, so a new table needs no CLI change) and the copies and orphans when there are any; the JSON report; or one
+`kind=N` per line.
+
+After the commit, `VACUUM` and a truncating WAL checkpoint remove the deleted rows' earlier copies from the store's
+files (a forget or any later update leaves them in free pages), and the vector-index sidecar is removed before the
+erasure and rebuilt at the next open. `VACUUM` takes time and up to about twice the store's size in free disk. When the
+purge does not complete (a full disk, a reader holding the WAL), the rows are gone, the command exits 1 with
+`erased, not purged: <cause>` and the exact command to run again: an erasure whose target is already gone deletes
+nothing, records nothing and still purges. An `erase --fact` that finds nothing exits 1 with `fact N not found; purged`.
+An erasure whose record would exceed the event limit is refused whole; erase by fact then.
+
+It does not reach backups (restic keeps older copies until its retention rotates them out), the `<db>.vN.bak`
+migration backups, `.pak` archives, or a `-wal` file left by a crash between the commit and the checkpoint. It writes
+the store, so it takes the store lock: stop the server first.
 
 #### `dump [facts|events|all]` — Debug Listing
 

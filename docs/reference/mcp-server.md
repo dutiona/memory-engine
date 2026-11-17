@@ -3,15 +3,15 @@
 ## What
 
 An MCP server binary that serves memory-engine over streamable HTTP (stateless `POST /mcp`, JSON responses), behind
-per-machine Bearer tokens, and gives the model three tools: `recall`, `remember` and `set_level` (ADR-0020 §8). Part of
+per-machine Bearer tokens, and gives the model four tools: `recall`, `remember`, `forget` and `set_level` (ADR-0020 §8). Part of
 the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence): this crate bridges Memory to
 Intelligence via the Model Context Protocol.
 
 ## Why
 
 The memory service is reachable from every machine of its owner, so its model-facing surface is deliberately small
-(ADR-0020 §8): the model reads and writes memories, and nothing it can call prunes, deletes, dumps or writes a path.
-Maintenance (pruning, export, consolidation, inspection) is `memory-engine-cli`'s, run by an operator; captured
+(ADR-0020 §8): the model reads, writes and retracts memories, and nothing it can call prunes, deletes, dumps or writes a
+path. Maintenance (pruning, erasure, reversing a forget, export, consolidation, inspection) is `memory-engine-cli`'s, run by an operator; captured
 session events arrive through the lifecycle routes, not through tools. The server validates every input at the
 transport boundary: the engine trusts its callers, the server does not.
 
@@ -246,16 +246,15 @@ it are keyless.
 
 ### Tools
 
-Three tools, each taking a JSON object and refusing any argument it does not declare (`additionalProperties: false`,
+Four tools, each taking a JSON object and refusing any argument it does not declare (`additionalProperties: false`,
 and the server refuses a stray key even when the client ignores the schema):
 
 ```text
 recall(query: string, project?: string)
 remember(content: string, level?: "project" | "user")
+forget(id: integer, reason: string)
 set_level(id: integer, level: "project" | "user")
 ```
-
-`forget` (a reversible retraction) arrives with #1023.
 
 **Every answer starts with its call ID.** The answer is one text content whose first line is `call ` followed by 16
 lowercase hex digits; failures included, as tool results with `isError: true` and the body `error: <message>`, never as
@@ -267,6 +266,7 @@ JSON-RPC errors. A name that is not a tool is a JSON-RPC `-32602 unknown tool: <
 |---|---|---|
 | `remember(content)` | the session's project; with no key, `unscoped:<machine>` | — |
 | `remember(content, level: "user")` | `user:<user>` | — |
+| `forget(id, reason)` | retracts one of the session's memories, in its own Home or `user:<user>` | — |
 | `set_level(id, level)` | moves one of the session's memories between its own Home and `user:<user>` | — |
 | `recall(query)` | — | exactly the session's own Home and `user:<user>`; `user:<user>` alone while the project holds nothing |
 | `recall(query, project: K)` | — | exactly the project whose key is `K` and `user:<user>`; never a bucket |
@@ -318,6 +318,16 @@ hint: this reads as specific to one project; set_level(412, "project") files it 
 The hint is a deterministic phrase match, outside the contract. `remember` needs an embedder; without one it refuses
 (`error: no embedder is configured, so nothing can be remembered`).
 
+**`forget`.** Retracts one memory, by its id, so it does not come up again (#1023). It never deletes: the row and every
+event stay. The memory and every active memory with the same content in the same Homes (the session's own Home and
+`user:<user>`) end their validity (`t_expired`, `t_invalid`) and leave recall, and each gets a tombstone that keeps
+that exact content out of every later import (both `bootstrap` paths, `batch-ingest`) and promotion, in any scope. A
+fresh `remember` of the same content is a new assertion and is stored. The answer is `forgotten`, `already forgotten` or
+`not found`; a memory of another project (even one `recall` returned through `project`), of another bucket or of the
+root, and a missing id all answer `not found`, which reveals nothing. The reason is kept in the tombstone, not in the
+log. Only an operator reverses a forget (`memory-engine-cli unforget`, with the server stopped) or deletes
+(`memory-engine-cli erase`). The forget, its record and the scope path the record needs commit in one transaction.
+
 **`set_level`.** Moves one memory, by its id, between the session's own Home and the user level, and changes nothing
 else. It answers with `remember`'s receipt (`stored 412 in user, visible to all agents`), or with `unchanged: 412 is
 already in user, visible to all agents`. A memory of another project, even one `recall` returned through `project`, of
@@ -332,7 +342,8 @@ machine and `project`, the request's facts as decoded with the dropped ones, the
 {"call":"9f1c2b7a40d3e6f5","tool":"set_level","machine":"laptop","fact_ids":[412],"level":"user","from":"user:alice/project:github.com%2Fexample%2Fproject","to":"user:alice","project":{"facts":{"root":"/home/alice/perso/dev/project","dev_root":"/home/alice/perso/dev","origin_url":"github.com:example/project.git"},"dropped":{},"key":"github.com/example/project","rules":1}}
 ```
 
-`recall` adds `fact_ids`; `remember` adds `level`; `set_level` adds `fact_ids`, `level`, `from` and `to`; a failure adds
+`recall` adds `fact_ids`; `remember` adds `level`; `forget` adds `fact_ids` (the requested id; the memories it
+changed are those whose tombstone names the record); `set_level` adds `fact_ids`, `level`, `from` and `to`; a failure adds
 `error` instead: the message as answered, with the userinfo of every URL it quotes removed: in the scheme form (the
 authority runs to the next `/`, across spaces, and a URL that rule 11 would drop loses everything through its last
 `@`) and in the scp form (per space-delimited token, so an scp user name holding a space keeps its first part).
@@ -357,7 +368,7 @@ Agent (Claude, etc.) → HTTP POST /mcp → auth layer → rmcp (stateless) → 
                                          ├── server.rs (ServerHandler, calling machine, instructions)
                                          ├── project.rs (project facts, key rules version 1)
                                          ├── home.rs (the user, Homes)
-                                         ├── tools/ (recall, remember, set_level, placement, call IDs, call records)
+                                         ├── tools/ (recall, remember, forget, set_level, placement, call IDs, call records)
                                          └── embedding.rs (HTTP embedding provider)
 ```
 

@@ -9,7 +9,7 @@ is appended to the event log. Events are never modified or deleted.
 
 **Facts** are knowledge the agent has internalized. They are derived from events (or
 created directly) and carry metadata: embeddings, importance scores, temporal bounds.
-Facts can be expired (soft-deleted) but never hard-deleted.
+Facts can be expired (soft-deleted) but never hard-deleted, except by `memory-engine-cli erase` (#1023), the one hard delete, and archival into a `.pak`.
 
 ```
 Event (raw)                    Fact (derived)
@@ -55,7 +55,7 @@ This enables:
 
 - **Historical queries**: "What did the agent know as of last Tuesday?"
 - **Future scheduling**: Set `t_valid` in the future; the fact surfaces when its time arrives
-- **Soft deletion**: Expired facts are never hard-deleted, preserving the full audit trail
+- **Soft deletion**: Expired facts are never hard-deleted (bar `erase` and archival), preserving the full audit trail
 
 ## Trait System
 

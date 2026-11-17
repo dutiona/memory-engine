@@ -130,10 +130,15 @@ let config = BootstrapConfig {
 | `turns_reconstructed` | `usize`          | User-assistant turn pairs reconstructed.                          |
 | `candidates_found`    | `usize`          | Episodes that matched keyword pre-filter.                         |
 | `facts_created`       | `usize`          | Facts inserted into the engine.                                   |
+| `facts_reinforced`    | `usize`          | Active facts with the same content reinforced instead of duplicated. |
+| `facts_blocked`       | `usize`          | Facts not written: a forget's tombstone blocks their content.     |
 | `events_ingested`     | `usize`          | Marker events inserted (one per session).                         |
 | `outcome_counts`      | `OutcomeCounts`  | Breakdown by session outcome (success/failure/indeterminate).     |
 | `category_counts`     | `CategoryCounts` | Breakdown by episode category (bug/decision/convention/learning). |
 | `prewarm_metrics`     | `PrewarmMetrics` | Cold-start quality metrics.                                       |
+
+A memory the model forgot (`forget`, #1023) stays out of every re-run: its tombstone blocks the exact content in any
+scope, and the run counts it in `facts_blocked`. Only `memory-engine-cli unforget` lifts it.
 
 ### `PrewarmMetrics`
 
