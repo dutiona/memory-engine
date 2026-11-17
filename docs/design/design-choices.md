@@ -118,11 +118,11 @@ Facts can have `t_valid` set to a future timestamp. They exist in storage but do
 
 ---
 
-## MCP Server **{Planned}**
+## MCP Server
 
-A `memory-engine-mcp` workspace member that exposes the engine's API as MCP tools. Separate from the core crate.
+The `memory-engine-mcp` workspace member (`crates/memory-engine-mcp`) exposes the engine's API as MCP tools, separate from the core crate.
 
-**Rationale:** MCP is the standard protocol for agent-to-tool communication. The engine should be usable as an MCP server so any MCP-compatible agent can use it without Rust integration. Keeping it as a separate workspace member prevents the core crate from depending on MCP/async/networking.
+**Rationale:** MCP is the standard protocol for agent-to-tool communication, so any MCP-compatible agent can use the engine without Rust integration. Keeping it a separate workspace member keeps MCP, async serving and networking out of the core crate's dependencies.
 
 ---
 
