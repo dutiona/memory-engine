@@ -187,8 +187,6 @@ impl MemoryEngine {
     /// serialization fails.
     /// Returns [`MemoryError::NotImplemented`](crate::MemoryError::NotImplemented) if a compression format is used
     /// without the corresponding feature enabled.
-    /// Returns [`MemoryError::ReadOnly`](crate::MemoryError::ReadOnly) for the `Sqlite` format if the engine
-    /// was opened read-only (the `VACUUM INTO` backup acquires the write lock).
     pub async fn dump_state(&self, format: &crate::inspect::DumpFormat) -> Result<()> {
         self.ensure_open()?;
         // The whole format dispatch (including the feature-gated `NotImplemented`

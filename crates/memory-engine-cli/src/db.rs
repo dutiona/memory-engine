@@ -146,7 +146,7 @@ pub fn open_engine(path: &Path) -> anyhow::Result<MemoryEngine> {
 ///
 /// Used by every command that mutates a previously-embedded database and does not
 /// already know its embedding dimension — e.g. `record-outcome`, `consolidate`,
-/// `migrate`, `export` with `SQLite` format, and the no-`--embed-dim` branch of
+/// `migrate`, and the no-`--embed-dim` branch of
 /// `batch-ingest` / `bootstrap`. Commands that derive the dimension from their own
 /// input (`add-fact`, and `batch-ingest` / `bootstrap` *with* `--embed-dim`) use
 /// [`open_engine_writable_with_dim`] instead. Sets `backup_dir` next to the

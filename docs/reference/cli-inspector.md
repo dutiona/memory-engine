@@ -91,7 +91,7 @@ memory-engine-cli export -o backup.json.gz --export-format json-gz
 memory-engine-cli export -o backup.json.zst --export-format json-zst
 ```
 
-Exports the full engine state. JSON is human-readable; SQLite is a WAL-safe binary copy; compressed formats save space.
+Exports the full engine state. JSON is human-readable; SQLite is a WAL-safe binary copy; compressed formats save space. Every format opens the store read-only, so an export runs against a live store, beside a running server.
 
 #### `import <snapshot>` — Restore from Snapshot
 

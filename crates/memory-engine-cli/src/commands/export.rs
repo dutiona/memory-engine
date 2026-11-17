@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use memory_engine::inspect_types::DumpFormat;
 
-use crate::db::{open_engine, open_engine_writable};
+use crate::db::open_engine;
 
 /// Serialization format for `export`.
 ///
@@ -35,12 +35,9 @@ pub struct ExportArgs {
 }
 
 pub async fn run(db: &Path, args: &ExportArgs) -> anyhow::Result<()> {
-    // Only SQLite export needs write access (VACUUM INTO); others are read-only.
-    let engine = if args.export_format == ExportFormat::Sqlite {
-        open_engine_writable(db)?
-    } else {
-        open_engine(db)?
-    };
+    // Every format runs read-only, `VACUUM INTO` included, so an export never takes the store
+    // lock and runs beside a live server.
+    let engine = open_engine(db)?;
 
     let format = match args.export_format {
         ExportFormat::Json => DumpFormat::Json(args.output.clone()),

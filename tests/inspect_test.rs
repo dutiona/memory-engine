@@ -227,3 +227,51 @@ async fn stamp_surfaced_on_list_due() {
         .expect("surfaced_at should still be Some on second call");
     assert_eq!(ts1, ts2, "surfaced_at must not change across calls");
 }
+
+/// D13 (#1020): a read-only engine exports `SQLite` while another connection holds the
+/// write lock, so a backup never needs the server stopped.
+#[tokio::test]
+async fn a_read_only_engine_exports_sqlite_while_a_writer_holds_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("live.db");
+    let writer = MemoryEngine::builder(DIM).path(db.clone()).build().unwrap();
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(TestEmbed);
+    for content in ["first fact", "second fact"] {
+        writer
+            .add_fact(
+                &AddFactRequest {
+                    content: content.to_owned(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::clone(&embedder),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    let side = rusqlite::Connection::open(&db).unwrap();
+    side.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let reader = MemoryEngine::builder(DIM)
+        .path(db.clone())
+        .read_only(true)
+        .build()
+        .unwrap();
+    let copy = dir.path().join("backup.db");
+    reader
+        .dump_state(&DumpFormat::Sqlite(copy.clone()))
+        .await
+        .unwrap();
+    side.execute_batch("ROLLBACK").unwrap();
+
+    let restored = rusqlite::Connection::open(&copy).unwrap();
+    let n: i64 = restored
+        .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 2);
+    drop(writer);
+}
