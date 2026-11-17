@@ -73,6 +73,12 @@ impl StoreLock {
             .create(true)
             .truncate(false)
             .open(&path)
+            // A lock file another user created (a maintenance command run as root) still
+            // locks: the lock needs only a read handle.
+            .or_else(|e| match e.kind() {
+                io::ErrorKind::PermissionDenied => File::open(&path),
+                _ => Err(e),
+            })
             .map_err(|source| StoreLockError::Io {
                 lock: path.clone(),
                 source,
@@ -135,5 +141,23 @@ mod tests {
         let err = StoreLock::acquire(&db).unwrap_err().to_string();
         assert!(err.contains("memory.db.store-lock"), "{err}");
         assert!(err.contains("in use by another process"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_this_user_cannot_write_still_locks() {
+        // e.g. left by a maintenance command run as root: flock needs only a read handle.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        drop(StoreLock::acquire(&db).unwrap());
+        let lock = dir.path().join("memory.db.store-lock");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let held = StoreLock::acquire(&db).unwrap();
+        assert!(matches!(
+            StoreLock::acquire(&db),
+            Err(StoreLockError::Held { .. })
+        ));
+        drop(held);
     }
 }
