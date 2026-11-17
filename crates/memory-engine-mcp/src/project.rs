@@ -40,8 +40,8 @@ pub enum Flaw {
     Control,
     /// The dev root is not an absolute path of plain ASCII without `%`, `"` or `\`.
     NotPlainAbsolute,
-    /// A remote URL would still hold userinfo after stripping: an encoded `/` in its password
-    /// ends the decoded authority early, so the URL is dropped rather than stored.
+    /// A remote URL still holds userinfo after stripping and gives no remote key: an encoded
+    /// `/` or `@` hid it from the strip, so the URL is dropped rather than stored.
     UnstrippedUserinfo,
 }
 
@@ -93,11 +93,11 @@ impl ProjectFacts {
             };
             match decoded {
                 Ok(value) if name.ends_with("_url") => {
-                    let raw = String::from_utf8_lossy(first.as_bytes());
-                    if lost_userinfo(&raw, &value) {
+                    let value = strip_userinfo(&value);
+                    if unstripped_userinfo(&value) {
                         facts.dropped.insert(name, Flaw::UnstrippedUserinfo);
                     } else {
-                        *facts.slot(name) = Some(strip_userinfo(&value));
+                        *facts.slot(name) = Some(value);
                     }
                 }
                 Ok(value) => *facts.slot(name) = Some(value),
@@ -337,28 +337,21 @@ fn dev_root(raw: &[u8]) -> Result<String, Flaw> {
     Ok(String::from_utf8_lossy(raw).into_owned())
 }
 
-/// A `/` that a client sent encoded inside a scheme-form URL's userinfo ends the decoded
-/// authority before its `@`, so stripping misses the secret: the raw authority (up to the first
-/// raw `/`) holds an `@` that the decoded one has lost (`https://user:pa%2Fss@host/x`).
-fn lost_userinfo(raw: &str, decoded: &str) -> bool {
-    let authority = |url: &str| {
-        url.find("://")
-            .filter(|&at| is_scheme(&url[..at]))
-            .map(|at| {
-                let rest = &url[at + 3..];
-                rest.split('/').next().unwrap_or(rest).to_owned()
-            })
-    };
-    matches!(
-        (authority(raw), authority(decoded)),
-        (Some(r), Some(d)) if r.contains('@') && !d.contains('@')
-    )
+/// A scheme-form URL that still holds an `@` after stripping and gives no remote key had its
+/// userinfo hidden from the strip: a client that did not encode `%` sent a password's `/` (or
+/// the separating `@`) encoded, so the decoded authority ends before the real `@`. Judged on
+/// the decoded value alone, so every encoding of one URL gives one outcome, and a dropped URL
+/// gave no key anyway: the flag never changes a key.
+fn unstripped_userinfo(url: &str) -> bool {
+    url.find("://")
+        .is_some_and(|at| is_scheme(&url[..at]) && url[at + 3..].contains('@'))
+        && remote_key(url).is_none()
 }
 
 /// Remove the userinfo of every URL in free text, such as an error that quotes a tool argument.
 ///
-/// At each `://`, the authority up to the next `/` or whitespace loses everything through its
-/// last `@`; then each whitespace-delimited token in the scp form (a `:` with no `/` before
+/// At each `://`, the authority up to the next `/` (across whitespace, but not into the next
+/// URL) loses everything through its last `@`; then each whitespace-delimited token in the scp form (a `:` with no `/` before
 /// it) loses everything through the last `@` before that `:`. Where a token's bounds are
 /// unclear, more is removed, never less. ADR-0020 §3: nothing stored holds userinfo.
 #[must_use]
@@ -369,9 +362,14 @@ pub fn redact_userinfo(text: &str) -> String {
         let start = at + 3;
         schemed.push_str(&rest[..start]);
         let tail = &rest[start..];
-        let end = tail
-            .find(|c: char| c == '/' || c.is_whitespace())
-            .unwrap_or(tail.len());
+        // The authority runs to the next `/`, across whitespace (a secret may hold a space),
+        // but never into the next URL's token.
+        let next_url = tail.find("://").map_or(tail.len(), |at| {
+            tail[..at]
+                .rfind(char::is_whitespace)
+                .map_or(at, |ws| ws + 1)
+        });
+        let end = tail.find('/').unwrap_or(tail.len()).min(next_url);
         let authority = &tail[..end];
         schemed.push_str(
             authority
@@ -588,29 +586,44 @@ mod tests {
 
     #[test]
     fn a_url_whose_userinfo_survives_stripping_is_dropped() {
-        // A client that did not encode `%` sends a password's `/` as `%2F`: decoded, it ends
-        // the authority early, so the userinfo would survive the strip.
+        // A client that did not encode `%` sent a password's `/` (or the separating `@`)
+        // encoded: decoded, the userinfo would survive the strip and give no remote key.
         for raw in [
             &b"https://alice:pa%2Fss@github.com/x"[..],
             b"https://alice:a%2Fb%2Fc@github.com/x",
+            b"https://alice%40corp:pa%2Fss@github.com/x",
+            b"https://alice:pa%2Fss%40github.com/x",
         ] {
             let map = headers(&[("ME-Project-Origin-Url", raw)]);
             let facts = ProjectFacts::from_headers(&map);
             assert_eq!(facts.origin_url, None, "{raw:?}");
             assert_eq!(
                 facts.dropped.get("origin_url"),
-                Some(&Flaw::UnstrippedUserinfo)
+                Some(&Flaw::UnstrippedUserinfo),
+                "{raw:?}"
             );
         }
-        for kept in [
-            "https://github.com/example/a@b",
-            "https://github.com/a@b/x",
-            "https://alice:s3cret@github.com/example/a@b",
-            "git@host:a://b/c@d",
+        // The judgement reads only the decoded value, so every encoding of one URL gives one
+        // outcome (ADR-0020 §3: decoding is canonical).
+        for (raw, stored) in [
+            (
+                &b"https://github.com/example/a@b"[..],
+                "https://github.com/example/a@b",
+            ),
+            (
+                b"https://github.com%2Fexample%2Fa@b",
+                "https://github.com/example/a@b",
+            ),
+            (b"https://github.com/a@b/x", "https://github.com/a@b/x"),
+            (
+                b"https://alice:s3cret@github.com/example/a@b",
+                "https://github.com/example/a@b",
+            ),
+            (b"git@host:a://b/c@d", "host:a://b/c@d"),
         ] {
-            let map = headers(&[("ME-Project-Upstream-Url", kept.as_bytes())]);
+            let map = headers(&[("ME-Project-Upstream-Url", raw)]);
             let facts = ProjectFacts::from_headers(&map);
-            assert!(facts.upstream_url.is_some(), "{kept}: {facts:?}");
+            assert_eq!(facts.upstream_url.as_deref(), Some(stored), "{raw:?}");
         }
     }
 
@@ -641,6 +654,10 @@ mod tests {
             (
                 "unknown variant `tok@host:x`, expected",
                 "unknown variant host:x`, expected",
+            ),
+            (
+                "unknown project: \"https://alice:p ss@github.com/p\"",
+                "unknown project: \"https://github.com/p\"",
             ),
             (
                 "https://github.com/example/a@b",
