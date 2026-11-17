@@ -62,11 +62,22 @@ operator CLI (`memory-engine-cli`). Build it with Podman from a checkout of a re
 podman build --pull=newer -t memory-engine:<tag> .
 ```
 
+or from an archive of the tag, which builds exactly its committed tree:
+
+```bash
+git archive --format=tar <tag> | podman build --pull=newer -t memory-engine:<tag> -
+```
+
 - `--pull=newer` refreshes the floating base images (`rust:1-slim-trixie`, `debian:trixie-slim`). Podman's default
   (`missing`) keeps the first copy it pulled, so later tags would build on a stale toolchain and ship stale OpenSSL,
   `curl` and CA certificates.
 - The release build runs with `--locked` from the committed `Cargo.lock`; a lock that no longer matches the
   manifests fails the build.
+- Only the `apt-get` steps (Debian-signed packages from the Debian archive) and `cargo fetch --locked` (downloads
+  the locked crates, runs none of their code) have network. The release build, where every dependency's build script
+  and proc-macro runs, and the `--version` smoke run under `RUN --network=none`: their network namespace holds only
+  loopback, so code that only needs to compile cannot open a connection from the build host. `--offline` separately
+  makes cargo fail on a crate the fetch missed instead of trying to download it.
 - The build context is an allowlist (`.containerignore`): only `Cargo.toml`, `Cargo.lock` and `crates/`. Docker
   ignores `.containerignore` and would send the whole tree, so build with Podman (or Buildah).
 - The runtime is Debian slim with CA certificates, the `sqlite3` CLI and `curl`.
