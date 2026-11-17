@@ -51,3 +51,37 @@ pub struct Tombstone {
     /// The fact's `t_invalid` before the forget, which an unforget writes back.
     pub prior_t_invalid: Option<DateTime<Utc>>,
 }
+
+/// What an erasure deletes: one fact, or everything a machine wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EraseTarget {
+    /// One fact, by id.
+    Fact(i64),
+    /// A machine, by name: the facts and events it wrote and what sits in its bucket.
+    Machine(String),
+}
+
+/// What an erasure did.
+///
+/// A sibling that erases a new table adds a kind to `deleted`, never a field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EraseReport {
+    /// What was asked.
+    pub target: EraseTarget,
+    /// Rows deleted per kind (`activities`, `checkpoints`, `edges`, `events`, `facts`,
+    /// `summaries`), every kind present, zero included.
+    pub deleted: std::collections::BTreeMap<String, usize>,
+    /// The facts deleted, in id order.
+    pub erased_facts: Vec<i64>,
+    /// Expired facts left behind whose successor was deleted (the target of a
+    /// `supersedes` or `contradicts` edge from an erased fact): they stay expired.
+    pub orphaned: Vec<i64>,
+    /// Facts left behind with the same content as an erased one.
+    pub copies: Vec<i64>,
+    /// Whether the post-commit purge (`VACUUM`, WAL truncation) removed the deleted rows'
+    /// old copies from the store's files.
+    pub purged: bool,
+    /// Why the purge did not complete, when it did not.
+    pub purge_error: Option<String>,
+}

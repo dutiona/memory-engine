@@ -9,6 +9,7 @@ pub mod checkpoints;
 pub mod edges;
 pub mod embedding_meta;
 pub mod embedding_spaces;
+pub mod erase;
 pub mod events;
 pub mod fact_vectors;
 pub mod facts;

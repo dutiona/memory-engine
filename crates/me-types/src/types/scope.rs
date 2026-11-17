@@ -29,6 +29,29 @@ pub enum ScopeQuery {
 /// Maximum byte length of a single scope-path segment (label).
 pub const MAX_SEGMENT_LEN: usize = 256;
 
+/// Whether `name` is a lowercase DNS label, `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`: the
+/// machine-name grammar (ADR-0020 §4), so `unscoped:<machine>` is always one scope segment.
+#[must_use]
+pub fn is_dns_label(name: &[u8]) -> bool {
+    let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    match (name.first(), name.last()) {
+        (Some(first), Some(last)) => {
+            name.len() <= 63
+                && edge(first)
+                && edge(last)
+                && name.iter().all(|b| edge(b) || *b == b'-')
+        }
+        _ => false,
+    }
+}
+
+/// A machine's bucket, `unscoped:<machine>`: the top-level node a keyless session of that
+/// machine files into (ADR-0021 §6). One definition for the server and the erasure.
+#[must_use]
+pub fn machine_bucket(machine: &str) -> String {
+    format!("unscoped:{machine}")
+}
+
 /// Validate the *structural* rules a single scope-path segment must satisfy:
 /// non-empty, no embedded `/`, and at most [`MAX_SEGMENT_LEN`] bytes.
 ///

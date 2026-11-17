@@ -137,6 +137,12 @@ macro_rules! all_behaviors_into {
             unforget_reverses_the_whole_forget => retraction::unforget_reverses_the_whole_forget,
             unforget_of_a_live_or_missing_fact => retraction::unforget_of_a_live_or_missing_fact,
             is_forgotten_matches_content_in_any_scope => retraction::is_forgotten_matches_content_in_any_scope,
+            erase_fact_clears_every_reference => retraction::erase_fact_clears_every_reference,
+            erase_fact_keeps_its_source_event_and_links_it => retraction::erase_fact_keeps_its_source_event_and_links_it,
+            erase_reports_orphans_and_copies => retraction::erase_reports_orphans_and_copies,
+            erase_machine_takes_what_names_it_or_sits_in_its_bucket => retraction::erase_machine_takes_what_names_it_or_sits_in_its_bucket,
+            a_second_machine_erasure_deletes_nothing => retraction::a_second_machine_erasure_deletes_nothing,
+            erase_of_a_missing_fact_deletes_nothing => retraction::erase_of_a_missing_fact_deletes_nothing,
         );
     };
 }
