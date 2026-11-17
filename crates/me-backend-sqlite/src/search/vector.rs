@@ -3,6 +3,7 @@ use rusqlite::{Connection, params_from_iter};
 
 use crate::search::FilterSql;
 use crate::store::deserialize_embedding;
+use crate::store::facts::HAS_VECTOR;
 use me_types::error::Result;
 use me_types::types::FactType;
 
@@ -116,7 +117,7 @@ pub fn vector_search_filtered(
     }
 
     let sql = format!(
-        "SELECT id, embedding FROM facts WHERE {}",
+        "SELECT id, embedding FROM facts WHERE {HAS_VECTOR} AND ({})",
         filter.where_clause
     );
     let mut stmt = conn.prepare(&sql).map_err(StorageError::backend)?;
@@ -223,6 +224,23 @@ mod tests {
                 actual: 2
             }
         ));
+    }
+
+    #[test]
+    fn vector_search_never_scores_a_fact_without_a_vector() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let embedded = store
+            .insert(&make_fact_with_embedding(
+                "embedded",
+                vec![1.0, 0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        crate::test_util::seed_without_vector(&conn, "waiting");
+
+        let results = vector_search(&conn, &[1.0, 0.0, 0.0, 0.0], DIM, 10, None, None).unwrap();
+        let ids: Vec<i64> = results.iter().map(|r| r.fact_id).collect();
+        assert_eq!(ids, [embedded]);
     }
 
     #[test]

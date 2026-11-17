@@ -250,6 +250,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lexical_finds_a_fact_without_a_vector_and_vector_skips_it() {
+        let pool = seeded(&[fact("embedded memory", [1.0, 0.0, 0.0, 0.0], false)]);
+        let waiting = crate::test_util::seed_without_vector(&pool.write(), "waiting memory");
+        let be = backend(Arc::clone(&pool));
+
+        let lexical = be
+            .lexical_search("waiting", &FactFilter::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            lexical.iter().map(|&(id, _)| id).collect::<Vec<_>>(),
+            [waiting]
+        );
+        let vector = be
+            .vector_search(&[1.0, 0.0, 0.0, 0.0], &FactFilter::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(vector.len(), 1);
+        assert_ne!(vector[0].0, waiting);
+    }
+
+    #[tokio::test]
     async fn vector_parity_distinct_scores_value_and_order() {
         let pool = seeded(&[
             fact("a", [1.0, 0.0, 0.0, 0.0], false),

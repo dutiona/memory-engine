@@ -26,6 +26,11 @@ const FACT_COLUMNS: &str = "id, content, content_hash, embedding, fact_type, \
      source_event_id, importance, access_count, last_accessed, metadata, scope_id, \
      is_pinned, importance_score, surfaced_at";
 
+/// The predicate every vector reader filters with (#1021): a fact waiting in the
+/// deferred-embedding queue stores `embedding = X''`, which no reader may score, index or
+/// merge. Bare column name: callers use it only on a single-table `FROM facts`.
+pub(crate) const HAS_VECTOR: &str = "length(embedding) > 0";
+
 /// The minimal column set needed to score a fact's importance during a prune
 /// pass — identity, decay inputs, and the pin flag. Deliberately excludes the
 /// heavy `content`, `embedding`, and `metadata` columns. Kept in lockstep with
@@ -1688,9 +1693,15 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })?;
 
-    let embedding = deserialize_embedding(&embedding_blob, embed_dim).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
-    })?;
+    // `X''` is a fact still waiting for its vector (#1021); every vector reader filters
+    // it out in SQL, so only this generic hydration sees it.
+    let embedding = if embedding_blob.is_empty() {
+        Vec::new()
+    } else {
+        deserialize_embedding(&embedding_blob, embed_dim).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
+        })?
+    };
 
     let metadata: serde_json::Value = serde_json::from_str(&metadata_str).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -1972,6 +1983,28 @@ mod tests {
             Some(c2),
             "expired fact excluded"
         );
+    }
+
+    #[test]
+    fn a_fact_without_a_vector_reads_back_empty() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = crate::test_util::seed_without_vector(&conn, "waiting for its vector");
+
+        let none = Vec::<f32>::new();
+        assert_eq!(store.get(id).unwrap().embedding, none);
+        assert_eq!(store.get_many(&[id]).unwrap()[&id].embedding, none);
+        let active = store.list_active(None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].embedding, none);
+        let mut widths = Vec::new();
+        store
+            .for_each(|f| {
+                widths.push(f.embedding.len());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(widths, [0]);
     }
 
     #[test]

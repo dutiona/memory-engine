@@ -48,6 +48,7 @@ use space::Neighbor;
 use crate::search::strategy::VectorSearchStrategy;
 use crate::search::vector::VectorResult;
 use crate::store::deserialize_embedding;
+use crate::store::facts::HAS_VECTOR;
 use me_types::error::Result;
 use me_types::types::FactType;
 
@@ -193,7 +194,9 @@ impl HnswStrategy {
     /// `MemoryError::EmbeddingDimension` if a stored embedding has the wrong size.
     fn build_inner(conn: &Connection, embed_dim: usize) -> Result<HnswInner> {
         let mut stmt = conn
-            .prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")
+            .prepare(&format!(
+                "SELECT id, embedding FROM facts WHERE t_expired IS NULL AND {HAS_VECTOR} ORDER BY id"
+            ))
             .map_err(StorageError::backend)?;
         // The mapped-rows iterator borrows `stmt`, which is owned here and outlives
         // the `build_hnsw_inner` call below — so the kernel can pull rows lazily.
@@ -317,7 +320,9 @@ impl HnswStrategy {
         use me_types::types::snapshot::{HnswEntry, HnswSnapshot};
 
         let mut stmt = conn
-            .prepare("SELECT id, embedding FROM facts WHERE t_expired IS NULL ORDER BY id")
+            .prepare(&format!(
+                "SELECT id, embedding FROM facts WHERE t_expired IS NULL AND {HAS_VECTOR} ORDER BY id"
+            ))
             .map_err(StorageError::backend)?;
         let rows = stmt
             .query_map([], |row| {
@@ -588,7 +593,10 @@ impl VectorSearchStrategy for HnswStrategy {
 ///
 /// - `t_expired IS NULL` (active only),
 /// - `?2 IS NULL OR fact_type = ?2` (optional `fact_type` filter),
-/// - `?3 IS NULL OR scope_id IN (json_each(?3))` (optional scope filter).
+/// - `?3 IS NULL OR scope_id IN (json_each(?3))` (optional scope filter),
+///
+/// plus [`HAS_VECTOR`] (#1021), so a fact waiting for its vector is never scored even
+/// if the index holds it: the invariant never depends on the index being fresh.
 ///
 /// The candidate id list is passed as a JSON array expanded via `json_each` — the
 /// same binding technique the scope filter already uses, so a large candidate set
@@ -620,13 +628,14 @@ fn fetch_candidate_embeddings(
     let scope_json = serialize_scope_ids(scope_ids)?;
 
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT id, embedding FROM facts
          WHERE id IN (SELECT value FROM json_each(?1))
            AND t_expired IS NULL
+           AND {HAS_VECTOR}
            AND (?2 IS NULL OR fact_type = ?2)
            AND (?3 IS NULL OR scope_id IN (SELECT value FROM json_each(?3)))",
-        )
+        ))
         .map_err(StorageError::backend)?;
     let rows = stmt
         .query_map(
@@ -774,6 +783,30 @@ mod tests {
                 ids.push(id);
             }
             (conn, ids)
+        }
+
+        #[test]
+        fn hnsw_build_and_snapshot_skip_a_fact_without_a_vector() {
+            let (conn, ids) = setup_with_facts();
+            crate::test_util::seed_without_vector(&conn, "waiting");
+
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+            assert_eq!(strategy.mapping_snapshot().0, ids);
+            strategy.rebuild_from_db(&conn).unwrap();
+            assert_eq!(strategy.mapping_snapshot().0, ids);
+            let snap = strategy.to_snapshot(&conn, DIM).unwrap();
+            let snapped: Vec<i64> = snap.entries.iter().map(|e| e.fact_id).collect();
+            assert_eq!(snapped, ids);
+        }
+
+        #[test]
+        fn fetch_candidate_embeddings_skips_a_fact_without_a_vector() {
+            let (conn, ids) = setup_with_facts();
+            let waiting = crate::test_util::seed_without_vector(&conn, "waiting");
+
+            let got =
+                fetch_candidate_embeddings(&conn, &[ids[0], waiting], None, None, DIM).unwrap();
+            assert_eq!(got.keys().copied().collect::<Vec<_>>(), [ids[0]]);
         }
 
         #[test]

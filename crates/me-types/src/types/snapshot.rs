@@ -23,8 +23,9 @@ pub struct SnapshotHeader {
 
 /// Composite fingerprint from the three source-of-truth tables.
 ///
-/// Catches inserts (`max_*_id` changes) and soft-deletes (`active_*_count`
-/// changes). **Not** based on the `events` table — many mutators
+/// Catches inserts (`max_*_id` changes), soft-deletes (`active_*_count`
+/// changes) and a vector filled in for a fact that waited for one
+/// (`vectorless_fact_count`). **Not** based on the `events` table — many mutators
 /// (`add_fact`, `forget`, `consolidate`, `link_session_facts`) modify
 /// `facts`/`edges`/`scopes` without appending an event.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,6 +36,13 @@ pub struct DbFingerprint {
     pub active_edge_count: i64,
     pub max_scope_id: i64,
     pub scope_count: i64,
+    /// Facts of any state stored without a vector, waiting in the deferred-embedding
+    /// queue (#1021). Filling a vector lowers it; only a deferred insert, which also
+    /// raises `max_fact_id`, raises it, so no mix of fills, expiries and inserts
+    /// leaves an older sidecar matching. A sidecar written before the field decodes
+    /// it as 0 and still matches a store with no waiting fact.
+    #[serde(default)]
+    pub vectorless_fact_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -106,6 +106,8 @@ pub struct Fact {
     pub id: i64,
     pub content: String,
     pub content_hash: String,
+    /// Empty while the fact waits in the deferred-embedding queue (#1021); no vector
+    /// reader returns such a fact; otherwise exactly the store's dimension.
     pub embedding: Vec<f32>,
     pub fact_type: FactType,
     /// Transaction-time start: when the row was first written. Bootstrap backdates this
