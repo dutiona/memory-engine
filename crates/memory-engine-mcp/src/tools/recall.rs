@@ -7,9 +7,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::CallContext;
+use crate::embedding;
 use crate::home::Home;
 use crate::project::ProjectKey;
-use crate::embedding;
 
 /// A fixed result count keeps the recall log comparable (ADR-0020 §8: no limit argument).
 const RESULTS: usize = 10;
