@@ -40,8 +40,9 @@ pub enum Flaw {
     Control,
     /// The dev root is not an absolute path of plain ASCII without `%`, `"` or `\`.
     NotPlainAbsolute,
-    /// A remote URL still holds userinfo after stripping and gives no remote key: an encoded
-    /// `/` or `@` hid it from the strip, so the URL is dropped rather than stored.
+    /// A remote URL still holds an `@` after stripping and gives no remote key (or ends its
+    /// authority with an empty port): userinfo an encoded `/` or `@` hid from the strip, or a
+    /// keyless URL with an `@` in its path; dropped rather than stored.
     UnstrippedUserinfo,
 }
 
@@ -337,23 +338,29 @@ fn dev_root(raw: &[u8]) -> Result<String, Flaw> {
     Ok(String::from_utf8_lossy(raw).into_owned())
 }
 
-/// A scheme-form URL that still holds an `@` after stripping and gives no remote key had its
-/// userinfo hidden from the strip: a client that did not encode `%` sent a password's `/` (or
-/// the separating `@`) encoded, so the decoded authority ends before the real `@`. Judged on
-/// the decoded value alone, so every encoding of one URL gives one outcome, and a dropped URL
-/// gave no key anyway: the flag never changes a key.
+/// A scheme-form URL that still holds an `@` after stripping, and gives no remote key or ends
+/// its authority with an empty port (which git never writes), had its userinfo hidden from the
+/// strip: a `/` in the password, or the separating `@`, came encoded (`https://user:pa/ss@…`
+/// once decoded). Judged on the decoded value alone, so every encoding of one URL gives one
+/// outcome.
 fn unstripped_userinfo(url: &str) -> bool {
-    url.find("://")
-        .is_some_and(|at| is_scheme(&url[..at]) && url[at + 3..].contains('@'))
-        && remote_key(url).is_none()
+    url.find("://").is_some_and(|at| {
+        let rest = &url[at + 3..];
+        let authority = rest.split('/').next().unwrap_or(rest);
+        is_scheme(&url[..at])
+            && rest.contains('@')
+            && (authority.ends_with(':') || remote_key(url).is_none())
+    })
 }
 
 /// Remove the userinfo of every URL in free text, such as an error that quotes a tool argument.
 ///
 /// At each `://`, the authority up to the next `/` (across whitespace, but not into the next
-/// URL) loses everything through its last `@`; then each whitespace-delimited token in the scp form (a `:` with no `/` before
-/// it) loses everything through the last `@` before that `:`. Where a token's bounds are
-/// unclear, more is removed, never less. ADR-0020 §3: nothing stored holds userinfo.
+/// URL) loses everything through its last `@`. Then each whitespace-delimited token loses
+/// everything through the last `@` before its first `:` in the scp form (no `/` before that
+/// `:`), and through its last `@` when it is a scheme-form URL that rule 11 would drop (a `/`
+/// in the password). Where a token's bounds are unclear, more is removed, never less.
+/// ADR-0020 §3: nothing stored holds userinfo.
 #[must_use]
 pub fn redact_userinfo(text: &str) -> String {
     let mut schemed = String::with_capacity(text.len());
@@ -384,11 +391,31 @@ pub fn redact_userinfo(text: &str) -> String {
         .map(|token| {
             let before = token.find(':').map_or("", |colon| &token[..colon]);
             match before.rfind('@') {
-                Some(last) if !before.contains('/') => &token[last + 1..],
-                _ => token,
+                Some(last) if !before.contains('/') => token[last + 1..].to_owned(),
+                _ => redact_hidden_userinfo(token),
             }
         })
         .collect()
+}
+
+/// A token holding a scheme-form URL that rule 11 would drop loses everything between its
+/// `://` and its last `@`.
+fn redact_hidden_userinfo(token: &str) -> String {
+    let Some(at) = token.find("://") else {
+        return token.to_owned();
+    };
+    let scheme_start = token[..at]
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-')))
+        .map_or(0, |i| i + 1);
+    let url = token[scheme_start..].trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';' | ')' | '\\')
+    });
+    match token.rfind('@') {
+        Some(last) if last > at && unstripped_userinfo(url) => {
+            format!("{}{}", &token[..at + 3], &token[last + 1..])
+        }
+        _ => token.to_owned(),
+    }
 }
 
 /// Remove userinfo in two steps: the plugin's scheme rule (the authority after the first
@@ -593,6 +620,7 @@ mod tests {
             b"https://alice:a%2Fb%2Fc@github.com/x",
             b"https://alice%40corp:pa%2Fss@github.com/x",
             b"https://alice:pa%2Fss%40github.com/x",
+            b"https://alice:%2Fss@github.com/x",
         ] {
             let map = headers(&[("ME-Project-Origin-Url", raw)]);
             let facts = ProjectFacts::from_headers(&map);
@@ -657,6 +685,10 @@ mod tests {
             ),
             (
                 "unknown project: \"https://alice:p ss@github.com/p\"",
+                "unknown project: \"https://github.com/p\"",
+            ),
+            (
+                "unknown project: \"https://alice:pa/ss@github.com/p\"",
                 "unknown project: \"https://github.com/p\"",
             ),
             (
