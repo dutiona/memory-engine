@@ -203,10 +203,12 @@ Decoding, per header (`ME-Project-Root` → `root`, `-Dev-Root` → `dev_root`, 
     the next `/`) loses everything through its last `@`; then, when a `:` exists and the text before the first one
     holds no `/`, that text loses everything through its last `@`. This removes at least what the plugin's client
     removes.
-11. A scheme-form URL whose raw authority (before decoding, up to the first raw `/`) holds an `@` that the decoded
-    authority has lost had an encoded `/` in its userinfo (`https://user:pa%2Fss@host/x`, from a client that did not
-    encode `%`): `unstripped_userinfo`, so the secret is never stored. An `@` in the path is kept
-    (`https://github.com/example/a@b`).
+11. A scheme-form URL that still holds an `@` after step 10 and gives no remote key (R2) had its userinfo hidden from
+    the strip by a client that did not encode `%`: an encoded `/` in the password, or an encoded separating `@`
+    (`https://user:pa%2Fss@host/x`). It is dropped as `unstripped_userinfo` instead of stored. The rule reads only the
+    decoded value, so every encoding of one URL gives one outcome, and a dropped URL gave no key anyway. An `@` in a
+    path that gives a key is kept (`https://github.com/example/a@b`). Residual: such a client's token with no user
+    name and an encoded `/` (`https://to%2Fken@host/x`) gives a key, so it is kept.
 
 Remote key, tried on `upstream_url` then `origin_url`; a URL that gives none is ignored, and the next rule applies:
 
@@ -328,8 +330,9 @@ machine and `project`, the request's facts as decoded with the dropped ones, the
 ```
 
 `recall` adds `fact_ids`; `remember` adds `level`; `set_level` adds `fact_ids`, `level`, `from` and `to`; a failure adds
-`error` instead: the message as answered, with the userinfo of every URL it quotes removed, in the scheme form and in
-the scp form. A `set_level` record is a move only when it carries `from` and `to`, which is what re-filing replays.
+`error` instead: the message as answered, with the userinfo of every URL it quotes removed, in the scheme form (the
+authority runs to the next `/`, across spaces) and in the scp form (per space-delimited token, so an scp user name
+holding a space keeps its first part). A `set_level` record is a move only when it carries `from` and `to`, which is what re-filing replays.
 `remember`'s content is stored as the memory, as written: redacting it is #1024's.
 Records sit under the calling machine's bucket, except a valid `remember`'s, which sits under the Home it wrote to.
 
