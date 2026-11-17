@@ -93,6 +93,40 @@ impl EmbeddingArgs {
             .context("--embed-url and --embed-model are required for this command")
     }
 
+    /// [`build_required`](Self::build_required) on a blocking thread.
+    ///
+    /// A blocking reqwest client builds and drops a runtime of its own in debug builds, which
+    /// panics on the async executor; async commands build the provider through this.
+    ///
+    /// # Errors
+    ///
+    /// As [`build_required`](Self::build_required), or if the blocking task fails to join.
+    pub async fn build_required_blocking(
+        &self,
+        engine_dim: usize,
+    ) -> anyhow::Result<HttpEmbeddingProvider> {
+        let args = self.clone();
+        tokio::task::spawn_blocking(move || args.build_required(engine_dim))
+            .await
+            .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))?
+    }
+
+    /// [`build_optional`](Self::build_optional) on a blocking thread, for the same reason as
+    /// [`build_required_blocking`](Self::build_required_blocking).
+    ///
+    /// # Errors
+    ///
+    /// As [`build_optional`](Self::build_optional), or if the blocking task fails to join.
+    pub async fn build_optional_blocking(
+        &self,
+        engine_dim: usize,
+    ) -> anyhow::Result<Option<HttpEmbeddingProvider>> {
+        let args = self.clone();
+        tokio::task::spawn_blocking(move || args.build_optional(engine_dim))
+            .await
+            .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))?
+    }
+
     /// Construct the provider, wiring `provider`, `query_instruction`, and `mrl_dim`.
     ///
     /// The provider's `expected_dim` is the **native** dimension it validates raw

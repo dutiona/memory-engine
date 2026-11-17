@@ -103,9 +103,13 @@ pub async fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::R
     // When an embedder is configured, embed the query text via embed_query (so an
     // asymmetric model applies its query instruction prefix) for hybrid FTS + vector
     // search. With no embedder configured the query stays FTS-only (#619, §Design.6).
-    if let Some(provider) = args.embed.build_optional(engine.embed_dim())? {
-        let embedding = provider
-            .embed_query(&args.text)
+    if let Some(provider) = args.embed.build_optional_blocking(engine.embed_dim()).await? {
+        // Each blocking request also builds and drops a runtime in debug builds: embed (and
+        // drop the provider) off the executor too.
+        let text = args.text.clone();
+        let embedding = tokio::task::spawn_blocking(move || provider.embed_query(&text))
+            .await
+            .map_err(|e| anyhow::anyhow!("join error embedding the query: {e}"))?
             .map_err(|e| anyhow::anyhow!("query embedding failed: {e}"))?;
         query = query.embedding(embedding);
     }
