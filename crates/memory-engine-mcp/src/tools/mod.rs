@@ -1,6 +1,6 @@
-//! The model's tools (ADR-0020 §8): `recall` and `remember`.
+//! The model's tools (ADR-0020 §8): `recall`, `remember` and `set_level`.
 //!
-//! #1022 and #1023 add `set_level` and `forget`. Each tool is one module holding its
+//! #1023 adds `forget`. Each tool is one module holding its
 //! definition, its closed argument struct and its handler; this module routes a name to it,
 //! mints the call ID that heads every answer and appends the call's record to the event log.
 
@@ -20,11 +20,16 @@ use crate::project::{ProjectFacts, ProjectKey};
 mod placement;
 mod recall;
 mod remember;
+mod set_level;
 
 /// The tools the server lists, in the order it lists them.
 #[must_use]
 pub fn definitions() -> Vec<Tool> {
-    vec![recall::definition(), remember::definition()]
+    vec![
+        recall::definition(),
+        remember::definition(),
+        set_level::definition(),
+    ]
 }
 
 /// What one model-tool call runs against.
@@ -95,7 +100,7 @@ pub(crate) async fn call_model_tool(
     args: Map<String, Value>,
     ctx: &CallContext<'_>,
 ) -> Option<Result<CallToolResult, ErrorData>> {
-    if !matches!(name, "recall" | "remember") {
+    if !matches!(name, "recall" | "remember" | "set_level") {
         return None;
     }
     // Unreachable once main's startup probe succeeded: Linux getrandom(2) never fails after
@@ -110,12 +115,35 @@ pub(crate) async fn call_model_tool(
         }
     };
     let args = Value::Object(args);
-    let outcome = if name == "recall" {
-        recall::run(ctx, &call, args).await
-    } else {
-        remember::run(ctx, &call, args).await
+    let outcome = match name {
+        "recall" => recall::run(ctx, &call, args).await,
+        "remember" => remember::run(ctx, &call, args).await,
+        _ => set_level::run(ctx, &call, args).await,
     };
     Some(Ok(respond(&call, outcome)))
+}
+
+/// The answer to a by-ID call on a memory the session may not act on: the same as for a
+/// missing id, so it reveals nothing (ADR-0020 §8).
+pub(crate) const NOT_FOUND: &str = "not found";
+
+/// ADR-0021 §5's by-ID authority, shared with #1023's `forget`: the fact and the Home that
+/// holds it when that Home is the session's own or the user level; `None` for anything else
+/// (root, another project, another bucket, a fact `recall` reached through `project`, a
+/// missing id). Liveness is the caller's.
+pub(crate) async fn owned_fact(
+    ctx: &CallContext<'_>,
+    id: i64,
+) -> Result<Option<(memory_engine::types::Fact, Home)>, String> {
+    let fact = match ctx.engine.get_fact(id).await {
+        Ok(fact) => fact,
+        Err(memory_engine::MemoryError::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    Ok([ctx.own_home(), Home::User]
+        .into_iter()
+        .find(|home| ctx.engine.resolve_scope_path(&home.path(ctx.user)) == Some(fact.scope_id))
+        .map(|home| (fact, home)))
 }
 
 /// The call's record (ADR-0020 §8): its ID, tool and machine, the request's project facts

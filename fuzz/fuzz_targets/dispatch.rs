@@ -10,7 +10,9 @@
 //!
 //! Each run uses a fresh in-memory engine and no embedder, so `remember` refuses after
 //! validating its arguments and `recall` runs full-text only: exactly the untrusted-parse
-//! surface. Neither tool writes outside the store (no tool takes a path).
+//! surface. Each run also seeds one fact at the user level, so `set_level` reaches its move
+//! (a fuzzed key's project creation included) for the fact's id 1. No tool writes outside
+//! the store (no tool takes a path).
 #![no_main]
 
 use std::cell::RefCell;
@@ -27,7 +29,13 @@ use serde_json::{Map, Value};
 const DIM: usize = 8;
 
 /// The model tools, one removed tool and one unknown name, picked by the first input byte.
-const TOOL_NAMES: &[&str] = &["recall", "remember", "memory_forget", "memory_unknown_tool_name"];
+const TOOL_NAMES: &[&str] = &[
+    "recall",
+    "remember",
+    "set_level",
+    "memory_forget",
+    "memory_unknown_tool_name",
+];
 
 thread_local! {
     // Reuse a single current-thread runtime across iterations: building a Tokio
@@ -113,9 +121,29 @@ fn drive(name: &str, facts: &ProjectFacts, args: Map<String, Value>) {
             return;
         };
         let user = User::parse("fuzz").expect("a valid user");
-        let server = MemoryMcpServer::new(Arc::new(engine), None, user);
+        let engine = Arc::new(engine);
+        let server = MemoryMcpServer::new(Arc::clone(&engine), None, user);
         rt.block_on(async {
+            if seed(&engine).await.is_none() {
+                return;
+            }
             let _ = server.dispatch(machine, facts, name, args).await;
         });
     });
+}
+
+/// One fact at `user:fuzz`, so `set_level` has a memory it may move.
+async fn seed(engine: &MemoryEngine) -> Option<i64> {
+    let fingerprint = memory_engine::EmbeddingFingerprint::new("fuzz", "m", DIM);
+    let request = memory_engine::types::AddFactRequest {
+        content: "seeded".to_owned(),
+        fact_type: memory_engine::types::FactType::Semantic,
+        source_event_id: None,
+        scope: Some("user:fuzz".to_owned()),
+        opts: None,
+    };
+    engine
+        .add_fact_precomputed(&request, vec![0.5; DIM], &fingerprint, None)
+        .await
+        .ok()
 }

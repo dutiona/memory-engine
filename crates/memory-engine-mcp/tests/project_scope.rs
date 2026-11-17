@@ -1019,3 +1019,315 @@ async fn an_unknown_level_is_refused_and_stores_nothing() {
     }
     assert_eq!(server.fact_count().await, 0);
 }
+
+// --- set_level (ADR-0020 §8, ADR-0021 §5, §7) ---
+
+async fn set_level(
+    server: &TestServer,
+    machine: &str,
+    facts: &Owned,
+    id: i64,
+    level: &str,
+) -> common::Reply {
+    server
+        .tool_with(
+            machine,
+            &borrow(facts),
+            "set_level",
+            json!({ "id": id, "level": level }),
+        )
+        .await
+}
+
+/// The `set_level` records that moved a fact (they carry `from` and `to`), oldest first.
+fn moves(server: &TestServer) -> Vec<(String, String)> {
+    server
+        .records()
+        .into_iter()
+        .filter(|(_, p, _)| p["tool"] == "set_level" && p.get("from").is_some())
+        .map(|(_, p, _)| {
+            (
+                p["from"].as_str().unwrap().to_owned(),
+                p["to"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn q_session(dev: &str) -> Owned {
+    session(dev, "q", Some("https://github.com/example/q"), None)
+}
+
+#[tokio::test]
+async fn set_level_moves_a_memory_and_back() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let id = stored_id(
+        &remember(
+            &server,
+            "laptop",
+            &p,
+            json!({ "content": "kestrel moving" }),
+        )
+        .await,
+    );
+    let before = server.engine.get_fact(id).await.unwrap();
+    let up = set_level(&server, "laptop", &p, id, "user").await;
+    assert_eq!(
+        up.body,
+        format!("stored {id} in user, visible to all agents"),
+        "{up:?}"
+    );
+    assert!(sees(&server, "laptop", &q_session(LAPTOP_DEV), id).await);
+    let down = set_level(&server, "laptop", &p, id, "project").await;
+    assert_eq!(
+        down.body,
+        format!("stored {id} in project {P_KEY}, visible to all agents")
+    );
+    assert!(!sees(&server, "laptop", &q_session(LAPTOP_DEV), id).await);
+    let after = server.engine.get_fact(id).await.unwrap();
+    assert_eq!(
+        (
+            after.content,
+            after.metadata,
+            after.fact_type,
+            after.t_created
+        ),
+        (
+            before.content,
+            before.metadata,
+            before.fact_type,
+            before.t_created
+        )
+    );
+    let again = set_level(&server, "laptop", &p, id, "project").await;
+    assert_eq!(
+        again.body,
+        format!("unchanged: {id} is already in project {P_KEY}, visible to all agents")
+    );
+    let last = server.records().pop().unwrap().1;
+    assert_eq!(last["from"], last["to"], "{last}");
+}
+
+#[tokio::test]
+async fn a_memory_rehomes_through_the_user_level() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let id = stored_id(
+        &remember(
+            &server,
+            "laptop",
+            &p,
+            json!({ "content": "kestrel rehomed" }),
+        )
+        .await,
+    );
+    set_level(&server, "laptop", &p, id, "user").await;
+    let q = q_session(DESKTOP_DEV);
+    let down = set_level(&server, "desktop", &q, id, "project").await;
+    assert_eq!(
+        down.body,
+        format!("stored {id} in project github.com/example/q, visible to all agents")
+    );
+    assert!(
+        server
+            .engine
+            .resolve_scope_path(&home_of("github.com/example/q"))
+            .is_some()
+    );
+    assert!(!sees(&server, "laptop", &p, id).await);
+    assert!(sees(&server, "desktop", &q, id).await);
+    assert_eq!(
+        moves(&server),
+        vec![
+            (home_of(P_KEY), "user:alice".to_owned()),
+            ("user:alice".to_owned(), home_of("github.com/example/q")),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_keyless_session_moves_between_its_bucket_and_user() {
+    let server = TestServer::start().await;
+    let id = stored_id(
+        &remember(
+            &server,
+            "laptop",
+            &Vec::new(),
+            json!({ "content": "kestrel keyless" }),
+        )
+        .await,
+    );
+    let up = set_level(&server, "laptop", &Vec::new(), id, "user").await;
+    assert_eq!(
+        up.body,
+        format!("stored {id} in user, visible to all agents")
+    );
+    let down = set_level(&server, "laptop", &Vec::new(), id, "project").await;
+    assert_eq!(
+        down.body,
+        format!("stored {id} in unscoped on laptop, visible to all agents")
+    );
+}
+
+#[tokio::test]
+async fn set_level_right_after_a_machines_first_remember() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let id =
+        stored_id(&remember(&server, "laptop", &p, json!({ "content": "kestrel first" })).await);
+    assert_eq!(server.engine.resolve_scope_path("unscoped:laptop"), None);
+    let up = set_level(&server, "laptop", &p, id, "user").await;
+    assert!(!up.is_error, "{up:?}");
+    assert_eq!(server.records().last().unwrap().2, "unscoped:laptop");
+}
+
+#[tokio::test]
+async fn set_level_never_reaches_another_home() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let in_q = server
+        .seed(
+            Some(&home_of("github.com/example/q")),
+            "kestrel in q",
+            json!({}),
+        )
+        .await;
+    let swap = recall(
+        &server,
+        "laptop",
+        &p,
+        json!({ "query": "kestrel", "project": "github.com/example/q" }),
+    )
+    .await;
+    assert_eq!(result_ids(&swap), vec![in_q]);
+    let at_root = server.seed(None, "kestrel at root", json!({})).await;
+    let in_bucket = server
+        .seed(Some("unscoped:laptop"), "kestrel in the bucket", json!({}))
+        .await;
+    let on_desktop = server
+        .seed(Some("unscoped:desktop"), "kestrel on desktop", json!({}))
+        .await;
+    let expired = server
+        .seed(Some(&home_of(P_KEY)), "kestrel expired", json!({}))
+        .await;
+    let ended = server
+        .seed(Some(&home_of(P_KEY)), "kestrel ended", json!({}))
+        .await;
+    let later = server
+        .seed(Some(&home_of(P_KEY)), "kestrel ends later", json!({}))
+        .await;
+    server.sql(&format!(
+        "UPDATE facts SET t_expired = '2026-01-01T00:00:00+00:00' WHERE id = {expired}"
+    ));
+    server.sql(&format!(
+        "UPDATE facts SET t_invalid = '2026-01-01T00:00:00+00:00' WHERE id = {ended}"
+    ));
+    server.sql(&format!(
+        "UPDATE facts SET t_invalid = '2999-01-01T00:00:00+00:00' WHERE id = {later}"
+    ));
+    let before = server.engine.statistics().await.unwrap();
+    for id in [
+        in_q, at_root, in_bucket, on_desktop, 999_999, expired, ended,
+    ] {
+        let reply = set_level(&server, "laptop", &p, id, "user").await;
+        assert!(reply.is_error, "{id}: {reply:?}");
+        assert_eq!(reply.body, "error: not found", "{id}");
+    }
+    let after = server.engine.statistics().await.unwrap();
+    assert_eq!(after.facts.total, before.facts.total);
+    for id in [in_q, at_root, in_bucket, on_desktop, expired, ended] {
+        let fact = server.engine.get_fact(id).await.unwrap();
+        assert_ne!(
+            Some(fact.scope_id),
+            server.engine.resolve_scope_path("user:alice"),
+            "{id}"
+        );
+    }
+    let reply = set_level(&server, "laptop", &p, later, "user").await;
+    assert!(!reply.is_error, "a future t_invalid is live: {reply:?}");
+}
+
+#[tokio::test]
+async fn a_move_whose_record_fails_does_not_happen() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let id =
+        stored_id(&remember(&server, "laptop", &p, json!({ "content": "kestrel stays" })).await);
+    server.refuse_event_writes();
+    let reply = set_level(&server, "laptop", &p, id, "user").await;
+    assert!(reply.is_error && reply.body.contains("record"), "{reply:?}");
+    let fact = server.engine.get_fact(id).await.unwrap();
+    assert_eq!(
+        Some(fact.scope_id),
+        server.engine.resolve_scope_path(&home_of(P_KEY))
+    );
+}
+
+#[tokio::test]
+async fn a_record_never_names_a_move_that_failed() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let id =
+        stored_id(&remember(&server, "laptop", &p, json!({ "content": "kestrel stays" })).await);
+    server.sql("CREATE TRIGGER refuse_moves BEFORE UPDATE OF scope_id ON facts BEGIN SELECT RAISE(ABORT, 'moves refused by the test'); END;");
+    let reply = set_level(&server, "laptop", &p, id, "user").await;
+    assert!(reply.is_error, "{reply:?}");
+    assert_eq!(moves(&server), Vec::<(String, String)>::new());
+    let fact = server.engine.get_fact(id).await.unwrap();
+    assert_eq!(
+        Some(fact.scope_id),
+        server.engine.resolve_scope_path(&home_of(P_KEY))
+    );
+}
+
+#[tokio::test]
+async fn concurrent_moves_leave_a_replayable_log() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let q = q_session(DESKTOP_DEV);
+    for _ in 0..8 {
+        let id = stored_id(
+            &remember(&server, "laptop", &p, json!({ "content": "kestrel raced" })).await,
+        );
+        let (up_one, up_two) = tokio::join!(
+            set_level(&server, "laptop", &p, id, "user"),
+            set_level(&server, "laptop", &p, id, "user")
+        );
+        let (down_p, down_q) = tokio::join!(
+            set_level(&server, "laptop", &p, id, "project"),
+            set_level(&server, "desktop", &q, id, "project")
+        );
+        for reply in [up_one, up_two, down_p, down_q] {
+            assert!(
+                !reply.is_error
+                    || reply.body == "error: not found"
+                    || reply.body.contains("changed while it was being moved"),
+                "{reply:?}"
+            );
+        }
+        let path: Vec<(String, String)> = server
+            .records()
+            .into_iter()
+            .filter(|(_, r, _)| {
+                r["tool"] == "set_level" && r.get("from").is_some() && r["fact_ids"] == json!([id])
+            })
+            .map(|(_, r, _)| {
+                (
+                    r["from"].as_str().unwrap().to_owned(),
+                    r["to"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let mut at = home_of(P_KEY);
+        for (from, to) in &path {
+            assert_eq!(from, &at, "{path:?}");
+            at.clone_from(to);
+        }
+        assert_eq!(
+            server.engine.explain_fact(id).await.unwrap().scope_path,
+            at,
+            "{path:?}"
+        );
+    }
+}

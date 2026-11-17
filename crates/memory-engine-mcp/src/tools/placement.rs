@@ -34,6 +34,14 @@ pub fn receipt(id: i64, home: &Home) -> String {
     format!("stored {id} in {}, visible to all agents", home.words())
 }
 
+/// The answer to a `set_level` whose memory is already at that level.
+pub fn unchanged(id: i64, home: &Home) -> String {
+    format!(
+        "unchanged: {id} is already in {}, visible to all agents",
+        home.words()
+    )
+}
+
 /// One hint line naming `set_level` when a memory filed at `target` reads as if it belonged
 /// at the other level; `own` is the session's own Home, which a project-level move targets.
 pub fn hint(content: &str, id: i64, target: &Home, own: &Home) -> Option<String> {
