@@ -123,15 +123,23 @@ facts() {
 	return 0
 }
 
-# fact_lines: the ME-Project-* header lines, an absent fact omitted.
+# dev_root_ok: the dev root is sent as configured, so it must already be its own encoding (ADR-0020 §3).
+dev_root_ok() {
+	case $DEV in /*) ;; *) return 1 ;; esac
+	printable "$DEV" || return 1
+	case $DEV in *[%\"\\]*) return 1 ;; esac
+	return 0
+}
+
+# fact_lines: the ME-Project-* header lines, an absent fact omitted; fails when a write fails.
 fact_lines() {
 	[ -n "$F_OK" ] || return 0
 	pct "$F_ROOT"
-	printf 'ME-Project-Root: %s\n' "$R"
-	case $DEV in /*) printable "$DEV" && case $DEV in *[%\"\\]*) ;; *) printf 'ME-Project-Dev-Root: %s\n' "$DEV" ;; esac ;; esac
-	[ -z "$F_UPSTREAM" ] || { pct "$F_UPSTREAM" && printf 'ME-Project-Upstream-Url: %s\n' "$R"; }
-	[ -z "$F_ORIGIN" ] || { pct "$F_ORIGIN" && printf 'ME-Project-Origin-Url: %s\n' "$R"; }
-	[ -z "$F_BRANCH" ] || { pct "$F_BRANCH" && printf 'ME-Project-Branch: %s\n' "$R"; }
+	printf 'ME-Project-Root: %s\n' "$R" || return 1
+	if dev_root_ok; then printf 'ME-Project-Dev-Root: %s\n' "$DEV" || return 1; fi
+	if [ -n "$F_UPSTREAM" ]; then pct "$F_UPSTREAM" && printf 'ME-Project-Upstream-Url: %s\n' "$R" || return 1; fi
+	if [ -n "$F_ORIGIN" ]; then pct "$F_ORIGIN" && printf 'ME-Project-Origin-Url: %s\n' "$R" || return 1; fi
+	if [ -n "$F_BRANCH" ]; then pct "$F_BRANCH" && printf 'ME-Project-Branch: %s\n' "$R" || return 1; fi
 	return 0
 }
 
@@ -210,13 +218,14 @@ capture() {
 		fi
 		_n=$((_n + 1))
 	done
+	# Every write is checked: a group's status is only its last command's.
 	{
-		printf 'ME-Event-Id: %s\n' "$_id"
-		printf 'ME-Event-Time: %s\n' "$_tm"
-		printf 'ME-Event-Seq: %s\n' "$_seq"
-		printf 'ME-Harness: claude-code\n'
-		printf 'ME-Client-Version: %s\n' "$ME_VERSION"
-		fact_lines
+		printf 'ME-Event-Id: %s\n' "$_id" &&
+			printf 'ME-Event-Time: %s\n' "$_tm" &&
+			printf 'ME-Event-Seq: %s\n' "$_seq" &&
+			printf 'ME-Harness: claude-code\n' &&
+			printf 'ME-Client-Version: %s\n' "$ME_VERSION" &&
+			fact_lines
 	} >"$_t/headers" || abandon
 	[ "$SUB" = session-start ] && count_outbox
 	mv "$_t" "$O/$_id" || abandon

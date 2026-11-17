@@ -323,8 +323,19 @@ t_seq_concurrent() {
 	[ -z "$dups" ] || fail "seqs reserved twice in one second: $dups"
 }
 
+t_headers_write_fail() {
+	# A header line longer than a 512-byte file-size limit makes printf fail midway (EFBIG, SIGXFSZ ignored): the event
+	# must be abandoned, not published with a truncated envelope.
+	d=$C/p
+	for i in 1 2 3 4 5 6 7 8; do d=$d/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done
+	mkdir -p "$d"
+	CLAUDE_PLUGIN_OPTION_ME_URL=$URL CLAUDE_PROJECT_DIR=$d PATH=$RB /bin/sh -c 'trap "" XFSZ; ulimit -f 1; exec /bin/sh "$0" capture' \
+		"$HB" <"$C/in" >"$C/out" 2>&1 || fail "capture exited $?"
+	eq "$(count)" 0 "events published with a failed header write"
+}
+
 t_body_write_fail() {
-	wrap cat '[ $# -eq 0 ] && { dd bs=1 count=3 2>/dev/null; exit 1; }'
+	wrap cat "[ \$# -eq 0 ] && { $(command -v dd) bs=1 count=3 2>/dev/null; exit 1; }"
 	hook capture <"$C/in"
 	eq "$(count)" 0 "events"
 	set -- "$O"/tmp/*
@@ -1148,7 +1159,7 @@ t_session_start_token() {
 CASES=${CASES:-"
 registration version
 body_identical envelope order seq_taken seq_bound seq_concurrent pid_reuse id_collision rejected_collision tree_heals
-body_write_fail endpoint options_absent side_duties_fail silent modes real_no_token_argv
+body_write_fail headers_write_fail endpoint options_absent side_duties_fail silent modes real_no_token_argv
 facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
 newline dev_root no_git facts_unborn facts_layouts
 status_classes curl_exit queue_while_failing no_token token_channel token_forms endpoint_update_fail
