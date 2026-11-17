@@ -492,6 +492,25 @@ mod tests {
         );
     }
 
+    fn served_fp(digit: char) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("m", "llama.cpp", DIM).with_served(crate::types::ServedArtifact {
+            artifact_sha256: std::iter::repeat_n(digit, 64).collect(),
+            pooling: "last".into(),
+            normalization: "l2".into(),
+            max_input_tokens: 2048,
+        })
+    }
+
+    #[test]
+    fn space_name_for_distinguishes_served_artifacts() {
+        let plain = space_name_for(&EmbeddingFingerprint::new("m", "llama.cpp", DIM)).unwrap();
+        let a = space_name_for(&served_fp('a')).unwrap();
+        let b = space_name_for(&served_fp('b')).unwrap();
+        assert_ne!(a, b, "served artifacts that differ get different names");
+        assert_ne!(a, plain, "a served identity is never the legacy slug");
+        assert_eq!(a, space_name_for(&served_fp('a')).unwrap());
+    }
+
     // --- reconstruct() end-to-end (#623 T4) ---
 
     // kept: purpose-built - parameterized model slug + value so reconstruction tests
@@ -652,6 +671,35 @@ mod tests {
             ),
             "embedder/target dim mismatch rejected, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn reconstruct_twice_across_served_artifacts() {
+        // Re-quantizing (another served file under the same model, provider and dim) is a
+        // reconstruction; doing it twice must not collide on the space name.
+        struct Served(EmbeddingFingerprint, f32);
+        impl EmbeddingProvider for Served {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![self.1; DIM])
+            }
+            fn fingerprint(&self) -> EmbeddingFingerprint {
+                self.0.clone()
+            }
+        }
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let a: Arc<dyn EmbeddingProvider> = Arc::new(Served(served_fp('a'), 0.1));
+        engine.add_fact(&req("x"), a, None).await.unwrap();
+        for (digit, value) in [('b', 0.5), ('c', 0.9)] {
+            let target = served_fp(digit);
+            let embedder: Arc<dyn EmbeddingProvider> = Arc::new(Served(target.clone(), value));
+            let outcome = engine.reconstruct(&target, &embedder).await.unwrap();
+            assert_eq!(outcome.new_fingerprint, target);
+            assert_eq!(
+                engine.storage().load_embedding_fingerprint().await.unwrap(),
+                Some(target),
+                "the active identity is the target, served artifact included"
+            );
+        }
     }
 
     #[tokio::test]
