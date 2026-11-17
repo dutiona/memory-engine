@@ -272,7 +272,6 @@ pub trait FactGraph: Send + Sync {
     /// Atomically stamp the embedding identity (fingerprint) and insert one fact,
     /// in a single `rusqlite` transaction.
     ///
-    /// This is the verbatim body of `ingest.rs:228–231` moved below the seam.
     /// The caller (`insert_fact_with_embedding`) is responsible for:
     /// - scope resolution (done before the call, autocommit-separate by design)
     /// - HNSW `notify_insert` (fired post-call, engine-side, on success)
@@ -307,8 +306,6 @@ pub trait FactGraph: Send + Sync {
     /// Atomically insert a batch of facts in a savepoint, returning their ids and
     /// the scope ids that need to be cached engine-side.
     ///
-    /// This is the verbatim DB body of `ingest.rs:397–476` moved below the seam.
-    ///
     /// The **scope split** (plan §3): scope resolution and `ScopeStore::ensure_path`
     /// run inside the savepoint and are returned as `scope_ids_to_cache` so the
     /// engine can update `scope_tree.write()` **after** the successful commit,
@@ -341,8 +338,7 @@ pub trait FactGraph: Send + Sync {
     /// Atomically insert co-session edges (deduplicating against existing ones)
     /// for the given list of fact ids, in a single transaction.
     ///
-    /// This is the verbatim tx body of `engine/graph.rs:71–101` moved below the
-    /// seam. The `now` timestamp is passed in so the engine controls the clock
+    /// The `now` timestamp is passed in so the engine controls the clock
     /// (consistent with the surrounding engine logic).
     ///
     /// The caller is responsible for:
@@ -424,7 +420,6 @@ pub trait FactGraph: Send + Sync {
     /// Select archive candidates (expired, non-pinned facts) and their internal
     /// edges.
     ///
-    /// This exposes the read body of `engine/archive.rs:167–176` through the port.
     /// It is a **read method** (uses a read connection) — the write commit is
     /// `ColdStorage::commit_archive_atomic`.
     ///

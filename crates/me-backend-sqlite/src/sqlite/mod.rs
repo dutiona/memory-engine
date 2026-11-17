@@ -145,10 +145,9 @@ impl SqliteBackend {
     /// Attach a [`SearchConfig`] and, when the `ann` feature is enabled and
     /// `cfg.ann_threshold < usize::MAX`, build the HNSW index from the database.
     ///
-    /// This is the builder that replicates the engine's `init_from_pool` HNSW
-    /// construction (`engine/mod.rs:272-284`). It acquires a read connection,
-    /// runs the full `SELECT id, embedding FROM facts WHERE t_expired IS NULL`
-    /// scan, and constructs an in-memory index.
+    /// It acquires a read connection, runs the full
+    /// `SELECT id, embedding FROM facts WHERE t_expired IS NULL` scan, and constructs an
+    /// in-memory index.
     ///
     /// # Errors
     ///
@@ -249,7 +248,7 @@ impl SqliteBackend {
     #[cfg(feature = "ann")]
     fn should_use_hnsw(&self, filter: &me_storage::FactFilter) -> bool {
         use me_storage::TemporalFilter;
-        // Replication of `engine/mod.rs:379-387` + filter-compatibility guard.
+        // Filter-compatibility guard.
         // HNSW's batched candidate fetch only handles:
         //   t_expired IS NULL  +  fact_type  +  scope_ids
         // Any extra dimension (pinned, metadata, ids, non-Active temporal) must
@@ -305,8 +304,7 @@ impl SqliteBackend {
     /// [`hnsw_snapshot`](Self::hnsw_snapshot), discarding the current in-memory
     /// index.
     ///
-    /// This replicates `engine/mod.rs:334-353`'s `try_load_snapshot` HNSW path.
-    /// Returns `Ok(())` if HNSW is not active (no-op for non-ann builds or
+    /// The snapshot's HNSW load path. Returns `Ok(())` if HNSW is not active (no-op for non-ann builds or
     /// `ann_threshold == usize::MAX`).
     ///
     /// # Errors
@@ -334,9 +332,8 @@ impl SqliteBackend {
 impl SqliteBackend {
     /// Notify the HNSW index that a fact was inserted (post-commit).
     ///
-    /// Mirrors the engine's post-commit `notify_insert` calls in `ingest.rs:235-238`
-    /// and `cognitive.rs:362-364`. Must be called **after** the write has committed
-    /// and the write lock has been released (matching the engine's ordering).
+    /// Must be called **after** the write has committed and the write lock has been
+    /// released.
     ///
     /// No-op when the `ann` feature is disabled or when no HNSW index is active.
     ///

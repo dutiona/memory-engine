@@ -48,8 +48,7 @@ pub trait ColdStorage: Send + Sync {
     /// Single write transaction: manifest insert + hard-delete edges (by fact ids)
     /// + hard-delete facts — atomic, crash-safe.
     ///
-    /// This is the verbatim body of `engine/archive.rs:238–279` moved below the
-    /// seam. The `.pak` file I/O stays engine-side; this method only commits the
+    /// The `.pak` file I/O stays engine-side; this method only commits the
     /// database side of the archive operation.
     ///
     /// # Contract

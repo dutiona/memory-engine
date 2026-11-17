@@ -66,12 +66,10 @@ impl ColdStorage for SqliteBackend {
     // Stage A atomic port method
     // -------------------------------------------------------------------------
 
-    // ATOMIC WRITE — manifest insert + hard-delete edges + hard-delete facts,
-    // verbatim body of engine/archive.rs:238-279 moved below the seam.
+    // ATOMIC WRITE — manifest insert + hard-delete edges + hard-delete facts.
     //
-    // `created_at` is captured as `Utc::now()` inside the transaction, matching
-    // the original `commit_archive` (archive.rs:239). This preserves ordering
-    // correctness for `list_archive_manifest` (`ORDER BY created_at ASC`).
+    // `created_at` is captured as `Utc::now()` inside the transaction, which keeps
+    // ordering correct for `list_archive_manifest` (`ORDER BY created_at ASC`).
     #[allow(clippy::cast_possible_wrap, clippy::too_many_arguments)]
     async fn commit_archive_atomic(
         &self,
@@ -95,8 +93,7 @@ impl ColdStorage for SqliteBackend {
         let fact_ids = fact_ids.to_vec();
         let dim = self.embed_dim;
         self.block_write(move |conn| {
-            // Verbatim body of engine/archive.rs:239,253-279: capture `now` at the
-            // transaction boundary, then manifest insert + FK-safe edge delete + fact
+            // Capture `now` at the transaction boundary, then manifest insert + FK-safe edge delete + fact
             // hard-delete, all in one transaction.
             let now = Utc::now();
             let tx = conn.unchecked_transaction().map_err(|e| {

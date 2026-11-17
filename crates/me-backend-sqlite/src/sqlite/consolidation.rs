@@ -202,7 +202,7 @@ impl ConsolidationStore for SqliteBackend {
         let result_tuple = self
             .block_write(move |conn| {
                 // --- Validation pass (read-only, on the held connection) ---
-                // Verbatim from validate_report in apply.rs:364-462
+                // Every delta is validated before any is applied.
                 {
                     fn ensure_active(
                         f: &me_types::types::Fact,
@@ -344,7 +344,7 @@ impl ConsolidationStore for SqliteBackend {
 
                 // #613 guard: AddFact / Synthesize carry pre-computed embeddings with no
                 // live provider — reject against an un-stamped store. Called inside the
-                // transaction (on `&tx`) to match the original apply.rs:91-94 exactly.
+                // transaction (on `&tx`), so the check and the writes see one state.
                 if report
                     .deltas
                     .iter()
@@ -405,7 +405,7 @@ impl ConsolidationStore for SqliteBackend {
                             // (Promote in apply_cycle_report always passes scope: None → 1).
                             let source = FactStore::new(&tx, embed_dim).get(*fact_id)?;
 
-                            // Embedding dimension guard — mirrors promote_in_conn (cognitive.rs:385-390).
+                            // Embedding dimension guard, as `promote_in_conn` applies it.
                             // Defends against a pre-existing data integrity violation producing a
                             // wrong-dimension embedded fact.
                             if source.embedding.len() != embed_dim {
@@ -576,7 +576,7 @@ impl ConsolidationStore for SqliteBackend {
                     &report.metadata.time_window.end.to_rfc3339(),
                 )?;
 
-                // append_cycle_history verbatim from apply.rs:467-479
+                // Append the cycle history in the same transaction.
                 {
                     let mut history: Vec<me_types::types::cycle_report::CycleMetadata> =
                         match get_config(&tx, DREAM_CYCLE_HISTORY)? {

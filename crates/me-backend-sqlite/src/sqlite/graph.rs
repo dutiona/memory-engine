@@ -165,7 +165,7 @@ impl FactGraph for SqliteBackend {
         let id = self
             .block_write(move |c| FactStore::new(c, dim).insert(&fact))
             .await?;
-        // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238).
+        // Post-commit HNSW notification: the index learns only of committed facts.
         #[cfg(feature = "ann")]
         self.hnsw_notify_insert(id, &embedding)?;
         Ok(id)
@@ -746,8 +746,7 @@ impl FactGraph for SqliteBackend {
         let dim = self.embed_dim;
         let id = self
             .block_write(move |conn| {
-                // Verbatim body of ingest.rs:228-231: one unchecked_transaction wrapping
-                // stamp_identity + FactStore::insert so a vector is never committed
+                // One unchecked_transaction wrapping stamp_identity + FactStore::insert so a vector is never committed
                 // without an established, matching identity (the #614 silent-corruption guard).
                 let tx = conn
                     .unchecked_transaction()
@@ -759,8 +758,7 @@ impl FactGraph for SqliteBackend {
                 Ok(id)
             })
             .await?;
-        // Post-commit HNSW notification (mirrors engine/ingest.rs:235-238). The fact
-        // is already durably committed, so this `?` is the SOLE carve-out to this
+        // Post-commit HNSW notification. The fact is already durably committed, so this `?` is the SOLE carve-out to this
         // method's `Err ⟹ byte-identical` contract: it can only surface
         // `IndexInconsistent` (the write SUCCEEDED, only the in-memory index is now
         // stale — rebuild it, do NOT retry the write, which would duplicate the fact).
@@ -850,8 +848,7 @@ impl FactGraph for SqliteBackend {
         let fact_ids = fact_ids.to_vec();
         let relation = relation.to_owned();
         self.block_write(move |conn| {
-            // Verbatim body of engine/graph.rs:71-101: one unchecked_transaction
-            // wrapping batch-dedup + edge inserts.
+            // One unchecked_transaction wrapping batch-dedup + edge inserts.
             let tx = conn
                 .unchecked_transaction()
                 .map_err(StorageError::backend)?;
@@ -1008,7 +1005,7 @@ impl FactGraph for SqliteBackend {
         Ok((new_id, edge_id))
     }
 
-    // READ — archive candidate selection (verbatim body of engine/archive.rs:167-176).
+    // READ — archive candidate selection.
     async fn select_archive_candidates(
         &self,
         expired_before: DateTime<Utc>,
