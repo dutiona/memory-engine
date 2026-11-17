@@ -148,6 +148,7 @@ fn compute_plan_capped(
             global_summary: None,
             embedding_fingerprint: None,
             now: snapshot.now,
+            skipped_vectorless: snapshot.skipped_vectorless,
         });
     }
 
@@ -209,6 +210,7 @@ fn compute_plan_capped(
         global_summary,
         embedding_fingerprint,
         now: snapshot.now,
+        skipped_vectorless: snapshot.skipped_vectorless,
     })
 }
 

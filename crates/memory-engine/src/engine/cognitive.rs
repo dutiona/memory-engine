@@ -570,6 +570,25 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-util")]
+    #[tokio::test]
+    async fn a_dream_cycle_never_selects_a_waiting_fact() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let embedded = add_source_facts(&engine, &[1]).await;
+        let waiting = crate::test_utils::seed_waiting_fact(&engine, "waiting fact", false).await;
+
+        let report = engine
+            .run_dream_cycle(&crate::cognitive::DefaultDreamCycle::with_defaults())
+            .await
+            .unwrap();
+        assert_eq!(report.metadata.processed_ids, embedded);
+        let fact = engine.storage().get_fact(waiting).await.unwrap();
+        assert!(
+            fact.metadata.get("dream_cycle").is_none(),
+            "left unmarked for the first cycle after its embedding"
+        );
+    }
+
     #[tokio::test]
     async fn run_dream_cycle_creates_context_and_delegates() {
         let engine = MemoryEngine::builder(4).build().unwrap();

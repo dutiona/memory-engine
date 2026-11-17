@@ -407,6 +407,48 @@ impl<'a> FactStore<'a> {
         Ok(facts)
     }
 
+    /// List the active facts that have a vector, in ascending `id` order (#1021).
+    ///
+    /// Consolidation's input: dedup, clustering and the global pass never compare a fact
+    /// still waiting for its vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
+    pub fn list_active_with_vector(&self) -> Result<Vec<Fact>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts WHERE t_expired IS NULL AND {HAS_VECTOR} ORDER BY id"
+            ))
+            .map_err(StorageError::backend)?;
+        let dim = self.embed_dim;
+        let rows = stmt
+            .query_map([], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::backend(e).into())
+    }
+
+    /// Count the active facts that have a vector without materializing any rows: the
+    /// `COUNT(*)` companion of [`list_active_with_vector`](Self::list_active_with_vector),
+    /// for consolidation's safety caps.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
+    pub fn count_active_with_vector(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM facts WHERE t_expired IS NULL AND {HAS_VECTOR}"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::backend)?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
     /// Count active facts (`t_expired IS NULL`) without materializing any rows.
     ///
     /// A `COUNT(*)` companion to [`list_active`](Self::list_active): consolidation
@@ -554,6 +596,7 @@ impl<'a> FactStore<'a> {
              WHERE t_expired IS NULL
                AND is_pinned = 0
                AND importance_score < ?1
+               AND {HAS_VECTOR}
                AND (t_valid IS NULL OR t_valid <= ?2)
                AND (t_invalid IS NULL OR t_invalid > ?2){scope_clause}"
         );
@@ -1211,12 +1254,14 @@ impl<'a> FactStore<'a> {
         // serde's `get().is_none()` is true only for an *absent* key. `json_type`
         // returns the text `'null'` for a present-null value (so `IS NULL` is false)
         // and SQL NULL only when the key is absent or the path doesn't resolve.
+        // A fact without a vector (#1021) stays unmarked, so the first cycle after its
+        // embedding takes it.
         self.list_active_in_period_inner(
             start,
             end,
             scope_ids,
             fact_type,
-            &["json_type(metadata, '$.dream_cycle') IS NULL"],
+            &["json_type(metadata, '$.dream_cycle') IS NULL", HAS_VECTOR],
         )
     }
 
@@ -3928,6 +3973,48 @@ mod tests {
         let mut expected = vec![low_id, other_id];
         expected.sort_unstable();
         assert_eq!(all, expected, "None scope spans every scope");
+    }
+
+    #[test]
+    fn list_dormant_skips_a_fact_without_a_vector() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut low = make_fact("low", vec![0.1; DIM]);
+        low.base_importance = 0.2;
+        let embedded = store.insert(&low).unwrap();
+        let waiting = crate::test_util::seed_without_vector(&conn, "waiting");
+        store.update_importance_score(waiting, 0.2).unwrap();
+
+        let as_of: DateTime<Utc> = "2100-01-01T00:00:00Z".parse().unwrap();
+        let dormant = store.list_dormant(0.5, None, as_of).unwrap();
+        assert_eq!(dormant.iter().map(|f| f.id).collect::<Vec<_>>(), [embedded]);
+    }
+
+    #[test]
+    fn list_undreamt_in_period_skips_a_fact_without_a_vector() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let embedded = store.insert(&make_fact("a", vec![0.1; DIM])).unwrap();
+        let waiting = crate::test_util::seed_without_vector(&conn, "waiting");
+
+        let start = "2000-01-01T00:00:00Z".parse().unwrap();
+        let end = "2100-01-01T00:00:00Z".parse().unwrap();
+        let undreamt = store
+            .list_undreamt_in_period(start, end, &[], None)
+            .unwrap();
+        assert_eq!(
+            undreamt.iter().map(|f| f.id).collect::<Vec<_>>(),
+            [embedded]
+        );
+        // Left unmarked, so the first cycle after its embedding takes it.
+        assert!(
+            store
+                .get(waiting)
+                .unwrap()
+                .metadata
+                .get("dream_cycle")
+                .is_none()
+        );
     }
 
     // -------------------------------------------------------------------------

@@ -21,3 +21,36 @@
 
 pub use me_traits::test_util::MockEmbedder;
 pub use me_types::test_util::new_fact_hashed;
+
+/// Store `content` as a deferred write leaves it (#1021): `embedding = X''` plus its
+/// `embed_queue` row, marked failed when `failed`. Returns the fact id. `content` must
+/// hold no single quote.
+#[cfg(feature = "test-util")]
+pub async fn seed_waiting_fact(engine: &crate::MemoryEngine, content: &str, failed: bool) -> i64 {
+    let now = chrono::Utc::now().to_rfc3339();
+    let hash = &blake3::hash(content.as_bytes()).to_hex()[..32];
+    let failed_at = if failed {
+        format!("'{now}'")
+    } else {
+        "NULL".to_owned()
+    };
+    engine
+        .storage()
+        .raw_exec(&format!(
+            "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed)
+                 VALUES ('{content}', '{hash}', X'', 'semantic', '{now}', '{now}');
+             INSERT INTO embed_queue (fact_id, enqueued_at, next_attempt_at, failed_at)
+                 VALUES (last_insert_rowid(), '{now}', '{now}', {failed_at});"
+        ))
+        .await
+        .expect("seed a waiting fact");
+    engine
+        .storage()
+        .list_all_facts()
+        .await
+        .expect("list facts")
+        .iter()
+        .map(|f| f.id)
+        .max()
+        .expect("the seeded fact")
+}

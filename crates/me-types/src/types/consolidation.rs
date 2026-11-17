@@ -31,6 +31,9 @@ pub struct Snapshot {
     /// The corpus exceeded BOTH safety caps, so the (expensive) `list_active` load was
     /// skipped (#659): the plan is a complete no-op (dedup skipped, clustering skipped).
     pub over_both_caps: bool,
+    /// An active fact had no vector at the load (waiting or failed in the
+    /// deferred-embedding queue, #1021), so it was left out and the watermark must hold.
+    pub skipped_vectorless: bool,
 }
 
 /// The fully-computed plan for one consolidation run — pure data.
@@ -56,6 +59,8 @@ pub struct ConsolidationPlan {
     pub embedding_fingerprint: Option<EmbeddingFingerprint>,
     /// Run-level timestamp (expiry stamp + watermark).
     pub now: DateTime<Utc>,
+    /// Carried from [`Snapshot::skipped_vectorless`]: the watermark must not advance.
+    pub skipped_vectorless: bool,
 }
 
 /// One planned expiry: a `loser` folded into its `survivor`.

@@ -938,6 +938,116 @@ async fn consolidate_is_idempotent() {
     assert_eq!(engine.list_active_facts(None).await.unwrap().len(), 2);
 }
 
+#[cfg(feature = "test-util")]
+#[tokio::test]
+async fn consolidation_ignores_a_waiting_fact() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let embedded = insert_raw_fact(
+        &engine,
+        &make_new_fact("same words", vec![1.0, 0.0, 0.0, 0.0]),
+    )
+    .await;
+    let waiting = crate::test_utils::seed_waiting_fact(&engine, "same words", false).await;
+
+    // Threshold 0 merges any pair the pass compares, so both staying active proves the
+    // waiting fact never entered the comparison.
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.0)
+        .min_cluster_size(10)
+        .build();
+    let stats = engine
+        .consolidate(
+            std::sync::Arc::new(MockGen) as std::sync::Arc<dyn SummaryGenerator>,
+            std::sync::Arc::new(crate::test_utils::MockEmbedder::new(DIM))
+                as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats.duplicates_removed, 0);
+    let active: Vec<i64> = engine
+        .list_active_facts(None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|f| f.id)
+        .collect();
+    assert_eq!(active, [embedded, waiting]);
+}
+
+/// The watermark never passes a fact without a vector, so a failed fact is compared as
+/// new at the first consolidation after it gets its vector, whichever path gives it one.
+#[cfg(feature = "test-util")]
+#[tokio::test]
+async fn a_waiting_fact_that_failed_is_compared_as_new_once_embedded() {
+    use std::sync::Arc;
+
+    async fn duplicates_removed(engine: &MemoryEngine) -> usize {
+        let config = ConsolidationConfig::builder()
+            .dedup_threshold(0.90)
+            .min_cluster_size(10)
+            .build();
+        engine
+            .consolidate(
+                Arc::new(MockGen) as Arc<dyn SummaryGenerator>,
+                Arc::new(crate::test_utils::MockEmbedder::new(DIM)) as Arc<dyn EmbeddingProvider>,
+                &config,
+            )
+            .await
+            .unwrap()
+            .duplicates_removed
+    }
+
+    let old: Arc<dyn EmbeddingProvider> = Arc::new(crate::test_utils::MockEmbedder::new(DIM));
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let request = AddFactRequest {
+        content: "cats purr".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+    engine.add_fact(&request, old.clone(), None).await.unwrap();
+    assert_eq!(duplicates_removed(&engine).await, 0);
+    let mark = engine.get_config("last_consolidated_at").await.unwrap();
+    assert!(mark.is_some(), "the first run sets the watermark");
+
+    let waiting = crate::test_utils::seed_waiting_fact(&engine, "cats purr", true).await;
+    assert_eq!(duplicates_removed(&engine).await, 0);
+    assert_eq!(
+        engine.get_config("last_consolidated_at").await.unwrap(),
+        mark,
+        "the watermark holds while a fact has no vector"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("dump.json");
+    engine
+        .dump_state(&crate::inspect::DumpFormat::Json(dump.clone()))
+        .await
+        .unwrap();
+
+    // A reconstruction re-embeds the failed fact from its content.
+    let new: Arc<dyn EmbeddingProvider> = Arc::new(DeterministicEmbedder { dim: DIM });
+    engine.reconstruct(&new.fingerprint(), &new).await.unwrap();
+    assert_eq!(duplicates_removed(&engine).await, 1);
+
+    // A restore queues it again; once it has its vector, the next run compares it.
+    let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
+    let mut blob = String::new();
+    for b in crate::store::serialize_embedding(&old.embed("cats purr").unwrap()) {
+        std::fmt::Write::write_fmt(&mut blob, format_args!("{b:02x}")).unwrap();
+    }
+    restored
+        .storage()
+        .raw_exec(&format!(
+            "UPDATE facts SET embedding = X'{blob}' WHERE id = {waiting};
+             DELETE FROM embed_queue WHERE fact_id = {waiting};"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(duplicates_removed(&restored).await, 1);
+}
+
 /// A `SummaryGenerator` that performs an engine WRITE from inside `summarize`.
 /// Used to prove the consumer callbacks run without the engine holding its write
 /// lock (#409): the write only succeeds if `consolidate` is *not* holding
