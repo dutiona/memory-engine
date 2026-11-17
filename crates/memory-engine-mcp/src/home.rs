@@ -60,6 +60,15 @@ impl Home {
         }
     }
 
+    /// The Home in a receipt's words: `user`, `project <key>`, or `unscoped on <machine>`.
+    pub(crate) fn words(&self) -> String {
+        match self {
+            Self::User => "user".to_owned(),
+            Self::Project(key) => format!("project {key}"),
+            Self::Bucket(machine) => format!("unscoped on {}", machine.as_str()),
+        }
+    }
+
     /// The Home's scope path.
     pub(crate) fn path(&self, user: &User) -> String {
         match self {

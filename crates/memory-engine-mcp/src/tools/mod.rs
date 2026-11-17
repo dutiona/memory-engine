@@ -9,6 +9,7 @@ use std::sync::Arc;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::types::{EventType, NewEvent};
 use rmcp::model::{CallToolResult, Content, ErrorData, Tool};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::auth::Machine;
@@ -16,6 +17,7 @@ use crate::embedding::HttpEmbeddingProvider;
 use crate::home::{Home, User};
 use crate::project::{ProjectFacts, ProjectKey};
 
+mod placement;
 mod recall;
 mod remember;
 
@@ -36,7 +38,34 @@ pub(crate) struct CallContext<'a> {
     pub(crate) key: Option<ProjectKey>,
 }
 
+/// The level a write asks for (ADR-0020 §8): the session's project (or its machine's bucket
+/// outside a project), or the user level.
+#[derive(Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Level {
+    #[default]
+    Project,
+    User,
+}
+
+impl Level {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::User => "user",
+        }
+    }
+}
+
 impl CallContext<'_> {
+    /// The Home a write at `level` targets.
+    pub(crate) fn home_at(&self, level: Level) -> Home {
+        match level {
+            Level::Project => self.own_home(),
+            Level::User => Home::User,
+        }
+    }
+
     /// The session's own Home: its project, else its machine's bucket.
     pub(crate) fn own_home(&self) -> Home {
         Home::own(self.key.clone(), self.machine)

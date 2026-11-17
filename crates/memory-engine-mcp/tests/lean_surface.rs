@@ -67,7 +67,7 @@ async fn unknown_arguments_are_refused() {
         ("recall", "mode"),
         ("recall", "scope"),
         ("recall", "depth"),
-        ("remember", "level"),
+        ("remember", "scope"),
         ("remember", "metadata"),
         ("remember", "embedding"),
     ] {
@@ -437,7 +437,7 @@ async fn each_call_is_recorded_in_the_event_log() {
         .tool(
             "laptop",
             "remember",
-            json!({ "content": "c", "level": "user" }),
+            json!({ "content": "c", "level": "global" }),
         )
         .await;
     let _ = server.call("laptop", "memory_forget", json!({})).await;
@@ -465,7 +465,7 @@ async fn each_call_is_recorded_in_the_event_log() {
     }
     assert_eq!(records[1].1["fact_ids"], json!([fact]));
     assert!(records[2].1["error"].as_str().unwrap().contains("nowhere"));
-    assert!(records[3].1["error"].as_str().unwrap().contains("level"));
+    assert!(records[3].1["error"].as_str().unwrap().contains("global"));
     assert!(records[0].1.get("fact_ids").is_none() && records[0].1.get("error").is_none());
     let stored = server.engine.get_fact(fact).await.unwrap();
     assert_eq!(stored.source_event_id, Some(records[0].0));

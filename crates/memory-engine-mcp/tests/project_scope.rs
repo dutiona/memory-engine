@@ -99,9 +99,14 @@ async fn every_record_keeps_the_project_facts_key_and_rules() {
     for (_, payload, _) in &records {
         assert_eq!(payload["project"], want, "{payload}");
     }
-    for (_, payload, scope) in &records {
+    // A read's record sits under the bucket; a valid remember's under the Home it wrote to.
+    for (_, payload, scope) in [&records[0], &records[2]] {
         assert_eq!(scope, "unscoped:laptop", "{payload}");
     }
+    assert_eq!(
+        records[1].2,
+        "user:alice/project:github.com%2Fexample%2Fproject"
+    );
 }
 
 #[tokio::test]
@@ -455,4 +460,562 @@ async fn the_swap_reads_the_named_project_and_never_the_own() {
     let mut want = vec![in_q, at_user];
     want.sort_unstable();
     assert_eq!(result_ids(&reply), want);
+}
+
+// --- remember files under the session's Home (ADR-0020 §7-§8, ADR-0021 §7) ---
+
+type Owned = Vec<(&'static str, Vec<u8>)>;
+
+/// A session on a machine whose dev root is `dev`, at `rel`, with optional remotes.
+fn session(dev: &str, rel: &str, origin: Option<&str>, upstream: Option<&str>) -> Owned {
+    let mut facts = at_path(dev, rel);
+    if let Some(origin) = origin {
+        facts.push((ORIGIN, origin.as_bytes().to_vec()));
+    }
+    if let Some(upstream) = upstream {
+        facts.push((UPSTREAM, upstream.as_bytes().to_vec()));
+    }
+    facts
+}
+
+async fn remember(
+    server: &TestServer,
+    machine: &str,
+    facts: &Owned,
+    args: serde_json::Value,
+) -> common::Reply {
+    server
+        .tool_with(machine, &borrow(facts), "remember", args)
+        .await
+}
+
+fn stored_id(reply: &common::Reply) -> i64 {
+    assert!(!reply.is_error, "{reply:?}");
+    reply.body.split(' ').nth(1).unwrap().parse().unwrap()
+}
+
+async fn sees(server: &TestServer, machine: &str, facts: &Owned, id: i64) -> bool {
+    let reply = recall(server, machine, facts, json!({ "query": "kestrel" })).await;
+    assert!(!reply.is_error, "{reply:?}");
+    result_ids(&reply).contains(&id)
+}
+
+const P_SSH: &str = "git@github.com:example/project.git";
+const P_HTTPS: &str = "https://github.com/example/project";
+const P_KEY: &str = "github.com/example/project";
+
+#[tokio::test]
+async fn one_remote_is_one_project_on_every_machine() {
+    let server = TestServer::start().await;
+    let laptop = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let reply = remember(
+        &server,
+        "laptop",
+        &laptop,
+        json!({ "content": "kestrel shared" }),
+    )
+    .await;
+    let id = stored_id(&reply);
+    assert_eq!(
+        reply.body,
+        format!("stored {id} in project {P_KEY}, visible to all agents")
+    );
+    let desktop = session(DESKTOP_DEV, "project", Some(P_HTTPS), None);
+    let worktree = session(DESKTOP_DEV, "project/.worktrees/w", Some(P_HTTPS), None);
+    assert!(sees(&server, "desktop", &desktop, id).await);
+    assert!(sees(&server, "desktop", &worktree, id).await);
+    let reply = recall(&server, "desktop", &desktop, json!({ "query": "kestrel" })).await;
+    assert_eq!(scopes(&reply), vec![P_KEY.to_owned()]);
+    assert_eq!(project_nodes(&server), 1);
+}
+
+#[tokio::test]
+async fn upstream_wins_over_origin() {
+    let server = TestServer::start().await;
+    let fork = session(
+        LAPTOP_DEV,
+        "project",
+        Some("git@github.com:alice/fork.git"),
+        Some("https://github.com/example/project.git"),
+    );
+    let reply = remember(
+        &server,
+        "laptop",
+        &fork,
+        json!({ "content": "kestrel upstream" }),
+    )
+    .await;
+    let id = stored_id(&reply);
+    assert!(
+        reply.body.contains(&format!("in project {P_KEY},")),
+        "{reply:?}"
+    );
+    let fork_only = session(
+        LAPTOP_DEV,
+        "fork",
+        Some("git@github.com:alice/fork.git"),
+        None,
+    );
+    assert!(!sees(&server, "laptop", &fork_only, id).await);
+}
+
+#[tokio::test]
+async fn a_default_write_is_read_in_its_project_only() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let id =
+        stored_id(&remember(&server, "laptop", &p, json!({ "content": "kestrel in p" })).await);
+    assert!(sees(&server, "laptop", &p, id).await);
+    assert!(
+        sees(
+            &server,
+            "desktop",
+            &session(DESKTOP_DEV, "project", Some(P_HTTPS), None),
+            id
+        )
+        .await
+    );
+    assert!(
+        !sees(
+            &server,
+            "laptop",
+            &session(LAPTOP_DEV, "q", Some("https://github.com/example/q"), None),
+            id
+        )
+        .await
+    );
+    assert!(!sees(&server, "laptop", &Vec::new(), id).await);
+}
+
+#[tokio::test]
+async fn a_user_write_is_read_everywhere() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let reply = remember(
+        &server,
+        "laptop",
+        &p,
+        json!({ "content": "kestrel for alice", "level": "user" }),
+    )
+    .await;
+    let id = stored_id(&reply);
+    assert_eq!(
+        reply.body,
+        format!("stored {id} in user, visible to all agents")
+    );
+    assert!(sees(&server, "laptop", &p, id).await);
+    assert!(
+        sees(
+            &server,
+            "laptop",
+            &session(LAPTOP_DEV, "q", Some("https://github.com/example/q"), None),
+            id
+        )
+        .await
+    );
+    assert!(sees(&server, "laptop", &Vec::new(), id).await);
+    assert!(sees(&server, "desktop", &Vec::new(), id).await);
+    let reply = remember(
+        &server,
+        "laptop",
+        &p,
+        json!({ "content": "kestrel in p", "level": "project" }),
+    )
+    .await;
+    assert!(
+        reply.body.contains(&format!("in project {P_KEY},")),
+        "{reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_keyless_memory_stays_in_its_machines_bucket() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    for facts in [
+        Vec::new(),
+        session("/home/alice/elsewhere", "x", None, None)
+            .into_iter()
+            .map(|(n, v)| {
+                (
+                    n,
+                    if n == DEV {
+                        LAPTOP_DEV.as_bytes().to_vec()
+                    } else {
+                        v
+                    },
+                )
+            })
+            .collect(),
+        vec![
+            (ROOT, LAPTOP_DEV.as_bytes().to_vec()),
+            (DEV, LAPTOP_DEV.as_bytes().to_vec()),
+        ],
+        at_path(LAPTOP_DEV, "./x"),
+    ] {
+        let reply = remember(
+            &server,
+            "laptop",
+            &facts,
+            json!({ "content": "kestrel keyless" }),
+        )
+        .await;
+        let id = stored_id(&reply);
+        assert_eq!(
+            reply.body,
+            format!("stored {id} in unscoped on laptop, visible to all agents"),
+            "{facts:?}"
+        );
+        assert!(sees(&server, "laptop", &Vec::new(), id).await);
+        assert!(!sees(&server, "laptop", &p, id).await);
+        assert!(!sees(&server, "desktop", &Vec::new(), id).await);
+        let swap = recall(
+            &server,
+            "laptop",
+            &p,
+            json!({ "query": "kestrel", "project": "unscoped:laptop" }),
+        )
+        .await;
+        assert!(swap.is_error, "{swap:?}");
+    }
+    assert_eq!(project_nodes(&server), 0);
+}
+
+#[tokio::test]
+async fn remote_less_paths_are_one_project_per_machine() {
+    let server = TestServer::start().await;
+    let laptop_x = stored_id(
+        &remember(
+            &server,
+            "laptop",
+            &at_path(LAPTOP_DEV, "x"),
+            json!({ "content": "kestrel laptop x" }),
+        )
+        .await,
+    );
+    let desktop_x = stored_id(
+        &remember(
+            &server,
+            "desktop",
+            &at_path(DESKTOP_DEV, "x"),
+            json!({ "content": "kestrel desktop x" }),
+        )
+        .await,
+    );
+    assert!(!sees(&server, "desktop", &at_path(DESKTOP_DEV, "x"), laptop_x).await);
+    assert!(!sees(&server, "laptop", &at_path(LAPTOP_DEV, "x"), desktop_x).await);
+    let old = stored_id(
+        &remember(
+            &server,
+            "laptop",
+            &at_path(LAPTOP_DEV, "old/x"),
+            json!({ "content": "kestrel old x" }),
+        )
+        .await,
+    );
+    assert!(!sees(&server, "laptop", &at_path(LAPTOP_DEV, "x"), old).await);
+    let shadow = remember(
+        &server,
+        "laptop",
+        &at_path(LAPTOP_DEV, "github.com/example/project"),
+        json!({ "content": "kestrel shadow" }),
+    )
+    .await;
+    assert!(
+        shadow
+            .body
+            .contains("in project laptop:github.com/example/project,"),
+        "{shadow:?}"
+    );
+    let mut by_key = Vec::new();
+    for (machine, facts) in [
+        (
+            "laptop",
+            session(
+                LAPTOP_DEV,
+                "ab",
+                Some("https://github.com/example/a:b"),
+                None,
+            ),
+        ),
+        (
+            "laptop",
+            session(
+                LAPTOP_DEV,
+                "v6",
+                Some("ssh://git@[2001:DB8::1]:22/example/x.git"),
+                None,
+            ),
+        ),
+        ("laptop", at_path(LAPTOP_DEV, "a:b")),
+    ] {
+        let reply = remember(
+            &server,
+            machine,
+            &facts,
+            json!({ "content": "kestrel keyed" }),
+        )
+        .await;
+        by_key.push(stored_id(&reply));
+    }
+    for (key, id) in [
+        "github.com/example/a:b",
+        "[2001:db8::1]/example/x",
+        "laptop:a:b",
+    ]
+    .into_iter()
+    .zip(by_key)
+    {
+        let reply = recall(
+            &server,
+            "laptop",
+            &Vec::new(),
+            json!({ "query": "kestrel", "project": key }),
+        )
+        .await;
+        assert_eq!(result_ids(&reply), vec![id], "{key}");
+    }
+    assert_eq!(project_nodes(&server), 7);
+}
+
+#[tokio::test]
+async fn no_locator_falls_to_the_bucket() {
+    let server = TestServer::start().await;
+    let long = session(
+        LAPTOP_DEV,
+        "p",
+        Some("https://github.com/example/p"),
+        Some(&format!("https://github.com/example/{}", "a".repeat(240))),
+    );
+    let reply = remember(
+        &server,
+        "laptop",
+        &long,
+        json!({ "content": "kestrel long" }),
+    )
+    .await;
+    assert!(reply.body.contains("in unscoped on laptop,"), "{reply:?}");
+    let local = session(
+        LAPTOP_DEV,
+        "project",
+        Some("file:///srv/git/project.git"),
+        Some("/srv/git/project.git"),
+    );
+    let reply = remember(
+        &server,
+        "laptop",
+        &local,
+        json!({ "content": "kestrel local" }),
+    )
+    .await;
+    assert!(
+        reply.body.contains("in project laptop:project,"),
+        "{reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_percent_encoded_non_ascii_root_derives_the_key_of_its_utf8_form() {
+    let server = TestServer::start().await;
+    let mut ids = Vec::new();
+    for root in [
+        format!("{LAPTOP_DEV}/caf%C3%A9"),
+        format!("{LAPTOP_DEV}/caf%c3%a9"),
+        "%2Fhome%2Falice%2Fperso%2Fdev%2Fcaf%C3%A9".to_owned(),
+    ] {
+        let facts = vec![
+            (ROOT, root.into_bytes()),
+            (DEV, LAPTOP_DEV.as_bytes().to_vec()),
+        ];
+        let reply = remember(
+            &server,
+            "laptop",
+            &facts,
+            json!({ "content": "kestrel café" }),
+        )
+        .await;
+        assert!(reply.body.contains("in project laptop:café,"), "{reply:?}");
+        ids.push(stored_id(&reply));
+    }
+    let reply = recall(
+        &server,
+        "laptop",
+        &Vec::new(),
+        json!({ "query": "kestrel", "project": "laptop:café" }),
+    )
+    .await;
+    ids.sort_unstable();
+    assert_eq!(result_ids(&reply), ids);
+    let raw = vec![
+        (ROOT, format!("{LAPTOP_DEV}/café").into_bytes()),
+        (DEV, LAPTOP_DEV.as_bytes().to_vec()),
+    ];
+    let reply = remember(&server, "laptop", &raw, json!({ "content": "kestrel raw" })).await;
+    assert!(reply.body.contains("in unscoped on laptop,"), "{reply:?}");
+}
+
+#[tokio::test]
+async fn a_doubtful_placement_gets_one_hint() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    let reply = remember(
+        &server,
+        "laptop",
+        &p,
+        json!({ "content": "I prefer rebase over merge in every project" }),
+    )
+    .await;
+    let id = reply.body.split(' ').nth(1).unwrap().to_owned();
+    assert_eq!(
+        reply.body,
+        format!(
+            "stored {id} in project {P_KEY}, visible to all agents\nhint: this reads as true in every project; set_level({id}, \"user\") files it at the user level"
+        )
+    );
+    let reply = remember(
+        &server,
+        "laptop",
+        &p,
+        json!({ "content": "this repo pins rust 1.89", "level": "user" }),
+    )
+    .await;
+    let id = reply.body.split(' ').nth(1).unwrap().to_owned();
+    assert_eq!(
+        reply.body,
+        format!(
+            "stored {id} in user, visible to all agents\nhint: this reads as specific to one project; set_level({id}, \"project\") files it in project {P_KEY}"
+        )
+    );
+    for level in ["project", "user"] {
+        let reply = remember(
+            &server,
+            "laptop",
+            &p,
+            json!({ "content": "the lock file sits beside the store", "level": level }),
+        )
+        .await;
+        assert_eq!(reply.body.lines().count(), 1, "{reply:?}");
+    }
+}
+
+#[tokio::test]
+async fn remember_records_its_level() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    remember(&server, "laptop", &p, json!({ "content": "kestrel a" })).await;
+    remember(
+        &server,
+        "laptop",
+        &p,
+        json!({ "content": "kestrel b", "level": "user" }),
+    )
+    .await;
+    let levels: Vec<_> = server
+        .records()
+        .into_iter()
+        .map(|(_, p, _)| p["level"].clone())
+        .collect();
+    assert_eq!(levels, vec![json!("project"), json!("user")]);
+}
+
+#[tokio::test]
+async fn remember_files_its_record_under_its_target() {
+    let server = TestServer::start().await;
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+    remember(&server, "laptop", &p, json!({ "content": "kestrel a" })).await;
+    remember(
+        &server,
+        "laptop",
+        &p,
+        json!({ "content": "kestrel b", "level": "user" }),
+    )
+    .await;
+    remember(
+        &server,
+        "laptop",
+        &p,
+        json!({ "content": "kestrel c", "level": "global" }),
+    )
+    .await;
+    let homes: Vec<_> = server.records().into_iter().map(|(_, _, h)| h).collect();
+    assert_eq!(
+        homes,
+        vec![
+            home_of(P_KEY),
+            "user:alice".to_owned(),
+            "unscoped:laptop".to_owned()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_remember_whose_record_fails_mints_nothing() {
+    let server = TestServer::start().await;
+    server.refuse_event_writes();
+    let p = session(
+        LAPTOP_DEV,
+        "fresh",
+        Some("https://github.com/example/fresh"),
+        None,
+    );
+    let reply = remember(&server, "laptop", &p, json!({ "content": "kestrel lost" })).await;
+    assert!(reply.is_error, "{reply:?}");
+    assert_eq!(project_nodes(&server), 0);
+    let reply = recall(
+        &server,
+        "laptop",
+        &Vec::new(),
+        json!({ "query": "kestrel", "project": "github.com/example/fresh" }),
+    )
+    .await;
+    assert!(
+        reply
+            .body
+            .contains("unknown project: \"github.com/example/fresh\""),
+        "{reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_fact_write_leaves_a_known_project() {
+    let server = TestServer::start().await;
+    server.sql("CREATE TRIGGER refuse_facts BEFORE INSERT ON facts BEGIN SELECT RAISE(ABORT, 'fact writes refused by the test'); END;");
+    let p = session(
+        LAPTOP_DEV,
+        "fresh",
+        Some("https://github.com/example/fresh"),
+        None,
+    );
+    let reply = remember(&server, "laptop", &p, json!({ "content": "kestrel lost" })).await;
+    assert!(reply.is_error, "{reply:?}");
+    let records = server.records();
+    assert_eq!(
+        records.last().unwrap().2,
+        home_of("github.com/example/fresh")
+    );
+    let reply = recall(
+        &server,
+        "laptop",
+        &Vec::new(),
+        json!({ "query": "kestrel", "project": "github.com/example/fresh" }),
+    )
+    .await;
+    assert!(!reply.is_error, "{reply:?}");
+    assert_eq!(result_ids(&reply), Vec::<i64>::new());
+}
+
+#[tokio::test]
+async fn an_unknown_level_is_refused_and_stores_nothing() {
+    let server = TestServer::start().await;
+    for level in [json!("global"), json!("Project"), json!(1)] {
+        let reply = remember(
+            &server,
+            "laptop",
+            &Vec::new(),
+            json!({ "content": "kestrel", "level": level }),
+        )
+        .await;
+        assert!(reply.is_error, "{level}: {reply:?}");
+    }
+    assert_eq!(server.fact_count().await, 0);
 }
