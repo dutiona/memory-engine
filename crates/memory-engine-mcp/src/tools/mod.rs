@@ -116,8 +116,10 @@ async fn refuse(
 ) -> Result<String, String> {
     let mut detail = Map::new();
     detail.insert("error".to_owned(), capture_cut(&message).into());
-    record(ctx, call, tool, detail).await?;
-    Err(message)
+    match record(ctx, call, tool, detail).await {
+        Ok(_) => Err(message),
+        Err(e) => Err(format!("{message} ({e})")),
+    }
 }
 
 /// ADR-0020 §6's capture cap, 512 bytes back to a character boundary: no client-supplied

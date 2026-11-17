@@ -568,6 +568,25 @@ async fn a_recall_whose_record_fails_is_an_error() {
 }
 
 #[tokio::test]
+async fn a_refusal_whose_record_fails_still_says_why() {
+    let server = TestServer::start().await;
+    refuse_event_writes(&server);
+    let reply = server
+        .tool(
+            "laptop",
+            "recall",
+            json!({ "query": "kestrel", "project": "github.com/nowhere/at-all" }),
+        )
+        .await;
+    assert!(reply.is_error, "{reply:?}");
+    assert!(
+        reply.body.contains("\"github.com/nowhere/at-all\""),
+        "{reply:?}"
+    );
+    assert!(reply.body.contains("record"), "{reply:?}");
+}
+
+#[tokio::test]
 async fn a_remember_whose_fact_write_fails_leaves_an_unnamed_record() {
     let server = TestServer::start().await;
     server.embedder.reset().await;
