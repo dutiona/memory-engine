@@ -112,9 +112,9 @@ const fn default_summary_timeout() -> u64 {
 
 /// Probe the embedding dimension from an existing database.
 ///
-/// Reads the persisted identity from the `embedding_meta` config row (#613,
-/// ADR 0015) and extracts its `dim`, falling back to the legacy bare `embed_dim`
-/// key for pre-#613 databases. Mirrors `peek_embed_dim_from_db` in
+/// Reads `dim` from the active `embedding_spaces` row (v13+, #622), falling back to the
+/// legacy `embedding_meta` config row (v12, #613) and then to the bare `embed_dim` key of
+/// pre-#613 databases. Opens the file read-only. Mirrors `peek_embed_dim_from_db` in
 /// `memory-engine-cli/src/db.rs`.
 ///
 /// # Errors
