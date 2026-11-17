@@ -36,6 +36,7 @@ pub(crate) mod cognitive;
 mod conflict;
 mod consolidation;
 mod dormant;
+pub(crate) mod embed_queue;
 mod forgetting;
 mod graph;
 mod graph_load;

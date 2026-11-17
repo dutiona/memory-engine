@@ -1033,18 +1033,20 @@ async fn a_waiting_fact_that_failed_is_compared_as_new_once_embedded() {
 
     // A restore queues it again; once it has its vector, the next run compares it.
     let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
-    let mut blob = String::new();
-    for b in crate::store::serialize_embedding(&old.embed("cats purr").unwrap()) {
-        std::fmt::Write::write_fmt(&mut blob, format_args!("{b:02x}")).unwrap();
-    }
-    restored
-        .storage()
-        .raw_exec(&format!(
-            "UPDATE facts SET embedding = X'{blob}' WHERE id = {waiting};
-             DELETE FROM embed_queue WHERE fact_id = {waiting};"
-        ))
+    let crate::types::NextEmbedding::Due(item) = restored.next_embedding().await.unwrap() else {
+        panic!("the restored fact is queued again");
+    };
+    assert_eq!(item.fact_id, waiting);
+    let settled = restored
+        .settle_embedding(
+            &item,
+            old.embed(&item.content),
+            &old.fingerprint(),
+            crate::Backoff::DEFAULT,
+        )
         .await
         .unwrap();
+    assert_eq!(settled, crate::Settled::Embedded);
     assert_eq!(duplicates_removed(&restored).await, 1);
 }
 

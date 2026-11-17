@@ -26,8 +26,8 @@ use crate::store::scopes::ScopeStore;
 use me_storage::graph::{BootstrapIngestOutcome, FactGraph, ImportOutcome, ScopedWrite};
 use me_types::error::Result;
 use me_types::types::{
-    Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
-    NewFact, RelationType, ScopeNode, SessionFact,
+    Edge, EmbeddingFailure, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType,
+    NewEdge, NewEvent, NewFact, NextEmbedding, RelationType, ScopeNode, SessionFact,
 };
 
 /// `(fact_ids, scope_ids_to_cache, embeddings)` — the result of the batch-insert
@@ -1169,6 +1169,62 @@ impl FactGraph for SqliteBackend {
         let dim = self.embed_dim;
         self.block_write(move |c| crate::store::embed_queue::insert_deferred(c, &fact, dim, now))
             .await
+    }
+
+    // READ
+    async fn next_embedding(&self, now: DateTime<Utc>) -> Result<NextEmbedding> {
+        self.block_read(move |c| crate::store::embed_queue::next(c, now))
+            .await
+    }
+
+    // ATOMIC WRITE — fill the vector, drop the queue row, then index it post-commit.
+    async fn complete_embedding(
+        &self,
+        fact_id: i64,
+        embedding: &[f32],
+        fingerprint: &EmbeddingFingerprint,
+        expected_dim: usize,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let embedding = embedding.to_vec();
+        let fingerprint = fingerprint.clone();
+        let (written_active, embedding) = self
+            .block_write(move |c| {
+                let written_active = crate::store::embed_queue::complete(
+                    c,
+                    fact_id,
+                    &embedding,
+                    &fingerprint,
+                    expected_dim,
+                    now,
+                )?;
+                Ok((written_active, embedding))
+            })
+            .await?;
+        // The vector is durably committed, so this `?` can only surface the post-commit
+        // `IndexInconsistent` carve-out (rebuild the index, never retry the write).
+        #[cfg(feature = "ann")]
+        if written_active {
+            self.hnsw_notify_insert(fact_id, &embedding)?;
+        }
+        #[cfg(not(feature = "ann"))]
+        let _ = (written_active, embedding);
+        Ok(())
+    }
+
+    // WRITE
+    async fn record_embedding_failure(
+        &self,
+        fact_id: i64,
+        error: &str,
+        failure: EmbeddingFailure,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let error = error.to_owned();
+        self.block_write(move |c| {
+            crate::store::embed_queue::record_failure(c, fact_id, &error, failure, now)
+        })
+        .await
     }
 }
 

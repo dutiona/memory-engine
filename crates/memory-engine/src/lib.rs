@@ -175,6 +175,7 @@ pub use archive::{ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVeri
 pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
 pub use engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, PromoteAction};
 pub use engine::builder::{File, InMemory, MemoryEngineBuilder};
+pub use engine::embed_queue::{Backoff, Settled};
 pub use engine::{EngineConfig, MemoryEngine};
 pub use store_lock::{StoreLock, StoreLockError};
 // Explicit re-export of the full `error` public surface (the umbrella
@@ -284,10 +285,10 @@ pub use me_types::types::{
     ConsolidationProposal, DreamCycleConfig, Edge, EmbeddingFingerprint, Event, EventFilter,
     EventType, Fact, FactId, FactScoringRow, FactType, Insight, LineageId, LineageRecord,
     LineageSnapshotEntry, MergeGroup, NewActivity, NewEdge, NewEvent, NewFact, NewFactBuilder,
-    NewLineageRecord, NewSummary, Outcome, OutcomeClass, OutcomeCounts, ParseActivityStatusError,
-    ProjectContext, PromoteOutcome, PromoteRequest, PromotionProvenance, PromotionResult,
-    RecordActivityRequest, RecordActivityResult, RelationType, ScopeNode, ScopeQuery,
-    ServedArtifact, SessionCheckpoint, SessionFact, Summary,
+    NewLineageRecord, NewSummary, NextEmbedding, Outcome, OutcomeClass, OutcomeCounts,
+    ParseActivityStatusError, PendingEmbedding, ProjectContext, PromoteOutcome, PromoteRequest,
+    PromotionProvenance, PromotionResult, RecordActivityRequest, RecordActivityResult,
+    RelationType, ScopeNode, ScopeQuery, ServedArtifact, SessionCheckpoint, SessionFact, Summary,
 };
 
 // Storage port — tight flat re-export of the umbrella + cross-cutting types only.
@@ -417,6 +418,10 @@ mod tests {
         let _ = std::mem::size_of::<crate::Fact>();
         let _ = std::mem::size_of::<crate::EngineConfig>();
         let _ = std::mem::size_of::<crate::MemoryEngine>();
+        let _ = std::mem::size_of::<crate::Backoff>();
+        let _ = std::mem::size_of::<crate::Settled>();
+        let _ = std::mem::size_of::<crate::NextEmbedding>();
+        let _ = std::mem::size_of::<crate::PendingEmbedding>();
 
         // error surface — the typed sub-enums + umbrella + Result alias are now
         // hand-enumerated re-exports (no glob), so assert each is reachable at the

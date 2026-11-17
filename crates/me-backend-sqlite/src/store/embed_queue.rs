@@ -1,12 +1,29 @@
 //! The deferred-embedding queue (#1021): a fact stored before its vector exists holds
 //! `embedding = X''` and one `embed_queue` row until the drain fills the vector.
+//!
+//! Queue-wide state lives in five `config` keys, named here once.
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use crate::store::facts::FactStore;
-use me_types::error::{Result, StorageError};
-use me_types::types::NewFact;
+use crate::store::schema::set_config;
+use crate::store::{embedding_meta, parse_timestamp, serialize_embedding};
+use me_types::error::{MemoryError, Result, StorageError};
+use me_types::types::{
+    EmbeddingFailure, EmbeddingFingerprint, NewFact, NextEmbedding, PendingEmbedding,
+};
+
+/// When the queue was first paused by a rejected key; absent when not paused.
+pub const PAUSED_SINCE: &str = "embed_queue_paused_since";
+/// The latest rejected-key error while paused.
+pub const PAUSE_ERROR: &str = "embed_queue_pause_error";
+/// When an embed last succeeded.
+pub const LAST_SUCCESS_AT: &str = "embed_last_success_at";
+/// When an embed last failed, whatever the failure.
+pub const LAST_ERROR_AT: &str = "embed_last_error_at";
+/// The last embed failure's error.
+pub const LAST_ERROR: &str = "embed_last_error";
 
 /// Insert `fact` without a vector and queue it, due at `now`, in one transaction.
 ///
@@ -31,4 +48,207 @@ pub fn insert_deferred(
     .map_err(StorageError::backend)?;
     tx.commit().map_err(StorageError::backend)?;
     Ok(id)
+}
+
+/// The waiting item the drain takes next: the smallest `(next_attempt_at, fact_id)` among
+/// the items not failed, `Due` once its time is `now` or earlier.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` on a query failure or an unparseable timestamp.
+pub fn next(conn: &Connection, now: DateTime<Utc>) -> Result<NextEmbedding> {
+    let row = conn
+        .query_row(
+            "SELECT q.fact_id, f.content, q.attempts, q.next_attempt_at
+               FROM embed_queue q JOIN facts f ON f.id = q.fact_id
+              WHERE q.failed_at IS NULL
+              ORDER BY q.next_attempt_at, q.fact_id LIMIT 1",
+            [],
+            |r| {
+                Ok((
+                    PendingEmbedding {
+                        fact_id: r.get(0)?,
+                        content: r.get(1)?,
+                        attempts: u32::try_from(r.get::<_, i64>(2)?).unwrap_or(u32::MAX),
+                    },
+                    parse_timestamp(&r.get::<_, String>(3)?)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::backend)?;
+    Ok(match row {
+        None => NextEmbedding::Idle,
+        Some((item, at)) if at <= now => NextEmbedding::Due(item),
+        Some((_, at)) => NextEmbedding::NotBefore(at),
+    })
+}
+
+/// Fill fact `fact_id`'s vector and drop its queue row, in one transaction; returns
+/// whether a vector was written on an active fact (the caller indexes it).
+///
+/// The vector is never written over another: a fact that already has one, or is gone,
+/// only loses its queue row, and then no identity is recorded. Records the success time
+/// and clears the pause.
+///
+/// # Errors
+///
+/// Returns `MemoryError::EmbeddingDimension` if `embedding` is not `expected_dim` wide,
+/// `MemoryError::EmbeddingModelMismatch` if `fingerprint` differs from the recorded
+/// identity, or `MemoryError::Storage` on a write failure; nothing is written on any
+/// error.
+pub fn complete(
+    conn: &Connection,
+    fact_id: i64,
+    embedding: &[f32],
+    fingerprint: &EmbeddingFingerprint,
+    expected_dim: usize,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    if embedding.len() != expected_dim {
+        return Err(MemoryError::EmbeddingDimension {
+            expected: expected_dim,
+            actual: embedding.len(),
+        });
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
+    let written_active: Option<bool> = tx
+        .query_row(
+            "UPDATE facts SET embedding = ?1 WHERE id = ?2 AND length(embedding) = 0
+             RETURNING t_expired IS NULL",
+            params![serialize_embedding(embedding), fact_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(StorageError::backend)?;
+    if written_active.is_some() {
+        embedding_meta::record_if_absent(&tx, fingerprint, expected_dim)?;
+    }
+    tx.execute("DELETE FROM embed_queue WHERE fact_id = ?1", [fact_id])
+        .map_err(StorageError::backend)?;
+    set_config(&tx, LAST_SUCCESS_AT, &now.to_rfc3339())?;
+    clear_pause(&tx)?;
+    tx.commit().map_err(StorageError::backend)?;
+    Ok(written_active == Some(true))
+}
+
+/// Record a failed attempt on fact `fact_id`, in one transaction.
+///
+/// `Retry` and `Fail` count the attempt and keep `error` on the row; an answer came back,
+/// so they clear the pause. `Hold` changes no queue row; paused, it keeps the first pause
+/// time and the latest `error`. Every failure records its time and `error`.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` on a write failure; nothing is written on any error.
+pub fn record_failure(
+    conn: &Connection,
+    fact_id: i64,
+    error: &str,
+    failure: EmbeddingFailure,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let now = now.to_rfc3339();
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
+    match failure {
+        EmbeddingFailure::Retry { at } => {
+            tx.execute(
+                "UPDATE embed_queue SET attempts = attempts + 1, next_attempt_at = ?2,
+                        last_error = ?3
+                  WHERE fact_id = ?1",
+                params![fact_id, at.to_rfc3339(), error],
+            )
+            .map_err(StorageError::backend)?;
+            clear_pause(&tx)?;
+        }
+        EmbeddingFailure::Fail => {
+            tx.execute(
+                "UPDATE embed_queue SET attempts = attempts + 1, failed_at = ?2, last_error = ?3
+                  WHERE fact_id = ?1",
+                params![fact_id, now, error],
+            )
+            .map_err(StorageError::backend)?;
+            clear_pause(&tx)?;
+        }
+        EmbeddingFailure::Hold { paused: true } => {
+            tx.execute(
+                "INSERT OR IGNORE INTO config (key, value) VALUES (?1, ?2)",
+                params![PAUSED_SINCE, now],
+            )
+            .map_err(StorageError::backend)?;
+            set_config(&tx, PAUSE_ERROR, error)?;
+        }
+        EmbeddingFailure::Hold { paused: false } => {}
+    }
+    set_config(&tx, LAST_ERROR_AT, &now)?;
+    set_config(&tx, LAST_ERROR, error)?;
+    tx.commit().map_err(StorageError::backend)?;
+    Ok(())
+}
+
+fn clear_pause(tx: &Transaction) -> Result<()> {
+    tx.execute(
+        "DELETE FROM config WHERE key IN (?1, ?2)",
+        params![PAUSED_SINCE, PAUSE_ERROR],
+    )
+    .map_err(StorageError::backend)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{seed_without_vector, setup_memory_db};
+
+    #[test]
+    fn next_takes_the_earliest_due_item_and_skips_a_failed_one() {
+        let conn = setup_memory_db();
+        let failed = seed_without_vector(&conn, "failed");
+        let later = seed_without_vector(&conn, "later");
+        let first = seed_without_vector(&conn, "first");
+        let tie = seed_without_vector(&conn, "tie");
+        let t = |s: &str| format!("2026-01-01T00:00:0{s}+00:00");
+        for (id, at) in [
+            (failed, t("0")),
+            (later, t("5")),
+            (first, t("1")),
+            (tie, t("1")),
+        ] {
+            conn.execute(
+                "UPDATE embed_queue SET next_attempt_at = ?2 WHERE fact_id = ?1",
+                params![id, at],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE embed_queue SET failed_at = ?2 WHERE fact_id = ?1",
+            params![failed, t("0")],
+        )
+        .unwrap();
+        let at = |s: &str| parse_timestamp(&t(s)).unwrap();
+
+        let NextEmbedding::Due(item) = next(&conn, at("1")).unwrap() else {
+            panic!("an item is due");
+        };
+        assert_eq!(
+            item,
+            PendingEmbedding {
+                fact_id: first,
+                content: "first".into(),
+                attempts: 0
+            },
+            "by time, then by id"
+        );
+        assert_eq!(
+            next(&conn, at("0")).unwrap(),
+            NextEmbedding::NotBefore(at("1"))
+        );
+        conn.execute("DELETE FROM embed_queue WHERE fact_id <> ?1", [failed])
+            .unwrap();
+        assert_eq!(next(&conn, at("9")).unwrap(), NextEmbedding::Idle);
+    }
 }

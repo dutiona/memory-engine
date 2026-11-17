@@ -84,6 +84,13 @@ impl HnswStrategy {
         inner.fact_to_hnsw.len()
     }
 
+    /// Test seam: desync the ID mappings, as an `hnsw` contract break would, so the next
+    /// `notify_insert` trips its sequential-ID guard.
+    #[cfg(feature = "test-util")]
+    pub(crate) fn break_sequential_ids(&self) {
+        self.inner.write().index_to_fact.push(-1);
+    }
+
     /// Construct an empty `hnsw::Hnsw` with the canonical seed + params.
     ///
     /// The single construction point for the index used by every build path

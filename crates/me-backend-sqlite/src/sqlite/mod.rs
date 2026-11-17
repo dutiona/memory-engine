@@ -354,6 +354,17 @@ impl SqliteBackend {
         Ok(())
     }
 
+    /// Test seam: make the next post-commit HNSW insert fail with
+    /// [`MemoryError::IndexInconsistent`](me_types::error::MemoryError::IndexInconsistent),
+    /// so a caller's handling of a write that committed before the index broke can be
+    /// tested. No-op when no HNSW index is active.
+    #[cfg(all(feature = "ann", feature = "test-util"))]
+    pub fn break_hnsw_index(&self) {
+        if let Some(ref hnsw) = self.hnsw {
+            hnsw.break_sequential_ids();
+        }
+    }
+
     /// Notify the HNSW index that a fact was expired or hard-deleted (post-commit).
     ///
     /// Mirrors the engine's `notify_expire` calls. Must be called **after** the write
