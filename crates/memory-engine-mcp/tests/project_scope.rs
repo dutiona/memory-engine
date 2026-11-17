@@ -157,7 +157,7 @@ async fn no_file_of_the_store_holds_userinfo() {
         ),
         (ORIGIN, b"TOKEN123@github.com:alice/fork.git"),
     ];
-    server
+    let remembered = server
         .tool_with(
             "laptop",
             facts,
@@ -165,6 +165,7 @@ async fn no_file_of_the_store_holds_userinfo() {
             json!({ "content": "kestrel kept" }),
         )
         .await;
+    assert!(!remembered.is_error, "{remembered:?}");
     server
         .tool_with("laptop", facts, "recall", json!({ "query": "kestrel" }))
         .await;
@@ -180,6 +181,36 @@ async fn no_file_of_the_store_holds_userinfo() {
     let files = store_bytes(&server);
     assert!(files.iter().any(|(name, _)| name == "memory.db"));
     for (name, bytes) in &files {
+        for secret in [&b"s3cret"[..], b"TOKEN123"] {
+            assert!(!holds(bytes, secret), "{name} holds {secret:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn no_file_of_the_store_holds_userinfo_quoted_from_a_tool_argument() {
+    let mut server = TestServer::start().await;
+    let reply = server
+        .tool(
+            "laptop",
+            "recall",
+            json!({ "query": "kestrel", "project": "https://alice:s3cret@github.com/p" }),
+        )
+        .await;
+    assert!(
+        reply.is_error && reply.body.contains("s3cret"),
+        "the answer names the value: {reply:?}"
+    );
+    let reply = server
+        .tool(
+            "laptop",
+            "set_level",
+            json!({ "id": 1, "level": "ssh://TOKEN123@host/x" }),
+        )
+        .await;
+    assert!(reply.is_error, "{reply:?}");
+    server.stop().await;
+    for (name, bytes) in &store_bytes(&server) {
         for secret in [&b"s3cret"[..], b"TOKEN123"] {
             assert!(!holds(bytes, secret), "{name} holds {secret:?}");
         }

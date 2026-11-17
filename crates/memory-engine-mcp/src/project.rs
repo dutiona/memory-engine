@@ -40,6 +40,9 @@ pub enum Flaw {
     Control,
     /// The dev root is not an absolute path of plain ASCII without `%`, `"` or `\`.
     NotPlainAbsolute,
+    /// A remote URL still holds userinfo after stripping: a `/` in its password ended the
+    /// authority early, so the URL is dropped rather than stored with the secret.
+    UnstrippedUserinfo,
 }
 
 /// ADR-0020 §3: each header value is at most 4,096 bytes.
@@ -90,12 +93,16 @@ impl ProjectFacts {
             };
             match decoded {
                 Ok(value) => {
-                    let slot = facts.slot(name);
-                    *slot = Some(if name.ends_with("_url") {
+                    let value = if name.ends_with("_url") {
                         strip_userinfo(&value)
                     } else {
                         value
-                    });
+                    };
+                    if name.ends_with("_url") && holds_userinfo(&value) {
+                        facts.dropped.insert(name, Flaw::UnstrippedUserinfo);
+                    } else {
+                        *facts.slot(name) = Some(value);
+                    }
                 }
                 Err(flaw) => {
                     facts.dropped.insert(name, flaw);
@@ -337,6 +344,44 @@ fn dev_root(raw: &[u8]) -> Result<String, Flaw> {
 /// `://`, up to the next `/`, loses everything through its last `@`), then its scp rule
 /// (when a `:` exists and the text before the first one holds no `/`, that text loses
 /// everything through its last `@`). It removes at least what the client removes.
+/// After stripping, a scheme-form URL whose first path segment still holds an `@` held a `/`
+/// in its userinfo (`https://user:pa/ss@host/x`); a later segment's `@` is a path.
+fn holds_userinfo(url: &str) -> bool {
+    url.find("://").is_some_and(|at| {
+        url[at + 3..]
+            .split('/')
+            .nth(1)
+            .is_some_and(|segment| segment.contains('@'))
+    })
+}
+
+/// Remove the userinfo of every URL in free text, such as an error that quotes a tool argument.
+///
+/// At each `://`, the authority up to the next `/`, whitespace or quote loses everything
+/// through its last `@`. ADR-0020 §3: nothing stored holds userinfo.
+#[must_use]
+pub fn redact_userinfo(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let start = at + 3;
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let end = tail
+            .find(|c: char| c == '/' || c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '\\'))
+            .unwrap_or(tail.len());
+        let authority = &tail[..end];
+        out.push_str(
+            authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host),
+        );
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn strip_userinfo(url: &str) -> String {
     let mut out = url.to_owned();
     if let Some(at) = out.find("://") {
@@ -523,6 +568,54 @@ mod tests {
             ),
         ] {
             assert_eq!(strip_userinfo(url), want, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_url_whose_userinfo_survives_stripping_is_dropped() {
+        // A client that did not encode `%` sends a password's `/` as `%2F`: decoded, it ends
+        // the authority early, so the userinfo would survive the strip.
+        let map = headers(&[
+            (
+                "ME-Project-Origin-Url",
+                b"https://alice:pa%2Fss@github.com/x",
+            ),
+            ("ME-Project-Upstream-Url", b"https://github.com/example/a@b"),
+        ]);
+        let facts = ProjectFacts::from_headers(&map);
+        assert_eq!(facts.origin_url, None);
+        assert_eq!(
+            facts.dropped.get("origin_url"),
+            Some(&Flaw::UnstrippedUserinfo)
+        );
+        assert_eq!(
+            facts.upstream_url.as_deref(),
+            Some("https://github.com/example/a@b")
+        );
+    }
+
+    #[test]
+    fn text_loses_the_userinfo_of_every_url_it_holds() {
+        for (text, want) in [
+            (
+                "unknown project: \"https://alice:s3cret@github.com/p\"",
+                "unknown project: \"https://github.com/p\"",
+            ),
+            (
+                "unknown variant `ssh://tok@host`, expected `project` or `user`",
+                "unknown variant `ssh://host`, expected `project` or `user`",
+            ),
+            ("a://x@y b://z@w/q", "a://y b://w/q"),
+            (
+                "no url here, alice@example.org",
+                "no url here, alice@example.org",
+            ),
+            (
+                "https://github.com/example/a@b",
+                "https://github.com/example/a@b",
+            ),
+        ] {
+            assert_eq!(redact_userinfo(text), want, "{text}");
         }
     }
 

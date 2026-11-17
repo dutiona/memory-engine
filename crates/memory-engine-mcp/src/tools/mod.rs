@@ -192,7 +192,8 @@ async fn record(
         .map_err(|e| format!("cannot record this call: {e}"))
 }
 
-/// Record a call that failed before anything was stored, then answer its failure.
+/// Record a call that failed before anything was stored, then answer its failure. The record
+/// keeps the message without the userinfo of any URL it quotes from a tool argument.
 async fn refuse(
     ctx: &CallContext<'_>,
     call: &str,
@@ -200,7 +201,8 @@ async fn refuse(
     message: String,
 ) -> Result<String, String> {
     let mut detail = Map::new();
-    detail.insert("error".to_owned(), capture_cut(&message).into());
+    let recorded = crate::project::redact_userinfo(&message);
+    detail.insert("error".to_owned(), capture_cut(&recorded).into());
     match record(ctx, call, tool, detail, &ctx.bucket()).await {
         Ok(_) => Err(message),
         Err(e) => Err(format!("{message} ({e})")),
