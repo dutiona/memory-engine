@@ -123,7 +123,7 @@ fn is_token_shaped(token: &[u8]) -> bool {
 }
 
 /// `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`
-fn is_dns_label(name: &[u8]) -> bool {
+pub(crate) fn is_dns_label(name: &[u8]) -> bool {
     let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
     match (name.first(), name.last()) {
         (Some(first), Some(last)) => {

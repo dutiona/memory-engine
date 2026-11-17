@@ -30,8 +30,84 @@ use crate::embedding::HttpEmbeddingProvider;
 mod definitions;
 mod handlers;
 mod parse;
+mod recall;
+mod remember;
 
-pub use definitions::all_tool_definitions;
+use rmcp::model::{Content, Tool};
+
+use crate::auth::Machine;
+use crate::home::User;
+
+/// Every tool the server lists: the model tools first.
+#[must_use]
+pub fn all_tool_definitions() -> Vec<Tool> {
+    let mut tools = vec![recall::definition(), remember::definition()];
+    tools.extend(definitions::all_tool_definitions());
+    tools
+}
+
+/// What one model-tool call runs against.
+pub(crate) struct CallContext<'a> {
+    pub(crate) engine: &'a MemoryEngine,
+    pub(crate) embedder: Option<&'a Arc<HttpEmbeddingProvider>>,
+    pub(crate) user: &'a User,
+    pub(crate) machine: &'a Machine,
+}
+
+/// A fresh call ID: 16 lowercase hex digits from the OS random number generator
+/// (ADR-0020 §8).
+///
+/// # Errors
+///
+/// The OS random number generator failed.
+pub fn new_call_id() -> Result<String, getrandom::Error> {
+    let mut bytes = [0_u8; 8];
+    getrandom::fill(&mut bytes)?;
+    Ok(format!("{:016x}", u64::from_be_bytes(bytes)))
+}
+
+/// Run `name` when it is a model tool, else `None`. Every answer, failures included, is a
+/// tool result whose text starts with the call line (ADR-0020 §8).
+pub(crate) async fn call_model_tool(
+    name: &str,
+    args: Map<String, Value>,
+    ctx: &CallContext<'_>,
+) -> Option<Result<CallToolResult, ErrorData>> {
+    let args = Value::Object(args);
+    let outcome = match name {
+        "recall" => recall::run(ctx, args).await,
+        "remember" => remember::run(ctx, args).await,
+        _ => return None,
+    };
+    // Unreachable once main's startup probe succeeded: Linux getrandom(2) never fails after
+    // one success. No call ID can head this answer, so it is the one JSON-RPC error.
+    let call = match new_call_id() {
+        Ok(call) => call,
+        Err(e) => {
+            return Some(Err(ErrorData::internal_error(
+                format!("no call ID: the OS random number generator failed: {e}"),
+                None,
+            )));
+        }
+    };
+    Some(Ok(respond(&call, outcome)))
+}
+
+fn respond(call: &str, outcome: Result<String, String>) -> CallToolResult {
+    match outcome {
+        Ok(body) => CallToolResult::success(vec![Content::text(format!("call {call}\n{body}"))]),
+        Err(message) => CallToolResult::error(vec![Content::text(format!(
+            "call {call}\nerror: {message}"
+        ))]),
+    }
+}
+
+fn tool(name: &'static str, description: &'static str, schema: Value) -> Tool {
+    let Value::Object(schema) = schema else {
+        unreachable!("a tool schema is a JSON object")
+    };
+    Tool::new(name, description, Arc::new(schema))
+}
 
 // ---------------------------------------------------------------------------
 // Trust-boundary input-size caps (#266/#267/#355/#294)
@@ -121,5 +197,26 @@ pub async fn dispatch(
             format!("unknown tool: {name}"),
             None,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_call_line_is_call_and_sixteen_lowercase_hex_digits() {
+        let call = new_call_id().unwrap();
+        assert_eq!(call.len(), 16);
+        assert!(
+            call.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{call}"
+        );
+        assert_ne!(new_call_id().unwrap(), call);
+        let result = respond(&call, Err("boom".to_owned()));
+        assert_eq!(result.is_error, Some(true));
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert_eq!(text, format!("call {call}\nerror: boom"));
     }
 }

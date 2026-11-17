@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 
 use crate::auth::Machine;
 use crate::embedding::HttpEmbeddingProvider;
+use crate::home::User;
 use crate::tools;
 
 /// MCP server wrapping a [`MemoryEngine`] instance.
@@ -32,6 +33,7 @@ pub struct MemoryMcpServer {
     pub(crate) summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
     pub(crate) embed_dim: usize,
     pub(crate) filter_config: Arc<ActivityFilterConfig>,
+    pub(crate) user: User,
     /// Held for reading by every tool call; `http::serve` takes it for writing to drain.
     pub(crate) in_flight: Arc<tokio::sync::RwLock<()>>,
 }
@@ -56,6 +58,7 @@ impl MemoryMcpServer {
         embedder: Option<Arc<HttpEmbeddingProvider>>,
         summary_gen: Option<Arc<dyn SummaryGenerator + Send + Sync>>,
         embed_dim: usize,
+        user: User,
     ) -> Self {
         Self {
             engine,
@@ -63,12 +66,50 @@ impl MemoryMcpServer {
             summary_gen,
             embed_dim,
             filter_config: Arc::new(crate::activity_policy::default_filter_config()),
+            user,
             in_flight: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
     fn tool_definitions() -> Vec<Tool> {
         tools::all_tool_definitions()
+    }
+
+    /// Run one tool call for the authenticated `machine`: the seam `call_tool`, the fuzz
+    /// target and the tests drive.
+    ///
+    /// # Errors
+    ///
+    /// A JSON-RPC error for a name that is not a tool; the model tools answer every failure
+    /// as a tool result instead.
+    pub async fn dispatch(
+        &self,
+        machine: &Machine,
+        name: &str,
+        mut args: Map<String, Value>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = tools::CallContext {
+            engine: &self.engine,
+            embedder: self.embedder.as_ref(),
+            user: &self.user,
+            machine,
+        };
+        if let Some(result) = tools::call_model_tool(name, args.clone(), &ctx).await {
+            return result;
+        }
+        if name == "memory_add_fact" {
+            record_machine(&mut args, machine)?;
+        }
+        tools::dispatch(
+            name,
+            args,
+            &self.engine,
+            self.embedder.clone(),
+            self.summary_gen.clone(),
+            self.embed_dim,
+            &self.filter_config,
+        )
+        .await
     }
 }
 
@@ -116,29 +157,8 @@ impl ServerHandler for MemoryMcpServer {
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         let machine = calling_machine(&context.extensions)?;
         let _in_flight = self.in_flight.read().await;
-        let name = request.name.clone();
-        let mut args = request.arguments.unwrap_or_default();
-        if name == "memory_add_fact" {
-            record_machine(&mut args, machine)?;
-        }
-
-        // The engine is async-native (#631): await the tool dispatch directly on the
-        // runtime. Storage I/O is offloaded below the `StorageBackend` seam and any
-        // consumer-trait (blocking HTTP) call is offloaded inside the engine, so no
-        // `spawn_blocking` hop is needed here. `MemoryEngine` is `Send + Sync` and its
-        // futures are `Send`, so the borrowed `&self` dispatch is sound across `.await`.
-        let result = tools::dispatch(
-            &name,
-            args,
-            &self.engine,
-            self.embedder.clone(),
-            self.summary_gen.clone(),
-            self.embed_dim,
-            &self.filter_config,
-        )
-        .await?;
-
-        Ok(result)
+        let args = request.arguments.unwrap_or_default();
+        self.dispatch(machine, &request.name, args).await
     }
 }
 

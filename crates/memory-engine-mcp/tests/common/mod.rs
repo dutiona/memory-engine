@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use memory_engine::MemoryEngine;
 use memory_engine_mcp::auth::TokenTable;
 use memory_engine_mcp::embedding::HttpEmbeddingProvider;
+use memory_engine_mcp::home::User;
 use memory_engine_mcp::http;
 use memory_engine_mcp::server::MemoryMcpServer;
 use serde_json::{Value, json};
@@ -75,6 +76,7 @@ pub struct TestServer {
     pub url: String,
     pub client: reqwest::Client,
     pub engine: Arc<MemoryEngine>,
+    pub provider: Option<Arc<HttpEmbeddingProvider>>,
     pub embedder: MockServer,
     pub dir: TempDir,
     shutdown: Option<oneshot::Sender<()>>,
@@ -87,6 +89,24 @@ impl TestServer {
     }
 
     pub async fn start_with_hosts(allowed_hosts: &[&str]) -> Self {
+        Self::start_with(allowed_hosts, true, None).await
+    }
+
+    /// A server with no embedder: recall is full-text only and remember refuses.
+    pub async fn start_without_embedder() -> Self {
+        Self::start_with(&[], false, None).await
+    }
+
+    /// A server whose provider carries `instruction` as its configured query instruction.
+    pub async fn start_with_query_instruction(instruction: &str) -> Self {
+        Self::start_with(&[], true, Some(instruction.to_owned())).await
+    }
+
+    async fn start_with(
+        allowed_hosts: &[&str],
+        with_embedder: bool,
+        instruction: Option<String>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let embedder = MockServer::start().await;
         Mock::given(method("POST"))
@@ -101,16 +121,28 @@ impl TestServer {
         let db = dir.path().join("memory.db");
         // The blocking reqwest client inside the provider must not be built on the runtime.
         let (engine, provider) = tokio::task::spawn_blocking(move || {
-            let provider =
-                HttpEmbeddingProvider::new(endpoint, "m".into(), "tei".into(), None, DIM, 10)
-                    .unwrap();
+            let provider = with_embedder.then(|| {
+                let provider =
+                    HttpEmbeddingProvider::new(endpoint, "m".into(), "tei".into(), None, DIM, 10)
+                        .unwrap();
+                Arc::new(match instruction {
+                    Some(i) => provider.with_query_instruction(i),
+                    None => provider,
+                })
+            });
             let engine = MemoryEngine::builder(DIM).path(db).build().unwrap();
-            (Arc::new(engine), Arc::new(provider))
+            (Arc::new(engine), provider)
         })
         .await
         .unwrap();
         let tokens = TokenTable::load(&write_token_file(dir.path(), &MACHINES)).unwrap();
-        let server = MemoryMcpServer::new(Arc::clone(&engine), Some(provider), None, DIM);
+        let server = MemoryMcpServer::new(
+            Arc::clone(&engine),
+            provider.clone(),
+            None,
+            DIM,
+            User::parse("alice").unwrap(),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = oneshot::channel();
@@ -122,6 +154,7 @@ impl TestServer {
             url,
             client: reqwest::Client::new(),
             engine,
+            provider,
             embedder,
             dir,
             shutdown: Some(tx),
@@ -177,6 +210,62 @@ impl TestServer {
         serde_json::from_str(text).unwrap()
     }
 
+    /// Call a model tool as `machine`: asserts the call line and splits the answer.
+    pub async fn tool(&self, machine: &str, name: &str, args: Value) -> Reply {
+        let response = self.call(machine, name, args).await;
+        assert!(
+            response.get("error").is_none(),
+            "a model tool answered a JSON-RPC error: {response}"
+        );
+        let result = &response["result"];
+        let text = result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no text content in {response}"));
+        let (line, body) = text
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("no call line in {text:?}"));
+        let call = line
+            .strip_prefix("call ")
+            .unwrap_or_else(|| panic!("the first line is not a call line: {line:?}"));
+        assert!(
+            call.len() == 16 && call.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "not 16 lowercase hex digits: {call:?}"
+        );
+        Reply {
+            is_error: result["isError"].as_bool().unwrap_or(false),
+            call: call.to_owned(),
+            body: body.to_owned(),
+        }
+    }
+
+    /// Store a fact at the scope path `home` (root when `None`) without the tools, as another
+    /// writer would; it carries `metadata` and the mock embedder's vector.
+    pub async fn seed(&self, home: Option<&str>, content: &str, metadata: Value) -> i64 {
+        use memory_engine::traits::EmbeddingProvider;
+        let fingerprint = self.provider.as_ref().map_or_else(
+            || memory_engine::EmbeddingFingerprint::new("tei", "m", DIM),
+            |p| p.fingerprint(),
+        );
+        self.engine
+            .add_fact_precomputed(
+                &memory_engine::types::AddFactRequest {
+                    content: content.to_owned(),
+                    fact_type: memory_engine::types::FactType::Semantic,
+                    source_event_id: None,
+                    scope: home.map(str::to_owned),
+                    opts: Some(memory_engine::types::AddFactOptions {
+                        metadata: Some(metadata),
+                        ..Default::default()
+                    }),
+                },
+                vec![0.25; DIM],
+                &fingerprint,
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
     pub async fn fact_count(&self) -> i64 {
         self.engine.statistics().await.unwrap().facts.total
     }
@@ -206,6 +295,21 @@ impl Drop for TestServer {
         if let Some(task) = &self.task {
             task.abort();
         }
+    }
+}
+
+/// A model tool's answer, its call line checked and split off.
+#[derive(Debug)]
+pub struct Reply {
+    pub is_error: bool,
+    pub call: String,
+    pub body: String,
+}
+
+impl Reply {
+    #[must_use]
+    pub fn json(&self) -> Value {
+        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("{e}: {}", self.body))
     }
 }
 
@@ -255,7 +359,24 @@ impl ServerProcess {
 
     /// Start the binary with only `--listen` and `--token-file` plus `args` and `envs`: no
     /// `--config`, as a deployment configured entirely through its environment runs it.
+    /// The user is `alice` unless `envs` sets `MEMORY_MCP_USER`.
     pub fn spawn_bare(dir: &Path, token_file: &Path, args: &[&str], envs: &[(&str, &str)]) -> Self {
+        Self::spawn_inner(dir, token_file, args, envs, true)
+    }
+
+    /// As [`spawn_bare`](Self::spawn_bare), with no user setting at all.
+    pub fn spawn_without_user(dir: &Path, args: &[&str]) -> Self {
+        let tokens = write_token_file(dir, &MACHINES);
+        Self::spawn_inner(dir, &tokens, args, &[], false)
+    }
+
+    fn spawn_inner(
+        dir: &Path,
+        token_file: &Path,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        with_user: bool,
+    ) -> Self {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -268,6 +389,9 @@ impl ServerProcess {
             if key.to_string_lossy().starts_with("MEMORY_MCP_") {
                 command.env_remove(key);
             }
+        }
+        if with_user {
+            command.env("MEMORY_MCP_USER", "alice");
         }
         command
             .arg("--listen")

@@ -73,7 +73,7 @@ podman build --pull=newer -t memory-engine:<tag> .
 - The image runs as the non-root user `memory-engine`, UID and GID `10001`, in `/var/lib/memory-engine`, with
   `memory-engine-mcp` as its entry point. Run the CLI with `--entrypoint memory-engine-cli`.
 - The entry point serves MCP over HTTP and needs `MEMORY_MCP_LISTEN` (`0.0.0.0:<port>` inside a container, so a
-  published port reaches it) and `MEMORY_MCP_TOKEN_FILE`
+  published port reaches it), `MEMORY_MCP_TOKEN_FILE` and `MEMORY_MCP_USER` (the owner, a lowercase DNS label)
   ([MCP server reference](../reference/mcp-server.md#transport-and-authentication)).
 - Every route requires a machine token, so a health probe expects 401:
   `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/mcp` prints `401`.

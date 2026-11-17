@@ -345,3 +345,36 @@ fn a_second_server_on_the_same_store_is_refused() {
     );
     first.wait_ready().unwrap();
 }
+
+#[test]
+fn the_user_setting_is_required_and_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::write_config(dir.path(), "");
+    let config = config.to_str().unwrap();
+    let mut missing = ServerProcess::spawn_without_user(dir.path(), &["--config", config]);
+    let status = missing.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.code(), Some(2), "stderr:\n{}", missing.stderr());
+    assert!(
+        missing.stderr().contains("--user"),
+        "stderr:\n{}",
+        missing.stderr()
+    );
+
+    for (args, envs) in [
+        (vec!["--user", "Alice"], vec![]),
+        (vec![], vec![("MEMORY_MCP_USER", "a/b")]),
+    ] {
+        let mut server = ServerProcess::spawn(dir.path(), &args, &envs);
+        let status = server.wait_exit(Duration::from_secs(10));
+        assert_eq!(status.code(), Some(2), "stderr:\n{}", server.stderr());
+        assert!(
+            server.stderr().contains("--user"),
+            "stderr:\n{}",
+            server.stderr()
+        );
+    }
+    assert!(!dir.path().join("memory.db").exists());
+
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[("MEMORY_MCP_USER", "bob")]);
+    server.wait_ready().unwrap();
+}

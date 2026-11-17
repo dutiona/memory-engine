@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use memory_engine::MemoryEngine;
-use memory_engine_mcp::{auth, config, embedding, http, server, summary};
+use memory_engine_mcp::{auth, config, embedding, home, http, server, summary, tools};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -29,6 +29,10 @@ struct Cli {
         value_parser = http::parse_allowed_host
     )]
     allowed_hosts: Vec<String>,
+
+    /// The owner whose user level (`user:<user>`) this server reads and files (ADR-0020 §7).
+    #[arg(long, env = "MEMORY_MCP_USER", value_parser = home::User::parse)]
+    user: home::User,
 
     /// Path to TOML configuration file.
     #[arg(long, env = "MEMORY_MCP_CONFIG")]
@@ -86,6 +90,9 @@ async fn main() -> Result<(), BoxError> {
 
     // 0. The token file first: a bad one must never get as far as migrating the store.
     let tokens = auth::TokenTable::load(&cli.token_file).map_err(|e| e.to_string())?;
+    // Every model-tool answer starts with a call ID drawn from the OS RNG (ADR-0020 §8). One
+    // draw now, before anything opens, so a served call never meets an uninitialised RNG.
+    tools::new_call_id().map_err(|e| format!("the OS random number generator failed: {e}"))?;
 
     // 1. Load config (TOML file, with CLI overrides)
     let mcp_config = load_config(&cli)?;
@@ -143,7 +150,8 @@ async fn main() -> Result<(), BoxError> {
     }
 
     // 6. Construct and serve
-    let mcp_server = server::MemoryMcpServer::new(engine, embedder, summary_gen, embed_dim);
+    let mcp_server =
+        server::MemoryMcpServer::new(engine, embedder, summary_gen, embed_dim, cli.user.clone());
 
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     tracing::info!("memory-engine-mcp listening on {}", listener.local_addr()?);

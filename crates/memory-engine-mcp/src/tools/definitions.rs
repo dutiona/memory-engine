@@ -17,8 +17,6 @@ use serde_json::{Map, Value, json};
 ///
 /// let defs = tools::all_tool_definitions();
 /// assert!(!defs.is_empty());
-/// // Every tool is namespaced under the `memory_` prefix.
-/// assert!(defs.iter().all(|t| t.name.starts_with("memory_")));
 /// // The exact count and name-uniqueness are pinned in the integration tests,
 /// // not here — a doc comment should illustrate the contract, not hardcode a
 /// // number that drifts every time a tool is added.

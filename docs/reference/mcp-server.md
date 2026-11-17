@@ -27,15 +27,15 @@ cargo build -p memory-engine-mcp --release
 
 ```bash
 # With TOML config
-memory-engine-mcp --listen 127.0.0.1:<port> --token-file /path/to/tokens --config /path/to/mcp.toml
+memory-engine-mcp --listen 127.0.0.1:<port> --token-file /path/to/tokens --user alice --config /path/to/mcp.toml
 
 # With CLI args
-memory-engine-mcp --listen 127.0.0.1:<port> --token-file /path/to/tokens \
+memory-engine-mcp --listen 127.0.0.1:<port> --token-file /path/to/tokens --user alice \
   --db-path /path/to/memory.db --embed-url http://localhost:11434/v1/embeddings --embed-model nomic-embed-text \
   --embed-query-instruction ''   # nomic is symmetric: opt out of ME's default query instruction
 
 # With env vars
-MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens \
+MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens MEMORY_MCP_USER=alice \
   MEMORY_MCP_DB_PATH=/path/to/memory.db MEMORY_MCP_EMBED_URL=... memory-engine-mcp
 ```
 
@@ -43,6 +43,7 @@ MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens \
 |---|---|---|
 | `--listen` (required) | `MEMORY_MCP_LISTEN` | Socket address to serve on |
 | `--token-file` (required) | `MEMORY_MCP_TOKEN_FILE` | The token-hash file (below) |
+| `--user` (required) | `MEMORY_MCP_USER` | The owner: the user level is `user:<user>` (ADR-0020 §7). A lowercase DNS label |
 | `--allowed-host` (repeatable) | `MEMORY_MCP_ALLOWED_HOSTS` (comma list, no spaces) | A `Host` value served besides loopback |
 | `--backup-dir` | `MEMORY_MCP_BACKUP_DIR` | Overrides `engine.backup_dir` |
 | `--embed-dim` | `MEMORY_MCP_EMBED_DIM` | Overrides `engine.embed_dim` (lets a blank store start without a TOML file) |

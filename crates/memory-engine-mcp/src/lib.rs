@@ -6,7 +6,7 @@
 //! tests under `tests/` are `pub`; modules used only within this library are
 //! `pub(crate)` so they are not part of the crate's published surface:
 //!
-//! - `pub`: [`auth`], [`config`], [`embedding`], [`http`], [`server`], [`summary`], [`tools`]
+//! - `pub`: [`auth`], [`config`], [`embedding`], [`home`], [`http`], [`server`], [`summary`], [`tools`]
 //!   — referenced by `main.rs` and/or `tests/`.
 //! - `pub(crate)`: [`activity_policy`], [`depth`], [`error`]
 //!   — internal helpers with no external (binary or test) consumer.
@@ -17,6 +17,7 @@ pub mod config;
 pub(crate) mod depth;
 pub mod embedding;
 pub(crate) mod error;
+pub mod home;
 pub mod http;
 pub mod server;
 pub mod summary;
