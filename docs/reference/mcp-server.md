@@ -180,29 +180,60 @@ lifecycle routes: `ME-Project-Root`, `ME-Project-Dev-Root`, `ME-Project-Upstream
 and `\`; the server decodes every `%HH` in either hex case, so two clients that encode a path differently name one
 project. The dev root is plain ASCII and sent as configured, never decoded.
 
-**A bad fact is dropped, never the call.** A fact is ignored, and named in the call record's `project.dropped` with its
-reason, when it is sent twice (`repeated`), sent empty (`empty`), exceeds 4,096 bytes (`too_long`), holds a raw byte
-outside 0x21 to 0x7E (`raw_byte`), holds a `%` without two hex digits (`bad_escape`), decodes to something that is not
-UTF-8 (`not_utf8`) or to a control character (`control`), or, for the dev root, is not an absolute path of plain ASCII
-without `%`, `"` or `\` (`not_plain_absolute`). Both remote URLs lose their userinfo before anything holds them.
+**A bad fact is dropped, never the call**: it is named in the call record's `project.dropped` with its reason, and the
+call goes on without it.
 
 This page holds the key rules canonically; `KEY_RULES_VERSION` in `src/project.rs` names their version, and any change
-to them increments it. **Rules, version 1:**
+to what follows increments it. **Rules, version 1.**
 
-- The key is the normalized `upstream` remote, else the normalized `origin`, else the path key, else none.
-- **Remotes.** A `file:` remote and a remote-helper URL (`<transport>::<address>`) are ignored, and so is a local path.
-  The scheme form (`ssh://`, `https://`, ...) and the scp form (`host:path`) both normalize to the host, lowercased in
-  ASCII, then `/`, then the path with its case kept, without the userinfo, the port, leading and trailing `/` or one
-  trailing lowercase `.git`. `git@github.com:example/project.git` and `https://github.com/example/project` are both
-  `github.com/example/project`; a bracketed IPv6 host keeps its brackets. A remote that leaves no host or no path is
-  ignored, so the next rule applies.
-- **Path key.** `<machine>:<path>`, where `<path>` is the root relative to the dev root, strictly below it, with no
-  empty, `.` or `..` segment: on `laptop`, with dev root `/home/alice/perso/dev`, the root
-  `/home/alice/perso/dev/notes/2026` is `laptop:notes/2026`. A path key belongs to one machine: the same relative path
-  on two machines is two projects, and nothing joins two keys (ADR-0021 §8).
-- When the chosen key's segment `project:<label>` exceeds 256 bytes there is no key: the rules do not fall through to
-  the next remote.
-- With no key the session is keyless: it files into its machine's bucket.
+Decoding, per header (`ME-Project-Root` → `root`, `-Dev-Root` → `dev_root`, `-Upstream-Url` → `upstream_url`,
+`-Origin-Url` → `origin_url`, `-Branch` → `branch`); the first failing rule drops the fact with its reason:
+
+1. No header: no fact, no flag.
+2. Two or more headers of that name: `repeated`.
+3. Empty value: `empty`.
+4. Over 4,096 bytes: `too_long`.
+5. A byte outside 0x21 to 0x7E: `raw_byte`.
+6. Dev root only: not starting with `/`, or holding `%`, `"` or `\`: `not_plain_absolute`; otherwise taken as sent,
+   never decoded.
+7. A `%` not followed by two hex digits: `bad_escape`; each `%HH`, either case, decodes exactly once to its byte.
+8. Not UTF-8: `not_utf8`.
+9. Any control character (C0, DEL, C1): `control`.
+10. Both URLs then lose their userinfo, in two steps: when `://` occurs, the authority after its first occurrence (up to
+    the next `/`) loses everything through its last `@`; then, when a `:` exists and the text before the first one
+    holds no `/`, that text loses everything through its last `@`. This removes at least what the plugin's client
+    removes.
+11. A scheme-form URL whose first path segment still holds an `@` after step 10 had a `/` in its userinfo
+    (`https://user:pa/ss@host/x`, from a client that did not encode `%`): `unstripped_userinfo`, so the secret is never
+    stored. An `@` in a later segment is a path (`https://github.com/example/a@b`).
+
+Remote key, tried on `upstream_url` then `origin_url`; a URL that gives none is ignored, and the next rule applies:
+
+- R1. A `file:` prefix in any case, or a remote-helper prefix `[A-Za-z][A-Za-z0-9+.-]*::`: none.
+- R2. Scheme form (`[A-Za-z][A-Za-z0-9+.-]*://`): the authority runs to the first `/`; the host is the authority after
+  its last `@`; a host starting with `[` runs through the first `]` (no `]`: none); otherwise it ends at its first `:`.
+  After the host only nothing, or `:` and zero or more ASCII digits (the port, dropped), may follow; else none.
+- R3. scp form: a `:` exists and the text before the first one holds no `/`. The host starts after the last `@` before
+  it, bracket-aware (`[...]` must be followed by `:`); the path follows the `:` that ends the host.
+- R4. Anything else is a local path: none.
+- R5. Path: trim `/` at both ends, drop one trailing `.git` (lowercase only: `.GIT` stays), trim trailing `/` again.
+  Empty host or path: none.
+- R6. Key: the host lowercased in ASCII only, `/`, the path with its case kept. No URL-level decoding.
+
+`git@github.com:example/project.git` and `https://github.com/example/project` are both `github.com/example/project`.
+
+Path key, when no remote gives one; it needs both the root and the dev root:
+
+- P1. Trim trailing `/` from the dev root (`/` becomes empty); the root must start with it followed by `/`.
+- P2. The rest, trailing `/` trimmed, is the relative path; empty (the root is the dev root): none.
+- P3. A segment that is empty, `.` or `..`: none.
+- P4. Key: `<machine>:<relative path>`. On `laptop`, with dev root `/home/alice/perso/dev`, the root
+  `/home/alice/perso/dev/notes/2026` is `laptop:notes/2026`.
+
+Final key: the first candidate in that order, kept only when `project:<label>` fits 256 bytes; past it there is no key,
+and the rules do not fall through to the next candidate. Label: every byte outside `A-Z a-z 0-9 - . _ ~` as uppercase
+`%HH`. With no key the session is keyless: it files into its machine's bucket. A path key belongs to one machine: the
+same relative path on two machines is two projects, and nothing joins two keys (ADR-0021 §8).
 
 Git reports resolved paths, so a dev root configured through a symlink matches no root, and remote-less projects under
 it are keyless.
@@ -296,7 +327,7 @@ machine and `project`, the request's facts as decoded with the dropped ones, the
 ```
 
 `recall` adds `fact_ids`; `remember` adds `level`; `set_level` adds `fact_ids`, `level`, `from` and `to`; a failure adds
-`error` instead. A `set_level` record is a move only when it carries `from` and `to`, which is what re-filing replays.
+`error` instead, the message as answered but with the userinfo of any URL it quotes removed. A `set_level` record is a move only when it carries `from` and `to`, which is what re-filing replays.
 Records sit under the calling machine's bucket, except a valid `remember`'s, which sits under the Home it wrote to.
 
 ### Derived jobs: off in the server
