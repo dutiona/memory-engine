@@ -524,10 +524,27 @@ impl HttpEmbeddingProvider {
         text: &str,
         limit: usize,
         tokenize: bool,
-    ) -> Result<Vec<f32>, MemoryError> {
+    ) -> Result<Vec<f32>, SendError> {
         match self.split(text, limit, tokenize)?.as_slice() {
-            [(whole, _)] => self.embed_one(whole).map_err(|e| e.error),
+            [(whole, _)] => self.embed_one(whole),
             pieces => self.pool(pieces),
+        }
+    }
+
+    /// After `refused` for `text` counted within the declared `limit`: when it is llama-server's
+    /// over-length answer with a smaller context, embed `text` again, once, within the
+    /// server's own limit; any other refusal is the error.
+    fn within_served(
+        &self,
+        text: &str,
+        limit: usize,
+        refused: SendError,
+    ) -> Result<Vec<f32>, MemoryError> {
+        match refused.recorded_limit() {
+            Some(served) if served < limit => {
+                self.embed_within(text, served, true).map_err(|e| e.error)
+            }
+            _ => Err(refused.error),
         }
     }
 
@@ -591,10 +608,10 @@ impl HttpEmbeddingProvider {
     /// non-finite L2 norm.
     // A count is far below 2^52; the sum accumulates in f64 and is stored as f32.
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    fn pool(&self, pieces: &[(&str, usize)]) -> Result<Vec<f32>, MemoryError> {
+    fn pool(&self, pieces: &[(&str, usize)]) -> Result<Vec<f32>, SendError> {
         let mut sum: Vec<f64> = Vec::new();
         for &(piece, weight) in pieces {
-            let vector = self.embed_one(piece).map_err(|e| e.error)?;
+            let vector = self.embed_one(piece)?;
             sum.resize(vector.len(), 0.0);
             for (s, x) in sum.iter_mut().zip(&vector) {
                 *s = (weight as f64).mul_add(f64::from(*x), *s);
@@ -604,7 +621,8 @@ impl HttpEmbeddingProvider {
         if !norm.is_finite() || norm == 0.0 {
             return Err(MemoryError::Internal(
                 "pooled embedding has a zero or non-finite L2 norm; cannot normalise".into(),
-            ));
+            )
+            .into());
         }
         Ok(sum.iter().map(|x| (x / norm) as f32).collect())
     }
@@ -723,7 +741,9 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     /// The limit is the served `max_input_tokens` ([`with_served_artifact`](Self::with_served_artifact),
     /// ADR-0015 §1). With none declared, it is llama-server's own: when the server answers its
     /// over-length 400 (`exceed_context_size_error` with an integer `n_ctx`), the text is
-    /// split within `n_ctx − 1` tokens. An over-length text is split into consecutive pieces
+    /// split within `n_ctx − 1` tokens. That answer to a text or piece counted within a
+    /// declared limit larger than `n_ctx − 1` splits the text again, once, within
+    /// `n_ctx − 1`. An over-length text is split into consecutive pieces
     /// that rejoin exactly, each within the limit as the server counts it: provider
     /// `llama.cpp`, or a server that answered that 400, counts at its `/tokenize`; any other
     /// counts the conservative bound of its UTF-8 bytes + 2, as does a server with no
@@ -744,9 +764,9 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     ///
     /// Returns [`MemoryError::Embedder`] if a request (an embed or a count) gets no answer
     /// or a non-2xx one (status and capped body included), classified as in
-    /// [`EmbedderError`]; an over-length answer for a piece counted to fit is
-    /// [`InputRejected`](EmbedderError::InputRejected), as is a limit in which not even one
-    /// character fits.
+    /// [`EmbedderError`]; an over-length answer for a piece counted to fit the server's own
+    /// limit is [`InputRejected`](EmbedderError::InputRejected), as is a limit in which not
+    /// even one character fits.
     ///
     /// Returns [`MemoryError::Internal`] if:
     /// - the response body exceeds the 32 MiB size cap;
@@ -760,11 +780,13 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     /// length does not match the native `expected_dim` supplied at construction.
     fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
         if let Some(limit) = self.declared_limit() {
-            return self.embed_within(text, limit, self.provider == "llama.cpp");
+            return self
+                .embed_within(text, limit, self.provider == "llama.cpp")
+                .or_else(|refused| self.within_served(text, limit, refused));
         }
         self.embed_one(text)
             .or_else(|refused| match refused.recorded_limit() {
-                Some(limit) => self.embed_within(text, limit, true),
+                Some(limit) => self.embed_within(text, limit, true).map_err(|e| e.error),
                 None => Err(refused.error),
             })
     }
@@ -777,9 +799,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     /// without any HTTP call.
     ///
     /// A text longer than the declared limit is embedded alone, as [`embed`](Self::embed)
-    /// splits and pools it; the rest stay one request. With no declared limit, llama-server's
-    /// over-length answer to the batch makes each text go through [`embed`](Self::embed): the
-    /// answer does not say which text is long.
+    /// splits and pools it; the rest stay one request. llama-server's over-length answer to
+    /// that request sends each of its texts alone, as the answer does not say which is long:
+    /// through [`embed`](Self::embed) with no declared limit, or within the server's own limit
+    /// when it is smaller than the declared one.
     ///
     /// Supports the `OpenAI` batch format (`data[]` with `index` fields, so
     /// out-of-order responses are reordered by index) and the Ollama batch format
@@ -819,7 +842,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         for text in texts {
             let pieces = self.split(text, limit, tokenize)?;
             pooled.push(if pieces.len() > 1 {
-                Some(self.pool(&pieces)?)
+                Some(
+                    self.pool(&pieces)
+                        .or_else(|refused| self.within_served(text, limit, refused))?,
+                )
             } else {
                 None
             });
@@ -829,7 +855,18 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             .zip(&pooled)
             .filter_map(|(text, vector)| vector.is_none().then_some(*text))
             .collect();
-        let mut whole = self.embed_many(&whole).map_err(|e| e.error)?.into_iter();
+        let mut whole = match self.embed_many(&whole) {
+            Ok(vectors) => vectors,
+            // The answer does not say which input is long.
+            Err(refused) => match refused.recorded_limit() {
+                Some(served) if served < limit => whole
+                    .iter()
+                    .map(|t| self.embed_within(t, served, true).map_err(|e| e.error))
+                    .collect::<Result<_, _>>()?,
+                _ => return Err(refused.error),
+            },
+        }
+        .into_iter();
         pooled
             .into_iter()
             .map(|vector| vector.or_else(|| whole.next()))

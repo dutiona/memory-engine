@@ -399,7 +399,8 @@ the pieces' mean weighted by their token counts, L2-normalised. The stored conte
 counts the conservative bound of UTF-8 bytes + 2 (finer pieces, never a failure). A memory whose bytes + 2 fit is
 never counted. With no `max_input_tokens` declared, llama-server's own over-length 400 (`exceed_context_size_error`)
 gives the limit (its `n_ctx` − 1) and the text is counted by `/tokenize`; any other server is sent the whole text, and
-its rejection fails the item.
+its rejection fails the item. A declared `max_input_tokens` above the server's real context gets that same answer for a
+piece counted to fit, and the memory is split again, once, by the server's limit.
 
 The queue is a table, so it survives a restart. Check it beside the running server, read-only and without the lock
 ([`memory-engine-cli status`](cli-inspector.md)):

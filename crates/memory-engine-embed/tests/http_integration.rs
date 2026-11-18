@@ -767,6 +767,58 @@ async fn over_length_counted_400_after_a_fitting_count_is_input_rejected() {
     }
 }
 
+/// The served `max_input_tokens` may be larger than the server's real context: its recorded
+/// answer then gives the limit, and the text is split again, once, by it.
+#[tokio::test]
+async fn over_length_declared_above_the_servers_context_is_split_by_its_answer() {
+    // One that fits the declared 16 whole, one whose first 16-token piece is refused.
+    for text in [["a"; 12].join(" "), abc()] {
+        let server = MockServer::start().await;
+        mount_tokenize(&server).await;
+        mount_embed(&server, 8, letters).await;
+        let uri = server.uri();
+        let input = text.clone();
+        let vector = blocking(move || limited(&uri, "llama.cpp", Some(16)).embed(&input))
+            .await
+            .unwrap();
+        let (fitting, refused): (Vec<String>, Vec<String>) = embedded(&server)
+            .await
+            .into_iter()
+            .partition(|p| words(p) <= 8);
+        assert_eq!(refused.len(), 1, "split again once: {refused:?}");
+        assert_eq!(fitting.concat(), text);
+        assert_close(&vector, &by_words(&fitting, letters));
+    }
+}
+
+#[tokio::test]
+async fn over_length_declared_above_the_servers_context_in_a_batch_is_split_by_its_answer() {
+    let server = MockServer::start().await;
+    mount_tokenize(&server).await;
+    mount_embed(&server, 8, letters).await;
+    let uri = server.uri();
+    // Counted to fit the declared 16, the `d` text makes the batch request refused.
+    let d = ["d"; 12].join(" ");
+    let vectors =
+        blocking(move || limited(&uri, "llama.cpp", Some(16)).embed_batch(&["a b", &d, &abc()]))
+            .await
+            .unwrap();
+
+    assert_eq!(vectors.len(), 3);
+    assert_eq!(vectors[0], letters("a b"));
+    assert_close(&vectors[1], &[0.0, 0.0, 0.0, 1.0]);
+    let abc_pieces: Vec<String> = requests(&server, "/v1/embeddings")
+        .await
+        .iter()
+        .map(inputs)
+        .filter(|batch| batch.len() == 1)
+        .flatten()
+        .filter(|p| words(p) <= 8 && !p.contains('d') && p != "a b")
+        .collect();
+    assert_eq!(abc_pieces.concat(), abc());
+    assert_close(&vectors[2], &by_words(&abc_pieces, letters));
+}
+
 #[tokio::test]
 async fn over_length_pooling_applies_mrl_per_piece() {
     let server = MockServer::start().await;
