@@ -224,8 +224,9 @@ mod tests {
                  INSERT INTO activities (session_id, tool_name, args_hash, first_seen, last_seen,
                                          promoted_fact_id)
                      VALUES ('s', 'Edit', 'h', 't', 't', {a});
-                 INSERT INTO fact_tombstones (fact_id, content_hash, forgotten_at)
-                     VALUES ({a}, 'h', 't');"
+                 INSERT INTO fact_tombstones (fact_id, content_hash, reason, forgotten_at,
+                                              prior_t_expired, prior_t_invalid)
+                     VALUES ({a}, 'h', 'a was wrong', 't', 't0', 't1');"
             ))
             .unwrap();
         }
@@ -240,10 +241,25 @@ mod tests {
             })
             .unwrap();
         assert_eq!(dangling, 0);
-        let tombstones: i64 = conn
-            .query_row("SELECT COUNT(*) FROM fact_tombstones", [], |r| r.get(0))
+        let stone: (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT content_hash, fact_id, reason, prior_t_expired, prior_t_invalid
+                 FROM fact_tombstones",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
             .unwrap();
-        assert_eq!(tombstones, 1, "the block stays");
+        assert_eq!(
+            stone,
+            ("h".to_owned(), None, None, None, None),
+            "the block stays; its link, reason and priors go"
+        );
     }
 
     /// An event whose payload is not JSON is never the machine's, and does not abort.

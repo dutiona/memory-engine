@@ -23,8 +23,9 @@ fn record() -> NewEvent {
 }
 
 /// A store with a laptop-bucket fact (id 1) forgotten with the reason `it moved`, and a live
-/// one (id 2); `expired` forgets an already expired fact instead of a live one.
-async fn store(expired: bool) -> (TempDir, PathBuf) {
+/// one (id 2); `expired` forgets an already expired fact instead of a live one, and `copy`
+/// adds an identical copy of fact 1 (id 3), which the forget takes too.
+async fn store(expired: bool, copy: bool) -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("memory.db");
     let mut engine = memory_engine::MemoryEngine::builder(4)
@@ -32,11 +33,16 @@ async fn store(expired: bool) -> (TempDir, PathBuf) {
         .build()
         .unwrap();
     let fingerprint = memory_engine::EmbeddingFingerprint::new("mock", "test", 4);
-    for content in ["the kestrel nests", "the falcon hunts"] {
+    let contents: &[&str] = if copy {
+        &["the kestrel nests", "the falcon hunts", "the kestrel nests"]
+    } else {
+        &["the kestrel nests", "the falcon hunts"]
+    };
+    for content in contents {
         engine
             .add_fact_precomputed(
                 &AddFactRequest {
-                    content: content.into(),
+                    content: (*content).into(),
                     fact_type: FactType::Semantic,
                     source_event_id: None,
                     scope: Some("unscoped:laptop".into()),
@@ -95,7 +101,7 @@ fn kestrel_found(db: &Path) -> bool {
 
 #[tokio::test]
 async fn unforget_returns_a_forgotten_fact_to_recall() {
-    let (_dir, db) = store(false).await;
+    let (_dir, db) = store(false, false).await;
     assert!(!kestrel_found(&db));
     cli(&db)
         .args(["unforget", "1"])
@@ -107,7 +113,7 @@ async fn unforget_returns_a_forgotten_fact_to_recall() {
 
 #[tokio::test]
 async fn unforget_says_when_the_fact_stays_out_of_recall() {
-    let (_dir, db) = store(true).await;
+    let (_dir, db) = store(true, false).await;
     cli(&db)
         .args(["--format", "json", "unforget", "1"])
         .assert()
@@ -118,17 +124,17 @@ async fn unforget_says_when_the_fact_stays_out_of_recall() {
 
 #[tokio::test]
 async fn unforget_lists_every_copy_it_restores() {
-    let (_dir, db) = store(false).await;
+    let (_dir, db) = store(false, true).await;
     cli(&db)
         .args(["--format", "plain", "unforget", "1"])
         .assert()
         .success()
-        .stdout("fact_id=1 active=true\n");
+        .stdout("fact_id=1 active=true\nfact_id=3 active=true\n");
 }
 
 #[tokio::test]
 async fn unforget_refuses_while_the_store_is_held() {
-    let (_dir, db) = store(false).await;
+    let (_dir, db) = store(false, false).await;
     {
         let _held = StoreLock::acquire(&db).unwrap();
         cli(&db)
@@ -147,7 +153,7 @@ async fn unforget_refuses_while_the_store_is_held() {
 
 #[tokio::test]
 async fn unforget_of_a_fact_that_is_not_forgotten_or_missing_fails() {
-    let (_dir, db) = store(false).await;
+    let (_dir, db) = store(false, false).await;
     cli(&db)
         .args(["unforget", "2"])
         .assert()
@@ -164,7 +170,7 @@ async fn unforget_of_a_fact_that_is_not_forgotten_or_missing_fails() {
 
 #[tokio::test]
 async fn explain_names_a_forgotten_fact_and_why() {
-    let (_dir, db) = store(false).await;
+    let (_dir, db) = store(false, false).await;
     cli(&db)
         .args(["explain", "1"])
         .assert()

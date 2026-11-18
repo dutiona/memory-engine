@@ -26,8 +26,8 @@ fn event(payload: serde_json::Value) -> NewEvent {
 }
 
 /// A store with laptop's remembered fact 1 (its record is event 1), desktop's fact 2 and
-/// laptop's sentinel fact 3, which was recalled and forgotten, so earlier versions of its row
-/// exist in the file.
+/// laptop's sentinel fact 3, which was recalled and forgotten with a reason quoting it, so
+/// earlier versions of its row exist in the file and its tombstone holds the sentinel.
 async fn store() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("memory.db");
@@ -80,7 +80,7 @@ async fn store() -> (TempDir, PathBuf) {
         .forget_fact(
             3,
             &["unscoped:laptop".into()],
-            "wrong",
+            &format!("{SENTINEL} was wrong"),
             "unscoped:laptop",
             &event(serde_json::json!({ "tool": "forget", "machine": "laptop" })),
         )
@@ -244,13 +244,29 @@ async fn erase_fact_of_a_missing_fact_exits_1_and_purges() {
 #[tokio::test]
 async fn erase_prints_its_copies_and_orphans() {
     let (_dir, db) = store().await;
+    // Fact 1 superseded fact 2, and fact 4 is a copy of fact 1.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "UPDATE facts SET t_expired = '2026-01-01T00:00:00+00:00' WHERE id = 2;
+             INSERT INTO edges (source_fact_id, target_fact_id, relation_type, t_created)
+                 VALUES (1, 2, 'supersedes', '2026-01-01T00:00:00+00:00');
+             INSERT INTO facts (content, content_hash, embedding, fact_type, t_created,
+                                last_accessed, scope_id)
+                 SELECT content, content_hash, embedding, fact_type, t_created, last_accessed,
+                        scope_id
+                 FROM facts WHERE id = 1;",
+        )
+        .unwrap();
     cli(&db)
         .args(["erase", "--fact", "1"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "erased: activities=0 checkpoints=0 edges=0 events=0 facts=1 summaries=0",
-        ));
+        .stdout(
+            "erased: activities=0 checkpoints=0 edges=1 events=0 facts=1 summaries=0\n\
+             copies left: [4]\n\
+             orphaned (still expired): [2]\n",
+        );
 }
 
 #[tokio::test]

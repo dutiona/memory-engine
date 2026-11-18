@@ -135,6 +135,7 @@ macro_rules! all_behaviors_into {
             a_forgotten_fact_leaves_lexical_and_vector_search => retraction::a_forgotten_fact_leaves_lexical_and_vector_search,
             unforget_restores_the_prior_state_and_records_it => retraction::unforget_restores_the_prior_state_and_records_it,
             unforget_reverses_the_whole_forget => retraction::unforget_reverses_the_whole_forget,
+            unforget_reports_active_only_when_recall_would_show_it => retraction::unforget_reports_active_only_when_recall_would_show_it,
             unforget_of_a_live_or_missing_fact => retraction::unforget_of_a_live_or_missing_fact,
             is_forgotten_matches_content_in_any_scope => retraction::is_forgotten_matches_content_in_any_scope,
             erase_fact_clears_every_reference => retraction::erase_fact_clears_every_reference,

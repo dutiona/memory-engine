@@ -112,6 +112,11 @@ pub async fn forget_retracts_active_copies_in_its_homes_only<F: ConformanceBacke
             assert_eq!(stone.record_event_id, Some(record));
         }
     }
+    assert!(
+        be.get_fact(ids[1]).await.unwrap().t_expired.is_some(),
+        "[{}] the copy in the other Home leaves recall",
+        f.name()
+    );
     assert!(be.get_fact(ids[2]).await.unwrap().t_expired.is_none());
 }
 
@@ -226,13 +231,24 @@ pub async fn unforget_restores_the_prior_state_and_records_it<F: ConformanceBack
     );
 }
 
-/// Given any of its facts, an unforget reverses the whole forget, and only that one.
+/// Given any of its facts, an unforget reverses the whole forget, and only that one; a
+/// copy erased since keeps its block.
 pub async fn unforget_reverses_the_whole_forget<F: ConformanceBackend>(f: &F) {
     let be = f.make().await;
     let s = homes(&be).await;
-    let ids = seed_facts(&be, &[at("pair", s.h), at("pair", s.u), at("other", s.h)]).await;
+    let ids = seed_facts(
+        &be,
+        &[
+            at("pair", s.h),
+            at("pair", s.u),
+            at("other", s.h),
+            at("pair", s.h),
+        ],
+    )
+    .await;
     forget(&be, ids[0], &[s.h, s.u]).await;
     forget(&be, ids[2], &[s.h, s.u]).await;
+    erase(&be, EraseTarget::Fact(ids[3])).await;
     let outcome = be.unforget_fact(ids[1], Utc::now()).await.unwrap();
     assert_eq!(
         outcome,
@@ -247,6 +263,29 @@ pub async fn unforget_reverses_the_whole_forget<F: ConformanceBackend>(f: &F) {
         "[{}]",
         f.name()
     );
+}
+
+/// `Restored { active }` follows recall: a fact whose validity ended before the forget comes
+/// back inactive, one whose validity ends later comes back active.
+pub async fn unforget_reports_active_only_when_recall_would_show_it<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let s = homes(&be).await;
+    let mut ended = at("ended", s.h);
+    ended.t_invalid = Some(Utc::now() - Duration::hours(1));
+    let mut ending = at("ending", s.h);
+    ending.t_invalid = Some(Utc::now() + Duration::hours(1));
+    let ids = seed_facts(&be, &[ended, ending]).await;
+    for (id, active) in [(ids[0], false), (ids[1], true)] {
+        forget(&be, id, &[s.h]).await;
+        assert_eq!(
+            be.unforget_fact(id, Utc::now()).await.unwrap(),
+            UnforgetOutcome::Restored {
+                facts: vec![(id, active)]
+            },
+            "[{}] fact {id}",
+            f.name()
+        );
+    }
 }
 
 /// A live fact is `NotForgotten`; a missing id is `NotFound`.
@@ -455,16 +494,28 @@ pub async fn erase_reports_orphans_and_copies<F: ConformanceBackend>(f: &F) {
     let be = f.make().await;
     let mut old = new_fact("old version");
     old.t_expired = Some(Utc::now());
+    let mut contradicted = new_fact("contradicted version");
+    contradicted.t_expired = Some(Utc::now());
     let ids = seed_facts(
         &be,
-        &[new_fact("new version"), old, new_fact("new version")],
+        &[
+            new_fact("new version"),
+            old,
+            new_fact("new version"),
+            contradicted,
+        ],
     )
     .await;
-    be.insert_edge(&edge(ids[0], ids[1], RelationType::Supersedes))
-        .await
-        .unwrap();
+    for (target, relation) in [
+        (ids[1], RelationType::Supersedes),
+        (ids[3], RelationType::Contradicts),
+    ] {
+        be.insert_edge(&edge(ids[0], target, relation))
+            .await
+            .unwrap();
+    }
     let report = erase(&be, EraseTarget::Fact(ids[0])).await;
-    assert_eq!(report.orphaned, vec![ids[1]], "[{}]", f.name());
+    assert_eq!(report.orphaned, vec![ids[1], ids[3]], "[{}]", f.name());
     assert_eq!(report.copies, vec![ids[2]], "[{}]", f.name());
 }
 
