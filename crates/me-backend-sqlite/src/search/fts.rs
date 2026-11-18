@@ -27,12 +27,13 @@ pub struct FtsResult {
 /// the engine's hybrid path; richer `FactFilter` dimensions are translated by the
 /// backend (#684).
 ///
-/// FTS5 syntax errors (e.g., unbalanced quotes) return an empty vec
-/// rather than propagating an error.
+/// A query string FTS5 rejects (unbalanced quote, dangling operator, unknown column)
+/// matches nothing and returns an empty vec.
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Storage` for non-FTS5 database errors.
+/// Returns `MemoryError::Storage` for every other failure, including a storage fault
+/// and a row that fails to decode.
 pub fn fts_search(
     conn: &Connection,
     query: &str,
@@ -52,12 +53,12 @@ pub fn fts_search(
 /// between the `MATCH` query and the trailing `LIMIT`, so the parameter order is
 /// `[query, ..filter, limit]`.
 ///
-/// FTS5 syntax errors (e.g., unbalanced quotes) return an empty vec rather than
-/// propagating an error.
+/// A query string FTS5 rejects matches nothing and returns an empty vec.
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Storage` for non-FTS5 database errors.
+/// Returns `MemoryError::Storage` for every other failure, including a storage fault
+/// and a row that fails to decode.
 pub fn fts_search_filtered(
     conn: &Connection,
     query: &str,
@@ -84,33 +85,46 @@ pub fn fts_search_filtered(
         .chain(filter.bind_refs())
         .chain(std::iter::once(limit_param.as_ref()));
 
-    // FTS5 syntax errors surface at query_map execution time, not at prepare time.
-    // They are indistinguishable from other rusqlite::Error variants at the type level,
-    // so we catch all errors here. This is intentional: the only realistic failure mode
-    // for a parameterized MATCH query is malformed FTS5 syntax from the caller.
-    let rows = match stmt.query_map(params_from_iter(bound), |row| {
-        Ok(FtsResult {
-            fact_id: row.get(0)?,
-            score: row.get(1)?,
+    // `query_map` only binds: FTS5 parses the MATCH string when the statement first
+    // steps, so a rejected query surfaces as the first row's error, like a fault.
+    let rows = stmt
+        .query_map(params_from_iter(bound), |row| {
+            Ok(FtsResult {
+                fact_id: row.get(0)?,
+                score: row.get(1)?,
+            })
         })
-    }) {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!("FTS5 query failed (likely syntax error): {e}");
-            return Ok(vec![]);
-        }
-    };
+        .and_then(Iterator::collect);
+    rows.or_else(|e| no_match_or_fault(conn, query, e, Vec::new()))
+}
 
-    let results: Vec<FtsResult> = rows
-        .filter_map(|row| match row {
-            Ok(r) => Some(r),
-            Err(e) => {
-                tracing::warn!("FTS5 row mapping failed, skipping row: {e}");
-                None
-            }
-        })
-        .collect();
-    Ok(results)
+/// Classify a failed MATCH query: `no_match` when FTS5 rejected the query string, a
+/// storage error otherwise.
+///
+/// FTS5 rejects a malformed string with a bare `SQLITE_ERROR` under varying messages,
+/// but the filter fragment's JSON functions raise the same code (e.g. on a tampered
+/// `metadata` value). So the string is re-run alone: only when it fails there with
+/// that code is the error the query's, and a string that fails alone matches nothing.
+fn no_match_or_fault<T>(
+    conn: &Connection,
+    query: &str,
+    err: rusqlite::Error,
+    no_match: T,
+) -> Result<T> {
+    let is_sqlite_error =
+        |e: &rusqlite::Error| e.sqlite_extended_error_code() == Some(rusqlite::ffi::SQLITE_ERROR);
+    if is_sqlite_error(&err) {
+        let alone = conn.query_row(
+            "SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?1 LIMIT 1",
+            [query],
+            |_| Ok(()),
+        );
+        if alone.as_ref().is_err_and(is_sqlite_error) {
+            tracing::warn!("FTS5 rejected the query, reading it as no match: {err}");
+            return Ok(no_match);
+        }
+    }
+    Err(StorageError::backend(err).into())
 }
 
 /// Count expired facts matching the FTS5 query (abstention diagnostics).
@@ -118,11 +132,11 @@ pub fn fts_search_filtered(
 /// Mirrors [`fts_search`] but queries `t_expired IS NOT NULL` and returns
 /// only a count — no row materialisation, no embedding deserialisation.
 ///
-/// FTS5 syntax errors return `Ok(0)` (same fallback as `fts_search`).
+/// A query string FTS5 rejects counts `Ok(0)`, as in [`fts_search`].
 ///
 /// # Errors
 ///
-/// Returns `MemoryError::Storage` for non-FTS5 database errors.
+/// Returns `MemoryError::Storage` for every other failure.
 pub fn fts_count_expired(
     conn: &Connection,
     query: &str,
@@ -144,19 +158,14 @@ pub fn fts_count_expired(
     let fact_type_str: Option<&str> = fact_type.map(fact_type_to_str);
     let scope_ids_json = serialize_scope_ids(scope_ids)?;
 
-    match stmt.query_row(
-        rusqlite::params![query, fact_type_str, scope_ids_json],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(n) => usize::try_from(n)
-            .map_err(|e| me_types::error::MemoryError::Internal(format!("invalid FTS count: {e}"))),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
-        Err(e) => {
-            // FTS5 syntax errors are caught here, same as fts_search.
-            tracing::warn!("FTS5 count_expired query failed (likely syntax error): {e}");
-            Ok(0)
-        }
-    }
+    let n = stmt
+        .query_row(
+            rusqlite::params![query, fact_type_str, scope_ids_json],
+            |row| row.get::<_, i64>(0),
+        )
+        .or_else(|e| no_match_or_fault(conn, query, e, 0))?;
+    usize::try_from(n)
+        .map_err(|e| me_types::error::MemoryError::Internal(format!("invalid FTS count: {e}")))
 }
 
 /// Fuzz-only seam (`--cfg fuzzing`, set only by `cargo fuzz`).
@@ -168,9 +177,9 @@ pub fn fts_count_expired(
 ///
 /// The contract under test is total: any UTF-8 query string — balanced or not,
 /// containing FTS5 operators, column filters, quotes, NUL bytes, or arbitrary
-/// Unicode — must either return rows or be caught as an FTS5 syntax error and
-/// mapped to an empty result. It must NEVER panic and never propagate an error
-/// for a syntax-malformed query.
+/// Unicode — must either return rows or be rejected by FTS5 and read as no match.
+/// On this healthy store every error a query string can cause is such a
+/// rejection, so it must NEVER panic and never propagate an error.
 ///
 /// Compiled solely under `cargo fuzz` (`#[cfg(fuzzing)]`); adds nothing to the
 /// shipped crate.
@@ -227,10 +236,10 @@ pub fn fuzz_fts_query(query: &str) {
     // filter exercising the extra bind ordering), and the expired-count probe.
     //
     // The fuzzed property is the *total* contract: every query string — balanced
-    // or malformed — must map to `Ok`, never propagate. FTS5 syntax errors are
-    // caught at `query_map`/`query_row` time and folded into an empty result
-    // (`Ok(vec![])` / `Ok(0)`), so `Err` here would be a real regression of that
-    // guarantee (or a genuine non-FTS5 DB fault) — assert it loudly.
+    // or malformed — must map to `Ok`, never propagate. A string FTS5 rejects
+    // surfaces when the statement first steps and is folded into an empty result
+    // (`Ok(vec![])` / `Ok(0)`), so `Err` here is a string the classifier failed
+    // to attribute (or a genuine DB fault) — assert it loudly.
     fts_search(&conn, query, 10, None, None)
         .expect("malformed query must map to Ok, not propagate");
     fts_search(&conn, query, 10, Some(&FactType::Episodic), Some(&[1]))
@@ -500,5 +509,98 @@ mod tests {
 
         let count = fts_count_expired(&conn, "\"unbalanced", None, None).unwrap();
         assert_eq!(count, 0);
+    }
+
+    // --- error classification (#1067) ---
+
+    /// The extended result code of the bare MATCH query, `None` when it succeeds.
+    fn raw_match_code(conn: &Connection, query: &str) -> Option<i32> {
+        conn.query_row(
+            "SELECT count(*) FROM facts_fts WHERE facts_fts MATCH ?1",
+            [query],
+            |row| row.get::<_, i64>(0),
+        )
+        .err()
+        .and_then(|e| e.sqlite_extended_error_code())
+    }
+
+    fn is_storage_error<T: std::fmt::Debug>(outcome: &Result<T>) -> bool {
+        matches!(
+            outcome,
+            Err(me_types::error::MemoryError::Storage(
+                StorageError::Backend(_)
+            ))
+        )
+    }
+
+    #[test]
+    fn malformed_match_strings_read_as_no_match() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = store.insert(&make_fact("Rust language")).unwrap();
+        store.expire(id, Utc::now()).unwrap();
+        store.insert(&make_fact("Rust compiler")).unwrap();
+
+        for query in [
+            "\"unbalanced",
+            "foo AND",
+            "(",
+            "NEAR(a b",
+            "^",
+            "a + ",
+            "\"a\" OR",
+            "nocol:rust",
+            "*",
+        ] {
+            assert_eq!(
+                raw_match_code(&conn, query),
+                Some(rusqlite::ffi::SQLITE_ERROR),
+                "premise: FTS5 rejects {query:?} with a bare SQLITE_ERROR"
+            );
+            assert_eq!(fts_search(&conn, query, 10, None, None).unwrap(), []);
+            assert_eq!(fts_count_expired(&conn, query, None, None).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn corrupt_fts_index_is_a_storage_error() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = store.insert(&make_fact("Rust language")).unwrap();
+        store.expire(id, Utc::now()).unwrap();
+        conn.execute("DELETE FROM facts_fts_data", []).unwrap();
+
+        let code = raw_match_code(&conn, "Rust");
+        assert!(
+            code.is_some_and(|c| c != rusqlite::ffi::SQLITE_ERROR),
+            "injection: the MATCH must fail with a storage code, got {code:?}"
+        );
+        assert!(is_storage_error(&fts_search(&conn, "Rust", 10, None, None)));
+        assert!(is_storage_error(&fts_count_expired(
+            &conn, "Rust", None, None
+        )));
+    }
+
+    #[test]
+    fn malformed_metadata_under_a_valid_query_is_a_storage_error() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = store.insert(&make_fact("Rust language")).unwrap();
+        // CHECK(json_valid(metadata)) rejects a plain UPDATE; bypass it to simulate
+        // on-disk tampering or a writer without the constraint.
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        conn.execute("UPDATE facts SET metadata = '{' WHERE id = ?1", [id])
+            .unwrap();
+        conn.execute_batch("PRAGMA ignore_check_constraints = OFF")
+            .unwrap();
+
+        let filter = FilterSql {
+            where_clause: "json_extract(f.metadata, ?) IS NOT NULL".into(),
+            params: vec![Box::new("$.k".to_string())],
+        };
+        assert!(is_storage_error(&fts_search_filtered(
+            &conn, "Rust", 10, &filter
+        )));
     }
 }
