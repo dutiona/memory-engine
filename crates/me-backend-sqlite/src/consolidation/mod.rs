@@ -94,11 +94,11 @@ pub fn load_snapshot_capped(
         .map(|dt| dt.with_timezone(&Utc));
     let now = Utc::now();
 
-    // Dedup, cluster and global read only the facts with a vector (#1021); one without
-    // is recorded so the watermark holds until it has one.
+    // Dedup, cluster and global read only the facts with a vector (#1021); one without,
+    // active or not, is recorded so the watermark holds until it has one.
     let fact_store = FactStore::new(conn, embed_dim);
     let active_count = fact_store.count_active_with_vector()?;
-    let skipped_vectorless = fact_store.count_active()? > active_count;
+    let skipped_vectorless = fact_store.any_without_vector()?;
 
     // #659: if the corpus is over BOTH caps, the dedup pass would skip AND the cluster
     // pass would skip — so neither needs the materialized active set. Short-circuit the
@@ -184,14 +184,15 @@ pub fn apply_plan(
     // is a divergence, not a skip: the dedup that *did* apply is committed, so the
     // watermark advances and the kept loser is reconsidered next run.
     //
-    // Nor while any active fact has no vector (#1021), at the load or now: it sits above
-    // the watermark and is compared as new at the first run after it gets one. The check
-    // here catches a deferred insert backdated between the load and this write.
-    if !plan.dedup.skipped && !plan.skipped_vectorless {
-        let fact_store = FactStore::new(&tx, embed_dim);
-        if fact_store.count_active()? == fact_store.count_active_with_vector()? {
-            set_config(&tx, "last_consolidated_at", &plan.now.to_rfc3339())?;
-        }
+    // Nor while any fact has no vector (#1021), at the load or now, whether active or
+    // not (a forgotten one can be unforgotten): it sits above the watermark and is compared
+    // as new at the first run after it gets one. The check here catches a deferred insert
+    // backdated between the load and this write.
+    if !plan.dedup.skipped
+        && !plan.skipped_vectorless
+        && !FactStore::new(&tx, embed_dim).any_without_vector()?
+    {
+        set_config(&tx, "last_consolidated_at", &plan.now.to_rfc3339())?;
     }
 
     tx.commit().map_err(StorageError::backend)?;

@@ -31,8 +31,9 @@ pub struct Snapshot {
     /// The corpus exceeded BOTH safety caps, so the (expensive) `list_active` load was
     /// skipped (#659): the plan is a complete no-op (dedup skipped, clustering skipped).
     pub over_both_caps: bool,
-    /// An active fact had no vector at the load (waiting or failed in the
-    /// deferred-embedding queue, #1021), so it was left out and the watermark must hold.
+    /// A fact had no vector at the load (waiting or failed in the deferred-embedding
+    /// queue, #1021, active or not), so the watermark must hold: an active one was left out,
+    /// and an expired or forgotten one can come back.
     pub skipped_vectorless: bool,
 }
 

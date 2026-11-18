@@ -975,28 +975,30 @@ async fn consolidation_ignores_a_waiting_fact() {
     assert_eq!(active, [embedded, waiting]);
 }
 
+/// Consolidate at a dedup threshold of 0.90 and no clustering; the duplicates it removed.
+async fn duplicates_removed(engine: &MemoryEngine) -> usize {
+    use std::sync::Arc;
+    let config = ConsolidationConfig::builder()
+        .dedup_threshold(0.90)
+        .min_cluster_size(10)
+        .build();
+    engine
+        .consolidate(
+            Arc::new(MockGen) as Arc<dyn SummaryGenerator>,
+            Arc::new(crate::test_utils::MockEmbedder::new(DIM)) as Arc<dyn EmbeddingProvider>,
+            &config,
+        )
+        .await
+        .unwrap()
+        .duplicates_removed
+}
+
 /// The watermark never passes a fact without a vector, so a failed fact is compared as
 /// new at the first consolidation after it gets its vector, whichever path gives it one.
 #[cfg(feature = "test-util")]
 #[tokio::test]
 async fn a_waiting_fact_that_failed_is_compared_as_new_once_embedded() {
     use std::sync::Arc;
-
-    async fn duplicates_removed(engine: &MemoryEngine) -> usize {
-        let config = ConsolidationConfig::builder()
-            .dedup_threshold(0.90)
-            .min_cluster_size(10)
-            .build();
-        engine
-            .consolidate(
-                Arc::new(MockGen) as Arc<dyn SummaryGenerator>,
-                Arc::new(crate::test_utils::MockEmbedder::new(DIM)) as Arc<dyn EmbeddingProvider>,
-                &config,
-            )
-            .await
-            .unwrap()
-            .duplicates_removed
-    }
 
     let old: Arc<dyn EmbeddingProvider> = Arc::new(crate::test_utils::MockEmbedder::new(DIM));
     let engine = MemoryEngine::builder(DIM).build().unwrap();
@@ -1048,6 +1050,69 @@ async fn a_waiting_fact_that_failed_is_compared_as_new_once_embedded() {
         .unwrap();
     assert_eq!(settled, crate::Settled::Embedded);
     assert_eq!(duplicates_removed(&restored).await, 1);
+}
+
+/// A duplicate remembered during an outage and forgotten while it waits holds the
+/// watermark too: once unforgotten and embedded, it is compared as new.
+#[tokio::test]
+async fn a_retracted_waiting_fact_is_compared_as_new_once_embedded() {
+    use std::sync::Arc;
+
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(crate::test_utils::MockEmbedder::new(DIM));
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let request = AddFactRequest {
+        content: "cats purr".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: Some("user:alice".into()),
+        opts: None,
+    };
+    engine
+        .add_fact(&request, embedder.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(duplicates_removed(&engine).await, 0);
+
+    let duplicate = engine.add_fact_deferred(&request).await.unwrap();
+    let record = NewEvent {
+        timestamp: chrono::Utc::now(),
+        event_type: EventType::MemoryOp,
+        payload: serde_json::json!({ "tool": "forget" }),
+        source: "test".into(),
+        session_id: None,
+        scope_id: 1,
+        origin_node_id: "test".into(),
+        sequence_id: 0,
+        created_at: None,
+    };
+    engine
+        .forget_fact(
+            duplicate,
+            &["user:alice".into()],
+            "wrong",
+            "unscoped:laptop",
+            &record,
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicates_removed(&engine).await, 0);
+
+    engine.unforget_fact(duplicate).await.unwrap();
+    let crate::types::NextEmbedding::Due(item) = engine.next_embedding().await.unwrap() else {
+        panic!("the duplicate still waits for its vector");
+    };
+    assert_eq!(item.fact_id, duplicate);
+    let settled = engine
+        .settle_embedding(
+            &item,
+            embedder.embed(&item.content),
+            &embedder.fingerprint(),
+            crate::Backoff::DEFAULT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(settled, crate::Settled::Embedded);
+    assert_eq!(duplicates_removed(&engine).await, 1);
 }
 
 /// A `SummaryGenerator` that performs an engine WRITE from inside `summarize`.

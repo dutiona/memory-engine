@@ -468,6 +468,23 @@ impl<'a> FactStore<'a> {
         Ok(usize::try_from(count).unwrap_or(0))
     }
 
+    /// Whether any fact, active or not, has no vector (#1021). Consolidation's watermark
+    /// holds while one does: an expired or forgotten fact can come back active, and it must
+    /// then sit above the watermark to be compared as new.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
+    pub fn any_without_vector(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                &format!("SELECT EXISTS (SELECT 1 FROM facts WHERE NOT ({HAS_VECTOR}))"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::backend(e).into())
+    }
+
     /// Count active facts (`t_expired IS NULL`) without materializing any rows.
     ///
     /// A `COUNT(*)` companion to [`list_active`](Self::list_active): consolidation
