@@ -620,6 +620,70 @@ pub type Result<T> = std::result::Result<T, MemoryError>;
 mod tests {
     use super::*;
 
+    /// Each `MemoryError` variant's declaration, read from this file as rustfmt lays it
+    /// out: `#[from] ` dropped, a split struct variant's fields joined on one line. A
+    /// layout this does not know panics rather than silently dropping a variant.
+    fn declared_memory_error_variants() -> Vec<String> {
+        let (_, body) = include_str!("error.rs")
+            .split_once("pub enum MemoryError {\n")
+            .expect("error.rs declares MemoryError");
+        let (body, _) = body.split_once("\n}\n").expect("MemoryError's body ends");
+        let mut variants = Vec::new();
+        let mut lines = body.lines();
+        while let Some(line) = lines.next() {
+            let Some(decl) = line.strip_prefix("    ") else {
+                continue;
+            };
+            if !decl.starts_with(|c: char| c.is_ascii_uppercase()) {
+                continue;
+            }
+            let decl = decl.replace("#[from] ", "");
+            if let Some(single) = decl.strip_suffix(',') {
+                variants.push(single.to_owned());
+            } else if decl.ends_with('{') {
+                let fields: Vec<&str> = lines
+                    .by_ref()
+                    .map(str::trim)
+                    .take_while(|l| *l != "},")
+                    .filter(|l| !l.starts_with("///"))
+                    .map(|l| l.trim_end_matches(','))
+                    .collect();
+                variants.push(format!("{decl} {} }}", fields.join(", ")));
+            } else {
+                panic!("unknown MemoryError variant layout: {line:?}");
+            }
+        }
+        variants
+    }
+
+    /// The first cell of each row of `docs/reference/api.md`'s `MemoryError` table.
+    fn documented_memory_error_variants() -> Vec<String> {
+        let (_, table) = include_str!("../../../docs/reference/api.md")
+            .split_once("`MemoryError` variants:")
+            .expect("api.md's MemoryError table");
+        table
+            .lines()
+            .skip_while(|l| l.trim().is_empty())
+            .take_while(|l| l.starts_with('|'))
+            .filter_map(|row| row.strip_prefix("| `"))
+            .map(|cell| {
+                cell.split_once('`')
+                    .expect("a closing backtick")
+                    .0
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn api_md_error_table_matches_the_enum() {
+        assert_eq!(
+            documented_memory_error_variants(),
+            declared_memory_error_variants(),
+            "docs/reference/api.md's MemoryError table drifted from the enum"
+        );
+    }
+
     #[test]
     fn error_display() {
         let err = MemoryError::NotFound("fact 42".into());

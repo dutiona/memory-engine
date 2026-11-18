@@ -247,16 +247,29 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 
 All fallible methods return `Result<T>`, which is `std::result::Result<T, MemoryError>`.
 
+`MemoryError` is `#[non_exhaustive]`: a `match` on it needs a wildcard arm.
+
 `MemoryError` variants:
 
-| Variant                                   | Trigger                                                         |
-| ----------------------------------------- | --------------------------------------------------------------- |
-| `NotFound(String)`                        | Requested fact or scope does not exist.                         |
-| `Database(rusqlite::Error)`               | SQLite operation failed.                                        |
-| `Serialization(serde_json::Error)`        | JSON serialization/deserialization failed.                      |
-| `EmbeddingDimension { expected, actual }` | Embedding vector has wrong number of dimensions.                |
-| `Conflict(String)`                        | Conflict resolution logic error or invalid policy parameters.   |
-| `Migration(String)`                       | Schema migration failed (e.g., `embed_dim` mismatch on reopen). |
-| `NotImplemented(String)`                  | Feature not yet implemented.                                    |
-| `Pool(String)`                            | Connection pool error.                                          |
-| `Internal(String)`                        | I/O failure or other internal error (e.g., dump write failure). |
+| Variant                                                                                                                         | Trigger                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `NotFound(String)`                                                                                                              | A requested entity (fact, event, scope, snapshot, …) does not exist.                               |
+| `Serialization(serde_json::Error)`                                                                                              | JSON (de)serialization of a payload, snapshot or config failed.                                    |
+| `EmbeddingDimension { expected: usize, actual: usize }`                                                                         | An embedding's length differs from the engine's configured dimension.                              |
+| `EmbeddingModelMismatch { expected: Box<crate::types::EmbeddingFingerprint>, actual: Box<crate::types::EmbeddingFingerprint> }` | The provider's embedding identity differs from the one the store was created with (ADR 0015).      |
+| `EmbeddingReopenRequired { new_dim: usize }`                                                                                    | A reconstruction promoted a new embedding dimension; reopen the engine at `new_dim`.               |
+| `Conflict(ConflictError)`                                                                                                       | A precondition or input-validation conflict; `ConflictError` names the cause.                      |
+| `Migration(MigrationError)`                                                                                                     | A schema migration or compatibility check failed; `MigrationError` names the cause.                |
+| `NotImplemented(String)`                                                                                                        | The operation is recognized but not yet implemented.                                               |
+| `Pool(String)`                                                                                                                  | The connection pool could not hand out or manage a connection.                                     |
+| `UnsupportedEpoch { db_epoch: u16, supported_epoch: u16 }`                                                                      | The database's storage epoch is too old or too new for this build.                                 |
+| `SnapshotTooLarge { cap: u64 }`                                                                                                 | A snapshot's decompressed stream exceeded the size cap (possible decompression bomb).              |
+| `Internal(String)`                                                                                                              | An engine invariant was violated: a bug or corrupted state.                                        |
+| `IndexInconsistent { fact_id: i64, detail: String }`                                                                            | The write committed, but the in-memory vector index is now inconsistent: rebuild it, do not retry. |
+| `Io(std::io::Error)`                                                                                                            | A filesystem I/O operation failed.                                                                 |
+| `Reranker(RerankerError)`                                                                                                       | The reranking stage failed; `RerankerError` names the cause.                                       |
+| `Archive(ArchiveError)`                                                                                                         | A cold-storage archive operation failed; `ArchiveError` names the cause.                           |
+| `ReadOnly`                                                                                                                      | A write was attempted on an engine opened read-only.                                               |
+| `Lineage(String)`                                                                                                               | A wisdom-fact lineage or provenance record is missing or inconsistent.                             |
+| `Cycle(CycleError)`                                                                                                             | A dream-cycle report failed validation or application; `CycleError` names the cause.               |
+| `Storage(StorageError)`                                                                                                         | A failure at the storage seam: an opaque backend error or a missing capability.                    |
